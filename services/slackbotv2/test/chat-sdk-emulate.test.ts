@@ -78,6 +78,9 @@ beforeAll(async () => {
             'channels:join',
             'channels:read',
             'chat:write',
+            'im:read',
+            'im:write',
+            'im:history',
             'users:read'
           ]
         },
@@ -125,6 +128,269 @@ afterAll(async () => {
 })
 
 describe('slackbotv2', () => {
+  for (const agentViewEnabled of [false, true]) {
+    it(`routes DM roots and replies with agent view ${agentViewEnabled}`, async () => {
+      bot = createTestBot({ agentViewEnabled })
+      const members = await slackBot.users.list({})
+      const userId = members.members?.find(member => member.name === 'tester')?.id
+      expect(userId).toBeDefined()
+      const dm = await slackBot.conversations.open({ users: userId! })
+      expect(dm.channel?.id).toBeDefined()
+      const channel = dm.channel!.id!
+      // A prior legacy DM leaves this subscription behind when the toggle is
+      // enabled. Agent mode must still use the new user message as its root.
+      if (agentViewEnabled) await bot.chat.getState().subscribe(`slack:${channel}:`)
+      const roots: string[] = []
+      for (let turn = 0; turn < 2; turn++) {
+        const posted = await slackBot.chat.postMessage({ channel, text: `DM request ${turn}` })
+        expect(posted.ts).toBeDefined()
+        roots.push(posted.ts!)
+        const waits: Promise<unknown>[] = []
+        const response = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
+          event_id: `Ev-agent-dm-${turn}`,
+          event: {
+            type: 'message', channel_type: 'im', channel, user: USER_ID,
+            ts: posted.ts, text: `DM request ${turn}`
+          }
+        }), {}, waitUntilContext(waits))
+        expect(response.status).toBe(200)
+        await Promise.all(waits)
+        const delivered = agentViewEnabled
+          ? await slackBot.conversations.replies({ channel, ts: posted.ts! })
+          : await slackBot.conversations.history({ channel })
+        const answerText = (delivered.messages ?? [])
+          .map(message => [message.text ?? '', blocksText(message.blocks)].join('\n'))
+          .join('\n')
+        expect(answerText).toContain(`Executed request ${turn + 1}.`)
+      }
+      expect(codexApi.executes.map(request => request.threadKey)).toEqual(
+        roots.map(ts => `slack:${channel}:${agentViewEnabled ? ts : ''}`)
+      )
+      const reply = await slackBot.chat.postMessage({ channel, thread_ts: roots[0], text: 'Follow up' })
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
+        event_id: 'Ev-agent-dm-reply',
+        event: {
+          type: 'message', channel_type: 'im', channel, user: USER_ID,
+          ts: reply.ts, thread_ts: roots[0], text: 'Follow up'
+        }
+      }), {}, waitUntilContext(waits))
+      expect(response.status).toBe(200)
+      await Promise.all(waits)
+      expect(codexApi.executes.at(-1)?.threadKey).toBe(`slack:${channel}:${roots[0]}`)
+      expect(slackApi.calls.some(call => call.method === 'chat.stopStream')).toBe(true)
+      expect(slackApi.calls.some(call => call.method === 'agents.sessions.rename')).toBe(agentViewEnabled)
+    })
+  }
+
+  it('delivers native Stop once, suppresses late output, and keeps it stopped after restart', async () => {
+    const state = createMemoryState()
+    bot = createTestBot({ agentViewEnabled: true, state })
+    codexApi.autoRespond = false
+    const parent = await postUserMessage(`<@${BOT_USER_ID}> work until stopped`)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
+      event_id: 'Ev-native-stop-start',
+      event: {
+        type: 'app_mention', channel: CHANNEL_ID, user: USER_ID,
+        ts: parent.ts, text: `<@${BOT_USER_ID}> work until stopped`
+      }
+    }), {}, waitUntilContext(waits))
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.streamCount === 1)
+    codexApi.emitOutputLine(threadKey(parent.ts), JSON.stringify({
+      type: 'item.started',
+      item: { id: 'cmd-stop', type: 'commandExecution', command: 'sleep 60', status: 'inProgress' }
+    }))
+    await waitFor(() => slackApi.calls.some(call => call.method === 'chat.startStream'))
+    const streamsBeforeStop = slackApi.calls.filter(call => call.method === 'chat.startStream').length
+    const event = {
+      type: 'agent_session_stopped', channel: CHANNEL_ID, thread_ts: parent.ts,
+      event_ts: String(Number(parent.ts) + 1), user: USER_ID, streaming_message_ts: []
+    }
+    const stopped = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
+      event_id: 'Ev-native-stop', event
+    }))
+    expect(stopped.status).toBe(200)
+    expect(codexApi.interrupts).toEqual([{
+      threadKey: threadKey(parent.ts), body: { reason: `Interrupted from Slack by ${USER_ID}` }
+    }])
+    codexApi.emitOutputLines(threadKey(parent.ts), sampleCodexOutputLines('Late answer after Stop'))
+    await Promise.all(waits)
+    expect(await bot.chat.thread(threadKey(parent.ts)).state).toEqual(expect.objectContaining({
+      activeExecution: false, renderObligation: null,
+      agentStop: expect.objectContaining({ completed: true })
+    }))
+    expect(slackApi.calls.filter(call => call.method === 'chat.startStream')).toHaveLength(streamsBeforeStop)
+    expect(await threadText(parent.ts)).not.toContain('Late answer after Stop')
+    const eventRequestsBeforeRestart = codexApi.eventRequests.length
+    bot = createTestBot({ agentViewEnabled: true, state })
+    const duplicate = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
+      event_id: 'Ev-native-stop', event, retry_num: '1'
+    }))
+    expect(duplicate.status).toBe(200)
+    expect(codexApi.interrupts).toHaveLength(1)
+    expect(codexApi.eventRequests).toHaveLength(eventRequestsBeforeRestart)
+    expect(slackApi.calls).toContainEqual(expect.objectContaining({
+      method: 'agents.sessions.setStatus', body: expect.objectContaining({ status: 'active' })
+    }))
+  })
+
+  it('retries a failed native Stop handoff instead of deduplicating it as delivered', async () => {
+    bot = createTestBot({ agentViewEnabled: true, recoverRenderObligationsOnStart: false })
+    await bot.chat.initialize()
+    const thread = bot.chat.thread(threadKey('1700000000.000001'))
+    await thread.setState({
+      activeExecution: true,
+      renderObligation: {
+        executionId: 'exe-stop-retry', afterEventId: 0,
+        message: apiMessageFromSlackEvent({
+          isMention: true, text: 'run', threadId: thread.id, ts: '1700000000.000001'
+        })
+      }
+    })
+    const event = {
+      type: 'agent_session_stopped', channel: CHANNEL_ID, thread_ts: '1700000000.000001',
+      event_ts: '1700000001.000001', user: USER_ID, streaming_message_ts: []
+    }
+    codexApi.failNextInterrupt = true
+    const failed = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
+      event_id: 'Ev-stop-retry', event
+    }))
+    expect(failed.status).toBe(503)
+    expect((await thread.state)?.agentStop).toEqual(expect.objectContaining({ completed: false }))
+    expect((await thread.state)?.activeExecution).toBe(true)
+    const retried = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
+      event_id: 'Ev-stop-retry', event, retry_num: '1'
+    }))
+    expect(retried.status).toBe(200)
+    expect(codexApi.interrupts).toHaveLength(2)
+    expect((await thread.state)?.renderObligation).toBeNull()
+    await thread.setState({
+      activeExecution: true,
+      renderObligation: {
+        executionId: 'exe-after-stop', afterEventId: 0,
+        message: apiMessageFromSlackEvent({
+          isMention: true, text: 'new run', threadId: thread.id, ts: '1700000003.000001'
+        })
+      }
+    })
+    const stale = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
+      event_id: 'Ev-stale-stop', event: { ...event, event_ts: '1700000002.000001' }
+    }))
+    expect(stale.status).toBe(200)
+    expect(codexApi.interrupts).toHaveLength(2)
+    expect((await thread.state)?.activeExecution).toBe(true)
+  })
+
+  it('applies the external workspace allowlist to native Stop actors', async () => {
+    const state = createMemoryState()
+    bot = createTestBot({ agentViewEnabled: true, state, recoverRenderObligationsOnStart: false })
+    await bot.chat.initialize()
+    const thread = bot.chat.thread(threadKey('1700000000.000001'))
+    await thread.setState({
+      activeExecution: true,
+      renderObligation: {
+        executionId: 'exe-shared-stop', afterEventId: 0,
+        message: apiMessageFromSlackEvent({
+          isMention: true, text: 'run', threadId: thread.id, ts: '1700000000.000001'
+        })
+      }
+    })
+    slackApi.setUserProfile(USER_ID, { name: 'external', team_id: 'TEXTERNAL' })
+    const request = () => signedSlackEvent({
+      event_id: 'Ev-shared-stop',
+      event: {
+        type: 'agent_session_stopped', channel: CHANNEL_ID, thread_ts: '1700000000.000001',
+        event_ts: '1700000001.000001', user: USER_ID
+      }
+    })
+    expect((await bot.app.request('/api/webhooks/slack', request())).status).toBe(200)
+    expect(codexApi.interrupts).toHaveLength(0)
+    expect((await thread.state)?.activeExecution).toBe(true)
+    bot = createTestBot({
+      agentViewEnabled: true, state, allowedExternalTeamIds: ['TEXTERNAL'],
+      recoverRenderObligationsOnStart: false
+    })
+    expect((await bot.app.request('/api/webhooks/slack', request())).status).toBe(200)
+    expect(codexApi.interrupts).toHaveLength(1)
+  })
+
+  it('rejects unsigned native Stop and ignores it when agent view is disabled', async () => {
+    const event = {
+      type: 'agent_session_stopped', channel: CHANNEL_ID, thread_ts: '1700000000.000001',
+      event_ts: '1700000001.000001', user: USER_ID
+    }
+    bot = createTestBot({ agentViewEnabled: true })
+    const unsigned = await bot.app.request('/api/webhooks/slack', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'event_callback', event })
+    })
+    expect(unsigned.status).toBe(401)
+    bot = createTestBot()
+    const disabled = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
+      event_id: 'Ev-stop-disabled', event
+    }))
+    expect(disabled.status).toBe(200)
+    expect(codexApi.interrupts).toHaveLength(0)
+    expect(slackApi.calls).toHaveLength(0)
+  })
+
+  it('recovers a pending native Stop after restart without replaying the answer', async () => {
+    const state = createMemoryState()
+    await state.connect()
+    const key = threadKey('1700000000.000001')
+    await state.set(`thread-state:${key}`, {
+      activeExecution: true,
+      stoppedExecutionIds: ['exe-pending-stop'],
+      agentStop: {
+        executionId: 'exe-pending-stop', eventTs: '1700000001.000001', userId: USER_ID, completed: false
+      },
+      renderObligation: {
+        executionId: 'exe-pending-stop', afterEventId: 0,
+        message: apiMessageFromSlackEvent({ isMention: true, text: 'run', threadId: key, ts: '1700000000.000001' })
+      }
+    })
+    await state.appendToList('slackbotv2:render:index', key)
+    bot = createTestBot({ agentViewEnabled: true, state })
+    await waitFor(async () => (await bot.chat.thread(key).state)?.renderObligation === null)
+    expect(codexApi.interrupts).toHaveLength(1)
+    expect(codexApi.eventRequests).toHaveLength(0)
+    expect(slackApi.calls.filter(call => call.method === 'chat.startStream')).toHaveLength(0)
+  })
+
+  it('honors native Stop while the execution handoff is still in progress', async () => {
+    bot = createTestBot({ agentViewEnabled: true })
+    const parent = await postUserMessage(`<@${BOT_USER_ID}> work until stopped`)
+    const release = codexApi.holdNextExecute()
+    const waits: Promise<unknown>[] = []
+    const handoff = bot.app.request('/api/webhooks/slack', signedSlackEvent({
+      event_id: 'Ev-early-stop-start',
+      event: {
+        type: 'app_mention', channel: CHANNEL_ID, user: USER_ID,
+        ts: parent.ts, text: `<@${BOT_USER_ID}> work until stopped`
+      }
+    }), {}, waitUntilContext(waits))
+    try {
+      await waitFor(() => codexApi.executes.length === 1)
+      const stopped = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
+        event_id: 'Ev-early-stop',
+        event: {
+          type: 'agent_session_stopped', channel: CHANNEL_ID, thread_ts: parent.ts,
+          event_ts: String(Number(parent.ts) + 1), user: USER_ID
+        }
+      }))
+      expect(stopped.status).toBe(503)
+    } finally {
+      release()
+    }
+    expect((await handoff).status).toBe(200)
+    await Promise.all(waits)
+    expect(codexApi.interrupts).toHaveLength(1)
+    expect((await bot.chat.thread(threadKey(parent.ts)).state)?.renderObligation).toBeNull()
+    expect(slackApi.calls.filter(call => call.method === 'chat.startStream')).toHaveLength(0)
+  })
+
   it('accepts Slack events on the legacy route', async () => {
     const parent = await postUserMessage('Legacy route context.')
     const mention = await postUserMessage(`<@${BOT_USER_ID}> use the legacy route`, parent.ts)
@@ -6100,6 +6366,8 @@ type MockWorkflowEventRequest = {
 }
 
 type MockSessionApi = {
+  interrupts: MockSessionRequest<{ reason: string }>[]
+  failNextInterrupt: boolean
   appends: MockSessionRequest<SlackbotV2AppendMessagesRequest>[]
   autoRespond: boolean
   close(): Promise<void>
@@ -6122,6 +6390,8 @@ type MockSessionApi = {
 }
 
 async function startMockCodexApi(): Promise<MockSessionApi> {
+  const interrupts: MockSessionRequest<{ reason: string }>[] = []
+  let failNextInterrupt = false
   const appends: MockSessionRequest<SlackbotV2AppendMessagesRequest>[] = []
   const createResponses: Array<{ body: Record<string, unknown>; status: number }> = []
   const creates: MockSessionRequest<SlackbotV2CreateSessionRequest>[] = []
@@ -6145,6 +6415,9 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
   }
   const server = createServer((req, res) => {
     void handleMockCodexRequest(req, res, {
+      interrupts,
+      get failNextInterrupt() { return failNextInterrupt },
+      setFailNextInterrupt(value) { failNextInterrupt = value },
       appends,
       createResponses,
       creates,
@@ -6191,11 +6464,16 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
   await listen(server, port)
 
   const api: MockSessionApi = {
+    interrupts,
+    get failNextInterrupt() { return failNextInterrupt },
+    set failNextInterrupt(value: boolean) { failNextInterrupt = value },
     appends,
     creates,
     eventRequests,
     executes,
     reset() {
+      interrupts.length = 0
+      failNextInterrupt = false
       appends.length = 0
       createResponses.length = 0
       creates.length = 0
@@ -6297,6 +6575,9 @@ async function handleMockCodexRequest(
   res: ServerResponse,
   input: {
     appends: MockSessionRequest<SlackbotV2AppendMessagesRequest>[]
+    interrupts: MockSessionRequest<{ reason: string }>[]
+    failNextInterrupt: boolean
+    setFailNextInterrupt(value: boolean): void
     autoRespond: boolean
     createResponses: Array<{ body: Record<string, unknown>; status: number }>
     creates: MockSessionRequest<SlackbotV2CreateSessionRequest>[]
@@ -6324,7 +6605,7 @@ async function handleMockCodexRequest(
     await sendWebResponse(res, Response.json({ ok: true }))
     return
   }
-  const match = /^\/api\/session\/([^/]+)(?:\/(messages|execute|events))?$/.exec(url.pathname)
+  const match = /^\/api\/session\/([^/]+)(?:\/(messages|execute|events|interrupt))?$/.exec(url.pathname)
   if (!match?.[1]) {
     await sendWebResponse(res, new Response('not found', { status: 404 }))
     return
@@ -6390,6 +6671,17 @@ async function handleMockCodexRequest(
   }
 
   const request = await nodeRequestToWebRequest(req, url)
+  if (endpoint === 'interrupt') {
+    const body = await request.json() as { reason: string }
+    input.interrupts.push({ threadKey, body })
+    if (input.failNextInterrupt) {
+      input.setFailNextInterrupt(false)
+      await sendWebResponse(res, new Response('unavailable', { status: 503 }))
+      return
+    }
+    await sendWebResponse(res, Response.json({ interrupted: true, execution_id: 'exe-stopped' }))
+    return
+  }
   if (endpoint === 'messages') {
     const body = (await request.json()) as SlackbotV2AppendMessagesRequest
     input.appends.push({ threadKey, body })
@@ -6500,6 +6792,8 @@ type PatchedSlackApi = {
 type StreamCall = {
   body: Record<string, unknown>
   method:
+    | 'agents.sessions.setStatus'
+    | 'agents.sessions.rename'
     | 'assistant.threads.setStatus'
     | 'assistant.threads.setTitle'
     | 'chat.startStream'
@@ -6698,6 +6992,12 @@ async function handlePatchedSlackRequest(
   }
 
   const path = normalizeApiPath(url.pathname)
+  if (path === '/api/agents.sessions.setStatus' || path === '/api/agents.sessions.rename') {
+    const body = await requestBody(request)
+    input.calls.push({ method: path.slice('/api/'.length) as StreamCall['method'], body })
+    await sendWebResponse(res, Response.json({ ok: true }))
+    return
+  }
   if (path === '/api/assistant.threads.setStatus') {
     const body = await requestBody(request)
     input.calls.push({ method: 'assistant.threads.setStatus', body })
@@ -6731,6 +7031,7 @@ async function handlePatchedSlackRequest(
           ok: true,
           user: {
             id: userId,
+            team_id: profile.team_id ?? TEAM_ID,
             name: profile.name,
             real_name: profile.real_name,
             profile
