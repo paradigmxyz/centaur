@@ -276,6 +276,14 @@ should take effect, enforce that in the action, such as the stable child-workflo
 idempotency key above. External side effects inside steps must also be idempotent.
 Removing buttons does not cancel clicks that are already in flight.
 
+Signatures do not prevent replay. Anyone who can read a signed button and post
+as the bot can copy it into another message in the same channel. Clicking that
+copy can start another execution with the same workflow and input. Signatures
+have no expiry and are not bound to the original message timestamp. The receiving
+workflow must check whether the action is still valid. For actions that should
+only happen once, use an idempotency key based on the business operation, such as
+`deploy:release-42`, rather than the click or receiving workflow execution.
+
 Keep posting step names stable and unique. Posting uses an ordinary checkpoint
 and a stable Slack `client_msg_id`; an ambiguous Slack failure can still produce
 duplicate messages. All copies carry the same workflow target and group ID.
