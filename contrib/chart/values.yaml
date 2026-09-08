@@ -533,6 +533,9 @@ apiRs:
   # 0 disables retention. Other session event types are preserved.
   # Events without an execution expire by event age alone. Sweeps are bounded
   # per pass, so a large first backlog drains over several sweeps.
+  # First install the manual session_events_retention_index.sql migration.
+  # Sweeps skip deletion if session_events_stdout_created_at_idx is missing
+  # or invalid. See the configuration reference for setup and recovery.
   sessionEventsRetentionDays: 0
   sessionEventsRetentionSweepIntervalSecs: 300
   # Minimum age before proxy resources without a live Sandbox are reaped.

@@ -1211,6 +1211,25 @@ impl PgSessionStore {
             .collect()
     }
 
+    /// Whether the manually installed retention index is ready for queries.
+    pub async fn stdout_retention_index_is_valid(&self) -> Result<bool, SessionStoreError> {
+        Ok(sqlx::query_scalar(
+            r#"
+            select exists (
+                select 1
+                from pg_catalog.pg_index
+                where indexrelid = to_regclass('session_events_stdout_created_at_idx')
+                  and indrelid = 'session_events'::regclass
+                  and indisvalid
+                  and indisready
+                  and indislive
+            )
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
     /// Deletes one batch of `session.output.line` events older than `cutoff`,
     /// returning how many rows went. Other event types are preserved. Returns
     /// fewer than `batch_limit` when no more eligible, unlocked rows remain.

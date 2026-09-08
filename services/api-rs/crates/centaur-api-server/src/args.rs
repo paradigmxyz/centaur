@@ -206,6 +206,7 @@ struct SessionEventRetentionArgs {
     /// execution also completed before the cutoff. Other event types are
     /// preserved. Accepts 0 through 3650; 0 disables retention (the default).
     /// Events without an execution expire by event age alone.
+    /// Requires the manually installed session_events_stdout_created_at_idx index.
     #[arg(
         long = "session-events-retention-days",
         env = "SESSION_EVENTS_RETENTION_DAYS",

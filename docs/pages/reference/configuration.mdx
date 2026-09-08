@@ -128,7 +128,7 @@ Sandbox lifecycle:
 | `SESSION_IDLE_TIMEOUT_MS` | `slackbotv2.extraEnv`; default is up to 3 hours. | Slackbot v2 execute idle timeout. After an execution reaches a terminal state, api-rs pauses the sandbox if no newer execution has used that sandbox. If `SESSION_MAX_DURATION_MS` is lower than 3 hours and this value is unset, Slackbot v2 caps the default idle timeout to the max duration. |
 | `SESSION_MAX_DURATION_MS` | `slackbotv2.extraEnv`. | Optional per-execution max duration forwarded to api-rs. api-rs rejects requests where `idle_timeout_ms` is greater than `max_duration_ms`. |
 | `apiRs.sandboxMaxLifetimeSecs` / `SESSION_SANDBOX_MAX_LIFETIME_SECS` | Helm value, default `259200` (72 hours). | Restart-surviving sandbox deletion backstop. The reaper stops any non-terminal sandbox older than this, regardless of whether it is running or suspended. Set `0` to disable max-lifetime reaping. |
-| `apiRs.sessionEventsRetentionDays` / `SESSION_EVENTS_RETENTION_DAYS` | Helm value, default `0` (disabled); range `0` through `3650`. | Deletes only `session.output.line` events older than this many days, once their execution also completed before the cutoff. Other session event types are preserved. Events without an execution expire by event age alone. Sweeps are bounded per pass, so a large first backlog drains over several. |
+| `apiRs.sessionEventsRetentionDays` / `SESSION_EVENTS_RETENTION_DAYS` | Helm value, default `0` (disabled); range `0` through `3650`. | Deletes only `session.output.line` events older than this many days, once their execution also completed before the cutoff. Other session event types are preserved. Events without an execution expire by event age alone. Requires the [manual retention index](#stdout-event-retention). Sweeps skip deletion when the index is missing or invalid. |
 | `apiRs.sessionEventsRetentionSweepIntervalSecs` / `SESSION_EVENTS_RETENTION_SWEEP_INTERVAL_SECS` | Helm value, default `300`. | How often api-rs runs a session-event retention sweep when retention is enabled. |
 | `apiRs.sandboxReapIntervalSecs` / `SESSION_SANDBOX_REAP_INTERVAL_SECS` | Helm value, default `300`. | How often api-rs sweeps observed sandboxes for max-lifetime expiry and orphaned proxy resources. |
 | `apiRs.sandboxOrphanSweepGraceSecs` / `SESSION_SANDBOX_ORPHAN_SWEEP_GRACE_SECS` | Helm value, default `600`. | Minimum age of an iron-proxy resource with no live Sandbox before the orphan sweep may delete it. |
@@ -324,6 +324,57 @@ Linear ETL workflows:
 | `CENTAUR_RETENTION_ATTACHMENTS_TTL_DAYS`, `CENTAUR_RETENTION_TRANSCRIPTS_TTL_DAYS` | `api.extraEnv`. | Attachment/transcript retention TTLs. |
 | `CENTAUR_RETENTION_SWEEP_INTERVAL_SECONDS`, `CENTAUR_RETENTION_BATCH_SIZE`, `CENTAUR_RETENTION_DRY_RUN` | `api.extraEnv`. | Retention sweep cadence, batch size, and dry-run mode. |
 | `TOOL_CALL_TIMEOUT_S`, `TOOL_BINARY_INLINE_MAX_BYTES`, `TOOL_BINARY_PREVIEW_BYTES` | `api.extraEnv`. | Tool execution timeout and binary result handling. |
+
+### Stdout Event Retention
+
+Retention is disabled by default. Its index is installed separately from API-RS
+startup migrations, so an index build failure does not prevent the API from
+starting. Create the index before enabling retention.
+
+Connect `psql` to the application database with an account that owns
+`session_events`. Use your normal libpq connection settings and credential file.
+From the repository root, run:
+
+```sh
+psql -X --set ON_ERROR_STOP=1 \
+  --file services/api-rs/crates/centaur-session-sqlx/manual-migrations/session_events_retention_index.sql
+```
+
+The script creates a partial index concurrently. Run it outside a transaction;
+do not use `psql --single-transaction`. Ordinary reads and writes can continue,
+but the build adds database load and can wait for existing transactions.
+
+Verify the index after the command succeeds:
+
+```sql
+SELECT indexrelid::regclass AS index_name, indisvalid, indisready, indislive
+FROM pg_catalog.pg_index
+WHERE indexrelid = to_regclass('session_events_stdout_created_at_idx')
+  AND indrelid = 'session_events'::regclass;
+```
+
+Expect one row with all three flags set to `true`. Then set
+`apiRs.sessionEventsRetentionDays` or `SESSION_EVENTS_RETENTION_DAYS` to a value
+from `1` through `3650`. An execution's stdout becomes eligible after its
+completion time passes the retention cutoff. Deletions remain batched, so a
+large backlog can take several sweeps to drain.
+
+If a build fails, inspect the index before retrying. No row means the index is
+absent and the creation script can be retried after addressing the failure.
+If the index exists but is invalid, repair it outside a transaction:
+
+```sql
+REINDEX INDEX CONCURRENTLY session_events_stdout_created_at_idx;
+```
+
+Verify the flags again after repair. The creation script deliberately fails if
+the name already exists, so a retry cannot silently accept an invalid index.
+An already valid index does not need to be recreated.
+
+Each retention sweep checks the index. If it is missing or invalid, the worker
+logs `session_events_retention_skipped` and deletes nothing. API-RS stays
+available. After the index is repaired, the next sweep can proceed without
+another restart. Setting retention back to `0` disables the worker.
 
 ## Local Scripts
 
