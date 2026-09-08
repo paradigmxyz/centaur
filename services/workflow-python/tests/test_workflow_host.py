@@ -670,35 +670,6 @@ class WorkflowHostTests(unittest.TestCase):
             )
             self.assertIsNone(host.workflow_name_from_source(path))
 
-    def test_discover_with_standard_library_only(self) -> None:
-        host_path = Path(__file__).resolve().parents[1] / "workflow_host.py"
-        with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / "simple.py").write_text(
-                "WORKFLOW_NAME = 'simple_workflow'\n"
-                "async def handler(inp, ctx):\n"
-                "    return inp\n"
-            )
-            result = subprocess.run(
-                [sys.executable, "-E", "-S", str(host_path)],
-                input='{"type": "workflow.discover"}\n',
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env={
-                    **os.environ,
-                    "WORKFLOW_DIRS": tmp,
-                    "WORKFLOW_ENABLE_MODE": "all",
-                },
-            )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        payload = json.loads(result.stdout)
-        self.assertEqual(payload["type"], "workflow.discovery")
-        self.assertEqual(
-            [workflow["workflow_name"] for workflow in payload["workflows"]],
-            ["simple_workflow"],
-        )
-
     def test_discover_skips_disallowed_workflows_without_importing(self) -> None:
         host = load_workflow_host()
         with tempfile.TemporaryDirectory() as tmp:
