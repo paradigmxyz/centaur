@@ -9135,7 +9135,14 @@ mod adoption_tests {
         let store = PgSessionStore::connect(&url)
             .await
             .expect("connect test db");
-        store.run_migrations().await.expect("run migrations");
+        {
+            // Parallel tests each run the migrator; two migrators on one fresh
+            // database deadlock on `create index concurrently`, and the
+            // interrupted build leaves an invalid index behind.
+            static MIGRATIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+            let _serialized = MIGRATIONS.lock().await;
+            store.run_migrations().await.expect("run migrations");
+        }
         Some(store)
     }
 
