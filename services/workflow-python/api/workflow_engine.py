@@ -6,6 +6,7 @@ import inspect
 from typing import Any
 
 from api.app import WorkflowToolManager, WorkflowTools, bind_context_rpc, reset_context_rpc
+from api.workflow_db import WorkflowDatabase
 
 
 @dataclasses.dataclass
@@ -25,6 +26,7 @@ class WorkflowContext:
         task_id: str,
         workflow_name: str,
         pool: Any = None,
+        source_path: str | None = None,
         agent_defaults: dict[str, Any] | None = None,
     ) -> None:
         self._rpc = rpc
@@ -32,6 +34,7 @@ class WorkflowContext:
         self.task_id = task_id
         self.workflow_name = workflow_name
         self._pool = pool
+        self.db = WorkflowDatabase(pool, source_path=source_path)
         # Module-level `AGENT_DEFAULTS` (e.g. {"model": ..., "reasoning": ...})
         # applied to every ctx.agent_turn as a per-workflow default; explicit
         # per-call kwargs always win. See agent_turn().
