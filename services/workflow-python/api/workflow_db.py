@@ -11,8 +11,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-import asyncpg
-
 
 class MigrationError(RuntimeError):
     """The SQLx CLI failed to run workflow migrations."""
@@ -63,6 +61,9 @@ class WorkflowDatabase:
         on every invocation; SQLx owns history, checksums, and transactions.
         """
         pool = self._require_pool()
+        # Discovery and workflows without database operations need no DB driver.
+        import asyncpg
+
         if not schema or len(schema.encode()) > 63 or "\0" in schema:
             raise ValueError("schema must contain 1 to 63 UTF-8 bytes and no NUL")
         if not math.isfinite(lock_timeout) or lock_timeout <= 0:
