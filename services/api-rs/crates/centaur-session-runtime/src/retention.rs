@@ -16,11 +16,6 @@ pub struct SessionEventRetentionConfig {
     pub retention: Duration,
 }
 
-#[derive(Debug, Default)]
-struct SessionEventRetentionReport {
-    deleted_events: u64,
-}
-
 pub(crate) struct SessionEventRetentionWorker {
     store: PgSessionStore,
     config: SessionEventRetentionConfig,
@@ -49,30 +44,30 @@ impl SessionEventRetentionWorker {
     /// `session.output.line` carries one row per harness stdout line. Bounded sweeps
     /// keep the initial backlog from monopolizing a database connection or
     /// creating one large delete transaction.
-    async fn sweep_once(&self) -> Result<SessionEventRetentionReport, SessionStoreError> {
+    async fn sweep_once(&self) -> Result<u64, SessionStoreError> {
         let Some(cutoff) = SystemTime::now().checked_sub(self.config.retention) else {
-            return Ok(SessionEventRetentionReport::default());
+            return Ok(0);
         };
-        let mut report = SessionEventRetentionReport::default();
+        let mut deleted_events = 0;
         for _ in 0..EVENT_RETENTION_MAX_BATCHES {
             let deleted = self
                 .store
                 .delete_stdout_events_older_than(cutoff, EVENT_RETENTION_BATCH_ROWS)
                 .await?;
-            report.deleted_events += deleted;
+            deleted_events += deleted;
             if deleted < EVENT_RETENTION_BATCH_ROWS as u64 {
                 break;
             }
         }
-        if report.deleted_events > 0 {
+        if deleted_events > 0 {
             info!(
                 component = crate::COMPONENT_SESSION_RUNTIME,
                 event = "session_events_expired",
-                deleted = report.deleted_events,
+                deleted = deleted_events,
                 retention_secs = self.config.retention.as_secs(),
                 "deleted stdout output-line events past the retention window"
             );
         }
-        Ok(report)
+        Ok(deleted_events)
     }
 }
