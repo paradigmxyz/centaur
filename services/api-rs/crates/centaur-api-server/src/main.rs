@@ -89,6 +89,9 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     }
     runtime = runtime.with_sandbox_reaper(args.sandbox_reaper_config());
     runtime = runtime.with_sandbox_cleanup(args.sandbox_cleanup_config());
+    if let Some(config) = args.output_line_retention_config() {
+        runtime = runtime.with_session_output_line_retention(config);
+    }
     let workflow_host_sandbox = args
         .workflow_host_sandbox_runtime(&iron_control.workflow_host_principal)
         .await?;

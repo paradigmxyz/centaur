@@ -32,7 +32,8 @@ use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
 use centaur_session_core::HarnessType;
 use centaur_session_runtime::{
-    PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode, SessionSandboxCleanupConfig,
+    PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode, SessionOutputLineRetentionConfig,
+    SessionSandboxCleanupConfig,
 };
 use centaur_workflows::{WorkflowHostSandboxRuntime, WorkflowPrincipalRegistrar};
 use clap::{Args as ClapArgs, Parser, ValueEnum};
@@ -62,6 +63,8 @@ pub(crate) struct Args {
     pub(crate) server: ServerArgs,
     #[command(flatten)]
     sandbox: SandboxArgs,
+    #[command(flatten)]
+    output_line_retention: SessionOutputLineRetentionArgs,
     #[command(flatten)]
     activity_summary: ActivitySummaryArgs,
 }
@@ -97,6 +100,10 @@ impl Args {
 
     pub(crate) fn sandbox_cleanup_config(&self) -> SessionSandboxCleanupConfig {
         self.sandbox.sandbox_cleanup_config()
+    }
+
+    pub(crate) fn output_line_retention_config(&self) -> Option<SessionOutputLineRetentionConfig> {
+        self.output_line_retention.config()
     }
 
     pub(crate) async fn workflow_host_sandbox_runtime(
@@ -191,6 +198,36 @@ struct ActivitySummaryArgs {
         default_value = "low"
     )]
     reasoning_effort: String,
+}
+
+#[derive(Debug, ClapArgs)]
+struct SessionOutputLineRetentionArgs {
+    /// Delete `session.output.line` events older than this many days. 0
+    /// disables retention, which is the default. Only harness stdout lines are
+    /// deleted: lifecycle events, execution outcomes and assistant replies are
+    /// kept, as are output lines of a queued or running execution.
+    #[arg(
+        long = "session-output-line-retention-days",
+        env = "SESSION_OUTPUT_LINE_RETENTION_DAYS",
+        default_value_t = 0
+    )]
+    retention_days: u32,
+    #[arg(
+        long = "session-output-line-retention-sweep-interval-secs",
+        env = "SESSION_OUTPUT_LINE_RETENTION_SWEEP_INTERVAL_SECS",
+        default_value_t = 300,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    sweep_interval_secs: u64,
+}
+
+impl SessionOutputLineRetentionArgs {
+    fn config(&self) -> Option<SessionOutputLineRetentionConfig> {
+        (self.retention_days > 0).then(|| SessionOutputLineRetentionConfig {
+            interval: Duration::from_secs(self.sweep_interval_secs),
+            retention: Duration::from_secs(u64::from(self.retention_days) * 24 * 60 * 60),
+        })
+    }
 }
 
 impl ActivitySummaryArgs {
@@ -2229,6 +2266,39 @@ mod tests {
                 what: "unsupported transform".to_owned(),
             })
         ));
+    }
+
+    #[test]
+    fn output_line_retention_is_disabled_by_default() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+        ])
+        .unwrap();
+
+        assert!(args.output_line_retention_config().is_none());
+    }
+
+    #[test]
+    fn output_line_retention_has_an_independent_sweep_interval() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-output-line-retention-days",
+            "7",
+            "--session-output-line-retention-sweep-interval-secs",
+            "45",
+            "--session-sandbox-cleanup-interval-secs",
+            "0",
+        ])
+        .unwrap();
+
+        let config = args.output_line_retention_config().unwrap();
+        assert_eq!(config.retention, Duration::from_secs(7 * 24 * 60 * 60));
+        assert_eq!(config.interval, Duration::from_secs(45));
+        assert!(!args.sandbox_cleanup_config().is_enabled());
     }
 
     #[test]

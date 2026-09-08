@@ -344,6 +344,8 @@
         "mcpPublicUrl": { "type": "string" },
         "sandboxRunningLimit": { "type": "integer", "minimum": 0 },
         "sandboxHotIdleGraceSecs": { "type": "integer", "minimum": 0 },
+        "sessionOutputLineRetentionDays": { "type": "integer", "minimum": 0 },
+        "sessionOutputLineRetentionSweepIntervalSecs": { "type": "integer", "minimum": 1 },
         "sandboxOrphanSweepGraceSecs": { "type": "integer", "minimum": 1 },
         "workflowHostSandbox": { "type": "boolean" },
         "workflowHostResources": { "type": "object" },
@@ -427,8 +429,7 @@
                   "minimum": 1,
                   "maximum": 8192
                 },
-                "model": { "type": "string", "minLength": 1 },
-                "dimensions": { "type": "integer", "minimum": 1, "maximum": 2000 }
+                "model": { "type": "string", "minLength": 1 }
               }
             }
           }

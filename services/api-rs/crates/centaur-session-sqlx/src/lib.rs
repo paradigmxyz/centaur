@@ -23,6 +23,9 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 pub const SESSION_EVENTS_CHANNEL: &str = "centaur_session_events";
 const DEFAULT_MAX_CONNECTIONS: u32 = 500;
+/// Advisory lock name serializing output-line retention batches across
+/// api-rs replicas.
+const OUTPUT_LINE_RETENTION_LOCK: &str = "centaur:session-output-line-retention";
 
 #[derive(Clone, Debug)]
 pub struct CreateExecutionResult {
@@ -45,6 +48,29 @@ pub struct ClaimExecutionResult {
 pub struct ReleasedExecution {
     pub execution_id: String,
     pub thread_key: ThreadKey,
+}
+
+/// One batch of [`PgSessionStore::delete_expired_output_line_events`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExpiredOutputLineBatch {
+    /// Output-line events examined, expired or not.
+    pub scanned: u64,
+    /// Output-line events deleted.
+    pub deleted: u64,
+    /// Every output line at or below this id is handled: deleted, kept for an
+    /// active execution, or not an output line. Resume the next batch here.
+    pub next_after_event_id: i64,
+    /// The walk reached rows inside the retention window, so nothing older is
+    /// left to delete until more rows age out.
+    pub reached_retained_events: bool,
+}
+
+#[derive(Debug, FromRow)]
+struct ExpiredOutputLineBatchRow {
+    scanned: i64,
+    deleted: i64,
+    next_after_event_id: Option<i64>,
+    reached_retained_events: bool,
 }
 
 /// An active execution together with its stdout-owner lease state, as
@@ -1211,6 +1237,93 @@ impl PgSessionStore {
             .collect()
     }
 
+    /// Delete one batch of `session.output.line` events past the retention
+    /// window, walking the table in `event_id` order from `after_event_id`.
+    ///
+    /// `event_id` is an identity column and `created_at` defaults to `now()`,
+    /// so the two are monotonic together and the oldest rows are always the
+    /// lowest ids. Walking the primary key means each batch is a bounded index
+    /// range read: no `created_at` index, no sort, and no seq scan when the
+    /// backlog is drained. The caller resumes the next batch from
+    /// `next_after_event_id`; `reached_retained_events` says the walk hit rows
+    /// still inside the window, after which nothing older remains.
+    ///
+    /// Only output lines are deleted. Lifecycle events (`session.sandbox_paused`
+    /// drives capacity admission), execution outcomes (the assistant's reply
+    /// lives in `session.execution_completed`) and everything else are kept.
+    /// Output lines of a `queued` or `running` execution are also kept, whatever
+    /// their age, because a reconnecting client replays them; the cursor passes
+    /// over them so a stuck execution cannot stall retention, and they are
+    /// picked up by the next walk from the head of the table.
+    ///
+    /// Batches are serialized across processes with a transaction-scoped
+    /// advisory lock. `None` means another sweeper held it.
+    pub async fn delete_expired_output_line_events(
+        &self,
+        after_event_id: i64,
+        retention: Duration,
+        batch_limit: i64,
+    ) -> Result<Option<ExpiredOutputLineBatch>, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        let locked: bool =
+            sqlx::query_scalar("select pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(OUTPUT_LINE_RETENTION_LOCK)
+                .fetch_one(&mut *tx)
+                .await?;
+        if !locked {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        let row = sqlx::query_as::<_, ExpiredOutputLineBatchRow>(
+            r#"
+            with candidates as (
+                select
+                    e.event_id,
+                    e.created_at < now() - ($2::float8 * interval '1 second') as expired,
+                    exists (
+                        select 1
+                        from session_executions active
+                        where active.execution_id = e.execution_id
+                          and active.status in ('queued', 'running')
+                    ) as active
+                from session_events e
+                where e.event_id > $1
+                  and e.event_type = 'session.output.line'
+                order by e.event_id
+                limit $3
+            ),
+            deleted as (
+                delete from session_events e
+                using candidates c
+                where e.event_id = c.event_id
+                  and c.expired
+                  and not c.active
+                returning e.event_id
+            )
+            select
+                (select count(*) from candidates) as scanned,
+                (select count(*) from deleted) as deleted,
+                coalesce(
+                    (select min(event_id) - 1 from candidates where not expired),
+                    (select max(event_id) from candidates)
+                ) as next_after_event_id,
+                exists (select 1 from candidates where not expired) as reached_retained_events
+            "#,
+        )
+        .bind(after_event_id)
+        .bind(retention.as_secs_f64())
+        .bind(batch_limit)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(ExpiredOutputLineBatch {
+            scanned: u64::try_from(row.scanned).unwrap_or_default(),
+            deleted: u64::try_from(row.deleted).unwrap_or_default(),
+            next_after_event_id: row.next_after_event_id.unwrap_or(after_event_id),
+            reached_retained_events: row.reached_retained_events,
+        }))
+    }
+
     pub async fn list_sandbox_capacity_candidates(
         &self,
         excluded_thread_key: Option<&ThreadKey>,
@@ -2095,7 +2208,9 @@ mod tests {
     use time::{Duration as TimeDuration, OffsetDateTime};
     use uuid::Uuid;
 
-    use super::{IdleSandboxCandidateRow, PgSessionStore, SessionEventNotification};
+    use super::{
+        ExpiredOutputLineBatch, IdleSandboxCandidateRow, PgSessionStore, SessionEventNotification,
+    };
 
     async fn test_store() -> Option<PgSessionStore> {
         let Ok(url) = std::env::var("SESSION_RUNTIME_TEST_DATABASE_URL") else {
@@ -2716,6 +2831,190 @@ mod tests {
                 .await
                 .expect("list referenced sandboxes")
                 .contains(&sandbox_id)
+        );
+    }
+
+    /// The two retention tests contend for the same advisory lock, so they run
+    /// one at a time.
+    static OUTPUT_LINE_RETENTION_TEST_LOCK: tokio::sync::Mutex<()> =
+        tokio::sync::Mutex::const_new(());
+
+    #[tokio::test]
+    async fn output_line_retention_walks_the_primary_key_and_keeps_everything_else() {
+        let _serialized = OUTPUT_LINE_RETENTION_TEST_LOCK.lock().await;
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key =
+            ThreadKey::parse(format!("test:output-line-retention-{}", Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        let completed = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create completed execution")
+            .execution
+            .execution_id;
+        store
+            .complete_execution(&completed)
+            .await
+            .expect("complete execution");
+        let running = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create running execution")
+            .execution
+            .execution_id;
+        store
+            .mark_execution_running(&running)
+            .await
+            .expect("mark execution running");
+
+        // One statement so the ids are contiguous: rows other tests insert
+        // concurrently cannot land between ours and change the batch shape.
+        let mut ids: Vec<i64> = sqlx::query_scalar(
+            r#"
+            insert into session_events
+                (thread_key, execution_id, event_type, payload, created_at)
+            values
+                ($1, $2, 'session.output.line', '{}', now() - interval '30 days'),
+                ($1, $2, 'session.output.line', '{}', now() - interval '30 days'),
+                ($1, $2, 'session.output.line', '{}', now() - interval '30 days'),
+                ($1, $3, 'session.output.line', '{}', now() - interval '30 days'),
+                ($1, $2, 'session.execution_completed', '{}', now() - interval '30 days'),
+                ($1, null, 'session.output.line', '{}', now() - interval '30 days'),
+                ($1, $2, 'session.output.line', '{}', now())
+            returning event_id
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .bind(&completed)
+        .bind(&running)
+        .fetch_all(store.pool())
+        .await
+        .expect("insert events");
+        ids.sort_unstable();
+        let [
+            old_a,
+            old_b,
+            _old_c,
+            running_old,
+            terminal_old,
+            _unscoped_old,
+            fresh,
+        ]: [i64; 7] = ids.try_into().expect("seven event ids");
+        let retention = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+        let sweep = |after: i64| store.delete_expired_output_line_events(after, retention, 2);
+
+        // Batch one: two expired lines of a completed execution.
+        let batch = sweep(old_a - 1).await.expect("batch one").expect("lock");
+        assert_eq!(
+            batch,
+            ExpiredOutputLineBatch {
+                scanned: 2,
+                deleted: 2,
+                next_after_event_id: old_b,
+                reached_retained_events: false,
+            }
+        );
+
+        // Batch two: an expired line of a running execution is kept, but the
+        // cursor passes it so a stuck execution cannot stall the sweep.
+        let batch = sweep(batch.next_after_event_id)
+            .await
+            .expect("batch two")
+            .expect("lock");
+        assert_eq!(
+            batch,
+            ExpiredOutputLineBatch {
+                scanned: 2,
+                deleted: 1,
+                next_after_event_id: running_old,
+                reached_retained_events: false,
+            }
+        );
+
+        // Batch three: the terminal event is not a candidate at all, the
+        // execution-less line is deleted, and the fresh line marks the frontier.
+        // The cursor stops just before the first retained row.
+        let batch = sweep(batch.next_after_event_id)
+            .await
+            .expect("batch three")
+            .expect("lock");
+        assert_eq!(
+            batch,
+            ExpiredOutputLineBatch {
+                scanned: 2,
+                deleted: 1,
+                next_after_event_id: fresh - 1,
+                reached_retained_events: true,
+            }
+        );
+
+        // Resuming at the frontier deletes nothing and reports it again.
+        let batch = sweep(batch.next_after_event_id)
+            .await
+            .expect("batch four")
+            .expect("lock");
+        assert_eq!(batch.deleted, 0);
+        assert!(batch.reached_retained_events);
+        assert_eq!(batch.next_after_event_id, fresh - 1);
+
+        let remaining: Vec<i64> = sqlx::query_scalar(
+            "select event_id from session_events where thread_key = $1 order by event_id",
+        )
+        .bind(thread_key.as_str())
+        .fetch_all(store.pool())
+        .await
+        .expect("list remaining events");
+        assert_eq!(remaining, vec![running_old, terminal_old, fresh]);
+
+        sqlx::query("delete from sessions where thread_key = $1")
+            .bind(thread_key.as_str())
+            .execute(store.pool())
+            .await
+            .expect("cleanup session");
+    }
+
+    #[tokio::test]
+    async fn output_line_retention_yields_while_a_peer_holds_the_lock() {
+        let _serialized = OUTPUT_LINE_RETENTION_TEST_LOCK.lock().await;
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let retention = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
+        let mut peer = store.pool().begin().await.expect("begin peer transaction");
+        sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(super::OUTPUT_LINE_RETENTION_LOCK)
+            .execute(&mut *peer)
+            .await
+            .expect("peer takes the lock");
+
+        assert_eq!(
+            store
+                .delete_expired_output_line_events(i64::MAX - 1, retention, 1)
+                .await
+                .expect("sweep while locked"),
+            None
+        );
+
+        peer.rollback().await.expect("release peer lock");
+
+        assert!(
+            store
+                .delete_expired_output_line_events(i64::MAX - 1, retention, 1)
+                .await
+                .expect("sweep after release")
+                .is_some()
         );
     }
 }

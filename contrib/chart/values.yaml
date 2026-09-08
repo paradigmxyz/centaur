@@ -519,15 +519,22 @@ apiRs:
       maxInputChars: 8192
       # Shared by the embedding workflow and company-context searches in agent sandboxes.
       model: text-embedding-3-small
-      # Vector width requested from the model by both the write and query sides.
-      # This must match the database column width. Changing it requires a schema
-      # migration, index rebuild, and re-embedding existing rows. pgvector will
-      # not build an HNSW or IVFFlat index above 2000.
-      dimensions: 1536
   # Reaper: stop sandboxes older than the max lifetime, regardless of whether
   # they are running or suspended. 0 disables the sweep. Interval must be >= 1.
   sandboxMaxLifetimeSecs: 259200 # 3 days
   sandboxReapIntervalSecs: 300
+  # Delete session.output.line events older than this many days. 0 disables
+  # retention. Harness stdout lines are the bulk of session_events and nothing
+  # removed them, so the table grows for the life of the deployment -- order
+  # 450MB/day on a modest single node, against the 20Gi default Postgres volume
+  # below. Only output lines are deleted: lifecycle events, execution outcomes
+  # and assistant replies are kept, so console transcripts stay intact. Output
+  # lines of a queued or running execution are also kept, whatever their age.
+  # Sweeps are bounded per pass, so a large first backlog drains over several.
+  # Retention caps growth; it does not shrink a volume that is already full,
+  # because Postgres reuses freed pages for new rows rather than returning them.
+  sessionOutputLineRetentionDays: 0
+  sessionOutputLineRetentionSweepIntervalSecs: 300
   # Minimum age before proxy resources without a live Sandbox are reaped.
   sandboxOrphanSweepGraceSecs: 600
   # Cleanup worker: stop unreferenced session/warm-pool sandboxes after two
@@ -664,14 +671,6 @@ linearbot:
     tag: latest
     pullPolicy: Always
   userName: centaur
-  # Reasoning effort per turn type (codex turn/start.effort). Both unset run at
-  # the harness default. These turns are autonomous, so there is no message for
-  # a -rsn flag to ride on, and one global setting suits neither an assignment
-  # turn implementing a whole ticket nor a one-line comment reply.
-  # Accepts none | minimal | low | medium | high | xhigh | max.
-  reasoningEffort:
-    assignment: ""
-    comment: ""
   extraEnv: {}
   resources: {}
 
