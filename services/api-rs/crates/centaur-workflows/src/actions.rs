@@ -98,14 +98,14 @@ fn queue_table(queue: &str) -> Result<String, WorkflowRuntimeError> {
     Ok(format!("absurd.t_{queue}"))
 }
 
-pub async fn create(
+async fn create(
     pool: &PgPool,
     queue: &str,
     task_id: &str,
     workflow_name: &str,
     step: &str,
-    config: ActionConfig,
-) -> Result<Value, WorkflowRuntimeError> {
+    config: &ActionConfig,
+) -> Result<Uuid, WorkflowRuntimeError> {
     queue_table(queue)?;
     config.validate()?;
     if step.trim().is_empty() || step.len() > 200 {
@@ -113,7 +113,7 @@ pub async fn create(
             "action step name must contain 1-200 bytes".into(),
         ));
     }
-    let config_json = serde_json::to_value(&config)?;
+    let config_json = serde_json::to_value(config)?;
     let row = sqlx::query(
         "INSERT INTO workflow_actions (id, queue_name, task_id, workflow_name, step_name, config, expires_at)
          VALUES ($1, $2, $3::uuid, $4, $5, $6, now() + make_interval(secs => $7))
@@ -127,7 +127,7 @@ pub async fn create(
             "workflow action configuration changed during replay; use a new step name".into(),
         ));
     }
-    Ok(json!({"id": row.try_get::<Uuid, _>("id")?}))
+    Ok(row.try_get("id")?)
 }
 
 async fn resolve(
@@ -137,8 +137,14 @@ async fn resolve(
     state: &str,
     result: Value,
 ) -> Result<Value, WorkflowRuntimeError> {
-    sqlx::query("UPDATE workflow_actions SET state = $2, result = $3, resolved_at = now(), delivery_after = CASE WHEN delivery_lease IS NULL THEN now() ELSE delivery_after END WHERE id = $1")
-        .bind(id).bind(state).bind(&result).execute(&mut **tx).await?;
+    sqlx::query(
+        "UPDATE workflow_actions SET state = $2, result = $3, resolved_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .bind(state)
+    .bind(&result)
+    .execute(&mut **tx)
+    .await?;
     // State and wakeup commit together. Absurd retains early events and applies
     // the first event once, so a click before wait registration is safe.
     sqlx::query("SELECT absurd.emit_event($1, $2, $3::jsonb)")
@@ -215,7 +221,7 @@ pub async fn invoke(
         ));
     }
     let mut tx = pool.begin().await?;
-    let row = sqlx::query("SELECT * FROM workflow_actions WHERE id = $1 FOR UPDATE")
+    let row = sqlx::query("SELECT id, queue_name, task_id, workflow_name, config, result FROM workflow_actions WHERE id = $1 FOR UPDATE")
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
@@ -234,10 +240,6 @@ pub async fn invoke(
     if !config.buttons.iter().any(|b| b.id == choice) {
         return Ok(json!({"outcome": "unavailable"}));
     }
-    // A verified click proves the message exists even if the original post's
-    // response was lost. Recover its address so terminal feedback can retry.
-    sqlx::query("UPDATE workflow_actions SET message_ts = coalesce(message_ts, $2), delivered_state = coalesce(delivered_state, 'pending') WHERE id = $1")
-        .bind(id).bind(&invocation.message_ts).execute(&mut *tx).await?;
     let workflow_name: String = row.try_get("workflow_name")?;
     if WorkflowEnablement::from_env()?
         .ensure_enabled(&workflow_name)
@@ -268,122 +270,122 @@ pub async fn invoke(
     Ok(json!({"outcome": "accepted", "result": result}))
 }
 
-pub async fn wait(
+async fn wait(pool: &PgPool, ctx: &TaskContext, id: Uuid) -> Result<Value, WorkflowRuntimeError> {
+    let mut resumed = false;
+    loop {
+        let mut tx = pool.begin().await?;
+        let row = sqlx::query("SELECT id, queue_name, task_id, workflow_name, config, result FROM workflow_actions WHERE id = $1 AND task_id = $2::uuid AND queue_name = $3 FOR UPDATE")
+            .bind(id).bind(ctx.task_id()).bind(ctx.queue_name()).fetch_optional(&mut *tx).await?
+            .ok_or_else(|| WorkflowRuntimeError::BadRequest("workflow action does not belong to this task".into()))?;
+        let result = close_if_inactive(&mut tx, &row).await?;
+        let seconds: f64 = sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM expires_at - clock_timestamp())::float8 FROM workflow_actions WHERE id = $1")
+            .bind(id).fetch_one(&mut *tx).await?;
+        tx.commit().await?;
+        // Read authoritative state both before waiting and after wakeup.
+        if let Some(result) = result {
+            return Ok(result);
+        }
+        if resumed {
+            return Err(WorkflowRuntimeError::Internal(
+                "action woke without a durable result".into(),
+            ));
+        }
+        match ctx
+            .await_event::<Value>(
+                &event_name(id),
+                AwaitEventOptions {
+                    step_name: Some(format!("$action:{id}")),
+                    timeout: Some(Duration::from_secs(seconds.ceil().max(1.0) as u64)),
+                },
+            )
+            .await
+        {
+            Err(absurd::Error::Suspend) => return Err(WorkflowRuntimeError::Suspend),
+            Err(absurd::Error::Timeout(_)) | Ok(_) => resumed = true,
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+/// Register, post, wait, and update using the owning task's checkpoints.
+pub async fn run(
     pool: &PgPool,
     ctx: &TaskContext,
-    id: Uuid,
+    workflow_name: &str,
+    step: &str,
+    config: ActionConfig,
 ) -> Result<Value, WorkflowRuntimeError> {
-    let mut tx = pool.begin().await?;
-    let row = sqlx::query("SELECT * FROM workflow_actions WHERE id = $1 AND task_id = $2::uuid AND queue_name = $3 FOR UPDATE")
-        .bind(id).bind(ctx.task_id()).bind(ctx.queue_name()).fetch_optional(&mut *tx).await?
-        .ok_or_else(|| WorkflowRuntimeError::BadRequest("workflow action does not belong to this task".into()))?;
-    let result = close_if_inactive(&mut tx, &row).await?;
-    let seconds: f64 = sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM expires_at - clock_timestamp())::float8 FROM workflow_actions WHERE id = $1")
-        .bind(id).fetch_one(&mut *tx).await?;
-    tx.commit().await?;
-    if let Some(result) = result {
-        return Ok(result);
-    }
-    let seconds = seconds.ceil().max(1.0) as u64;
-    match ctx
-        .await_event::<Value>(
-            &event_name(id),
-            AwaitEventOptions {
-                step_name: Some(format!("$action:{id}")),
-                timeout: Some(Duration::from_secs(seconds)),
-            },
+    run_with(pool, ctx, workflow_name, step, config, send_slack_request).await
+}
+
+async fn run_with<F, Fut>(
+    pool: &PgPool,
+    ctx: &TaskContext,
+    workflow_name: &str,
+    step: &str,
+    config: ActionConfig,
+    send: F,
+) -> Result<Value, WorkflowRuntimeError>
+where
+    F: Fn(&'static str, Value) -> Fut + Sync,
+    Fut: Future<Output = Result<Value, WorkflowRuntimeError>> + Send,
+{
+    let id = create(
+        pool,
+        ctx.queue_name(),
+        ctx.task_id(),
+        workflow_name,
+        step,
+        &config,
+    )
+    .await?;
+    let message_ts = ctx
+        .step(&format!("$action:{id}:post"), || async {
+            // A click can arrive before a successful post response is checkpointed.
+            // Reuse its verified message address when recovering that window.
+            let result: Option<Value> =
+                sqlx::query_scalar("SELECT result FROM workflow_actions WHERE id = $1")
+                    .bind(id)
+                    .fetch_one(pool)
+                    .await
+                    .map_err(|error| absurd_error(error.into()))?;
+            if let Some(ts) = result
+                .as_ref()
+                .and_then(|r| r.get("message_ts"))
+                .and_then(Value::as_str)
+            {
+                return Ok(ts.to_owned());
+            }
+            let response = send(
+                "chat.postMessage",
+                slack_payload(id, &config, result.as_ref(), None),
+            )
+            .await
+            .map_err(absurd_error)?;
+            response
+                .get("ts")
+                .and_then(Value::as_str)
+                .filter(|ts| !ts.is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| {
+                    absurd_error(WorkflowRuntimeError::Upstream(
+                        "Slack action delivery missing message timestamp".into(),
+                    ))
+                })
+        })
+        .await?;
+    let result = wait(pool, ctx, id).await?;
+    ctx.step(&format!("$action:{id}:update"), || async {
+        send(
+            "chat.update",
+            slack_payload(id, &config, Some(&result), Some(&message_ts)),
         )
         .await
-    {
-        Err(absurd::Error::Suspend) => Err(WorkflowRuntimeError::Suspend),
-        Err(absurd::Error::Timeout(_)) | Ok(_) => {
-            // The stored result is authoritative, never an event's payload.
-            let mut tx = pool.begin().await?;
-            let row = sqlx::query("SELECT * FROM workflow_actions WHERE id = $1 FOR UPDATE")
-                .bind(id)
-                .fetch_one(&mut *tx)
-                .await?;
-            let result = close_if_inactive(&mut tx, &row).await?;
-            tx.commit().await?;
-            result.ok_or_else(|| {
-                WorkflowRuntimeError::Internal("action woke without a durable result".into())
-            })
-        }
-        Err(error) => Err(error.into()),
-    }
-}
-
-pub(super) fn start_worker(pool: PgPool) -> WorkflowTaskHeartbeatGuard {
-    WorkflowTaskHeartbeatGuard {
-        task: tokio::spawn(async move {
-            loop {
-                if let Err(error) = maintain(&pool).await {
-                    warn!(%error, "workflow_action_maintenance_failed");
-                }
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-        }),
-    }
-}
-
-pub async fn maintain(pool: &PgPool) -> Result<(), WorkflowRuntimeError> {
-    // Bounded batches, including terminal tasks, ensure abandoned prompts close.
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM workflow_actions WHERE state = 'pending' ORDER BY checked_at LIMIT 100",
-    )
-    .fetch_all(pool)
+        .map_err(absurd_error)?;
+        Ok(())
+    })
     .await?;
-    for id in ids {
-        let mut tx = pool.begin().await?;
-        let row =
-            sqlx::query("SELECT * FROM workflow_actions WHERE id = $1 FOR UPDATE SKIP LOCKED")
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await?;
-        if let Some(row) = row {
-            close_if_inactive(&mut tx, &row).await?;
-            sqlx::query("UPDATE workflow_actions SET checked_at = now() WHERE id = $1")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-        }
-        tx.commit().await?;
-    }
-    for _ in 0..10 {
-        if !deliver_next(pool).await? {
-            break;
-        }
-    }
-    Ok(())
-}
-
-pub(super) async fn cancel_task(
-    pool: &PgPool,
-    queue: &str,
-    task_id: &str,
-) -> Result<(), WorkflowRuntimeError> {
-    queue_table(queue)?;
-    let mut tx = pool.begin().await?;
-    let rows = sqlx::query("SELECT id FROM workflow_actions WHERE queue_name = $1 AND task_id = $2::uuid AND state = 'pending' ORDER BY id FOR UPDATE")
-        .bind(queue).bind(task_id).fetch_all(&mut *tx).await?;
-    for row in rows {
-        let id: Uuid = row.try_get("id")?;
-        resolve(
-            &mut tx,
-            id,
-            queue,
-            "cancelled",
-            json!({"id": id, "outcome": "cancelled"}),
-        )
-        .await?;
-    }
-    sqlx::query("SELECT absurd.cancel_task($1, $2::uuid)")
-        .bind(queue)
-        .bind(task_id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(())
+    Ok(result)
 }
 
 fn slack_payload(
@@ -435,92 +437,6 @@ fn slack_payload(
     payload
 }
 
-async fn deliver_next(pool: &PgPool) -> Result<bool, WorkflowRuntimeError> {
-    deliver_next_with(pool, send_slack_action_message).await
-}
-
-async fn deliver_next_with<F, Fut>(pool: &PgPool, send: F) -> Result<bool, WorkflowRuntimeError>
-where
-    F: FnOnce(&'static str, Value) -> Fut,
-    Fut: Future<Output = Result<Value, WorkflowRuntimeError>>,
-{
-    let lease = Uuid::new_v4();
-    let row = sqlx::query(
-        "UPDATE workflow_actions SET delivery_lease = $1, delivery_after = now() + interval '30 seconds'
-         WHERE id = (SELECT id FROM workflow_actions WHERE delivery_after <= now()
-             AND delivered_state IS DISTINCT FROM state AND (message_ts IS NOT NULL OR state = 'pending')
-             ORDER BY delivery_after FOR UPDATE SKIP LOCKED LIMIT 1)
-         RETURNING *",
-    ).bind(lease).fetch_optional(pool).await?;
-    let Some(row) = row else {
-        return Ok(false);
-    };
-    let id: Uuid = row.try_get("id")?;
-    let config: ActionConfig = serde_json::from_value(row.try_get("config")?)?;
-    let result: Option<Value> = row.try_get("result")?;
-    let message_ts: Option<String> = row.try_get("message_ts")?;
-    let state: String = row.try_get("state")?;
-    let method = if message_ts.is_some() {
-        "chat.update"
-    } else {
-        "chat.postMessage"
-    };
-    let response = send(
-        method,
-        slack_payload(id, &config, result.as_ref(), message_ts.as_deref()),
-    )
-    .await;
-    match response {
-        Ok(response) => {
-            let ts = response
-                .get("ts")
-                .and_then(Value::as_str)
-                .or(message_ts.as_deref())
-                .ok_or_else(|| {
-                    WorkflowRuntimeError::Upstream(
-                        "Slack action delivery missing message timestamp".into(),
-                    )
-                })?;
-            sqlx::query("UPDATE workflow_actions SET message_ts = $3, delivered_state = $4, delivery_lease = NULL, delivery_after = now() WHERE id = $1 AND delivery_lease = $2")
-                .bind(id).bind(lease).bind(ts).bind(state).execute(pool).await?;
-        }
-        Err(error) => {
-            // Keep the retry timestamp and leave the durable outcome untouched.
-            warn!(action_id = %id, %error, "workflow_action_delivery_failed");
-        }
-    }
-    Ok(true)
-}
-
-async fn send_slack_action_message(
-    method: &'static str,
-    payload: Value,
-) -> Result<Value, WorkflowRuntimeError> {
-    let token = env::var("SLACK_BOT_TOKEN")
-        .or_else(|_| env::var("SLACK_BOT_TOKEN_OVERRIDE"))
-        .map_err(|_| {
-            WorkflowRuntimeError::BadRequest("Slack action delivery requires a bot token".into())
-        })?;
-    let base = env::var("SLACK_API_URL").unwrap_or_else(|_| "https://slack.com/api/".into());
-    let response: Value = reqwest::Client::new()
-        .post(format!("{}/{method}", base.trim_end_matches('/')))
-        .timeout(Duration::from_secs(15))
-        .bearer_auth(token)
-        .json(&payload)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    if response.get("ok").and_then(Value::as_bool) != Some(true) {
-        return Err(WorkflowRuntimeError::Upstream(format!(
-            "Slack action delivery failed: {}",
-            response["error"].as_str().unwrap_or("unknown_error")
-        )));
-    }
-    Ok(response)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,6 +475,23 @@ mod tests {
             message_ts: "1700000000.000100".into(),
             action_ts: "1700000001.000100".into(),
         }
+    }
+
+    async fn spawn_action(
+        client: &Client,
+        job: &str,
+    ) -> Result<(absurd::SpawnResult, Uuid), WorkflowRuntimeError> {
+        let owner = client.spawn(job, json!({}), Default::default()).await?;
+        let id = create(
+            client.pool(),
+            WORKFLOW_QUEUE,
+            &owner.task_id,
+            "action_test",
+            "choice",
+            &config(),
+        )
+        .await?;
+        Ok((owner, id))
     }
 
     #[test]
@@ -622,27 +555,44 @@ mod tests {
         )?;
         client.create_queue(None, Default::default()).await?;
         let callbacks = Arc::new(AtomicUsize::new(0));
+        let posts = Arc::new(AtomicUsize::new(0));
+        let updates = Arc::new(AtomicUsize::new(0));
         let job = format!("action-test-{}", Uuid::new_v4());
         client.register_task(&job, {
             let pool = pool.clone();
             let callbacks = callbacks.clone();
+            let posts = posts.clone();
+            let updates = updates.clone();
             move |_: Value, ctx| {
                 let pool = pool.clone();
                 let callbacks = callbacks.clone();
+                let posts = posts.clone();
+                let updates = updates.clone();
                 async move {
-                    let prompt = create(
+                    let result = run_with(
                         &pool,
-                        ctx.queue_name(),
-                        ctx.task_id(),
+                        &ctx,
                         "action_test",
                         "choice",
                         config(),
+                        |method, body| {
+                            let posts = posts.clone();
+                            let updates = updates.clone();
+                            async move {
+                                if method == "chat.postMessage" {
+                                    posts.fetch_add(1, Ordering::SeqCst);
+                                    assert_eq!(body["blocks"][1]["type"], "actions");
+                                } else {
+                                    updates.fetch_add(1, Ordering::SeqCst);
+                                    assert_eq!(body["ts"], "1700000000.000100");
+                                    assert_eq!(body["blocks"][1]["type"], "context");
+                                }
+                                Ok(json!({"ok": true, "ts": "1700000000.000100"}))
+                            }
+                        },
                     )
                     .await
                     .map_err(absurd_error)?;
-                    let id =
-                        Uuid::parse_str(prompt["id"].as_str().expect("prompt id")).expect("uuid");
-                    let result = wait(&pool, &ctx, id).await.map_err(absurd_error)?;
                     ctx.step("callback", || async move {
                         callbacks.fetch_add(1, Ordering::SeqCst);
                         Ok(result)
@@ -662,6 +612,12 @@ mod tests {
                 .bind(&owner.task_id)
                 .fetch_one(&pool)
                 .await?;
+        // Upgrade a suspended action without losing its identity or post checkpoint.
+        sqlx::raw_sql(include_str!(
+            "../../centaur-session-sqlx/migrations/0056_workflow_action_steps.sql"
+        ))
+        .execute(&pool)
+        .await?;
         // Replay preserves identity and refuses to silently change its meaning.
         let replay = create(
             &pool,
@@ -669,10 +625,10 @@ mod tests {
             &owner.task_id,
             "action_test",
             "choice",
-            config(),
+            &config(),
         )
         .await?;
-        assert_eq!(replay["id"], id.to_string());
+        assert_eq!(replay, id);
         let mut changed = config();
         changed.allowed_users.push("UNEW".into());
         assert!(
@@ -682,7 +638,7 @@ mod tests {
                 &owner.task_id,
                 "action_test",
                 "choice",
-                changed
+                &changed
             )
             .await
             .is_err()
@@ -731,19 +687,11 @@ mod tests {
             Some(winner)
         );
         assert_eq!(callbacks.load(Ordering::SeqCst), 1);
+        assert_eq!(posts.load(Ordering::SeqCst), 1);
+        assert_eq!(updates.load(Ordering::SeqCst), 1);
 
         // A click before the owner reaches its wait is retained.
-        let early = client.spawn(&job, json!({}), Default::default()).await?;
-        let prompt = create(
-            &pool,
-            WORKFLOW_QUEUE,
-            &early.task_id,
-            "action_test",
-            "choice",
-            config(),
-        )
-        .await?;
-        let early_id = Uuid::parse_str(prompt["id"].as_str().expect("id")).expect("uuid");
+        let (early, early_id) = spawn_action(&client, &job).await?;
         assert_eq!(
             invoke(&pool, click(early_id, "reject")).await?["outcome"],
             "accepted"
@@ -760,17 +708,7 @@ mod tests {
         );
 
         // Expiry is enforced on invocation without relying on a worker tick.
-        let expired = client.spawn(&job, json!({}), Default::default()).await?;
-        let prompt = create(
-            &pool,
-            WORKFLOW_QUEUE,
-            &expired.task_id,
-            "action_test",
-            "choice",
-            config(),
-        )
-        .await?;
-        let expired_id = Uuid::parse_str(prompt["id"].as_str().expect("id")).expect("uuid");
+        let (expired, expired_id) = spawn_action(&client, &job).await?;
         sqlx::query(
             "UPDATE workflow_actions SET expires_at = now() - interval '1 second' WHERE id = $1",
         )
@@ -781,93 +719,106 @@ mod tests {
             invoke(&pool, click(expired_id, "approve")).await?["result"]["outcome"],
             "expired"
         );
-        cancel_task(&pool, WORKFLOW_QUEUE, &expired.task_id).await?;
+        client.cancel_task(&expired.task_id, None).await?;
 
-        let cancelled = client.spawn(&job, json!({}), Default::default()).await?;
-        let prompt = create(
-            &pool,
-            WORKFLOW_QUEUE,
-            &cancelled.task_id,
-            "action_test",
-            "choice",
-            config(),
-        )
-        .await?;
-        let cancelled_id = Uuid::parse_str(prompt["id"].as_str().expect("id")).expect("uuid");
-        cancel_task(&pool, WORKFLOW_QUEUE, &cancelled.task_id).await?;
+        let (cancelled, cancelled_id) = spawn_action(&client, &job).await?;
+        client.cancel_task(&cancelled.task_id, None).await?;
         assert_eq!(
             invoke(&pool, click(cancelled_id, "approve")).await?["result"]["outcome"],
             "cancelled"
         );
 
-        // Prior cases invoked the API directly without a Slack transport.
-        // Acknowledge their feedback before isolating delivery recovery below.
-        sqlx::query("UPDATE workflow_actions SET delivered_state = state WHERE id = ANY($1)")
-            .bind(vec![id, early_id, expired_id, cancelled_id])
-            .execute(&pool)
-            .await?;
-
-        // A post can race with a click. The original send must retain its lease
-        // and the next delivery must render the recorded terminal state.
-        let delivery = client.spawn(&job, json!({}), Default::default()).await?;
-        let prompt = create(
-            &pool,
-            WORKFLOW_QUEUE,
-            &delivery.task_id,
-            "action_test",
-            "choice",
-            config(),
-        )
-        .await?;
-        let delivery_id = Uuid::parse_str(prompt["id"].as_str().expect("id")).expect("uuid");
-        assert!(
-            deliver_next_with(&pool, |method, body| {
-                let pool = &pool;
+        // A lost post response and a failed message update use normal task
+        // retries. The accepted click and successful checkpoints survive both.
+        let recovery_job = format!("action-recovery-{}", Uuid::new_v4());
+        let sends = Arc::new(AtomicUsize::new(0));
+        let recovered_callbacks = Arc::new(AtomicUsize::new(0));
+        client.register_task(&recovery_job, {
+            let pool = pool.clone();
+            let sends = sends.clone();
+            let callbacks = recovered_callbacks.clone();
+            move |_: Value, ctx| {
+                let pool = pool.clone();
+                let sends = sends.clone();
+                let callbacks = callbacks.clone();
                 async move {
-                    assert_eq!(method, "chat.postMessage");
-                    assert_eq!(body["client_msg_id"], delivery_id.to_string());
-                    assert_eq!(
-                        body["blocks"][1]["elements"][0]["action_id"],
-                        format!("{ACTION_PREFIX}{delivery_id}:approve")
-                    );
-                    invoke(pool, click(delivery_id, "approve")).await?;
-                    let stolen = deliver_next_with(pool, |_, _| async {
-                        panic!("active delivery lease was stolen")
+                    let result = run_with(
+                        &pool,
+                        &ctx,
+                        "action_test",
+                        "recover",
+                        config(),
+                        |method, body| {
+                            let pool = pool.clone();
+                            let sends = sends.clone();
+                            async move {
+                                match sends.fetch_add(1, Ordering::SeqCst) {
+                                    0 => {
+                                        assert_eq!(method, "chat.postMessage");
+                                        let id =
+                                            serde_json::from_value(body["client_msg_id"].clone())?;
+                                        assert_eq!(
+                                            invoke(&pool, click(id, "approve")).await?["outcome"],
+                                            "accepted"
+                                        );
+                                        Err(WorkflowRuntimeError::Upstream(
+                                            "lost post response".into(),
+                                        ))
+                                    }
+                                    1 => {
+                                        assert_eq!(method, "chat.update");
+                                        Err(WorkflowRuntimeError::Upstream(
+                                            "temporary update failure".into(),
+                                        ))
+                                    }
+                                    2 => {
+                                        assert_eq!(method, "chat.update");
+                                        assert_eq!(body["ts"], "1700000000.000100");
+                                        Ok(json!({"ok": true}))
+                                    }
+                                    _ => panic!("checkpointed delivery repeated"),
+                                }
+                            }
+                        },
+                    )
+                    .await
+                    .map_err(absurd_error)?;
+                    ctx.step("callback", || async {
+                        callbacks.fetch_add(1, Ordering::SeqCst);
+                        Ok(result)
                     })
-                    .await?;
-                    assert!(!stolen);
-                    Ok(json!({"ok": true, "ts": "1700000000.000100"}))
+                    .await
                 }
-            })
-            .await?
-        );
-        assert!(
-            deliver_next_with(&pool, |method, body| async move {
-                assert_eq!(method, "chat.update");
-                assert_eq!(body["ts"], "1700000000.000100");
-                assert_eq!(body["blocks"][1]["type"], "context");
-                Err(WorkflowRuntimeError::Upstream("temporary failure".into()))
-            })
-            .await?
-        );
-        let state: String = sqlx::query_scalar("SELECT state FROM workflow_actions WHERE id = $1")
-            .bind(delivery_id)
-            .fetch_one(&pool)
+            }
+        })?;
+        let recovery = client
+            .spawn(
+                &recovery_job,
+                json!({}),
+                SpawnOptions {
+                    max_attempts: Some(3),
+                    retry_strategy: Some(absurd::RetryStrategy {
+                        kind: absurd::RetryKind::Fixed,
+                        base_seconds: Some(0.0),
+                        factor: None,
+                        max_seconds: None,
+                    }),
+                    ..Default::default()
+                },
+            )
             .await?;
-        assert_eq!(state, "resolved");
-        sqlx::query("UPDATE workflow_actions SET delivery_after = now() WHERE id = $1")
-            .bind(delivery_id)
-            .execute(&pool)
-            .await?;
-        assert!(
-            deliver_next_with(&pool, |method, _| async move {
-                assert_eq!(method, "chat.update");
-                Ok(json!({"ok": true}))
-            })
+        for _ in 0..3 {
+            client.work_batch(WorkBatchOptions::default()).await?;
+        }
+        let recovered = client
+            .fetch_task_result(&recovery.task_id, None)
             .await?
-        );
-        assert!(!deliver_next_with(&pool, |_, _| async { panic!("already delivered") }).await?);
-        cancel_task(&pool, WORKFLOW_QUEUE, &delivery.task_id).await?;
+            .expect("recovery task")
+            .result::<Value>()?
+            .expect("recovered result");
+        assert_eq!(recovered["action"], "approve");
+        assert_eq!(sends.load(Ordering::SeqCst), 3);
+        assert_eq!(recovered_callbacks.load(Ordering::SeqCst), 1);
         Ok(())
     }
 }

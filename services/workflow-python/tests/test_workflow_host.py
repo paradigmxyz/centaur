@@ -751,7 +751,7 @@ from api.workflow_engine import Button
 WORKFLOW_NAME = "buttons"
 async def handler(inp, ctx):
     async def approve(click):
-        return await ctx.start_workflow("echo", {"actor": click.user_id}, name="approved-child")
+        return await ctx.start_workflow("echo", {"actor": click.user_id}, idempotency_key=f"approval:{click.id}")
     async def reject(click):
         return {"rejected_by": click.user_id}
     result = await ctx.slack_actions(
@@ -781,18 +781,16 @@ async def handler(inp, ctx):
                         expected = {"outcome": "expired", "value": None} if outcome == "expired" else {"outcome": "clicked", "value": callback_result}
                         self.assertEqual(request["result"], expected)
                         break
-                    if kind == "ctx.actions.create":
+                    if kind == "ctx.actions":
                         self.assertEqual(request["config"]["allowed_users"], ["U1"])
                         self.assertEqual([button["id"] for button in request["config"]["buttons"]], ["approve", "reject"])
-                        value = {"id": "action-1"}
-                    elif kind == "ctx.actions.wait":
                         value = {"id": "action-1", "outcome": "expired"} if outcome == "expired" else {**click, "action": outcome}
                     elif kind == "ctx.step.get":
                         value = {"done": replay, "value": callback_result, "checkpoint_name": "callback"}
                     elif kind == "ctx.workflow.start":
                         child_starts += 1
                         self.assertEqual(request["input"], {"actor": "U1"})
-                        self.assertEqual(request["step"], "approved-child")
+                        self.assertEqual(request["idempotency_key"], "approval:action-1")
                         value = callback_result
                     elif kind == "ctx.step.put":
                         self.assertEqual(request["value"], callback_result)

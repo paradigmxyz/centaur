@@ -117,7 +117,6 @@ struct WorkflowRuntimeInner {
     _etl_worker: Worker,
     _etl_backfill_worker: Worker,
     _schedule_worker: Worker,
-    _action_worker: WorkflowTaskHeartbeatGuard,
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
 }
@@ -827,7 +826,6 @@ impl WorkflowRuntime {
                 _etl_worker: etl_worker,
                 _etl_backfill_worker: etl_backfill_worker,
                 _schedule_worker: schedule_worker,
-                _action_worker: actions::start_worker(store.pool().clone()),
                 webhook_registry,
                 schedule_registry,
             }),
@@ -992,7 +990,7 @@ impl WorkflowRuntime {
             (WORKFLOW_ETL_BACKFILL_QUEUE, &self.inner.etl_backfill_client),
         ] {
             if let Some(run) = self.get_run_for_queue(queue_name, run_id).await? {
-                actions::cancel_task(client.pool(), queue_name, &run.task_id).await?;
+                client.cancel_task(&run.task_id, None).await?;
                 return Ok(());
             }
         }
@@ -3463,33 +3461,25 @@ async fn handle_python_context_request(
                 Err(error) => Err(error.to_string()),
             }
         }
-        Some("ctx.actions.create") => {
-            let step = required_python_string(message, "step", "ctx.actions.create")?;
+        Some("ctx.actions") => {
+            let step = required_python_string(message, "step", "ctx.actions")?;
             let config =
                 serde_json::from_value(message.get("config").cloned().unwrap_or(Value::Null))?;
-            actions::create(
+            match actions::run(
                 workflow_clients.standard.pool(),
-                ctx.queue_name(),
-                ctx.task_id(),
+                ctx,
                 &input.workflow_name,
                 step,
                 config,
             )
             .await
-            .map_err(|error| error.to_string())
-        }
-        Some("ctx.actions.wait") => {
-            let id = required_python_string(message, "id", "ctx.actions.wait")?;
-            let id = uuid::Uuid::parse_str(id).map_err(|_| {
-                WorkflowRuntimeError::BadRequest("invalid workflow action ID".into())
-            })?;
-            match actions::wait(workflow_clients.standard.pool(), ctx, id).await {
+            {
                 Err(WorkflowRuntimeError::Suspend) => return Err(WorkflowRuntimeError::Suspend),
                 result => result.map_err(|error| error.to_string()),
             }
         }
         Some("ctx.workflow.start") => {
-            match start_named_python_child_workflow(message, ctx, input, workflow_clients).await {
+            match start_python_child_workflow(message, input, workflow_clients).await {
                 Ok(value) => Ok(value),
                 Err(error) => Err(error.to_string()),
             }
@@ -3520,38 +3510,6 @@ async fn handle_python_context_request(
             "error": error,
         }),
     })
-}
-
-async fn start_named_python_child_workflow(
-    message: &Value,
-    ctx: &TaskContext,
-    parent: &WorkflowTaskInput,
-    clients: &WorkflowQueueClients,
-) -> Result<Value, WorkflowRuntimeError> {
-    let Some(name) = message.get("step").and_then(Value::as_str) else {
-        return start_python_child_workflow(message, parent, clients).await;
-    };
-    if name.trim().is_empty() {
-        return Err(WorkflowRuntimeError::BadRequest(
-            "child workflow step name must not be empty".into(),
-        ));
-    }
-    let step = ctx.begin_step::<Value>(&format!("$child:{name}")).await?;
-    if step.done {
-        return step.state.ok_or_else(|| {
-            WorkflowRuntimeError::Internal("child workflow checkpoint missing result".into())
-        });
-    }
-    let mut message = message.clone();
-    if message.get("idempotency_key").is_none() {
-        message["idempotency_key"] = json!(format!(
-            "workflow-child:{}:{}",
-            ctx.task_id(),
-            step.checkpoint_name
-        ));
-    }
-    let result = start_python_child_workflow(&message, parent, clients).await?;
-    Ok(ctx.complete_step(step, result).await?)
 }
 
 async fn start_python_child_workflow(
@@ -4180,21 +4138,14 @@ async fn post_tool_result_to_slack(
     note: &str,
     tool: &ToolResult,
 ) -> Result<SlackPostResult, WorkflowRuntimeError> {
-    let token = env::var("SLACK_BOT_TOKEN")
-        .or_else(|_| env::var("SLACK_BOT_TOKEN_OVERRIDE"))
-        .map_err(|_| {
-            WorkflowRuntimeError::BadRequest(
-                "SLACK_BOT_TOKEN or SLACK_BOT_TOKEN_OVERRIDE must be set".to_owned(),
-            )
-        })?;
     let text = format!(
         "{note}\nworkflow=tool_and_slack\ntool={}.{}\nresult={}",
         tool.tool,
         tool.method,
         serde_json::to_string(&tool.output)?,
     );
-    let response = send_slack_message(
-        &token,
+    let response = send_slack_request(
+        "chat.postMessage",
         json!({
             "channel": channel,
             "text": text,
@@ -4228,15 +4179,8 @@ async fn post_python_slack_message(
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| format!("{}:slack:{request_id}", ctx.task_id()));
 
-    let token = env::var("SLACK_BOT_TOKEN")
-        .or_else(|_| env::var("SLACK_BOT_TOKEN_OVERRIDE"))
-        .map_err(|_| {
-            WorkflowRuntimeError::BadRequest(
-                "SLACK_BOT_TOKEN or SLACK_BOT_TOKEN_OVERRIDE must be set".to_owned(),
-            )
-        })?;
     let payload = python_slack_message_payload(channel, text, &client_msg_id, &args);
-    let response = send_slack_message(&token, payload).await?;
+    let response = send_slack_request("chat.postMessage", payload).await?;
     serde_json::to_value(slack_post_result_from_response(channel, response))
         .map_err(WorkflowRuntimeError::from)
 }
@@ -4284,22 +4228,32 @@ fn python_slack_message_payload(
     payload
 }
 
-async fn send_slack_message(token: &str, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+async fn send_slack_request(
+    method: &'static str,
+    payload: Value,
+) -> Result<Value, WorkflowRuntimeError> {
+    let token = env::var("SLACK_BOT_TOKEN")
+        .or_else(|_| env::var("SLACK_BOT_TOKEN_OVERRIDE"))
+        .map_err(|_| {
+            WorkflowRuntimeError::BadRequest(
+                "SLACK_BOT_TOKEN or SLACK_BOT_TOKEN_OVERRIDE must be set".into(),
+            )
+        })?;
+    let base = env::var("SLACK_API_URL").unwrap_or_else(|_| "https://slack.com/api/".into());
     let response: Value = reqwest::Client::new()
-        .post("https://slack.com/api/chat.postMessage")
+        .post(format!("{}/{method}", base.trim_end_matches('/')))
+        .timeout(Duration::from_secs(15))
         .bearer_auth(token)
         .json(&payload)
         .send()
         .await?
+        .error_for_status()?
         .json()
         .await?;
     if response.get("ok").and_then(Value::as_bool) != Some(true) {
         return Err(WorkflowRuntimeError::Upstream(format!(
-            "Slack chat.postMessage failed: {}",
-            response
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown_error")
+            "Slack {method} failed: {}",
+            response["error"].as_str().unwrap_or("unknown_error")
         )));
     }
     Ok(response)

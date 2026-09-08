@@ -197,9 +197,8 @@ class WorkflowContext:
         input: dict[str, Any] | None = None,
         *,
         idempotency_key: str | None = None,
-        name: str | None = None,
     ) -> dict[str, Any]:
-        """Queue a child; supplying ``name`` makes its start replay-safe."""
+        """Queue a child; use a stable idempotency key to prevent duplicate starts."""
         request: dict[str, Any] = {
             "type": "ctx.workflow.start",
             "workflow_name": workflow_name,
@@ -207,8 +206,6 @@ class WorkflowContext:
         }
         if idempotency_key:
             request["idempotency_key"] = idempotency_key
-        if name is not None:
-            request["step"] = name
         return await self._rpc.request(request)
 
     async def slack_actions(
@@ -227,7 +224,7 @@ class WorkflowContext:
 
         The group is single-use: the first permitted click wins. Callbacks run
         in this workflow and can use its ordinary durable context operations.
-        Use named child starts and idempotent external writes inside callbacks,
+        Use stable child idempotency keys and idempotent external writes in callbacks,
         just as in any checkpointed step. Expiry returns without a callback.
         """
         if not buttons or any(
@@ -241,9 +238,9 @@ class WorkflowContext:
         seconds = duration_seconds(timeout)
         if not 1 <= seconds <= 2592000 or seconds != int(seconds):
             raise ValueError("button timeout must be a whole number of seconds between 1 and 2592000")
-        prompt = await self._rpc.request(
+        result = await self._rpc.request(
             {
-                "type": "ctx.actions.create",
+                "type": "ctx.actions",
                 "step": name,
                 "config": {
                     "channel": channel,
@@ -259,7 +256,6 @@ class WorkflowContext:
                 },
             }
         )
-        result = await self._rpc.request({"type": "ctx.actions.wait", "id": prompt["id"]})
         if result["outcome"] != "clicked":
             return ButtonResult(outcome=result["outcome"])
         click = ButtonClick(

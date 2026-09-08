@@ -213,7 +213,7 @@ async def handler(inp, ctx):
         return await ctx.start_workflow(
             "echo",
             {"approved_by": click.user_id},
-            name="approved-child",
+            idempotency_key=f"approval:{click.id}",
         )
 
     async def reject(click):
@@ -246,7 +246,8 @@ digits, underscores, or hyphens. Labels contain at most 75 characters.
 The result contains `outcome`, `click`, and `value`. A selected button returns
 `outcome="clicked"`, verified click context, and the callback's return value.
 An expired request returns `outcome="expired"` without calling a callback.
-Cancelling the workflow closes its pending buttons. Click context includes
+Cancelling the workflow prevents further button actions, but may leave buttons
+visible in Slack. Click context includes
 `id`, `action`, `user_id`, `team_id`, `channel_id`, `message_ts`, and `action_ts`.
 
 Keep group names stable and unique within the workflow. The API persists each
@@ -255,13 +256,16 @@ different configuration fails explicitly. Callbacks follow ordinary workflow
 replay rules: keep their meaning compatible for outstanding requests, use
 durable steps, and make external side effects idempotent. A callback can retry
 after failure; a recorded click does not make an external API call exactly once.
-The callback result is checkpointed. `ctx.start_workflow(..., name="...")`
-also checkpoints the child start and derives a stable idempotency key, so a
-retry cannot enqueue another child for that named step.
+The callback result is checkpointed. When starting a child workflow, pass a
+stable `idempotency_key`, such as `f"approval:{click.id}"`, so a retry cannot
+enqueue another child. Use a different key for each distinct child start.
 Callback return values must be JSON-compatible.
 
-Slack delivery retries separately from the recorded click. The API updates the
-message with the selected choice and user, or with expiry/cancellation status.
+Slack posting and message updates use the owning workflow's checkpoints and
+retry policy. After a click or timeout, the workflow updates the message before
+running the selected callback or returning the expired result. A Slack failure
+can delay callback execution. There is no background message cleanup after a
+workflow is cancelled or exhausts its retries. Further clicks are rejected.
 An ambiguous Slack posting timeout can produce duplicate messages; all copies
 reference the same single-use group. Feedback says the selection was recorded,
 not that the callback's work has finished.
@@ -273,9 +277,6 @@ raw workflow events. The `centaur.workflow.action:` namespace is reserved for
 these buttons. Internal action wakeups cannot be emitted through the public
 workflow event API. `SLACK_API_URL` can target a local Slack emulator in both
 the API and Slackbot during development.
-
-See `workflows/button_actions.py` for an example with Approve starting an echo
-workflow and Reject returning the clicking user.
 
 ## Schedule a workflow
 
