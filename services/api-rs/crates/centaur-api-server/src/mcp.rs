@@ -31,6 +31,9 @@ use crate::{
     tool_discovery::{DiscoveredTool, ToolDiscoveryConfig, discover_tool_catalog},
 };
 
+#[cfg(test)]
+pub(crate) static MCP_ENV_LOCK: Mutex<()> = Mutex::new(());
+
 pub(crate) async fn mcp_get() -> Response {
     (
         StatusCode::METHOD_NOT_ALLOWED,
@@ -76,6 +79,12 @@ struct CentaurToolMcpArguments {
     method: String,
     #[serde(default)]
     arguments: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum CentaurMcpAction {
+    List {},
 }
 
 struct McpToolCallOutcome {
@@ -131,7 +140,7 @@ pub(crate) async fn mcp_post(
             ensure_mcp_scope(&principal.scopes, "mcp:tools")?;
             let policy = mcp_tool_host_call_policy(&state, &principal).await?;
             let filter = parse_sandbox_tool_filter(policy.tool_filter());
-            let mut tools = vec![mcp_whoami_tool()];
+            let mut tools = mcp_builtin_tools();
             tools.extend(mcp_centaur_tool_entries(&filter)?);
             json!({
                 "tools": tools,
@@ -141,7 +150,10 @@ pub(crate) async fn mcp_post(
             ensure_mcp_scope(&principal.scopes, "mcp:tools")?;
             let params = serde_json::from_value::<McpToolCallParams>(request.params.clone())
                 .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-            let tool = if params.name == "centaur_whoami" {
+            if params.name == "centaur" && !mcp_v2_enabled() {
+                return Ok(mcp_json_error(id, -32602, "unknown tool"));
+            }
+            let tool = if matches!(params.name.as_str(), "centaur" | "centaur_whoami") {
                 None
             } else {
                 let policy = mcp_tool_host_call_policy(&state, &principal).await?;
@@ -197,6 +209,13 @@ async fn mcp_tool_call_result(
     async move {
         let outcome = if let Some((tool, policy)) = tool {
             mcp_centaur_tool_result(state, principal, tool, params.arguments, policy).await
+        } else if params.name == "centaur" {
+            mcp_dispatcher_result(state, principal, params.arguments)
+                .await
+                .map(|result| McpToolCallOutcome {
+                    result,
+                    timed_out: false,
+                })
         } else {
             mcp_whoami_result(principal, params.arguments).map(|result| McpToolCallOutcome {
                 result,
@@ -282,6 +301,72 @@ fn mcp_whoami_tool() -> Value {
             "additionalProperties": false,
         },
     })
+}
+
+fn mcp_builtin_tools() -> Vec<Value> {
+    let mut tools = Vec::new();
+    if mcp_v2_enabled() {
+        tools.push(mcp_dispatcher_tool());
+    }
+    tools.push(mcp_whoami_tool());
+    tools
+}
+
+fn mcp_dispatcher_tool() -> Value {
+    json!({
+        "name": "centaur",
+        "description": "Discover Centaur services. Use action=list to list service names and descriptions available under your current Centaur Console policy. Results reflect the current catalog without refreshing MCP tool definitions.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["action"],
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list"],
+                },
+            },
+            "additionalProperties": false,
+        },
+    })
+}
+
+async fn mcp_dispatcher_result(
+    state: &AppState,
+    principal: &McpPrincipal,
+    arguments: Value,
+) -> Result<Value, ApiError> {
+    let action = match serde_json::from_value::<CentaurMcpAction>(arguments) {
+        Ok(action) => action,
+        Err(error) => {
+            return Ok(mcp_text_result(
+                format!("invalid centaur arguments: {error}. Use {{\"action\":\"list\"}}."),
+                true,
+            ));
+        }
+    };
+    match action {
+        CentaurMcpAction::List {} => {
+            record_mcp_tool_method(&Span::current(), "centaur", "list");
+            let policy = mcp_tool_host_call_policy(state, principal).await?;
+            mcp_service_list_result(&parse_sandbox_tool_filter(policy.tool_filter()))
+        }
+    }
+}
+
+fn mcp_service_list_result(filter: &SandboxToolFilter) -> Result<Value, ApiError> {
+    let services = mcp_centaur_tool_catalog(filter)?
+        .into_iter()
+        .map(|tool| {
+            json!({
+                "name": tool.name,
+                "description": tool.description,
+            })
+        })
+        .collect::<Vec<_>>();
+    let content = json!({"services": services});
+    let mut result = mcp_text_result(serde_json::to_string_pretty(&content)?, false);
+    result["structuredContent"] = content;
+    Ok(result)
 }
 
 fn mcp_centaur_tool_entries(filter: &SandboxToolFilter) -> Result<Vec<Value>, ApiError> {
@@ -443,6 +528,8 @@ fn mcp_centaur_tool_catalog(filter: &SandboxToolFilter) -> Result<Vec<Discovered
     };
     Ok(tools
         .into_iter()
+        // Built-in names take precedence over scripts from tool sources.
+        .filter(|tool| !matches!(tool.name.as_str(), "centaur" | "centaur_whoami"))
         .filter(|tool| filter.admits(tool))
         .collect())
 }
@@ -1102,6 +1189,12 @@ fn mcp_public_url_env() -> Option<String> {
     static_env(&CELL, "CENTAUR_MCP_PUBLIC_URL")
 }
 
+fn mcp_v2_enabled() -> bool {
+    static CELL: OnceLock<Option<String>> = OnceLock::new();
+    static_env(&CELL, "CENTAUR_MCP_V2_ENABLED")
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+}
+
 fn console_public_url_env() -> Option<String> {
     static CELL: OnceLock<Option<String>> = OnceLock::new();
     static_env(&CELL, "CENTAUR_CONSOLE_PUBLIC_URL")
@@ -1146,16 +1239,13 @@ fn constant_time_eq(actual: &[u8], expected: &[u8]) -> bool {
 
 #[cfg(test)]
 mod mcp_tests {
-    use std::{
-        sync::Mutex,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use futures_util::FutureExt;
 
     use super::*;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use super::MCP_ENV_LOCK as ENV_LOCK;
 
     struct EnvGuard {
         saved: Vec<(&'static str, Option<String>)>,
@@ -1674,6 +1764,202 @@ def search(query, limit=20):
         let mut blocked_script = test_tool(PathBuf::from("/tools/demo-dir"));
         blocked_script.name = "blocked-script".to_owned();
         assert!(!filter.admits(&blocked_script));
+    }
+
+    #[test]
+    fn mcp_v2_feature_flag_gates_discovery_and_cached_calls() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("CENTAUR_JWT_SIGNING_SECRET", "test-secret"),
+            ("CENTAUR_MCP_PUBLIC_URL", "http://localhost:3000/mcp"),
+            ("CENTAUR_CONSOLE_PUBLIC_URL", "http://localhost:3001"),
+            ("CENTAUR_MCP_V2_ENABLED", ""),
+        ]);
+        // SAFETY: ENV_LOCK is held, and the guard restores the original value.
+        unsafe { env::remove_var("CENTAUR_MCP_V2_ENABLED") };
+        assert!(!mcp_v2_enabled());
+
+        let state = AppState::unready(crate::auth::ApiAuthConfig::testing("test-secret"));
+        let token = test_jwt(
+            "test-secret",
+            json!({
+                "iss": "http://localhost:3001",
+                "aud": "http://localhost:3000/mcp",
+                "exp": OffsetDateTime::now_utc().unix_timestamp() + 3600,
+                "principal_id": "prn_test",
+                "scope": "mcp:tools",
+            }),
+        );
+        for (flag, enabled) in [
+            ("", false),
+            ("false", false),
+            ("invalid", false),
+            ("true", true),
+            (" TRUE ", true),
+        ] {
+            let _flag = EnvGuard::set(&[("CENTAUR_MCP_V2_ENABLED", flag)]);
+            let names = mcp_builtin_tools()
+                .into_iter()
+                .map(|tool| tool["name"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                names,
+                if enabled {
+                    vec!["centaur", "centaur_whoami"]
+                } else {
+                    vec!["centaur_whoami"]
+                }
+            );
+
+            // An invalid action proves enabled requests reach the dispatcher
+            // without requiring a runtime. Disabled cached calls fail earlier.
+            let response = mcp_post(
+                State(state.clone()),
+                mcp_auth_headers(&token),
+                Json(McpJsonRpcRequest {
+                    jsonrpc: Some("2.0".to_owned()),
+                    id: Some(json!(1)),
+                    method: "tools/call".to_owned(),
+                    params: json!({"name": "centaur", "arguments": {"action": "invalid"}}),
+                }),
+            )
+            .now_or_never()
+            .unwrap()
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .now_or_never()
+                .unwrap()
+                .unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            if enabled {
+                assert!(mcp_result_is_error(&body["result"]));
+                assert!(
+                    body["result"]["content"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("invalid centaur arguments")
+                );
+            } else {
+                assert_eq!(
+                    body["error"],
+                    json!({"code": -32602, "message": "unknown tool"})
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_service_list_returns_sorted_summaries_and_current_policy() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = temp_dir("centaur-api-rs-service-list");
+        for name in ["beta", "alpha", "centaur"] {
+            let package_dir = temp.join(name);
+            fs::create_dir_all(&package_dir).unwrap();
+            fs::write(
+                package_dir.join("pyproject.toml"),
+                format!(
+                    "[project]\nname = \"{name}-tool\"\ndescription = \"{name} service\"\n\n[project.scripts]\n{name} = \"{name}.cli:main\"\n"
+                ),
+            )
+            .unwrap();
+        }
+        let _env = EnvGuard::set(&[(
+            "TOOL_DIRS",
+            Box::leak(temp.display().to_string().into_boxed_str()),
+        )]);
+        let result = mcp_service_list_result(&SandboxToolFilter::default()).unwrap();
+        let expected = json!({"services": [
+            {"name": "alpha", "description": "alpha service"},
+            {"name": "beta", "description": "beta service"},
+        ]});
+        assert_eq!(result["structuredContent"], expected);
+        assert!(!mcp_result_is_error(&result));
+        let text: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text, expected);
+
+        let mut filter = SandboxToolFilter {
+            allowlist: Some(BTreeSet::from(["alpha-tool".to_owned()])),
+            blocklist: BTreeSet::new(),
+        };
+        assert_eq!(
+            mcp_service_list_result(&filter).unwrap()["structuredContent"],
+            json!({"services": [{"name": "alpha", "description": "alpha service"}]})
+        );
+        filter.blocklist.insert("alpha".to_owned());
+        assert_eq!(
+            mcp_service_list_result(&filter).unwrap()["structuredContent"],
+            json!({"services": []})
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn mcp_service_list_reads_catalog_updates_and_optional_descriptions() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = temp_dir("centaur-api-rs-service-list-refresh");
+        fs::create_dir_all(&temp).unwrap();
+        let _env = EnvGuard::set(&[(
+            "TOOL_DIRS",
+            Box::leak(temp.display().to_string().into_boxed_str()),
+        )]);
+        let filter = SandboxToolFilter::default();
+        assert_eq!(
+            mcp_service_list_result(&filter).unwrap()["structuredContent"],
+            json!({"services": []})
+        );
+        let package_dir = temp.join("demo");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            package_dir.join("pyproject.toml"),
+            "[project]\nname = \"demo\"\n\n[project.scripts]\ndemo = \"demo.cli:main\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            mcp_service_list_result(&filter).unwrap()["structuredContent"],
+            json!({"services": [{"name": "demo", "description": null}]})
+        );
+        fs::remove_dir_all(package_dir).unwrap();
+        assert_eq!(
+            mcp_service_list_result(&filter).unwrap()["structuredContent"],
+            json!({"services": []})
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn mcp_dispatcher_reports_invalid_arguments_as_tool_errors() {
+        let state = AppState::unready(crate::auth::ApiAuthConfig::testing("test-secret"));
+        let principal = McpPrincipal {
+            token_id: "test-token".to_owned(),
+            principal_id: "prn_test".to_owned(),
+            console_user_email: None,
+            console_user_name: None,
+            name: "Test".to_owned(),
+            scopes: vec!["mcp:tools".to_owned()],
+            expires_at: None,
+        };
+        for arguments in [
+            Value::Null,
+            json!({}),
+            json!([]),
+            json!({"action": 1}),
+            json!({"action": "invalid"}),
+            json!({"action": "list", "unexpected": true}),
+        ] {
+            let result = mcp_dispatcher_result(&state, &principal, arguments.clone())
+                .now_or_never()
+                .unwrap()
+                .unwrap();
+            assert!(mcp_result_is_error(&result), "arguments: {arguments}");
+            assert!(
+                result["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Use {\"action\":\"list\"}")
+            );
+        }
     }
 
     #[test]

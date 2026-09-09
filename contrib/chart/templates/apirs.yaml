@@ -260,6 +260,10 @@ spec:
 {{- end }}
             - name: RUN_MIGRATIONS
               value: {{ .Values.apiRs.runMigrations | quote }}
+{{- if not (hasKey .Values.apiRs.extraEnv "CENTAUR_MCP_V2_ENABLED") }}
+            - name: CENTAUR_MCP_V2_ENABLED
+              value: {{ .Values.apiRs.mcpV2Enabled | quote }}
+{{- end }}
             - name: IRON_CONTROL_SYNC_INFRA_SECRETS
               value: {{ .Values.apiRs.syncInfraSecrets | quote }}
             - name: RUST_LOG

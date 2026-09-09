@@ -341,6 +341,7 @@
       "type": "object",
       "properties": {
         "syncInfraSecrets": { "type": "boolean" },
+        "mcpV2Enabled": { "type": "boolean" },
         "mcpPublicUrl": { "type": "string" },
         "sandboxRunningLimit": { "type": "integer", "minimum": 0 },
         "sandboxHotIdleGraceSecs": { "type": "integer", "minimum": 0 },

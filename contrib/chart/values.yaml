@@ -447,6 +447,8 @@ apiRs:
   # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
   mcpPublicUrl: ""
   runMigrations: true
+  # Expose the experimental centaur MCP dispatcher (currently action=list).
+  mcpV2Enabled: false
   sandboxBackend: agent-k8s
   sandboxWorkload: codex-app-server
   sandboxReadyTimeoutSecs: 90
