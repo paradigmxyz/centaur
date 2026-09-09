@@ -1,19 +1,20 @@
 //! Workflow-owned button feedback using the runner's existing checkpoints.
+use std::{
+    future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+
 use absurd::{StepHandle, TaskContext};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
 
 use crate::WorkflowRuntimeError;
-use std::future::Future;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ButtonFeedback {
-    channel: String,
-    ts: String,
     original: Value,
     processing: Value,
     #[serde(skip)]
@@ -59,8 +60,6 @@ impl ButtonFeedback {
         });
         let text = message["text"].as_str().unwrap_or_default();
         Some(Self {
-            channel: channel.into(),
-            ts: ts.into(),
             original: json!({"channel": channel, "ts": ts, "text": text, "blocks": blocks}),
             updated_step: None,
             updated: Arc::default(),
@@ -68,38 +67,14 @@ impl ButtonFeedback {
                 "text": format!("{text}\n{status}"), "blocks": processing_blocks}),
         })
     }
-}
-
-impl ButtonFeedback {
-    pub(crate) async fn prepare<F, Fut>(&mut self, ctx: &TaskContext, send: F) -> absurd::Result<()>
-    where
-        F: Fn(Value) -> Fut + Send + Sync,
-        Fut: Future<Output = Result<Value, WorkflowRuntimeError>> + Send,
-    {
-        let updated = ctx.begin_step::<bool>("$slack_button.updated").await?;
-        self.updated.store(updated.done, Ordering::SeqCst);
-        self.updated_step = Some(updated);
-        if !self.updated.load(Ordering::SeqCst) {
-            ctx.step(
-                &format!("$slack_button.processing:{}", ctx.attempt()),
-                || async {
-                    send(self.processing.clone())
-                        .await
-                        .map_err(crate::absurd_error)
-                },
-            )
-            .await?;
-        }
-        Ok(())
-    }
 
     pub(crate) async fn message_updated(
         &self,
         ctx: &TaskContext,
         message: &Value,
     ) -> Result<(), WorkflowRuntimeError> {
-        if message["channel"] == self.channel
-            && message["ts"] == self.ts
+        if message["channel"] == self.original["channel"]
+            && message["ts"] == self.original["ts"]
             && let Some(step) = &self.updated_step
         {
             ctx.complete_step(step.clone(), true).await?;
@@ -107,62 +82,60 @@ impl ButtonFeedback {
         }
         Ok(())
     }
-
-    pub(crate) async fn restore_if_unhandled<F, Fut>(
-        &self,
-        ctx: &TaskContext,
-        send: F,
-    ) -> absurd::Result<()>
-    where
-        F: Fn(Value) -> Fut + Send + Sync,
-        Fut: Future<Output = Result<Value, WorkflowRuntimeError>> + Send,
-    {
-        if !self.updated.load(Ordering::SeqCst) {
-            ctx.step(
-                &format!("$slack_button.restore:{}", ctx.attempt()),
-                || async {
-                    send(self.original.clone())
-                        .await
-                        .map_err(crate::absurd_error)
-                },
-            )
-            .await?;
-        }
-        Ok(())
-    }
 }
 
 /// Keep feedback in the workflow's ordered execution, including retry/replay.
-pub(crate) async fn run<T, S, SF, H, HF>(
+pub(crate) async fn run<T, SendFuture, HandlerFuture>(
     mut feedback: Option<ButtonFeedback>,
     ctx: &TaskContext,
-    send: S,
-    handler: H,
+    send: impl Fn(Value) -> SendFuture + Send + Sync,
+    handler: impl FnOnce(Option<ButtonFeedback>) -> HandlerFuture,
 ) -> absurd::Result<T>
 where
-    S: Fn(Value) -> SF + Clone + Send + Sync,
-    SF: Future<Output = Result<Value, WorkflowRuntimeError>> + Send,
-    H: FnOnce(Option<ButtonFeedback>) -> HF,
-    HF: Future<Output = absurd::Result<T>>,
+    SendFuture: Future<Output = Result<Value, WorkflowRuntimeError>> + Send,
+    HandlerFuture: Future<Output = absurd::Result<T>>,
 {
-    let preparation = if let Some(feedback) = &mut feedback {
-        feedback.prepare(ctx, send.clone()).await
-    } else {
-        Ok(())
-    };
-    let result = match preparation {
-        Ok(()) => handler(feedback.clone()).await,
-        Err(error) => Err(error),
-    };
+    let result = async {
+        if let Some(feedback) = &mut feedback {
+            let updated = ctx.begin_step::<bool>("$slack_button.updated").await?;
+            feedback.updated.store(updated.done, Ordering::SeqCst);
+            feedback.updated_step = Some(updated);
+            if !feedback.updated.load(Ordering::SeqCst) {
+                ctx.step(
+                    &format!("$slack_button.processing:{}", ctx.attempt()),
+                    || async {
+                        send(feedback.processing.clone())
+                            .await
+                            .map_err(crate::absurd_error)
+                    },
+                )
+                .await?;
+            }
+        }
+        handler(feedback.clone()).await
+    }
+    .await;
     // Suspension still means work in progress. On rejection/failure, restore
     // only our own busy state; an explicit workflow edit owns the result.
     if !matches!(&result, Err(absurd::Error::Suspend))
         && let Some(feedback) = feedback
-        && let Err(error) = feedback.restore_if_unhandled(ctx, send).await
+        && !feedback.updated.load(Ordering::SeqCst)
     {
-        tracing::warn!(%error, "failed to restore workflow buttons");
-        if result.is_ok() {
-            return Err(error);
+        let restored = ctx
+            .step(
+                &format!("$slack_button.restore:{}", ctx.attempt()),
+                || async {
+                    send(feedback.original.clone())
+                        .await
+                        .map_err(crate::absurd_error)
+                },
+            )
+            .await;
+        if let Err(error) = restored {
+            tracing::warn!(%error, "failed to restore workflow buttons");
+            if result.is_ok() {
+                return Err(error);
+            }
         }
     }
     result
