@@ -17,6 +17,7 @@ class ToolHostTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.temp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.temp.cleanup)
         cls.root = Path(cls.temp.name)
         cls.bin_dir = cls.root / "bin"
         cls.bin_dir.mkdir()
@@ -72,20 +73,23 @@ class ToolHostTest(unittest.TestCase):
             "CENTAUR_TOOL_ANALYTICS_LOG_PATH": str(cls.root / "analytics.jsonl"),
         }
         # Install once before exercising the host's execution timeout.
-        subprocess.run(
+        install = subprocess.run(
             [str(cls.bin_dir / "centaur-tools"), "run", "demo", "--help"],
             env=cls.env,
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
             timeout=60,
         )
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        cls.temp.cleanup()
+        if install.returncode != 0:
+            raise RuntimeError(
+                f"could not install test CLI:\n{install.stdout}{install.stderr}"
+            )
 
     def requests(self, *requests: dict) -> list[dict]:
+        requests = tuple(
+            {**request, "id": f"test-{index}"} for index, request in enumerate(requests)
+        )
         result = subprocess.run(
             [sys.executable, str(Path(__file__).with_name("centaur_tool_host.py"))],
             input="".join(json.dumps(request) + "\n" for request in requests),
@@ -103,7 +107,9 @@ class ToolHostTest(unittest.TestCase):
             envelope = json.loads(event)
             self.assertEqual(envelope["type"], "result")
             self.assertEqual(envelope["turn_id"], request["id"])
-            responses.append(json.loads(envelope["result"]))
+            response = json.loads(envelope["result"])
+            self.assertEqual(response["id"], request["id"])
+            responses.append(response)
         return responses
 
     def run_request(self, argv: list[str], **kwargs) -> dict:
