@@ -31,6 +31,8 @@ use crate::{
     tool_discovery::{DiscoveredTool, ToolDiscoveryConfig, discover_tool_catalog},
 };
 
+mod search;
+
 #[cfg(test)]
 pub(crate) static MCP_ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -82,9 +84,9 @@ struct CentaurToolMcpArguments {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-enum CentaurMcpAction {
-    List {},
+#[serde(deny_unknown_fields)]
+struct CentaurMcpArguments {
+    command: Vec<String>,
 }
 
 struct McpToolCallOutcome {
@@ -315,19 +317,62 @@ fn mcp_builtin_tools() -> Vec<Value> {
 fn mcp_dispatcher_tool() -> Value {
     json!({
         "name": "centaur",
-        "description": "Discover Centaur services. Use action=list to list service names and descriptions available under your current Centaur Console policy. Results reflect the current catalog without refreshing MCP tool definitions.",
+        "description": concat!(
+            "Discover Centaur services. Centaur exposes internal and third-party services ",
+            "(company data, Slack, Google Workspace, market data, on-chain analytics, and more) ",
+            "through MCP.\n\n",
+            "Pass command as an argv array. Position 0 is a discovery verb.\n\n",
+            "Discovery verbs:\n",
+            "  [\"list\"]                          services available under your Console policy\n",
+            "  [\"search\", \"slack messages\"]      search names and descriptions, ranked\n\n",
+            "Search matches words in names and descriptions, ignoring case and punctuation. ",
+            "Exact name matches rank first. Results reflect the current catalog without ",
+            "refreshing MCP tool definitions, so they stay accurate even when this tool list ",
+            "is stale.",
+        ),
         "inputSchema": {
             "type": "object",
-            "required": ["action"],
+            "required": ["command"],
+            "additionalProperties": false,
             "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["list"],
+                "command": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "description": concat!(
+                        "argv array. Each element is one token; do not pre-join with spaces. ",
+                        "Examples: [\"list\"] · [\"search\", \"slack messages\"]",
+                    ),
                 },
             },
-            "additionalProperties": false,
         },
     })
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum CentaurMcpCommand {
+    List,
+    Search(String),
+}
+
+fn parse_centaur_command(arguments: Value) -> Result<CentaurMcpCommand, String> {
+    let CentaurMcpArguments { command } = serde_json::from_value(arguments)
+        .map_err(|error| format!("invalid centaur arguments: {error}"))?;
+    if command.iter().any(|arg| arg.contains('\0')) {
+        return Err("command tokens must not contain NUL characters".to_owned());
+    }
+    match command.as_slice() {
+        [verb] if verb == "list" => Ok(CentaurMcpCommand::List),
+        [verb, query] if verb == "search" => {
+            if query.trim().is_empty() {
+                return Err("query must not be blank".to_owned());
+            }
+            Ok(CentaurMcpCommand::Search(query.clone()))
+        }
+        [verb, ..] if verb == "list" => Err("list takes no arguments".to_owned()),
+        [verb, ..] if verb == "search" => Err("search takes exactly one query token".to_owned()),
+        _ => Err("command must start with a supported discovery verb: list or search".to_owned()),
+    }
 }
 
 async fn mcp_dispatcher_result(
@@ -335,26 +380,41 @@ async fn mcp_dispatcher_result(
     principal: &McpPrincipal,
     arguments: Value,
 ) -> Result<Value, ApiError> {
-    let action = match serde_json::from_value::<CentaurMcpAction>(arguments) {
-        Ok(action) => action,
+    let command = match parse_centaur_command(arguments) {
+        Ok(command) => command,
         Err(error) => {
             return Ok(mcp_text_result(
-                format!("invalid centaur arguments: {error}. Use {{\"action\":\"list\"}}."),
+                format!(
+                    "{error}. Use {{\"command\":[\"list\"]}} or {{\"command\":[\"search\",\"slack messages\"]}}."
+                ),
                 true,
             ));
         }
     };
-    match action {
-        CentaurMcpAction::List {} => {
+    match command {
+        CentaurMcpCommand::List => {
             record_mcp_tool_method(&Span::current(), "centaur", "list");
             let policy = mcp_tool_host_call_policy(state, principal).await?;
             mcp_service_list_result(&parse_sandbox_tool_filter(policy.tool_filter()))
+        }
+        CentaurMcpCommand::Search(query) => {
+            record_mcp_tool_method(&Span::current(), "centaur", "search");
+            let policy = mcp_tool_host_call_policy(state, principal).await?;
+            mcp_service_search_result(&parse_sandbox_tool_filter(policy.tool_filter()), &query)
         }
     }
 }
 
 fn mcp_service_list_result(filter: &SandboxToolFilter) -> Result<Value, ApiError> {
-    let services = mcp_centaur_tool_catalog(filter)?
+    mcp_service_summaries_result(mcp_centaur_tool_catalog(filter)?)
+}
+
+fn mcp_service_search_result(filter: &SandboxToolFilter, query: &str) -> Result<Value, ApiError> {
+    mcp_service_summaries_result(search::search(mcp_centaur_tool_catalog(filter)?, query))
+}
+
+fn mcp_service_summaries_result(tools: Vec<DiscoveredTool>) -> Result<Value, ApiError> {
+    let services = tools
         .into_iter()
         .map(|tool| {
             json!({
@@ -1811,7 +1871,7 @@ def search(query, limit=20):
                 }
             );
 
-            // An invalid action proves enabled requests reach the dispatcher
+            // Invalid argv proves enabled requests reach the dispatcher
             // without requiring a runtime. Disabled cached calls fail earlier.
             let response = mcp_post(
                 State(state.clone()),
@@ -1820,7 +1880,7 @@ def search(query, limit=20):
                     jsonrpc: Some("2.0".to_owned()),
                     id: Some(json!(1)),
                     method: "tools/call".to_owned(),
-                    params: json!({"name": "centaur", "arguments": {"action": "invalid"}}),
+                    params: json!({"name": "centaur", "arguments": {"command": "list"}}),
                 }),
             )
             .now_or_never()
@@ -1878,6 +1938,12 @@ def search(query, limit=20):
         let text: Value =
             serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(text, expected);
+        let search = mcp_service_search_result(&SandboxToolFilter::default(), "service").unwrap();
+        assert_eq!(search["structuredContent"], expected);
+        assert!(!mcp_result_is_error(&search));
+        let text: Value =
+            serde_json::from_str(search["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text, expected);
 
         let mut filter = SandboxToolFilter {
             allowlist: Some(BTreeSet::from(["alpha-tool".to_owned()])),
@@ -1887,9 +1953,24 @@ def search(query, limit=20):
             mcp_service_list_result(&filter).unwrap()["structuredContent"],
             json!({"services": [{"name": "alpha", "description": "alpha service"}]})
         );
+        assert_eq!(
+            mcp_service_search_result(&filter, "service").unwrap()["structuredContent"],
+            json!({"services": [{"name": "alpha", "description": "alpha service"}]})
+        );
+        assert_eq!(
+            mcp_service_search_result(&filter, "beta").unwrap()["structuredContent"],
+            json!({"services": []})
+        );
+        assert!(mcp_find_centaur_tool("alpha", &filter).unwrap().is_some());
+        assert!(mcp_find_centaur_tool("beta", &filter).unwrap().is_none());
         filter.blocklist.insert("alpha".to_owned());
+        assert!(mcp_find_centaur_tool("alpha", &filter).unwrap().is_none());
         assert_eq!(
             mcp_service_list_result(&filter).unwrap()["structuredContent"],
+            json!({"services": []})
+        );
+        assert_eq!(
+            mcp_service_search_result(&filter, "alpha").unwrap()["structuredContent"],
             json!({"services": []})
         );
         fs::remove_dir_all(temp).unwrap();
@@ -1920,7 +2001,15 @@ def search(query, limit=20):
             mcp_service_list_result(&filter).unwrap()["structuredContent"],
             json!({"services": [{"name": "demo", "description": null}]})
         );
+        assert_eq!(
+            mcp_service_search_result(&filter, "demo").unwrap()["structuredContent"],
+            json!({"services": [{"name": "demo", "description": null}]})
+        );
         fs::remove_dir_all(package_dir).unwrap();
+        assert_eq!(
+            mcp_service_search_result(&filter, "demo").unwrap()["structuredContent"],
+            json!({"services": []})
+        );
         assert_eq!(
             mcp_service_list_result(&filter).unwrap()["structuredContent"],
             json!({"services": []})
@@ -1944,9 +2033,18 @@ def search(query, limit=20):
             Value::Null,
             json!({}),
             json!([]),
-            json!({"action": 1}),
-            json!({"action": "invalid"}),
-            json!({"action": "list", "unexpected": true}),
+            json!({"action": "list"}),
+            json!({"command": "list"}),
+            json!({"command": []}),
+            json!({"command": [1]}),
+            json!({"command": [" "]}),
+            json!({"command": ["list"], "unexpected": true}),
+            json!({"command": ["list", "extra"]}),
+            json!({"command": ["search"]}),
+            json!({"command": ["search", "slack", "messages"]}),
+            json!({"command": ["search", ""]}),
+            json!({"command": ["search", " \n\t "]}),
+            json!({"command": ["service", "nul\0byte"]}),
         ] {
             let result = mcp_dispatcher_result(&state, &principal, arguments.clone())
                 .now_or_never()
@@ -1957,7 +2055,26 @@ def search(query, limit=20):
                 result["content"][0]["text"]
                     .as_str()
                     .unwrap()
-                    .contains("Use {\"action\":\"list\"}")
+                    .contains("Use {\"command\":[\"list\"]}")
+            );
+        }
+    }
+
+    #[test]
+    fn centaur_commands_parse_discovery_and_preserve_query_text() {
+        assert_eq!(
+            parse_centaur_command(json!({"command": ["list"]})).unwrap(),
+            CentaurMcpCommand::List
+        );
+        for query in [
+            "slack messages",
+            "  spaced query  ",
+            "CAFÉ",
+            "company_context",
+        ] {
+            assert_eq!(
+                parse_centaur_command(json!({"command": ["search", query]})).unwrap(),
+                CentaurMcpCommand::Search(query.to_owned()),
             );
         }
     }
