@@ -208,7 +208,7 @@ from api.workflow_engine import Button
 
 await ctx.slack_buttons(
     "release-review",
-    channel="C123",
+    channel="releases",
     text="Approve this release?",
     workflow="review_release",
     input={"release_id": "release-42"},
@@ -227,9 +227,10 @@ Each click starts `review_release` with the supplied input and a `click` field.
 The Rust workflow context signs the target workflow, input, action, group, and
 destination channel before posting. The invoke endpoint verifies that signature
 before creating a run. Posting a lookalike button through the agent Slack tool
-does not grant permission to start workflows. Use a Slack conversation ID for
-`channel`, such as a channel ID starting with `C` or a DM conversation ID starting
-with `D`.
+does not grant permission to start workflows. Set `channel` to a channel name
+such as `releases`, or a Slack conversation ID such as `C123` or `D123`. Names
+are resolved through the Slack tool's existing channel resolver before signing,
+so name lookup uses the same tool access as `slack.send_message`.
 
 Slackbot supplies `click` from the verified Slack interaction, and the API uses it
 instead of any `click` field in the signed input. It contains `id` (the button group ID),

@@ -207,7 +207,7 @@ class WorkflowContext:
         buttons: dict[str, str | Button], input: dict[str, Any] | None = None,
         thread_ts: str | None = None,
     ) -> dict[str, Any]:
-        """Post buttons that start a workflow per click; return the Slack message."""
+        """Post workflow buttons to a channel ID or raw channel name."""
         normalized = {action: Button(button) if isinstance(button, str) else button
                       for action, button in buttons.items()}
         if (
@@ -236,10 +236,15 @@ class WorkflowContext:
                 for action, button in normalized.items()
             ]},
         ]
-        return await self.step(
-            f"{name}.post",
-            lambda: self.post_to_slack(channel, text, blocks=blocks, client_msg_id=group_id, thread_ts=thread_ts),
-        )
+        async def post() -> Any:
+            destination = channel
+            if not re.fullmatch(r"[CDG][A-Z0-9]+", destination):
+                destination = await self.call_tool("slack", "resolve_channel", {"channel": channel})
+            return await self.post_to_slack(
+                destination, text, blocks=blocks, client_msg_id=group_id, thread_ts=thread_ts,
+            )
+
+        return await self.step(f"{name}.post", post)
 
     async def update_slack(self, channel: str, message_ts: str, text: str, **kwargs: Any) -> Any:
         return await self._rpc.request({

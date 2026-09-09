@@ -747,11 +747,14 @@ class WorkflowHostTests(unittest.TestCase):
 
     def test_slack_buttons_post_workflow_target_and_replay_message(self) -> None:
         source = '''
+from api import app
 from api.workflow_engine import Button
+# Exercise tool calls through the test RPC, independent of installed CLI shims.
+app.resolve_tool_shim = lambda: None
 WORKFLOW_NAME = "buttons"
 async def handler(inp, ctx):
     return await ctx.slack_buttons(
-        "review", channel="C1", text="Proceed?", workflow="review_release",
+        "review", channel=inp["channel"], text="Proceed?", workflow="review_release",
         input={"release_id": "release-1"},
         buttons={"approve": Button("Approve", style="primary"),
                  "reject": Button("Reject", style="danger"),
@@ -760,13 +763,14 @@ async def handler(inp, ctx):
 '''
         message = {"ok": True, "channel": "C1", "ts": "1.0"}
         group_ids = []
-        for replay in [False, True, False]:
-            with self.subTest(replay=replay), self.workflow_host(source) as proc:
+        for channel, replay in [("C1", False), ("general", True), ("general", False)]:
+            with self.subTest(channel=channel, replay=replay), self.workflow_host(source) as proc:
                 self.send_host_message(proc, {
                     "type": "workflow.start", "workflow_name": "buttons",
-                    "task_id": "task-1", "run_id": "run-1", "input": {},
+                    "task_id": "task-1", "run_id": "run-1", "input": {"channel": channel},
                 })
                 posts = 0
+                lookups = 0
                 while True:
                     request = self.read_host_message(proc)
                     kind = request["type"]
@@ -776,8 +780,15 @@ async def handler(inp, ctx):
                     if kind == "ctx.step.get":
                         self.assertEqual(request["step"], "review.post")
                         value = {"done": replay, "value": message if replay else None, "checkpoint_name": "review.post"}
+                    elif kind == "ctx.call_tool":
+                        lookups += 1
+                        self.assertEqual(request["tool"], "slack")
+                        self.assertEqual(request["method"], "resolve_channel")
+                        self.assertEqual(request["args"], {"channel": channel})
+                        value = "C1"
                     elif kind == "ctx.post_to_slack":
                         posts += 1
+                        self.assertEqual(request["channel"], "C1")
                         elements = request["args"]["blocks"][1]["elements"]
                         group_id = request["args"]["client_msg_id"]
                         group_ids.append(group_id)
@@ -801,6 +812,7 @@ async def handler(inp, ctx):
                         self.fail(f"unexpected host output: {request}")
                     self.send_host_message(proc, {"type": "ctx.response", "request_id": request["request_id"], "ok": True, "value": value})
                 self.assertEqual(posts, int(not replay))
+                self.assertEqual(lookups, int(not replay and channel == "general"))
                 proc.wait(timeout=2)
                 self.assertEqual(proc.returncode, 0)
         self.assertEqual(group_ids[0], group_ids[1])
