@@ -14,8 +14,8 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose};
 use centaur_session_runtime::{
-    SessionRuntime, ToolHostCallInput, ToolHostCallOutput, ToolHostCallPolicy, ToolHostToolFilter,
-    tool_host_thread_key,
+    SessionRuntime, ToolHostCallInput, ToolHostCallOutput, ToolHostCallPolicy, ToolHostInvocation,
+    ToolHostToolFilter, tool_host_thread_key,
 };
 use hmac::{Hmac, KeyInit, Mac};
 use serde::Deserialize;
@@ -143,7 +143,7 @@ pub(crate) async fn mcp_post(
             let policy = mcp_tool_host_call_policy(&state, &principal).await?;
             let filter = parse_sandbox_tool_filter(policy.tool_filter());
             let mut tools = mcp_builtin_tools();
-            tools.extend(mcp_centaur_tool_entries(&filter)?);
+            tools.extend(mcp_v1_tool_entries(&filter)?);
             json!({
                 "tools": tools,
             })
@@ -210,14 +210,9 @@ async fn mcp_tool_call_result(
 
     async move {
         let outcome = if let Some((tool, policy)) = tool {
-            mcp_centaur_tool_result(state, principal, tool, params.arguments, policy).await
+            mcp_v1_tool_result(state, principal, tool, params.arguments, policy).await
         } else if params.name == "centaur" {
-            mcp_dispatcher_result(state, principal, params.arguments)
-                .await
-                .map(|result| McpToolCallOutcome {
-                    result,
-                    timed_out: false,
-                })
+            mcp_v2_command_result(state, principal, params.arguments).await
         } else {
             mcp_whoami_result(principal, params.arguments).map(|result| McpToolCallOutcome {
                 result,
@@ -308,23 +303,29 @@ fn mcp_whoami_tool() -> Value {
 fn mcp_builtin_tools() -> Vec<Value> {
     let mut tools = Vec::new();
     if mcp_v2_enabled() {
-        tools.push(mcp_dispatcher_tool());
+        tools.push(mcp_v2_tool());
     }
     tools.push(mcp_whoami_tool());
     tools
 }
 
-fn mcp_dispatcher_tool() -> Value {
+fn mcp_v2_tool() -> Value {
     json!({
         "name": "centaur",
         "description": concat!(
-            "Discover Centaur services. Centaur exposes internal and third-party services ",
+            "Discover and run Centaur tools. Centaur exposes tools for internal and third-party services ",
             "(company data, Slack, Google Workspace, market data, on-chain analytics, and more) ",
             "through MCP.\n\n",
-            "Pass command as an argv array. Position 0 is a discovery verb.\n\n",
-            "Discovery verbs:\n",
-            "  [\"list\"]                          services available under your Console policy\n",
-            "  [\"search\", \"slack messages\"]      search names and descriptions, ranked\n\n",
+            "Pass command as an argv array. Position 0 is a verb.\n\n",
+            "Commands:\n",
+            "  [\"list\"]                          tools available under your Console policy\n",
+            "  [\"search\", \"slack messages\"]      search names and descriptions, ranked\n",
+            "  [\"run\", \"slack\", \"--help\"]       show a tool's CLI help\n",
+            "  [\"run\", \"<tool>\", \"<argv>\", ...] run a tool CLI in your sandbox\n\n",
+            "Use run <tool> --help to discover commands and options. Pass each argument ",
+            "as a separate token, preserving spaces within values. Arguments are passed ",
+            "literally, without shell expansion, pipes, or redirection. Run returns stdout, ",
+            "stderr, exit_status, and timed_out; nonzero exits and timeouts are tool errors.\n\n",
             "Search matches words in names and descriptions, ignoring case and punctuation. ",
             "Exact name matches rank first. Results reflect the current catalog without ",
             "refreshing MCP tool definitions, so they stay accurate even when this tool list ",
@@ -341,7 +342,7 @@ fn mcp_dispatcher_tool() -> Value {
                     "minItems": 1,
                     "description": concat!(
                         "argv array. Each element is one token; do not pre-join with spaces. ",
-                        "Examples: [\"list\"] · [\"search\", \"slack messages\"]",
+                        "Examples: [\"list\"] · [\"search\", \"slack messages\"] · [\"run\", \"slack\", \"--help\"]",
                     ),
                 },
             },
@@ -353,9 +354,10 @@ fn mcp_dispatcher_tool() -> Value {
 enum CentaurMcpCommand {
     List,
     Search(String),
+    Run { tool: String, argv: Vec<String> },
 }
 
-fn parse_centaur_command(arguments: Value) -> Result<CentaurMcpCommand, String> {
+fn parse_mcp_v2_command(arguments: Value) -> Result<CentaurMcpCommand, String> {
     let CentaurMcpArguments { command } = serde_json::from_value(arguments)
         .map_err(|error| format!("invalid centaur arguments: {error}"))?;
     if command.iter().any(|arg| arg.contains('\0')) {
@@ -369,51 +371,92 @@ fn parse_centaur_command(arguments: Value) -> Result<CentaurMcpCommand, String> 
             }
             Ok(CentaurMcpCommand::Search(query.clone()))
         }
+        [verb, tool, argv @ ..] if verb == "run" => {
+            if tool.trim().is_empty() {
+                return Err("tool must not be blank".to_owned());
+            }
+            Ok(CentaurMcpCommand::Run {
+                tool: tool.clone(),
+                argv: argv.to_vec(),
+            })
+        }
         [verb, ..] if verb == "list" => Err("list takes no arguments".to_owned()),
         [verb, ..] if verb == "search" => Err("search takes exactly one query token".to_owned()),
-        _ => Err("command must start with a supported discovery verb: list or search".to_owned()),
+        [verb, ..] if verb == "run" => Err("run requires a tool name".to_owned()),
+        _ => Err("command must start with a supported verb: list, search, or run".to_owned()),
     }
 }
 
-async fn mcp_dispatcher_result(
+async fn mcp_v2_command_result(
     state: &AppState,
     principal: &McpPrincipal,
     arguments: Value,
-) -> Result<Value, ApiError> {
-    let command = match parse_centaur_command(arguments) {
+) -> Result<McpToolCallOutcome, ApiError> {
+    let command = match parse_mcp_v2_command(arguments) {
         Ok(command) => command,
         Err(error) => {
-            return Ok(mcp_text_result(
-                format!(
-                    "{error}. Use {{\"command\":[\"list\"]}} or {{\"command\":[\"search\",\"slack messages\"]}}."
+            return Ok(McpToolCallOutcome {
+                result: mcp_text_result(
+                    format!(
+                        "{error}. Use {{\"command\":[\"list\"]}}, {{\"command\":[\"search\",\"slack messages\"]}}, or {{\"command\":[\"run\",\"<tool>\",\"--help\"]}}."
+                    ),
+                    true,
                 ),
-                true,
-            ));
+                timed_out: false,
+            });
         }
     };
-    match command {
+    let result = match command {
         CentaurMcpCommand::List => {
             record_mcp_tool_method(&Span::current(), "centaur", "list");
             let policy = mcp_tool_host_call_policy(state, principal).await?;
-            mcp_service_list_result(&parse_sandbox_tool_filter(policy.tool_filter()))
+            mcp_v2_service_list_result(&parse_sandbox_tool_filter(policy.tool_filter()))
         }
         CentaurMcpCommand::Search(query) => {
             record_mcp_tool_method(&Span::current(), "centaur", "search");
             let policy = mcp_tool_host_call_policy(state, principal).await?;
-            mcp_service_search_result(&parse_sandbox_tool_filter(policy.tool_filter()), &query)
+            mcp_v2_service_search_result(&parse_sandbox_tool_filter(policy.tool_filter()), &query)
         }
-    }
+        CentaurMcpCommand::Run {
+            tool: tool_name,
+            argv,
+        } => {
+            record_mcp_tool_method(&Span::current(), "centaur", "run");
+            let policy = mcp_tool_host_call_policy(state, principal).await?;
+            let filter = parse_sandbox_tool_filter(policy.tool_filter());
+            let Some(tool) = mcp_find_centaur_tool(&tool_name, &filter)? else {
+                return Ok(McpToolCallOutcome {
+                    result: mcp_text_result(
+                        format!(
+                            "Unknown or unavailable tool {tool_name}. Use {{\"command\":[\"list\"]}} to discover available tools."
+                        ),
+                        true,
+                    ),
+                    timed_out: false,
+                });
+            };
+            Span::current().record("tool.name", tool.name.as_str());
+            return run_mcp_v2_tool(state.runtime()?, principal, &tool, argv, policy).await;
+        }
+    }?;
+    Ok(McpToolCallOutcome {
+        result,
+        timed_out: false,
+    })
 }
 
-fn mcp_service_list_result(filter: &SandboxToolFilter) -> Result<Value, ApiError> {
-    mcp_service_summaries_result(mcp_centaur_tool_catalog(filter)?)
+fn mcp_v2_service_list_result(filter: &SandboxToolFilter) -> Result<Value, ApiError> {
+    mcp_v2_service_summaries_result(mcp_centaur_tool_catalog(filter)?)
 }
 
-fn mcp_service_search_result(filter: &SandboxToolFilter, query: &str) -> Result<Value, ApiError> {
-    mcp_service_summaries_result(search::search(mcp_centaur_tool_catalog(filter)?, query))
+fn mcp_v2_service_search_result(
+    filter: &SandboxToolFilter,
+    query: &str,
+) -> Result<Value, ApiError> {
+    mcp_v2_service_summaries_result(search::search(mcp_centaur_tool_catalog(filter)?, query))
 }
 
-fn mcp_service_summaries_result(tools: Vec<DiscoveredTool>) -> Result<Value, ApiError> {
+fn mcp_v2_service_summaries_result(tools: Vec<DiscoveredTool>) -> Result<Value, ApiError> {
     let services = tools
         .into_iter()
         .map(|tool| {
@@ -429,10 +472,10 @@ fn mcp_service_summaries_result(tools: Vec<DiscoveredTool>) -> Result<Value, Api
     Ok(result)
 }
 
-fn mcp_centaur_tool_entries(filter: &SandboxToolFilter) -> Result<Vec<Value>, ApiError> {
+fn mcp_v1_tool_entries(filter: &SandboxToolFilter) -> Result<Vec<Value>, ApiError> {
     let mut entries = Vec::new();
     for tool in mcp_centaur_tool_catalog(filter)? {
-        let methods = mcp_tool_methods(&tool);
+        let methods = mcp_v1_tool_methods(&tool);
         let signatures = methods
             .iter()
             .map(|method| method.signature.as_str())
@@ -483,7 +526,7 @@ struct McpToolMethod {
     signature: String,
 }
 
-fn mcp_tool_methods(tool: &DiscoveredTool) -> Vec<McpToolMethod> {
+fn mcp_v1_tool_methods(tool: &DiscoveredTool) -> Vec<McpToolMethod> {
     let mut methods = BTreeMap::from([("help".to_owned(), "help()".to_owned())]);
     let path = tool.project_dir.join(&tool.client_module);
     if let Ok(contents) = fs::read_to_string(&path) {
@@ -537,7 +580,7 @@ fn mcp_method_signature(name: &str, params: &str) -> String {
     format!("{name}({params})")
 }
 
-fn mcp_tool_help_result(
+fn mcp_v1_tool_help_result(
     tool: &DiscoveredTool,
     methods: &[McpToolMethod],
 ) -> Result<Value, ApiError> {
@@ -690,14 +733,14 @@ fn mcp_whoami_result(principal: &McpPrincipal, arguments: Value) -> Result<Value
     ))
 }
 
-async fn mcp_centaur_tool_result(
+async fn mcp_v1_tool_result(
     state: &AppState,
     principal: &McpPrincipal,
     tool: DiscoveredTool,
     arguments: Value,
     policy: ToolHostCallPolicy,
 ) -> Result<McpToolCallOutcome, ApiError> {
-    match prepare_mcp_centaur_tool_call(&tool, arguments)? {
+    match prepare_mcp_v1_tool_call(&tool, arguments)? {
         McpCentaurToolAction::Return { result, method } => {
             if let Some(method) = method.as_deref() {
                 record_mcp_tool_method(&Span::current(), &tool.name, method);
@@ -709,11 +752,11 @@ async fn mcp_centaur_tool_result(
         }
         McpCentaurToolAction::Run { method, arguments } => {
             record_mcp_tool_method(&Span::current(), &tool.name, &method);
-            run_tool_host_centaur_tool(
+            run_mcp_v1_tool(
                 state.runtime()?,
                 principal,
                 &tool,
-                &method,
+                method,
                 arguments,
                 policy,
             )
@@ -733,7 +776,7 @@ enum McpCentaurToolAction {
     },
 }
 
-fn prepare_mcp_centaur_tool_call(
+fn prepare_mcp_v1_tool_call(
     tool: &DiscoveredTool,
     arguments: Value,
 ) -> Result<McpCentaurToolAction, ApiError> {
@@ -743,11 +786,13 @@ fn prepare_mcp_centaur_tool_call(
         return Err(ApiError::BadRequest("method is required".to_owned()));
     }
     let method = params.method.trim().to_owned();
-    let methods = mcp_tool_methods(tool);
+    let methods = mcp_v1_tool_methods(tool);
     if method == "help" {
-        return mcp_tool_help_result(tool, &methods).map(|result| McpCentaurToolAction::Return {
-            result,
-            method: Some(method),
+        return mcp_v1_tool_help_result(tool, &methods).map(|result| {
+            McpCentaurToolAction::Return {
+                result,
+                method: Some(method),
+            }
         });
     }
     if !methods.iter().any(|candidate| candidate.name == method) {
@@ -767,7 +812,7 @@ fn prepare_mcp_centaur_tool_call(
             method: None,
         });
     }
-    let arguments = match normalize_centaur_tool_arguments(params.arguments) {
+    let arguments = match normalize_mcp_v1_tool_arguments(params.arguments) {
         Ok(arguments) => arguments,
         Err(kind) => {
             return Ok(McpCentaurToolAction::Return {
@@ -789,7 +834,7 @@ fn mcp_result_is_error(result: &Value) -> bool {
     result.get("isError").and_then(Value::as_bool) == Some(true)
 }
 
-fn normalize_centaur_tool_arguments(arguments: Value) -> Result<Value, &'static str> {
+fn normalize_mcp_v1_tool_arguments(arguments: Value) -> Result<Value, &'static str> {
     if arguments.is_null() {
         return Ok(json!({}));
     }
@@ -810,14 +855,56 @@ fn json_type_name(value: &Value) -> &'static str {
     }
 }
 
-async fn run_tool_host_centaur_tool(
+// V1 calls Python client methods and requires JSON output.
+async fn run_mcp_v1_tool(
     runtime: SessionRuntime,
     principal: &McpPrincipal,
     tool: &DiscoveredTool,
-    method: &str,
+    method: String,
     arguments: Value,
     policy: ToolHostCallPolicy,
 ) -> Result<McpToolCallOutcome, ApiError> {
+    let output = run_mcp_tool_host(
+        runtime,
+        principal,
+        tool,
+        ToolHostInvocation::V1 {
+            method: method.clone(),
+            arguments,
+        },
+        policy,
+    )
+    .await?;
+    mcp_v1_output_result(tool, &method, output)
+}
+
+// V2 runs tool CLIs and preserves both output streams and exit status.
+async fn run_mcp_v2_tool(
+    runtime: SessionRuntime,
+    principal: &McpPrincipal,
+    tool: &DiscoveredTool,
+    argv: Vec<String>,
+    policy: ToolHostCallPolicy,
+) -> Result<McpToolCallOutcome, ApiError> {
+    let output = run_mcp_tool_host(
+        runtime,
+        principal,
+        tool,
+        ToolHostInvocation::V2 { argv },
+        policy,
+    )
+    .await?;
+    mcp_v2_run_output_result(output)
+}
+
+// Both MCP versions share principal-bound sandbox execution and tracing.
+async fn run_mcp_tool_host(
+    runtime: SessionRuntime,
+    principal: &McpPrincipal,
+    tool: &DiscoveredTool,
+    invocation: ToolHostInvocation,
+    policy: ToolHostCallPolicy,
+) -> Result<ToolHostCallOutput, ApiError> {
     let output = match runtime
         .run_tool_host_call(
             ToolHostCallInput {
@@ -826,8 +913,7 @@ async fn run_tool_host_centaur_tool(
                 console_user_name: principal.console_user_name.clone(),
                 token_id: Some(principal.token_id.clone()),
                 tool_name: tool.name.clone(),
-                method: method.to_owned(),
-                arguments,
+                invocation,
                 timeout: Duration::from_secs(120),
             },
             policy,
@@ -852,6 +938,14 @@ async fn run_tool_host_centaur_tool(
         Some(&output.execution_id),
         Some(&output.sandbox_id),
     );
+    Ok(output)
+}
+
+fn mcp_v1_output_result(
+    tool: &DiscoveredTool,
+    method: &str,
+    output: ToolHostCallOutput,
+) -> Result<McpToolCallOutcome, ApiError> {
     if output.timed_out {
         return Ok(McpToolCallOutcome {
             result: mcp_text_result(
@@ -911,6 +1005,22 @@ async fn run_tool_host_centaur_tool(
             timed_out: false,
         }),
     }
+}
+
+fn mcp_v2_run_output_result(output: ToolHostCallOutput) -> Result<McpToolCallOutcome, ApiError> {
+    let is_error = output.timed_out || output.exit_status != Some(0);
+    let content = json!({
+        "stdout": output.stdout,
+        "stderr": output.stderr,
+        "exit_status": output.exit_status,
+        "timed_out": output.timed_out,
+    });
+    let mut result = mcp_text_result(serde_json::to_string_pretty(&content)?, is_error);
+    result["structuredContent"] = content;
+    Ok(McpToolCallOutcome {
+        result,
+        timed_out: output.timed_out,
+    })
 }
 
 fn tool_host_error_context(output: &ToolHostCallOutput) -> String {
@@ -1414,7 +1524,7 @@ class DemoClient:
         )
         .unwrap();
 
-        let parsed = mcp_tool_methods(&test_tool(temp.clone()));
+        let parsed = mcp_v1_tool_methods(&test_tool(temp.clone()));
         let methods = parsed
             .iter()
             .map(|method| method.name.clone())
@@ -1521,8 +1631,7 @@ def search(query, limit=20):
 
         let tool = test_tool(temp.clone());
         let (result, method) = returned_tool_action(
-            prepare_mcp_centaur_tool_call(&tool, json!({"method": "missing", "arguments": {}}))
-                .unwrap(),
+            prepare_mcp_v1_tool_call(&tool, json!({"method": "missing", "arguments": {}})).unwrap(),
         );
 
         assert_eq!(method, None);
@@ -1542,8 +1651,7 @@ def search(query, limit=20):
 
         let tool = test_tool(temp.clone());
         let (result, method) = returned_tool_action(
-            prepare_mcp_centaur_tool_call(&tool, json!({"method": "missing", "arguments": {}}))
-                .unwrap(),
+            prepare_mcp_v1_tool_call(&tool, json!({"method": "missing", "arguments": {}})).unwrap(),
         );
 
         assert_eq!(method, None);
@@ -1569,7 +1677,7 @@ def search(query, limit=20):
 
         let tool = test_tool(temp.clone());
         let (result, method) = returned_tool_action(
-            prepare_mcp_centaur_tool_call(
+            prepare_mcp_v1_tool_call(
                 &tool,
                 json!({"method": "search", "arguments": ["not", "an", "object"]}),
             )
@@ -1588,15 +1696,15 @@ def search(query, limit=20):
     #[test]
     fn mcp_tool_arguments_default_to_empty_object() {
         assert_eq!(
-            normalize_centaur_tool_arguments(Value::Null).unwrap(),
+            normalize_mcp_v1_tool_arguments(Value::Null).unwrap(),
             json!({})
         );
         assert_eq!(
-            normalize_centaur_tool_arguments(json!({"query": "hello"})).unwrap(),
+            normalize_mcp_v1_tool_arguments(json!({"query": "hello"})).unwrap(),
             json!({"query": "hello"})
         );
         assert_eq!(
-            normalize_centaur_tool_arguments(json!(["not", "object"])).unwrap_err(),
+            normalize_mcp_v1_tool_arguments(json!(["not", "object"])).unwrap_err(),
             "array"
         );
     }
@@ -1928,7 +2036,7 @@ def search(query, limit=20):
             "TOOL_DIRS",
             Box::leak(temp.display().to_string().into_boxed_str()),
         )]);
-        let result = mcp_service_list_result(&SandboxToolFilter::default()).unwrap();
+        let result = mcp_v2_service_list_result(&SandboxToolFilter::default()).unwrap();
         let expected = json!({"services": [
             {"name": "alpha", "description": "alpha service"},
             {"name": "beta", "description": "beta service"},
@@ -1938,7 +2046,8 @@ def search(query, limit=20):
         let text: Value =
             serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(text, expected);
-        let search = mcp_service_search_result(&SandboxToolFilter::default(), "service").unwrap();
+        let search =
+            mcp_v2_service_search_result(&SandboxToolFilter::default(), "service").unwrap();
         assert_eq!(search["structuredContent"], expected);
         assert!(!mcp_result_is_error(&search));
         let text: Value =
@@ -1950,15 +2059,15 @@ def search(query, limit=20):
             blocklist: BTreeSet::new(),
         };
         assert_eq!(
-            mcp_service_list_result(&filter).unwrap()["structuredContent"],
+            mcp_v2_service_list_result(&filter).unwrap()["structuredContent"],
             json!({"services": [{"name": "alpha", "description": "alpha service"}]})
         );
         assert_eq!(
-            mcp_service_search_result(&filter, "service").unwrap()["structuredContent"],
+            mcp_v2_service_search_result(&filter, "service").unwrap()["structuredContent"],
             json!({"services": [{"name": "alpha", "description": "alpha service"}]})
         );
         assert_eq!(
-            mcp_service_search_result(&filter, "beta").unwrap()["structuredContent"],
+            mcp_v2_service_search_result(&filter, "beta").unwrap()["structuredContent"],
             json!({"services": []})
         );
         assert!(mcp_find_centaur_tool("alpha", &filter).unwrap().is_some());
@@ -1966,11 +2075,11 @@ def search(query, limit=20):
         filter.blocklist.insert("alpha".to_owned());
         assert!(mcp_find_centaur_tool("alpha", &filter).unwrap().is_none());
         assert_eq!(
-            mcp_service_list_result(&filter).unwrap()["structuredContent"],
+            mcp_v2_service_list_result(&filter).unwrap()["structuredContent"],
             json!({"services": []})
         );
         assert_eq!(
-            mcp_service_search_result(&filter, "alpha").unwrap()["structuredContent"],
+            mcp_v2_service_search_result(&filter, "alpha").unwrap()["structuredContent"],
             json!({"services": []})
         );
         fs::remove_dir_all(temp).unwrap();
@@ -1987,7 +2096,7 @@ def search(query, limit=20):
         )]);
         let filter = SandboxToolFilter::default();
         assert_eq!(
-            mcp_service_list_result(&filter).unwrap()["structuredContent"],
+            mcp_v2_service_list_result(&filter).unwrap()["structuredContent"],
             json!({"services": []})
         );
         let package_dir = temp.join("demo");
@@ -1998,20 +2107,20 @@ def search(query, limit=20):
         )
         .unwrap();
         assert_eq!(
-            mcp_service_list_result(&filter).unwrap()["structuredContent"],
+            mcp_v2_service_list_result(&filter).unwrap()["structuredContent"],
             json!({"services": [{"name": "demo", "description": null}]})
         );
         assert_eq!(
-            mcp_service_search_result(&filter, "demo").unwrap()["structuredContent"],
+            mcp_v2_service_search_result(&filter, "demo").unwrap()["structuredContent"],
             json!({"services": [{"name": "demo", "description": null}]})
         );
         fs::remove_dir_all(package_dir).unwrap();
         assert_eq!(
-            mcp_service_search_result(&filter, "demo").unwrap()["structuredContent"],
+            mcp_v2_service_search_result(&filter, "demo").unwrap()["structuredContent"],
             json!({"services": []})
         );
         assert_eq!(
-            mcp_service_list_result(&filter).unwrap()["structuredContent"],
+            mcp_v2_service_list_result(&filter).unwrap()["structuredContent"],
             json!({"services": []})
         );
         fs::remove_dir_all(temp).unwrap();
@@ -2044,12 +2153,16 @@ def search(query, limit=20):
             json!({"command": ["search", "slack", "messages"]}),
             json!({"command": ["search", ""]}),
             json!({"command": ["search", " \n\t "]}),
+            json!({"command": ["run"]}),
+            json!({"command": ["run", " \t"]}),
+            json!({"command": ["run", "slack", "nul\0byte"]}),
             json!({"command": ["service", "nul\0byte"]}),
         ] {
-            let result = mcp_dispatcher_result(&state, &principal, arguments.clone())
+            let result = mcp_v2_command_result(&state, &principal, arguments.clone())
                 .now_or_never()
                 .unwrap()
-                .unwrap();
+                .unwrap()
+                .result;
             assert!(mcp_result_is_error(&result), "arguments: {arguments}");
             assert!(
                 result["content"][0]["text"]
@@ -2063,7 +2176,7 @@ def search(query, limit=20):
     #[test]
     fn centaur_commands_parse_discovery_and_preserve_query_text() {
         assert_eq!(
-            parse_centaur_command(json!({"command": ["list"]})).unwrap(),
+            parse_mcp_v2_command(json!({"command": ["list"]})).unwrap(),
             CentaurMcpCommand::List
         );
         for query in [
@@ -2073,8 +2186,70 @@ def search(query, limit=20):
             "company_context",
         ] {
             assert_eq!(
-                parse_centaur_command(json!({"command": ["search", query]})).unwrap(),
+                parse_mcp_v2_command(json!({"command": ["search", query]})).unwrap(),
                 CentaurMcpCommand::Search(query.to_owned()),
+            );
+        }
+    }
+
+    #[test]
+    fn centaur_run_preserves_cli_arguments() {
+        for argv in [
+            vec![],
+            vec!["--help"],
+            vec![
+                "search",
+                "  café messages  ",
+                "",
+                "--limit",
+                "2",
+                "$(echo literal)",
+                "|",
+                ">",
+            ],
+        ] {
+            let mut command = vec!["run", "slack"];
+            command.extend(&argv);
+            assert_eq!(
+                parse_mcp_v2_command(json!({"command": command})).unwrap(),
+                CentaurMcpCommand::Run {
+                    tool: "slack".to_owned(),
+                    argv: argv.into_iter().map(str::to_owned).collect(),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_cli_output_preserves_streams_and_reports_exit_and_timeout() {
+        for (stdout, stderr, exit_status, timed_out, is_error) in [
+            ("Usage: demo [OPTIONS]\n", "", Some(0), false, false),
+            ("{\"ok\":true}\n", "warning\n", Some(0), false, false),
+            ("", "", Some(0), false, false),
+            ("partial\n", "invalid option\n", Some(2), false, true),
+            ("partial\n", "timed out\n", None, true, true),
+            ("", "terminated\n", None, false, true),
+        ] {
+            let outcome = mcp_v2_run_output_result(ToolHostCallOutput {
+                request_id: "request".to_owned(),
+                execution_id: "execution".to_owned(),
+                sandbox_id: "sandbox".to_owned(),
+                stdout: stdout.to_owned(),
+                stderr: stderr.to_owned(),
+                exit_status,
+                timed_out,
+            })
+            .unwrap();
+            assert_eq!(outcome.timed_out, timed_out);
+            assert_eq!(mcp_result_is_error(&outcome.result), is_error);
+            let expected = json!({"stdout": stdout, "stderr": stderr, "exit_status": exit_status, "timed_out": timed_out});
+            assert_eq!(outcome.result["structuredContent"], expected);
+            assert_eq!(
+                serde_json::from_str::<Value>(
+                    outcome.result["content"][0]["text"].as_str().unwrap()
+                )
+                .unwrap(),
+                expected
             );
         }
     }

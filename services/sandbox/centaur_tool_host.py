@@ -17,11 +17,45 @@ def _text(value: Any) -> str:
     return str(value)
 
 
+def _v1_call_command(request: dict[str, Any]) -> list[str]:
+    """V1 invokes a Python client method with JSON keyword arguments."""
+    return [
+        "centaur-tools",
+        "call",
+        str(request["tool"]),
+        str(request["method"]),
+        json.dumps(request.get("arguments", {}), separators=(",", ":")),
+    ]
+
+
+def _v2_run_command(request: dict[str, Any]) -> list[str]:
+    """V2 invokes the tool CLI with literal argv tokens."""
+    argv = request["argv"]
+    if not isinstance(argv, list):
+        raise TypeError("tool argv must be an array of strings")
+    for arg in argv:
+        if not isinstance(arg, str):
+            raise TypeError("each tool argv token must be a string")
+        if "\0" in arg:
+            raise ValueError("tool argv tokens must not contain NUL characters")
+    return ["centaur-tools", "run", str(request["tool"]), *argv]
+
+
+def _command_for_request(request: dict[str, Any]) -> list[str]:
+    # V1 requests predate the mode field and invoke Python client methods.
+    mode = request.get("mode", "v1")
+    match mode:
+        case "v1":
+            return _v1_call_command(request)
+        case "v2":
+            return _v2_run_command(request)
+        case _:
+            raise ValueError(f"unsupported tool host mode: {mode}")
+
+
 def _run_tool(request: dict[str, Any]) -> dict[str, Any]:
     request_id = request.get("id")
-    tool = request["tool"]
-    method = request["method"]
-    arguments = request.get("arguments", {})
+    command = _command_for_request(request)
     timeout_seconds = max(1, int(request.get("timeout_seconds") or 120))
 
     env = os.environ.copy()
@@ -34,13 +68,7 @@ def _run_tool(request: dict[str, Any]) -> dict[str, Any]:
 
     try:
         completed = subprocess.run(
-            [
-                "centaur-tools",
-                "call",
-                str(tool),
-                str(method),
-                json.dumps(arguments, separators=(",", ":")),
-            ],
+            command,
             check=False,
             text=True,
             capture_output=True,

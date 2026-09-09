@@ -386,9 +386,26 @@ pub struct ToolHostCallInput {
     pub console_user_name: Option<String>,
     pub token_id: Option<String>,
     pub tool_name: String,
-    pub method: String,
-    pub arguments: Value,
+    pub invocation: ToolHostInvocation,
     pub timeout: Duration,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ToolHostInvocation {
+    /// Invoke a Python client method through `centaur-tools call`.
+    V1 { method: String, arguments: Value },
+    /// Run a tool CLI through `centaur-tools run`.
+    V2 { argv: Vec<String> },
+}
+
+impl ToolHostInvocation {
+    fn method(&self) -> &str {
+        match self {
+            Self::V1 { method, .. } => method,
+            Self::V2 { .. } => "cli",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -511,8 +528,8 @@ struct SessionPipe {
 struct ToolHostRequest {
     id: String,
     tool: String,
-    method: String,
-    arguments: Value,
+    #[serde(flatten)]
+    invocation: ToolHostInvocation,
     principal_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     token_id: Option<String>,
@@ -1022,7 +1039,21 @@ impl SessionRuntime {
     ) -> Result<ToolHostCallOutput, ToolHostCallError> {
         let principal_id = input.principal_id.trim().to_owned();
         let tool_name = input.tool_name.trim().to_owned();
-        let method = input.method.trim().to_owned();
+        let invocation = match input.invocation {
+            ToolHostInvocation::V1 { method, arguments } => ToolHostInvocation::V1 {
+                method: method.trim().to_owned(),
+                arguments,
+            },
+            ToolHostInvocation::V2 { argv } => {
+                if argv.iter().any(|arg| arg.contains('\0')) {
+                    return Err(SessionRuntimeError::BadRequest(
+                        "tool host argv must not contain NUL characters".to_owned(),
+                    )
+                    .into());
+                }
+                ToolHostInvocation::V2 { argv }
+            }
+        };
         if principal_id.is_empty() {
             return Err(SessionRuntimeError::BadRequest(
                 "tool host principal_id is required".to_owned(),
@@ -1035,7 +1066,7 @@ impl SessionRuntime {
             )
             .into());
         }
-        if method.is_empty() {
+        if invocation.method().is_empty() {
             return Err(
                 SessionRuntimeError::BadRequest("tool host method is required".to_owned()).into(),
             );
@@ -1057,7 +1088,7 @@ impl SessionRuntime {
         let input = ToolHostCallInput {
             principal_id,
             tool_name,
-            method,
+            invocation,
             ..input
         };
         let call_lock = self.tool_host_call_lock(&thread_key);
@@ -1124,8 +1155,7 @@ impl SessionRuntime {
             console_user_name,
             token_id,
             tool_name,
-            method,
-            arguments,
+            invocation,
             timeout,
         } = input;
         self.create_or_get_tool_host_session(
@@ -1137,11 +1167,11 @@ impl SessionRuntime {
         .await?;
 
         let request_id = format!("mcp-call-{}", Uuid::new_v4().simple());
+        let method = invocation.method().to_owned();
         let request = ToolHostRequest {
             id: request_id.clone(),
             tool: tool_name.clone(),
-            method: method.clone(),
-            arguments,
+            invocation,
             principal_id,
             token_id,
             timeout_seconds: timeout.as_secs().max(1),
@@ -7505,6 +7535,35 @@ mod tests {
                 .unwrap()
                 .persona_id,
             "public"
+        );
+    }
+
+    #[test]
+    fn tool_host_request_serializes_cli_arguments() {
+        let request = ToolHostRequest {
+            id: "request".to_owned(),
+            tool: "demo".to_owned(),
+            invocation: ToolHostInvocation::V2 {
+                argv: vec![
+                    "search".to_owned(),
+                    " spaced query ".to_owned(),
+                    String::new(),
+                ],
+            },
+            principal_id: "prn_test".to_owned(),
+            token_id: None,
+            timeout_seconds: 120,
+        };
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            serde_json::json!({
+                "id": "request",
+                "tool": "demo",
+                "mode": "v2",
+                "argv": ["search", " spaced query ", ""],
+                "principal_id": "prn_test",
+                "timeout_seconds": 120,
+            })
         );
     }
 
