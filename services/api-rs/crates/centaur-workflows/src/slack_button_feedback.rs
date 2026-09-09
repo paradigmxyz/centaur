@@ -67,21 +67,30 @@ impl ButtonFeedback {
                 "text": format!("{text}\n{status}"), "blocks": processing_blocks}),
         })
     }
+}
 
-    pub(crate) async fn message_updated(
-        &self,
-        ctx: &TaskContext,
-        message: &Value,
-    ) -> Result<(), WorkflowRuntimeError> {
-        if message["channel"] == self.original["channel"]
-            && message["ts"] == self.original["ts"]
-            && let Some(step) = &self.updated_step
-        {
-            ctx.complete_step(step.clone(), true).await?;
-            self.updated.store(true, Ordering::SeqCst);
+/// Report update errors through the context RPC without losing a successful Slack edit.
+pub(crate) async fn update(
+    feedback: Option<&ButtonFeedback>,
+    ctx: &TaskContext,
+    message: &Value,
+    response: impl Future<Output = Result<Value, WorkflowRuntimeError>>,
+) -> Result<Value, String> {
+    let value = response.await.map_err(|error| error.to_string())?;
+    if let Some(feedback) = feedback
+        && message["channel"] == feedback.original["channel"]
+        && message["ts"] == feedback.original["ts"]
+    {
+        // Slack already changed. A checkpoint error must never let cleanup
+        // overwrite that result, even when Python does not catch the RPC error.
+        feedback.updated.store(true, Ordering::SeqCst);
+        if let Some(step) = &feedback.updated_step {
+            ctx.complete_step(step.clone(), true)
+                .await
+                .map_err(|error| error.to_string())?;
         }
-        Ok(())
     }
+    Ok(value)
 }
 
 /// Keep feedback in the workflow's ordered execution, including retry/replay.
@@ -95,7 +104,7 @@ where
     SendFuture: Future<Output = Result<Value, WorkflowRuntimeError>> + Send,
     HandlerFuture: Future<Output = absurd::Result<T>>,
 {
-    let result = async {
+    let preparation = async {
         if let Some(feedback) = &mut feedback {
             let updated = ctx.begin_step::<bool>("$slack_button.updated").await?;
             feedback.updated.store(updated.done, Ordering::SeqCst);
@@ -112,9 +121,21 @@ where
                 .await?;
             }
         }
-        handler(feedback.clone()).await
+        Ok::<_, absurd::Error>(())
     }
     .await;
+    if let Err(error) = preparation {
+        tracing::warn!(%error, "failed to prepare workflow button feedback");
+        // Without reading the marker we cannot safely replace or restore a
+        // message from a previous attempt. Continue without cosmetic edits.
+        if feedback
+            .as_ref()
+            .is_some_and(|feedback| feedback.updated_step.is_none())
+        {
+            feedback = None;
+        }
+    }
+    let result = handler(feedback.clone()).await;
     // Suspension still means work in progress. On rejection/failure, restore
     // only our own busy state; an explicit workflow edit owns the result.
     if !matches!(&result, Err(absurd::Error::Suspend))
@@ -133,9 +154,6 @@ where
             .await;
         if let Err(error) = restored {
             tracing::warn!(%error, "failed to restore workflow buttons");
-            if result.is_ok() {
-                return Err(error);
-            }
         }
     }
     result
@@ -145,7 +163,7 @@ where
 mod tests {
     use super::*;
     use absurd::{Client, ClientOptions, SpawnOptions, TaskResultSnapshot, WorkBatchOptions};
-    use std::time::Duration;
+    use std::{sync::atomic::AtomicUsize, time::Duration};
     use tokio::sync::Mutex;
 
     fn fixture() -> ButtonFeedback {
@@ -200,7 +218,11 @@ mod tests {
     #[tokio::test]
     async fn durable_feedback_restores_rejection_and_failure_and_preserves_results_on_replay()
     -> Result<(), Box<dyn std::error::Error>> {
-        let Ok(url) = std::env::var("ABSURD_TEST_DATABASE_URL") else {
+        let Ok(url) = std::env::var("SESSION_SQLX_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("SESSION_RUNTIME_TEST_DATABASE_URL"))
+            .or_else(|_| std::env::var("ABSURD_TEST_DATABASE_URL"))
+        else {
+            eprintln!("skipping button feedback tests: set SESSION_SQLX_TEST_DATABASE_URL");
             return Ok(());
         };
         let pool = sqlx::PgPool::connect(&url).await?;
@@ -225,31 +247,61 @@ mod tests {
         )?;
         client.create_queue(None, Default::default()).await?;
         let edits = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let handler_calls = Arc::new(AtomicUsize::new(0));
         client.register_task("button", {
             let edits = edits.clone();
+            let handler_calls = handler_calls.clone();
             move |input: Value, ctx| {
                 let edits = edits.clone();
+                let handler_calls = handler_calls.clone();
                 async move {
                     let feedback: ButtonFeedback = serde_json::from_value(input["feedback"].clone())?;
+                    let mode = input["mode"].as_str().unwrap().to_owned();
+                    let fail_processing = mode == "processing_error";
+                    let fail_restore = mode == "restore_error";
+                    let processing = feedback.processing.clone();
+                    let original = feedback.original.clone();
                     let send = move |message: Value| {
                         let edits = edits.clone();
-                        async move { edits.lock().await.push(message); Ok(json!({"ok": true})) }
+                        let fail = (fail_processing && message == processing)
+                            || (fail_restore && message == original);
+                        async move {
+                            if fail {
+                                return Err(WorkflowRuntimeError::Upstream("Slack edit failed".into()));
+                            }
+                            edits.lock().await.push(message);
+                            Ok(json!({"ok": true}))
+                        }
                     };
                     run(Some(feedback), &ctx.clone(), send.clone(), |feedback| async move {
-                        let mode = input["mode"].as_str().unwrap();
-                        if mode == "failure" { return Err(absurd::Error::InvalidOptions("handler failed".into())); }
-                        if mode == "result" || mode == "replay" || mode == "failure_after_result" {
+                        // Deliberately not checkpointed: cosmetic failures must
+                        // not cause the engine to execute this side effect again.
+                        handler_calls.fetch_add(1, Ordering::SeqCst);
+                        if mode == "failure" {
+                            return Err(absurd::Error::InvalidOptions("handler failed".into()));
+                        }
+                        if !matches!(mode.as_str(), "rejection" | "restore_error") {
                             ctx.step("workflow-result", || async {
                                 let message = json!({"channel": "C1", "ts": "1.1", "text": "Approved", "blocks": []});
-                                send(message.clone()).await.map_err(crate::absurd_error)?;
-                                feedback.as_ref().unwrap().message_updated(&ctx, &message).await.map_err(crate::absurd_error)?;
+                                let response = update(feedback.as_ref(), &ctx, &message, send(message.clone())).await;
+                                if mode.ends_with("checkpoint_error") {
+                                    let error: String = response.expect_err("marker write must fail");
+                                    assert!(error.contains("reject_feedback_checkpoint"), "{error}");
+                                    // The context RPC returned an ordinary error;
+                                    // a handler can catch it and keep making calls.
+                                    ctx.step("after-rpc-error", || async { Ok(()) }).await?;
+                                } else {
+                                    response.map_err(absurd::Error::InvalidOptions)?;
+                                }
                                 Ok(())
                             }).await?;
                         }
-                        if mode == "failure_after_result" {
+                        if mode == "failure_after_result" || mode == "failure_after_checkpoint_error" {
                             return Err(absurd::Error::InvalidOptions("later step failed".into()));
                         }
-                        if mode == "replay" { ctx.sleep_for("wait", Duration::from_millis(20)).await?; }
+                        if mode == "replay" {
+                            ctx.sleep_for("wait", Duration::from_millis(20)).await?;
+                        }
                         Ok(json!({"done": true}))
                     }).await
                 }
@@ -262,8 +314,14 @@ mod tests {
             "result",
             "replay",
             "failure_after_result",
+            "processing_error",
+            "restore_error",
+            "checkpoint_error",
+            "failure_after_checkpoint_error",
+            "checkpoint_read_error",
         ] {
             edits.lock().await.clear();
+            handler_calls.store(0, Ordering::SeqCst);
             let params = json!({"feedback": feedback, "mode": mode});
             let spawn = client
                 .spawn(
@@ -271,11 +329,33 @@ mod tests {
                     params.clone(),
                     SpawnOptions {
                         idempotency_key: Some(mode.into()),
-                        max_attempts: Some(1),
+                        max_attempts: Some(if mode == "restore_error" { 5 } else { 1 }),
                         ..Default::default()
                     },
                 )
                 .await?;
+            if mode.ends_with("checkpoint_error") {
+                // Reject a real checkpoint INSERT after Slack has accepted the
+                // result. Only this task's update marker is affected.
+                let task_id = uuid::Uuid::parse_str(&spawn.task_id)?;
+                sqlx::query(&format!(
+                    "ALTER TABLE absurd.c_{} DROP CONSTRAINT IF EXISTS reject_feedback_checkpoint,
+                     ADD CONSTRAINT reject_feedback_checkpoint
+                     CHECK (task_id <> '{task_id}'::uuid OR checkpoint_name <> '$slack_button.updated')",
+                    client.queue_name()
+                )).execute(client.pool()).await?;
+            }
+            if mode == "checkpoint_read_error" {
+                sqlx::query(&format!(
+                    "INSERT INTO absurd.c_{} (task_id, checkpoint_name, state)
+                     VALUES ($1::uuid, '$slack_button.updated', $2::jsonb)",
+                    client.queue_name()
+                ))
+                .bind(&spawn.task_id)
+                .bind(json!("invalid marker"))
+                .execute(client.pool())
+                .await?;
+            }
             client.work_batch(WorkBatchOptions::default()).await?;
             if mode == "replay" {
                 tokio::time::sleep(Duration::from_millis(30)).await;
@@ -295,16 +375,29 @@ mod tests {
                     matches!(outcome, TaskResultSnapshot::Completed { .. }),
                     "{mode}: {outcome:?}"
                 );
+                assert_eq!(
+                    outcome.result::<Value>()?,
+                    Some(json!({"done": true})),
+                    "{mode}"
+                );
             }
+            let calls = if mode == "replay" { 2 } else { 1 };
+            assert_eq!(handler_calls.load(Ordering::SeqCst), calls, "{mode}");
             let recorded = edits.lock().await.clone();
-            assert_eq!(recorded.len(), 2, "{mode}: {recorded:?}");
-            assert_eq!(recorded[0], feedback.processing, "{mode}");
-            if mode == "rejection" || mode == "failure" {
-                assert_eq!(recorded[1], feedback.original, "{mode}");
-            } else {
-                assert_eq!(recorded[1]["text"], "Approved", "{mode}");
-                assert_eq!(recorded[1]["blocks"], json!([]), "{mode}");
-            }
+            let expected = match mode {
+                "rejection" | "failure" => {
+                    vec![feedback.processing.clone(), feedback.original.clone()]
+                }
+                "processing_error" | "checkpoint_read_error" => {
+                    vec![json!({"channel": "C1", "ts": "1.1", "text": "Approved", "blocks": []})]
+                }
+                "restore_error" => vec![feedback.processing.clone()],
+                _ => vec![
+                    feedback.processing.clone(),
+                    json!({"channel": "C1", "ts": "1.1", "text": "Approved", "blocks": []}),
+                ],
+            };
+            assert_eq!(recorded, expected, "{mode}");
             let duplicate = client
                 .spawn(
                     "button",
@@ -319,6 +412,7 @@ mod tests {
             assert_eq!(duplicate.task_id, spawn.task_id);
             client.work_batch(WorkBatchOptions::default()).await?;
             assert_eq!(*edits.lock().await, recorded);
+            assert_eq!(handler_calls.load(Ordering::SeqCst), calls, "{mode}");
         }
         client.drop_queue(None).await?;
         Ok(())

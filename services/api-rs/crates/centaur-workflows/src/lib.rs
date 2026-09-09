@@ -3488,15 +3488,13 @@ async fn handle_python_context_request(
             Err(error) => Err(error.to_string()),
         },
         Some("ctx.update_slack") => {
-            match send_slack_request("chat.update", message["message"].clone()).await {
-                Ok(value) => {
-                    if let Some(feedback) = &input.slack_button_feedback {
-                        feedback.message_updated(ctx, &message["message"]).await?;
-                    }
-                    Ok(value)
-                }
-                Err(error) => Err(error.to_string()),
-            }
+            slack_button_feedback::update(
+                input.slack_button_feedback.as_ref(),
+                ctx,
+                &message["message"],
+                send_slack_request("chat.update", message["message"].clone()),
+            )
+            .await
         }
         Some("ctx.post_to_slack") => {
             match post_python_slack_message(message, ctx, &request_id).await {

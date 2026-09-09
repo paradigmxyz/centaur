@@ -355,17 +355,14 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       // The workflow owns the message and its final button state. Successful
       // handoff (including redelivery) only needs Slack's native acknowledgment;
       // a separate success message adds noise before the actual result arrives.
-      if (result && result.outcome !== 'accepted' && result.outcome !== 'duplicate'
-        && payload.channel_id) {
+      if (result?.outcome === 'unavailable' && payload.channel_id) {
         backgroundWaitUntil(
           withSlackApiTimeout(options, 'post workflow action feedback', () =>
             callSlackApi('chat.postEphemeral', {
               channel: payload.channel_id,
               user: payload.user_id,
               ...(payload.thread_ts ? { thread_ts: payload.thread_ts } : {}),
-              text: result.outcome === 'unavailable'
-                ? 'This request is no longer available.'
-                : 'This request is closed.'
+              text: 'This request is no longer available.'
             }, {
               apiUrl: options.slackApiUrl,
               fetch: options.fetch as typeof globalThis.fetch | undefined,
