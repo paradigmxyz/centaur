@@ -1601,6 +1601,48 @@ def sheets_read_cmd(
         raise typer.Exit(1)
 
 
+@sheets_app.command("batch-read")
+def sheets_batch_read_cmd(
+    spreadsheet_id: str = typer.Argument(..., help="Spreadsheet ID (from URL)"),
+    range_notations: list[str] = typer.Option(..., "--range", "-r", help="A1 notation range"),  # noqa: B008
+    output_json: bool = typer.Option(False, "--json", "-o", help="Output as JSON"),
+):
+    """Read data from a Google Sheet, across several ranges.
+
+    Example:
+        gsuite sheets batch-read "1Abc..." --range "Sheet1!A1:D10" --range "Sheet2!A1:B5"
+        gsuite sheets batch-read "1Abc..." --range "Sheet1!A1:D10" --json
+    """
+    from .client import sheets_batch_read
+
+    try:
+        result = sheets_batch_read(spreadsheet_id, range_notations)
+
+        if output_json:
+            console.print(json.dumps(result, indent=2), markup=False, soft_wrap=True)
+            return
+
+        for value_range in result:
+            if not value_range["rows"]:
+                console.print(f"[yellow]{value_range['range']}: No data found.[/]")
+                continue
+
+            table = Table(title=f"{value_range['range']} ({len(value_range['rows'])} rows)")
+            for header in value_range["headers"]:
+                table.add_column(header, style="cyan", max_width=30)
+
+            for row in value_range["rows"][:50]:
+                values = [str(row.get(h, ""))[:30] for h in value_range["headers"]]
+                table.add_row(*values)
+
+            console.print(table)
+            if len(value_range["rows"]) > 50:
+                console.print(f"[dim]... and {len(value_range['rows']) - 50} more rows[/]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+
 @sheets_app.command("update")
 def sheets_update_cmd(
     spreadsheet_id: str = typer.Argument(..., help="Spreadsheet ID (from URL)"),

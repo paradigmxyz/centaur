@@ -8,6 +8,101 @@ from gsuite.cli import app, extract_drive_file_id
 runner = CliRunner()
 
 
+def test_sheets_batch_read_passes_repeated_ranges_and_outputs_json(monkeypatch):
+    calls = []
+    expected = [{"spreadsheet_id": "sheet-123", "raw_values": [["[bold]data"]]}]
+
+    def fake_batch_read(spreadsheet_id, range_notations):
+        calls.append((spreadsheet_id, range_notations))
+        return expected
+
+    monkeypatch.setattr(client, "sheets_batch_read", fake_batch_read)
+    for json_flag in ["--json", "-o"]:
+        calls.clear()
+        result = runner.invoke(
+            app,
+            [
+                "sheets",
+                "batch-read",
+                "sheet-123",
+                "-r",
+                "Data!A1:B3",
+                "--range",
+                "Other!A1",
+                json_flag,
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert calls == [("sheet-123", ["Data!A1:B3", "Other!A1"])]
+        assert json.loads(result.stdout) == expected
+
+
+def test_sheets_batch_read_displays_each_range_by_default(monkeypatch):
+    monkeypatch.setattr(
+        client,
+        "sheets_batch_read",
+        lambda spreadsheet_id, range_notations: [
+            {"range": "Empty!A1", "headers": [], "rows": []},
+            {"range": "Data!A1:A2", "headers": ["Name"], "rows": [{"Name": "Alice"}]},
+            {"range": "Other!A1:A2", "headers": ["Name"], "rows": [{"Name": "Bob"}]},
+        ],
+    )
+    result = runner.invoke(
+        app,
+        [
+            "sheets",
+            "batch-read",
+            "sheet-123",
+            "-r",
+            "Empty!A1",
+            "-r",
+            "Data!A1:A2",
+            "-r",
+            "Other!A1:A2",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Empty!A1: No data found." in result.stdout
+    assert "Data!A1:A2" in "".join(result.stdout.split())
+    assert "Alice" in result.stdout
+    assert "Other!A1:A2" in "".join(result.stdout.split())
+    assert "Bob" in result.stdout
+
+
+def test_sheets_batch_read_requires_ranges():
+    result = runner.invoke(app, ["sheets", "batch-read", "sheet-123"])
+    assert result.exit_code == 2
+
+
+def test_sheets_batch_read_requires_range_flag():
+    result = runner.invoke(app, ["sheets", "batch-read", "sheet-123", "Data!A1"])
+    assert result.exit_code == 2
+
+
+def test_sheets_batch_read_accepts_one_range(monkeypatch):
+    calls = []
+
+    def fake_batch_read(spreadsheet_id, range_notations):
+        calls.append((spreadsheet_id, range_notations))
+        return []
+
+    monkeypatch.setattr(client, "sheets_batch_read", fake_batch_read)
+    result = runner.invoke(app, ["sheets", "batch-read", "sheet-123", "--range", "Data!A1"])
+    assert result.exit_code == 0
+    assert calls == [("sheet-123", ["Data!A1"])]
+
+
+def test_sheets_batch_read_reports_errors(monkeypatch):
+    def fake_batch_read(spreadsheet_id, range_notations):
+        raise ValueError("Invalid range")
+
+    monkeypatch.setattr(client, "sheets_batch_read", fake_batch_read)
+    result = runner.invoke(app, ["sheets", "batch-read", "sheet-123", "-r", "invalid"])
+    assert result.exit_code == 1
+    assert "Invalid range" in result.stdout
+
+
 def test_extract_drive_file_id_accepts_editor_and_drive_urls():
     assert (
         extract_drive_file_id("https://docs.google.com/document/d/doc-123/edit")

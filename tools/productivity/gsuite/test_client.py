@@ -1,6 +1,7 @@
 import base64
 import tomllib
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -1003,6 +1004,74 @@ def test_gsuite_client_exposes_doc_comments(monkeypatch):
             "include_deleted": True,
         }
     ]
+
+
+def test_sheets_batch_read_uses_one_request_and_preserves_range_order(monkeypatch):
+    service = Mock()
+    values_api = service.spreadsheets.return_value.values.return_value
+    response = {
+        "valueRanges": [
+            {"range": "Data!A1:B3", "values": [["Name", "Count"], ["Alice", 2], ["Bob"]]},
+            {"range": "Empty!A1:B3"},
+            {"range": "Headers!A1:B1", "values": [["Name", "Count"]]},
+            {"range": "Data!A1:B3", "values": [["Name", "Count"], ["Alice", 2], ["Bob"]]},
+        ]
+    }
+    values_api.batchGet.return_value.execute.return_value = response
+    monkeypatch.setattr(client, "get_sheets_service", lambda: service)
+    range_notations = ["Data!A1:B3", "Empty!A1:B3", "Headers!A1:B1", "Data!A1:B3"]
+
+    result = client.GSuiteClient().sheets_batch_read(
+        "spreadsheet-123", range_notations=range_notations
+    )
+
+    values_api.batchGet.assert_called_once_with(
+        spreadsheetId="spreadsheet-123", ranges=range_notations
+    )
+    values_api.batchGet.return_value.execute.assert_called_once_with()
+    values_api.get.assert_not_called()
+    assert isinstance(result, list)
+    assert [entry["range"] for entry in result] == range_notations
+    assert result[0] == {
+        "spreadsheet_id": "spreadsheet-123",
+        "range": range_notations[0],
+        "headers": ["Name", "Count"],
+        "rows": [{"Name": "Alice", "Count": 2}, {"Name": "Bob", "Count": ""}],
+        "raw_values": response["valueRanges"][0]["values"],
+    }
+    assert result[1]["raw_values"] == []
+    assert result[1]["headers"] == []
+    assert result[1]["rows"] == []
+    assert result[2]["headers"] == ["Name", "Count"]
+    assert result[2]["rows"] == []
+    assert result[3] == result[0]
+
+    for range_notation, value_range, expected in zip(
+        range_notations, response["valueRanges"], result, strict=True
+    ):
+        values_api.get.return_value.execute.return_value = value_range
+        assert client.sheets_read("spreadsheet-123", range_notation) == expected
+
+
+def test_sheets_batch_read_rejects_empty_range_list_before_connecting(monkeypatch):
+    get_service = Mock()
+    monkeypatch.setattr(client, "get_sheets_service", get_service)
+
+    with pytest.raises(ValueError, match="Provide at least one range"):
+        client.sheets_batch_read("spreadsheet-123", range_notations=[])
+
+    get_service.assert_not_called()
+
+
+def test_sheets_batch_read_propagates_api_errors(monkeypatch):
+    service = Mock()
+    service.spreadsheets.return_value.values.return_value.batchGet.return_value.execute.side_effect = RuntimeError(
+        "Unable to read spreadsheet"
+    )
+    monkeypatch.setattr(client, "get_sheets_service", lambda: service)
+
+    with pytest.raises(RuntimeError, match="Unable to read spreadsheet"):
+        client.sheets_batch_read("spreadsheet-123", ["Data!A1"])
 
 
 def test_sheets_add_tab_uses_batch_update(monkeypatch):
