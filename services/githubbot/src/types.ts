@@ -114,6 +114,10 @@ export type GithubbotOptions = {
   mapper?: CodexAppServerToChatStreamOptions;
   maxDurationMs?: number;
   postgresUrl?: string;
+  /** Override the dependency readiness check. Primarily used by tests. */
+  readinessCheck?: () => Promise<void>;
+  /** Timeout for the api-rs readiness probe. Default 2000ms. */
+  readinessTimeoutMs?: number;
   state?: StateAdapter;
   stateKeyPrefix?: string;
   /**

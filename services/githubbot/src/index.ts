@@ -67,6 +67,7 @@ export type {
 
 const POSTGRES_CONNECT_INITIAL_DELAY_MS = 250;
 const POSTGRES_CONNECT_MAX_DELAY_MS = 10_000;
+const READINESS_TIMEOUT_MS = 2_000;
 const DEDUP_WINDOW = 200;
 
 export function createGithubbot(options: GithubbotOptions): Githubbot {
@@ -82,7 +83,10 @@ export function createGithubbot(options: GithubbotOptions): Githubbot {
     logger,
   } satisfies GitHubAdapterConfig;
   const github = createGitHubAdapter(githubConfig);
-  const state = options.state ?? createDefaultState(options, logger);
+  const defaultState = options.state ? undefined : createDefaultState(options, logger);
+  const state = options.state ?? defaultState?.state;
+  if (!state) throw new Error("githubbot state is required");
+  const checkStateReady = options.readinessCheck ?? defaultState?.checkReady;
   const chat = new Chat<{ github: typeof github }, GithubbotThreadState>({
     userName,
     adapters: { github },
@@ -148,6 +152,29 @@ export function createGithubbot(options: GithubbotOptions): Githubbot {
 
   const app = new Hono();
   app.get("/health", (c) => c.json({ ok: true, service: "githubbot" }));
+  app.get("/livez", (c) => c.json({ live: true, service: "githubbot" }));
+  app.get("/readyz", async (c) => {
+    try {
+      await checkStateReady?.();
+    } catch {
+      return c.json({ ready: false, dependency: "postgres" }, 503);
+    }
+
+    try {
+      const timeoutMs = options.readinessTimeoutMs ?? READINESS_TIMEOUT_MS;
+      const response = await (options.fetch ?? fetch)(
+        new URL("readyz", `${options.apiUrl.replace(/\/$/, "")}/`),
+        { signal: AbortSignal.timeout(timeoutMs) },
+      );
+      if (!response.ok) {
+        return c.json({ ready: false, dependency: "api-rs" }, 503);
+      }
+    } catch {
+      return c.json({ ready: false, dependency: "api-rs" }, 503);
+    }
+
+    return c.json({ ready: true, service: "githubbot" });
+  });
 
   const handleGithubWebhook = async (c: Context) => {
     const eventType = c.req.header("x-github-event") ?? "";
@@ -523,22 +550,31 @@ function verifyGithubSignature(
 function createDefaultState(
   options: GithubbotOptions,
   logger: Logger,
-): StateAdapter {
+): { checkReady: () => Promise<void>; state: StateAdapter } {
   const stateLogger = logger.child("postgres-state");
   // Own the pool so we can attach an error handler. pg.Pool emits 'error' for
   // idle clients whose connection drops (Postgres restart, or a transient blip
   // while the pod's network is still being programmed at startup). With no
   // listener, node-postgres rethrows it as an uncaught exception and the process
   // crashes/spews. Logging and swallowing lets the pool reconnect on the next query.
-  const pool = new pg.Pool({ connectionString: options.postgresUrl });
+  const pool = new pg.Pool({
+    connectionString: options.postgresUrl,
+    connectionTimeoutMillis: READINESS_TIMEOUT_MS,
+    query_timeout: READINESS_TIMEOUT_MS,
+  });
   pool.on("error", (error) => {
     stateLogger.warn("postgres pool error", { error: errorMessage(error) });
   });
-  return createPostgresState({
-    client: pool,
-    keyPrefix: options.stateKeyPrefix ?? "centaur-githubbot",
-    logger: stateLogger,
-  });
+  return {
+    checkReady: async () => {
+      await pool.query("SELECT 1");
+    },
+    state: createPostgresState({
+      client: pool,
+      keyPrefix: options.stateKeyPrefix ?? "centaur-githubbot",
+      logger: stateLogger,
+    }),
+  };
 }
 
 /**
