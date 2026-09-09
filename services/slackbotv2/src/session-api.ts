@@ -572,6 +572,7 @@ export async function dispatchSlackBlockAction(
     }
     body = {
       button: payload.value,
+      ...(payload.workflow_message ? { message: payload.workflow_message } : {}),
       idempotency_key: 'slack.button:' + createHash('sha256').update(JSON.stringify([
         payload.team_id, payload.channel_id, payload.user_id,
         payload.message_ts, payload.action_ts, payload.action_id

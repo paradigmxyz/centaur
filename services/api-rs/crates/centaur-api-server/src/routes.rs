@@ -2847,8 +2847,12 @@ async fn invoke_workflow_button(
     State(state): State<AppState>,
     Json(request): Json<centaur_workflows::slack_buttons::Invocation>,
 ) -> Result<Json<Value>, ApiError> {
+    let feedback =
+        centaur_workflows::slack_button_feedback::ButtonFeedback::from_invocation(&request);
     let request = state.auth.verify_workflow_button(request)?;
-    let run = workflow_runtime(&state)?.create_run(request).await?;
+    let run = workflow_runtime(&state)?
+        .create_button_run(request, feedback)
+        .await?;
     Ok(Json(serde_json::to_value(run)?))
 }
 

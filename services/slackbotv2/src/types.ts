@@ -112,6 +112,7 @@ export type SlackbotV2InterruptSessionResponse = {
 export type SlackbotV2Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
 export type SlackbotV2BlockActionPayload = {
+  workflow_message?: JsonObject
   action_id: string
   action_ts?: string
   block_id?: string

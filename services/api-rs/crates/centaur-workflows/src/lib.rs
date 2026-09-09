@@ -36,6 +36,7 @@ use tokio::{
 };
 use tracing::{info, warn};
 
+pub mod slack_button_feedback;
 pub mod slack_buttons;
 
 pub const WORKFLOW_QUEUE: &str = "centaur_workflows";
@@ -475,6 +476,8 @@ struct WorkflowTaskInput {
     workflow_name: String,
     input: Value,
     harness_type: HarnessType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    slack_button_feedback: Option<slack_button_feedback::ButtonFeedback>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -836,6 +839,14 @@ impl WorkflowRuntime {
         &self,
         request: CreateWorkflowRunRequest,
     ) -> Result<CreateWorkflowRunResponse, WorkflowRuntimeError> {
+        self.create_button_run(request, None).await
+    }
+
+    pub async fn create_button_run(
+        &self,
+        request: CreateWorkflowRunRequest,
+        feedback: Option<slack_button_feedback::ButtonFeedback>,
+    ) -> Result<CreateWorkflowRunResponse, WorkflowRuntimeError> {
         let workflow_name = request.workflow_name.trim();
         if workflow_name.is_empty() {
             return Err(WorkflowRuntimeError::BadRequest(
@@ -851,6 +862,7 @@ impl WorkflowRuntime {
                     workflow_name: workflow_name.to_owned(),
                     input: request.input,
                     harness_type: request.harness_type.unwrap_or(HarnessType::Codex),
+                    slack_button_feedback: feedback,
                 },
                 SpawnOptions {
                     max_attempts: request.max_attempts,
@@ -2410,6 +2422,7 @@ async fn run_schedule_tick(
                 workflow_name: schedule.workflow_name.clone(),
                 input: schedule.input.clone(),
                 harness_type: HarnessType::Codex,
+                slack_button_feedback: None,
             },
             SpawnOptions {
                 idempotency_key: Some(fire_key.clone()),
@@ -2599,7 +2612,7 @@ fn normalize_cron_expression(expr: &str) -> String {
 }
 
 async fn run_centaur_workflow(
-    input: WorkflowTaskInput,
+    mut input: WorkflowTaskInput,
     ctx: TaskContext,
     session_runtime: SessionRuntime,
     workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
@@ -2607,12 +2620,21 @@ async fn run_centaur_workflow(
 ) -> absurd::Result<WorkflowResult> {
     let mut cleanup_guard =
         WorkflowSandboxCleanupGuard::new(session_runtime.clone(), ctx.run_id().to_owned());
-    let result = run_centaur_workflow_inner(
-        input,
-        ctx,
-        session_runtime,
-        workflow_host_sandbox,
-        workflow_clients,
+    let feedback = input.slack_button_feedback.take();
+    let result = slack_button_feedback::run(
+        feedback,
+        &ctx.clone(),
+        |message| send_slack_request("chat.update", message),
+        |feedback| {
+            input.slack_button_feedback = feedback;
+            run_centaur_workflow_inner(
+                input,
+                ctx,
+                session_runtime,
+                workflow_host_sandbox,
+                workflow_clients,
+            )
+        },
     )
     .await;
     if let Some(reason) = workflow_cleanup_reason(&result) {
@@ -3465,9 +3487,17 @@ async fn handle_python_context_request(
             Ok(value) => Ok(value),
             Err(error) => Err(error.to_string()),
         },
-        Some("ctx.update_slack") => send_slack_request("chat.update", message["message"].clone())
-            .await
-            .map_err(|error| error.to_string()),
+        Some("ctx.update_slack") => {
+            match send_slack_request("chat.update", message["message"].clone()).await {
+                Ok(value) => {
+                    if let Some(feedback) = &input.slack_button_feedback {
+                        feedback.message_updated(ctx, &message["message"]).await?;
+                    }
+                    Ok(value)
+                }
+                Err(error) => Err(error.to_string()),
+            }
+        }
         Some("ctx.post_to_slack") => {
             match post_python_slack_message(message, ctx, &request_id).await {
                 Ok(value) => Ok(value),
@@ -3533,6 +3563,7 @@ async fn start_python_child_workflow(
                 workflow_name: workflow_name.to_owned(),
                 input: child_input,
                 harness_type: parent.harness_type.clone(),
+                slack_button_feedback: None,
             },
             SpawnOptions {
                 idempotency_key,

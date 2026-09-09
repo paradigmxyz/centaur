@@ -352,18 +352,20 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     }
     try {
       const result = await dispatchSlackBlockAction(options, payload)
-      if (result && payload.channel_id) {
-        const messages: Record<string, string> = {
-          accepted: 'Your click was received.',
-          duplicate: 'Your click was already received.',
-          unavailable: 'This request is no longer available.'
-        }
+      // The workflow owns the message and its final button state. Successful
+      // handoff (including redelivery) only needs Slack's native acknowledgment;
+      // a separate success message adds noise before the actual result arrives.
+      if (result && result.outcome !== 'accepted' && result.outcome !== 'duplicate'
+        && payload.channel_id) {
         backgroundWaitUntil(
           withSlackApiTimeout(options, 'post workflow action feedback', () =>
             callSlackApi('chat.postEphemeral', {
               channel: payload.channel_id,
               user: payload.user_id,
-              text: messages[String(result.outcome)] ?? 'This request is closed.'
+              ...(payload.thread_ts ? { thread_ts: payload.thread_ts } : {}),
+              text: result.outcome === 'unavailable'
+                ? 'This request is no longer available.'
+                : 'This request is closed.'
             }, {
               apiUrl: options.slackApiUrl,
               fetch: options.fetch as typeof globalThis.fetch | undefined,
@@ -899,6 +901,9 @@ function slackBlockActionPayload(event: ActionEvent): SlackbotV2BlockActionPaylo
   const messageTs = stringValue(message.ts) ?? stringValue(container.message_ts)
   const messageId = event.messageId.startsWith('ephemeral:') ? (messageTs ?? '') : event.messageId
   return removeUndefinedValues({
+    ...(event.actionId.startsWith(WORKFLOW_ACTION_PREFIX) && Array.isArray(message.blocks)
+      ? { workflow_message: { text: stringValue(message.text) ?? '', blocks: message.blocks } }
+      : {}),
     action_id: event.actionId,
     action_ts: stringValue(rawAction.action_ts),
     block_id: stringValue(rawAction.block_id),

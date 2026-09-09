@@ -30,6 +30,8 @@ pub struct Invocation {
     pub button: String,
     pub click: Value,
     pub idempotency_key: String,
+    #[serde(default)]
+    pub message: Option<Value>,
 }
 
 fn button_mac(secret: &[u8]) -> Hmac<Sha256> {
@@ -155,6 +157,7 @@ mod tests {
         Invocation {
             button,
             idempotency_key: "delivery-1".into(),
+            message: None,
             click: json!({"id": "00000000-0000-0000-0000-000000000001", "action": "approve", "channel_id": "C1", "user_id": "U1"}),
         }
     }
