@@ -237,13 +237,6 @@ instead of any `click` field in the signed input. It contains `id` (the button g
 A workflow using a dataclass `Input` can type this field as `ButtonClick` from
 `api.workflow_engine`.
 
-When the workflow runner starts handling a click, it replaces the button row with
-an inline processing label before starting the Python handler. The handler uses
-`ctx.update_slack` to replace this state with its result. Returning without editing
-the message, including an authorization rejection, restores the original buttons.
-A failed attempt also restores them unless the handler already updated the message.
-Feedback uses the existing workflow checkpoints, so replay preserves handler edits.
-
 The receiving workflow owns authorization, the message update, and the action:
 
 ```python
@@ -271,10 +264,10 @@ async def handler(inp, ctx):
 ```
 
 Check team and channel as well when your authorization policy requires them.
-An unauthorized click can return without updating the message. The runner restores
-its buttons for an authorized user. To leave a final result, the receiving workflow
-must update or remove buttons explicitly with `ctx.update_slack`. There is no
-automatic expiration or cancellation cleanup after posting.
+An unauthorized click can return without updating the message, leaving its
+buttons available to an authorized user. The receiving workflow must update
+or remove buttons explicitly. There is no automatic expiration or cancellation
+cleanup after posting.
 
 Slack redelivery of the same click reuses the workflow execution through the
 engine's existing idempotency support. Distinct clicks start distinct executions,
