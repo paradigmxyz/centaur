@@ -1,5 +1,9 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { createGitHubAdapter, type GitHubAdapter } from "@chat-adapter/github";
+import {
+  createGitHubAdapter,
+  type GitHubAdapter,
+  type GitHubAdapterConfig,
+} from "@chat-adapter/github";
 import { createPostgresState } from "@chat-adapter/state-pg";
 import {
   Chat,
@@ -15,6 +19,7 @@ import {
   authorAssociationFromRaw,
   isCommentAuthorAllowed,
 } from "./authorization";
+import { resolveGithubbotAuth } from "./auth";
 import { handleBodyMention } from "./body-mention";
 import { backgroundWaitUntil, requestContext, waitUntil } from "./context";
 import {
@@ -67,14 +72,16 @@ const DEDUP_WINDOW = 200;
 export function createGithubbot(options: GithubbotOptions): Githubbot {
   const userName = options.userName ?? "github-bot";
   const logger = options.logger ?? noopLogger;
-  const github = createGitHubAdapter({
-    token: options.token,
+  const auth = resolveGithubbotAuth(options);
+  const githubConfig = {
+    ...auth,
     webhookSecret: options.webhookSecret,
     userName,
     ...(options.botUserId ? { botUserId: Number(options.botUserId) } : {}),
     ...(options.githubApiUrl ? { apiUrl: options.githubApiUrl } : {}),
     logger,
-  });
+  } satisfies GitHubAdapterConfig;
+  const github = createGitHubAdapter(githubConfig);
   const state = options.state ?? createDefaultState(options, logger);
   const chat = new Chat<{ github: typeof github }, GithubbotThreadState>({
     userName,

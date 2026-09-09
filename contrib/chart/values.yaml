@@ -688,15 +688,17 @@ linearbot:
   extraEnv: {}
   resources: {}
 
-# Chat SDK GitHub bot — GitHub teammate (PAT) ingress. Receives issue/PR comment
+# Chat SDK GitHub bot ingress. Receives issue/PR comment
 # webhooks on /api/webhooks/github (the @chat-adapter/github adapter), answers in
 # the comment thread, and runs a review when the bot account is requested as a
 # reviewer. Forwards sessions to the api-rs control plane (:8080). Disabled by
-# default: requires the GITHUBBOT_TOKEN (PAT) and GITHUBBOT_WEBHOOK_SECRET secrets
-# (see contrib/scripts/bootstrap-k8s-secrets.sh). userName must be the bot
-# account's GitHub login so @-mention and review-request matching work.
+# default: requires either GitHub App credentials or a PAT, plus a webhook secret.
 githubbot:
   enabled: false
+  # "app" uses GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, and
+  # GITHUB_APP_PRIVATE_KEY. "pat" preserves the legacy GITHUBBOT_TOKEN mode.
+  authMode: pat
+  webhookSecretKey: GITHUBBOT_WEBHOOK_SECRET
   replicaCount: 1
   image:
     repository: centaur-githubbot

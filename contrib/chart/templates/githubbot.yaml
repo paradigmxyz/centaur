@@ -67,20 +67,37 @@ spec:
             # the deployment's default harness.
             - name: GITHUBBOT_DEFAULT_HARNESS
               value: {{ .Values.sandbox.harnessEngine | quote }}
-            # Personal access token for the bot's GitHub teammate account — kept
-            # distinct from the sandbox tool token so the bot acts as its own
-            # GitHub user (requestable as a reviewer, @-mentionable).
+{{- if eq .Values.githubbot.authMode "app" }}
+            - name: GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sGITHUB_APP_ID" .Values.secretManager.envPrefix }}
+            - name: GITHUB_APP_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sGITHUB_APP_INSTALLATION_ID" .Values.secretManager.envPrefix }}
+            - name: GITHUB_APP_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sGITHUB_APP_PRIVATE_KEY" .Values.secretManager.envPrefix }}
+{{- else if eq .Values.githubbot.authMode "pat" }}
             - name: GITHUB_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sGITHUBBOT_TOKEN" .Values.secretManager.envPrefix }}
+{{- else }}
+{{- fail "githubbot.authMode must be one of: app, pat" }}
+{{- end }}
             # githubbot's own webhook signing secret (the GitHub repo/org webhook).
             - name: GITHUB_WEBHOOK_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sGITHUBBOT_WEBHOOK_SECRET" .Values.secretManager.envPrefix }}
+                  key: {{ printf "%s%s" .Values.secretManager.envPrefix .Values.githubbot.webhookSecretKey }}
             - name: GITHUBBOT_API_KEY
               valueFrom:
                 secretKeyRef:
