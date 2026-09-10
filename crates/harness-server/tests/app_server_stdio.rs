@@ -598,6 +598,62 @@ fn fake_codex_blocks_mode_spawns_app_server_and_translates_user_blocks() {
 }
 
 #[test]
+fn fake_codex_blocks_mode_switches_model_after_cyber_policy_rejection() {
+    let fake_codex = temp_path("fake-cyber-fallback-codex.sh");
+    let fake_codex_log = temp_path("fake-cyber-fallback-codex-requests.jsonl");
+    let script = fake_codex_cyber_fallback_script(&fake_codex_log);
+    std::fs::write(&fake_codex, script).expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex)
+        .expect("fake codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
+        Harness::Codex,
+        None,
+        Some((
+            "CODEX_BIN",
+            fake_codex.to_str().expect("utf-8 fake codex path"),
+        )),
+        &[("CODEX_CYBER_POLICY_FALLBACK_MODEL", "fallback-model")],
+    );
+    let turn = bridge.run_blocks_user_turn_with_model(
+        "retry with fallback",
+        Some("primary-model"),
+        Duration::from_secs(10),
+    );
+    bridge.finish_successfully();
+
+    assert_completed_turn(&turn);
+    assert_eq!(turn.text_from_deltas, "fallback answer");
+    assert!(!turn.methods.contains(&"error".to_string()));
+
+    let requests = std::fs::read_to_string(&fake_codex_log).expect("read fake codex request log");
+    let turn_models: Vec<_> = requests
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("fake codex request JSON"))
+        .filter(|value| value.get("method").and_then(Value::as_str) == Some("turn/start"))
+        .map(|value| {
+            value
+                .pointer("/params/model")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    assert_eq!(
+        turn_models,
+        vec![
+            Some("primary-model".to_string()),
+            Some("fallback-model".to_string())
+        ]
+    );
+
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(fake_codex_log);
+}
+
+#[test]
 fn fake_codex_blocks_mode_interrupts_active_turn() {
     let fake_codex = temp_path("fake-interruptible-codex.sh");
     let fake_codex_log = temp_path("fake-interruptible-codex-requests.jsonl");
@@ -1275,6 +1331,7 @@ impl BridgeProcess {
             "CENTAUR_AMP_APP_BRIDGE_COMMAND",
             "CODEX_MODEL",
             "CODEX_MODEL_PROVIDER",
+            "CODEX_CYBER_POLICY_FALLBACK_MODEL",
             "OPENROUTER_MODEL",
         ] {
             command.env_remove(env_key);
@@ -2281,6 +2338,62 @@ while IFS= read -r line; do
       ;;
     *)
       printf '%s\n' "unexpected request: $line" >&2
+      exit 65
+      ;;
+  esac
+done
+"#,
+    );
+    script
+}
+
+fn fake_codex_cyber_fallback_script(log_path: &Path) -> String {
+    let mut script = String::new();
+    script.push_str("#!/bin/sh\n");
+    script.push_str("log=");
+    script.push_str(&shell_quote(log_path));
+    script.push_str(
+        r#"
+touch "$log"
+if [ "${1:-}" = "app-server" ] && [ "${2:-}" = "--help" ]; then
+  printf '%s\n' '--listen stdio://'
+  exit 0
+fi
+if [ "${1:-}" != "app-server" ]; then
+  exit 64
+fi
+
+request_id() {
+  printf '%s' "$1" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'
+}
+
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$log"
+  case "$line" in
+    *'"method":"initialize"'*)
+      id=$(request_id "$line")
+      printf '{"id":%s,"result":{"userAgent":"fake-codex"}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      id=$(request_id "$line")
+      printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*'"model":"fallback-model"'*)
+      id=$(request_id "$line")
+      printf '{"id":%s,"result":{"turn":{"id":"turn-2"}}}\n' "$id"
+      printf '%s\n' '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-2","items":[],"itemsView":"full","status":"inProgress","error":null,"startedAt":2,"completedAt":null,"durationMs":null}}}'
+      printf '%s\n' '{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-2","itemId":"answer-2","delta":"fallback answer"}}'
+      printf '%s\n' '{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-2","item":{"type":"agentMessage","id":"answer-2","text":"fallback answer","phase":null,"memoryCitation":null},"completedAtMs":3}}'
+      printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-2","items":[{"type":"agentMessage","id":"answer-2","text":"fallback answer","phase":null,"memoryCitation":null}],"itemsView":"full","status":"completed","error":null,"startedAt":2,"completedAt":3,"durationMs":1}}}'
+      ;;
+    *'"method":"turn/start"'*)
+      id=$(request_id "$line")
+      printf '{"id":%s,"result":{"turn":{"id":"turn-1"}}}\n' "$id"
+      printf '%s\n' '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[],"itemsView":"full","status":"inProgress","error":null,"startedAt":1,"completedAt":null,"durationMs":null}}}'
+      printf '%s\n' '{"method":"thread/status/changed","params":{"threadId":"thread-1","status":{"type":"systemError"}}}'
+      printf '%s\n' '{"method":"error","params":{"error":{"message":"This request has been flagged for potentially high-risk cyber activity.","codexErrorInfo":"cyberPolicy","additionalDetails":null},"willRetry":false,"threadId":"thread-1","turnId":"turn-1"}}'
+      ;;
+    *)
       exit 65
       ;;
   esac
