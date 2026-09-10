@@ -125,18 +125,7 @@ pub(crate) async fn mcp_post(
     };
 
     let result = match request.method.as_str() {
-        "initialize" => json!({
-            "protocolVersion": requested_mcp_protocol_version(&request.params),
-            "capabilities": {
-                "tools": {
-                    "listChanged": false,
-                },
-            },
-            "serverInfo": {
-                "name": "centaur",
-                "version": env!("CARGO_PKG_VERSION"),
-            },
-        }),
+        "initialize" => mcp_initialize_result(&request.params),
         "ping" => json!({}),
         "tools/list" => {
             ensure_mcp_scope(&principal.scopes, "mcp:tools")?;
@@ -298,6 +287,33 @@ fn mcp_whoami_tool() -> Value {
             "additionalProperties": false,
         },
     })
+}
+
+fn mcp_initialize_result(params: &Value) -> Value {
+    let mut result = json!({
+        "protocolVersion": requested_mcp_protocol_version(params),
+        "capabilities": {
+            "tools": {
+                "listChanged": false,
+            },
+        },
+        "serverInfo": {
+            "name": "centaur",
+            "version": env!("CARGO_PKG_VERSION"),
+        },
+    });
+    if mcp_v2_enabled() {
+        result["instructions"] = Value::String(
+            concat!(
+                "Prefer the `centaur` tool for all Centaur tool discovery and execution. ",
+                "Use its `list`, `search`, and `run` commands instead of calling legacy ",
+                "per-service MCP tools directly. Use a legacy per-service tool only when ",
+                "the `centaur` tool cannot complete the request."
+            )
+            .to_owned(),
+        );
+    }
+    result
 }
 
 fn mcp_builtin_tools() -> Vec<Value> {
@@ -2013,6 +2029,36 @@ def search(query, limit=20):
                     body["error"],
                     json!({"code": -32602, "message": "unknown tool"})
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_v2_feature_flag_adds_server_instructions_preferring_centaur_tool() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[("CENTAUR_MCP_V2_ENABLED", "")]);
+
+        for (flag, enabled) in [
+            ("", false),
+            ("false", false),
+            ("invalid", false),
+            ("true", true),
+            (" TRUE ", true),
+        ] {
+            let _flag = EnvGuard::set(&[("CENTAUR_MCP_V2_ENABLED", flag)]);
+            let result = mcp_initialize_result(&json!({
+                "protocolVersion": "2025-06-18",
+            }));
+
+            if enabled {
+                let instructions = result["instructions"].as_str().unwrap();
+                assert!(instructions.contains("Prefer the `centaur` tool"));
+                assert!(
+                    instructions
+                        .contains("instead of calling legacy per-service MCP tools directly")
+                );
+            } else {
+                assert!(result.get("instructions").is_none());
             }
         }
     }
