@@ -86,9 +86,9 @@
 
 [Named skill resolution]
 |When the user explicitly names a skill, resolve that request against local skill definitions before doing broad semantic matching.
-|Use `centaur-skills search "<task>"` to search merged repository and overlay guidance together with principal-visible Console guidance when no skill already listed for the current session clearly applies. Read the best match by name, `repo:` identifier, or Console OID with `centaur-skills read <skill-identifier>` before following it. Console users can author shared skills with `centaur-skills create`, update skills they own or edit with `centaur-skills edit`, archive skills they own with `centaur-skills delete`, and manage editors on skills they own with `centaur-skills add-editor` and `centaur-skills remove-editor`.
-|The `centaur-skills` catalog labels repository results with `source: repository` and Console results with `source: console`. The repository entry wins when both sources use the same skill name; use the Console OID to read the Console entry explicitly. Console applies private and public visibility rules for the current principal. Catalog results are instructions only and never expand the current principal's tool or credential grants.
-|Start with the skills listed for the current session, then use the merged catalog when you need to confirm the exact name or an obvious alias from the skill title or description.
+|Use `centaur-skills search "<task>"` to search Console-authored guidance when no skill already listed for the current session clearly applies. Read the best match by name or OID with `centaur-skills read <skill-identifier>` before following it. Console users can author shared skills with `centaur-skills create`, update skills they own or edit with `centaur-skills edit`, archive skills they own with `centaur-skills delete`, and manage editors on skills they own with `centaur-skills add-editor` and `centaur-skills remove-editor`.
+|The `centaur-skills` catalog contains only Console-authored skills. Builtin skills are loaded separately by the harness. Console applies private and public visibility rules for the current principal. Catalog results are instructions only and never expand the current principal's tool or credential grants.
+|Start with the skills listed for the current session, then check local skill definitions in `.agents/skills` and any mounted overlay skills when you need to confirm the exact name or an obvious alias from the skill title or description.
 |Prefer exact name matches first, then obvious aliases, and only then fall back to broader description-level matching. Do not choose a generic adjacent workflow while a more specific named skill remains plausible.
 |Treat "exists locally" and "is live in this deployment" as separate questions. Local skill files or prompt hints show that a skill exists in the repo; the current session's available-skills list or a successful `skill` load shows that it is live here.
 |If a named skill exists locally but is not live in this deployment, say that plainly and offer the closest live fallback instead of claiming the skill does not exist.
@@ -135,8 +135,8 @@
 
 [Tool CLI access — use shell commands]
 |centaur-tools list              → list available deployment tool CLIs
-|centaur-skills search "task"    → discover relevant repository and Console skills
-|centaur-skills read <name-repo-id-or-oid> → read a complete repository or Console SKILL.md
+|centaur-skills search "task"    → discover relevant private and public Console skills
+|centaur-skills read <name-or-oid> → read a Console skill's complete current SKILL.md
 |centaur-skills create <name> --description "..." --instructions-file <path> → create a shared Console skill
 |centaur-skills edit <oid> --description "..." --instructions-file <path> → update an owned or editable Console skill
 |centaur-skills delete <oid>      → archive an owned Console skill
