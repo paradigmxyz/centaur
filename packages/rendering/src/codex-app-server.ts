@@ -49,6 +49,7 @@ type CodexMapperState = {
   harnessAnswerText: string
   answerText: string
   commentaryByItemId: Map<string, string>
+  unphasedByItemId: Map<string, string>
   harnessCommentaryText: string
   commentaryText: string
   completedItemIds: Set<string>
@@ -92,6 +93,7 @@ export class CodexAppServerRendererEventMapper
   private readonly sessionId: string
   private readonly logInfo?: RendererLogInfo
   private readonly unknownAgentMessagePhase: AgentMessagePhase
+  private readonly deferUnphasedAgentMessages: boolean
   private readonly includeTaskOutput: boolean
   private readonly preStreamGraceMs: number
 
@@ -99,6 +101,7 @@ export class CodexAppServerRendererEventMapper
     this.sessionId = options.sessionId ?? ''
     this.logInfo = options.logInfo
     this.unknownAgentMessagePhase = options.unknownAgentMessagePhase ?? 'final_answer'
+    this.deferUnphasedAgentMessages = options.unknownAgentMessagePhase === undefined
     this.includeTaskOutput = options.taskOutput === 'full'
     this.preStreamGraceMs = options.preStreamGraceMs ?? PRE_STREAM_GRACE_MS
   }
@@ -120,6 +123,7 @@ export class CodexAppServerRendererEventMapper
 
   flush(): RendererEvent[] {
     if (this.state.done) return []
+    promoteLastUnphasedMessage(this.state)
     this.state.done = true
     const out: RendererEvent[] = []
     completeOpenTasks(this.state)
@@ -137,6 +141,7 @@ export class CodexAppServerRendererEventMapper
 
   private complete(resultText?: string): RendererEvent[] {
     if (this.state.done) return []
+    promoteLastUnphasedMessage(this.state)
     const normalized = resultText?.trim() ?? ''
     if (normalized && !this.state.answerText.trim()) {
       const out: RendererEvent[] = []
@@ -178,6 +183,10 @@ export class CodexAppServerRendererEventMapper
 
     trackAgentMessageLifecycle(event, this.state)
     ensureCommentarySegmentBreak(event, this.state)
+    if (this.deferUnphasedAgentMessages) {
+      prepareUnphasedMessage(event, this.state)
+      if (eventContinuesTurn(event)) this.state.unphasedByItemId.clear()
+    }
 
     const structuredPlan = structuredPlanUpdate(event)
     if (structuredPlan) {
@@ -302,6 +311,7 @@ export class CodexAppServerRendererEventMapper
     }
 
     if (isTerminalCodexAppServerEvent(event)) {
+      promoteLastUnphasedMessage(this.state)
       const resultText = terminalResultText(event)
       const willClose = Boolean(resultText || event?.type !== 'result')
       this.logCodexTerminalEventReceived(event, {
@@ -437,32 +447,14 @@ export class CodexAppServerRendererEventMapper
     })
   }
 
-  private activeAssistantBuffer(event: ServerNotification): 'commentary' | 'answer' {
+  private activeAssistantBuffer(
+    event: ServerNotification
+  ): 'commentary' | 'answer' | 'unphased' {
     if (event?.type === 'item.agentMessage.delta' || event?.type === 'item.completed') {
       const codexId = agentMessageEventId(event)
       const itemPhase = this.state.agentMessagePhaseByItemId.get(codexId)
       if (itemPhase) return itemPhase === 'final_answer' ? 'answer' : 'commentary'
-      if (
-        event?.type === 'item.completed' &&
-        (event?.item?.type === 'agentMessage' || event?.item?.type === 'agent_message') &&
-        this.state.taskByUseId.size > 0
-      ) {
-        this.log('codex_renderer_unphased_final_agent_message_classified', {
-          agent_session_id: this.sessionId,
-          centaur_thread_key: event?.centaur_thread_key,
-          execution_id: event?.centaur_execution_id,
-          assignment_generation: event?.centaur_assignment_generation,
-          codex_id: codexId,
-          codex_item_id: codexId,
-          codex_item_type: event?.item?.type,
-          codex_session_id: this.state.threadId || event?.session_id || event?.thread_id,
-          task_count: this.state.taskByUseId.size,
-          commentary_chars: this.state.commentaryText.length,
-          answer_chars: this.state.answerText.length,
-          item_text_chars: String(event?.item?.text ?? '').length
-        })
-        return 'answer'
-      }
+      if (codexId && this.deferUnphasedAgentMessages) return 'unphased'
       if (codexId) return this.unknownAgentMessagePhase === 'final_answer' ? 'answer' : 'commentary'
       return (this.state.agentMessagePhase ?? this.unknownAgentMessagePhase) === 'final_answer'
         ? 'answer'
@@ -473,7 +465,7 @@ export class CodexAppServerRendererEventMapper
 
   private applyAgentMessageUpdate(
     event: ServerNotification,
-    buffer: 'answer' | 'commentary'
+    buffer: 'answer' | 'commentary' | 'unphased'
   ): {
     bufferChanged: boolean
     correction?: { previous: string; canonical: string }
@@ -484,9 +476,9 @@ export class CodexAppServerRendererEventMapper
       if (!itemId || this.state.completedItemIds.has(itemId)) return { bufferChanged: false }
       const delta = extractDeltaText(event)
       if (!delta) return { bufferChanged: false }
-      const byId = buffer === 'answer' ? this.state.answerByItemId : this.state.commentaryByItemId
+      const byId = messageBuffer(this.state, buffer)
       byId.set(itemId, (byId.get(itemId) ?? '') + delta)
-      recomposeBuffers(this.state)
+      if (buffer !== 'unphased') recomposeBuffers(this.state)
       return { bufferChanged: true }
     }
 
@@ -503,12 +495,12 @@ export class CodexAppServerRendererEventMapper
         })
         return { bufferChanged: false }
       }
-      const byId = buffer === 'answer' ? this.state.answerByItemId : this.state.commentaryByItemId
+      const byId = messageBuffer(this.state, buffer)
       const previous = byId.get(itemId) ?? ''
       this.state.completedItemIds.add(itemId)
       if (canonical === previous) return { bufferChanged: false }
       byId.set(itemId, canonical)
-      recomposeBuffers(this.state)
+      if (buffer !== 'unphased') recomposeBuffers(this.state)
       return {
         bufferChanged: true,
         correction: previous ? { previous, canonical } : undefined
@@ -715,6 +707,7 @@ function newState(): CodexMapperState {
     harnessAnswerText: '',
     answerText: '',
     commentaryByItemId: new Map(),
+    unphasedByItemId: new Map(),
     harnessCommentaryText: '',
     commentaryText: '',
     completedItemIds: new Set(),
@@ -818,6 +811,62 @@ function trackAgentMessageLifecycle(event: any, state: CodexMapperState): void {
   state.agentMessagePhase = phase
   const id = agentMessageEventId(event)
   if (id) state.agentMessagePhaseByItemId.set(id, phase)
+}
+
+function prepareUnphasedMessage(event: any, state: CodexMapperState): void {
+  if (event?.type !== 'item.started') return
+  const itemType = event?.item?.type
+  if (itemType !== 'agentMessage' && itemType !== 'agent_message') return
+  if (agentMessageItemPhase(event?.item)) {
+    state.unphasedByItemId.clear()
+    return
+  }
+  const id = agentMessageEventId(event)
+  for (const candidateId of state.unphasedByItemId.keys()) {
+    if (candidateId !== id) state.unphasedByItemId.delete(candidateId)
+  }
+}
+
+function eventContinuesTurn(event: any): boolean {
+  const type = String(event?.type ?? '')
+  if (type.startsWith('item.reasoning.')) return true
+  if (type === 'item.started' || type === 'item.updated' || type === 'item.completed') {
+    const itemType = event?.item?.type
+    return (
+      itemType === 'commandExecution' ||
+      itemType === 'command_execution' ||
+      itemType === 'fileChange' ||
+      itemType === 'file_change' ||
+      itemType === 'dynamicToolCall' ||
+      itemType === 'dynamic_tool_call' ||
+      itemType === 'reasoning'
+    )
+  }
+  return (
+    type === 'turn.plan.updated' ||
+    type === 'item.plan.delta' ||
+    toolUses(event).length > 0 ||
+    toolResults(event).length > 0
+  )
+}
+
+function promoteLastUnphasedMessage(state: CodexMapperState): void {
+  const id = lastInsertedKey(state.unphasedByItemId)
+  if (!id) return
+  const text = state.unphasedByItemId.get(id) ?? ''
+  state.unphasedByItemId.clear()
+  if (!text) return
+  state.answerByItemId.set(id, text)
+  recomposeBuffers(state)
+}
+
+function messageBuffer(
+  state: CodexMapperState,
+  buffer: 'answer' | 'commentary' | 'unphased'
+): Map<string, string> {
+  if (buffer === 'answer') return state.answerByItemId
+  if (buffer === 'commentary') return state.commentaryByItemId
+  return state.unphasedByItemId
 }
 
 function agentMessageEventId(event: any): string {
