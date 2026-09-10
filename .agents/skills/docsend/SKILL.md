@@ -115,9 +115,12 @@ docsend fetch '<session-id>' \
 When the owner enabled downloads, `fetch` uses DocSend's regular download button
 and returns the original file with `download_method: original`. When the button
 is disabled, `fetch` opens the document viewer in the authenticated Space
-session and uses the standalone rendered-page recovery to return a PDF with
-`download_method: rendered_pdf`. The downloaded filename may differ from the
-visible Space title. Do not pass folder or external URL item IDs to `fetch`.
+session. HTML spreadsheet previews are extracted into machine-readable XLSX
+workbooks with `download_method: spreadsheet_xlsx`; other documents use
+rendered-page recovery and return a PDF with `download_method: rendered_pdf`.
+Use the `filename`, `mime_type`, and `output` fields from the result instead of
+assuming a PDF extension. The downloaded filename may differ from the visible
+Space title. Do not pass folder or external URL item IDs to `fetch`.
 
 Close the session when finished:
 

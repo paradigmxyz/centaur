@@ -18,6 +18,8 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 from browserbase import APIStatusError, AsyncBrowserbase
+from openpyxl import Workbook
+from openpyxl.styles import Alignment
 from PIL import Image
 from websockets.asyncio.client import connect as websocket_connect
 from websockets.asyncio.server import serve as websocket_serve
@@ -1321,6 +1323,12 @@ def _rendered_pdf_filename(name: str) -> str:
     return f"{stem}.pdf"
 
 
+def _spreadsheet_filename(name: str) -> str:
+    filename = name.rsplit("/", 1)[-1].replace("\x00", "").strip() or "docsend_workbook"
+    stem = re.sub(r"\.[A-Za-z0-9]{1,10}$", "", filename).strip() or "docsend_workbook"
+    return f"{stem}.xlsx"
+
+
 async def _recover_space_document(page, item: dict, row) -> dict:
     links = row.locator("a[href]")
     if await links.count() < 1:
@@ -1363,7 +1371,7 @@ async def _recover_space_document(page, item: dict, row) -> dict:
             document_page,
             filename=_rendered_pdf_filename(item["name"]),
         )
-        if result["status"] == "ok":
+        if result["status"] == "ok" and "download_method" not in result:
             result["download_method"] = "rendered_pdf"
         return result
     finally:
@@ -1438,6 +1446,21 @@ async def _fetch_space_item(
 
 async def _recover_rendered_document(page, *, filename: str) -> dict:
     """Recover a visible DocSend document from its rendered page images."""
+    workbook = await _extract_spreadsheet_workbook(page)
+    if workbook is not None:
+        data, sheet_count = workbook
+        LOGGER.info("Extracted %d DocSend spreadsheet sheets as XLSX", sheet_count)
+        return {
+            "status": "ok",
+            "filename": _spreadsheet_filename(filename),
+            "data": base64.b64encode(data).decode(),
+            "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "sheet_count": sheet_count,
+            "downloaded": sheet_count,
+            "download_method": "spreadsheet_xlsx",
+            "error": None,
+        }
+
     images = await _capture_spreadsheet_sheets(page)
     total = len(images)
     if total:
@@ -1504,6 +1527,132 @@ async def _recover_rendered_document(page, *, filename: str) -> dict:
         "downloaded": len(images),
         "error": None,
     }
+
+
+def _spreadsheet_cell_value(text: str):
+    value = " ".join(text.replace("\xa0", " ").split()).strip()
+    if not value:
+        return None
+    numeric = value
+    negative = numeric.startswith("(") and numeric.endswith(")")
+    if negative:
+        numeric = numeric[1:-1].strip()
+    percent = numeric.endswith("%")
+    if percent:
+        numeric = numeric[:-1].strip()
+    numeric = numeric.lstrip("$€£¥").replace(",", "").strip()
+    if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", numeric):
+        number = float(numeric) if "." in numeric else int(numeric)
+        if negative:
+            number = -number
+        if percent:
+            number /= 100
+        return number
+    return value
+
+
+def _unique_sheet_title(name: str, existing: set[str]) -> str:
+    title = re.sub(r"[\\/*?:\[\]]", "_", name).strip()[:31] or "Sheet"
+    candidate = title
+    suffix = 2
+    while candidate.casefold() in existing:
+        marker = f" {suffix}"
+        candidate = f"{title[: 31 - len(marker)]}{marker}"
+        suffix += 1
+    existing.add(candidate.casefold())
+    return candidate
+
+
+def _build_spreadsheet_workbook(sheets: list[dict]) -> bytes:
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    existing_titles: set[str] = set()
+
+    for index, sheet in enumerate(sheets):
+        worksheet = workbook.create_sheet(
+            _unique_sheet_title(str(sheet.get("name") or f"Sheet {index + 1}"), existing_titles)
+        )
+        for column_index, width in enumerate(sheet.get("column_widths", []), start=1):
+            if isinstance(width, (int, float)) and width > 0:
+                worksheet.column_dimensions[
+                    worksheet.cell(1, column_index).column_letter
+                ].width = max(1.0, min(255.0, (float(width) - 5) / 7))
+
+        occupied: set[tuple[int, int]] = set()
+        for row_index, row in enumerate(sheet.get("rows", []), start=1):
+            height = row.get("height")
+            if isinstance(height, (int, float)) and height > 0:
+                worksheet.row_dimensions[row_index].height = float(height) * 0.75
+            column_index = 1
+            for cell in row.get("cells", []):
+                while (row_index, column_index) in occupied:
+                    column_index += 1
+                colspan = max(1, int(cell.get("colspan") or 1))
+                rowspan = max(1, int(cell.get("rowspan") or 1))
+                value = _spreadsheet_cell_value(str(cell.get("text") or ""))
+                target = worksheet.cell(row_index, column_index, value)
+                target.alignment = Alignment(wrap_text=True, vertical="top")
+                if isinstance(value, float) and str(cell.get("text") or "").strip().endswith("%"):
+                    target.number_format = "0.00%"
+                for occupied_row in range(row_index, row_index + rowspan):
+                    for occupied_column in range(column_index, column_index + colspan):
+                        occupied.add((occupied_row, occupied_column))
+                if rowspan > 1 or colspan > 1:
+                    worksheet.merge_cells(
+                        start_row=row_index,
+                        start_column=column_index,
+                        end_row=row_index + rowspan - 1,
+                        end_column=column_index + colspan - 1,
+                    )
+                column_index += colspan
+
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+async def _extract_spreadsheet_workbook(page) -> tuple[bytes, int] | None:
+    """Extract visible HTML spreadsheet tables into a machine-readable XLSX workbook."""
+    try:
+        iframe = await page.query_selector("#previews-iframe")
+        if iframe is None:
+            return None
+        frame = await iframe.content_frame()
+        if frame is None:
+            return None
+        sheets = await frame.evaluate(
+            """() => {
+              const tabs = [...document.querySelectorAll('#tabstrip a.tabstrip-link')];
+              const sheetElements = [...document.querySelectorAll('.sheet-content')];
+              if (!tabs.length || tabs.length !== sheetElements.length) return null;
+              return sheetElements.map((sheet, index) => {
+                const table = sheet.querySelector('table');
+                if (!table) return null;
+                return {
+                  name: tabs[index].textContent.trim() || `Sheet ${index + 1}`,
+                  column_widths: [...table.querySelectorAll('col')].map(col =>
+                    Number.parseFloat(col.getAttribute('width') || '') || null
+                  ),
+                  rows: [...table.querySelectorAll('tr')].map(row => ({
+                    height: Number.parseFloat(row.getAttribute('height') || '') || null,
+                    cells: [...row.children]
+                      .filter(cell => cell.matches('td, th'))
+                      .map(cell => ({
+                        text: cell.innerText,
+                        colspan: cell.colSpan || 1,
+                        rowspan: cell.rowSpan || 1,
+                      })),
+                  })),
+                };
+              });
+            }"""
+        )
+        if not isinstance(sheets, list) or not sheets or any(sheet is None for sheet in sheets):
+            return None
+        return _build_spreadsheet_workbook(sheets), len(sheets)
+    except Exception as exc:
+        LOGGER.warning("Could not extract DocSend spreadsheet data; using PDF fallback: %s", exc)
+        return None
 
 
 async def _slide_count(page) -> int:
