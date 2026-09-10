@@ -11,7 +11,10 @@ import pandas as pd
 
 matplotlib.use("Agg")
 
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+from matplotlib.transforms import blended_transform_factory
+from pandas.api.types import is_datetime64_any_dtype, is_numeric_dtype
 
 _OKABE_ITO = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#F0E442", "#56B4E9", "#E69F00"]
 
@@ -37,6 +40,89 @@ def _pick_y(df: pd.DataFrame, x_col: str, hint: str | list[str] | None) -> list[
     if numeric:
         return numeric[:4]
     return [str(df.columns[1])] if len(df.columns) > 1 else [x_col]
+
+
+def _prepare_time_axis(df: pd.DataFrame, x_col: str) -> tuple[pd.DataFrame, bool]:
+    """Parse and sort date-like x values so spacing reflects elapsed time."""
+    values = df[x_col]
+    if is_numeric_dtype(values.dtype):
+        return df, False
+
+    if is_datetime64_any_dtype(values.dtype):
+        parsed = pd.to_datetime(values, errors="coerce")
+    else:
+        text = values.astype("string").str.strip()
+        looks_temporal = text.str.match(r"^\d{4}-\d{2}-\d{2}(?:[T ][^ ]+)?$").all()
+        if not looks_temporal:
+            return df, False
+        parsed = pd.to_datetime(text, errors="coerce")
+
+    if parsed.isna().any():
+        return df, False
+
+    prepared = df.copy()
+    prepared[x_col] = parsed
+    return prepared.sort_values(x_col, kind="stable"), True
+
+
+def _annotation_value(value: Any, is_time_axis: bool) -> Any:
+    if not is_time_axis:
+        return value
+    parsed = pd.to_datetime(value, errors="coerce")
+    return parsed if not pd.isna(parsed) else None
+
+
+def _apply_annotations(
+    ax: plt.Axes,
+    annotations: list[dict[str, Any]],
+    is_time_axis: bool,
+) -> None:
+    """Draw dated event lines and shaded activity regions in the chart body."""
+    label_transform = blended_transform_factory(ax.transData, ax.transAxes)
+    for idx, annotation in enumerate(annotations):
+        label = str(annotation.get("label") or annotation.get("event") or "").strip()
+        color = str(annotation.get("color") or "#6B7280")
+        label_y = 0.96 - (idx % 3) * 0.075
+        start = _annotation_value(annotation.get("start"), is_time_axis)
+        end = _annotation_value(annotation.get("end"), is_time_axis)
+        event_date = _annotation_value(annotation.get("date") or annotation.get("x"), is_time_axis)
+
+        if start is not None and end is not None:
+            ax.axvspan(
+                start,
+                end,
+                color=color,
+                alpha=float(annotation.get("alpha", 0.12)),
+                linewidth=0,
+                zorder=0,
+            )
+            if label:
+                midpoint = start + (end - start) / 2
+                ax.text(
+                    midpoint,
+                    label_y,
+                    label,
+                    transform=label_transform,
+                    ha="center",
+                    va="top",
+                    fontsize=8,
+                    color=color,
+                    fontweight=600,
+                )
+        elif event_date is not None:
+            ax.axvline(event_date, color=color, alpha=0.65, linewidth=1, linestyle="--")
+            if label:
+                ax.text(
+                    event_date,
+                    label_y,
+                    label,
+                    transform=label_transform,
+                    ha="left",
+                    va="top",
+                    fontsize=8,
+                    color=color,
+                    fontweight=600,
+                )
 
 
 def _style_axes(ax: plt.Axes, title: str, subtitle: str | None, source: str) -> None:
@@ -98,7 +184,9 @@ class ChartClient:
             source: Optional source line.
             theme_mode: light | dark | editorial.
             x/y: Optional column hints; otherwise first/numeric columns are used.
-            extras: Optional handler-specific settings.
+            extras: Optional handler-specific settings. ``annotations`` accepts
+                dated events (``date`` + ``label``) or shaded activity windows
+                (``start`` + ``end`` + ``label``).
         """
         if not data:
             return ""
@@ -113,6 +201,7 @@ class ChartClient:
         chart_kind = chart_type.lower().replace("_", "-")
         x_col = _pick_x(df, x)
         y_cols = _pick_y(df, x_col, y)
+        df, is_time_axis = _prepare_time_axis(df, x_col)
 
         fig, ax = plt.subplots(figsize=(8, 4.5))
         if chart_kind in {"pie", "pie-chart", "donut", "donut-chart"}:
@@ -176,13 +265,25 @@ class ChartClient:
                 ax.plot(
                     df[x_col],
                     df[col],
-                    marker="o",
+                    marker="o" if len(df) <= 12 else None,
                     linewidth=1.8,
                     label=col,
                     color=_OKABE_ITO[idx % len(_OKABE_ITO)],
                 )
-            if len(df) > 6:
+            if is_time_axis:
+                locator = mdates.AutoDateLocator(minticks=4, maxticks=8)
+                ax.xaxis.set_major_locator(locator)
+                ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+            elif len(df) > 6:
                 ax.tick_params(axis="x", labelrotation=30)
+
+        annotations = extras.get("annotations", [])
+        if isinstance(annotations, list):
+            _apply_annotations(
+                ax,
+                [item for item in annotations if isinstance(item, dict)],
+                is_time_axis,
+            )
 
         ax.set_xlabel(x_col)
         ax.set_ylabel(", ".join(y_cols))
