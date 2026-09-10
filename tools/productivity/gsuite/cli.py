@@ -376,6 +376,7 @@ def calendar_create(
     description: str = typer.Option(None, "--description", "-d", help="Event description"),
     location: str = typer.Option(None, "--location", "-l", help="Event location"),
     attendees: str = typer.Option(None, "--attendees", "-a", help="Comma-separated emails"),
+    meet: bool = typer.Option(False, "--meet", "-m", help="Add a Google Meet link"),
 ):
     """Create a calendar event.
 
@@ -383,6 +384,7 @@ def calendar_create(
         gsuite calendar create "Team Meeting" "2024-01-15T10:00:00Z" "2024-01-15T11:00:00Z"
         gsuite calendar create "All-day event" "2024-01-15" "2024-01-16"
         gsuite calendar create "Meeting" "..." "..." -a "a@b.com,c@d.com" -l "Room 1"
+        gsuite calendar create "Standup" "..." "..." --meet
     """
     from .client import calendar_create_event
 
@@ -397,9 +399,12 @@ def calendar_create(
             description=description,
             location=location,
             attendees=attendee_list,
+            conference=meet,
         )
         console.print("[green]✓ Event created[/]")
         console.print(f"[dim]{result['html_link']}[/]")
+        if result.get("meet_link"):
+            console.print(f"[dim]{result['meet_link']}[/]")
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
@@ -415,6 +420,12 @@ def calendar_update(
     description: str = typer.Option(None, "--description", "-d", help="New description"),
     location: str = typer.Option(None, "--location", "-l", help="New location"),
     add_attendees: str = typer.Option(None, "--add", "-a", help="Comma-separated emails to add"),
+    meet: bool = typer.Option(False, "--meet", "-m", help="Add a Google Meet link"),
+    notify: bool = typer.Option(
+        None,
+        "--notify/--no-notify",
+        help="Email attendees (default: on a material change to an event with attendees)",
+    ),
 ):
     """Update a calendar event.
 
@@ -422,6 +433,8 @@ def calendar_update(
         gsuite calendar update "event_id" --summary "New Title"
         gsuite calendar update "event_id" --start "2024-01-15T14:00:00Z" --end "2024-01-15T15:00:00Z"
         gsuite calendar update "event_id" --add "a@b.com,c@d.com"
+        gsuite calendar update "event_id" --meet
+        gsuite calendar update "event_id" --start "..." --end "..." --no-notify
     """
     from .client import calendar_update_event
 
@@ -437,12 +450,40 @@ def calendar_update(
             description=description,
             location=location,
             add_attendees=attendee_list,
+            conference=meet,
+            notify=notify,
         )
         console.print("[green]✓ Event updated[/]")
         console.print(f"[dim]{result['html_link']}[/]")
+        if result.get("meet_link"):
+            console.print(f"[dim]{result['meet_link']}[/]")
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
+
+
+@calendar_app.command("delete")
+def calendar_delete(
+    event_id: str = typer.Argument(..., help="Event ID"),
+    calendar: str = typer.Option("primary", "--calendar", "-c", help="Calendar ID"),
+    notify: bool = typer.Option(
+        True, "--notify/--no-notify", help="Email attendees that the event was cancelled"
+    ),
+):
+    """Delete a calendar event.
+
+    Examples:
+        gsuite calendar delete "event_id"
+        gsuite calendar delete "event_id" --no-notify
+    """
+    from .client import calendar_delete_event
+
+    try:
+        calendar_delete_event(event_id=event_id, calendar_id=calendar, notify=notify)
+        console.print("[green]✓ Event deleted[/]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
 
 
 @calendar_app.command("rsvp")
