@@ -482,10 +482,14 @@ fn mcp_v2_service_summaries_result(tools: Vec<DiscoveredTool>) -> Result<Value, 
     let services = tools
         .into_iter()
         .map(|tool| {
-            json!({
+            let mut summary = json!({
                 "name": tool.name,
-                "description": tool.description,
-            })
+                "description": mcp_tool_discovery_description(&tool),
+            });
+            if !tool.skills.is_empty() {
+                summary["skills"] = json!(tool.skills);
+            }
+            summary
         })
         .collect::<Vec<_>>();
     let content = json!({"services": services});
@@ -515,6 +519,7 @@ fn mcp_v1_tool_entries(filter: &SandboxToolFilter) -> Result<Vec<Value>, ApiErro
             description.push_str(&signatures.join(", "));
             description.push_str(". Pass keyword arguments matching the method signature; call method=help for this list.");
         }
+        append_skill_guidance(&mut description, &tool.skills);
         let mut method_schema = json!({
             "type": "string",
             "description": "Public method on the tool client to call. Use help to list available methods.",
@@ -522,7 +527,7 @@ fn mcp_v1_tool_entries(filter: &SandboxToolFilter) -> Result<Vec<Value>, ApiErro
         if !methods.is_empty() {
             method_schema["enum"] = json!(names);
         }
-        entries.push(json!({
+        let mut entry = json!({
             "name": tool.name,
             "description": description,
             "inputSchema": {
@@ -538,9 +543,42 @@ fn mcp_v1_tool_entries(filter: &SandboxToolFilter) -> Result<Vec<Value>, ApiErro
                 },
                 "additionalProperties": false,
             },
-        }));
+        });
+        if !tool.skills.is_empty() {
+            entry["_meta"] = json!({"centaur/skills": tool.skills});
+        }
+        entries.push(entry);
     }
     Ok(entries)
+}
+
+fn mcp_tool_discovery_description(tool: &DiscoveredTool) -> Option<String> {
+    let mut description = tool.description.clone().unwrap_or_default();
+    append_skill_guidance(&mut description, &tool.skills);
+    (!description.is_empty()).then_some(description)
+}
+
+fn append_skill_guidance(description: &mut String, skills: &[String]) {
+    if skills.is_empty() {
+        return;
+    }
+    if !description.is_empty() && !description.ends_with(char::is_whitespace) {
+        description.push(' ');
+    }
+    if let [skill] = skills {
+        description.push_str(&format!(
+            "Before using this tool, search for and read the associated `{skill}` skill."
+        ));
+        return;
+    }
+    let names = skills
+        .iter()
+        .map(|skill| format!("`{skill}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    description.push_str(&format!(
+        "Before using this tool, search for and read its associated skills: {names}."
+    ));
 }
 
 struct McpToolMethod {
@@ -606,18 +644,19 @@ fn mcp_v1_tool_help_result(
     tool: &DiscoveredTool,
     methods: &[McpToolMethod],
 ) -> Result<Value, ApiError> {
-    Ok(mcp_text_result(
-        serde_json::to_string_pretty(&json!({
-            "tool": tool.name,
-            "description": tool.description,
-            "methods": methods
-                .iter()
-                .map(|method| method.signature.as_str())
-                .collect::<Vec<_>>(),
-            "usage": "Call this tool with {\"method\": \"<name>\", \"arguments\": {<keyword arguments matching the signature>}}.",
-        }))?,
-        false,
-    ))
+    let mut help = json!({
+        "tool": tool.name,
+        "description": mcp_tool_discovery_description(tool),
+        "methods": methods
+            .iter()
+            .map(|method| method.signature.as_str())
+            .collect::<Vec<_>>(),
+        "usage": "Call this tool with {\"method\": \"<name>\", \"arguments\": {<keyword arguments matching the signature>}}.",
+    });
+    if !tool.skills.is_empty() {
+        help["skills"] = json!(tool.skills);
+    }
+    Ok(mcp_text_result(serde_json::to_string_pretty(&help)?, false))
 }
 
 fn mcp_centaur_tool_catalog(filter: &SandboxToolFilter) -> Result<Vec<DiscoveredTool>, ApiError> {
@@ -1489,6 +1528,7 @@ mod mcp_tests {
             name: "demo".to_owned(),
             package: "demo".to_owned(),
             description: Some("Demo tool".to_owned()),
+            skills: Vec::new(),
             client_module: "client.py".to_owned(),
             project_dir,
         }
@@ -2231,6 +2271,54 @@ def search(query, limit=20):
             mcp_v2_service_list_result(&filter).unwrap()["structuredContent"],
             json!({"services": []})
         );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn mcp_discovery_advertises_associated_skills() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = temp_dir("centaur-api-rs-service-skills");
+        let package_dir = temp.join("docsend");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            package_dir.join("pyproject.toml"),
+            concat!(
+                "[project]\n",
+                "name = \"docsend\"\n",
+                "description = \"Download DocSend documents\"\n\n",
+                "[project.scripts]\n",
+                "docsend = \"docsend.cli:main\"\n\n",
+                "[tool.centaur]\n",
+                "skills = [\"docsend\"]\n",
+            ),
+        )
+        .unwrap();
+        let _env = EnvGuard::set(&[(
+            "TOOL_DIRS",
+            Box::leak(temp.display().to_string().into_boxed_str()),
+        )]);
+        let filter = SandboxToolFilter::default();
+
+        let summary =
+            &mcp_v2_service_list_result(&filter).unwrap()["structuredContent"]["services"][0];
+        assert_eq!(summary["name"], "docsend");
+        assert_eq!(summary["skills"], json!(["docsend"]));
+        assert!(
+            summary["description"]
+                .as_str()
+                .unwrap()
+                .contains("search for and read the associated `docsend` skill")
+        );
+
+        let entry = &mcp_v1_tool_entries(&filter).unwrap()[0];
+        assert_eq!(entry["_meta"]["centaur/skills"], json!(["docsend"]));
+        assert!(
+            entry["description"]
+                .as_str()
+                .unwrap()
+                .contains("search for and read the associated `docsend` skill")
+        );
+
         fs::remove_dir_all(temp).unwrap();
     }
 

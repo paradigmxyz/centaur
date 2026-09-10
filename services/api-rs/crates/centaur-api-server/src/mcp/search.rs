@@ -10,11 +10,13 @@ pub(super) fn search(tools: Vec<DiscoveredTool>, query: &str) -> Vec<DiscoveredT
         .filter_map(|tool| {
             let name = normalize(&tool.name);
             let description = normalize(tool.description.as_deref().unwrap_or_default());
+            let skills = normalize(&tool.skills.join(" "));
             let name_terms = name.split_whitespace().collect::<BTreeSet<_>>();
             let all_terms = name_terms
                 .iter()
                 .copied()
                 .chain(description.split_whitespace())
+                .chain(skills.split_whitespace())
                 .collect::<BTreeSet<_>>();
             let name_matches = terms.intersection(&name_terms).count();
             let coverage = terms.intersection(&all_terms).count();
@@ -45,6 +47,7 @@ mod tests {
         DiscoveredTool {
             name: name.to_owned(),
             description: description.map(str::to_owned),
+            skills: Vec::new(),
             package: name.to_owned(),
             client_module: format!("{name}.client"),
             project_dir: name.into(),
@@ -111,5 +114,13 @@ mod tests {
         );
         assert_eq!(names(tools.clone(), "CAFÉ"), ["alpha", "zeta"]);
         assert_eq!(names(tools.clone(), "issue issue"), names(tools, "issue"));
+    }
+
+    #[test]
+    fn matches_associated_skill_names() {
+        let mut docsend = tool("document-downloader", Some("Download documents"));
+        docsend.skills = vec!["docsend".to_owned()];
+
+        assert_eq!(names(vec![docsend], "docsend"), ["document-downloader"]);
     }
 }
