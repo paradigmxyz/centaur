@@ -174,6 +174,36 @@ module Api
         assert created.next_attempt_at.present?
       end
 
+      test "create github_app grant stores private key and redacts it" do
+        private_key = OpenSSL::PKey::RSA.generate(2048).to_pem
+        body = {
+          data: {
+            namespace: "acme", foreign_id: "github-app",
+            grant: "github_app",
+            token_endpoint: "https://api.github.com/app/installations/456/access_tokens",
+            client_id: "123",
+            client_secret: private_key
+          }
+        }
+
+        assert_difference -> { BrokerCredential.count } => 1 do
+          post api_v1_broker_credentials_url, params: body.to_json, headers: auth_headers
+        end
+        assert_response :created
+        data = json_body.fetch("data")
+        assert_equal "github_app", data["grant"]
+        assert_equal "123", data["client_id"]
+        refute data.key?("client_secret")
+        refute data.key?("access_token")
+
+        created = BrokerCredential.find_by_oid(data["id"])
+        assert_equal private_key, created.client_secret
+        # A freshly-created github_app credential must be due for its first mint.
+        # next_attempt_at is left nil on create here, which the refreshable scope
+        # treats as immediately due (next_attempt_at IS NULL).
+        assert BrokerCredential.refreshable.exists?(id: created.id)
+      end
+
       test "create rejects a missing client_id" do
         body = {
           data: {

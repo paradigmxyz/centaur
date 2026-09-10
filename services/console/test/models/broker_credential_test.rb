@@ -41,6 +41,26 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     bc
   end
 
+  def github_private_key
+    @github_private_key ||= OpenSSL::PKey::RSA.generate(2048)
+  end
+
+  def github_app_response(token: "ghs_installation", expires_at: 1.hour.from_now)
+    response = Net::HTTPOK.new("1.1", "200", "OK")
+    response.instance_variable_set(
+      :@body,
+      JSON.generate({ "token" => token, "expires_at" => expires_at.iso8601 })
+    )
+    # Mark the body as already read; otherwise Net::HTTPResponse#body tries to
+    # read from a (nil) socket and raises "attempt to read body out of block".
+    response.instance_variable_set(:@read, true)
+    response
+  end
+
+  teardown do
+    Broker::CredentialGrants.github_app_http_client = nil
+  end
+
   # --- validations ----------------------------------------------------------
 
   test "valid with a client_id" do
@@ -98,6 +118,29 @@ class BrokerCredentialTest < ActiveSupport::TestCase
                           api_key: nil, refresh_token: nil)
     refute bc.valid?
     assert bc.errors[:api_key].any? { |m| m.include?("Preqin broker grant") }
+  end
+
+  test "github_app grant is valid with app id, private key, and installation token endpoint" do
+    bc = build_credential(
+      grant: "github_app",
+      token_endpoint: "https://api.github.com/app/installations/456/access_tokens",
+      client_id: "123",
+      client_secret: github_private_key.to_pem,
+      refresh_token: nil
+    )
+    assert bc.valid?, bc.errors.full_messages.to_sentence
+  end
+
+  test "github_app grant requires a private key" do
+    bc = build_credential(
+      grant: "github_app",
+      token_endpoint: "https://api.github.com/app/installations/456/access_tokens",
+      client_id: "123",
+      client_secret: nil,
+      refresh_token: nil
+    )
+    refute bc.valid?
+    assert bc.errors[:client_secret].any? { |m| m.include?("GitHub App broker grant") }
   end
 
   # --- oauth_app provenance (flow-minted credentials) -----------------------
@@ -454,6 +497,86 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert_equal "AT", bc.access_token
   end
 
+  test "github_app grant mints and stores an installation access token" do
+    captured = {}
+    expires_at = 1.hour.from_now
+    Broker::CredentialGrants.github_app_http_client = ->(uri, request) {
+      captured = { uri: uri, request: request }
+      github_app_response(token: "ghs_installation", expires_at: expires_at)
+    }
+    now = Time.current
+    bc = create_credential(
+      grant: "github_app",
+      token_endpoint: "https://api.github.com/app/installations/456/access_tokens",
+      client_id: "123",
+      client_secret: github_private_key.to_pem,
+      refresh_token: nil
+    )
+
+    bc.refresh!(now: now)
+    bc.reload
+
+    assert_equal "ghs_installation", bc.access_token
+    assert_nil bc.refresh_token
+    assert_in_delta expires_at.to_f, bc.expires_at.to_f, 2
+    assert_equal "https://api.github.com/app/installations/456/access_tokens", captured[:uri].to_s
+    assert_match(/\ABearer /, captured[:request]["Authorization"])
+    assert_equal "application/vnd.github+json", captured[:request]["Accept"]
+  end
+
+  test "github_app grant output is delivered through existing token_broker sources" do
+    Broker::CredentialGrants.github_app_http_client = ->(_uri, _request) {
+      github_app_response(token: "ghs_brokered", expires_at: 1.hour.from_now)
+    }
+    bc = create_credential(
+      grant: "github_app",
+      token_endpoint: "https://api.github.com/app/installations/456/access_tokens",
+      client_id: "123",
+      client_secret: github_private_key.to_pem,
+      refresh_token: nil
+    )
+    bc.refresh!
+
+    source = SecretSource.new(source_type: "token_broker", config: { "credential_id" => bc.oid })
+
+    assert_equal({ "type" => "control_plane", "value" => "ghs_brokered" }, source.to_proxy_source)
+    assert source.deliverable?
+  end
+
+  test "github_app grant accepts a base64 encoded private key" do
+    Broker::CredentialGrants.github_app_http_client = ->(_uri, _request) {
+      github_app_response(token: "ghs_encoded", expires_at: 1.hour.from_now)
+    }
+    bc = create_credential(
+      grant: "github_app",
+      token_endpoint: "https://api.github.com/app/installations/456/access_tokens",
+      client_id: "123",
+      client_secret: Base64.strict_encode64(github_private_key.to_pem),
+      refresh_token: nil
+    )
+
+    bc.refresh!
+    bc.reload
+
+    assert_equal "ghs_encoded", bc.access_token
+  end
+
+  test "github_app grant marks invalid private keys dead" do
+    bc = create_credential(
+      grant: "github_app",
+      token_endpoint: "https://api.github.com/app/installations/456/access_tokens",
+      client_id: "123",
+      client_secret: "not-a-private-key",
+      refresh_token: nil
+    )
+
+    bc.refresh!
+    bc.reload
+
+    assert bc.dead?
+    assert_equal "invalid_private_key", bc.dead_reason
+  end
+
   test "preqin grant prefers the Preqin refresh endpoint when it has a refresh token" do
     client = Minitest::Mock.new
     expect_refresh(client, returns: result(access_token: "AT", refresh_token: nil)) do |request|
@@ -560,6 +683,19 @@ class BrokerCredentialTest < ActiveSupport::TestCase
   test "refreshable includes client_credentials without a refresh_token after a prior refresh" do
     bc = create_credential(grant: "client_credentials", refresh_token: nil,
                            client_id: "cid", client_secret: "sec")
+    bc.update_columns(last_refresh: 1.hour.ago, next_attempt_at: 1.minute.ago)
+
+    assert_includes BrokerCredential.refreshable.pluck(:id), bc.id
+  end
+
+  test "refreshable includes github_app credentials without a refresh_token" do
+    bc = create_credential(
+      grant: "github_app",
+      token_endpoint: "https://api.github.com/app/installations/456/access_tokens",
+      client_id: "123",
+      client_secret: github_private_key.to_pem,
+      refresh_token: nil
+    )
     bc.update_columns(last_refresh: 1.hour.ago, next_attempt_at: 1.minute.ago)
 
     assert_includes BrokerCredential.refreshable.pluck(:id), bc.id

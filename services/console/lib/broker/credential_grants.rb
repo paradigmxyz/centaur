@@ -3,15 +3,24 @@ module Broker
   # owns persistence and scheduling; these strategies own provider-specific
   # request shapes and bootstrap validation.
   module CredentialGrants
+    require "base64"
+    require "json"
+    require "net/http"
+    require "openssl"
+    require "time"
+    require "uri"
+
     PREQIN_TOKEN_ENDPOINT = "https://api.preqin.com/connect/token".freeze
     PREQIN_REFRESH_TOKEN_ENDPOINT = "https://api.preqin.com/connect/refresh_token".freeze
 
-    GRANTS = %w[refresh_token client_credentials password preqin].freeze
-    REFRESHABLE_WITHOUT_TOKEN_GRANTS = %w[client_credentials password preqin].freeze
+    GRANTS = %w[refresh_token client_credentials password preqin github_app].freeze
+    REFRESHABLE_WITHOUT_TOKEN_GRANTS = %w[client_credentials password preqin github_app].freeze
 
     Outcome = Data.define(:result, :clear_refresh_token, :dead_reason)
 
     class << self
+      attr_writer :github_app_http_client
+
       def default_token_endpoint(grant)
         PREQIN_TOKEN_ENDPOINT if grant == "preqin"
       end
@@ -28,6 +37,8 @@ module Broker
           validate_password(credential)
         when "preqin"
           validate_preqin(credential)
+        when "github_app"
+          validate_github_app(credential)
         end
       end
 
@@ -39,6 +50,8 @@ module Broker
           refresh_password(credential)
         when "preqin"
           refresh_preqin(credential)
+        when "github_app"
+          refresh_github_app(credential)
         else
           refresh_token(credential)
         end
@@ -129,6 +142,63 @@ module Broker
         success(result, clear_refresh_token: clear_stale_refresh_token && result.refresh_token.blank?)
       end
 
+      def refresh_github_app(credential)
+        now = Time.current
+        require_value!("client_id", credential.client_id)
+        require_value!("client_secret", credential.client_secret)
+        require_value!("token_endpoint", credential.token_endpoint)
+
+        uri = URI.parse(credential.token_endpoint)
+        request = Net::HTTP::Post.new(uri)
+        request["Authorization"] = "Bearer #{github_app_jwt(credential, now)}"
+        request["Accept"] = "application/vnd.github+json"
+        request["X-GitHub-Api-Version"] = "2022-11-28"
+
+        response = github_app_http_request(uri, request, credential.refresh_timeout_seconds)
+        unless response.is_a?(Net::HTTPSuccess)
+          raise github_app_http_error(response)
+        end
+
+        parsed = JSON.parse(response.body)
+        token = parsed["token"].to_s
+        raise Broker::RefreshError.new("GitHub App token response missing token", stage: "parse", retryable: true) if token.blank?
+
+        expires_at = Time.iso8601(parsed.fetch("expires_at"))
+        expires_in = [ (expires_at - now).to_i, 1 ].max
+        result = Broker::RefreshClient::Result.new(
+          access_token: token,
+          refresh_token: nil,
+          expires_in: expires_in
+        )
+        success(result, clear_refresh_token: true)
+      rescue JSON::ParserError, KeyError, ArgumentError, TypeError => e
+        raise Broker::RefreshError.new(
+          "GitHub App token response could not be parsed: #{e.class}",
+          stage: "parse",
+          retryable: true
+        )
+      rescue OpenSSL::PKey::PKeyError => e
+        raise Broker::RefreshError.new(
+          "GitHub App private key is invalid: #{e.class}",
+          stage: "config",
+          code: "invalid_private_key",
+          retryable: false
+        )
+      rescue URI::InvalidURIError => e
+        raise Broker::RefreshError.new(
+          "GitHub App token endpoint is invalid: #{e.class}",
+          stage: "config",
+          code: "invalid_token_endpoint",
+          retryable: false
+        )
+      rescue IOError, SystemCallError, Timeout::Error, Net::OpenTimeout, Net::ReadTimeout => e
+        raise Broker::RefreshError.new(
+          "GitHub App token endpoint request failed: #{e.class}",
+          stage: "network",
+          retryable: true
+        )
+      end
+
       def oauth_refresh_token(credential)
         post_token_form(
           credential,
@@ -202,6 +272,55 @@ module Broker
         { "refresh_token" => credential.refresh_token }
       end
 
+      def github_app_jwt(credential, now)
+        header = base64url(JSON.generate({ alg: "RS256", typ: "JWT" }))
+        payload = base64url(JSON.generate({
+          iat: now.to_i - 60,
+          exp: now.to_i + 9.minutes.to_i,
+          iss: credential.client_id
+        }))
+        signing_input = "#{header}.#{payload}"
+        key = OpenSSL::PKey::RSA.new(github_app_private_key_pem(credential.client_secret))
+        signature = key.sign(OpenSSL::Digest.new("SHA256"), signing_input)
+        "#{signing_input}.#{base64url(signature)}"
+      end
+
+      def github_app_private_key_pem(value)
+        text = value.to_s
+        return text if text.include?("-----BEGIN")
+
+        Base64.strict_decode64(text)
+      rescue ArgumentError
+        text
+      end
+
+      def github_app_http_request(uri, request, timeout)
+        if @github_app_http_client
+          return @github_app_http_client.call(uri, request)
+        end
+
+        Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https",
+                        open_timeout: timeout, read_timeout: timeout) do |http|
+          http.request(request)
+        end
+      end
+
+      def github_app_http_error(response)
+        status = response.code.to_i
+        retryable = status / 100 == 5 || status == 429
+        Broker::RefreshError.new(
+          "GitHub App installation token endpoint returned HTTP #{status}",
+          stage: "http",
+          code: "http_#{status}",
+          status: status,
+          retryable: retryable
+        )
+      end
+
+      def base64url(value)
+        Base64.urlsafe_encode64(value, padding: false)
+      end
+
       def add_oauth_optional_fields(form, credential)
         form["client_secret"] = credential.effective_client_secret if credential.effective_client_secret.present?
 
@@ -228,6 +347,12 @@ module Broker
       def validate_preqin(credential)
         credential.errors.add(:username, "can't be blank for the Preqin broker grant") if credential.username.blank?
         credential.errors.add(:api_key, "can't be blank for the Preqin broker grant") if credential.api_key.blank?
+      end
+
+      def validate_github_app(credential)
+        if credential.client_secret.blank?
+          credential.errors.add(:client_secret, "can't be blank for the GitHub App broker grant")
+        end
       end
 
       def password_values_present?(credential)
