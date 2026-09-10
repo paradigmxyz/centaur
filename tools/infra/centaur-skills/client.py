@@ -326,7 +326,7 @@ class SkillsCatalog:
         return _merge_skills(self.repository.list(), console_skills, limit=limit)
 
     def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
-        """Search repository and Console catalogs with repository precedence."""
+        """Search both catalogs while preserving source-distinct results."""
         repository_skills = self.repository.search(query, limit=limit)
         console_skills = [
             _with_source(skill, CONSOLE_SOURCE) for skill in self.console.search(query, limit=limit)
@@ -422,26 +422,17 @@ def _with_source(skill: dict[str, Any], source: str) -> dict[str, Any]:
 
 
 def _merge_skills(
-    preferred: list[dict[str, Any]],
-    fallback: list[dict[str, Any]],
+    repository: list[dict[str, Any]],
+    console: list[dict[str, Any]],
     *,
     limit: int,
 ) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
-    names: set[str] = set()
-    preferred_names = {str(skill.get("name", "")) for skill in preferred}
-    for index in range(max(len(preferred), len(fallback))):
-        candidates = []
-        if index < len(preferred):
-            candidates.append((preferred[index], True))
-        if index < len(fallback):
-            candidates.append((fallback[index], False))
-
-        for skill, is_preferred in candidates:
-            name = str(skill.get("name", ""))
-            if not name or name in names or (not is_preferred and name in preferred_names):
+    for index in range(max(len(repository), len(console))):
+        for skills in (repository, console):
+            if index >= len(skills):
                 continue
-            names.add(name)
+            skill = skills[index]
             merged.append(skill)
             if len(merged) == limit:
                 return merged

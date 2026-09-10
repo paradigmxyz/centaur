@@ -292,7 +292,7 @@ description: >-
     assert [skill["name"] for skill in catalog.search("protected DocSend Spaces")] == ["docsend"]
 
 
-def test_merged_catalog_combines_sources_and_prefers_repository_name(tmp_path):
+def test_merged_catalog_preserves_same_name_rows_and_reads_by_distinct_ids(tmp_path):
     skills_dir = tmp_path / ".agents" / "skills"
     local_document = write_skill(skills_dir, "docsend", "Local DocSend guidance.")
     console = StubConsoleCatalog(
@@ -318,13 +318,15 @@ def test_merged_catalog_combines_sources_and_prefers_repository_name(tmp_path):
     listed = catalog.list()
     searched = catalog.search("docsend")
 
-    assert [(skill["name"], skill["source"]) for skill in listed] == [
-        ("docsend", "repository"),
-        ("console-only", "console"),
+    assert [(skill["id"], skill["name"], skill["source"]) for skill in listed] == [
+        ("repo:docsend", "docsend", "repository"),
+        ("skl_duplicate", "docsend", "console"),
+        ("skl_console", "console-only", "console"),
     ]
-    assert [(skill["name"], skill["source"]) for skill in searched] == [
-        ("docsend", "repository"),
-        ("console-only", "console"),
+    assert [(skill["id"], skill["name"], skill["source"]) for skill in searched] == [
+        ("repo:docsend", "docsend", "repository"),
+        ("skl_duplicate", "docsend", "console"),
+        ("skl_console", "console-only", "console"),
     ]
     assert catalog.read("docsend")["document"] == local_document
     assert catalog.read("skl_duplicate")["source"] == "console"
