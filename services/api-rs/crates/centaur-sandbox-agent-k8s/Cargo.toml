@@ -23,7 +23,9 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+http = "1"
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
+tower.workspace = true
 
 [lints]
 workspace = true

@@ -973,6 +973,7 @@ dependencies = [
  "centaur-iron-proxy",
  "centaur-sandbox-core",
  "clap",
+ "http 1.4.2",
  "jiff",
  "k8s-openapi",
  "kube",
@@ -980,6 +981,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "tracing",
  "uuid",
 ]
