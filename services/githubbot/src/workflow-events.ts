@@ -65,6 +65,16 @@ const SETTLED_CHECK_STATES = new Set([
 
 const SETTLED_STATUS_STATES = new Set(["ERROR", "FAILURE", "SUCCESS"]);
 
+const CENTAUR_SKIP_MARKER = "centaur-skip";
+
+/**
+ * A check whose job id contains `centaur-skip` is dropped from the CI evaluation:
+ * never counted as red, never fixed, never escalated.
+ */
+export function isCentaurSkipCheck(name: string | null | undefined): boolean {
+  return (name ?? "").toLowerCase().includes(CENTAUR_SKIP_MARKER);
+}
+
 export type CiCheck = { status: string; conclusion: string | null; name: string };
 export type CiStatus = { state: string; context: string };
 
@@ -225,12 +235,13 @@ export async function fetchCiEvaluation(
     );
     if (!pageNodes || readableNodes?.length !== pageNodes.length) {
       detailReadable = false;
-    } else {
-      nodes.push(...readableNodes);
     }
+    // Keep whatever *is* readable even on a partial page: the Actions fallback
+    // still needs the commit statuses, which a PAT can read.
+    if (readableNodes?.length) nodes.push(...readableNodes);
 
     const pageInfo: CiPageInfo | null | undefined = rollup.contexts?.pageInfo;
-    if (!detailReadable || !pageInfo?.hasNextPage) break;
+    if (!pageInfo?.hasNextPage) break;
     if (!pageInfo.endCursor) {
       logger.warn("githubbot_ci_rollup_pagination_failed", { ref: `${owner}/${repo}@${sha}` });
       return null;
@@ -239,7 +250,9 @@ export async function fetchCiEvaluation(
   }
 
   if (!rollupState) return null;
-  const detail = detailReadable ? evaluateCiRollupContexts(nodes) : null;
+  const detail = detailReadable
+    ? evaluateCiRollupContexts(nodes)
+    : await evaluateCiViaActions(ctx, owner, repo, sha, nodes, checkRunCounts, statusContextCounts);
   const aggregatePending = rollupState === "PENDING" || rollupState === "EXPECTED";
   const countsPending = stateCountsPending(checkRunCounts, statusContextCounts);
   let settled = rollupState === "SUCCESS";
@@ -249,18 +262,118 @@ export async function fetchCiEvaluation(
   }
   return {
     settled,
-    failed:
-      rollupState === "FAILURE" || rollupState === "ERROR" || detail?.failed === true,
+    // GitHub computes rollupState over every context, marked ones included, so
+    // OR-ing it in would undo the filter. A readable detail set is authoritative.
+    failed: detail ? detail.failed : rollupState === "FAILURE" || rollupState === "ERROR",
     failingNames: detail?.failingNames ?? [],
   };
 }
 
+/**
+ * Rebuild the check detail from the Actions API when the rollup's check nodes
+ * aren't readable. A fine-grained PAT — the type GitHub recommends — has no
+ * Checks permission at all, so `statusCheckRollup` hands it nulls and the
+ * evaluation degrades to the aggregate: no failing names, and no way to tell a
+ * `centaur-skip` check apart from a real one.
+ *
+ * An Actions job *is* a check run (same name, same conclusion), just behind the
+ * Actions permission instead. It sees fewer things though — no commit statuses,
+ * and no check runs from other GitHub Apps — so this trusts the reconstruction
+ * only when it accounts for every context GitHub counted, and otherwise returns
+ * null so the caller falls back to the aggregate rather than calling a PR green
+ * on a check it never saw.
+ */
+async function evaluateCiViaActions(
+  ctx: WorkflowEventProducerContext,
+  owner: string,
+  repo: string,
+  sha: string,
+  nodes: CiRollupContext[],
+  checkRunCounts: CiStateCount[] | null | undefined,
+  statusContextCounts: CiStateCount[] | null | undefined,
+): Promise<CiEvaluation | null> {
+  const logger = ctx.options.logger ?? noopLogger;
+  if (!checkRunCounts || !statusContextCounts) return null;
+
+  const statuses = latestCiStatuses(nodes);
+  if (statuses.length !== sumCounts(statusContextCounts)) return null;
+
+  let jobs: { name: string; status: string; conclusion: string | null }[];
+  try {
+    jobs = await fetchActionsJobs(ctx, owner, repo, sha);
+  } catch (error) {
+    logger.warn("githubbot_ci_actions_fallback_failed", { error: errorMessage(error) });
+    return null;
+  }
+  if (jobs.length !== sumCounts(checkRunCounts)) {
+    logger.warn("githubbot_ci_actions_fallback_incomplete", {
+      checkRuns: sumCounts(checkRunCounts),
+      jobs: jobs.length,
+      ref: `${owner}/${repo}@${sha}`,
+    });
+    return null;
+  }
+
+  return evaluateCi(
+    jobs
+      .filter((job) => !isCentaurSkipCheck(job.name))
+      .map((job) => ({
+        status: job.status.toLowerCase(),
+        conclusion: job.conclusion?.toLowerCase() ?? null,
+        name: job.name,
+      })),
+    statuses.map((node) => ({ state: node.state.toLowerCase(), context: node.context })),
+  );
+}
+
+/** Every job for a SHA, newest run first, deduped by name like the rollup does. */
+async function fetchActionsJobs(
+  ctx: WorkflowEventProducerContext,
+  owner: string,
+  repo: string,
+  sha: string,
+): Promise<{ name: string; status: string; conclusion: string | null }[]> {
+  const runs = await ctx.octokit.rest.actions.listWorkflowRunsForRepo({
+    head_sha: sha,
+    owner,
+    per_page: 100,
+    repo,
+  });
+  const latest = new Map<string, { name: string; status: string; conclusion: string | null }>();
+  // Descending id === newest first, so the first job seen for a name wins and a
+  // superseded re-run never overwrites it.
+  for (const run of [...runs.data.workflow_runs].sort((a, b) => b.id - a.id)) {
+    const jobs = await ctx.octokit.rest.actions.listJobsForWorkflowRun({
+      owner,
+      per_page: 100,
+      repo,
+      run_id: run.id,
+    });
+    for (const job of jobs.data.jobs) {
+      if (!latest.has(job.name)) {
+        latest.set(job.name, {
+          conclusion: job.conclusion ?? null,
+          name: job.name,
+          status: job.status,
+        });
+      }
+    }
+  }
+  return [...latest.values()];
+}
+
+function sumCounts(counts: CiStateCount[]): number {
+  return counts.reduce((total, { count }) => total + count, 0);
+}
+
 function evaluateCiRollupContexts(nodes: CiRollupContext[]): CiEvaluation {
-  const checks = latestCiChecks(nodes).map((node) => ({
-    status: node.status.toLowerCase(),
-    conclusion: node.conclusion?.toLowerCase() ?? null,
-    name: node.name,
-  }));
+  const checks = latestCiChecks(nodes)
+    .filter((node) => !isCentaurSkipCheck(node.name))
+    .map((node) => ({
+      status: node.status.toLowerCase(),
+      conclusion: node.conclusion?.toLowerCase() ?? null,
+      name: node.name,
+    }));
   const statuses = latestCiStatuses(nodes).map((node) => ({
     state: node.state.toLowerCase(),
     context: node.context,
