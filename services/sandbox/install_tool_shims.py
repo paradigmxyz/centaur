@@ -31,7 +31,12 @@ import sys
 from collections.abc import Mapping
 from contextlib import redirect_stdout
 
-import typer
+try:
+    import typer
+except ModuleNotFoundError as exc:
+    if exc.name != "typer":
+        raise
+    typer = None
 
 
 def display_value(value):
@@ -172,6 +177,11 @@ def inspect_command(entrypoint, tool_name, command_path):
     target = importlib.import_module(module_name)
     for attribute in attribute_path.split("."):
         target = getattr(target, attribute)
+    if typer is None or not isinstance(target, typer.Typer):
+        raise RuntimeError(
+            f"info is unavailable for {tool_name}: entrypoint {entrypoint} is not a "
+            f"Typer application; use centaur run {tool_name} --help instead"
+        )
 
     command = typer.main.get_command(target)
     root_commands = getattr(command, "commands", None)

@@ -292,6 +292,20 @@ class ToolHostTest(unittest.TestCase):
         self.assertEqual(with_ignored_command["status"], 0, with_ignored_command["stderr"])
         self.assertEqual(with_ignored_command["stdout"], expected)
 
+    def test_cli_info_rejects_non_typer_entrypoints_with_actionable_error(self) -> None:
+        failure, recovery = self.requests(
+            self.info_request([], tool="demo"),
+            self.info_request(["search"]),
+        )
+        self.assertEqual(failure["status"], 1)
+        self.assertIn(
+            "info is unavailable for demo: entrypoint demo.cli:main is not a Typer "
+            "application; use centaur run demo --help instead",
+            failure["stderr"],
+        )
+        self.assertNotIn("_add_completion", failure["stderr"])
+        self.assertEqual(recovery["status"], 0, recovery["stderr"])
+
     def test_catalog_rejects_unknown_tools_even_when_executable_exists(self) -> None:
         (response,) = self.requests(self.run_request([], tool="python3"))
         self.assertNotEqual(response["status"], 0)
