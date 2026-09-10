@@ -25,6 +25,75 @@ def test_extract_drive_file_id_accepts_editor_and_drive_urls():
     assert extract_drive_file_id("raw-file-id") == "raw-file-id"
 
 
+def test_slides_get_command_accepts_url_and_outputs_json(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        client,
+        "slides_get",
+        lambda presentation_id: (
+            calls.append(presentation_id)
+            or {"presentationId": presentation_id, "revisionId": "rev-123"}
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        ["slides", "get", "https://docs.google.com/presentation/d/slides-123/edit"],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)["revisionId"] == "rev-123"
+    assert calls == ["slides-123"]
+
+
+def test_slides_batch_update_command_reads_requests_file(tmp_path, monkeypatch):
+    calls: list[dict] = []
+    requests_file = tmp_path / "requests.json"
+    requests_file.write_text(
+        json.dumps({"requests": [{"createSlide": {"objectId": "slide-2"}}]})
+    )
+    monkeypatch.setattr(
+        client,
+        "slides_batch_update",
+        lambda presentation_id, requests, required_revision_id: (
+            calls.append(
+                {
+                    "presentation_id": presentation_id,
+                    "requests": requests,
+                    "required_revision_id": required_revision_id,
+                }
+            )
+            or {
+                "presentation_id": presentation_id,
+                "replies": [{}],
+                "revision_id": "rev-124",
+            }
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "slides",
+            "batch-update",
+            "slides-123",
+            str(requests_file),
+            "--required-revision-id",
+            "rev-123",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)["revision_id"] == "rev-124"
+    assert calls == [
+        {
+            "presentation_id": "slides-123",
+            "requests": [{"createSlide": {"objectId": "slide-2"}}],
+            "required_revision_id": "rev-123",
+        }
+    ]
+
+
 def test_drive_list_full_text_flag_is_passed_to_client(monkeypatch):
     calls: list[dict] = []
 
