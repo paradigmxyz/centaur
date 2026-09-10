@@ -690,7 +690,6 @@ def _write_catalog(path: Path, index_path: Path, pythonpath: str) -> None:
     content = f"""#!/usr/bin/env python3
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -930,32 +929,7 @@ def run_tool(tool, args):
     return returncode
 
 
-def info_cache_path(tool, command):
-    project_dir = Path(tool["project_dir"])
-    digest = hashlib.sha256()
-    digest.update(INFO_RUNNER.encode())
-    digest.update(str(tool.get("entrypoint") or "").encode())
-    digest.update(json.dumps(command, separators=(",", ":")).encode())
-    source_paths = [project_dir / "pyproject.toml", *project_dir.rglob("*.py")]
-    for source_path in sorted(source_paths, key=lambda item: str(item)):
-        try:
-            digest.update(str(source_path.relative_to(project_dir)).encode())
-            digest.update(source_path.read_bytes())
-        except (OSError, ValueError):
-            continue
-    cache_dir = Path(INDEX).parent / ".centaur-tools-info-cache"
-    return cache_dir / f"{{tool['name']}}-{{digest.hexdigest()}}.json"
-
-
 def info_tool(tool, command):
-    cache_path = info_cache_path(tool, command)
-    try:
-        cached = cache_path.read_text()
-        json.loads(cached)
-        return subprocess.CompletedProcess([], 0, cached, "")
-    except (OSError, json.JSONDecodeError):
-        pass
-
     project_dir = Path(tool["project_dir"])
     started_at = time.monotonic()
     emit_tool_call_event("tool_call_started", tool, "info", tool_args=command)
@@ -995,15 +969,6 @@ def info_tool(tool, command):
         started_at=started_at,
         returncode=result.returncode,
     )
-    if result.returncode == 0:
-        try:
-            json.loads(result.stdout)
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary_path = cache_path.with_suffix(f".{{os.getpid()}}.tmp")
-            temporary_path.write_text(result.stdout)
-            os.replace(temporary_path, cache_path)
-        except (OSError, json.JSONDecodeError):
-            pass
     return result
 
 
