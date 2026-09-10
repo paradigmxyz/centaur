@@ -131,10 +131,8 @@ pub(crate) async fn mcp_post(
             ensure_mcp_scope(&principal.scopes, "mcp:tools")?;
             let policy = mcp_tool_host_call_policy(&state, &principal).await?;
             let filter = parse_sandbox_tool_filter(policy.tool_filter());
-            let mut tools = mcp_builtin_tools();
-            tools.extend(mcp_v1_tool_entries(&filter)?);
             json!({
-                "tools": tools,
+                "tools": mcp_tool_entries(&filter)?,
             })
         }
         "tools/call" => {
@@ -323,6 +321,14 @@ fn mcp_builtin_tools() -> Vec<Value> {
     }
     tools.push(mcp_whoami_tool());
     tools
+}
+
+fn mcp_tool_entries(filter: &SandboxToolFilter) -> Result<Vec<Value>, ApiError> {
+    let mut tools = mcp_builtin_tools();
+    if !mcp_v2_enabled() {
+        tools.extend(mcp_v1_tool_entries(filter)?);
+    }
+    Ok(tools)
 }
 
 fn mcp_v2_tool() -> Value {
@@ -2031,6 +2037,62 @@ def search(query, limit=20):
                 );
             }
         }
+    }
+
+    #[test]
+    fn mcp_v2_hides_legacy_tools_from_discovery_but_keeps_them_callable() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = temp_dir("centaur-api-rs-mcp-v2-legacy-tools");
+        let package_dir = temp.join("demo");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            package_dir.join("pyproject.toml"),
+            concat!(
+                "[project]\n",
+                "name = \"demo-tool\"\n",
+                "description = \"Demo service\"\n\n",
+                "[project.scripts]\n",
+                "demo = \"demo.cli:main\"\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            package_dir.join("client.py"),
+            "def ping():\n    return {}\n",
+        )
+        .unwrap();
+        let _env = EnvGuard::set(&[
+            ("CENTAUR_MCP_V2_ENABLED", "true"),
+            (
+                "TOOL_DIRS",
+                Box::leak(temp.display().to_string().into_boxed_str()),
+            ),
+        ]);
+        let filter = SandboxToolFilter::default();
+
+        {
+            let _v1 = EnvGuard::set(&[("CENTAUR_MCP_V2_ENABLED", "false")]);
+            let names = mcp_tool_entries(&filter)
+                .unwrap()
+                .into_iter()
+                .map(|tool| tool["name"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(names, vec!["centaur_whoami", "demo"]);
+        }
+
+        let names = mcp_tool_entries(&filter)
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["centaur", "centaur_whoami"]);
+
+        let tool = mcp_find_centaur_tool("demo", &filter).unwrap().unwrap();
+        let action =
+            prepare_mcp_v1_tool_call(&tool, json!({"method": "ping", "arguments": {}})).unwrap();
+        assert!(matches!(action, McpCentaurToolAction::Run { .. }));
+
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
