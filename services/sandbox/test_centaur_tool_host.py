@@ -54,7 +54,7 @@ class ToolHostTest(unittest.TestCase):
         (metadata_package / "__init__.py").write_text("")
         (metadata_project / "pyproject.toml").write_text(
             '[project]\nname = "centaur-host-test-metadata"\nversion = "0.0.1"\n'
-            'dependencies = ["typer>=0.12.0"]\n'
+            'dependencies = ["typer==0.12.5", "click==8.1.7"]\n'
             '[project.scripts]\nmetadata-demo = "metadata_demo.cli:app"\n'
             'single-demo = "metadata_demo.single:app"\n'
             '[build-system]\nrequires = ["hatchling"]\n'
@@ -72,12 +72,15 @@ class ToolHostTest(unittest.TestCase):
             "    relevance = 'relevance'\n"
             "    date = 'date'\n"
             "@app.command('search')\n"
-            "def search(query: str = typer.Argument(..., help='Search query'), output: Path = typer.Option(Path('results.json'), '--output', '-o', help='Output path'), limit: int = typer.Option(20, '--limit', '-n', min=1, max=100, help='Maximum results'), order: Order = typer.Option(Order.relevance, '--order', help='Sort order'), json_output: bool = typer.Option(False, '--json/--no-json', '-j', help='Emit JSON'), deprecated: str = typer.Option('', '--deprecated', hidden=True)):\n"
+            "def search(query: str = typer.Argument(..., help='Search query'), output: Path = typer.Option(Path('results.json'), '--output', '-o', help='Output path'), limit: int = typer.Option(20, '--limit', '-n', min=1, max=100, help='Maximum results'), order: Order = typer.Option(Order.relevance, '--order', help='Sort order'), selector: str = typer.Option('all', '--selector', metavar='KEY{VALUE}', help='Selection'), json_output: bool = typer.Option(False, '--json/--no-json', '-j', help='Emit JSON'), deprecated: str = typer.Option('', '--deprecated', hidden=True)):\n"
             "    '''Search indexed metadata.\n\nLong implementation notes are omitted.'''\n"
             "    raise RuntimeError('metadata inspection invoked the command callback')\n"
             "@nested.command('read')\n"
-            "def read(document_id: str = typer.Argument(..., help='Document identifier')):\n"
+            "def read(document_id: str = typer.Argument(..., metavar='DOC{ID}', help='Document identifier')):\n"
             "    raise RuntimeError('metadata inspection invoked the nested callback')\n"
+            "@nested.command('internal', hidden=True)\n"
+            "def internal():\n"
+            "    raise RuntimeError('metadata inspection invoked the hidden callback')\n"
         )
         (metadata_package / "single.py").write_text(
             "import typer\n"
@@ -247,12 +250,13 @@ class ToolHostTest(unittest.TestCase):
         self.assertEqual(
             search["stdout"],
             "metadata-demo search QUERY [--output PATH] [--limit INT RANGE] "
-            "[--order CHOICE] [--json/--no-json]\n\n"
+            "[--order CHOICE] [--selector KEY{VALUE}] [--json/--no-json]\n\n"
             "Search indexed metadata.\n\n"
             "QUERY STRING (required): Search query\n"
             "-o, --output PATH (default: \"results.json\"): Output path\n"
             "-n, --limit INT RANGE (default: 20, >=1, <=100): Maximum results\n"
             "--order CHOICE (default: \"relevance\", choices: relevance|date): Sort order\n"
+            "--selector KEY{VALUE} (default: \"all\"): Selection\n"
             "-j, --json/--no-json: Emit JSON\n",
         )
         self.assertNotIn("deprecated", search["stdout"])
@@ -263,20 +267,29 @@ class ToolHostTest(unittest.TestCase):
         self.assertEqual(nested["status"], 0, nested["stderr"])
         self.assertEqual(
             nested["stdout"],
-            "metadata-demo nested read DOCUMENT_ID\n\n"
-            "DOCUMENT_ID STRING (required): Document identifier\n",
+            "metadata-demo nested read DOC{ID}\n\n"
+            "DOC{ID} (required): Document identifier\n",
         )
 
-    def test_cli_info_rejects_unknown_commands_and_recovers(self) -> None:
-        missing_path, failure, recovery = self.requests(
+    def test_cli_info_lists_groups_and_rejects_unknown_commands(self) -> None:
+        root, nested, failure, recovery = self.requests(
             self.info_request([]),
-            self.info_request(["missing"]),
+            self.info_request(["nested"]),
+            self.info_request(["nested", "missing"]),
             self.info_request(["search"]),
         )
-        self.assertEqual(missing_path["status"], 1)
-        self.assertIn("command path required for metadata-demo", missing_path["stderr"])
+        self.assertEqual(root["status"], 0, root["stderr"])
+        self.assertIn("Commands:\n  nested: Nested commands\n", root["stdout"])
+        self.assertIn("  search: Search indexed metadata.", root["stdout"])
+        self.assertEqual(nested["status"], 0, nested["stderr"])
+        self.assertIn("Commands:\n  read\n", nested["stdout"])
+        self.assertNotIn("internal", nested["stdout"])
         self.assertEqual(failure["status"], 1)
-        self.assertIn("unknown command path metadata-demo missing", failure["stderr"])
+        self.assertIn(
+            "unknown command path metadata-demo nested missing; available commands: read",
+            failure["stderr"],
+        )
+        self.assertNotIn("internal", failure["stderr"])
         self.assertEqual(recovery["status"], 0, recovery["stderr"])
 
     def test_cli_info_handles_typer_single_command_apps(self) -> None:

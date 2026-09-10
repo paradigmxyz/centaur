@@ -779,6 +779,7 @@ fn centaur_tool_labels(item: &Value, centaur_tool_names: &BTreeSet<String>) -> O
     let (name, method) = if executable == "centaur-tools" {
         match words.get(1).map(String::as_str) {
             Some("call") => (words.get(2)?, words.get(3).map_or("call", String::as_str)),
+            Some("info") => (words.get(2)?, "info"),
             Some("run") => (words.get(2)?, "cli"),
             _ => return None,
         }
@@ -1525,6 +1526,22 @@ mod tests {
         assert_eq!(labels.kind, "centaur");
         assert_eq!(labels.name, "vlogs");
         assert_eq!(labels.method, "errors");
+    }
+
+    #[test]
+    fn centaur_tools_info_exports_tool_and_method() {
+        let labels = tool_labels_from_item(
+            &json!({
+                "type": "commandExecution",
+                "command": "/bin/bash -lc 'centaur-tools info gsuite gmail'"
+            }),
+            &BTreeSet::from(["gsuite".to_owned()]),
+        )
+        .expect("labels");
+
+        assert_eq!(labels.kind, "centaur");
+        assert_eq!(labels.name, "gsuite");
+        assert_eq!(labels.method, "info");
     }
 
     #[test]

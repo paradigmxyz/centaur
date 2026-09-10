@@ -58,11 +58,11 @@ def clean_text(value):
 def parameter_type_name(parameter):
     explicit = clean_text(getattr(parameter, "metavar", None))
     if explicit:
-        return explicit.replace("{", "").replace("}", "")
+        return explicit
     type_name = clean_text(getattr(parameter.type, "name", None))
     if not type_name:
         type_name = type(parameter.type).__name__
-    aliases = {
+    word_aliases = {
         "str": "STRING",
         "string": "STRING",
         "text": "STRING",
@@ -72,7 +72,10 @@ def parameter_type_name(parameter):
         "boolean": "BOOL",
         "filename": "FILE",
     }
-    return aliases.get(type_name.lower(), type_name.upper())
+    return " ".join(
+        word_aliases.get(word.lower(), word.upper())
+        for word in type_name.replace("_", " ").split()
+    )
 
 
 def parameter_rendering(parameter):
@@ -100,11 +103,9 @@ def parameter_rendering(parameter):
             signature = f"{signature} {type_name}"
             label = f"{label} {type_name}"
     else:
-        signature = clean_text(getattr(parameter, "metavar", None)) or str(
-            parameter.name
-        ).upper()
-        signature = signature.replace("{", "").replace("}", "")
-        label = f"{signature} {parameter_type_name(parameter)}"
+        explicit_metavar = clean_text(getattr(parameter, "metavar", None))
+        signature = explicit_metavar or str(parameter.name).upper()
+        label = signature if explicit_metavar else f"{signature} {parameter_type_name(parameter)}"
     if getattr(parameter, "multiple", False) or getattr(parameter, "nargs", 1) != 1:
         signature = f"{signature}..."
         label = f"{label}..."
@@ -143,7 +144,7 @@ def parameter_details(parameter):
     return ", ".join(details)
 
 
-def render_info(tool_name, invocation_path, command, parameters):
+def render_info(tool_name, invocation_path, command, parameters, subcommands):
     rendered = [parameter_rendering(parameter) for parameter in parameters]
     lines = [
         " ".join([tool_name, *invocation_path, *(signature for signature, _ in rendered)])
@@ -160,6 +161,15 @@ def render_info(tool_name, invocation_path, command, parameters):
             label = f"{label} ({details})"
         help_text = clean_text(getattr(parameter, "help", None))
         lines.append(f"{label}: {help_text}" if help_text else label)
+    if subcommands:
+        lines.extend(["", "Commands:"])
+        for name, subcommand in subcommands:
+            summary = clean_text(
+                (getattr(subcommand, "short_help", None) or subcommand.help or "").split(
+                    "\n\n", 1
+                )[0]
+            )
+            lines.append(f"  {name}: {summary}" if summary else f"  {name}")
     return "\n".join(lines)
 
 
@@ -168,6 +178,17 @@ def is_visible_parameter(parameter):
         return False
     flags = set(getattr(parameter, "opts", ()))
     return not bool(flags & {"--install-completion", "--show-completion"})
+
+
+def visible_commands(command):
+    commands = getattr(command, "commands", None)
+    if not isinstance(commands, Mapping):
+        return []
+    return [
+        (name, child)
+        for name, child in sorted(commands.items())
+        if not getattr(child, "hidden", False)
+    ]
 
 
 def inspect_command(entrypoint, tool_name, command_path):
@@ -193,16 +214,13 @@ def inspect_command(entrypoint, tool_name, command_path):
             )
         invocation_path = []
     else:
-        if not command_path:
-            available = ", ".join(sorted(root_commands)) or "none"
-            raise RuntimeError(
-                f"command path required for {tool_name}; available commands: {available}"
-            )
         invocation_path = command_path
         for segment in command_path:
             commands = getattr(command, "commands", None)
             if not isinstance(commands, Mapping) or segment not in commands:
-                available = ", ".join(sorted(commands or {})) or "none"
+                available = ", ".join(
+                    name for name, _ in visible_commands(command)
+                ) or "none"
                 joined = " ".join(command_path)
                 raise RuntimeError(
                     f"unknown command path {tool_name} {joined}; available commands: {available}"
@@ -214,7 +232,13 @@ def inspect_command(entrypoint, tool_name, command_path):
         for parameter in command.params
         if is_visible_parameter(parameter)
     ]
-    return render_info(tool_name, invocation_path, command, parameters)
+    return render_info(
+        tool_name,
+        invocation_path,
+        command,
+        parameters,
+        visible_commands(command),
+    )
 
 
 try:
