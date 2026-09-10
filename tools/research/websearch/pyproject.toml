@@ -1,7 +1,7 @@
 [project]
 name = "websearch"
-description = "Web search and deep research via Parallel (free MCP or paid REST); optional Claude synthesis"
-version = "0.2.0"
+description = "Web search and deep research via Tako (default) or Parallel, anonymous or keyed; optional Claude synthesis"
+version = "0.3.0"
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.54.0",
@@ -10,7 +10,14 @@ dependencies = [
     "pydantic>=2.10.0",
     "python-dotenv>=1.0.0",
     "rich>=13.0.0",
+    "tako-sdk>=2.3.0",
     "typer>=0.12.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "respx>=0.22.0",
 ]
 
 [project.scripts]
@@ -29,12 +36,18 @@ build-backend = "hatchling.build"
 
 [tool.centaur]
 module = "client.py"
-# `search` works anonymously through the hosted Parallel Search MCP. Set
-# PARALLEL_API_KEY to use the paid REST path and unlock `deep_research`.
-# Set ANTHROPIC_API_KEY to enable the Claude-backed synthesis pipeline on
-# top of search results (reviewer → writer → citation repair).
+# WEBSEARCH_BACKEND (sandbox env, default `tako`) picks the vendor. Within a
+# vendor, `search` tries the keyed REST path with the injected placeholder and
+# falls back to that vendor's anonymous path on 401 or 403. `deep-research`
+# needs the vendor's key: TAKO_API_KEY for the Tako Answer Agent, PARALLEL_API_KEY for
+# the Parallel Task API. ANTHROPIC_API_KEY enables the Claude synthesis
+# pipeline on top of `search` results (reviewer → writer → citation repair).
+# Give every secret below its own `hosts`. An entry that omits them inherits the
+# top-level `hosts` list, which would bind it to mcp.tako.com and
+# search.parallel.ai — the paths that must stay anonymous.
 optional_secrets = [
+    {type = "http", name = "TAKO_API_KEY", mode = "inject", inject_header = "X-API-Key", hosts = ["tako.com"]},
     {type = "http", name = "PARALLEL_API_KEY", mode = "inject", inject_header = "x-api-key", hosts = ["api.parallel.ai"]},
     {type = "http", name = "ANTHROPIC_API_KEY", mode = "inject", inject_header = "x-api-key", hosts = ["api.anthropic.com"]},
 ]
-hosts = ["api.parallel.ai", "search.parallel.ai"]
+hosts = ["tako.com", "mcp.tako.com", "api.parallel.ai", "search.parallel.ai", "api.anthropic.com"]

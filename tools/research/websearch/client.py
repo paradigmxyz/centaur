@@ -1,39 +1,102 @@
 """Websearch client.
 
-Powered by Parallel Web Systems (https://docs.parallel.ai). Search runs
-through the free hosted Parallel Search MCP when no `PARALLEL_API_KEY` is
-configured, and through the Parallel Search REST API when one is. Deep
-research always goes through the Parallel Task API and requires a key.
+`search` retrieves sources through one backend and, when `ANTHROPIC_API_KEY`
+is configured, runs the Claude synthesis pipeline (reviewer → writer →
+citation repair) over them to produce a cited markdown report. `deep_research`
+asks the same backend for a finished report.
 
-`search(synthesize=True)` runs the original tool's Claude pipeline
-(reviewer → writer → citation-repair) against the Parallel results
-when `ANTHROPIC_API_KEY` is set. The synthesis prompts and repair loop
-are byte-identical to centaur main, so output quality and failure
-modes mirror that pipeline. Without an Anthropic key, the call still
-returns raw Parallel results and records the skipped synthesis in
-`meta.partial_failures`.
+The backend is chosen once from `WEBSEARCH_BACKEND` (`tako`, the default, or
+`parallel`). Within a backend, a keyed path is tried first with the iron-proxy
+placeholder and the anonymous path is used when that returns 401.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
+import time
 import warnings
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Protocol, get_args
 
 from anthropic import AsyncAnthropic, AuthenticationError
 
 from centaur_sdk import get_tool_context, secret
 
 from ._parallel import API_BASE_URL, MCP_URL, ParallelBackend
-from .models import SourceDocument
+from ._tako import API_BASE_URL as TAKO_API_BASE_URL
+from ._tako import MCP_URL as TAKO_MCP_URL
+from ._tako import TakoBackend
+from .models import (
+    DeepResearchIteration,
+    DeepResearchResponse,
+    DeepResearchResult,
+    DeepResearchSpec,
+    ResearchEffort,
+    ResponseMeta,
+    RetrievalResult,
+    SearchEffort,
+    SearchRequestSpec,
+    SearchResponse,
+    SourceDocument,
+)
 from .prompts import EVIDENCE_REVIEWER_SYSTEM, REPORT_REPAIR_SYSTEM, REPORT_WRITER_SYSTEM
 
 REVIEW_SOURCE_CHAR_LIMIT = 3500
 REVIEW_TOTAL_CHAR_BUDGET = 120000
 WRITE_SOURCE_CHAR_LIMIT = 7000
 WRITE_TOTAL_CHAR_BUDGET = 220000
+
+WEBSEARCH_BACKEND_ENV = "WEBSEARCH_BACKEND"
+BACKEND_NAMES = ("tako", "parallel")
+DEFAULT_BACKEND = "tako"
+SEARCH_EFFORTS = get_args(SearchEffort)
+RESEARCH_EFFORTS = get_args(ResearchEffort)
+MODE_TO_EFFORT = {"basic": "instant", "advanced": "fast"}
+
+
+class ResearchBackend(Protocol):
+    """One vendor's retrieval and research. Synthesis and assembly stay in the client.
+
+    Each call reports which path it took as `RetrievalResult.backend`
+    (`tako:api`, `tako:anonymous`, `parallel:api`, `parallel:mcp`); a backend
+    keeps its own keyed-vs-anonymous state private.
+    """
+
+    async def search(self, request: SearchRequestSpec) -> RetrievalResult: ...
+
+    async def deep_research(
+        self, request: DeepResearchSpec, progress: Callable[[str], None]
+    ) -> DeepResearchResult: ...
+
+
+def _resolve_backend_name(override: str | None) -> str:
+    raw = override or os.getenv(WEBSEARCH_BACKEND_ENV, "")  # noqa: TID251  # deployment config, not a secret
+    name = raw.strip().lower() or DEFAULT_BACKEND
+    if name not in BACKEND_NAMES:
+        raise RuntimeError(
+            f"{WEBSEARCH_BACKEND_ENV}={name!r} is not supported. "
+            f"Set it to one of: {', '.join(BACKEND_NAMES)}."
+        )
+    return name
+
+
+def _resolve_search_effort(effort: str | None, mode: str | None) -> str | None:
+    if effort is not None and mode is not None:
+        raise ValueError("Pass either --effort or --mode, not both. --mode is deprecated.")
+    if mode is not None:
+        if mode not in MODE_TO_EFFORT:
+            raise ValueError(f"--mode must be 'basic' or 'advanced' (got {mode!r}).")
+        warnings.warn(
+            "mode is deprecated; use effort ('basic' -> 'instant', 'advanced' -> 'fast').",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return MODE_TO_EFFORT[mode]
+    if effort is not None and effort not in SEARCH_EFFORTS:
+        raise ValueError(f"effort must be one of {', '.join(SEARCH_EFFORTS)} (got {effort!r}).")
+    return effort
 
 
 def _is_configured(key: str) -> bool:
@@ -63,22 +126,39 @@ def _is_configured(key: str) -> bool:
         return bool(val) and val != key
 
 
+def _placeholder(key: str) -> str:
+    """Resolve a secret to its value, or to the key name iron-proxy swaps in flight.
+
+    An exported-but-empty variable resolves to `""` through `secret()`, which
+    would skip the keyed attempt entirely rather than let the 401 fallback
+    decide. Kubernetes produces that shape for an optional secret left unset.
+    """
+    return secret(key, key) or key
+
+
 class WebSearchClient:
-    """Web search and deep research via Parallel."""
+    """Web search and deep research over one configurable backend."""
 
     def __init__(
         self,
+        *,
+        backend: str | None = None,
         parallel_api_key: str | None = None,
         parallel_api_base_url: str | None = None,
         parallel_mcp_url: str | None = None,
         parallel_deep_research_processor: str | None = None,
+        tako_api_key: str | None = None,
+        tako_api_base_url: str | None = None,
+        tako_mcp_url: str | None = None,
         anthropic_api_key: str | None = None,
         synthesis_model: str | None = None,
         max_retries: int = 3,
     ) -> None:
+        self._backend_name = _resolve_backend_name(backend)
         # Always pass the StubBackend placeholder so the SDK sends x-api-key.
         # Search falls back to anonymous MCP if injected authentication fails.
-        self._parallel_api_key = parallel_api_key or secret("PARALLEL_API_KEY", "PARALLEL_API_KEY")
+        self._parallel_api_key = parallel_api_key or _placeholder("PARALLEL_API_KEY")
+        self._tako_api_key = tako_api_key or _placeholder("TAKO_API_KEY")
         self._has_anthropic_key = anthropic_api_key is not None or _is_configured(
             "ANTHROPIC_API_KEY"
         )
@@ -90,16 +170,27 @@ class WebSearchClient:
         # StubBackend that would return the literal key name as a value.
         self._api_base_url = parallel_api_base_url or API_BASE_URL
         self._mcp_url = parallel_mcp_url or MCP_URL
+        self._tako_api_base_url = tako_api_base_url
+        self._tako_mcp_url = tako_mcp_url
         self._deep_research_processor = parallel_deep_research_processor or "ultra-fast"
         self._synthesis_model = synthesis_model or "claude-opus-4-6"
         self._max_retries = max_retries
         self._progress_callback: Callable[[str], None] | None = None
-        self._backend = ParallelBackend(
-            api_key=self._parallel_api_key,
-            api_base_url=self._api_base_url,
-            mcp_url=self._mcp_url,
-            deep_research_processor=self._deep_research_processor,
-            max_retries=self._max_retries,
+        self._backend: ResearchBackend = self._build_backend()
+
+    def _build_backend(self) -> ResearchBackend:
+        if self._backend_name == "parallel":
+            return ParallelBackend(
+                api_key=self._parallel_api_key,
+                api_base_url=self._api_base_url,
+                mcp_url=self._mcp_url,
+                deep_research_processor=self._deep_research_processor,
+                max_retries=self._max_retries,
+            )
+        return TakoBackend(
+            api_key=self._tako_api_key,
+            api_base_url=self._tako_api_base_url or TAKO_API_BASE_URL,
+            mcp_url=self._tako_mcp_url or TAKO_MCP_URL,
         )
 
     def _set_progress_callback(self, callback: Callable[[str], None] | None) -> None:
@@ -110,12 +201,8 @@ class WebSearchClient:
             self._progress_callback(stage)
 
     @property
-    def search_mode(self) -> str:
-        return self._backend.search_mode
-
-    @property
-    def has_api_key(self) -> bool:
-        return self._backend.has_api_key
+    def backend_name(self) -> str:
+        return self._backend_name
 
     @property
     def has_synthesis(self) -> bool:
@@ -136,6 +223,7 @@ class WebSearchClient:
         num_results: int = 10,
         timeout_seconds: float = 60.0,
         synthesize: bool = True,
+        effort: str | None = None,
         mode: str | None = None,
         client_model: str | None = None,
         max_chars_total: int | None = None,
@@ -147,66 +235,122 @@ class WebSearchClient:
         max_report_chars: int = 12000,
         search_type: str | None = None,
     ) -> dict:
-        """Search the web via Parallel.
+        """Retrieve sources through the configured backend and optionally synthesize.
 
         Args:
-          query: Required. The user's question or topic. Used as the search
-            objective (and as a single-query fallback per Parallel best
-            practices).
-          synthesize: When true, runs the Claude reviewer + writer pipeline
-            on top of Parallel results (matches the prior Exa+Claude
-            behavior). Requires `ANTHROPIC_API_KEY`; without one the call
-            still returns raw results and records the skipped synthesis in
+          query: Required. The question or topic.
+          synthesize: Run the Claude reviewer + writer pipeline over the
+            results. Requires `ANTHROPIC_API_KEY`; without one the call returns
+            raw results and records the skipped synthesis in
             `meta.partial_failures`.
-          mode: `basic` (lower latency, 2-3 queries) or `advanced` (default,
-            higher quality). REST path only.
-          client_model: Identifier of the LLM that will consume the
-            excerpts. Enables per-model optimization. Forwarded to MCP as
-            `model_name`.
-          max_chars_total: Hard cap on total excerpt characters. REST only.
-          include_domains / exclude_domains / max_age_hours: Source filters
-            for the REST path. Not honored by the free MCP — surfaced in
-            `meta.partial_failures` when used without a key. `max_age_hours`
-            is rounded down to a UTC calendar-date cutoff (Parallel's
-            source policy is date-granular, not hour-precise).
-          session_id: Stable identifier (UUID recommended) reused across
-            related Search/Extract calls. Required for free-tier rate
-            limiting when called over MCP.
-          thread_context: Optional prior-turn context strings passed to the
-            synthesis reviewer/writer for disambiguation. Synthesis only.
-          search_type: Accepted for backward compatibility with the original
-            Exa-backed tool; ignored under Parallel retrieval. Pass `None`.
+          effort: `instant`, `fast` (default), or `deep`. Tako honors all three;
+            Parallel maps `instant` to `basic` and the others to `advanced`.
+            Anonymous paths record it in `meta.partial_failures`.
+          mode: Deprecated alias for `effort` (`basic` -> `instant`,
+            `advanced` -> `fast`). Passing both is an error.
+          client_model, max_chars_total, session_id: Parallel REST knobs. Other
+            paths ignore them or note them in `meta.partial_failures`.
+          include_domains / exclude_domains / max_age_hours: Source filters on
+            the keyed paths; anonymous paths note them in `meta.partial_failures`.
+            `max_age_hours` rounds down to a UTC calendar date.
+          thread_context: Prior-turn context for the synthesis writer.
+          search_type: Accepted for backward compatibility; ignored.
         """
         if search_type is not None:
             warnings.warn(
-                "search_type is ignored — the Parallel retrieval backend does "
-                "not expose Exa's neural/keyword/auto modes.",
+                "search_type is ignored — no current backend exposes Exa's neural/keyword/auto modes.",
                 DeprecationWarning,
                 stacklevel=2,
             )
-        synthesis_pipeline = self._build_synthesis_pipeline() if synthesize else None
-        return await self._backend.search(
-            objective=query,
-            search_queries=[query],
+        resolved_effort = _resolve_search_effort(effort, mode)
+        started = time.perf_counter()
+        spec = SearchRequestSpec(
+            query=query,
             num_results=num_results,
             timeout_seconds=timeout_seconds,
-            synthesize=synthesize,
-            mode=mode,
-            client_model=client_model,
-            max_chars_total=max_chars_total,
             include_domains=include_domains,
             exclude_domains=exclude_domains,
             max_age_hours=max_age_hours,
+            effort=resolved_effort,
+            client_model=client_model,
+            max_chars_total=max_chars_total,
             session_id=session_id,
-            max_report_chars=max_report_chars,
-            synthesis_pipeline=synthesis_pipeline,
-            thread_context=thread_context,
         )
+        retrieval = await self._backend.search(spec)
+        capped = retrieval.sources[: max(1, min(40, num_results))]
+        partial_failures = list(retrieval.partial_failures)
+        footer = f"\n\n---\n_{retrieval.attribution}_\n" if retrieval.attribution else ""
+        answer_markdown: str | None = None
+        if synthesize and capped:
+            answer_markdown = await self._synthesize(
+                question=query,
+                sources=capped,
+                thread_context=thread_context,
+                max_report_chars=max(1, max_report_chars - len(footer)),
+                partial_failures=partial_failures,
+            )
+        if synthesize and not capped:
+            partial_failures.append(
+                {"query": query, "error": "synthesis skipped: retrieval returned no sources."}
+            )
+        if footer and answer_markdown:
+            answer_markdown = f"{answer_markdown.rstrip()}{footer}"
+        meta = ResponseMeta(
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            request_ids=retrieval.request_ids,
+            partial_failures=partial_failures,
+            backend=retrieval.backend,
+            usage=retrieval.usage,
+            attribution=retrieval.attribution,
+            estimated_cost_usd=retrieval.estimated_cost_usd,
+        )
+        return SearchResponse(
+            query=query, results=capped, answer_markdown=answer_markdown, meta=meta
+        ).model_dump()
+
+    async def _synthesize(
+        self,
+        *,
+        question: str,
+        sources: list[SourceDocument],
+        thread_context: list[str] | None,
+        max_report_chars: int,
+        partial_failures: list[dict[str, str]],
+    ) -> str | None:
+        pipeline = self._build_synthesis_pipeline()
+        if pipeline is None:
+            partial_failures.append(
+                {
+                    "query": question,
+                    "error": (
+                        "synthesize=true requested but ANTHROPIC_API_KEY is not set; "
+                        "returning raw excerpts. Set ANTHROPIC_API_KEY (or pass "
+                        "synthesize=false) to silence this notice."
+                    ),
+                }
+            )
+            return None
+        try:
+            outcome = await pipeline.synthesize(
+                question=question,
+                sources=sources,
+                thread_context=thread_context,
+                max_report_chars=max_report_chars,
+            )
+        except Exception as exc:
+            partial_failures.append({"query": question, "error": f"synthesis failed: {exc}"})
+            return None
+        if outcome["validation_error"]:
+            partial_failures.append(
+                {"query": question, "error": f"synthesis failed: {outcome['validation_error']}"}
+            )
+        return outcome["report"]
 
     async def deep_research(
         self,
         question: str,
         *,
+        effort: str | None = None,
         processor: str | None = None,
         timeout_seconds: float | None = None,
         max_report_chars: int = 50000,
@@ -215,22 +359,20 @@ class WebSearchClient:
         num_results_per_query: int | None = None,
         thread_context: list[str] | None = None,
     ) -> dict:
-        """Run deep research and return a cited markdown report.
+        """Run deep research through the configured backend and return a cited report.
 
         Args:
-          processor: Task API processor (pro/ultra family). Defaults to
-            the value passed to `WebSearchClient(parallel_deep_research_processor=...)`,
-            or `"ultra-fast"` if neither is set.
-          timeout_seconds: Override the request timeout. When omitted, a
-            processor-appropriate default is used (e.g. `ultra4x` waits up
-            to ~2h).
+          effort: `medium` (default) or `high`. Tako passes it to the Answer
+            Agent; Parallel maps `medium` to `ultra-fast` and `high` to `ultra`.
+          processor: Deprecated, Parallel-only. Overrides the `effort` mapping
+            on Parallel; Tako records it in `meta.partial_failures`.
+          timeout_seconds: Overall budget. Defaults to 600 s on Tako and to a
+            processor-appropriate value on Parallel.
           max_iterations / num_queries_per_iteration / num_results_per_query /
-          thread_context: Accepted for backward compatibility with the
-            original Exa+Claude iterative pipeline; ignored under Parallel
-            Task API (a single multi-source run replaces the iterative
-            planner→search→reviewer→writer loop).
+          thread_context: Accepted for backward compatibility; ignored.
 
-        Requires `PARALLEL_API_KEY`.
+        Requires the backend's API key. Neither backend has an anonymous tier
+        for deep research.
         """
         deprecated = [
             ("max_iterations", max_iterations),
@@ -241,18 +383,54 @@ class WebSearchClient:
         used = [name for name, value in deprecated if value is not None]
         if used:
             warnings.warn(
-                f"deep_research kwargs ignored under Parallel Task API: {used}. "
-                "The new backend is single-call; iteration knobs no longer apply.",
+                f"deep_research kwargs ignored: {used}. Both backends run a single "
+                "multi-source job; iteration knobs no longer apply.",
                 DeprecationWarning,
                 stacklevel=2,
             )
-        return await self._backend.deep_research(
-            question=question,
-            progress=self._emit_progress,
+        if processor is not None:
+            warnings.warn(
+                "processor is deprecated and Parallel-only; use effort ('medium' or 'high').",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if effort is not None and effort not in RESEARCH_EFFORTS:
+            raise ValueError(
+                f"effort must be one of {', '.join(RESEARCH_EFFORTS)} (got {effort!r})."
+            )
+        started = time.perf_counter()
+        normalized = question.strip()
+        spec = DeepResearchSpec(
+            question=normalized,
+            effort=effort,
             processor=processor,
             timeout_seconds=timeout_seconds,
             max_report_chars=max_report_chars,
         )
+        result = await self._backend.deep_research(spec, self._emit_progress)
+        meta = ResponseMeta(
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            request_ids=result.request_ids,
+            partial_failures=result.partial_failures,
+            backend=result.backend,
+            usage=result.usage,
+            estimated_cost_usd=result.estimated_cost_usd,
+        )
+        iterations = [
+            DeepResearchIteration(
+                iteration=1,
+                queries=[normalized],
+                results_count=len(result.sources),
+                continue_reason=result.backend,
+            )
+        ]
+        return DeepResearchResponse(
+            question=normalized,
+            answer_markdown=result.answer_markdown,
+            sources=result.sources,
+            iterations=iterations,
+            meta=meta,
+        ).model_dump()
 
 
 class ClaudeSynthesisPipeline:
