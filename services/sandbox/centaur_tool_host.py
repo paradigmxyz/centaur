@@ -41,12 +41,29 @@ def _v2_run_command(request: dict[str, Any]) -> list[str]:
     return ["centaur-tools", "run", str(request["tool"]), *argv]
 
 
+def _info_command(request: dict[str, Any]) -> list[str]:
+    """Inspect a CLI command without invoking its callback."""
+    command = request["command"]
+    if not isinstance(command, list) or not command:
+        raise TypeError("tool info command must be a non-empty array of strings")
+    for segment in command:
+        if not isinstance(segment, str):
+            raise TypeError("each tool info command segment must be a string")
+        if not segment.strip():
+            raise ValueError("tool info command segments must not be blank")
+        if "\0" in segment:
+            raise ValueError("tool info command segments must not contain NUL characters")
+    return ["centaur-tools", "info", str(request["tool"]), *command]
+
+
 def _command_for_request(request: dict[str, Any]) -> list[str]:
     # V1 requests predate the mode field and invoke Python client methods.
     mode = request.get("mode", "v1")
     match mode:
         case "v1":
             return _v1_call_command(request)
+        case "info":
+            return _info_command(request)
         case "v2":
             return _v2_run_command(request)
         case _:

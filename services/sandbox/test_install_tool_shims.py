@@ -312,6 +312,76 @@ class GeneratedShimTest(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("usage: centaur-tools", result.stderr)
 
+    def test_centaur_tools_info_caches_metadata_by_tool_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            fake_bin = root / "fake-bin"
+            project_dir = root / "demo"
+            bin_dir.mkdir()
+            fake_bin.mkdir()
+            project_dir.mkdir()
+            (project_dir / "pyproject.toml").write_text(
+                '[project]\nname = "demo"\n\n[project.scripts]\ndemo = "demo.cli:app"\n'
+            )
+            cli_path = project_dir / "cli.py"
+            cli_path.write_text("# version one\n")
+            index_path = bin_dir / ".centaur-tools.json"
+            index_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "demo",
+                            "project_dir": str(project_dir),
+                            "package": "demo",
+                            "entrypoint": "demo.cli:app",
+                            "client_module": "client.py",
+                        }
+                    ]
+                )
+            )
+            install_tool_shims._write_catalog(
+                bin_dir / "centaur-tools", index_path, ""
+            )
+
+            call_log = root / "calls.log"
+            fake_uvx = fake_bin / "uvx"
+            fake_uvx.write_text(
+                f"#!{sys.executable}\n"
+                "import json\n"
+                "import os\n"
+                "from pathlib import Path\n"
+                "path = Path(os.environ['CALL_LOG'])\n"
+                "with path.open('a') as output:\n"
+                "    output.write('called\\n')\n"
+                "print(json.dumps({'tool': 'demo', 'command': ['search'], 'signature': 'demo search'}))\n"
+            )
+            fake_uvx.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+            env["CALL_LOG"] = str(call_log)
+            env["CENTAUR_TOOL_ANALYTICS_LOG_PATH"] = "off"
+
+            command = [str(bin_dir / "centaur-tools"), "info", "demo", "search"]
+            first = subprocess.run(
+                command, check=False, env=env, text=True, capture_output=True
+            )
+            second = subprocess.run(
+                command, check=False, env=env, text=True, capture_output=True
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(json.loads(first.stdout)["signature"], "demo search")
+            self.assertEqual(second.stdout, first.stdout)
+            self.assertEqual(call_log.read_text().splitlines(), ["called"])
+
+            cli_path.write_text("# version two\n")
+            refreshed = subprocess.run(
+                command, check=False, env=env, text=True, capture_output=True
+            )
+            self.assertEqual(refreshed.returncode, 0, refreshed.stderr)
+            self.assertEqual(call_log.read_text().splitlines(), ["called", "called"])
+
     def test_call_runner_loads_hyphenated_tool_as_normalized_package(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -10,10 +10,11 @@ Use Centaur's MCP tools for actions and context exposed by the user's deployment
 ## Workflow
 
 1. When identity or authorization matters, call `centaur_whoami` before other Centaur tools.
-2. Choose the narrowest Centaur tool that satisfies the request.
-3. Each tool package accepts a `method` and an `arguments` object. If its methods or parameters are unclear, call that tool with `method: "help"` first.
-4. Treat the MCP tool description and help result as the current contract. Do not guess method names or parameters.
-5. Summarize consequential writes and return relevant identifiers or links.
+2. Use the `centaur` MCP tool to list or search the tool catalog when the correct tool is unclear.
+3. Before running an unfamiliar CLI command, call `centaur` with `{"command": ["info", "<tool>", "<command>"]}`. Add nested command segments as separate tokens. Treat the returned signature and parameter details as the current contract.
+4. Run the command with `{"command": ["run", "<tool>", "<argv>", "..."]}`. Pass every CLI argument as a separate token and do not guess command names or options.
+5. Use a legacy per-service MCP tool only when the `centaur` tool cannot complete the request.
+6. Summarize consequential writes and return relevant identifiers or links.
 
 Centaur authorizes calls using the signed-in principal's live roles and grants. Never request, paste, print, or store Centaur OAuth tokens.
 

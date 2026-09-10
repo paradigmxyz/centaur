@@ -306,7 +306,7 @@ fn mcp_initialize_result(params: &Value) -> Value {
         result["instructions"] = Value::String(
             concat!(
                 "Prefer the `centaur` tool for all Centaur tool discovery and execution. ",
-                "Use its `list`, `search`, and `run` commands instead of calling legacy ",
+                "Use its `list`, `search`, `info`, and `run` commands instead of calling legacy ",
                 "per-service MCP tools directly. Use a legacy per-service tool only when ",
                 "the `centaur` tool cannot complete the request."
             )
@@ -336,9 +336,11 @@ fn mcp_v2_tool() -> Value {
             "Commands:\n",
             "  [\"list\"]                          tools available under your Console policy\n",
             "  [\"search\", \"slack messages\"]      search names and descriptions, ranked\n",
-            "  [\"run\", \"slack\", \"--help\"]       show a tool's CLI help\n",
+            "  [\"info\", \"slack\", \"search\"]       inspect a CLI command's full signature\n",
+            "  [\"info\", \"gsuite\", \"gmail\", \"search\"] inspect a nested CLI command\n",
             "  [\"run\", \"<tool>\", \"<argv>\", ...] run a tool CLI in your sandbox\n\n",
-            "Use run <tool> --help to discover commands and options. Pass each argument ",
+            "Use info <tool> <command> to inspect command arguments and options without running ",
+            "the command. Pass nested command segments as separate tokens. Pass each run argument ",
             "as a separate token, preserving spaces within values. Arguments are passed ",
             "literally, without shell expansion, pipes, or redirection. Run returns stdout, ",
             "stderr, exit_status, and timed_out; nonzero exits and timeouts are tool errors.\n\n",
@@ -358,7 +360,7 @@ fn mcp_v2_tool() -> Value {
                     "minItems": 1,
                     "description": concat!(
                         "argv array. Each element is one token; do not pre-join with spaces. ",
-                        "Examples: [\"list\"] · [\"search\", \"slack messages\"] · [\"run\", \"slack\", \"--help\"]",
+                        "Examples: [\"list\"] · [\"search\", \"slack messages\"] · [\"info\", \"slack\", \"search\"] · [\"run\", \"slack\", \"search\", \"query\"]",
                     ),
                 },
             },
@@ -370,6 +372,7 @@ fn mcp_v2_tool() -> Value {
 enum CentaurMcpCommand {
     List,
     Search(String),
+    Info { tool: String, command: Vec<String> },
     Run { tool: String, argv: Vec<String> },
 }
 
@@ -387,6 +390,18 @@ fn parse_mcp_v2_command(arguments: Value) -> Result<CentaurMcpCommand, String> {
             }
             Ok(CentaurMcpCommand::Search(query.clone()))
         }
+        [verb, tool, command @ ..] if verb == "info" && !command.is_empty() => {
+            if tool.trim().is_empty() {
+                return Err("tool must not be blank".to_owned());
+            }
+            if command.iter().any(|segment| segment.trim().is_empty()) {
+                return Err("info command segments must not be blank".to_owned());
+            }
+            Ok(CentaurMcpCommand::Info {
+                tool: tool.clone(),
+                command: command.to_vec(),
+            })
+        }
         [verb, tool, argv @ ..] if verb == "run" => {
             if tool.trim().is_empty() {
                 return Err("tool must not be blank".to_owned());
@@ -398,8 +413,11 @@ fn parse_mcp_v2_command(arguments: Value) -> Result<CentaurMcpCommand, String> {
         }
         [verb, ..] if verb == "list" => Err("list takes no arguments".to_owned()),
         [verb, ..] if verb == "search" => Err("search takes exactly one query token".to_owned()),
+        [verb, ..] if verb == "info" => {
+            Err("info requires a tool name and command path".to_owned())
+        }
         [verb, ..] if verb == "run" => Err("run requires a tool name".to_owned()),
-        _ => Err("command must start with a supported verb: list, search, or run".to_owned()),
+        _ => Err("command must start with a supported verb: list, search, info, or run".to_owned()),
     }
 }
 
@@ -414,7 +432,7 @@ async fn mcp_v2_command_result(
             return Ok(McpToolCallOutcome {
                 result: mcp_text_result(
                     format!(
-                        "{error}. Use {{\"command\":[\"list\"]}}, {{\"command\":[\"search\",\"slack messages\"]}}, or {{\"command\":[\"run\",\"<tool>\",\"--help\"]}}."
+                        "{error}. Use {{\"command\":[\"list\"]}}, {{\"command\":[\"search\",\"slack messages\"]}}, {{\"command\":[\"info\",\"<tool>\",\"<command>\"]}}, or {{\"command\":[\"run\",\"<tool>\",\"<argv>\"]}}."
                     ),
                     true,
                 ),
@@ -432,6 +450,27 @@ async fn mcp_v2_command_result(
             record_mcp_tool_method(&Span::current(), "centaur", "search");
             let policy = mcp_tool_host_call_policy(state, principal).await?;
             mcp_v2_service_search_result(&parse_sandbox_tool_filter(policy.tool_filter()), &query)
+        }
+        CentaurMcpCommand::Info {
+            tool: tool_name,
+            command,
+        } => {
+            record_mcp_tool_method(&Span::current(), "centaur", "info");
+            let policy = mcp_tool_host_call_policy(state, principal).await?;
+            let filter = parse_sandbox_tool_filter(policy.tool_filter());
+            let Some(tool) = mcp_find_centaur_tool(&tool_name, &filter)? else {
+                return Ok(McpToolCallOutcome {
+                    result: mcp_text_result(
+                        format!(
+                            "Unknown or unavailable tool {tool_name}. Use {{\"command\":[\"list\"]}} to discover available tools."
+                        ),
+                        true,
+                    ),
+                    timed_out: false,
+                });
+            };
+            Span::current().record("tool.name", tool.name.as_str());
+            return run_mcp_v2_info(state.runtime()?, principal, &tool, command, policy).await;
         }
         CentaurMcpCommand::Run {
             tool: tool_name,
@@ -913,6 +952,24 @@ async fn run_mcp_v2_tool(
     mcp_v2_run_output_result(output)
 }
 
+async fn run_mcp_v2_info(
+    runtime: SessionRuntime,
+    principal: &McpPrincipal,
+    tool: &DiscoveredTool,
+    command: Vec<String>,
+    policy: ToolHostCallPolicy,
+) -> Result<McpToolCallOutcome, ApiError> {
+    let output = run_mcp_tool_host(
+        runtime,
+        principal,
+        tool,
+        ToolHostInvocation::Info { command },
+        policy,
+    )
+    .await?;
+    mcp_v2_info_output_result(output)
+}
+
 // Both MCP versions share principal-bound sandbox execution and tracing.
 async fn run_mcp_tool_host(
     runtime: SessionRuntime,
@@ -1036,6 +1093,56 @@ fn mcp_v2_run_output_result(output: ToolHostCallOutput) -> Result<McpToolCallOut
     Ok(McpToolCallOutcome {
         result,
         timed_out: output.timed_out,
+    })
+}
+
+fn mcp_v2_info_output_result(output: ToolHostCallOutput) -> Result<McpToolCallOutcome, ApiError> {
+    if output.timed_out || output.exit_status != Some(0) {
+        return mcp_v2_run_output_result(output);
+    }
+    let content = match serde_json::from_str::<Value>(output.stdout.trim()) {
+        Ok(content) if content.is_object() => content,
+        Ok(_) => {
+            return Ok(McpToolCallOutcome {
+                result: mcp_text_result(
+                    format!(
+                        "centaur tool info returned non-object metadata in {}",
+                        tool_host_error_context(&output)
+                    ),
+                    true,
+                ),
+                timed_out: false,
+            });
+        }
+        Err(error) => {
+            return Ok(McpToolCallOutcome {
+                result: mcp_text_result(
+                    format!(
+                        "centaur tool info returned invalid metadata in {}: {error}",
+                        tool_host_error_context(&output)
+                    ),
+                    true,
+                ),
+                timed_out: false,
+            });
+        }
+    };
+    let Some(text) = content.get("text").and_then(Value::as_str) else {
+        return Ok(McpToolCallOutcome {
+            result: mcp_text_result(
+                format!(
+                    "centaur tool info returned metadata without text in {}",
+                    tool_host_error_context(&output)
+                ),
+                true,
+            ),
+            timed_out: false,
+        });
+    };
+    let result = mcp_text_result(text.to_owned(), false);
+    Ok(McpToolCallOutcome {
+        result,
+        timed_out: false,
     })
 }
 
@@ -2199,6 +2306,11 @@ def search(query, limit=20):
             json!({"command": ["search", "slack", "messages"]}),
             json!({"command": ["search", ""]}),
             json!({"command": ["search", " \n\t "]}),
+            json!({"command": ["info"]}),
+            json!({"command": ["info", "slack"]}),
+            json!({"command": ["info", "", "search"]}),
+            json!({"command": ["info", "slack", ""]}),
+            json!({"command": ["info", "slack", " \t"]}),
             json!({"command": ["run"]}),
             json!({"command": ["run", " \t"]}),
             json!({"command": ["run", "slack", "nul\0byte"]}),
@@ -2234,6 +2346,21 @@ def search(query, limit=20):
             assert_eq!(
                 parse_mcp_v2_command(json!({"command": ["search", query]})).unwrap(),
                 CentaurMcpCommand::Search(query.to_owned()),
+            );
+        }
+
+        for (tool, command) in [
+            ("slack", vec!["search"]),
+            ("gsuite", vec!["gmail", "search"]),
+        ] {
+            let mut argv = vec!["info", tool];
+            argv.extend(&command);
+            assert_eq!(
+                parse_mcp_v2_command(json!({"command": argv})).unwrap(),
+                CentaurMcpCommand::Info {
+                    tool: tool.to_owned(),
+                    command: command.into_iter().map(str::to_owned).collect(),
+                },
             );
         }
     }
@@ -2298,6 +2425,68 @@ def search(query, limit=20):
                 expected
             );
         }
+    }
+
+    #[test]
+    fn mcp_cli_info_returns_compact_text() {
+        let metadata = json!({
+            "tool": "slack",
+            "command": ["search"],
+            "signature": "slack search [OPTIONS] QUERY",
+            "help": "Search Slack messages.",
+            "text": "slack search QUERY [--limit INT]\n\nSearch Slack messages.\n\nQUERY STRING (required): Search query\n-n, --limit INT (default: 20): Maximum results",
+            "parameters": [{
+                "name": "query",
+                "kind": "argument",
+                "type": "STRING",
+                "required": true,
+                "default": null,
+            }],
+        });
+        let outcome = mcp_v2_info_output_result(ToolHostCallOutput {
+            request_id: "request".to_owned(),
+            execution_id: "execution".to_owned(),
+            sandbox_id: "sandbox".to_owned(),
+            stdout: serde_json::to_string(&metadata).unwrap(),
+            stderr: String::new(),
+            exit_status: Some(0),
+            timed_out: false,
+        })
+        .unwrap();
+
+        assert!(!mcp_result_is_error(&outcome.result));
+        assert_eq!(outcome.result["content"][0]["text"], metadata["text"]);
+        assert!(outcome.result.get("structuredContent").is_none());
+
+        for stdout in ["not json", "[]", "{}"] {
+            let invalid = mcp_v2_info_output_result(ToolHostCallOutput {
+                request_id: "request".to_owned(),
+                execution_id: "execution".to_owned(),
+                sandbox_id: "sandbox".to_owned(),
+                stdout: stdout.to_owned(),
+                stderr: String::new(),
+                exit_status: Some(0),
+                timed_out: false,
+            })
+            .unwrap();
+            assert!(mcp_result_is_error(&invalid.result));
+        }
+
+        let failure = mcp_v2_info_output_result(ToolHostCallOutput {
+            request_id: "request".to_owned(),
+            execution_id: "execution".to_owned(),
+            sandbox_id: "sandbox".to_owned(),
+            stdout: String::new(),
+            stderr: "unknown command".to_owned(),
+            exit_status: Some(1),
+            timed_out: false,
+        })
+        .unwrap();
+        assert!(mcp_result_is_error(&failure.result));
+        assert_eq!(
+            failure.result["structuredContent"]["stderr"],
+            "unknown command"
+        );
     }
 
     #[test]

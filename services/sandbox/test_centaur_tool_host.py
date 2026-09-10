@@ -48,6 +48,39 @@ class ToolHostTest(unittest.TestCase):
             "    else:\n"
             "        print(json.dumps({'argv': args, 'principal': os.environ.get('CENTAUR_MCP_PRINCIPAL_ID')}))\n"
         )
+        metadata_project = cls.root / "metadata-demo"
+        metadata_package = metadata_project / "metadata_demo"
+        metadata_package.mkdir(parents=True)
+        (metadata_package / "__init__.py").write_text("")
+        (metadata_project / "pyproject.toml").write_text(
+            '[project]\nname = "centaur-host-test-metadata"\nversion = "0.0.1"\n'
+            'dependencies = ["typer>=0.12.0"]\n'
+            '[project.scripts]\nmetadata-demo = "metadata_demo.cli:app"\n'
+            'single-demo = "metadata_demo.single:app"\n'
+            '[build-system]\nrequires = ["hatchling"]\n'
+            'build-backend = "hatchling.build"\n'
+            '[tool.hatch.build.targets.wheel]\npackages = ["metadata_demo"]\n'
+        )
+        (metadata_package / "cli.py").write_text(
+            "import typer\n"
+            "app = typer.Typer(help='Metadata test CLI')\n"
+            "nested = typer.Typer(help='Nested commands')\n"
+            "app.add_typer(nested, name='nested')\n"
+            "@app.command('search')\n"
+            "def search(query: str = typer.Argument(..., help='Search query'), limit: int = typer.Option(20, '--limit', '-n', help='Maximum results'), json_output: bool = typer.Option(False, '--json/--no-json', '-j', help='Emit JSON')):\n"
+            "    '''Search indexed metadata.\n\nLong implementation notes are omitted.'''\n"
+            "    raise RuntimeError('metadata inspection invoked the command callback')\n"
+            "@nested.command('read')\n"
+            "def read(document_id: str = typer.Argument(..., help='Document identifier')):\n"
+            "    raise RuntimeError('metadata inspection invoked the nested callback')\n"
+        )
+        (metadata_package / "single.py").write_text(
+            "import typer\n"
+            "app = typer.Typer(help='Single-command CLI')\n"
+            "@app.command('fetch')\n"
+            "def fetch(url: str = typer.Argument(..., help='URL to fetch')):\n"
+            "    raise RuntimeError('metadata inspection invoked the single callback')\n"
+        )
         index = cls.bin_dir / ".centaur-tools.json"
         index.write_text(
             json.dumps(
@@ -58,7 +91,21 @@ class ToolHostTest(unittest.TestCase):
                         "package": "centaur-host-test-demo",
                         "entrypoint": "demo.cli:main",
                         "client_module": "client.py",
-                    }
+                    },
+                    {
+                        "name": "metadata-demo",
+                        "project_dir": str(metadata_project),
+                        "package": "centaur-host-test-metadata",
+                        "entrypoint": "metadata_demo.cli:app",
+                        "client_module": "client.py",
+                    },
+                    {
+                        "name": "single-demo",
+                        "project_dir": str(metadata_project),
+                        "package": "centaur-host-test-metadata",
+                        "entrypoint": "metadata_demo.single:app",
+                        "client_module": "client.py",
+                    },
                 ]
             )
         )
@@ -84,6 +131,24 @@ class ToolHostTest(unittest.TestCase):
         if install.returncode != 0:
             raise RuntimeError(
                 f"could not install test CLI:\n{install.stdout}{install.stderr}"
+            )
+        metadata_install = subprocess.run(
+            [
+                str(cls.bin_dir / "centaur-tools"),
+                "info",
+                "metadata-demo",
+                "search",
+            ],
+            env=cls.env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if metadata_install.returncode != 0:
+            raise RuntimeError(
+                "could not inspect test CLI metadata:\n"
+                f"{metadata_install.stdout}{metadata_install.stderr}"
             )
 
     def requests(self, *requests: dict) -> list[dict]:
@@ -114,6 +179,15 @@ class ToolHostTest(unittest.TestCase):
 
     def run_request(self, argv: list[str], **kwargs) -> dict:
         return {"id": "test", "mode": "v2", "tool": "demo", "argv": argv, **kwargs}
+
+    def info_request(self, command: list[str], **kwargs) -> dict:
+        return {
+            "id": "test",
+            "mode": "info",
+            "tool": "metadata-demo",
+            "command": command,
+            **kwargs,
+        }
 
     def test_cli_preserves_literal_arguments_and_principal(self) -> None:
         sentinel = self.root / "shell-ran"
@@ -159,6 +233,69 @@ class ToolHostTest(unittest.TestCase):
         self.assertIn("started\n", response["stdout"])
         self.assertIn("timed out after 1s", response["stderr"])
 
+    def test_cli_info_reads_typer_metadata_without_invoking_callbacks(self) -> None:
+        search, nested = self.requests(
+            self.info_request(["search"]),
+            self.info_request(["nested", "read"]),
+        )
+        self.assertEqual(search["status"], 0, search["stderr"])
+        metadata = json.loads(search["stdout"])
+        self.assertEqual(metadata["tool"], "metadata-demo")
+        self.assertEqual(metadata["command"], ["search"])
+        self.assertEqual(
+            metadata["signature"],
+            "metadata-demo search QUERY [--limit INT] [--json/--no-json]",
+        )
+        self.assertEqual(metadata["usage"], "metadata-demo search [OPTIONS] query")
+        self.assertEqual(
+            metadata["help"],
+            "Search indexed metadata.\n\nLong implementation notes are omitted.",
+        )
+        by_name = {parameter["name"]: parameter for parameter in metadata["parameters"]}
+        self.assertEqual(by_name["query"]["kind"], "argument")
+        self.assertTrue(by_name["query"]["required"])
+        self.assertEqual(by_name["limit"]["flags"], ["--limit", "-n"])
+        self.assertEqual(by_name["limit"]["default"], 20)
+        self.assertEqual(by_name["json_output"]["flags"], ["--json", "-j"])
+        self.assertEqual(
+            by_name["json_output"]["secondary_flags"], ["--no-json"]
+        )
+        self.assertTrue(by_name["json_output"]["is_flag"])
+        self.assertEqual(
+            metadata["text"],
+            "metadata-demo search QUERY [--limit INT] [--json/--no-json]\n\n"
+            "Search indexed metadata.\n\n"
+            "QUERY STRING (required): Search query\n"
+            "-n, --limit INT (default: 20): Maximum results\n"
+            "-j, --json/--no-json: Emit JSON",
+        )
+
+        self.assertEqual(nested["status"], 0, nested["stderr"])
+        nested_metadata = json.loads(nested["stdout"])
+        self.assertEqual(nested_metadata["command"], ["nested", "read"])
+        self.assertEqual(
+            nested_metadata["signature"],
+            "metadata-demo nested read DOCUMENT_ID",
+        )
+
+    def test_cli_info_rejects_unknown_commands_and_recovers(self) -> None:
+        failure, recovery = self.requests(
+            self.info_request(["missing"]),
+            self.info_request(["search"]),
+        )
+        self.assertEqual(failure["status"], 1)
+        self.assertIn("unknown command path metadata-demo missing", failure["stderr"])
+        self.assertEqual(recovery["status"], 0, recovery["stderr"])
+
+    def test_cli_info_handles_typer_single_command_apps(self) -> None:
+        (response,) = self.requests(
+            self.info_request(["fetch"], tool="single-demo")
+        )
+        self.assertEqual(response["status"], 0, response["stderr"])
+        metadata = json.loads(response["stdout"])
+        self.assertEqual(metadata["command"], ["fetch"])
+        self.assertEqual(metadata["signature"], "single-demo URL")
+
     def test_catalog_rejects_unknown_tools_even_when_executable_exists(self) -> None:
         (response,) = self.requests(self.run_request([], tool="python3"))
         self.assertNotEqual(response["status"], 0)
@@ -169,6 +306,10 @@ class ToolHostTest(unittest.TestCase):
             self.run_request("--help"),
             self.run_request([1]),
             self.run_request(["nul\0byte"]),
+            self.info_request([]),
+            self.info_request([""]),
+            self.info_request([1]),
+            self.info_request(["nul\0byte"]),
             self.run_request([], mode="unknown"),
         ]:
             with self.subTest(request=invalid):

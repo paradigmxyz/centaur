@@ -9,12 +9,15 @@ Deployments with `CENTAUR_MCP_V2_ENABLED=true` expose the `centaur` MCP tool. Pa
 ```json
 {"command": ["list"]}
 {"command": ["search", "slack messages"]}
-{"command": ["run", "slack", "--help"]}
+{"command": ["info", "slack", "search"]}
+{"command": ["run", "slack", "search", "incident response", "--json"]}
 ```
 
-`centaur run <tool> <argv>` runs the tool's CLI in your principal's sandbox using current Console policy. Use `--help` to find its commands and options, then pass each argument as a separate array element. Spaces within values are preserved. Shell expansion, pipes, and redirection are not interpreted.
+`centaur info <tool> <command> [subcommand...]` returns a compact CLI signature, summary, and parameter details from Typer metadata without invoking the command callback. It omits redundant structured metadata to keep agent context small. Use it before `run` when a command's arguments are unclear. Pass nested command segments separately, for example `{"command": ["info", "gsuite", "gmail", "search"]}`.
 
-The result includes `stdout`, `stderr`, `exit_status`, and `timed_out` in both text and structured content. Plain-text help and JSON output are supported. Nonzero exits and timeouts set MCP `isError`. Calls have a 120-second execution timeout. Existing v1 tools with `method` and `arguments` remain available.
+`centaur run <tool> <argv>` runs the tool's CLI in your principal's sandbox using current Console policy. Pass each argument as a separate array element. Spaces within values are preserved. Shell expansion, pipes, and redirection are not interpreted.
+
+The `run` result includes `stdout`, `stderr`, `exit_status`, and `timed_out` in both text and structured content. Plain-text and JSON output are supported. Nonzero exits and timeouts set MCP `isError`. Calls have a 120-second execution timeout. Existing v1 tools with `method` and `arguments` remain available.
 
 ## Codex
 
