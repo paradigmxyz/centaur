@@ -1048,12 +1048,6 @@ impl SessionRuntime {
                 arguments,
             },
             ToolHostInvocation::Info { command } => {
-                if command.is_empty() {
-                    return Err(SessionRuntimeError::BadRequest(
-                        "tool host info command is required".to_owned(),
-                    )
-                    .into());
-                }
                 if command
                     .iter()
                     .any(|segment| segment.trim().is_empty() || segment.contains('\0'))
@@ -7593,10 +7587,8 @@ mod tests {
     fn tool_host_request_serializes_cli_info_command() {
         let request = ToolHostRequest {
             id: "request".to_owned(),
-            tool: "gsuite".to_owned(),
-            invocation: ToolHostInvocation::Info {
-                command: vec!["gmail".to_owned(), "search".to_owned()],
-            },
+            tool: "eventregistry".to_owned(),
+            invocation: ToolHostInvocation::Info { command: vec![] },
             principal_id: "prn_test".to_owned(),
             token_id: None,
             timeout_seconds: 120,
@@ -7605,9 +7597,9 @@ mod tests {
             serde_json::to_value(request).unwrap(),
             serde_json::json!({
                 "id": "request",
-                "tool": "gsuite",
+                "tool": "eventregistry",
                 "mode": "info",
-                "command": ["gmail", "search"],
+                "command": [],
                 "principal_id": "prn_test",
                 "timeout_seconds": 120,
             })

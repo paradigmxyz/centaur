@@ -62,12 +62,17 @@ class ToolHostTest(unittest.TestCase):
             '[tool.hatch.build.targets.wheel]\npackages = ["metadata_demo"]\n'
         )
         (metadata_package / "cli.py").write_text(
+            "from enum import Enum\n"
+            "from pathlib import Path\n"
             "import typer\n"
             "app = typer.Typer(help='Metadata test CLI')\n"
             "nested = typer.Typer(help='Nested commands')\n"
             "app.add_typer(nested, name='nested')\n"
+            "class Order(str, Enum):\n"
+            "    relevance = 'relevance'\n"
+            "    date = 'date'\n"
             "@app.command('search')\n"
-            "def search(query: str = typer.Argument(..., help='Search query'), limit: int = typer.Option(20, '--limit', '-n', help='Maximum results'), json_output: bool = typer.Option(False, '--json/--no-json', '-j', help='Emit JSON')):\n"
+            "def search(query: str = typer.Argument(..., help='Search query'), output: Path = typer.Option(Path('results.json'), '--output', '-o', help='Output path'), limit: int = typer.Option(20, '--limit', '-n', min=1, max=100, help='Maximum results'), order: Order = typer.Option(Order.relevance, '--order', help='Sort order'), json_output: bool = typer.Option(False, '--json/--no-json', '-j', help='Emit JSON'), deprecated: str = typer.Option('', '--deprecated', hidden=True)):\n"
             "    '''Search indexed metadata.\n\nLong implementation notes are omitted.'''\n"
             "    raise RuntimeError('metadata inspection invoked the command callback')\n"
             "@nested.command('read')\n"
@@ -239,62 +244,53 @@ class ToolHostTest(unittest.TestCase):
             self.info_request(["nested", "read"]),
         )
         self.assertEqual(search["status"], 0, search["stderr"])
-        metadata = json.loads(search["stdout"])
-        self.assertEqual(metadata["tool"], "metadata-demo")
-        self.assertEqual(metadata["command"], ["search"])
         self.assertEqual(
-            metadata["signature"],
-            "metadata-demo search QUERY [--limit INT] [--json/--no-json]",
-        )
-        self.assertEqual(metadata["usage"], "metadata-demo search [OPTIONS] query")
-        self.assertEqual(
-            metadata["help"],
-            "Search indexed metadata.\n\nLong implementation notes are omitted.",
-        )
-        by_name = {parameter["name"]: parameter for parameter in metadata["parameters"]}
-        self.assertEqual(by_name["query"]["kind"], "argument")
-        self.assertTrue(by_name["query"]["required"])
-        self.assertEqual(by_name["limit"]["flags"], ["--limit", "-n"])
-        self.assertEqual(by_name["limit"]["default"], 20)
-        self.assertEqual(by_name["json_output"]["flags"], ["--json", "-j"])
-        self.assertEqual(
-            by_name["json_output"]["secondary_flags"], ["--no-json"]
-        )
-        self.assertTrue(by_name["json_output"]["is_flag"])
-        self.assertEqual(
-            metadata["text"],
-            "metadata-demo search QUERY [--limit INT] [--json/--no-json]\n\n"
+            search["stdout"],
+            "metadata-demo search QUERY [--output PATH] [--limit INT RANGE] "
+            "[--order CHOICE] [--json/--no-json]\n\n"
             "Search indexed metadata.\n\n"
             "QUERY STRING (required): Search query\n"
-            "-n, --limit INT (default: 20): Maximum results\n"
-            "-j, --json/--no-json: Emit JSON",
+            "-o, --output PATH (default: \"results.json\"): Output path\n"
+            "-n, --limit INT RANGE (default: 20, >=1, <=100): Maximum results\n"
+            "--order CHOICE (default: \"relevance\", choices: relevance|date): Sort order\n"
+            "-j, --json/--no-json: Emit JSON\n",
         )
+        self.assertNotIn("deprecated", search["stdout"])
+        self.assertNotIn("<typer.", search["stdout"])
+        self.assertNotIn("<IntRange", search["stdout"])
+        self.assertNotIn("Choice([", search["stdout"])
 
         self.assertEqual(nested["status"], 0, nested["stderr"])
-        nested_metadata = json.loads(nested["stdout"])
-        self.assertEqual(nested_metadata["command"], ["nested", "read"])
         self.assertEqual(
-            nested_metadata["signature"],
-            "metadata-demo nested read DOCUMENT_ID",
+            nested["stdout"],
+            "metadata-demo nested read DOCUMENT_ID\n\n"
+            "DOCUMENT_ID STRING (required): Document identifier\n",
         )
 
     def test_cli_info_rejects_unknown_commands_and_recovers(self) -> None:
-        failure, recovery = self.requests(
+        missing_path, failure, recovery = self.requests(
+            self.info_request([]),
             self.info_request(["missing"]),
             self.info_request(["search"]),
         )
+        self.assertEqual(missing_path["status"], 1)
+        self.assertIn("command path required for metadata-demo", missing_path["stderr"])
         self.assertEqual(failure["status"], 1)
         self.assertIn("unknown command path metadata-demo missing", failure["stderr"])
         self.assertEqual(recovery["status"], 0, recovery["stderr"])
 
     def test_cli_info_handles_typer_single_command_apps(self) -> None:
-        (response,) = self.requests(
-            self.info_request(["fetch"], tool="single-demo")
+        without_command, with_ignored_command = self.requests(
+            self.info_request([], tool="single-demo"),
+            self.info_request(["anything"], tool="single-demo"),
         )
-        self.assertEqual(response["status"], 0, response["stderr"])
-        metadata = json.loads(response["stdout"])
-        self.assertEqual(metadata["command"], ["fetch"])
-        self.assertEqual(metadata["signature"], "single-demo URL")
+        expected = (
+            "single-demo URL\n\nURL STRING (required): URL to fetch\n"
+        )
+        self.assertEqual(without_command["status"], 0, without_command["stderr"])
+        self.assertEqual(without_command["stdout"], expected)
+        self.assertEqual(with_ignored_command["status"], 0, with_ignored_command["stderr"])
+        self.assertEqual(with_ignored_command["stdout"], expected)
 
     def test_catalog_rejects_unknown_tools_even_when_executable_exists(self) -> None:
         (response,) = self.requests(self.run_request([], tool="python3"))
@@ -306,7 +302,6 @@ class ToolHostTest(unittest.TestCase):
             self.run_request("--help"),
             self.run_request([1]),
             self.run_request(["nul\0byte"]),
-            self.info_request([]),
             self.info_request([""]),
             self.info_request([1]),
             self.info_request(["nul\0byte"]),

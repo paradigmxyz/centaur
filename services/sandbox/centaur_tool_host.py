@@ -44,8 +44,8 @@ def _v2_run_command(request: dict[str, Any]) -> list[str]:
 def _info_command(request: dict[str, Any]) -> list[str]:
     """Inspect a CLI command without invoking its callback."""
     command = request["command"]
-    if not isinstance(command, list) or not command:
-        raise TypeError("tool info command must be a non-empty array of strings")
+    if not isinstance(command, list):
+        raise TypeError("tool info command must be an array of strings")
     for segment in command:
         if not isinstance(segment, str):
             raise TypeError("each tool info command segment must be a string")

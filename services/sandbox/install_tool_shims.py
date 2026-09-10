@@ -34,9 +34,11 @@ from contextlib import redirect_stdout
 import typer
 
 
-def json_value(value):
+def display_value(value):
+    if hasattr(value, "value"):
+        value = value.value
     if callable(value):
-        return getattr(value, "__qualname__", getattr(value, "__name__", str(value)))
+        return getattr(value, "__qualname__", getattr(value, "__name__", type(value).__name__))
     try:
         json.dumps(value)
     except (TypeError, ValueError):
@@ -44,100 +46,73 @@ def json_value(value):
     return value
 
 
-def parameter_metadata(parameter):
-    kind = getattr(parameter, "param_type_name", "parameter")
-    metadata = {
-        "name": parameter.name,
-        "kind": kind,
-        "type": str(parameter.type),
-        "required": bool(parameter.required),
-        "default": json_value(parameter.default),
-        "help": getattr(parameter, "help", None),
-        "metavar": getattr(parameter, "metavar", None),
-        "nargs": getattr(parameter, "nargs", 1),
-        "multiple": bool(getattr(parameter, "multiple", False)),
-    }
-    if kind == "option":
-        metadata.update(
-            {
-                "flags": list(getattr(parameter, "opts", ())),
-                "secondary_flags": list(getattr(parameter, "secondary_opts", ())),
-                "is_flag": bool(getattr(parameter, "is_flag", False)),
-                "count": bool(getattr(parameter, "count", False)),
-            }
-        )
-    choices = getattr(parameter.type, "choices", None)
-    if choices is not None:
-        metadata["choices"] = [json_value(choice) for choice in choices]
-    return metadata
-
-
-def parameter_signature(parameter):
-    kind = getattr(parameter, "param_type_name", "parameter")
-    if kind == "option":
-        primary_flags = list(getattr(parameter, "opts", ()))
-        secondary_flags = list(getattr(parameter, "secondary_opts", ()))
-        token = next(
-            (flag for flag in primary_flags if flag.startswith("--")),
-            (primary_flags or secondary_flags or [str(parameter.name)])[0],
-        )
-        if secondary_flags:
-            token = "/".join([token, *secondary_flags])
-        if not getattr(parameter, "is_flag", False) and not getattr(
-            parameter, "count", False
-        ):
-            metavar = getattr(parameter, "metavar", None) or str(parameter.type)
-            token = f"{token} {metavar}"
-    else:
-        token = getattr(parameter, "metavar", None) or str(parameter.name).upper()
-    token = str(token).replace("{", "").replace("}", "")
-    if getattr(parameter, "multiple", False) or getattr(parameter, "nargs", 1) != 1:
-        token = f"{token}..."
-    if not parameter.required:
-        token = f"[{token}]"
-    return token
-
-
 def clean_text(value):
     return " ".join(str(value or "").split())
 
 
-def parameter_label(parameter):
+def parameter_type_name(parameter):
+    explicit = clean_text(getattr(parameter, "metavar", None))
+    if explicit:
+        return explicit.replace("{", "").replace("}", "")
+    type_name = clean_text(getattr(parameter.type, "name", None))
+    if not type_name:
+        type_name = type(parameter.type).__name__
+    aliases = {
+        "str": "STRING",
+        "string": "STRING",
+        "text": "STRING",
+        "int": "INT",
+        "integer": "INT",
+        "bool": "BOOL",
+        "boolean": "BOOL",
+        "filename": "FILE",
+    }
+    return aliases.get(type_name.lower(), type_name.upper())
+
+
+def parameter_rendering(parameter):
     kind = getattr(parameter, "param_type_name", "parameter")
     if kind == "option":
         primary_flags = sorted(
             getattr(parameter, "opts", ()), key=lambda flag: (flag.startswith("--"), flag)
         )
         secondary_flags = list(getattr(parameter, "secondary_opts", ()))
+        canonical = next(
+            (flag for flag in primary_flags if flag.startswith("--")),
+            (primary_flags or secondary_flags or [str(parameter.name)])[0],
+        )
         if secondary_flags:
-            canonical = next(
-                (flag for flag in primary_flags if flag.startswith("--")),
-                primary_flags[0],
-            )
-            paired = "/".join([canonical, *secondary_flags])
+            signature = "/".join([canonical, *secondary_flags])
             aliases = [flag for flag in primary_flags if flag != canonical]
-            label = ", ".join([*aliases, paired])
+            label = ", ".join([*aliases, signature])
         else:
+            signature = canonical
             label = ", ".join(primary_flags) or str(parameter.name)
         if not getattr(parameter, "is_flag", False) and not getattr(
             parameter, "count", False
         ):
-            metavar = getattr(parameter, "metavar", None) or str(parameter.type)
-            label = f"{label} {metavar}"
+            type_name = parameter_type_name(parameter)
+            signature = f"{signature} {type_name}"
+            label = f"{label} {type_name}"
     else:
-        metavar = getattr(parameter, "metavar", None) or str(parameter.name).upper()
-        label = f"{metavar} {parameter.type}"
-    label = str(label).replace("{", "").replace("}", "")
+        signature = clean_text(getattr(parameter, "metavar", None)) or str(
+            parameter.name
+        ).upper()
+        signature = signature.replace("{", "").replace("}", "")
+        label = f"{signature} {parameter_type_name(parameter)}"
     if getattr(parameter, "multiple", False) or getattr(parameter, "nargs", 1) != 1:
+        signature = f"{signature}..."
         label = f"{label}..."
-    return label
+    if not parameter.required:
+        signature = f"[{signature}]"
+    return signature, label
 
 
 def parameter_details(parameter):
     details = []
     if parameter.required:
         details.append("required")
-    default = json_value(parameter.default)
+    default = display_value(parameter.default)
     has_meaningful_default = (
         default is not None
         and default is not False
@@ -151,20 +126,30 @@ def parameter_details(parameter):
         details.append("repeatable")
     choices = getattr(parameter.type, "choices", None)
     if choices is not None:
-        details.append("choices: " + "|".join(str(choice) for choice in choices))
+        details.append(
+            "choices: " + "|".join(str(display_value(choice)) for choice in choices)
+        )
+    minimum = getattr(parameter.type, "min", None)
+    maximum = getattr(parameter.type, "max", None)
+    if minimum is not None:
+        details.append(f"{'>' if getattr(parameter.type, 'min_open', False) else '>='}{minimum}")
+    if maximum is not None:
+        details.append(f"{'<' if getattr(parameter.type, 'max_open', False) else '<='}{maximum}")
     return ", ".join(details)
 
 
-def render_info(metadata, parameters):
-    lines = [metadata["signature"]]
-    help_text = metadata.get("help") or ""
+def render_info(tool_name, invocation_path, command, parameters):
+    rendered = [parameter_rendering(parameter) for parameter in parameters]
+    lines = [
+        " ".join([tool_name, *invocation_path, *(signature for signature, _ in rendered)])
+    ]
+    help_text = command.help or ""
     summary = clean_text(help_text.split("\n\n", 1)[0])
     if summary:
         lines.extend(["", summary])
     if parameters:
         lines.append("")
-    for parameter in parameters:
-        label = parameter_label(parameter)
+    for parameter, (_, label) in zip(parameters, rendered, strict=True):
         details = parameter_details(parameter)
         if details:
             label = f"{label} ({details})"
@@ -173,13 +158,11 @@ def render_info(metadata, parameters):
     return "\n".join(lines)
 
 
-def command_context(command, info_name, parent=None):
-    return command.context_class(command, info_name=info_name, parent=parent)
-
-
-def is_generated_completion_option(parameter):
+def is_visible_parameter(parameter):
+    if getattr(parameter, "hidden", False):
+        return False
     flags = set(getattr(parameter, "opts", ()))
-    return bool(flags & {"--install-completion", "--show-completion"})
+    return not bool(flags & {"--install-completion", "--show-completion"})
 
 
 def inspect_command(entrypoint, tool_name, command_path):
@@ -191,16 +174,20 @@ def inspect_command(entrypoint, tool_name, command_path):
         target = getattr(target, attribute)
 
     command = typer.main.get_command(target)
-    context = command_context(command, tool_name)
     root_commands = getattr(command, "commands", None)
     if not isinstance(root_commands, Mapping):
-        if command_path != [command.name]:
+        if len(command_path) > 1:
             joined = " ".join(command_path)
             raise RuntimeError(
                 f"unknown command path {tool_name} {joined}; available commands: {command.name}"
             )
         invocation_path = []
     else:
+        if not command_path:
+            available = ", ".join(sorted(root_commands)) or "none"
+            raise RuntimeError(
+                f"command path required for {tool_name}; available commands: {available}"
+            )
         invocation_path = command_path
         for segment in command_path:
             commands = getattr(command, "commands", None)
@@ -211,45 +198,22 @@ def inspect_command(entrypoint, tool_name, command_path):
                     f"unknown command path {tool_name} {joined}; available commands: {available}"
                 )
             command = commands[segment]
-            context = command_context(command, segment, context)
 
-    usage = command.get_usage(context).strip()
-    if usage.startswith("Usage:"):
-        usage = usage.removeprefix("Usage:").strip()
-    # Typer marks argument metavars with Rich braces before rendering.
-    usage = usage.replace("{", "").replace("}", "")
     parameters = [
         parameter
         for parameter in command.params
-        if not is_generated_completion_option(parameter)
+        if is_visible_parameter(parameter)
     ]
-    metadata = {
-        "tool": tool_name,
-        "command": command_path,
-        "signature": " ".join(
-            [tool_name, *invocation_path, *(parameter_signature(item) for item in parameters)]
-        ),
-        "usage": usage,
-        "help": command.help,
-        "parameters": [parameter_metadata(parameter) for parameter in parameters],
-    }
-    metadata["text"] = render_info(metadata, parameters)
-    return metadata
+    return render_info(tool_name, invocation_path, command, parameters)
 
 
 try:
     captured_stdout = io.StringIO()
     with redirect_stdout(captured_stdout):
-        metadata = inspect_command(sys.argv[1], sys.argv[2], json.loads(sys.argv[3]))
+        text = inspect_command(sys.argv[1], sys.argv[2], json.loads(sys.argv[3]))
     if captured_stdout.getvalue():
         print(captured_stdout.getvalue(), file=sys.stderr, end="")
-    print(
-        json.dumps(
-            metadata,
-            separators=(",", ":"),
-            default=str,
-        )
-    )
+    print(text)
 except Exception as exc:
     print(f"could not inspect tool command: {exc}", file=sys.stderr)
     raise SystemExit(1) from exc
@@ -715,7 +679,7 @@ def load():
 
 
 def usage():
-    print("usage: centaur-tools [list|json|refresh|which <name>|info <name> <command> [subcommand...]|run <name> [args...]|call <name> <method> [json]]", file=sys.stderr)
+    print("usage: centaur-tools [list|json|refresh|which <name>|info <name> [command [subcommand...]]|run <name> [args...]|call <name> <method> [json]]", file=sys.stderr)
     return 2
 
 
@@ -899,42 +863,52 @@ def emit_tool_call_event(event, tool, method, tool_args=None, started_at=None, r
         pass
 
 
-def run_tool(tool, args):
-    project_dir = Path(tool["project_dir"])
+def recorded_tool_call(tool, method, invoke, tool_args=None):
     started_at = time.monotonic()
-    emit_tool_call_event("tool_call_started", tool, "cli", tool_args=args)
+    emit_tool_call_event("tool_call_started", tool, method, tool_args=tool_args)
     try:
-        returncode = subprocess.call(
-            ["uvx", "--from", str(project_dir), tool["name"], *args],
-            env=tool_env(),
-        )
+        result = invoke()
     except Exception:
         emit_tool_call_event(
             "tool_call_completed",
             tool,
-            "cli",
-            tool_args=args,
+            method,
+            tool_args=tool_args,
             started_at=started_at,
             returncode=1,
         )
         raise
+    returncode = result if isinstance(result, int) else result.returncode
     emit_tool_call_event(
         "tool_call_completed",
         tool,
-        "cli",
-        tool_args=args,
+        method,
+        tool_args=tool_args,
         started_at=started_at,
         returncode=returncode,
     )
-    return returncode
+    return result
+
+
+def run_tool(tool, args):
+    project_dir = Path(tool["project_dir"])
+    return recorded_tool_call(
+        tool,
+        "cli",
+        lambda: subprocess.call(
+            ["uvx", "--from", str(project_dir), tool["name"], *args],
+            env=tool_env(),
+        ),
+        tool_args=args,
+    )
 
 
 def info_tool(tool, command):
     project_dir = Path(tool["project_dir"])
-    started_at = time.monotonic()
-    emit_tool_call_event("tool_call_started", tool, "info", tool_args=command)
-    try:
-        result = subprocess.run(
+    return recorded_tool_call(
+        tool,
+        "info",
+        lambda: subprocess.run(
             [
                 "uvx",
                 "--from",
@@ -950,35 +924,18 @@ def info_tool(tool, command):
             text=True,
             capture_output=True,
             env=tool_env(),
-        )
-    except Exception:
-        emit_tool_call_event(
-            "tool_call_completed",
-            tool,
-            "info",
-            tool_args=command,
-            started_at=started_at,
-            returncode=1,
-        )
-        raise
-    emit_tool_call_event(
-        "tool_call_completed",
-        tool,
-        "info",
+        ),
         tool_args=command,
-        started_at=started_at,
-        returncode=result.returncode,
     )
-    return result
 
 
 def call_tool(tool, method, payload):
     project_dir = Path(tool["project_dir"])
     client_module = tool.get("client_module", "client.py")
-    started_at = time.monotonic()
-    emit_tool_call_event("tool_call_started", tool, method)
-    try:
-        result = subprocess.run(
+    return recorded_tool_call(
+        tool,
+        method,
+        lambda: subprocess.run(
             [
                 "uvx",
                 "--from",
@@ -995,24 +952,16 @@ def call_tool(tool, method, payload):
             text=True,
             capture_output=True,
             env=tool_env(),
-        )
-    except Exception:
-        emit_tool_call_event(
-            "tool_call_completed",
-            tool,
-            method,
-            started_at=started_at,
-            returncode=1,
-        )
-        raise
-    emit_tool_call_event(
-        "tool_call_completed",
-        tool,
-        method,
-        started_at=started_at,
-        returncode=result.returncode,
+        ),
     )
-    return result
+
+
+def print_process_result(result):
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.returncode != 0 and result.stderr:
+        print(result.stderr, file=sys.stderr, end="")
+    return result.returncode
 
 
 def main(argv):
@@ -1042,19 +991,12 @@ def main(argv):
                 print(f"unknown tool: {{name}}", file=sys.stderr)
                 return 1
             return run_tool(by_name[name], argv[3:])
-        if command == "info" and len(argv) >= 4:
+        if command == "info" and len(argv) >= 3:
             name = argv[2]
             if name not in by_name:
                 print(f"unknown tool: {{name}}", file=sys.stderr)
                 return 1
-            result = info_tool(by_name[name], argv[3:])
-            if result.stdout:
-                print(result.stdout, end="")
-            if result.returncode != 0:
-                if result.stderr:
-                    print(result.stderr, file=sys.stderr, end="")
-                return result.returncode
-            return 0
+            return print_process_result(info_tool(by_name[name], argv[3:]))
         if command == "call" and len(argv) >= 4:
             # Internal compatibility for Python workflow ctx.call_tool(...). Agents
             # should use direct tool CLIs (`<tool> --help`, `<tool> ...`) instead.
@@ -1065,14 +1007,7 @@ def main(argv):
                 return 1
             try:
                 payload = json.loads(argv[4]) if len(argv) >= 5 else {{}}
-                result = call_tool(by_name[name], method, payload)
-                if result.stdout:
-                    print(result.stdout, end="")
-                if result.returncode != 0:
-                    if result.stderr:
-                        print(result.stderr, file=sys.stderr, end="")
-                    return result.returncode
-                return 0
+                return print_process_result(call_tool(by_name[name], method, payload))
             except Exception as exc:
                 print(str(exc), file=sys.stderr)
                 return 1

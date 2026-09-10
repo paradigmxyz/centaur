@@ -13,7 +13,7 @@ Deployments with `CENTAUR_MCP_V2_ENABLED=true` expose the `centaur` MCP tool. Pa
 {"command": ["run", "slack", "search", "incident response", "--json"]}
 ```
 
-`centaur info <tool> <command> [subcommand...]` returns a compact CLI signature, summary, and parameter details from Typer metadata without invoking the command callback. It omits redundant structured metadata to keep agent context small. Use it before `run` when a command's arguments are unclear. Pass nested command segments separately, for example `{"command": ["info", "gsuite", "gmail", "search"]}`.
+`centaur info <tool> [command [subcommand...]]` returns a compact CLI signature, summary, and parameter details from Typer metadata without invoking the command callback. It omits redundant structured metadata to keep agent context small. Omit the command for a single-command tool. Use it before `run` when a command's arguments are unclear. Pass nested command segments separately, for example `{"command": ["info", "gsuite", "gmail", "search"]}`.
 
 `centaur run <tool> <argv>` runs the tool's CLI in your principal's sandbox using current Console policy. Pass each argument as a separate array element. Spaces within values are preserved. Shell expansion, pipes, and redirection are not interpreted.
 
