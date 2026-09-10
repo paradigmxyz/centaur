@@ -57,6 +57,18 @@ centaur-tools list
 my-tool --help
 ```
 
+When a tool has an associated workflow skill, declare its exact skill name in
+`[tool.centaur]`:
+
+```toml
+[tool.centaur]
+module = "client.py"
+skills = ["my-tool-workflow"]
+```
+
+MCP discovery includes the association and instructs agents to search for and
+read the skill before using the tool. Keep the skill name aligned with the
+corresponding `SKILL.md` frontmatter.
 
 ## Available Plugins
 
@@ -66,7 +78,8 @@ The open-source tool inventory lives in this `tools/` tree and changes over time
   with best-effort vlogs/vmetrics context without exposing message context.
 - `centaur-console`: inspect sandbox permissions and configured OAuth apps, and
   manage the linked user's scheduled tasks.
-- `centaur-skills`: discover, author, and manage editors for private and public Console-authored skills.
+- `centaur-skills`: discover merged repository and overlay skills alongside
+  private and public Console-authored skills, and manage Console skills.
 - `datadog`: query Datadog logs, metrics, monitors, hosts, and dashboards
   read-only with `DD_API_KEY` and `DD_APP_KEY`.
 - `preqin`: query Preqin Operational API fund and fund-manager data, with
