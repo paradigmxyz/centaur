@@ -395,8 +395,6 @@ pub struct ToolHostCallInput {
 pub enum ToolHostInvocation {
     /// Invoke a Python client method through `centaur-tools call`.
     V1 { method: String, arguments: Value },
-    /// Inspect a tool CLI command through `centaur-tools info`.
-    Info { command: Vec<String> },
     /// Run a tool CLI through `centaur-tools run`.
     V2 { argv: Vec<String> },
 }
@@ -405,7 +403,6 @@ impl ToolHostInvocation {
     fn method(&self) -> &str {
         match self {
             Self::V1 { method, .. } => method,
-            Self::Info { .. } => "info",
             Self::V2 { .. } => "cli",
         }
     }
@@ -1047,19 +1044,6 @@ impl SessionRuntime {
                 method: method.trim().to_owned(),
                 arguments,
             },
-            ToolHostInvocation::Info { command } => {
-                if command
-                    .iter()
-                    .any(|segment| segment.trim().is_empty() || segment.contains('\0'))
-                {
-                    return Err(SessionRuntimeError::BadRequest(
-                        "tool host info command segments must be non-blank and contain no NUL characters"
-                            .to_owned(),
-                    )
-                    .into());
-                }
-                ToolHostInvocation::Info { command }
-            }
             ToolHostInvocation::V2 { argv } => {
                 if argv.iter().any(|arg| arg.contains('\0')) {
                     return Err(SessionRuntimeError::BadRequest(
@@ -7577,29 +7561,6 @@ mod tests {
                 "tool": "demo",
                 "mode": "v2",
                 "argv": ["search", " spaced query ", ""],
-                "principal_id": "prn_test",
-                "timeout_seconds": 120,
-            })
-        );
-    }
-
-    #[test]
-    fn tool_host_request_serializes_cli_info_command() {
-        let request = ToolHostRequest {
-            id: "request".to_owned(),
-            tool: "eventregistry".to_owned(),
-            invocation: ToolHostInvocation::Info { command: vec![] },
-            principal_id: "prn_test".to_owned(),
-            token_id: None,
-            timeout_seconds: 120,
-        };
-        assert_eq!(
-            serde_json::to_value(request).unwrap(),
-            serde_json::json!({
-                "id": "request",
-                "tool": "eventregistry",
-                "mode": "info",
-                "command": [],
                 "principal_id": "prn_test",
                 "timeout_seconds": 120,
             })
