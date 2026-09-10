@@ -546,7 +546,7 @@ fn load_tool_meta(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
-    let mut skills = optional_string_array(tool_conf.get("skills"))?.unwrap_or_default();
+    let mut skills = string_array(tool_conf.get("skills"));
     skills.sort();
     skills.dedup();
     let client_module = tool_conf
@@ -1652,6 +1652,38 @@ skills = ["docsend", "document-recovery", "docsend"]
             discovered.tools[0].skills,
             ["docsend".to_owned(), "document-recovery".to_owned()]
         );
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn malformed_tool_skill_associations_do_not_block_discovery() {
+        let temp = temp_dir("api-rs-malformed-tool-skills");
+        write_tool(
+            &temp.join("string-skills"),
+            r#"
+[project]
+name = "string-skills"
+
+[tool.centaur]
+skills = "docsend"
+"#,
+        );
+        write_tool(
+            &temp.join("empty-skill"),
+            r#"
+[project]
+name = "empty-skill"
+
+[tool.centaur]
+skills = ["docsend", ""]
+"#,
+        );
+
+        let discovered = discover_tool_catalog(std::slice::from_ref(&temp)).unwrap();
+
+        assert_eq!(discovered.tools.len(), 2);
+        assert!(discovered.tools.iter().all(|tool| tool.skills.is_empty()));
 
         fs::remove_dir_all(temp).unwrap();
     }
