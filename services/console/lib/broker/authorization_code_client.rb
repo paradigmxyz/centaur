@@ -1,3 +1,4 @@
+require "base64"
 require "json"
 
 module Broker
@@ -36,7 +37,8 @@ module Broker
     # the app is misconfigured. The console-login flow passes false: it requests no
     # offline access and only needs the id_token to identify the operator.
     def exchange(token_endpoint:, client_id:, client_secret:, code:, redirect_uri:,
-                 code_verifier:, timeout: DEFAULT_TIMEOUT, require_refresh_token: true)
+                 code_verifier:, timeout: DEFAULT_TIMEOUT, require_refresh_token: true,
+                 token_endpoint_auth_method: :client_secret_post)
       raise ArgumentError, "token endpoint is required" if token_endpoint.blank?
       raise ArgumentError, "client_id is required" if client_id.blank?
       raise ArgumentError, "code is required" if code.blank?
@@ -47,10 +49,20 @@ module Broker
         "client_id" => client_id,
         "redirect_uri" => redirect_uri
       }
-      form["client_secret"] = client_secret if client_secret.present?
+      headers = {}
+      case token_endpoint_auth_method.to_sym
+      when :client_secret_post
+        form["client_secret"] = client_secret if client_secret.present?
+      when :client_secret_basic
+        raise ArgumentError, "client_secret is required" if client_secret.blank?
+        form.delete("client_id")
+        headers["Authorization"] = "Basic #{Base64.strict_encode64("#{client_id}:#{client_secret}")}"
+      else
+        raise ArgumentError, "unsupported token endpoint auth method"
+      end
       form["code_verifier"] = code_verifier if code_verifier.present?
 
-      response = perform(token_endpoint, form, timeout)
+      response = perform(token_endpoint, form, headers, timeout)
 
       classify_error(response.status, response.body) if response.status / 100 != 2
 
@@ -59,9 +71,9 @@ module Broker
 
     private
 
-    def perform(url, form, timeout)
+    def perform(url, form, headers, timeout)
       if @http
-        return @http.call(url: url, form: form, headers: {}, timeout: timeout)
+        return @http.call(url: url, form: form, headers: headers, timeout: timeout)
       end
 
       response = HttpClient.new(
@@ -70,7 +82,8 @@ module Broker
         max_body_bytes: MAX_BODY_BYTES
       ).post(
         url,
-        form: form
+        form: form,
+        headers: headers
       )
       response
     rescue StandardError => e

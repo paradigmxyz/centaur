@@ -1,0 +1,60 @@
+---
+title: Calendar and Zoom meeting integration
+description: Configure Centaur's meeting scheduler for Google Calendar and Zoom.
+---
+
+# Calendar and Zoom meeting integration
+
+The `meeting-scheduler` tool provides a workflow-owned integration for finding
+availability, creating and updating Google Calendar events, creating Zoom
+rooms, enabling cloud recording, and retrieving processed recordings and AI
+Companion summaries.
+
+The tool is intentionally designed for use behind a durable workflow. Every
+write uses a stable `occurrence_key` and is persisted in
+`centaur_meeting_occurrences`, allowing retries to reconcile provider state
+without creating duplicate Calendar events or Zoom rooms.
+
+## Configuration
+
+Configure these values for the workflow principal that owns scheduling:
+
+- `GOOGLE_TOKEN_JSON`: refresh-token credentials with Calendar read and event
+  scopes.
+- `ZOOM_ACCESS_TOKEN`: a brokered token from a user-managed Zoom OAuth app.
+- `CENTAUR_POSTGRES_DSN`: a scoped DSN whose role can access only the meeting
+  occurrence table.
+- `MEETING_ORGANIZER_CALENDARS`: a JSON map from deployment-defined aliases to
+  managed Google Calendar IDs.
+- `MEETING_ZOOM_HOST_USER_ID`: the licensed Zoom user that owns created rooms.
+
+The bundled tool manifest expects the Console OAuth app slug
+`zoom-meeting-scheduler`. Zoom uses HTTP Basic client authentication for both
+authorization-code exchange and refresh-token rotation; Console stores each
+rotated refresh token and exposes only the current access token to the tool.
+
+## Zoom behavior
+
+Created rooms use the OAuth-bound `/users/me/meetings` endpoint, permit joining
+before the host, and request automatic cloud recording. The scheduler can set
+an alternative host when the deployment has enabled that Zoom capability.
+
+After a meeting finishes, workflows can call the recording and summary
+operations. The tool follows Zoom's regional transcript redirects, bounds
+returned transcript content, and never returns signed download URLs or bearer
+tokens.
+
+## Reliability and security
+
+- Provider writes are serialized per occurrence in PostgreSQL.
+- Reconciliation checks both Calendar and Zoom before repairing partial state.
+- Zoom errors retain bounded provider codes and messages while redacting URLs,
+  headers, tokens, and email addresses.
+- Post-meeting processing exposes lease and delivery markers so a durable
+  workflow can handle webhook races and retry safely.
+- User-facing agents should call a confirmation-gated workflow rather than
+  receiving the scheduler tool directly.
+
+The integration does not prescribe a Slack, Notion, or other downstream
+workflow. Deployments can compose those systems around the persisted meeting
+record and post-meeting artifact operations.

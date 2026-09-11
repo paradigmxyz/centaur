@@ -97,6 +97,23 @@ module Broker
       http.verify
     end
 
+    test "supports client_secret_basic without leaking client credentials into the form" do
+      client, http = client_with(status: 200, body: success_body) do |request|
+        assert_equal "Basic Y2lkOnNlYw==", request[:headers]["Authorization"]
+        assert_nil request[:form]["client_id"]
+        assert_nil request[:form]["client_secret"]
+      end
+      client.exchange(**base_args(token_endpoint_auth_method: :client_secret_basic))
+      http.verify
+    end
+
+    test "rejects unsupported token endpoint authentication" do
+      client, = client_with(status: 200, body: success_body)
+      assert_raises(ArgumentError) do
+        client.exchange(**base_args(token_endpoint_auth_method: :private_key_jwt))
+      end
+    end
+
     test "parses Slack nested authed_user token payload" do
       body = {
         ok: true,
