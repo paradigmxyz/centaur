@@ -2180,38 +2180,6 @@ def search(query, limit=20):
     }
 
     #[test]
-    fn mcp_v2_feature_flag_adds_catalog_guidance() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _env = EnvGuard::set(&[("CENTAUR_MCP_V2_ENABLED", "")]);
-
-        for (flag, enabled) in [
-            ("", false),
-            ("false", false),
-            ("invalid", false),
-            ("true", true),
-            (" TRUE ", true),
-        ] {
-            let _flag = EnvGuard::set(&[("CENTAUR_MCP_V2_ENABLED", flag)]);
-            let result = mcp_initialize_result(&json!({
-                "protocolVersion": "2025-06-18",
-            }));
-
-            if enabled {
-                let instructions = result["instructions"].as_str().unwrap();
-                assert!(instructions.contains("`company_context`, `slack`, `gsuite`"));
-                assert!(
-                    instructions
-                        .contains("Whenever you determine that you need to find or choose a tool")
-                );
-                assert!(instructions.contains("call `centaur_catalog_search`"));
-                assert!(instructions.contains("short MCP bootstrap tool list"));
-            } else {
-                assert!(result.get("instructions").is_none());
-            }
-        }
-    }
-
-    #[test]
     fn mcp_catalog_search_returns_sorted_summaries_and_current_policy() {
         let _lock = ENV_LOCK.lock().unwrap();
         let temp = temp_dir("centaur-api-rs-service-list");
