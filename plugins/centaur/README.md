@@ -4,20 +4,18 @@ Connect Codex, Claude Code, and other MCP clients to the tools approved for your
 
 ## Running Tools
 
-Deployments with `CENTAUR_MCP_V2_ENABLED=true` expose the `centaur` MCP tool. Pass an argv array in `command` to discover and run tools:
+Deployments with `CENTAUR_MCP_V2_ENABLED=true` expose four stable MCP tools while the catalog behind them changes dynamically:
 
 ```json
-{"command": ["list"]}
-{"command": ["search", "slack messages"]}
-{"command": ["run", "gsuite", "--help"]}
-{"command": ["run", "gsuite", "gmail", "--help"]}
-{"command": ["run", "slack", "search", "--help"]}
-{"command": ["run", "slack", "search", "incident response"]}
+{"name": "centaur_catalog_search", "arguments": {"query": "slack messages"}}
+{"name": "centaur_catalog_load", "arguments": {"tool": "slack"}}
+{"name": "centaur_tool_call", "arguments": {"tool": "slack", "argv": ["search", "incident response"]}}
+{"name": "centaur_whoami", "arguments": {}}
 ```
 
-`centaur run <tool> <argv>` runs the tool's CLI in your principal's sandbox using current Console policy. Start with `centaur run <tool> --help`, then add command segments before `--help` until the relevant options and arguments are shown. Pass each argument as a separate array element. Spaces within values are preserved. Shell expansion, pipes, and redirection are not interpreted.
+Search the catalog, load the selected tool's current description and top-level CLI help, then call it. `centaur_tool_call` runs the CLI in your principal's sandbox using current Console policy. To inspect a subcommand, call it with the command segments followed by `--help`. Pass each argument as a separate array element. Spaces within values are preserved. Shell expansion, pipes, and redirection are not interpreted.
 
-The result includes `stdout`, `stderr`, `exit_status`, and `timed_out` in both text and structured content. Plain-text help and JSON output are supported. Nonzero exits and timeouts set MCP `isError`. Calls have a 120-second execution timeout. Existing v1 tools with `method` and `arguments` remain available.
+Call results include `stdout`, `stderr`, `exit_status`, and `timed_out` in both text and structured content. Plain-text help and JSON output are supported. Nonzero exits and timeouts set MCP `isError`. Calls have a 120-second execution timeout. Existing v1 tools with `method` and `arguments` remain callable for cached clients.
 
 ## Codex
 
