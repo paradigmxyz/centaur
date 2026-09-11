@@ -3334,7 +3334,8 @@ describe('slackbotv2', () => {
     await waitFor(() => codexApi.streamCount === 1)
 
     const draft = 'Draft answer from the live deltas.'
-    const finalAnswer = 'Final reconciled answer from the result.'
+    const finalAnswer = 'Marked [Workspace fixes to-do](https://example.com/task) as Done.'
+    const slackFinalAnswer = 'Marked <https://example.com/task|Workspace fixes to-do> as Done.'
     // Stream a plan + the draft answer (so the answer delta reaches Slack), then
     // seal the answer item with a DIFFERENT canonical text. The recomposed
     // answer no longer extends the already-streamed text, so the renderer
@@ -3375,7 +3376,8 @@ describe('slackbotv2', () => {
 
     const texts = await threadTexts(parent.ts)
     // The streamed message was replaced in place with the durable final answer...
-    expect(texts.filter(text => text.includes(finalAnswer))).toHaveLength(1)
+    expect(texts.filter(text => text.includes(slackFinalAnswer))).toHaveLength(1)
+    expect(texts.some(text => text.includes('[Workspace fixes to-do]('))).toBe(false)
     // ...and the diverging live draft is gone (neither interleaved nor left behind).
     expect(texts.some(text => text.includes('Draft answer from the live deltas'))).toBe(false)
   })
@@ -4533,6 +4535,60 @@ describe('slackbotv2', () => {
       }
     ])
   })
+
+  for (const mode of ['failed-stream', 'no-cards', 'literal', 'native-stream'] as const) {
+    it(`preserves link semantics in the ${mode} answer path`, async () => {
+      codexApi.autoRespond = false
+      const adapter = bot.chat.getAdapter('slack')
+      const originalStream = adapter.stream
+      if (mode === 'failed-stream') {
+        // The legacy adapter rejects root DM streams this way. The durable
+        // fallback must still render the final answer's labeled hyperlink.
+        adapter.stream = async () => {
+          throw new Error('Slack streaming requires a valid thread context (non-empty threadTs)')
+        }
+      }
+      try {
+        const prompt = mode === 'no-cards' ? 'no interactive blocks'
+          : mode === 'literal' ? 'plain text only' : 'return the result'
+        const parent = await postUserMessage('Link rendering context.')
+        const text = `<@${BOT_USER_ID}> ${prompt}`
+        const mention = await postUserMessage(text, parent.ts)
+        const key = threadKey(parent.ts)
+        const waits: Promise<unknown>[] = []
+        const response = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
+          event_id: `Ev-slackbotv2-answer-links-${mode}`,
+          event: {
+            type: 'app_mention', user: USER_ID, channel: CHANNEL_ID, team: TEAM_ID,
+            ts: mention.ts, thread_ts: parent.ts, text
+          }
+        }), {}, waitUntilContext(waits))
+        expect(response.status).toBe(200)
+        await waitFor(() => codexApi.executes.length === 1)
+        await waitFor(() => codexApi.streamCount === 1)
+        const answer = 'Marked [Workspace fixes to-do](https://example.com/task) as Done.'
+        codexApi.emitOutputLines(key, sampleCodexOutputLines(answer))
+        codexApi.emitSessionEvent(key, 'session.execution_completed', {
+          execution_id: `exe-links-${mode}`, status: 'completed', result_text: answer
+        })
+        await Promise.all(waits)
+        const replies = (await threadTexts(parent.ts)).filter(text => text.includes('Marked '))
+        expect(replies).toHaveLength(1)
+        expect(replies[0]).toContain(mode === 'literal' || mode === 'native-stream'
+          ? '[Workspace fixes to-do](https://example.com/task)'
+          : '<https://example.com/task|Workspace fixes to-do>')
+        if (mode === 'native-stream') {
+          // The emulator stores native Markdown rather than rendering it.
+          // Assert the API uses a Markdown chunk, not legacy raw text.
+          expect(slackStreamTranscripts(slackApi.calls).flatMap(t => t.chunks))
+            .toContainEqual({ type: 'markdown_text', text: answer })
+        }
+        expect(codexApi.executes).toHaveLength(1)
+      } finally {
+        adapter.stream = originalStream
+      }
+    })
+  }
 
   it('honors plain-text-only requests without Slack plan blocks', async () => {
     const parent = await postUserMessage('Context before a plain text request.')

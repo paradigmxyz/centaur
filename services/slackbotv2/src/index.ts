@@ -30,6 +30,7 @@ import {
   type RendererEvent
 } from '@centaur/rendering'
 import { conflateChatSdkStream } from './conflate'
+import { slackAnswerLinks } from './slack-answer-links'
 import { resolveHarnessRollout } from './harness-rollout'
 import { observeSeconds, slackbotMetrics } from './metrics'
 import {
@@ -2047,7 +2048,7 @@ async function renderFallbackFinalAnswer(
       return null
     }
     const text = fallback.textOrDefault()
-    const fallbackText = truncateSlackText(text, SLACK_FALLBACK_TEXT_MAX_CHARS, 'Slack final answer')
+    const fallbackText = truncateSlackText(slackAnswerLinks(text), SLACK_FALLBACK_TEXT_MAX_CHARS, 'Slack final answer')
     if (replacement) {
       await thread.adapter.editMessage(thread.id, replacement.replaceMessageId, fallbackText)
     } else {
@@ -2770,8 +2771,13 @@ async function renderPlainTextExecutionStream(
     for await (const _chunk of chatStream) {
       void _chunk
     }
+    const answer = fallback.textOrDefault()
+    // Suppressing activity cards does not request literal Markdown syntax.
+    // Keep an explicit plain-text-only request literal, however.
     const text = truncateSlackText(
-      fallback.textOrDefault(),
+      /\bplain\s+text\s+only\b/i.test(slackMessagePromptText(message))
+        ? answer
+        : slackAnswerLinks(answer),
       SLACK_FALLBACK_TEXT_MAX_CHARS,
       'Slack final answer'
     )
