@@ -15,7 +15,7 @@ import install_tool_shims
 
 
 class CopyPublishedToolsTest(unittest.TestCase):
-    def test_copies_tool_dirs_and_skips_duplicate_names(self) -> None:
+    def test_copies_tool_dirs_and_later_source_replaces_duplicate_names(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             published = root / "published"
@@ -41,14 +41,37 @@ class CopyPublishedToolsTest(unittest.TestCase):
                 (target / "research" / "sensortower" / "pyproject.toml").read_text(),
                 "base\n",
             )
-            self.assertIn("skipping duplicate tool websearch", stderr.getvalue())
+            self.assertIn("shadowing tool websearch", stderr.getvalue())
             self.assertEqual(
                 (target / "research" / "websearch" / "pyproject.toml").read_text(),
-                "old project\n",
+                "new project\n",
             )
-            self.assertEqual((target / "research" / "websearch" / "old.py").read_text(), "old\n")
-            self.assertFalse((target / "research" / "websearch" / "new.py").exists())
+            self.assertFalse((target / "research" / "websearch" / "old.py").exists())
+            self.assertEqual((target / "research" / "websearch" / "new.py").read_text(), "new\n")
             self.assertEqual((target / "research" / "company" / "pyproject.toml").read_text(), "company\n")
+
+    def test_later_source_replaces_duplicate_in_a_different_category(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            published = root / "published"
+            target = root / "target"
+
+            (target / "observability" / "datadog").mkdir(parents=True)
+            (target / "observability" / "datadog" / "pyproject.toml").write_text("base\n")
+            (target / "observability" / "datadog" / "base.py").write_text("base\n")
+
+            (published / "datadog").mkdir(parents=True)
+            (published / "datadog" / "pyproject.toml").write_text("overlay\n")
+            (published / "datadog" / "overlay.py").write_text("overlay\n")
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                install_tool_shims._copy_published_tools(target, published)
+
+            self.assertIn("shadowing tool datadog", stderr.getvalue())
+            self.assertFalse((target / "observability" / "datadog").exists())
+            self.assertEqual((target / "datadog" / "pyproject.toml").read_text(), "overlay\n")
+            self.assertEqual((target / "datadog" / "overlay.py").read_text(), "overlay\n")
 
     def test_tool_allowlist_restricts_installed_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -390,6 +413,58 @@ class GeneratedShimTest(unittest.TestCase):
 
 
 class RefreshInstallTest(unittest.TestCase):
+    def test_refresh_later_source_replaces_earlier_package(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "dest"
+            dest.mkdir()
+            (dest / install_tool_shims.TOOLS_METADATA_NAME).write_text(
+                json.dumps(
+                    {
+                        "sources": [
+                            {
+                                "source": "repo_cache",
+                                "repo": "paradigmxyz/centaur",
+                                "repo_cache_repo_path": str(root / "base"),
+                                "source_subdir": "tools",
+                            },
+                            {
+                                "source": "repo_cache",
+                                "repo": "example/overlay",
+                                "repo_cache_repo_path": str(root / "overlay"),
+                                "source_subdir": "tools",
+                            },
+                        ]
+                    }
+                )
+                + "\n"
+            )
+
+            base_pkg = root / "base" / "tools" / "observability" / "datadog"
+            base_pkg.mkdir(parents=True)
+            (base_pkg / "pyproject.toml").write_text(
+                '[project]\nname = "datadog"\n\n[project.scripts]\ndatadog = "datadog.cli:app"\n'
+            )
+            (base_pkg / "base.py").write_text("base\n")
+
+            overlay_pkg = root / "overlay" / "tools" / "datadog"
+            overlay_pkg.mkdir(parents=True)
+            (overlay_pkg / "pyproject.toml").write_text(
+                '[project]\nname = "datadog"\n\n[project.scripts]\ndatadog = "datadog.cli:app"\n'
+            )
+            (overlay_pkg / "overlay.py").write_text("overlay\n")
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                self.assertTrue(install_tool_shims._refresh_tool_dir(dest))
+
+            self.assertIn("shadowing tool datadog", stderr.getvalue())
+            self.assertFalse((dest / "observability" / "datadog").exists())
+            self.assertEqual((dest / "datadog" / "overlay.py").read_text(), "overlay\n")
+            scripts = install_tool_shims._discover_scripts([dest])
+            self.assertEqual(scripts["datadog"]["project_dir"], str(dest / "datadog"))
+            self.assertEqual(scripts["datadog"]["package"], "datadog")
+
     def test_install_removes_stale_generated_shims(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
