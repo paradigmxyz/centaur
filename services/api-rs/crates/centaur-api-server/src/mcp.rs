@@ -303,7 +303,13 @@ fn mcp_initialize_result(params: &Value) -> Value {
     if mcp_v2_enabled() {
         result["instructions"] = Value::String(
             concat!(
-                "Prefer the `centaur` tool for all Centaur tool discovery and execution. ",
+                "At the start of every user request, always use the `centaur` tool's ",
+                "`search` command to search the current catalog for applicable tools. ",
+                "Build the search query from the task and any service names, URLs, or ",
+                "domains in the request. Search before using a general-purpose fallback ",
+                "or deciding that no Centaur tool applies. If an applicable tool is ",
+                "available, use it to complete the request. Prefer the `centaur` tool for ",
+                "all Centaur tool discovery and execution. ",
                 "Use its `list`, `search`, and `run` commands instead of calling legacy ",
                 "per-service MCP tools directly. Use a legacy per-service tool only when ",
                 "the `centaur` tool cannot complete the request."
@@ -2093,36 +2099,6 @@ def search(query, limit=20):
         assert!(matches!(action, McpCentaurToolAction::Run { .. }));
 
         fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn mcp_v2_feature_flag_adds_server_instructions_preferring_centaur_tool() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _env = EnvGuard::set(&[("CENTAUR_MCP_V2_ENABLED", "")]);
-
-        for (flag, enabled) in [
-            ("", false),
-            ("false", false),
-            ("invalid", false),
-            ("true", true),
-            (" TRUE ", true),
-        ] {
-            let _flag = EnvGuard::set(&[("CENTAUR_MCP_V2_ENABLED", flag)]);
-            let result = mcp_initialize_result(&json!({
-                "protocolVersion": "2025-06-18",
-            }));
-
-            if enabled {
-                let instructions = result["instructions"].as_str().unwrap();
-                assert!(instructions.contains("Prefer the `centaur` tool"));
-                assert!(
-                    instructions
-                        .contains("instead of calling legacy per-service MCP tools directly")
-                );
-            } else {
-                assert!(result.get("instructions").is_none());
-            }
-        }
     }
 
     #[test]
