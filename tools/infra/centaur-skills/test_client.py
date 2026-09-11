@@ -33,36 +33,43 @@ def make_client(handler, *, bearer_token=None):
     )
 
 
+def make_catalog(
+    skills_dir,
+    *,
+    listed=None,
+    searched=None,
+    read_result=None,
+    created=None,
+):
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST":
+            data = created
+        elif request.url.path == f"{SANDBOX_SKILLS_PATH}/search":
+            data = searched
+        elif request.url.path == SANDBOX_SKILLS_PATH:
+            data = listed
+        else:
+            data = read_result
+        assert data is not None, f"unexpected Console request: {request.url}"
+        return json_response({"data": data}, status_code=201 if created else 200)
+
+    catalog = SkillsCatalog(
+        repository=RepositorySkillsCatalog(skills_dir),
+        url="http://centaur-console:3000",
+        transport=httpx.MockTransport(handler),
+    )
+    return catalog, requests
+
+
 def write_skill(skills_dir, name, description, body="# Workflow\n\nDo it.\n"):
     skill_dir = skills_dir / name
     skill_dir.mkdir(parents=True)
     document = f'---\nname: {name}\ndescription: "{description}"\n---\n\n{body}'
     (skill_dir / "SKILL.md").write_text(document)
     return document
-
-
-class StubConsoleCatalog:
-    def __init__(self, *, listed=None, searched=None, read_result=None):
-        self.listed = listed or []
-        self.searched = searched or []
-        self.read_result = read_result
-        self.list_calls = []
-        self.closed = False
-
-    def list(self, scope=None, limit=20):
-        self.list_calls.append((scope, limit))
-        return self.listed[:limit]
-
-    def search(self, query, limit=10):
-        return self.searched[:limit]
-
-    def read(self, identifier):
-        if self.read_result is None:
-            raise AssertionError(f"unexpected Console read for {identifier}")
-        return self.read_result
-
-    def close(self):
-        self.closed = True
 
 
 def test_list_and_search_use_sandbox_catalog_endpoints():
@@ -265,8 +272,8 @@ def test_repository_catalog_lists_searches_and_reads_skill_documents(tmp_path):
     assert listed[0]["source"] == "repository"
     assert "document" not in listed[0]
     assert [skill["name"] for skill in searched] == ["docsend"]
+    assert catalog.search("Do it") == []
     assert read_result["document"] == document
-    assert read_result["checksum"]
 
 
 def test_repository_catalog_parses_multiline_yaml_description(tmp_path):
@@ -295,35 +302,35 @@ description: >-
 def test_merged_catalog_preserves_same_name_rows_and_reads_by_distinct_ids(tmp_path):
     skills_dir = tmp_path / ".agents" / "skills"
     local_document = write_skill(skills_dir, "docsend", "Local DocSend guidance.")
-    console = StubConsoleCatalog(
-        listed=[
-            {"id": "skl_duplicate", "name": "docsend", "visibility": "shared"},
-            {"id": "skl_console", "name": "console-only", "visibility": "private"},
-        ],
-        searched=[
-            {"id": "skl_duplicate", "name": "docsend", "visibility": "shared"},
-            {"id": "skl_console", "name": "console-only", "visibility": "private"},
-        ],
+    listed = [
+        {"id": "skl_duplicate", "name": "docsend", "visibility": "shared"},
+        {"id": "skl_console", "name": "console-only", "visibility": "private"},
+    ]
+    searched = [
+        {"id": "skl_duplicate", "name": "docsend", "visibility": "shared"},
+        {"id": "skl_console", "name": "console-only", "visibility": "private"},
+    ]
+
+    catalog, _ = make_catalog(
+        skills_dir,
+        listed=listed,
+        searched=searched,
         read_result={
             "id": "skl_duplicate",
             "name": "docsend",
             "document": "Console document",
         },
     )
-    catalog = SkillsCatalog(
-        console=console,
-        repository=RepositorySkillsCatalog(skills_dir),
-    )
 
-    listed = catalog.list()
-    searched = catalog.search("docsend")
+    catalog_list = catalog.list()
+    catalog_search = catalog.search("docsend")
 
-    assert [(skill["id"], skill["name"], skill["source"]) for skill in listed] == [
+    assert [(skill["id"], skill["name"], skill["source"]) for skill in catalog_list] == [
         ("repo:docsend", "docsend", "repository"),
         ("skl_duplicate", "docsend", "console"),
         ("skl_console", "console-only", "console"),
     ]
-    assert [(skill["id"], skill["name"], skill["source"]) for skill in searched] == [
+    assert [(skill["id"], skill["name"], skill["source"]) for skill in catalog_search] == [
         ("repo:docsend", "docsend", "repository"),
         ("skl_duplicate", "docsend", "console"),
         ("skl_console", "console-only", "console"),
@@ -335,30 +342,28 @@ def test_merged_catalog_preserves_same_name_rows_and_reads_by_distinct_ids(tmp_p
 def test_merged_catalog_scope_can_select_one_source(tmp_path):
     skills_dir = tmp_path / ".agents" / "skills"
     write_skill(skills_dir, "docsend", "Local DocSend guidance.")
-    console = StubConsoleCatalog(listed=[{"id": "skl_console", "name": "console-only"}])
-    catalog = SkillsCatalog(
-        console=console,
-        repository=RepositorySkillsCatalog(skills_dir),
+    catalog, requests = make_catalog(
+        skills_dir,
+        listed=[{"id": "skl_console", "name": "console-only"}],
     )
 
     assert [skill["name"] for skill in catalog.list(scope="repository")] == ["docsend"]
     assert [skill["name"] for skill in catalog.list(scope="private")] == ["console-only"]
-    assert console.list_calls == [("private", 20)]
+    assert len(requests) == 1
+    assert dict(requests[0].url.params) == {"limit": "20", "scope": "private"}
 
 
 def test_merged_catalog_limit_does_not_starve_console_results(tmp_path):
     skills_dir = tmp_path / ".agents" / "skills"
     write_skill(skills_dir, "alpha", "First local skill.")
     write_skill(skills_dir, "beta", "Second local skill.")
-    console = StubConsoleCatalog(
+
+    catalog, _ = make_catalog(
+        skills_dir,
         listed=[
             {"id": "skl_one", "name": "console-one"},
             {"id": "skl_two", "name": "console-two"},
-        ]
-    )
-    catalog = SkillsCatalog(
-        console=console,
-        repository=RepositorySkillsCatalog(skills_dir),
+        ],
     )
 
     assert [(skill["name"], skill["source"]) for skill in catalog.list(limit=2)] == [
@@ -368,13 +373,24 @@ def test_merged_catalog_limit_does_not_starve_console_results(tmp_path):
 
 
 def test_merged_catalog_reports_missing_explicit_repository_identifier(tmp_path):
-    catalog = SkillsCatalog(
-        console=StubConsoleCatalog(),
-        repository=RepositorySkillsCatalog(tmp_path / "missing"),
-    )
+    catalog, requests = make_catalog(tmp_path / "missing")
 
     with pytest.raises(RuntimeError, match="repository skill not found"):
         catalog.read("repo:missing")
+    assert requests == []
+
+
+def test_inherited_console_mutations_remain_available(tmp_path):
+    catalog, requests = make_catalog(
+        tmp_path / "missing",
+        created={"id": "skl_123", "name": "incident-triage"},
+    )
+
+    assert catalog.create("incident-triage", "Triage incidents.", "Do it.") == {
+        "id": "skl_123",
+        "name": "incident-triage",
+    }
+    assert requests[0].method == "POST"
 
 
 def test_cli_search_and_list_output_json(monkeypatch, capsys):

@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -227,19 +225,19 @@ class RepositorySkillsCatalog:
         return skills
 
     def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
-        """Search local skill names, descriptions, and documents."""
+        """Search local skill names and descriptions."""
         normalized_query = _normalize_search_text(query)
         if not normalized_query:
             return []
 
         query_terms = normalized_query.split()
         matches: list[tuple[tuple[int, int, str], dict[str, Any]]] = []
-        for skill in self._skills(include_document=True).values():
+        for skill in self._skills().values():
             name = _normalize_search_text(str(skill["name"]))
             description = _normalize_search_text(str(skill.get("description", "")))
-            document = _normalize_search_text(str(skill.get("document", "")))
-            haystack = f"{name} {description} {document}"
-            matched_terms = sum(term in haystack for term in query_terms)
+            haystack = f"{name} {description}"
+            haystack_terms = set(haystack.split())
+            matched_terms = sum(term in haystack_terms for term in query_terms)
             if not matched_terms:
                 continue
 
@@ -251,7 +249,6 @@ class RepositorySkillsCatalog:
             elif normalized_query in f"{name} {description}":
                 score += 25
 
-            skill.pop("document", None)
             matches.append(((-score, -matched_terms, str(skill["name"])), skill))
 
         matches.sort(key=lambda match: match[0])
@@ -276,7 +273,6 @@ class RepositorySkillsCatalog:
                 resolved_document = document_path.resolve()
                 resolved_document.relative_to(root)
                 document = document_path.read_text(encoding="utf-8")
-                stat = document_path.stat()
             except (OSError, UnicodeError, ValueError):
                 continue
 
@@ -289,10 +285,7 @@ class RepositorySkillsCatalog:
                 "id": f"repo:{name}",
                 "name": name,
                 "description": metadata.get("description", ""),
-                "visibility": REPOSITORY_SOURCE,
                 "source": REPOSITORY_SOURCE,
-                "updated_at": datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
-                "checksum": hashlib.sha256(document.encode()).hexdigest(),
             }
             if include_document:
                 skill["document"] = document
@@ -300,15 +293,23 @@ class RepositorySkillsCatalog:
         return skills
 
 
-class SkillsCatalog:
+class SkillsCatalog(SkillsClient):
     """Merge workspace skills with principal-visible Console skills."""
 
     def __init__(
         self,
-        console: SkillsClient | None = None,
         repository: RepositorySkillsCatalog | None = None,
+        url: str | None = None,
+        bearer_token: str | None = None,
+        timeout: float = 30.0,
+        transport: httpx.BaseTransport | None = None,
     ):
-        self.console = console or SkillsClient()
+        super().__init__(
+            url=url,
+            bearer_token=bearer_token,
+            timeout=timeout,
+            transport=transport,
+        )
         self.repository = repository or RepositorySkillsCatalog()
 
     def list(self, scope: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
@@ -317,8 +318,7 @@ class SkillsCatalog:
             return self.repository.list(limit=limit)
 
         console_skills = [
-            _with_source(skill, CONSOLE_SOURCE)
-            for skill in self.console.list(scope=scope, limit=limit)
+            _with_source(skill, CONSOLE_SOURCE) for skill in super().list(scope=scope, limit=limit)
         ]
         if scope in {"private", "shared"}:
             return console_skills
@@ -329,7 +329,7 @@ class SkillsCatalog:
         """Search both catalogs while preserving source-distinct results."""
         repository_skills = self.repository.search(query, limit=limit)
         console_skills = [
-            _with_source(skill, CONSOLE_SOURCE) for skill in self.console.search(query, limit=limit)
+            _with_source(skill, CONSOLE_SOURCE) for skill in super().search(query, limit=limit)
         ]
         return _merge_skills(repository_skills, console_skills, limit=limit)
 
@@ -341,47 +341,7 @@ class SkillsCatalog:
                 return repository_skill
             if identifier.startswith("repo:"):
                 raise RuntimeError(f"repository skill not found: {identifier}")
-        return _with_source(self.console.read(identifier), CONSOLE_SOURCE)
-
-    def create(self, name: str, description: str, instructions: str) -> dict[str, Any]:
-        return self.console.create(name, description, instructions)
-
-    def edit(
-        self,
-        identifier: str,
-        name: str | None = None,
-        description: str | None = None,
-        instructions: str | None = None,
-        lock_version: int | None = None,
-    ) -> dict[str, Any]:
-        return self.console.edit(
-            identifier,
-            name=name,
-            description=description,
-            instructions=instructions,
-            lock_version=lock_version,
-        )
-
-    def delete(self, identifier: str) -> None:
-        self.console.delete(identifier)
-
-    def list_editors(self, identifier: str) -> dict[str, Any]:
-        return self.console.list_editors(identifier)
-
-    def add_editor(self, identifier: str, user: str) -> dict[str, Any]:
-        return self.console.add_editor(identifier, user)
-
-    def remove_editor(self, identifier: str, user: str) -> dict[str, Any]:
-        return self.console.remove_editor(identifier, user)
-
-    def close(self) -> None:
-        self.console.close()
-
-    def __enter__(self) -> SkillsCatalog:
-        return self
-
-    def __exit__(self, *_args: object) -> None:
-        self.close()
+        return _with_source(super().read(identifier), CONSOLE_SOURCE)
 
 
 def _workspace_skills_dir() -> Path:
