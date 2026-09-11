@@ -1510,7 +1510,9 @@ def _get_channel_member_emails_via_cli(channel: str) -> list[str]:
 @docs_app.command("create")
 def docs_create_cmd(
     title: str = typer.Argument(..., help="Document title"),
-    channel: str = typer.Option(..., "--channel", help="Slack channel to share with (required)"),
+    channel: str | None = typer.Option(
+        None, "--channel", help="Optional Slack channel to share with"
+    ),
     owner: str = typer.Option(..., "--owner", help="Email of new owner (required)"),
     content: str = typer.Option(None, "--content", "-c", help="Initial content"),
 ):
@@ -1518,7 +1520,7 @@ def docs_create_cmd(
 
     This command:
     1. Creates the document
-    2. Shares with all channel members (writer role)
+    2. Shares with all channel members when --channel is provided (writer role)
     3. Transfers ownership to the specified owner
 
     The original owner (service account) is automatically downgraded to editor
@@ -1526,6 +1528,7 @@ def docs_create_cmd(
     removes the service account's editor role permissions after 7 days.
 
     Examples:
+        gsuite docs create "Personal Notes" --owner alice@paradigm.xyz
         gsuite docs create "Meeting Notes" --channel eng-ai --owner alice@paradigm.xyz
         gsuite docs create "Doc Title" --channel ai-agent --owner bob@paradigm.xyz --content "Hello"
     """
@@ -1537,8 +1540,11 @@ def docs_create_cmd(
         console.print(f"[cyan]URL: {result['url']}[/]", soft_wrap=True)
         console.print(f"[dim]ID: {result['document_id']}[/]")
 
-        member_emails = _get_channel_member_emails_via_cli(channel)
-        console.print(f"[dim]Setting up permissions for {len(member_emails)} channel members...[/]")
+        member_emails = _get_channel_member_emails_via_cli(channel) if channel else []
+        if channel:
+            console.print(
+                f"[dim]Setting up permissions for {len(member_emails)} channel members...[/]"
+            )
 
         perm_result = drive_setup_channel_permissions(
             file_id=result["document_id"],
@@ -1546,7 +1552,10 @@ def docs_create_cmd(
             requester_email=owner,
         )
 
-        console.print(f"[green]✓ Shared with {len(perm_result['shared_with'])} channel members[/]")
+        if channel:
+            console.print(
+                f"[green]✓ Shared with {len(perm_result['shared_with'])} channel members[/]"
+            )
         console.print(f"[green]✓ Ownership transferred to {owner}[/]")
 
     except Exception as e:

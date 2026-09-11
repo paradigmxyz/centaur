@@ -120,6 +120,44 @@ def test_extract_drive_file_id_accepts_editor_and_drive_urls():
     assert extract_drive_file_id("raw-file-id") == "raw-file-id"
 
 
+def test_docs_create_allows_omitting_channel(monkeypatch):
+    permission_calls: list[dict] = []
+    monkeypatch.setattr(
+        client,
+        "docs_create",
+        lambda title, content: {
+            "document_id": "doc-123",
+            "title": title,
+            "url": "https://docs.google.com/document/d/doc-123/edit",
+        },
+    )
+    monkeypatch.setattr(
+        client,
+        "drive_setup_channel_permissions",
+        lambda **kwargs: (
+            permission_calls.append(kwargs)
+            or {"shared_with": [], "new_owner": kwargs["requester_email"]}
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        ["docs", "create", "Personal Notes", "--owner", "alice@example.com"],
+    )
+
+    assert result.exit_code == 0
+    assert permission_calls == [
+        {
+            "file_id": "doc-123",
+            "channel_member_emails": [],
+            "requester_email": "alice@example.com",
+        }
+    ]
+    assert "Created document: Personal Notes" in result.output
+    assert "Shared with" not in result.output
+    assert "Ownership transferred to alice@example.com" in result.output
+
+
 def test_drive_list_full_text_flag_is_passed_to_client(monkeypatch):
     calls: list[dict] = []
 
