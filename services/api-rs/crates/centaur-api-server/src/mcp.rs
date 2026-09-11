@@ -328,11 +328,16 @@ fn mcp_initialize_result(params: &Value) -> Value {
     if mcp_v2_enabled() {
         result["instructions"] = Value::String(
             concat!(
-                "Centaur's catalog changes dynamically. When a request involves an external ",
-                "service, private or current data, an external action, or a service URL, search ",
-                "the live catalog with `centaur_catalog_search`. Load the selected tool with ",
-                "`centaur_catalog_load`, follow its help and skill instructions, then invoke it ",
-                "with `centaur_tool_call`."
+                "Centaur has a large tool catalog that changes dynamically. Representative ",
+                "tools include `company_context`, `slack`, `gsuite`, `linear`, `granola`, ",
+                "`websearch`, `figma`, `notion`, `dune`, `allium`, `grafana`, and `sentry`. ",
+                "Availability varies by Console policy, and these names are capability hints, ",
+                "not the complete catalog. Whenever you determine that you need to find or ",
+                "choose a tool, call `centaur_catalog_search`; do not infer catalog availability ",
+                "from the short MCP bootstrap tool list. In particular, search when a request ",
+                "involves an external service, private or current data, an external action, or ",
+                "a service URL. Load the selected tool with `centaur_catalog_load`, follow its ",
+                "help and skill instructions, then invoke it with `centaur_tool_call`."
             )
             .to_owned(),
         );
@@ -2172,6 +2177,38 @@ def search(query, limit=20):
         assert!(matches!(action, McpCentaurToolAction::Run { .. }));
 
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn mcp_v2_feature_flag_adds_catalog_guidance() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[("CENTAUR_MCP_V2_ENABLED", "")]);
+
+        for (flag, enabled) in [
+            ("", false),
+            ("false", false),
+            ("invalid", false),
+            ("true", true),
+            (" TRUE ", true),
+        ] {
+            let _flag = EnvGuard::set(&[("CENTAUR_MCP_V2_ENABLED", flag)]);
+            let result = mcp_initialize_result(&json!({
+                "protocolVersion": "2025-06-18",
+            }));
+
+            if enabled {
+                let instructions = result["instructions"].as_str().unwrap();
+                assert!(instructions.contains("`company_context`, `slack`, `gsuite`"));
+                assert!(
+                    instructions
+                        .contains("Whenever you determine that you need to find or choose a tool")
+                );
+                assert!(instructions.contains("call `centaur_catalog_search`"));
+                assert!(instructions.contains("short MCP bootstrap tool list"));
+            } else {
+                assert!(result.get("instructions").is_none());
+            }
+        }
     }
 
     #[test]
