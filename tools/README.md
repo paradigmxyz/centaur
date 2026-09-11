@@ -57,19 +57,6 @@ centaur-tools list
 my-tool --help
 ```
 
-When a tool has an associated workflow skill, declare its exact skill name in
-`[tool.centaur]`:
-
-```toml
-[tool.centaur]
-module = "client.py"
-skills = ["my-tool-workflow"]
-```
-
-MCP discovery includes the association and instructs agents to search for and
-read the skill before using the tool. Keep the skill name aligned with the
-corresponding `SKILL.md` frontmatter.
-
 ## Available Plugins
 
 The open-source tool inventory lives in this `tools/` tree and changes over time. To see what ships in a running sandbox, use `centaur-tools list`; private deployments may mount additional overlay tool directories.

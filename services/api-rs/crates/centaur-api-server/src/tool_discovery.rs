@@ -64,7 +64,6 @@ pub(crate) struct DiscoveredTool {
     pub(crate) name: String,
     pub(crate) package: String,
     pub(crate) description: Option<String>,
-    pub(crate) skills: Vec<String>,
     pub(crate) client_module: String,
     pub(crate) project_dir: PathBuf,
 }
@@ -179,7 +178,6 @@ pub(crate) fn discover_tool_catalog(
                 name: script_name,
                 package: tool.package.clone(),
                 description: tool.description.clone(),
-                skills: tool.skills.clone(),
                 client_module: tool.client_module.clone(),
                 project_dir: tool.dir.clone(),
             });
@@ -328,7 +326,6 @@ struct LoadedToolMeta {
     dir: PathBuf,
     package: String,
     description: Option<String>,
-    skills: Vec<String>,
     client_module: String,
     script_names: Vec<String>,
     secrets: Vec<ToolSecret>,
@@ -546,9 +543,6 @@ fn load_tool_meta(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
-    let mut skills = string_array(tool_conf.get("skills"));
-    skills.sort();
-    skills.dedup();
     let client_module = tool_conf
         .get("module")
         .and_then(TomlValue::as_str)
@@ -596,7 +590,6 @@ fn load_tool_meta(
         dir: tool_dir.to_path_buf(),
         package,
         description,
-        skills,
         client_module,
         script_names,
         secrets,
@@ -1625,67 +1618,6 @@ mod tests {
             config.resolve_tool_dirs().unwrap(),
             vec![PathBuf::from("/base"), PathBuf::from("/overlay")]
         );
-    }
-
-    #[test]
-    fn discovers_normalized_tool_skill_associations() {
-        let temp = temp_dir("api-rs-tool-skills");
-        write_tool(
-            &temp.join("docsend"),
-            r#"
-[project]
-name = "docsend"
-description = "Download DocSend documents"
-
-[project.scripts]
-docsend = "docsend.cli:app"
-
-[tool.centaur]
-skills = ["docsend", "document-recovery", "docsend"]
-"#,
-        );
-
-        let discovered = discover_tool_catalog(std::slice::from_ref(&temp)).unwrap();
-
-        assert_eq!(discovered.tools.len(), 1);
-        assert_eq!(
-            discovered.tools[0].skills,
-            ["docsend".to_owned(), "document-recovery".to_owned()]
-        );
-
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn malformed_tool_skill_associations_do_not_block_discovery() {
-        let temp = temp_dir("api-rs-malformed-tool-skills");
-        write_tool(
-            &temp.join("string-skills"),
-            r#"
-[project]
-name = "string-skills"
-
-[tool.centaur]
-skills = "docsend"
-"#,
-        );
-        write_tool(
-            &temp.join("empty-skill"),
-            r#"
-[project]
-name = "empty-skill"
-
-[tool.centaur]
-skills = ["docsend", ""]
-"#,
-        );
-
-        let discovered = discover_tool_catalog(std::slice::from_ref(&temp)).unwrap();
-
-        assert_eq!(discovered.tools.len(), 2);
-        assert!(discovered.tools.iter().all(|tool| tool.skills.is_empty()));
-
-        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]

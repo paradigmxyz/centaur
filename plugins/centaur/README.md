@@ -17,9 +17,6 @@ Deployments with `CENTAUR_MCP_V2_ENABLED=true` expose the `centaur` MCP tool. Pa
 
 `centaur run <tool> <argv>` runs the tool's CLI in your principal's sandbox using current Console policy. Start with `centaur run <tool> --help`, then add command segments before `--help` until the relevant options and arguments are shown. Pass each argument as a separate array element. Spaces within values are preserved. Shell expansion, pipes, and redirection are not interpreted.
 
-Tool list and search results include associated skill names when declared by
-the tool. Read those skills before running the tool's workflow.
-
 The result includes `stdout`, `stderr`, `exit_status`, and `timed_out` in both text and structured content. Plain-text help and JSON output are supported. Nonzero exits and timeouts set MCP `isError`. Calls have a 120-second execution timeout. Existing v1 tools with `method` and `arguments` remain available.
 
 ## Codex
