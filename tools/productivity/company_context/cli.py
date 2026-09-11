@@ -17,7 +17,11 @@ load_dotenv()
 
 app = typer.Typer(
     name="company_context",
-    help="Search or run scoped SQL over company history, Slack DMs, Google Docs, and Granola notes.",
+    help=(
+        "Search or run scoped SQL over company history, Slack DMs, Google Docs, and "
+        "Granola notes. Search for and read the `company-context` skill with "
+        "`centaur-skills` before use."
+    ),
 )
 
 
