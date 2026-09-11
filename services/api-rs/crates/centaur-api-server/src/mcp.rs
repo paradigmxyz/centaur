@@ -222,12 +222,13 @@ async fn mcp_tool_call_result(
                 "centaur_tool_call" => {
                     mcp_v2_tool_call_result(state, principal, params.arguments).await
                 }
-                _ => mcp_whoami_result(principal, params.arguments).map(|result| {
+                "centaur_whoami" => mcp_whoami_result(principal, params.arguments).map(|result| {
                     McpToolCallOutcome {
                         result,
                         timed_out: false,
                     }
                 }),
+                _ => unreachable!("non-builtin MCP tools are resolved before dispatch"),
             }
         };
         match outcome {
