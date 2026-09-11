@@ -11,6 +11,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 from company_context import cli
 
 
+def test_help_links_company_context_skill() -> None:
+    result = CliRunner().invoke(cli.app, ["--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "company-context" in result.output
+    assert "centaur-skills" in result.output
+
+
 def test_search_table_flag_uses_human_readable_output(monkeypatch):
     class FakeClient:
         def search(self, **kwargs):

@@ -312,7 +312,10 @@ fn mcp_initialize_result(params: &Value) -> Value {
                 "all Centaur tool discovery and execution. ",
                 "Use its `list`, `search`, and `run` commands instead of calling legacy ",
                 "per-service MCP tools directly. Use a legacy per-service tool only when ",
-                "the `centaur` tool cannot complete the request."
+                "the `centaur` tool cannot complete the request. When a tool's help tells ",
+                "you to look up a skill, use `centaur` to run `centaur-skills search ",
+                "<query>`, then `centaur-skills read <name-or-id>`, and follow the returned ",
+                "instructions before using the tool."
             )
             .to_owned(),
         );
