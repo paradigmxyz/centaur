@@ -598,6 +598,74 @@ fn fake_codex_blocks_mode_spawns_app_server_and_translates_user_blocks() {
 }
 
 #[test]
+fn fake_codex_blocks_mode_queues_active_turns_in_order() {
+    let fake_codex = temp_path("fake-queued-codex.sh");
+    let fake_codex_log = temp_path("fake-queued-codex-requests.jsonl");
+    let script = fake_codex_app_server_script(&fake_codex_log);
+    std::fs::write(&fake_codex, script).expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex)
+        .expect("fake codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
+        Harness::Codex,
+        None,
+        Some((
+            "CODEX_BIN",
+            fake_codex.to_str().expect("utf-8 fake codex path"),
+        )),
+        &[("FAKE_CODEX_TURN_DELAY", "0.2")],
+    );
+    for prompt in ["first queued turn", "second queued turn"] {
+        bridge.send(json!({
+            "type": "user",
+            "thread_key": "slack:C123:123.456",
+            "trace_metadata": {
+                "source": "slackbotv2",
+                "action": "execute"
+            },
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}],
+            },
+        }));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let first = bridge.read_blocks_turn(deadline);
+    let second = bridge.read_blocks_turn(deadline);
+    bridge.finish_successfully();
+
+    assert_completed_turn(&first);
+    assert_completed_turn(&second);
+
+    let requests = std::fs::read_to_string(&fake_codex_log).expect("read fake codex request log");
+    let turn_starts: Vec<Value> = requests
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("fake codex request JSON"))
+        .filter(|value: &Value| value.get("method").and_then(Value::as_str) == Some("turn/start"))
+        .collect();
+    assert_eq!(turn_starts.len(), 2, "both queued turns must execute");
+    assert_eq!(
+        turn_starts[0]
+            .pointer("/params/input/0/text")
+            .and_then(Value::as_str),
+        Some("first queued turn")
+    );
+    assert_eq!(
+        turn_starts[1]
+            .pointer("/params/input/0/text")
+            .and_then(Value::as_str),
+        Some("second queued turn")
+    );
+
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(fake_codex_log);
+}
+
+#[test]
 fn fake_codex_blocks_mode_interrupts_active_turn() {
     let fake_codex = temp_path("fake-interruptible-codex.sh");
     let fake_codex_log = temp_path("fake-interruptible-codex-requests.jsonl");
@@ -1344,6 +1412,8 @@ impl BridgeProcess {
             "CENTAUR_AMP_APP_BRIDGE_COMMAND",
             "CODEX_MODEL",
             "CODEX_MODEL_PROVIDER",
+            "FAKE_CODEX_TURN_DELAY",
+            "FAKE_CODEX_WAIT_FOR_STEER",
             "OPENROUTER_MODEL",
         ] {
             command.env_remove(env_key);
@@ -1747,8 +1817,10 @@ impl BridgeProcess {
 
     fn run_blocks_user_line(&mut self, user_line: Value, timeout: Duration) -> TurnCapture {
         self.send(user_line);
+        self.read_blocks_turn(Instant::now() + timeout)
+    }
 
-        let deadline = Instant::now() + timeout;
+    fn read_blocks_turn(&mut self, deadline: Instant) -> TurnCapture {
         let mut capture = TurnCapture::default();
 
         loop {
@@ -2400,6 +2472,9 @@ while IFS= read -r line; do
       id=$(request_id "$line")
       printf '{"id":%s,"result":{"turn":{"id":"turn-1"}}}\n' "$id"
       printf '%s\n' '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[],"itemsView":"full","status":"inProgress","error":null,"startedAt":1,"completedAt":null,"durationMs":null}}}'
+      if [ -n "${FAKE_CODEX_TURN_DELAY:-}" ]; then
+        sleep "$FAKE_CODEX_TURN_DELAY"
+      fi
       if [ "${FAKE_CODEX_WAIT_FOR_STEER:-}" != "1" ]; then
         printf '%s\n' '{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"answer-1","delta":"codex blocks"}}'
         printf '%s\n' '{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"agentMessage","id":"answer-1","text":"codex blocks","phase":null,"memoryCitation":null},"completedAtMs":2}}'
