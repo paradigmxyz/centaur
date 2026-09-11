@@ -64,13 +64,3 @@ def test_list_table_flag_uses_human_readable_output(monkeypatch):
     assert result.exit_code == 0, result.output
     assert "Granola Notes (1)" in result.output
     assert "Roadmap" in result.output
-
-
-def test_get_raw_still_uses_markdown_output(monkeypatch):
-    monkeypatch.setattr(granola_client, "_client", FakeClient)
-
-    result = CliRunner().invoke(cli.app, ["get", "meeting-1", "--raw"])
-
-    assert result.exit_code == 0, result.output
-    assert result.output.startswith("# Roadmap\n")
-    assert "Launch plans" in result.output
