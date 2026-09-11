@@ -306,7 +306,10 @@ fn mcp_initialize_result(params: &Value) -> Value {
                 "Prefer the `centaur` tool for all Centaur tool discovery and execution. ",
                 "Use its `list`, `search`, and `run` commands instead of calling legacy ",
                 "per-service MCP tools directly. Use a legacy per-service tool only when ",
-                "the `centaur` tool cannot complete the request."
+                "the `centaur` tool cannot complete the request. When a tool's help tells ",
+                "you to look up a skill, use `centaur` to run `centaur-skills search ",
+                "<query>`, then `centaur-skills read <name-or-id>`, and follow the returned ",
+                "instructions before using the tool."
             )
             .to_owned(),
         );
@@ -2119,6 +2122,8 @@ def search(query, limit=20):
                     instructions
                         .contains("instead of calling legacy per-service MCP tools directly")
                 );
+                assert!(instructions.contains("centaur-skills search <query>"));
+                assert!(instructions.contains("centaur-skills read <name-or-id>"));
             } else {
                 assert!(result.get("instructions").is_none());
             }
