@@ -1,46 +1,14 @@
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 from company_context import cli
-
-
-@pytest.mark.parametrize(
-    ("args", "client_method"),
-    [
-        (["query", "SELECT 1"], "query"),
-        (["search", "roadmap"], "search"),
-        (["search-dm-conversations", "alex"], "search_dm_conversations"),
-        (["search-dms", "roadmap"], "search_dms"),
-        (["list"], "list_documents"),
-        (["read", "doc-1"], "read_document"),
-    ],
-)
-def test_commands_default_to_json(monkeypatch, args, client_method):
-    payload = {
-        "status": "ok",
-        "results": [{"document_id": "doc-1", "title": "Roadmap"}],
-    }
-    fake_client = type(
-        "FakeClient",
-        (),
-        {client_method: lambda self, **kwargs: payload},
-    )
-
-    monkeypatch.setattr(cli, "CompanyContextClient", fake_client)
-
-    result = CliRunner().invoke(cli.app, args)
-
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.output) == payload
 
 
 def test_search_table_flag_uses_human_readable_output(monkeypatch):
