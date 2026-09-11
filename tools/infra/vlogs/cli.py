@@ -9,14 +9,7 @@ from rich.table import Table
 
 load_dotenv()
 
-app = typer.Typer(
-    name="vlogs",
-    help=(
-        "VictoriaLogs CLI for LogsQL queries and log exploration. For auth or credential "
-        "failures, search for and read the `auth-failure-log-triage` skill with "
-        "`centaur-skills` before use."
-    ),
-)
+app = typer.Typer(name="vlogs", help="VictoriaLogs CLI for LogsQL queries and log exploration")
 console = Console()
 
 
