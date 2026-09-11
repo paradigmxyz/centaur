@@ -4318,8 +4318,11 @@ async fn run_agent_session_turn(
             }],
         )
         .await?;
+    // The workflow waiter can be dropped on cancellation. Hand startup to the
+    // durable session driver so dropping it cannot strand a running execution
+    // before sandbox binding or the execution deadline has been installed.
     let execution = session_runtime
-        .execute_session(
+        .enqueue_session_execution(
             &thread_key,
             ExecuteSessionInput {
                 idempotency_key: Some(execution_idempotency_key),
