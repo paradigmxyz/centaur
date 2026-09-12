@@ -866,10 +866,10 @@ impl SandboxArgs {
                 self.local_workload_mode()?,
             )),
             SandboxBackendKind::AgentK8s => {
-                let backend = AgentSandboxBackend::new(
+                let backend = Arc::new(AgentSandboxBackend::new(
                     self.kube_client().await?,
                     AgentSandboxConfig::try_from(self)?,
-                );
+                ));
                 let stopped = backend.drain_service_account_mismatches().await?;
                 if !stopped.is_empty() {
                     info!(
@@ -877,10 +877,14 @@ impl SandboxArgs {
                         "drained sandboxes with stale service accounts before enabling reuse"
                     );
                 }
-                Ok(SandboxRuntime::backend_with_workload(
-                    Arc::new(backend),
-                    self.container_workload_mode()?,
-                ))
+                let artifact_backend = backend.clone();
+                Ok(
+                    SandboxRuntime::backend_with_workload(backend, self.container_workload_mode()?)
+                        .with_artifact_reader(move |id, path| {
+                            let backend = artifact_backend.clone();
+                            async move { backend.read_artifact(&id, &path).await }
+                        }),
+                )
             }
         }
     }

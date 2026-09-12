@@ -22,7 +22,7 @@ use kube::api::{
 };
 use kube::{Api, Client, Error, Resource};
 use serde_json::{Map, Value, json};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep};
 
@@ -42,6 +42,7 @@ const SANDBOX_ID_LABEL: &str = "centaur.ai/sandbox-id";
 const OBSERVABILITY_ENABLED_LABEL: &str = "centaur.ai/observability-enabled";
 const MANAGED_BY_VALUE: &str = "api-rs";
 const SANDBOX_FILES_VOLUME: &str = "sandbox-files";
+const ARTIFACT_GET_COMMAND: &str = "/usr/local/bin/centaur-artifact-get";
 // iron-control principal OID the sandbox's proxy binds to, stamped at create
 // so resume (which has only the sandbox id) can rebind without the spec or any
 // in-memory state. Survives pause and api-rs restarts.
@@ -700,6 +701,64 @@ impl SandboxBackend for AgentSandboxBackend {
         self.patch_sandbox_merge(id, sandbox_resume_patch(&capability_labels))
             .await?;
         self.wait_until_running(id).await
+    }
+}
+
+impl AgentSandboxBackend {
+    /// Read an artifact through a one-shot pod exec whose stdout is the file body.
+    pub async fn read_artifact(&self, id: &SandboxId, path: &str) -> SandboxResult<Vec<u8>> {
+        let params = AttachParams::default()
+            .container(self.config.container_name.clone())
+            .stdin(false)
+            .stdout(true)
+            .stderr(true)
+            .tty(false);
+        let mut process = self
+            .pods()
+            .exec(id.as_str(), [ARTIFACT_GET_COMMAND, path], &params)
+            .await
+            .map_err(|error| map_kube_error("exec sandbox artifact reader", error))?;
+        let mut stdout = process
+            .stdout()
+            .ok_or_else(|| SandboxError::io("artifact reader stdout was not attached"))?;
+        let mut stderr = process
+            .stderr()
+            .ok_or_else(|| SandboxError::io("artifact reader stderr was not attached"))?;
+        let status = process
+            .take_status()
+            .ok_or_else(|| SandboxError::io("artifact reader status was not attached"))?;
+
+        let mut contents = Vec::new();
+        let mut error_output = Vec::new();
+        let (stdout_result, stderr_result, status) = tokio::join!(
+            stdout.read_to_end(&mut contents),
+            stderr.read_to_end(&mut error_output),
+            status,
+        );
+        stdout_result.map_err(|error| {
+            SandboxError::io_source("read sandbox artifact command stdout", error)
+        })?;
+        stderr_result.map_err(|error| {
+            SandboxError::io_source("read sandbox artifact command stderr", error)
+        })?;
+        process.join().await.map_err(|error| {
+            SandboxError::backend_source("join sandbox artifact command", error)
+        })?;
+
+        if status.as_ref().and_then(|status| status.status.as_deref()) != Some("Success") {
+            let stderr = String::from_utf8_lossy(&error_output);
+            let detail = stderr.trim();
+            let detail = if detail.is_empty() {
+                status
+                    .and_then(|status| status.message)
+                    .unwrap_or_else(|| "artifact reader failed".to_owned())
+            } else {
+                detail.to_owned()
+            };
+            return Err(SandboxError::io(detail));
+        }
+
+        Ok(contents)
     }
 }
 

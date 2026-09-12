@@ -1,17 +1,13 @@
 from __future__ import annotations
 
-import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
 from pathlib import Path
-from unittest import mock
 
-import centaur_tool_host
 import install_tool_shims
 
 
@@ -179,113 +175,6 @@ class ToolHostTest(unittest.TestCase):
                 failure, recovery = self.requests(invalid, self.run_request(["--help"]))
                 self.assertEqual(failure["status"], 1)
                 self.assertEqual(recovery["status"], 0)
-
-    def test_download_file_reads_contents(self) -> None:
-        downloads = self.root / "downloads"
-        downloads.mkdir()
-        (downloads / "report.txt").write_bytes(b"sandbox report\n")
-
-        with mock.patch.object(centaur_tool_host, "DOWNLOADS_ROOT", downloads):
-            response = centaur_tool_host._run_tool(
-                {
-                    "id": "download-1",
-                    "mode": "download_file",
-                    "path": "report.txt",
-                }
-            )
-        self.assertEqual(response["id"], "download-1")
-        self.assertEqual(response["status"], 0)
-        self.assertEqual(
-            centaur_tool_host.base64.b64decode(response["data_base64"]),
-            b"sandbox report\n",
-        )
-
-        output = io.StringIO()
-        with redirect_stdout(output):
-            centaur_tool_host._emit_result(response, transient=True)
-        envelope = json.loads(output.getvalue())
-        self.assertEqual(envelope["type"], "centaur.transient_result")
-        self.assertEqual(envelope["turn_id"], "download-1")
-        self.assertEqual(json.loads(envelope["result"]), response)
-
-    def test_download_file_rejects_paths_outside_downloads_root(self) -> None:
-        downloads = self.root / "restricted-downloads"
-        downloads.mkdir()
-        (self.root / "secret.txt").write_text("secret")
-
-        with mock.patch.object(centaur_tool_host, "DOWNLOADS_ROOT", downloads):
-            for artifact_path in ["../secret.txt", "/etc/passwd"]:
-                with self.subTest(path=artifact_path):
-                    with self.assertRaisesRegex(ValueError, "relative"):
-                        centaur_tool_host._read_download_file(artifact_path)
-
-    def test_download_file_reads_nested_paths_and_in_root_symlinks(self) -> None:
-        downloads = self.root / "nested-downloads"
-        reports = downloads / "reports"
-        reports.mkdir(parents=True)
-        (reports / "quarterly.txt").write_text("quarterly")
-        (downloads / "latest.txt").symlink_to(reports / "quarterly.txt")
-
-        with mock.patch.object(centaur_tool_host, "DOWNLOADS_ROOT", downloads):
-            self.assertEqual(
-                centaur_tool_host._read_download_file("reports/quarterly.txt"),
-                b"quarterly",
-            )
-            self.assertEqual(
-                centaur_tool_host._read_download_file("latest.txt"), b"quarterly"
-            )
-
-    def test_download_file_rejects_symlinks_outside_downloads_root(self) -> None:
-        downloads = self.root / "symlink-downloads"
-        downloads.mkdir()
-        secret = self.root / "secret.txt"
-        secret.write_text("secret")
-        (downloads / "report.txt").symlink_to(secret)
-
-        with mock.patch.object(centaur_tool_host, "DOWNLOADS_ROOT", downloads):
-            with self.assertRaisesRegex(ValueError, "resolves outside"):
-                centaur_tool_host._read_download_file("report.txt")
-
-    def test_download_file_reads_from_the_validated_descriptor(self) -> None:
-        downloads = self.root / "descriptor-downloads"
-        downloads.mkdir()
-        report = downloads / "report.txt"
-        report.write_text("report")
-        secret = self.root / "secret.txt"
-        secret.write_text("secret")
-
-        with mock.patch.object(centaur_tool_host, "DOWNLOADS_ROOT", downloads):
-            file_fd = centaur_tool_host._open_download_file("report.txt")
-            report.unlink()
-            report.symlink_to(secret)
-            with os.fdopen(file_fd, "rb") as file:
-                self.assertEqual(file.read(), b"report")
-
-    def test_download_file_rejects_symlinked_downloads_root(self) -> None:
-        real_downloads = self.root / "real-downloads"
-        real_downloads.mkdir()
-        (real_downloads / "report.txt").write_text("report")
-        downloads_link = self.root / "downloads-link"
-        downloads_link.symlink_to(real_downloads, target_is_directory=True)
-
-        with mock.patch.object(
-            centaur_tool_host, "DOWNLOADS_ROOT", downloads_link
-        ):
-            with self.assertRaises(OSError):
-                centaur_tool_host._read_download_file("report.txt")
-
-    def test_download_file_rejects_oversized_files(self) -> None:
-        downloads = self.root / "size-limited-downloads"
-        downloads.mkdir()
-        (downloads / "large.bin").write_bytes(b"12345")
-
-        with (
-            mock.patch.object(centaur_tool_host, "DOWNLOADS_ROOT", downloads),
-            mock.patch.object(centaur_tool_host, "MAX_DOWNLOAD_BYTES", 4),
-        ):
-            with self.assertRaisesRegex(ValueError, "size limit"):
-                centaur_tool_host._read_download_file("large.bin")
-
 
 if __name__ == "__main__":
     unittest.main()

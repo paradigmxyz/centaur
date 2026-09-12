@@ -855,7 +855,7 @@ async fn mcp_artifact_get_result(
     record_mcp_tool_method(&Span::current(), "centaur_artifact_get", "get");
     let output = state
         .runtime()?
-        .read_tool_host_file(&principal.principal_id, &args.path, MCP_ARTIFACT_MAX_BYTES)
+        .read_sandbox_artifact(&principal.principal_id, &args.path, MCP_ARTIFACT_MAX_BYTES)
         .await?;
     record_mcp_tool_correlation(&Span::current(), None, None, Some(&output.sandbox_id));
     mcp_artifact_get_output_result(&args.path, output.contents)

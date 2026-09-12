@@ -12,12 +12,11 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use base64::{Engine as _, engine::general_purpose};
 use centaur_iron_control::{IronControlError, Principal, SessionRegistrar};
 use centaur_sandbox_core::{
     Mount, RepoCacheAccess, ResourceRequirements, SANDBOX_AGENT_HOME, SandboxBackend,
     SandboxCapabilities as BackendSandboxCapabilities, SandboxError, SandboxFile, SandboxId,
-    SandboxIoGuard, SandboxRead, SandboxSpec, SandboxStatus, SandboxWrite,
+    SandboxIoGuard, SandboxRead, SandboxResult, SandboxSpec, SandboxStatus, SandboxWrite,
 };
 use centaur_sandbox_manager::{
     SandboxManager, SandboxReaper, SandboxReaperConfig, WarmPoolConfig, WarmPoolError,
@@ -46,7 +45,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{
     io,
-    sync::{Mutex, oneshot},
+    sync::Mutex,
     time::{Instant, Interval, MissedTickBehavior, interval_at, sleep, timeout},
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
@@ -84,18 +83,18 @@ const CENTAUR_PUBLIC_SKILL_DIRS_ENV: &str = "CENTAUR_PUBLIC_SKILL_DIRS";
 const SANDBOX_REPO_CACHE_LABEL: &str = "centaur.sandbox_repo_cache";
 const OBSERVABILITY_TOOL_BLOCKLIST: &str =
     "vlogs,vmetrics,grafana,centaur_investigator,centaur-investigator";
-const TOOL_HOST_FILE_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const ARTIFACT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 type SandboxSpecFactory = Arc<
     dyn Fn(&ThreadKey, &str, &HarnessType, Option<&PersonaContext>) -> SandboxSpec + Send + Sync,
 >;
+type SandboxArtifactReader =
+    Arc<dyn Fn(SandboxId, String) -> BoxFuture<'static, SandboxResult<Vec<u8>>> + Send + Sync>;
 type SessionInputSink = FramedWrite<SandboxWrite, LinesCodec>;
 type ExecutionSpanRegistry = Arc<Mutex<HashMap<String, Span>>>;
 type SessionPipeMap = Arc<DashMap<String, SessionPipe>>;
 type SessionPipeOpenLocks = Arc<DashMap<String, Arc<Mutex<()>>>>;
 type ToolHostCallLocks = Arc<DashMap<String, Arc<Mutex<()>>>>;
-type ToolHostTransientResult = Result<String, String>;
-type ToolHostTransientWaiters = Arc<DashMap<String, oneshot::Sender<ToolHostTransientResult>>>;
 type SessionTitleThreadSet = Arc<DashSet<ThreadKey>>;
 type SessionTitleGenerator = Arc<
     dyn Fn(String) -> BoxFuture<'static, Result<String, SessionTitleGenerationError>> + Send + Sync,
@@ -148,7 +147,6 @@ pub struct SessionRuntime {
     sandbox_pipes: SessionPipeMap,
     sandbox_pipe_open_locks: SessionPipeOpenLocks,
     tool_host_call_locks: ToolHostCallLocks,
-    tool_host_transient_waiters: ToolHostTransientWaiters,
     execution_spans: ExecutionSpanRegistry,
     iron_control: Arc<dyn SessionPrincipalRegistrar>,
     warm_pool: Option<Arc<WarmPoolManager>>,
@@ -301,6 +299,8 @@ impl PersonaRegistry {
 pub struct SandboxRuntime {
     manager: Arc<SandboxManager>,
     spec_factory: SandboxSpecFactory,
+    /// Optional out-of-band transport supplied by runtimes that can read artifacts.
+    artifact_reader: Option<SandboxArtifactReader>,
     warm_spec_factory: Option<WarmSandboxSpecFactory>,
     workload_key: Option<String>,
     /// The harness warm sandboxes boot with. A warm claim is only valid for a
@@ -444,7 +444,7 @@ pub struct ToolHostCallOutput {
 }
 
 #[derive(Debug)]
-pub struct ToolHostFileOutput {
+pub struct SandboxArtifactOutput {
     pub sandbox_id: String,
     pub contents: Vec<u8>,
 }
@@ -547,13 +547,6 @@ struct ToolHostRequest {
     timeout_seconds: u64,
 }
 
-#[derive(Serialize)]
-struct ToolHostDownloadRequest<'a> {
-    id: &'a str,
-    mode: &'static str,
-    path: &'a str,
-}
-
 #[derive(Deserialize)]
 struct ToolHostResponse {
     status: Option<i32>,
@@ -565,27 +558,6 @@ struct ToolHostResponse {
     timed_out: bool,
 }
 
-#[derive(Deserialize)]
-struct ToolHostDownloadResponse {
-    id: String,
-    status: i32,
-    #[serde(default)]
-    data_base64: Option<String>,
-    #[serde(default)]
-    stderr: String,
-}
-
-struct ToolHostTransientWaiterGuard {
-    request_id: String,
-    waiters: ToolHostTransientWaiters,
-}
-
-impl Drop for ToolHostTransientWaiterGuard {
-    fn drop(&mut self) {
-        self.waiters.remove(&self.request_id);
-    }
-}
-
 /// Shared handles threaded through background session tasks (stdout pump,
 /// terminal-output recording, max-duration failure, idle pause).
 #[derive(Clone)]
@@ -594,7 +566,6 @@ struct RuntimeContext {
     manager: Arc<SandboxManager>,
     sandbox_pipes: SessionPipeMap,
     execution_spans: ExecutionSpanRegistry,
-    tool_host_transient_waiters: ToolHostTransientWaiters,
     stdout_owner_id: String,
 }
 
@@ -993,7 +964,6 @@ impl SessionRuntime {
             sandbox_pipes: Arc::new(DashMap::new()),
             sandbox_pipe_open_locks: Arc::new(DashMap::new()),
             tool_host_call_locks: Arc::new(DashMap::new()),
-            tool_host_transient_waiters: Arc::new(DashMap::new()),
             execution_spans: Arc::new(Mutex::new(HashMap::new())),
             iron_control: Arc::new(iron_control),
             warm_pool: None,
@@ -1069,7 +1039,6 @@ impl SessionRuntime {
             manager: self.sandbox_runtime.manager.clone(),
             sandbox_pipes: self.sandbox_pipes.clone(),
             execution_spans: self.execution_spans.clone(),
-            tool_host_transient_waiters: self.tool_host_transient_waiters.clone(),
             stdout_owner_id: self.stdout_owner_id.clone(),
         }
     }
@@ -1148,14 +1117,14 @@ impl SessionRuntime {
         result
     }
 
-    /// Read a file directly from an existing principal-bound MCP tool sandbox.
+    /// Read an artifact from an existing principal-bound MCP sandbox.
     /// This operation does not create an execution, event, or durable message.
-    pub async fn read_tool_host_file(
+    pub async fn read_sandbox_artifact(
         &self,
         principal_id: &str,
         artifact_path: &str,
         max_bytes: usize,
-    ) -> Result<ToolHostFileOutput, SessionRuntimeError> {
+    ) -> Result<SandboxArtifactOutput, SessionRuntimeError> {
         let principal_id = principal_id.trim();
         if principal_id.is_empty() {
             return Err(SessionRuntimeError::BadRequest(
@@ -1168,16 +1137,66 @@ impl SessionRuntime {
             ));
         }
         let thread_key = tool_host_thread_key(principal_id)?;
-        let call_lock = self.tool_host_call_lock(&thread_key);
-        let result = {
-            let _call_guard = call_lock.lock().await;
-            self.locked_tool_host_file_read(&thread_key, principal_id, artifact_path, max_bytes)
-                .await
+        let session = match self.store.get_session(&thread_key).await {
+            Ok(session) => session,
+            Err(SessionStoreError::NotFound { .. }) => {
+                return Err(SessionRuntimeError::BadRequest(
+                    "no MCP sandbox exists for this principal".to_owned(),
+                ));
+            }
+            Err(error) => return Err(error.into()),
         };
-        drop(call_lock);
-        self.tool_host_call_locks
-            .remove_if(thread_key.as_str(), |_, lock| Arc::strong_count(lock) == 1);
-        result
+        if session.iron_control_principal.as_deref() != Some(principal_id) {
+            return Err(SessionRuntimeError::BadRequest(
+                "MCP sandbox principal does not match the requester".to_owned(),
+            ));
+        }
+        let Some(sandbox_id) = session.sandbox_id else {
+            return Err(SessionRuntimeError::BadRequest(
+                "no MCP sandbox is currently assigned to this principal".to_owned(),
+            ));
+        };
+        let id = SandboxId::new(&sandbox_id);
+        match self.sandbox_runtime.manager.status(&id).await? {
+            SandboxStatus::Running => {}
+            SandboxStatus::Suspended => self.sandbox_runtime.manager.resume(&id).await?,
+            status => {
+                return Err(SessionRuntimeError::BadRequest(format!(
+                    "MCP sandbox is not available for artifact retrieval: {status:?}"
+                )));
+            }
+        }
+        let artifact_reader = self
+            .sandbox_runtime
+            .artifact_reader
+            .as_ref()
+            .ok_or_else(|| {
+                SessionRuntimeError::BadRequest(
+                    "artifact retrieval is not supported by the configured sandbox backend"
+                        .to_owned(),
+                )
+            })?;
+        let artifact = timeout(
+            ARTIFACT_READ_TIMEOUT,
+            artifact_reader(id, artifact_path.to_owned()),
+        )
+        .await
+        .map_err(|_| {
+            SessionRuntimeError::Sandbox(SandboxError::io(format!(
+                "sandbox artifact retrieval timed out after {} seconds",
+                ARTIFACT_READ_TIMEOUT.as_secs()
+            )))
+        })?;
+        let contents = artifact?;
+        if contents.len() > max_bytes {
+            return Err(SessionRuntimeError::Sandbox(SandboxError::io(format!(
+                "sandbox artifact exceeds the {max_bytes}-byte size limit"
+            ))));
+        }
+        Ok(SandboxArtifactOutput {
+            sandbox_id,
+            contents,
+        })
     }
 
     /// Resolve the principal once and return both the tool lists from its
@@ -1215,137 +1234,6 @@ impl SessionRuntime {
             .entry(thread_key.as_str().to_owned())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
-    }
-
-    async fn locked_tool_host_file_read(
-        &self,
-        thread_key: &ThreadKey,
-        principal_id: &str,
-        artifact_path: &str,
-        max_bytes: usize,
-    ) -> Result<ToolHostFileOutput, SessionRuntimeError> {
-        let session = match self.store.get_session(thread_key).await {
-            Ok(session) => session,
-            Err(SessionStoreError::NotFound { .. }) => {
-                return Err(SessionRuntimeError::BadRequest(
-                    "no MCP tool sandbox exists for this principal".to_owned(),
-                ));
-            }
-            Err(error) => return Err(error.into()),
-        };
-        if session.iron_control_principal.as_deref() != Some(principal_id) {
-            return Err(SessionRuntimeError::BadRequest(
-                "MCP tool sandbox principal does not match the requester".to_owned(),
-            ));
-        }
-        let Some(sandbox_id) = session.sandbox_id else {
-            return Err(SessionRuntimeError::BadRequest(
-                "no MCP tool sandbox is currently assigned to this principal".to_owned(),
-            ));
-        };
-        let id = SandboxId::new(&sandbox_id);
-        match self.sandbox_runtime.manager.status(&id).await? {
-            SandboxStatus::Running => {}
-            SandboxStatus::Suspended => self.sandbox_runtime.manager.resume(&id).await?,
-            status => {
-                return Err(SessionRuntimeError::BadRequest(format!(
-                    "MCP tool sandbox is not available for download: {status:?}"
-                )));
-            }
-        }
-        let pipe = self.ensure_session_pipe(thread_key, &sandbox_id).await?;
-        let request_id = format!("mcp-artifact-{}", Uuid::new_v4().simple());
-        let input_line = serde_json::to_string(&ToolHostDownloadRequest {
-            id: &request_id,
-            mode: "download_file",
-            path: artifact_path,
-        })
-        .map_err(|error| {
-            SessionRuntimeError::Sandbox(SandboxError::io_source(
-                "encode transient tool host download request",
-                error,
-            ))
-        })?;
-        let (sender, receiver) = oneshot::channel();
-        if self
-            .tool_host_transient_waiters
-            .insert(request_id.clone(), sender)
-            .is_some()
-        {
-            self.tool_host_transient_waiters.remove(&request_id);
-            return Err(SessionRuntimeError::Sandbox(SandboxError::io(
-                "duplicate transient tool host request id",
-            )));
-        }
-        let _waiter_guard = ToolHostTransientWaiterGuard {
-            request_id: request_id.clone(),
-            waiters: self.tool_host_transient_waiters.clone(),
-        };
-        {
-            let mut stdin = pipe.stdin.lock().await;
-            stdin
-                .send(input_line)
-                .await
-                .map_err(codec_error_to_runtime)?;
-        }
-        let received = timeout(TOOL_HOST_FILE_READ_TIMEOUT, receiver)
-            .await
-            .map_err(|_| {
-                SessionRuntimeError::Sandbox(SandboxError::io(format!(
-                    "tool host download timed out after {} seconds",
-                    TOOL_HOST_FILE_READ_TIMEOUT.as_secs()
-                )))
-            })?;
-        let response = received.map_err(|error| {
-            SessionRuntimeError::Sandbox(SandboxError::io_source(
-                "receive transient tool host download response",
-                error,
-            ))
-        })?;
-        let response_json =
-            response.map_err(|error| SessionRuntimeError::Sandbox(SandboxError::io(error)))?;
-        let response =
-            serde_json::from_str::<ToolHostDownloadResponse>(&response_json).map_err(|error| {
-                SessionRuntimeError::Sandbox(SandboxError::io_source(
-                    "decode transient tool host download response",
-                    error,
-                ))
-            })?;
-        if response.id != request_id {
-            return Err(SessionRuntimeError::Sandbox(SandboxError::io(
-                "transient tool host download response id did not match its request",
-            )));
-        }
-        if response.status != 0 {
-            let detail = response.stderr.trim();
-            return Err(SessionRuntimeError::Sandbox(SandboxError::io(
-                if detail.is_empty() {
-                    "tool host download failed".to_owned()
-                } else {
-                    format!("tool host download failed: {detail}")
-                },
-            )));
-        }
-        let encoded = response.data_base64.ok_or_else(|| {
-            SessionRuntimeError::Sandbox(SandboxError::io(
-                "tool host download response did not include file data",
-            ))
-        })?;
-        let contents = general_purpose::STANDARD.decode(encoded).map_err(|error| {
-            SessionRuntimeError::Sandbox(SandboxError::io_source(
-                "decode transient tool host download data",
-                error,
-            ))
-        })?;
-        if contents.len() > max_bytes {
-            return Err(SessionRuntimeError::Sandbox(SandboxError::io(format!(
-                "sandbox download file exceeds the {max_bytes}-byte size limit"
-            ))));
-        }
-        Ok(ToolHostFileOutput {
-            sandbox_id,
-            contents,
-        })
     }
 
     async fn locked_tool_host_call(
@@ -4394,6 +4282,7 @@ impl SandboxRuntime {
         Self {
             manager: Arc::new(SandboxManager::new(backend)),
             spec_factory: Arc::new(spec_factory),
+            artifact_reader: None,
             warm_spec_factory: None,
             workload_key: None,
             warm_harness: None,
@@ -4417,10 +4306,21 @@ impl SandboxRuntime {
         Self {
             manager: Arc::new(SandboxManager::new(backend)),
             spec_factory: Arc::new(spec_factory),
+            artifact_reader: None,
             warm_spec_factory: Some(warm_spec_factory),
             workload_key: Some(workload_key),
             warm_harness: None,
         }
+    }
+
+    /// Add an artifact transport without expanding the portable sandbox backend contract.
+    pub fn with_artifact_reader<F, Fut>(mut self, reader: F) -> Self
+    where
+        F: Fn(SandboxId, String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = SandboxResult<Vec<u8>>> + Send + 'static,
+    {
+        self.artifact_reader = Some(Arc::new(move |id, path| reader(id, path).boxed()));
+        self
     }
 }
 
@@ -5078,11 +4978,6 @@ async fn run_stdout_pump(
             };
             line_count += 1;
             let output_value = serde_json::from_str::<Value>(&line).ok();
-            if output_value.as_ref().is_some_and(|value| {
-                dispatch_transient_tool_host_result(&ctx.tool_host_transient_waiters, value)
-            }) {
-                continue;
-            }
             if let Some(harness_thread_id) = harness_thread_id_from_output_line(&line)
                 && let Err(error) = ctx
                     .store
@@ -5211,27 +5106,6 @@ async fn run_stdout_pump(
     }
     .instrument(span)
     .await
-}
-
-fn dispatch_transient_tool_host_result(waiters: &ToolHostTransientWaiters, value: &Value) -> bool {
-    if value.get("type").and_then(Value::as_str) != Some("centaur.transient_result") {
-        return false;
-    }
-    let Some(request_id) = value.get("turn_id").and_then(Value::as_str) else {
-        return true;
-    };
-    let Some((_, waiter)) = waiters.remove(request_id) else {
-        // Late transient results are deliberately discarded rather than being
-        // attributed to whichever durable execution happens to be active.
-        return true;
-    };
-    let result = value
-        .get("result")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| "transient tool host response did not include a result payload".to_owned());
-    let _ = waiter.send(result);
-    true
 }
 
 async fn record_stdout_pump_failure(
@@ -7796,49 +7670,6 @@ mod tests {
                 "timeout_seconds": 120,
             })
         );
-    }
-
-    #[test]
-    fn tool_host_download_request_serializes_as_transient_mode() {
-        let request = ToolHostDownloadRequest {
-            id: "download-1",
-            mode: "download_file",
-            path: "reports/report.pdf",
-        };
-        assert_eq!(
-            serde_json::to_value(request).unwrap(),
-            serde_json::json!({
-                "id": "download-1",
-                "mode": "download_file",
-                "path": "reports/report.pdf",
-            })
-        );
-    }
-
-    #[test]
-    fn transient_tool_host_results_are_never_routed_to_durable_output() {
-        let waiters = Arc::new(DashMap::new());
-        let (sender, mut receiver) = oneshot::channel();
-        waiters.insert("download-1".to_owned(), sender);
-        let value = json!({
-            "type": "centaur.transient_result",
-            "turn_id": "download-1",
-            "result": "{\"id\":\"download-1\",\"status\":0}",
-        });
-
-        assert!(dispatch_transient_tool_host_result(&waiters, &value));
-        assert_eq!(
-            receiver.try_recv().unwrap().unwrap(),
-            "{\"id\":\"download-1\",\"status\":0}"
-        );
-        assert!(waiters.is_empty());
-
-        // A late response remains transient even after its waiter timed out.
-        assert!(dispatch_transient_tool_host_result(&waiters, &value));
-        assert!(!dispatch_transient_tool_host_result(
-            &waiters,
-            &json!({"type": "result", "turn_id": "download-1"})
-        ));
     }
 
     #[test]
