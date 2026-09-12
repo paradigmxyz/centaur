@@ -1266,7 +1266,7 @@ impl SessionRuntime {
             }
         }
         let pipe = self.ensure_session_pipe(thread_key, &sandbox_id).await?;
-        let request_id = format!("mcp-download-{}", Uuid::new_v4().simple());
+        let request_id = format!("mcp-artifact-{}", Uuid::new_v4().simple());
         let input_line = serde_json::to_string(&ToolHostDownloadRequest {
             id: &request_id,
             mode: "download_file",
