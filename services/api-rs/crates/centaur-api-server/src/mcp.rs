@@ -102,6 +102,14 @@ struct CentaurToolCallArguments {
     argv: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CentaurDownloadFileArguments {
+    filename: String,
+}
+
+const MCP_DOWNLOAD_MAX_BYTES: usize = 10 * 1024 * 1024;
+
 struct McpToolCallOutcome {
     result: Value,
     timed_out: bool,
@@ -155,7 +163,7 @@ pub(crate) async fn mcp_post(
             if mcp_v2_tool_name(&params.name) && !mcp_v2_enabled() {
                 return Ok(mcp_json_error(id, -32602, "unknown tool"));
             }
-            let tool = if mcp_v2_tool_name(&params.name) || params.name == "centaur_whoami" {
+            let tool = if mcp_builtin_tool_name(&params.name) {
                 None
             } else {
                 let policy = mcp_tool_host_call_policy(&state, &principal).await?;
@@ -221,6 +229,9 @@ async fn mcp_tool_call_result(
                 }
                 "centaur_tool_call" => {
                     mcp_v2_tool_call_result(state, principal, params.arguments).await
+                }
+                "centaur_download_file" => {
+                    mcp_download_file_result(state, principal, params.arguments).await
                 }
                 "centaur_whoami" => mcp_whoami_result(principal, params.arguments).map(|result| {
                     McpToolCallOutcome {
@@ -312,6 +323,29 @@ fn mcp_whoami_tool() -> Value {
     })
 }
 
+fn mcp_download_file_tool() -> Value {
+    json!({
+        "name": "centaur_download_file",
+        "description": concat!(
+            "Download a file created by a Centaur tool in the sandbox. The file must be a regular, ",
+            "non-symlink direct child of /tmp/downloads and no larger than 10 MiB. Pass only its ",
+            "filename, not a path. Returns the file as an embedded MCP resource."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["filename"],
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The direct child filename within /tmp/downloads.",
+                },
+            },
+            "additionalProperties": false,
+        },
+    })
+}
+
 fn mcp_initialize_result(params: &Value) -> Value {
     let mut result = json!({
         "protocolVersion": requested_mcp_protocol_version(params),
@@ -350,6 +384,7 @@ fn mcp_builtin_tools() -> Vec<Value> {
     if mcp_v2_enabled() {
         tools.extend(mcp_v2_tools());
     }
+    tools.push(mcp_download_file_tool());
     tools.push(mcp_whoami_tool());
     tools
 }
@@ -367,6 +402,10 @@ fn mcp_v2_tool_name(name: &str) -> bool {
         name,
         "centaur_catalog_search" | "centaur_catalog_load" | "centaur_tool_call"
     )
+}
+
+fn mcp_builtin_tool_name(name: &str) -> bool {
+    mcp_v2_tool_name(name) || matches!(name, "centaur_download_file" | "centaur_whoami")
 }
 
 fn mcp_v2_tools() -> Vec<Value> {
@@ -468,7 +507,7 @@ async fn mcp_v2_catalog_load_result(
     let output = run_mcp_tool_host(
         state.runtime()?,
         principal,
-        &tool,
+        &tool.name,
         ToolHostInvocation::V2 {
             argv: vec!["--help".to_owned()],
         },
@@ -701,10 +740,7 @@ fn mcp_centaur_tool_catalog(filter: &SandboxToolFilter) -> Result<Vec<Discovered
     Ok(tools
         .into_iter()
         // Built-in names take precedence over scripts from tool sources.
-        .filter(|tool| {
-            !matches!(tool.name.as_str(), "centaur" | "centaur_whoami")
-                && !mcp_v2_tool_name(&tool.name)
-        })
+        .filter(|tool| tool.name != "centaur" && !mcp_builtin_tool_name(&tool.name))
         .filter(|tool| filter.admits(tool))
         .collect())
 }
@@ -803,6 +839,29 @@ fn mcp_whoami_result(principal: &McpPrincipal, arguments: Value) -> Result<Value
         }))?,
         false,
     ))
+}
+
+async fn mcp_download_file_result(
+    state: &AppState,
+    principal: &McpPrincipal,
+    arguments: Value,
+) -> Result<McpToolCallOutcome, ApiError> {
+    let args = match serde_json::from_value::<CentaurDownloadFileArguments>(arguments) {
+        Ok(args) if !args.filename.trim().is_empty() => args,
+        Ok(_) => return Ok(invalid_mcp_v2_arguments("filename must not be blank")),
+        Err(error) => return Ok(invalid_mcp_v2_arguments(error)),
+    };
+    record_mcp_tool_method(&Span::current(), "centaur_download_file", "download");
+    let output = state
+        .runtime()?
+        .read_tool_host_file(
+            &principal.principal_id,
+            &args.filename,
+            MCP_DOWNLOAD_MAX_BYTES,
+        )
+        .await?;
+    record_mcp_tool_correlation(&Span::current(), None, None, Some(&output.sandbox_id));
+    mcp_download_file_output_result(&args.filename, output.contents)
 }
 
 async fn mcp_v1_tool_result(
@@ -939,7 +998,7 @@ async fn run_mcp_v1_tool(
     let output = run_mcp_tool_host(
         runtime,
         principal,
-        tool,
+        &tool.name,
         ToolHostInvocation::V1 {
             method: method.clone(),
             arguments,
@@ -961,7 +1020,7 @@ async fn run_mcp_v2_tool(
     let output = run_mcp_tool_host(
         runtime,
         principal,
-        tool,
+        &tool.name,
         ToolHostInvocation::V2 { argv },
         policy,
     )
@@ -973,7 +1032,7 @@ async fn run_mcp_v2_tool(
 async fn run_mcp_tool_host(
     runtime: SessionRuntime,
     principal: &McpPrincipal,
-    tool: &DiscoveredTool,
+    tool_name: &str,
     invocation: ToolHostInvocation,
     policy: ToolHostCallPolicy,
 ) -> Result<ToolHostCallOutput, ApiError> {
@@ -984,7 +1043,7 @@ async fn run_mcp_tool_host(
                 console_user_email: principal.console_user_email.clone(),
                 console_user_name: principal.console_user_name.clone(),
                 token_id: Some(principal.token_id.clone()),
-                tool_name: tool.name.clone(),
+                tool_name: tool_name.to_owned(),
                 invocation,
                 timeout: Duration::from_secs(120),
             },
@@ -1113,6 +1172,41 @@ fn mcp_v2_load_output_result(
     Ok(McpToolCallOutcome {
         result,
         timed_out: output.timed_out,
+    })
+}
+
+fn mcp_download_file_output_result(
+    filename: &str,
+    contents: Vec<u8>,
+) -> Result<McpToolCallOutcome, ApiError> {
+    let data_base64 = general_purpose::STANDARD.encode(&contents);
+
+    let uri = format!("file:///tmp/downloads/{}", urlencoding::encode(filename));
+    let metadata = json!({
+        "filename": filename,
+        "mime_type": "application/octet-stream",
+        "size_bytes": contents.len(),
+    });
+    Ok(McpToolCallOutcome {
+        result: json!({
+            "content": [
+                {
+                    "type": "resource",
+                    "resource": {
+                        "uri": uri,
+                        "mimeType": metadata["mime_type"],
+                        "blob": data_base64,
+                    },
+                },
+                {
+                    "type": "text",
+                    "text": serde_json::to_string_pretty(&metadata)?,
+                },
+            ],
+            "structuredContent": metadata,
+            "isError": false,
+        }),
+        timed_out: false,
     })
 }
 
@@ -2070,10 +2164,11 @@ def search(query, limit=20):
                         "centaur_catalog_search",
                         "centaur_catalog_load",
                         "centaur_tool_call",
+                        "centaur_download_file",
                         "centaur_whoami",
                     ]
                 } else {
-                    vec!["centaur_whoami"]
+                    vec!["centaur_download_file", "centaur_whoami"]
                 }
             );
 
@@ -2153,7 +2248,10 @@ def search(query, limit=20):
                 .into_iter()
                 .map(|tool| tool["name"].as_str().unwrap().to_owned())
                 .collect::<Vec<_>>();
-            assert_eq!(names, vec!["centaur_whoami", "demo"]);
+            assert_eq!(
+                names,
+                vec!["centaur_download_file", "centaur_whoami", "demo"]
+            );
         }
 
         let names = mcp_tool_entries(&filter)
@@ -2167,6 +2265,7 @@ def search(query, limit=20):
                 "centaur_catalog_search",
                 "centaur_catalog_load",
                 "centaur_tool_call",
+                "centaur_download_file",
                 "centaur_whoami",
             ]
         );
@@ -2367,6 +2466,35 @@ def search(query, limit=20):
         assert_eq!(
             outcome.result["structuredContent"]["help"],
             "Usage: demo [OPTIONS]\n"
+        );
+    }
+
+    #[test]
+    fn mcp_download_file_returns_an_embedded_resource() {
+        let contents = b"sandbox report\n";
+        let outcome =
+            mcp_download_file_output_result("quarterly report.txt", contents.to_vec()).unwrap();
+
+        assert!(!mcp_result_is_error(&outcome.result));
+        assert_eq!(
+            outcome.result["content"][0]["resource"]["uri"],
+            "file:///tmp/downloads/quarterly%20report.txt"
+        );
+        assert_eq!(
+            outcome.result["content"][0]["resource"]["mimeType"],
+            "application/octet-stream"
+        );
+        assert_eq!(
+            outcome.result["content"][0]["resource"]["blob"],
+            general_purpose::STANDARD.encode(contents)
+        );
+        assert_eq!(
+            outcome.result["structuredContent"],
+            json!({
+                "filename": "quarterly report.txt",
+                "mime_type": "application/octet-stream",
+                "size_bytes": contents.len(),
+            })
         );
     }
 
