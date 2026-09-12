@@ -1288,24 +1288,22 @@ impl SessionRuntime {
                 .await
                 .map_err(codec_error_to_runtime)?;
         }
-        let response_json = match timeout(TOOL_HOST_FILE_READ_TIMEOUT, receiver).await {
-            Ok(Ok(Ok(response_json))) => response_json,
-            Ok(Ok(Err(error))) => {
-                return Err(SessionRuntimeError::Sandbox(SandboxError::io(error)));
-            }
-            Ok(Err(error)) => {
-                return Err(SessionRuntimeError::Sandbox(SandboxError::io_source(
-                    "receive transient tool host download response",
-                    error,
-                )));
-            }
-            Err(_) => {
-                return Err(SessionRuntimeError::Sandbox(SandboxError::io(format!(
+        let received = timeout(TOOL_HOST_FILE_READ_TIMEOUT, receiver)
+            .await
+            .map_err(|_| {
+                SessionRuntimeError::Sandbox(SandboxError::io(format!(
                     "tool host download timed out after {} seconds",
                     TOOL_HOST_FILE_READ_TIMEOUT.as_secs()
-                ))));
-            }
-        };
+                )))
+            })?;
+        let response = received.map_err(|error| {
+            SessionRuntimeError::Sandbox(SandboxError::io_source(
+                "receive transient tool host download response",
+                error,
+            ))
+        })?;
+        let response_json =
+            response.map_err(|error| SessionRuntimeError::Sandbox(SandboxError::io(error)))?;
         let response =
             serde_json::from_str::<ToolHostDownloadResponse>(&response_json).map_err(|error| {
                 SessionRuntimeError::Sandbox(SandboxError::io_source(
