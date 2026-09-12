@@ -232,11 +232,15 @@ jobs:
         run: |
           docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ steps.meta.outputs.version }}
 
-      - name: Notify Paradigm sandbox
-        if: >
-          github.event_name == 'push' &&
-          github.ref == 'refs/heads/main' &&
-          matrix.image == 'centaur-agent'
+  notify-paradigm:
+    name: Notify Paradigm sandbox
+    needs: merge
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: centaur-paradigm-dispatch
+    permissions: {}
+    steps:
+      - name: Dispatch sandbox update
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.CENTAUR_PARADIGM_DISPATCH_TOKEN }}
