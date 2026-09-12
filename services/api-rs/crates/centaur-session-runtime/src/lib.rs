@@ -568,17 +568,11 @@ struct ToolHostResponse {
 #[derive(Deserialize)]
 struct ToolHostDownloadResponse {
     id: String,
-    status: Option<i32>,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    size_bytes: Option<usize>,
+    status: i32,
     #[serde(default)]
     data_base64: Option<String>,
     #[serde(default)]
     stderr: String,
-    #[serde(default)]
-    timed_out: bool,
 }
 
 struct ToolHostTransientWaiterGuard {
@@ -1173,12 +1167,6 @@ impl SessionRuntime {
                 "artifact path is required".to_owned(),
             ));
         }
-        if max_bytes == 0 {
-            return Err(SessionRuntimeError::BadRequest(
-                "download size limit must be non-zero".to_owned(),
-            ));
-        }
-
         let thread_key = tool_host_thread_key(principal_id)?;
         let call_lock = self.tool_host_call_lock(&thread_key);
         let result = {
@@ -1330,7 +1318,7 @@ impl SessionRuntime {
                 "transient tool host download response id did not match its request",
             )));
         }
-        if response.timed_out || response.status != Some(0) {
+        if response.status != 0 {
             let detail = response.stderr.trim();
             return Err(SessionRuntimeError::Sandbox(SandboxError::io(
                 if detail.is_empty() {
@@ -1338,11 +1326,6 @@ impl SessionRuntime {
                 } else {
                     format!("tool host download failed: {detail}")
                 },
-            )));
-        }
-        if response.path.as_deref() != Some(artifact_path) {
-            return Err(SessionRuntimeError::Sandbox(SandboxError::io(
-                "tool host download response path did not match its request",
             )));
         }
         let encoded = response.data_base64.ok_or_else(|| {
@@ -1356,11 +1339,6 @@ impl SessionRuntime {
                 error,
             ))
         })?;
-        if response.size_bytes != Some(contents.len()) {
-            return Err(SessionRuntimeError::Sandbox(SandboxError::io(
-                "tool host download response size did not match its file data",
-            )));
-        }
         if contents.len() > max_bytes {
             return Err(SessionRuntimeError::Sandbox(SandboxError::io(format!(
                 "sandbox download file exceeds the {max_bytes}-byte size limit"

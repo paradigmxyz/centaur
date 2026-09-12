@@ -195,8 +195,6 @@ class ToolHostTest(unittest.TestCase):
             )
         self.assertEqual(response["id"], "download-1")
         self.assertEqual(response["status"], 0)
-        self.assertEqual(response["path"], "report.txt")
-        self.assertEqual(response["size_bytes"], len(b"sandbox report\n"))
         self.assertEqual(
             centaur_tool_host.base64.b64decode(response["data_base64"]),
             b"sandbox report\n",
@@ -257,7 +255,7 @@ class ToolHostTest(unittest.TestCase):
         secret.write_text("secret")
 
         with mock.patch.object(centaur_tool_host, "DOWNLOADS_ROOT", downloads):
-            file_fd, _ = centaur_tool_host._open_download_file("report.txt")
+            file_fd = centaur_tool_host._open_download_file("report.txt")
             report.unlink()
             report.symlink_to(secret)
             with os.fdopen(file_fd, "rb") as file:

@@ -74,7 +74,7 @@ def _open_file_path(file_fd: int) -> Path:
     raise OSError(f"open file path lookup is unsupported on {sys.platform}")
 
 
-def _open_download_file(artifact_path: Any) -> tuple[int, os.stat_result]:
+def _open_download_file(artifact_path: Any) -> int:
     """Open one regular file whose resolved location is below the download root."""
     if not isinstance(artifact_path, str) or not artifact_path:
         raise ValueError("artifact path must be a non-empty string")
@@ -92,7 +92,7 @@ def _open_download_file(artifact_path: Any) -> tuple[int, os.stat_result]:
     file_fd: int | None = None
     try:
         root_path = _open_file_path(root_fd)
-        file_flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+        file_flags = os.O_RDONLY | os.O_NONBLOCK
         file_fd = os.open(artifact_path, file_flags, dir_fd=root_fd)
         file_stat = os.fstat(file_fd)
         if not stat.S_ISREG(file_stat.st_mode):
@@ -108,7 +108,7 @@ def _open_download_file(artifact_path: Any) -> tuple[int, os.stat_result]:
             raise ValueError(
                 "artifact path resolves outside /tmp/downloads"
             ) from error
-        return file_fd, file_stat
+        return file_fd
     except Exception:
         if file_fd is not None:
             os.close(file_fd)
@@ -118,7 +118,7 @@ def _open_download_file(artifact_path: Any) -> tuple[int, os.stat_result]:
 
 
 def _read_download_file(artifact_path: Any) -> bytes:
-    file_fd, _ = _open_download_file(artifact_path)
+    file_fd = _open_download_file(artifact_path)
     with os.fdopen(file_fd, "rb") as file:
         contents = file.read(MAX_DOWNLOAD_BYTES + 1)
     if len(contents) > MAX_DOWNLOAD_BYTES:
@@ -132,13 +132,9 @@ def _download_file(request: dict[str, Any]) -> dict[str, Any]:
     artifact_path = request.get("path")
     contents = _read_download_file(artifact_path)
     return {
-        "id": request.get("id"),
+        "id": request["id"],
         "status": 0,
-        "path": artifact_path,
-        "size_bytes": len(contents),
         "data_base64": base64.b64encode(contents).decode("ascii"),
-        "stderr": "",
-        "timed_out": False,
     }
 
 

@@ -508,7 +508,7 @@ async fn mcp_v2_catalog_load_result(
     let output = run_mcp_tool_host(
         state.runtime()?,
         principal,
-        &tool.name,
+        &tool,
         ToolHostInvocation::V2 {
             argv: vec!["--help".to_owned()],
         },
@@ -995,7 +995,7 @@ async fn run_mcp_v1_tool(
     let output = run_mcp_tool_host(
         runtime,
         principal,
-        &tool.name,
+        tool,
         ToolHostInvocation::V1 {
             method: method.clone(),
             arguments,
@@ -1017,7 +1017,7 @@ async fn run_mcp_v2_tool(
     let output = run_mcp_tool_host(
         runtime,
         principal,
-        &tool.name,
+        tool,
         ToolHostInvocation::V2 { argv },
         policy,
     )
@@ -1029,7 +1029,7 @@ async fn run_mcp_v2_tool(
 async fn run_mcp_tool_host(
     runtime: SessionRuntime,
     principal: &McpPrincipal,
-    tool_name: &str,
+    tool: &DiscoveredTool,
     invocation: ToolHostInvocation,
     policy: ToolHostCallPolicy,
 ) -> Result<ToolHostCallOutput, ApiError> {
@@ -1040,7 +1040,7 @@ async fn run_mcp_tool_host(
                 console_user_email: principal.console_user_email.clone(),
                 console_user_name: principal.console_user_name.clone(),
                 token_id: Some(principal.token_id.clone()),
-                tool_name: tool_name.to_owned(),
+                tool_name: tool.name.clone(),
                 invocation,
                 timeout: Duration::from_secs(120),
             },
