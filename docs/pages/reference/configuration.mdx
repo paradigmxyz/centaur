@@ -49,6 +49,8 @@ Optional required-by-mode variables:
 | `OP_CONNECT_TOKEN` | Secret or local bootstrap shell env. | Token used by iron-proxy when `ironProxy.secretSource=onepassword-connect`. |
 | `TEAMS_BOT_APP_ID`, `TEAMS_BOT_APP_PASSWORD`, `TEAMS_BOT_APP_TENANT_ID` | Local shell before `just bootstrap-secrets`; production Secret. | Required by Teamsbot when `teamsbot.enabled=true`. |
 | `TEAMSBOT_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it when Teams credentials are present and it is omitted. | Static API key used by Teamsbot. |
+| `GOOGLE_CHAT_CREDENTIALS` | Local shell before `just bootstrap-secrets`; production Secret. | Google service account JSON used by Googlechatbot when `googlechatbot.enabled=true`. |
+| `GOOGLECHATBOT_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it when `GOOGLE_CHAT_CREDENTIALS` is present and it is omitted. | Static API key used by Googlechatbot. |
 | `CENTAUR_APIRS_ADMIN_API_KEY` | `secretManager.existingSecretName` or the api-rs environment. | Optional static bearer token with every api-rs capability. Generate a distinct value with `openssl rand -hex 32`. |
 | `CONSOLE_SQLEXPORTER_DATABASE_URL` | `secretManager.existingSecretName`; local bootstrap copies it from the shell when provided. | Database URL for a separately provisioned read-only PostgreSQL role. Required when `console.sqlExporter.enabled=true`. |
 
@@ -199,6 +201,31 @@ Execution tuning:
 | `TEAMS_DOWNLOAD_ATTACHMENTS` | `teamsbot.downloadAttachments`. | Enables allowed Teams attachment downloads into base64 payloads; defaults to `false`. |
 | `TEAMS_ATTACHMENT_MAX_BYTES`, `TEAMS_ATTACHMENT_ALLOWED_HOSTS` | Runtime env. | Attachment download size cap and HTTPS host allowlist. |
 | `TEAMS_GRAPH_BEARER_TOKEN`, `TEAMS_GRAPH_TOKEN_SCOPE` | Runtime env or Secret. | Optional Graph auth fallback for Graph/SharePoint-backed attachment URLs. |
+
+## Googlechatbot
+
+| Env var | Set from | Controls |
+| --- | --- | --- |
+| `PORT` | Runtime env. | Googlechatbot HTTP port; defaults to `3101`. |
+| `LOG_LEVEL` | Runtime env. | Googlechatbot JSON log level: `debug`, `info`, `warn`, `error`, or `silent`. |
+| `CENTAUR_API_URL` | Chart-rendered API service URL. | API base URL used by Googlechatbot; local default is `http://127.0.0.1:8080`. |
+| `GOOGLECHATBOT_API_KEY` | `secretManager.existingSecretName`. | Dedicated API key used by Googlechatbot to call api-rs. It is scoped to `gchat:` sessions. |
+| `GOOGLECHATBOT_DATABASE_URL`, `DATABASE_URL`, `POSTGRES_URL` | Secret. | Googlechatbot Postgres state store. The service refuses to boot without one unless tests/dev inject a state store. |
+| `GOOGLECHATBOT_STATE_KEY_PREFIX` | Runtime env. | Postgres state namespace; defaults to `centaur-googlechatbot`. |
+| `GOOGLE_CHAT_CREDENTIALS` | Secret. | Chat app service account JSON. `GOOGLE_CHAT_USE_ADC=true` uses Application Default Credentials instead; one of the two is required. |
+| `GOOGLE_CHAT_PROJECT_NUMBER`, `GOOGLE_CHAT_ENDPOINT_URL` | `googlechatbot.projectNumber`, `googlechatbot.endpointUrl`. | Expected audience of the Google-signed webhook JWT, matching the Chat app's "Authentication audience" setting. At least one is required; the service refuses to start without one rather than accepting unverified requests. |
+| `GOOGLE_CHAT_PUBSUB_TOPIC`, `GOOGLE_CHAT_PUBSUB_AUDIENCE`, `GOOGLE_CHAT_PUBSUB_SERVICE_ACCOUNT_EMAIL` | `googlechatbot.pubsub.*`. | Workspace Events delivery, used to receive every message in a space instead of only @mentions. The audience and the pushing service account identity are both required when a topic is set. |
+| `GOOGLE_CHAT_BOT_USER_ID` | `googlechatbot.botUserId`. | `users/<id>` of the Chat app, so it recognizes its own messages and mentions in multi-bot spaces. |
+| `GOOGLE_CHAT_IMPERSONATE_USER` | `googlechatbot.impersonateUser`. | Workspace user impersonated for Workspace Events subscriptions (domain-wide delegation). |
+| `GCHAT_ALLOWED_SPACE_IDS`, `GCHAT_ALLOWED_DOMAINS`, `GCHAT_ALLOWED_SENDER_EMAILS` | `googlechatbot.allowedSpaceIds`, `googlechatbot.allowedDomains`, `googlechatbot.allowedSenderEmails`. | Comma-separated allowlists. Empty means Googlechatbot ignores all Google Chat messages. Space ids accept `spaces/AAAA` or `AAAA`. |
+| `GCHAT_ALLOW_DIRECT_MESSAGES` | `googlechatbot.allowDirectMessages`. | Allows DM spaces; defaults to `false`. A DM also requires a sender allowlist, since it has no space to scope it by. |
+| `GCHAT_REQUIRE_MENTION` | `googlechatbot.requireMention`. | Requires a bot mention before activating a thread; defaults to `true`. |
+| `GCHAT_DEFAULT_HARNESS_TYPE` | `sandbox.harnessEngine`. | Default harness requested for new Google Chat sessions. Existing harness conflicts retry on the session's current harness. |
+| `SESSION_IDLE_TIMEOUT_MS`, `SESSION_MAX_DURATION_MS` | Runtime env. | Forwarded to api-rs execute. `GCHAT_IDLE_TIMEOUT_MS` and `GCHAT_MAX_DURATION_MS` override these for Google Chat only. |
+| `GCHAT_ACTIVE_EXECUTION_TTL_MS` | Runtime env. | Stale execution timeout used to unwedge Google Chat threads after crashes. |
+| `GCHAT_RENDER_DELIVERY_TIMEOUT_MS` | Runtime env. | Timeout for Chat message create/update calls during rendering; defaults to 15 seconds. |
+| `GCHAT_RENDER_MIN_EDIT_INTERVAL_MS` | Runtime env. | Minimum spacing between progress-message edits; defaults to `1500`. Google Chat has no streaming surface and rate limits `spaces.messages.update`. |
+| `GCHAT_DOWNLOAD_ATTACHMENTS`, `GCHAT_ATTACHMENT_MAX_BYTES` | `googlechatbot.downloadAttachments`, runtime env. | Enables Chat attachment downloads into base64 payloads (default `false`) and the size cap (default 10 MiB). |
 
 ## Sandbox
 

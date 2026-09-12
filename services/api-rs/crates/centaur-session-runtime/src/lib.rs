@@ -6660,6 +6660,19 @@ fn session_context_for_thread(thread_key: &ThreadKey) -> Option<serde_json::Map<
             }
             ("linear", linear)
         }
+        ChatDestination::GoogleChat {
+            space_name,
+            thread_name,
+            is_dm,
+        } => {
+            let mut googlechat = serde_json::Map::new();
+            googlechat.insert("space_name".to_owned(), Value::String(space_name));
+            if let Some(thread_name) = thread_name {
+                googlechat.insert("thread_name".to_owned(), Value::String(thread_name));
+            }
+            googlechat.insert("is_dm".to_owned(), Value::Bool(is_dm));
+            ("googlechat", googlechat)
+        }
         ChatDestination::Github {
             owner,
             repo,
@@ -8605,6 +8618,28 @@ mod tests {
         assert_eq!(value["session_context"]["discord"]["guild_id"], "111");
         assert_eq!(value["session_context"]["discord"]["channel_id"], "222");
         assert_eq!(value["session_context"]["discord"]["thread_id"], "333");
+        assert!(value["session_context"].get("slack").is_none());
+    }
+
+    #[test]
+    fn input_line_with_session_context_adds_google_chat_thread_context() {
+        let thread_key =
+            ThreadKey::parse("gchat:spaces/AAAA:c3BhY2VzL0FBQUEvdGhyZWFkcy9UVFRU").unwrap();
+        let trace = SessionTraceContext::new(None, None);
+
+        let line = input_line_with_session_context(&thread_key, &trace, r#"{"type":"user"}"#);
+        let value: Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(value["session_context"]["platform"], "googlechat");
+        assert_eq!(
+            value["session_context"]["googlechat"]["space_name"],
+            "spaces/AAAA"
+        );
+        assert_eq!(
+            value["session_context"]["googlechat"]["thread_name"],
+            "spaces/AAAA/threads/TTTT"
+        );
+        assert_eq!(value["session_context"]["googlechat"]["is_dm"], false);
         assert!(value["session_context"].get("slack").is_none());
     }
 

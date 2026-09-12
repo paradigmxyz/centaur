@@ -5,6 +5,7 @@
 
 use std::{collections::BTreeMap, fmt, str::FromStr};
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 use strum::{AsRefStr, Display, EnumString};
@@ -142,6 +143,14 @@ pub enum ChatDestination {
         comment_id: Option<String>,
         agent_session_id: Option<String>,
     },
+    /// A Google Chat thread. The reply lands in the space, in the originating
+    /// message thread when the space is threaded. Google Chat has no Centaur
+    /// file-upload tool, so replies are text.
+    GoogleChat {
+        space_name: String,
+        thread_name: Option<String>,
+        is_dm: bool,
+    },
     /// A GitHub issue or pull-request thread. The reply lands as a comment on
     /// the issue/PR (pinned to `review_comment_id` when the turn came in on a
     /// PR review-comment thread). Like Linear, GitHub has no file-upload
@@ -180,6 +189,7 @@ impl ChatDestination {
             Self::Discord { .. } => "discord",
             Self::Linear { .. } => "linear",
             Self::Github { .. } => "github",
+            Self::GoogleChat { .. } => "googlechat",
         }
     }
 
@@ -225,6 +235,22 @@ impl ChatDestination {
                     "[chat surface: Linear · issue {issue_id}{comment}. \
                      Centaur posts your reply as a comment on this Linear thread automatically — do not repost it with the linear tool. \
                      Linear replies are markdown comments with no file-upload surface; share artifacts inline or as a link.]"
+                )
+            }
+            Self::GoogleChat {
+                space_name,
+                thread_name,
+                is_dm,
+            } => {
+                let surface = if *is_dm { "direct message" } else { "space" };
+                let thread = thread_name
+                    .as_deref()
+                    .map(|name| format!(" · thread {name}"))
+                    .unwrap_or_default();
+                format!(
+                    "[chat surface: Google Chat · {surface} {space_name}{thread}. \
+                     Centaur delivers your reply to this thread automatically — do not repost it with a Google Chat tool. \
+                     Google Chat replies are text with no file-upload surface; share artifacts inline or as a link.]"
                 )
             }
             Self::Github {
@@ -291,6 +317,34 @@ impl ThreadKey {
                 number,
                 kind,
                 review_comment_id,
+            });
+        }
+        // `gchat:<spaces/ID>[:<base64url thread resource name>][:dm]`, the Chat
+        // SDK Google Chat adapter's `encodeThreadId` shape. The space resource
+        // name contains `/` but never `:`.
+        if key.starts_with("gchat:") {
+            let (rest, is_dm) = match key.strip_suffix(":dm") {
+                Some(rest) => (rest, true),
+                None => (key, false),
+            };
+            let rest = rest.strip_prefix("gchat:")?;
+            let mut segments = rest.split(':');
+            let space_name = segments.next().map(str::trim).filter(|s| !s.is_empty())?;
+            let thread_name = match segments.next() {
+                Some(encoded) if !encoded.is_empty() => {
+                    let decoded = String::from_utf8(URL_SAFE_NO_PAD.decode(encoded).ok()?).ok()?;
+                    (!decoded.is_empty()).then_some(decoded)
+                }
+                Some(_) => return None,
+                None => None,
+            };
+            if segments.next().is_some() {
+                return None;
+            }
+            return Some(ChatDestination::GoogleChat {
+                space_name: space_name.to_owned(),
+                thread_name,
+                is_dm,
             });
         }
         if let Some(rest) = key.strip_prefix("discord:") {
@@ -618,6 +672,74 @@ mod tests {
                 thread_id: None,
             }
         );
+    }
+
+    #[test]
+    fn chat_destination_resolves_google_chat_keys() {
+        let threaded = ThreadKey::parse("gchat:spaces/AAAA:c3BhY2VzL0FBQUEvdGhyZWFkcy9UVFRU")
+            .unwrap()
+            .chat_destination()
+            .unwrap();
+        assert_eq!(
+            threaded,
+            ChatDestination::GoogleChat {
+                space_name: "spaces/AAAA".to_owned(),
+                thread_name: Some("spaces/AAAA/threads/TTTT".to_owned()),
+                is_dm: false,
+            }
+        );
+        assert_eq!(threaded.platform(), "googlechat");
+
+        // A space-level message carries no thread segment.
+        let space_root = ThreadKey::parse("gchat:spaces/AAAA")
+            .unwrap()
+            .chat_destination()
+            .unwrap();
+        assert_eq!(
+            space_root,
+            ChatDestination::GoogleChat {
+                space_name: "spaces/AAAA".to_owned(),
+                thread_name: None,
+                is_dm: false,
+            }
+        );
+
+        // The `:dm` marker is a suffix, not a thread segment.
+        let dm = ThreadKey::parse("gchat:spaces/DDDD:dm")
+            .unwrap()
+            .chat_destination()
+            .unwrap();
+        assert_eq!(
+            dm,
+            ChatDestination::GoogleChat {
+                space_name: "spaces/DDDD".to_owned(),
+                thread_name: None,
+                is_dm: true,
+            }
+        );
+    }
+
+    #[test]
+    fn chat_destination_rejects_malformed_google_chat_keys() {
+        assert!(
+            ThreadKey::parse("gchat:spaces/AAAA:not-base64!:extra")
+                .unwrap()
+                .chat_destination()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn google_chat_context_line_names_the_space_and_thread() {
+        let line = ThreadKey::parse("gchat:spaces/AAAA:c3BhY2VzL0FBQUEvdGhyZWFkcy9UVFRU")
+            .unwrap()
+            .chat_destination()
+            .unwrap()
+            .context_line();
+        assert!(line.contains("Google Chat"));
+        assert!(line.contains("spaces/AAAA"));
+        assert!(line.contains("spaces/AAAA/threads/TTTT"));
+        assert!(line.contains("no file-upload surface"));
     }
 
     #[test]

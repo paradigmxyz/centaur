@@ -777,6 +777,50 @@ teamsbot:
   extraEnv: {}
   resources: {}
 
+googlechatbot:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: centaur-googlechatbot
+    tag: latest
+    pullPolicy: Always
+  # Google Cloud project number of the Chat app, used to verify the JWT Google
+  # signs on each webhook. Set this or `endpointUrl` (whichever the Chat app's
+  # "Authentication audience" is set to); the service refuses to boot without one.
+  projectNumber: ""
+  # Public HTTPS URL of the webhook, e.g. https://chat.example.com/api/webhooks/gchat.
+  endpointUrl: ""
+  # `users/<id>` of the Chat app itself, so it can tell its own messages and
+  # mentions apart from other bots in a space.
+  botUserId: ""
+  # Workspace user to impersonate for Workspace Events subscriptions
+  # (domain-wide delegation). Only needed with `pubsub.topic`.
+  impersonateUser: ""
+  # Receive every message in a space (not just @mentions) through Workspace
+  # Events. All three values are required together.
+  pubsub:
+    topic: ""
+    audience: ""
+    serviceAccountEmail: ""
+  # Comma-separated `spaces/<id>` allowlist. Empty means googlechatbot ignores
+  # every Google Chat message.
+  allowedSpaceIds: ""
+  allowedDomains: ""
+  allowedSenderEmails: ""
+  # DM spaces have no space allowlist to scope them, so they also require a
+  # sender allowlist above.
+  allowDirectMessages: false
+  requireMention: true
+  downloadAttachments: false
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    host: ""
+    tls: []
+  extraEnv: {}
+  resources: {}
+
 postgres:
   enabled: true
   image:

@@ -193,14 +193,38 @@ def current_github_thread() -> dict[str, str | int]:
     return destination
 
 
-def current_chat_destination() -> dict[str, str | int]:
+def current_googlechat_thread() -> dict[str, str | bool]:
+    """Return the current Google Chat destination.
+
+    ``{"space_name": ..., "thread_name": ..., "is_dm": ...}`` where
+    ``space_name`` is the ``spaces/<id>`` resource name and ``thread_name`` is
+    omitted for a message that is not in a thread. Raises if the current thread
+    is not a Google Chat thread.
+    """
+    context = current_session_context()
+    googlechat = context.get("googlechat")
+    if not isinstance(googlechat, dict) or not googlechat.get("space_name"):
+        raise RuntimeError(
+            f"current thread is not a Google Chat thread: {context.get('thread_key')!r}"
+        )
+    destination: dict[str, str | bool] = {
+        "space_name": str(googlechat["space_name"]),
+        "is_dm": bool(googlechat.get("is_dm")),
+    }
+    if googlechat.get("thread_name"):
+        destination["thread_name"] = str(googlechat["thread_name"])
+    return destination
+
+
+def current_chat_destination() -> dict[str, str | int | bool]:
     """Return the current chat surface in a platform-agnostic shape.
 
     Always includes ``platform`` (``"slack"`` / ``"discord"`` / ``"linear"`` /
-    ``"github"``) plus that platform's destination ids (Slack:
+    ``"github"`` / ``"googlechat"``) plus that platform's destination ids (Slack:
     ``channel_id``/``thread_ts``; Discord: ``guild_id``/``channel_id``/``thread_id``;
     Linear: ``issue_id``/``comment_id``/``agent_session_id``; GitHub:
-    ``owner``/``repo``/``number``/``kind``/``review_comment_id``). Prefer this
+    ``owner``/``repo``/``number``/``kind``/``review_comment_id``; Google Chat:
+    ``space_name``/``thread_name``/``is_dm``). Prefer this
     over the platform-specific helpers when writing tooling that should work on
     any chat surface. Raises if the current thread is not a recognized chat
     surface.
@@ -215,6 +239,8 @@ def current_chat_destination() -> dict[str, str | int]:
         return {"platform": "linear", **current_linear_thread()}
     if platform == "github":
         return {"platform": "github", **current_github_thread()}
+    if platform == "googlechat":
+        return {"platform": "googlechat", **current_googlechat_thread()}
     raise RuntimeError(
         f"current thread is not a recognized chat surface: {context.get('thread_key')!r}"
     )
