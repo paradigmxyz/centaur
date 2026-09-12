@@ -12,6 +12,7 @@
           "items": { "type": "string" },
           "uniqueItems": true
         },
+        "entitlementsHosts": { "type": "array", "items": { "type": "string" } },
         "sentryDsn": { "type": "string" },
         "railsEnv": { "type": "string" },
         "chat": {
