@@ -232,7 +232,7 @@ jobs:
         run: |
           docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ steps.meta.outputs.version }}
 
-  notify-paradigm:
+  notify-centaur-paradigm:
     name: Notify Paradigm sandbox
     needs: merge
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
