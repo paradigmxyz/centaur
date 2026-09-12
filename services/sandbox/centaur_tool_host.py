@@ -87,11 +87,7 @@ def _open_download_file(artifact_path: Any) -> tuple[int, os.stat_result]:
     ):
         raise ValueError("artifact path must be relative to /tmp/downloads")
 
-    root_flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        root_flags |= os.O_DIRECTORY
-    if hasattr(os, "O_NOFOLLOW"):
-        root_flags |= os.O_NOFOLLOW
+    root_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     root_fd = os.open(DOWNLOADS_ROOT, root_flags)
     file_fd: int | None = None
     try:
