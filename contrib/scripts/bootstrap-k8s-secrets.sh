@@ -69,6 +69,13 @@ Optional Teams ingress bootstrap (consumed when teamsbot.enabled=true):
   TEAMSBOT_API_KEY             bearer the bot sends to api-rs; auto-generated
                                once when absent (never rotated in place)
 
+Optional Google Chat ingress bootstrap (consumed when googlechatbot.enabled=true):
+  GOOGLE_CHAT_CREDENTIALS      service account JSON for the Chat app; when set,
+                               seeds the googlechatbot keys. Overwritten on every
+                               run so it rotates.
+  GOOGLECHATBOT_API_KEY        bearer the bot sends to api-rs; auto-generated
+                               once when absent (never rotated in place)
+
 Console bootstrap:
   IRON_CONTROL_DATABASE_URL    overrides the derived DSN (default points at the
                                bundled Postgres server with no database path, so
@@ -176,6 +183,16 @@ if [[ -n "${TEAMS_BOT_APP_ID:-}${TEAMS_BOT_APP_PASSWORD:-}${TEAMS_BOT_APP_TENANT
   require_env TEAMS_BOT_APP_TENANT_ID
 fi
 
+# The Google Chat app authenticates as a service account, so a malformed or
+# truncated credential blob deploys a googlechatbot that boots and then fails
+# every Chat API call. Reject it here instead.
+if [[ -n "${GOOGLE_CHAT_CREDENTIALS:-}" ]]; then
+  if ! printf '%s' "$GOOGLE_CHAT_CREDENTIALS" | grep -q '"client_email"'; then
+    echo "GOOGLE_CHAT_CREDENTIALS must be Google service account JSON" >&2
+    exit 1
+  fi
+fi
+
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 delete_if_forced centaur-infra-env
@@ -228,6 +245,15 @@ if secret_exists centaur-infra-env; then
     patch_data+=("\"TEAMS_BOT_APP_TENANT_ID\":\"$(printf '%s' "$TEAMS_BOT_APP_TENANT_ID" | base64 | tr -d '\n')\"")
     if ! secret_key_present TEAMSBOT_API_KEY; then
       patch_data+=("\"TEAMSBOT_API_KEY\":\"$(printf '%s' "${TEAMSBOT_API_KEY:-$(rand_hex)}" | base64 | tr -d '\n')\"")
+    fi
+  fi
+  # Google Chat ingress (googlechatbot) keys: added when
+  # GOOGLE_CHAT_CREDENTIALS is in the env. The credential is overwritten on each
+  # run; GOOGLECHATBOT_API_KEY is generated once if absent.
+  if [[ -n "${GOOGLE_CHAT_CREDENTIALS:-}" ]]; then
+    patch_data+=("\"GOOGLE_CHAT_CREDENTIALS\":\"$(printf '%s' "$GOOGLE_CHAT_CREDENTIALS" | base64 | tr -d '\n')\"")
+    if ! secret_key_present GOOGLECHATBOT_API_KEY; then
+      patch_data+=("\"GOOGLECHATBOT_API_KEY\":\"$(printf '%s' "${GOOGLECHATBOT_API_KEY:-$(rand_hex)}" | base64 | tr -d '\n')\"")
     fi
   fi
   # iron-control keys: top up only when absent so we never rotate them out from
@@ -351,6 +377,12 @@ else
       --from-literal=TEAMS_BOT_APP_PASSWORD="$TEAMS_BOT_APP_PASSWORD"
       --from-literal=TEAMS_BOT_APP_TENANT_ID="$TEAMS_BOT_APP_TENANT_ID"
       --from-literal=TEAMSBOT_API_KEY="${TEAMSBOT_API_KEY:-$(rand_hex)}"
+    )
+  fi
+  if [[ -n "${GOOGLE_CHAT_CREDENTIALS:-}" ]]; then
+    secret_args+=(
+      --from-literal=GOOGLE_CHAT_CREDENTIALS="$GOOGLE_CHAT_CREDENTIALS"
+      --from-literal=GOOGLECHATBOT_API_KEY="${GOOGLECHATBOT_API_KEY:-$(rand_hex)}"
     )
   fi
   if [[ -n "${OP_CONNECT_TOKEN:-}" ]]; then

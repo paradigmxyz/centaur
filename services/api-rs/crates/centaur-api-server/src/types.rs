@@ -44,7 +44,8 @@ pub struct CreateSessionResponse {
 pub struct SessionContextResponse {
     pub thread_key: ThreadKey,
     /// The chat surface the agent is operating on: `slack`, `discord`, `linear`,
-    /// `github`, or `unknown` for threads that are not platform-addressable.
+    /// `github`, `googlechat`, or `unknown` for threads that are not
+    /// platform-addressable.
     pub platform: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -56,6 +57,8 @@ pub struct SessionContextResponse {
     pub linear: Option<LinearThreadContext>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub github: Option<GithubThreadContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub googlechat: Option<GoogleChatThreadContext>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -79,6 +82,16 @@ pub struct LinearThreadContext {
     pub comment_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct GoogleChatThreadContext {
+    /// `spaces/<id>` resource name.
+    pub space_name: String,
+    /// `spaces/<id>/threads/<id>` resource name, when the message was threaded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_name: Option<String>,
+    pub is_dm: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

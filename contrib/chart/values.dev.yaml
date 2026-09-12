@@ -28,6 +28,12 @@ teamsbot:
   image:
     pullPolicy: IfNotPresent
 
+googlechatbot:
+  # Enable once GOOGLE_CHAT_CREDENTIALS and the Chat app webhook URL are configured.
+  enabled: false
+  image:
+    pullPolicy: IfNotPresent
+
 apiRs:
   image:
     pullPolicy: IfNotPresent

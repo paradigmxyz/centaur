@@ -43,6 +43,7 @@ impl<'a> SessionPrincipalMetadata<'a> {
                 .or_else(|| metadata.get("discord_conversation_name"))
                 .or_else(|| metadata.get("linear_conversation_name"))
                 .or_else(|| metadata.get("teams_conversation_name"))
+                .or_else(|| metadata.get("gchat_conversation_name"))
                 .and_then(Value::as_str),
         }
     }

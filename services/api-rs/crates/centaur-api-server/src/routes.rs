@@ -61,10 +61,10 @@ use crate::{
     types::{
         AppendMessagesRequest, AppendMessagesResponse, CreateSessionRequest, CreateSessionResponse,
         DiscordThreadContext, EmitWorkflowEventRequest, EventsQuery, ExecuteSessionRequest,
-        ExecuteSessionResponse, GithubThreadContext, InterruptSessionExecutionRequest,
-        InterruptSessionExecutionResponse, LinearThreadContext, ListWorkflowRunsQuery,
-        OnHarnessConflict, SessionContextResponse, SessionSseEvent, SlackThreadContext,
-        stream_error_sse,
+        ExecuteSessionResponse, GithubThreadContext, GoogleChatThreadContext,
+        InterruptSessionExecutionRequest, InterruptSessionExecutionResponse, LinearThreadContext,
+        ListWorkflowRunsQuery, OnHarnessConflict, SessionContextResponse, SessionSseEvent,
+        SlackThreadContext, stream_error_sse,
     },
 };
 
@@ -668,67 +668,71 @@ async fn get_session_context(
         .map(ChatDestination::platform)
         .unwrap_or("unknown")
         .to_owned();
-    let (slack, discord, linear, github) = match destination {
+    let mut slack = None;
+    let mut discord = None;
+    let mut linear = None;
+    let mut github = None;
+    let mut googlechat = None;
+    match destination {
         Some(ChatDestination::Slack {
             channel_id,
             thread_ts,
-        }) => (
-            Some(SlackThreadContext {
+        }) => {
+            slack = Some(SlackThreadContext {
                 channel_id,
                 thread_ts,
-            }),
-            None,
-            None,
-            None,
-        ),
+            });
+        }
         Some(ChatDestination::Discord {
             guild_id,
             channel_id,
             thread_id,
-        }) => (
-            None,
-            Some(DiscordThreadContext {
+        }) => {
+            discord = Some(DiscordThreadContext {
                 guild_id,
                 channel_id,
                 thread_id,
-            }),
-            None,
-            None,
-        ),
+            });
+        }
         Some(ChatDestination::Linear {
             issue_id,
             comment_id,
             agent_session_id,
-        }) => (
-            None,
-            None,
-            Some(LinearThreadContext {
+        }) => {
+            linear = Some(LinearThreadContext {
                 issue_id,
                 comment_id,
                 agent_session_id,
-            }),
-            None,
-        ),
+            });
+        }
         Some(ChatDestination::Github {
             owner,
             repo,
             number,
             kind,
             review_comment_id,
-        }) => (
-            None,
-            None,
-            None,
-            Some(GithubThreadContext {
+        }) => {
+            github = Some(GithubThreadContext {
                 owner,
                 repo,
                 number,
                 kind: kind.as_str().to_owned(),
                 review_comment_id,
-            }),
-        ),
-        None => (None, None, None, None),
-    };
+            });
+        }
+        Some(ChatDestination::GoogleChat {
+            space_name,
+            thread_name,
+            is_dm,
+        }) => {
+            googlechat = Some(GoogleChatThreadContext {
+                space_name,
+                thread_name,
+                is_dm,
+            });
+        }
+        None => {}
+    }
     let title = match runtime.session_title(&thread_key).await {
         Ok(title) => title,
         Err(error) => {
@@ -748,6 +752,7 @@ async fn get_session_context(
         discord,
         linear,
         github,
+        googlechat,
     }))
 }
 
