@@ -1,0 +1,26 @@
+# Baked omp (oh-my-pi) agent config. Copied to $PI_CODING_AGENT_DIR/config.yml
+# at container start by entrypoint.sh, which substitutes __OMP_LITELLM_BASE_URL__
+# (OMP_LITELLM_BASE_URL) so each deployment points omp at its own LiteLLM gateway.
+#
+# models.yml defines the gateway model STATICALLY; the model id goes on the wire
+# unchanged (discovery-based registries fuzzy-merge ids against models.dev).
+providers:
+  litellm:
+    baseUrl: __OMP_LITELLM_BASE_URL__
+    apiKey: LITELLM_API_KEY
+    auth: apiKey
+    api: openai-completions
+
+modelRoles:
+  default: "litellm/glm-5.2-fp8"
+  smol: "litellm/glm-5.2-fp8"
+  commit: "litellm/glm-5.2-fp8"
+  task: "litellm/glm-5.2-fp8"
+  # Every role stays on the gateway by default — sandboxes carry no
+  # frontier-provider keys. Point slow/plan/advisor at a frontier model only in
+  # deployments that inject its key.
+  slow: "litellm/glm-5.2-fp8"
+  plan: "litellm/glm-5.2-fp8"
+  advisor: "litellm/glm-5.2-fp8"
+
+defaultThinkingLevel: medium

@@ -76,6 +76,18 @@ impl SessionSandboxCleanupWorker {
         &mut self,
         report: &mut SessionSandboxCleanupReport,
     ) -> Result<(), SessionRuntimeError> {
+        match self.ctx.store.delete_expired_sandbox_leases().await {
+            Ok(expired_lease_count) if expired_lease_count > 0 => {
+                info!(
+                    expired_lease_count,
+                    "session sandbox cleanup worker purged expired leases"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(%error, "session sandbox cleanup worker failed to purge expired leases");
+            }
+        }
         let referenced = self
             .ctx
             .store
