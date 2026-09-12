@@ -551,7 +551,7 @@ struct ToolHostRequest {
 struct ToolHostDownloadRequest<'a> {
     id: &'a str,
     mode: &'static str,
-    filename: &'a str,
+    path: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -570,7 +570,7 @@ struct ToolHostDownloadResponse {
     id: String,
     status: Option<i32>,
     #[serde(default)]
-    filename: Option<String>,
+    path: Option<String>,
     #[serde(default)]
     size_bytes: Option<usize>,
     #[serde(default)]
@@ -1159,7 +1159,7 @@ impl SessionRuntime {
     pub async fn read_tool_host_file(
         &self,
         principal_id: &str,
-        filename: &str,
+        artifact_path: &str,
         max_bytes: usize,
     ) -> Result<ToolHostFileOutput, SessionRuntimeError> {
         let principal_id = principal_id.trim();
@@ -1168,9 +1168,9 @@ impl SessionRuntime {
                 "tool host principal_id is required".to_owned(),
             ));
         }
-        if filename.is_empty() {
+        if artifact_path.is_empty() {
             return Err(SessionRuntimeError::BadRequest(
-                "download filename is required".to_owned(),
+                "artifact path is required".to_owned(),
             ));
         }
         if max_bytes == 0 {
@@ -1183,7 +1183,7 @@ impl SessionRuntime {
         let call_lock = self.tool_host_call_lock(&thread_key);
         let result = {
             let _call_guard = call_lock.lock().await;
-            self.locked_tool_host_file_read(&thread_key, principal_id, filename, max_bytes)
+            self.locked_tool_host_file_read(&thread_key, principal_id, artifact_path, max_bytes)
                 .await
         };
         drop(call_lock);
@@ -1233,7 +1233,7 @@ impl SessionRuntime {
         &self,
         thread_key: &ThreadKey,
         principal_id: &str,
-        filename: &str,
+        artifact_path: &str,
         max_bytes: usize,
     ) -> Result<ToolHostFileOutput, SessionRuntimeError> {
         let session = match self.store.get_session(thread_key).await {
@@ -1270,7 +1270,7 @@ impl SessionRuntime {
         let input_line = serde_json::to_string(&ToolHostDownloadRequest {
             id: &request_id,
             mode: "download_file",
-            filename,
+            path: artifact_path,
         })
         .map_err(|error| {
             SessionRuntimeError::Sandbox(SandboxError::io_source(
@@ -1340,9 +1340,9 @@ impl SessionRuntime {
                 },
             )));
         }
-        if response.filename.as_deref() != Some(filename) {
+        if response.path.as_deref() != Some(artifact_path) {
             return Err(SessionRuntimeError::Sandbox(SandboxError::io(
-                "tool host download response filename did not match its request",
+                "tool host download response path did not match its request",
             )));
         }
         let encoded = response.data_base64.ok_or_else(|| {
@@ -7827,14 +7827,14 @@ mod tests {
         let request = ToolHostDownloadRequest {
             id: "download-1",
             mode: "download_file",
-            filename: "report.pdf",
+            path: "reports/report.pdf",
         };
         assert_eq!(
             serde_json::to_value(request).unwrap(),
             serde_json::json!({
                 "id": "download-1",
                 "mode": "download_file",
-                "filename": "report.pdf",
+                "path": "reports/report.pdf",
             })
         );
     }

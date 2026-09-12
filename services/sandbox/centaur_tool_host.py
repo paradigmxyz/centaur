@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import json
 import os
 import stat
@@ -14,6 +15,7 @@ from typing import Any
 
 DOWNLOADS_ROOT = Path("/tmp/downloads")
 MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
+MACOS_F_GETPATH = 50
 
 
 def _text(value: Any) -> str:
@@ -60,17 +62,30 @@ def _command_for_request(request: dict[str, Any]) -> list[str]:
             raise ValueError(f"unsupported tool host mode: {mode}")
 
 
-def _open_download_file(filename: Any) -> tuple[int, os.stat_result]:
-    """Open one regular file directly below the sandbox download directory."""
-    if not isinstance(filename, str) or not filename:
-        raise ValueError("download filename must be a non-empty string")
+def _open_file_path(file_fd: int) -> Path:
+    """Return the kernel-resolved path for an already-open file descriptor."""
+    if sys.platform.startswith("linux"):
+        return Path(os.readlink(f"/proc/self/fd/{file_fd}"))
+    if sys.platform == "darwin":
+        # F_GETPATH returns the path associated with the open descriptor on macOS.
+        path_buffer = fcntl.fcntl(file_fd, MACOS_F_GETPATH, bytes(1024))
+        path = path_buffer.split(b"\0", 1)[0]
+        return Path(os.fsdecode(path))
+    raise OSError(f"open file path lookup is unsupported on {sys.platform}")
+
+
+def _open_download_file(artifact_path: Any) -> tuple[int, os.stat_result]:
+    """Open one regular file whose resolved location is below the download root."""
+    if not isinstance(artifact_path, str) or not artifact_path:
+        raise ValueError("artifact path must be a non-empty string")
+    relative_path = Path(artifact_path)
     if (
-        filename in {".", ".."}
-        or os.sep in filename
-        or (os.altsep is not None and os.altsep in filename)
-        or "\0" in filename
+        relative_path.is_absolute()
+        or relative_path == Path(".")
+        or ".." in relative_path.parts
+        or "\0" in artifact_path
     ):
-        raise ValueError("download filename must name a direct child of /tmp/downloads")
+        raise ValueError("artifact path must be relative to /tmp/downloads")
 
     root_flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
@@ -78,15 +93,11 @@ def _open_download_file(filename: Any) -> tuple[int, os.stat_result]:
     if hasattr(os, "O_NOFOLLOW"):
         root_flags |= os.O_NOFOLLOW
     root_fd = os.open(DOWNLOADS_ROOT, root_flags)
+    file_fd: int | None = None
     try:
-        file_flags = os.O_RDONLY
-        if hasattr(os, "O_NOFOLLOW"):
-            file_flags |= os.O_NOFOLLOW
-        file_fd = os.open(filename, file_flags, dir_fd=root_fd)
-    finally:
-        os.close(root_fd)
-
-    try:
+        root_path = _open_file_path(root_fd)
+        file_flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+        file_fd = os.open(artifact_path, file_flags, dir_fd=root_fd)
         file_stat = os.fstat(file_fd)
         if not stat.S_ISREG(file_stat.st_mode):
             raise ValueError("download target must be a regular file")
@@ -94,14 +105,24 @@ def _open_download_file(filename: Any) -> tuple[int, os.stat_result]:
             raise ValueError(
                 f"download file exceeds the {MAX_DOWNLOAD_BYTES}-byte size limit"
             )
+        file_path = _open_file_path(file_fd)
+        try:
+            file_path.relative_to(root_path)
+        except ValueError as error:
+            raise ValueError(
+                "artifact path resolves outside /tmp/downloads"
+            ) from error
         return file_fd, file_stat
     except Exception:
-        os.close(file_fd)
+        if file_fd is not None:
+            os.close(file_fd)
         raise
+    finally:
+        os.close(root_fd)
 
 
-def _read_download_file(filename: Any) -> bytes:
-    file_fd, _ = _open_download_file(filename)
+def _read_download_file(artifact_path: Any) -> bytes:
+    file_fd, _ = _open_download_file(artifact_path)
     with os.fdopen(file_fd, "rb") as file:
         contents = file.read(MAX_DOWNLOAD_BYTES + 1)
     if len(contents) > MAX_DOWNLOAD_BYTES:
@@ -112,12 +133,12 @@ def _read_download_file(filename: Any) -> bytes:
 
 
 def _download_file(request: dict[str, Any]) -> dict[str, Any]:
-    filename = request.get("filename")
-    contents = _read_download_file(filename)
+    artifact_path = request.get("path")
+    contents = _read_download_file(artifact_path)
     return {
         "id": request.get("id"),
         "status": 0,
-        "filename": filename,
+        "path": artifact_path,
         "size_bytes": len(contents),
         "data_base64": base64.b64encode(contents).decode("ascii"),
         "stderr": "",

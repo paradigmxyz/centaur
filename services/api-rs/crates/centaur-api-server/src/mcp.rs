@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -105,7 +105,7 @@ struct CentaurToolCallArguments {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CentaurArtifactGetArguments {
-    filename: String,
+    path: String,
 }
 
 const MCP_ARTIFACT_MAX_BYTES: usize = 10 * 1024 * 1024;
@@ -327,18 +327,19 @@ fn mcp_artifact_get_tool() -> Value {
     json!({
         "name": "centaur_artifact_get",
         "description": concat!(
-            "Download a file created by a Centaur tool in the sandbox. The file must be a regular, ",
-            "non-symlink direct child of /tmp/downloads and no larger than 10 MiB. Pass only its ",
-            "filename, not a path. Returns the file as an embedded MCP resource."
+            "Retrieve a file created by a Centaur tool in the sandbox. Pass a relative path beneath ",
+            "/tmp/downloads. Subdirectories and symlinks are allowed when the opened regular file ",
+            "resolves within that directory. Files may be no larger than 10 MiB. Returns the file ",
+            "as an embedded MCP resource."
         ),
         "inputSchema": {
             "type": "object",
-            "required": ["filename"],
+            "required": ["path"],
             "properties": {
-                "filename": {
+                "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "The direct child filename within /tmp/downloads.",
+                    "description": "A relative file path within /tmp/downloads.",
                 },
             },
             "additionalProperties": false,
@@ -847,21 +848,17 @@ async fn mcp_artifact_get_result(
     arguments: Value,
 ) -> Result<McpToolCallOutcome, ApiError> {
     let args = match serde_json::from_value::<CentaurArtifactGetArguments>(arguments) {
-        Ok(args) if !args.filename.trim().is_empty() => args,
-        Ok(_) => return Ok(invalid_mcp_v2_arguments("filename must not be blank")),
+        Ok(args) if !args.path.trim().is_empty() => args,
+        Ok(_) => return Ok(invalid_mcp_v2_arguments("path must not be blank")),
         Err(error) => return Ok(invalid_mcp_v2_arguments(error)),
     };
     record_mcp_tool_method(&Span::current(), "centaur_artifact_get", "get");
     let output = state
         .runtime()?
-        .read_tool_host_file(
-            &principal.principal_id,
-            &args.filename,
-            MCP_ARTIFACT_MAX_BYTES,
-        )
+        .read_tool_host_file(&principal.principal_id, &args.path, MCP_ARTIFACT_MAX_BYTES)
         .await?;
     record_mcp_tool_correlation(&Span::current(), None, None, Some(&output.sandbox_id));
-    mcp_artifact_get_output_result(&args.filename, output.contents)
+    mcp_artifact_get_output_result(&args.path, output.contents)
 }
 
 async fn mcp_v1_tool_result(
@@ -1176,13 +1173,23 @@ fn mcp_v2_load_output_result(
 }
 
 fn mcp_artifact_get_output_result(
-    filename: &str,
+    artifact_path: &str,
     contents: Vec<u8>,
 ) -> Result<McpToolCallOutcome, ApiError> {
     let data_base64 = general_purpose::STANDARD.encode(&contents);
 
-    let uri = format!("file:///tmp/downloads/{}", urlencoding::encode(filename));
+    let encoded_path = artifact_path
+        .split('/')
+        .map(|component| urlencoding::encode(component).into_owned())
+        .collect::<Vec<_>>()
+        .join("/");
+    let uri = format!("file:///tmp/downloads/{encoded_path}");
+    let filename = Path::new(artifact_path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(artifact_path);
     let metadata = json!({
+        "path": artifact_path,
         "filename": filename,
         "mime_type": "application/octet-stream",
         "size_bytes": contents.len(),
@@ -2473,12 +2480,13 @@ def search(query, limit=20):
     fn mcp_artifact_get_returns_an_embedded_resource() {
         let contents = b"sandbox report\n";
         let outcome =
-            mcp_artifact_get_output_result("quarterly report.txt", contents.to_vec()).unwrap();
+            mcp_artifact_get_output_result("reports/quarterly report.txt", contents.to_vec())
+                .unwrap();
 
         assert!(!mcp_result_is_error(&outcome.result));
         assert_eq!(
             outcome.result["content"][0]["resource"]["uri"],
-            "file:///tmp/downloads/quarterly%20report.txt"
+            "file:///tmp/downloads/reports/quarterly%20report.txt"
         );
         assert_eq!(
             outcome.result["content"][0]["resource"]["mimeType"],
@@ -2491,6 +2499,7 @@ def search(query, limit=20):
         assert_eq!(
             outcome.result["structuredContent"],
             json!({
+                "path": "reports/quarterly report.txt",
                 "filename": "quarterly report.txt",
                 "mime_type": "application/octet-stream",
                 "size_bytes": contents.len(),
