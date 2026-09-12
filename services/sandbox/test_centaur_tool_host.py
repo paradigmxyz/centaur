@@ -176,6 +176,5 @@ class ToolHostTest(unittest.TestCase):
                 self.assertEqual(failure["status"], 1)
                 self.assertEqual(recovery["status"], 0)
 
-
 if __name__ == "__main__":
     unittest.main()

@@ -16,7 +16,7 @@ use centaur_iron_control::{IronControlError, Principal, SessionRegistrar};
 use centaur_sandbox_core::{
     Mount, RepoCacheAccess, ResourceRequirements, SANDBOX_AGENT_HOME, SandboxBackend,
     SandboxCapabilities as BackendSandboxCapabilities, SandboxError, SandboxFile, SandboxId,
-    SandboxIoGuard, SandboxRead, SandboxSpec, SandboxStatus, SandboxWrite,
+    SandboxIoGuard, SandboxRead, SandboxResult, SandboxSpec, SandboxStatus, SandboxWrite,
 };
 use centaur_sandbox_manager::{
     SandboxManager, SandboxReaper, SandboxReaperConfig, WarmPoolConfig, WarmPoolError,
@@ -83,10 +83,13 @@ const CENTAUR_PUBLIC_SKILL_DIRS_ENV: &str = "CENTAUR_PUBLIC_SKILL_DIRS";
 const SANDBOX_REPO_CACHE_LABEL: &str = "centaur.sandbox_repo_cache";
 const OBSERVABILITY_TOOL_BLOCKLIST: &str =
     "vlogs,vmetrics,grafana,centaur_investigator,centaur-investigator";
+const ARTIFACT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 type SandboxSpecFactory = Arc<
     dyn Fn(&ThreadKey, &str, &HarnessType, Option<&PersonaContext>) -> SandboxSpec + Send + Sync,
 >;
+type SandboxArtifactReader =
+    Arc<dyn Fn(SandboxId, String) -> BoxFuture<'static, SandboxResult<Vec<u8>>> + Send + Sync>;
 type SessionInputSink = FramedWrite<SandboxWrite, LinesCodec>;
 type ExecutionSpanRegistry = Arc<Mutex<HashMap<String, Span>>>;
 type SessionPipeMap = Arc<DashMap<String, SessionPipe>>;
@@ -296,6 +299,8 @@ impl PersonaRegistry {
 pub struct SandboxRuntime {
     manager: Arc<SandboxManager>,
     spec_factory: SandboxSpecFactory,
+    /// Optional out-of-band transport supplied by runtimes that can read artifacts.
+    artifact_reader: Option<SandboxArtifactReader>,
     warm_spec_factory: Option<WarmSandboxSpecFactory>,
     workload_key: Option<String>,
     /// The harness warm sandboxes boot with. A warm claim is only valid for a
@@ -436,6 +441,12 @@ pub struct ToolHostCallOutput {
     pub stderr: String,
     pub exit_status: Option<i32>,
     pub timed_out: bool,
+}
+
+#[derive(Debug)]
+pub struct SandboxArtifactOutput {
+    pub sandbox_id: String,
+    pub contents: Vec<u8>,
 }
 
 #[derive(Debug, Error)]
@@ -1104,6 +1115,88 @@ impl SessionRuntime {
         self.tool_host_call_locks
             .remove_if(thread_key.as_str(), |_, lock| Arc::strong_count(lock) == 1);
         result
+    }
+
+    /// Read an artifact from an existing principal-bound MCP sandbox.
+    /// This operation does not create an execution, event, or durable message.
+    pub async fn read_sandbox_artifact(
+        &self,
+        principal_id: &str,
+        artifact_path: &str,
+        max_bytes: usize,
+    ) -> Result<SandboxArtifactOutput, SessionRuntimeError> {
+        let principal_id = principal_id.trim();
+        if principal_id.is_empty() {
+            return Err(SessionRuntimeError::BadRequest(
+                "tool host principal_id is required".to_owned(),
+            ));
+        }
+        if artifact_path.is_empty() {
+            return Err(SessionRuntimeError::BadRequest(
+                "artifact path is required".to_owned(),
+            ));
+        }
+        let thread_key = tool_host_thread_key(principal_id)?;
+        let session = match self.store.get_session(&thread_key).await {
+            Ok(session) => session,
+            Err(SessionStoreError::NotFound { .. }) => {
+                return Err(SessionRuntimeError::BadRequest(
+                    "no MCP sandbox exists for this principal".to_owned(),
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if session.iron_control_principal.as_deref() != Some(principal_id) {
+            return Err(SessionRuntimeError::BadRequest(
+                "MCP sandbox principal does not match the requester".to_owned(),
+            ));
+        }
+        let Some(sandbox_id) = session.sandbox_id else {
+            return Err(SessionRuntimeError::BadRequest(
+                "no MCP sandbox is currently assigned to this principal".to_owned(),
+            ));
+        };
+        let id = SandboxId::new(&sandbox_id);
+        match self.sandbox_runtime.manager.status(&id).await? {
+            SandboxStatus::Running => {}
+            SandboxStatus::Suspended => self.sandbox_runtime.manager.resume(&id).await?,
+            status => {
+                return Err(SessionRuntimeError::BadRequest(format!(
+                    "MCP sandbox is not available for artifact retrieval: {status:?}"
+                )));
+            }
+        }
+        let artifact_reader = self
+            .sandbox_runtime
+            .artifact_reader
+            .as_ref()
+            .ok_or_else(|| {
+                SessionRuntimeError::BadRequest(
+                    "artifact retrieval is not supported by the configured sandbox backend"
+                        .to_owned(),
+                )
+            })?;
+        let artifact = timeout(
+            ARTIFACT_READ_TIMEOUT,
+            artifact_reader(id, artifact_path.to_owned()),
+        )
+        .await
+        .map_err(|_| {
+            SessionRuntimeError::Sandbox(SandboxError::io(format!(
+                "sandbox artifact retrieval timed out after {} seconds",
+                ARTIFACT_READ_TIMEOUT.as_secs()
+            )))
+        })?;
+        let contents = artifact?;
+        if contents.len() > max_bytes {
+            return Err(SessionRuntimeError::Sandbox(SandboxError::io(format!(
+                "sandbox artifact exceeds the {max_bytes}-byte size limit"
+            ))));
+        }
+        Ok(SandboxArtifactOutput {
+            sandbox_id,
+            contents,
+        })
     }
 
     /// Resolve the principal once and return both the tool lists from its
@@ -4189,6 +4282,7 @@ impl SandboxRuntime {
         Self {
             manager: Arc::new(SandboxManager::new(backend)),
             spec_factory: Arc::new(spec_factory),
+            artifact_reader: None,
             warm_spec_factory: None,
             workload_key: None,
             warm_harness: None,
@@ -4212,10 +4306,21 @@ impl SandboxRuntime {
         Self {
             manager: Arc::new(SandboxManager::new(backend)),
             spec_factory: Arc::new(spec_factory),
+            artifact_reader: None,
             warm_spec_factory: Some(warm_spec_factory),
             workload_key: Some(workload_key),
             warm_harness: None,
         }
+    }
+
+    /// Add an artifact transport without expanding the portable sandbox backend contract.
+    pub fn with_artifact_reader<F, Fut>(mut self, reader: F) -> Self
+    where
+        F: Fn(SandboxId, String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = SandboxResult<Vec<u8>>> + Send + 'static,
+    {
+        self.artifact_reader = Some(Arc::new(move |id, path| reader(id, path).boxed()));
+        self
     }
 }
 
