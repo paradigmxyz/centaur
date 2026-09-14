@@ -209,25 +209,9 @@ jobs:
           cargo test --workspace
 
           PGPASSWORD=postgres createdb --host localhost --username postgres session_runtime
-          mapfile -t runtime_tests < <(
-            cargo test -p centaur-session-runtime -- --list |
-              awk -F ': test$' '/^(adoption_tests|retention::tests)::.*: test$/ { print $1 }'
-          )
-          for runtime_test in "${runtime_tests[@]}"; do
-            # These checks accompany the runtime fix in a separate change.
-            if [[ "$runtime_test" == adoption_tests::stdout_eof_* ]]; then
-              continue
-            fi
-
-            status=0
-            SESSION_RUNTIME_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/session_runtime \
-              cargo test -p centaur-session-runtime "$runtime_test" -- --exact || status=$?
-            PGPASSWORD=postgres psql --host localhost --username postgres --dbname session_runtime \
-              --command 'truncate table sessions restart identity cascade'
-            if [[ "$status" -ne 0 ]]; then
-              exit "$status"
-            fi
-          done
+          SESSION_RUNTIME_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/session_runtime \
+            cargo test -p centaur-session-runtime -- \
+              --test-threads=1 --skip 'adoption_tests::stdout_eof_'
 
       - name: Run API integration test
         working-directory: services/api-rs

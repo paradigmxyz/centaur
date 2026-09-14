@@ -9358,6 +9358,13 @@ mod adoption_tests {
         Some(store)
     }
 
+    async fn reset_test_store(store: &PgSessionStore) {
+        sqlx::query("truncate table sessions restart identity cascade")
+            .execute(store.pool())
+            .await
+            .expect("reset test db");
+    }
+
     async fn orphaned_execution(
         store: &PgSessionStore,
         thread_key: &ThreadKey,
@@ -9568,6 +9575,7 @@ mod adoption_tests {
                 .iter()
                 .any(|event| event.event_type == "session.harness_switched")
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -9611,6 +9619,7 @@ mod adoption_tests {
             session_metadata(&store, &thread_key).await["persona"]["persona_id"],
             "old"
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -9669,6 +9678,7 @@ mod adoption_tests {
                 .as_deref(),
             Some("finance-automation")
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -9743,6 +9753,7 @@ mod adoption_tests {
             .expect("execution exists");
         assert_eq!(latest.execution_id, execution.execution_id);
         assert_eq!(latest.status, ExecutionStatus::Completed);
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -9821,6 +9832,7 @@ mod adoption_tests {
                 .is_err(),
             "unscoped stream should stay open after a terminal event"
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -9937,6 +9949,7 @@ mod adoption_tests {
         let session = store.get_session(&thread_key).await.unwrap();
         assert_eq!(session.title.as_deref(), Some("Fix worker memory leak"));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        reset_test_store(&store).await;
     }
 
     fn env_value<'a>(spec: &'a SandboxSpec, name: &str) -> Option<&'a str> {
@@ -10077,6 +10090,7 @@ mod adoption_tests {
             all.iter()
                 .any(|event| event.event_type == "session.sandbox_capabilities_replaced")
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10150,6 +10164,7 @@ mod adoption_tests {
         let spec = backend.created_specs().pop().expect("created cold spec");
         assert!(!spec.capabilities.repo_cache.enabled());
         assert!(!spec.capabilities.observability_enabled);
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10207,6 +10222,7 @@ mod adoption_tests {
                 proxy_labels
             )]
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10278,6 +10294,7 @@ mod adoption_tests {
                 ),
             ]
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10329,6 +10346,7 @@ mod adoption_tests {
             spec.iron_control_requester_principal.as_deref(),
             Some("prn_req")
         );
+        reset_test_store(&store).await;
     }
 
     fn requester_test_registrar(base_url: String) -> SessionRegistrar {
@@ -10454,6 +10472,7 @@ mod adoption_tests {
             )]
         );
         server.abort();
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10512,6 +10531,7 @@ mod adoption_tests {
             "Slack Connect executes must not upsert a requester principal"
         );
         server.abort();
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10568,6 +10588,7 @@ mod adoption_tests {
             .count();
         assert_eq!(user_upserts, 1, "only session create upserts the user");
         server.abort();
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10622,6 +10643,7 @@ mod adoption_tests {
             "non-Slack executes must not upsert a Slack requester principal"
         );
         server.abort();
+        reset_test_store(&store).await;
     }
 
     /// Minimal raw-TCP iron-control stub for execute-level requester tests:
@@ -10858,6 +10880,7 @@ mod adoption_tests {
             event.event_type == "session.sandbox_paused"
                 && event.payload.get("reason").and_then(Value::as_str) == Some("capacity_pressure")
         }));
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10932,6 +10955,7 @@ mod adoption_tests {
                 && event.payload["workflow_run_id"] == json!(workflow_run_id)
                 && event.payload["cleared"] == json!(true)
         }));
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10974,6 +10998,7 @@ mod adoption_tests {
             store.get_session(&thread_key).await.unwrap().sandbox_id,
             Some("sbx-explicit".to_owned())
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11017,6 +11042,7 @@ mod adoption_tests {
             store.get_session(&thread_key).await.unwrap().sandbox_id,
             None
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11083,6 +11109,7 @@ mod adoption_tests {
             all.iter()
                 .any(|event| event.event_type == "session.sandbox_resume_failed")
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11108,6 +11135,7 @@ mod adoption_tests {
         first.expect("first pipe ensure should succeed");
         second.expect("second pipe ensure should reuse the first pipe");
         assert_eq!(backend.opens(), 1);
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11158,6 +11186,7 @@ mod adoption_tests {
             Some("Recovered from pod logs.")
         );
         assert_eq!(backend.opens(), 1);
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11209,6 +11238,7 @@ mod adoption_tests {
             Some("Completed after reattach.")
         );
         assert_eq!(backend.opens(), 2);
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11279,6 +11309,7 @@ mod adoption_tests {
             completed.payload["result_text"].as_str(),
             Some("Completed after ownership handoff.")
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11324,6 +11355,7 @@ mod adoption_tests {
             "gone sandbox should not reattach"
         );
         assert_eq!(backend.opens(), 1);
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11365,6 +11397,7 @@ mod adoption_tests {
         assert_eq!(backend.opens(), 0);
         let session = store.get_session(&thread_key).await.unwrap();
         assert_ne!(session.status.as_ref(), "failed");
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11400,6 +11433,7 @@ mod adoption_tests {
             }),
             "expected a live adoption event"
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11432,6 +11466,7 @@ mod adoption_tests {
             "expected status detail: {error}"
         );
         assert_eq!(backend.opens(), 0);
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11479,6 +11514,7 @@ mod adoption_tests {
             .expect("execution exists");
         assert_eq!(latest.execution_id, execution_id);
         assert_eq!(latest.status, ExecutionStatus::Completed);
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11539,6 +11575,7 @@ mod adoption_tests {
             .fail_execution(&execution_id, "test cleanup")
             .await
             .expect("terminalize legacy execution");
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11569,6 +11606,7 @@ mod adoption_tests {
             .run_orphan_adoption_scan(&mut state, Some(PRE_SANDBOX_ORPHAN_GRACE))
             .await;
         wait_for_event(&store, &running_thread, "session.execution_failed").await;
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11617,6 +11655,7 @@ mod adoption_tests {
         runtime.adopt_orphaned_executions().await;
         wait_for_event(&store, &thread_key, "session.execution_adopted").await;
         wait_for_event(&store, &thread_key, "session.execution_completed").await;
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11664,6 +11703,7 @@ mod adoption_tests {
             .fail_execution_if_active(&execution_id, "test cleanup")
             .await
             .expect("terminalize execution");
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11688,6 +11728,7 @@ mod adoption_tests {
 
         wait_for_event(&store, &thread_key, "session.execution_adopted").await;
         wait_for_event(&store, &thread_key, "session.execution_completed").await;
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11744,6 +11785,7 @@ mod adoption_tests {
             .run_orphan_adoption_scan(&mut state, Some(PRE_SANDBOX_ORPHAN_GRACE))
             .await;
         wait_for_event(&store, &thread_key, "session.execution_completed").await;
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11783,6 +11825,7 @@ mod adoption_tests {
             .fail_execution_if_active(&execution_id, "test cleanup")
             .await
             .expect("terminalize execution");
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11833,6 +11876,7 @@ mod adoption_tests {
                 .all(|event| event.event_type != "session.stdout_owner_released"),
             "finished execution must not be handed off"
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11874,5 +11918,6 @@ mod adoption_tests {
             .fail_execution_if_active(&execution_id, "test cleanup")
             .await
             .expect("terminalize execution");
+        reset_test_store(&store).await;
     }
 }
