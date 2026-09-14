@@ -1187,45 +1187,7 @@ impl SessionRuntime {
             ));
         };
         let id = SandboxId::new(&sandbox_id);
-        let operation_id = format!("mcp-artifact-{}", Uuid::new_v4().simple());
-        match self.sandbox_runtime.manager.status(&id).await? {
-            SandboxStatus::Running => {}
-            SandboxStatus::Created | SandboxStatus::Suspended => {
-                self.sandbox_pipes.remove(&sandbox_id);
-                let resume_id = id.clone();
-                self.run_with_running_capacity(
-                    thread_key,
-                    &operation_id,
-                    "artifact_resume",
-                    || async {
-                        self.sandbox_runtime
-                            .manager
-                            .resume(&resume_id)
-                            .await
-                            .map_err(SessionRuntimeError::Sandbox)
-                    },
-                )
-                .await?;
-                self.store
-                    .append_event(
-                        thread_key,
-                        None,
-                        "session.sandbox_resumed",
-                        json!({
-                            "thread_key": thread_key.as_str(),
-                            "sandbox_id": sandbox_id,
-                            "reason": "artifact_retrieval",
-                            "operation_id": operation_id,
-                        }),
-                    )
-                    .await?;
-            }
-            status => {
-                return Err(SessionRuntimeError::BadRequest(format!(
-                    "MCP sandbox is not available for artifact retrieval: {status:?}"
-                )));
-            }
-        }
+        require_running_artifact_sandbox(self.sandbox_runtime.manager.status(&id).await?)?;
         if !self
             .store
             .touch_sandbox_activity(thread_key, &sandbox_id)
@@ -5879,6 +5841,19 @@ fn should_pause_idle_sandbox(
     )
 }
 
+fn require_running_artifact_sandbox(status: SandboxStatus) -> Result<(), SessionRuntimeError> {
+    match status {
+        SandboxStatus::Running => Ok(()),
+        SandboxStatus::Created | SandboxStatus::Suspended => Err(SessionRuntimeError::BadRequest(
+            "transient artifact cannot be retrieved because the MCP sandbox is not running; run the producing tool again"
+                .to_owned(),
+        )),
+        status => Err(SessionRuntimeError::BadRequest(format!(
+            "MCP sandbox is not available for artifact retrieval: {status:?}"
+        ))),
+    }
+}
+
 fn duration_millis_u64(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
@@ -8339,6 +8314,22 @@ mod tests {
             "exe-1",
             "asbx-other"
         ));
+    }
+
+    #[test]
+    fn artifact_retrieval_requires_a_running_sandbox() {
+        assert!(require_running_artifact_sandbox(SandboxStatus::Running).is_ok());
+        for status in [SandboxStatus::Created, SandboxStatus::Suspended] {
+            let error = require_running_artifact_sandbox(status).unwrap_err();
+            assert!(error.to_string().contains("transient artifact"));
+        }
+        for status in [
+            SandboxStatus::Stopped,
+            SandboxStatus::Gone,
+            SandboxStatus::Unknown("unavailable".to_owned()),
+        ] {
+            assert!(require_running_artifact_sandbox(status).is_err());
+        }
     }
 
     #[test]
