@@ -377,7 +377,9 @@ Mode connection instead of webhooks:
 Event subscriptions are unchanged. Socket Mode is single-consumer (one
 connection per app-level token), so keep `slackbotv2.replicaCount: 1`. Slack
 does not redeliver dropped socket events the way it redelivers failed webhook
-POSTs, so the Slackbot connects only once its database is up.
+POSTs, so the Slackbot connects only once its database is up. A socket that is
+down — a rejected app-level token, or one that never reconnects — fails the
+`/health` probe instead of leaving the pod up without a connection.
 
 ## 6. Deploy With Helm
 

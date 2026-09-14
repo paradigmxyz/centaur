@@ -22,9 +22,18 @@ const LOOPBACK_ORIGIN = 'http://slackbotv2.socket.internal'
 const CONNECT_INITIAL_DELAY_MS = 500
 const CONNECT_MAX_DELAY_MS = 30_000
 
+/**
+ * How long an established connection may stay down before /health reports the
+ * pod unhealthy. Slack recycles socket connections routinely and the client
+ * reconnects within seconds; failing the probe on every refresh would restart
+ * the pod for no reason.
+ */
+const DISCONNECT_GRACE_MS = 60_000
+
 export type SlackSocketStatus = {
   attempts: number
   connected: boolean
+  lastError?: string
 }
 
 /** How the runner opens and closes the Slack WebSocket. */
@@ -36,6 +45,8 @@ export type SlackSocketTransport = {
 }
 
 export type SlackSocketRunner = {
+  /** False once Slack events can no longer arrive; drives the health probe. */
+  healthy(): boolean
   /**
    * Waits for `ready`, then connects. Settles after the first attempt and never
    * rejects; a failed attempt keeps retrying with capped exponential backoff.
@@ -57,6 +68,8 @@ export function createSlackSocketRunner(
 ): SlackSocketRunner {
   const { logger } = input
   const status: SlackSocketStatus = { attempts: 0, connected: false }
+  let everConnected = false
+  let disconnectedSinceMs: number | undefined
   let startPromise: Promise<void> | undefined
   let stopped = false
 
@@ -65,11 +78,15 @@ export function createSlackSocketRunner(
       logger.info('slackbotv2_slack_socket_connected', { attempts: status.attempts })
     }
     status.connected = true
+    status.lastError = undefined
+    everConnected = true
+    disconnectedSinceMs = undefined
   }
 
   const markDisconnected = (event: string): void => {
     if (status.connected) logger.warn('slackbotv2_slack_socket_disconnected', { event })
     status.connected = false
+    disconnectedSinceMs ??= Date.now()
   }
 
   const handlers: SlackSocketModeHandlers = {
@@ -111,10 +128,11 @@ export function createSlackSocketRunner(
       markConnected()
       return true
     } catch (error) {
+      status.lastError = errorText(error)
       markDisconnected('connect_failed')
       logger.error('slackbotv2_slack_socket_connect_failed', {
         attempts: status.attempts,
-        error: errorText(error)
+        error: status.lastError
       })
       await input.disconnect().catch(() => undefined)
       return false
@@ -129,6 +147,12 @@ export function createSlackSocketRunner(
   }
 
   return {
+    healthy(): boolean {
+      if (status.connected) return true
+      if (!everConnected) return false
+      return disconnectedSinceMs !== undefined
+        && Date.now() - disconnectedSinceMs < DISCONNECT_GRACE_MS
+    },
     start(): Promise<void> {
       startPromise ??= (async () => {
         if (input.ready) await input.ready.catch(() => undefined)

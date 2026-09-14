@@ -11,7 +11,10 @@ const port = numberEnv('PORT', 3002)
 const apiUrl = stringEnv('CENTAUR_API_URL', 'http://127.0.0.1:8080')
 const botToken = requiredEnv('SLACK_BOT_TOKEN')
 const socketMode = booleanEnv('SLACKBOTV2_SOCKET_MODE', false)
-const appToken = optionalEnv('SLACK_APP_TOKEN')
+// Socket Mode is the only way events reach the bot, so a missing or malformed
+// app-level token fails startup rather than leaving a pod that serves health
+// checks and never connects.
+const appToken = socketMode ? requiredAppToken() : undefined
 // Signing secret only guards inbound webhooks; socket mode has none.
 const signingSecret = socketMode
   ? optionalEnv('SLACK_SIGNING_SECRET')
@@ -140,6 +143,16 @@ console.log(
 function optionalEnv(name: string): string | undefined {
   const value = process.env[name]?.trim()
   return value ? value : undefined
+}
+
+function requiredAppToken(): string {
+  const value = requiredEnv('SLACK_APP_TOKEN')
+  if (!value.startsWith('xapp-')) {
+    throw new Error(
+      'SLACK_APP_TOKEN must be a Slack app-level token (xapp-..., connections:write scope)'
+    )
+  }
+  return value
 }
 
 function requiredEnv(name: string): string {

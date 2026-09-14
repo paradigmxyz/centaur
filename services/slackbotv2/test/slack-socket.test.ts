@@ -133,6 +133,10 @@ function ignoredRequests(route: string, eventType: string): number {
 }
 
 describe('Slackbot socket mode', () => {
+  it('requires an app-level token', () => {
+    expect(() => socketBot({ appToken: undefined })).toThrow(/SLACK_APP_TOKEN/)
+  })
+
   it('rejects Slack routes reached from outside the process', async () => {
     const { bot } = socketBot()
 
@@ -193,6 +197,25 @@ describe('Slackbot socket mode', () => {
     expect(await waitFor(() => requests.some(url => url.includes('conversations.join')))).toBe(true)
   })
 
+  it('fails the health probe until the socket connects', async () => {
+    const { bot } = socketBot({
+      socketTransport: {
+        connect: async () => {
+          throw new Error('An API error occurred: invalid_auth')
+        },
+        disconnect: async () => undefined
+      }
+    })
+
+    await bot.socket!.start()
+    const response = await bot.app.fetch(new Request('http://slackbotv2.test/health'))
+    const body = (await response.json()) as Record<string, unknown>
+
+    expect(response.status).toBe(503)
+    expect(body.slack_socket_connected).toBe(false)
+    expect(body.slack_socket_error).toContain('invalid_auth')
+    await bot.socket!.stop()
+  })
 })
 
 describe('Slack socket runner', () => {
@@ -279,4 +302,23 @@ describe('Slack socket runner', () => {
     expect(dispatches).toBe(0)
   })
 
+  it('rides out a reconnect but reports a connection that stays down', async () => {
+    const fake = fakeTransport()
+    const socket = createSlackSocketRunner({
+      ...fake.transport,
+      dispatch: async () => new Response('ok'),
+      logger: silentLogger,
+      loopbackToken: 'token-abc'
+    })
+    await socket.start()
+
+    fake.handlers.onStateChange?.('reconnecting')
+    // Slack recycles connections routinely; seconds of downtime must not
+    // restart the pod.
+    expect(socket.status().connected).toBe(false)
+    expect(socket.healthy()).toBe(true)
+
+    fake.handlers.onStateChange?.('connected')
+    expect(socket.healthy()).toBe(true)
+  })
 })

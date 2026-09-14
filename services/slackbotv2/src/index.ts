@@ -75,7 +75,11 @@ import {
   isAllowedSlackWebhookBody,
   parseSlackWebhookPayload
 } from './slack-events'
-import { createSlackSocketRunner, slackSocketLoopbackVerifier } from './slack-socket'
+import {
+  createSlackSocketRunner,
+  slackSocketLoopbackVerifier,
+  type SlackSocketRunner
+} from './slack-socket'
 import { isSlackStopCommand } from './stop-command'
 import {
   createSteeringReactionController,
@@ -303,6 +307,9 @@ function stickyOverrideRaw(
 export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   const userName = options.userName ?? 'centaur'
   const logger = options.logger ?? noopLogger
+  if (options.socketMode && !options.appToken) {
+    throw new Error('SLACK_APP_TOKEN is required when slackbotv2 socket mode is enabled')
+  }
   // Socket Mode events arrive unsigned over an authenticated WebSocket and are
   // replayed into the webhook routes below, so signature verification is
   // replaced by a token only this process's own replays carry.
@@ -475,7 +482,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
         ready: socketReady
       })
     : undefined
-  app.get('/health', c => healthResponse(c, stateConnectionStatus))
+  app.get('/health', c => healthResponse(c, stateConnectionStatus, socket))
   app.get('/metrics', c =>
     c.text(slackbotMetrics.expose(), 200, {
       'Content-Type': 'text/plain; version=0.0.4; charset=utf-8'
@@ -974,7 +981,28 @@ function createDefaultState(options: SlackbotV2Options, logger: Logger): StateAd
   })
 }
 
-function healthResponse(c: Context, stateConnectionStatus: StateConnectionStatus): Response {
+function healthResponse(
+  c: Context,
+  stateConnectionStatus: StateConnectionStatus,
+  socket?: SlackSocketRunner
+): Response {
+  // Socket Mode is the pod's only way to receive Slack events, so a connection
+  // that never came up (a rejected app-level token) or one that has stayed down
+  // past the reconnect grace fails the probe instead of reporting a healthy bot.
+  if (socket && !socket.healthy()) {
+    const socketStatus = socket.status()
+    return c.json(
+      {
+        ok: false,
+        service: 'slackbotv2',
+        database_connected: stateConnectionStatus.connected,
+        slack_socket_connected: socketStatus.connected,
+        slack_socket_connect_attempts: socketStatus.attempts,
+        slack_socket_error: socketStatus.lastError
+      },
+      503
+    )
+  }
   if (stateConnectionStatus.connected) {
     return c.json({
       ok: true,
