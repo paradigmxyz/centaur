@@ -43,6 +43,24 @@ module Broker
       assert_equal "AT", result.response["access_token"]
     end
 
+    test "client_secret_basic sends credentials in the authorization header" do
+      client, http = client_with(status: 200, body: success_body) do |request|
+        assert_equal "Basic Y2lkOnNlYw==", request.dig(:headers, "Authorization")
+        assert_nil request[:form]["client_id"]
+        assert_nil request[:form]["client_secret"]
+      end
+
+      client.exchange(**base_args, client_auth_method: "client_secret_basic")
+      http.verify
+    end
+
+    test "rejects unsupported client authentication" do
+      client, = client_with(status: 200, body: success_body)
+      assert_raises(ArgumentError) do
+        client.exchange(**base_args(client_auth_method: :private_key_jwt))
+      end
+    end
+
     test "missing expires_in yields nil" do
       client, http = client_with(status: 200, body: success_body(expires_in: nil))
       assert_nil client.exchange(**base_args).expires_in
@@ -95,23 +113,6 @@ module Broker
       end
       client.exchange(**base_args(code_verifier: nil))
       http.verify
-    end
-
-    test "supports client_secret_basic without leaking client credentials into the form" do
-      client, http = client_with(status: 200, body: success_body) do |request|
-        assert_equal "Basic Y2lkOnNlYw==", request[:headers]["Authorization"]
-        assert_nil request[:form]["client_id"]
-        assert_nil request[:form]["client_secret"]
-      end
-      client.exchange(**base_args(token_endpoint_auth_method: :client_secret_basic))
-      http.verify
-    end
-
-    test "rejects unsupported token endpoint authentication" do
-      client, = client_with(status: 200, body: success_body)
-      assert_raises(ArgumentError) do
-        client.exchange(**base_args(token_endpoint_auth_method: :private_key_jwt))
-      end
     end
 
     test "parses Slack nested authed_user token payload" do

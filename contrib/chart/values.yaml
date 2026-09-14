@@ -129,7 +129,7 @@ console:
   # be shared by their owner from the Threads UI.
   publicSlackThreadsEnabled: false
   # Optional SSO admission policy. When non-empty, only identities whose email
-  # domain matches this list can sign in through Google or Slack.
+  # domain matches this list can sign in through Google, Slack, or Okta.
   ssoEmailDomains: []
   image:
     repository: centaur-console
@@ -163,6 +163,17 @@ console:
   # bot and DM sync use.
   slackOauth:
     enabled: false
+  # Okta as an OIDC identity provider for console sign-in. Set issuer to the
+  # authorization-server issuer (for example, https://id.example.com or
+  # https://id.example.com/oauth2/default). The Console discovers endpoints and
+  # signing keys from it. The shared infra Secret must contain keys
+  # <secretManager.envPrefix>CENTAUR_CONSOLE_OKTA_CLIENT_ID and
+  # <secretManager.envPrefix>CENTAUR_CONSOLE_OKTA_CLIENT_SECRET when enabled.
+  oktaOauth:
+    enabled: false
+    issuer: ""
+    # Must match token_endpoint_auth_method on the Okta client application.
+    tokenEndpointAuthMethod: client_secret_basic
   # OAuth app slug whose user-level Slack credentials are used by the DM sync
   # worker. Keep this aligned with the Console OAuth app users authorize.
   slackDmSync:
@@ -447,6 +458,8 @@ apiRs:
   # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
   mcpPublicUrl: ""
   runMigrations: true
+  # Expose the experimental centaur MCP dispatcher (currently action=list).
+  mcpV2Enabled: false
   sandboxBackend: agent-k8s
   sandboxWorkload: codex-app-server
   sandboxReadyTimeoutSecs: 90
@@ -528,6 +541,16 @@ apiRs:
   # they are running or suspended. 0 disables the sweep. Interval must be >= 1.
   sandboxMaxLifetimeSecs: 259200 # 3 days
   sandboxReapIntervalSecs: 300
+  # Delete session.output.line events older than this many days, once their
+  # execution also completed before the cutoff. Accepts 0 through 3650;
+  # 0 disables retention. Other session event types are preserved.
+  # Events without an execution expire by event age alone. Sweeps are bounded
+  # per pass, so a large first backlog drains over several sweeps.
+  # First install the manual session_events_retention_index.sql migration.
+  # Sweeps skip deletion if session_events_stdout_created_at_idx is missing
+  # or invalid. See the configuration reference for setup and recovery.
+  sessionEventsRetentionDays: 0
+  sessionEventsRetentionSweepIntervalSecs: 300
   # Minimum age before proxy resources without a live Sandbox are reaped.
   sandboxOrphanSweepGraceSecs: 600
   # Cleanup worker: stop unreferenced session/warm-pool sandboxes after two
@@ -592,6 +615,9 @@ slackbotv2:
     pullPolicy: Always
   userName: centaur
   assistantStatus: ""
+  # Match Slack's features.agent_view manifest setting. Changing Slack's
+  # manifest is irreversible; this switch only controls the service behavior.
+  agentViewEnabled: false
   # React to mentioned follow-ups while an execution is active, then remove
   # their reactions after the assistant response is posted. Requires the Slack
   # app to grant reactions:write. Slackbot disables the feature for the running

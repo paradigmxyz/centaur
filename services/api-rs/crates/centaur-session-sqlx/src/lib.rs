@@ -1186,8 +1186,11 @@ impl PgSessionStore {
                 s.thread_key,
                 s.sandbox_id as sandbox_id,
                 latest.execution_id,
-                latest.completed_at,
-                latest.metadata
+                latest.metadata,
+                greatest(
+                    coalesce(s.sandbox_last_active_at, latest.completed_at),
+                    latest.completed_at
+                ) as last_active_at
             from sessions s
             join latest on latest.thread_key = s.thread_key
             where s.sandbox_id is not null
@@ -1209,6 +1212,70 @@ impl PgSessionStore {
         rows.into_iter()
             .filter_map(|row| idle_candidate_from_row(row, idle_backstop, now).transpose())
             .collect()
+    }
+
+    /// Whether the manually installed retention index is ready for queries.
+    pub async fn stdout_retention_index_is_valid(&self) -> Result<bool, SessionStoreError> {
+        Ok(sqlx::query_scalar(
+            r#"
+            select exists (
+                select 1
+                from pg_catalog.pg_index
+                where indexrelid = to_regclass('session_events_stdout_created_at_idx')
+                  and indrelid = 'session_events'::regclass
+                  and indisvalid
+                  and indisready
+                  and indislive
+            )
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    /// Deletes one batch of `session.output.line` events older than `cutoff`,
+    /// returning how many rows went. Other event types are preserved. Returns
+    /// fewer than `batch_limit` when no more eligible, unlocked rows remain.
+    ///
+    /// Batched rather than a single statement because this table is the largest
+    /// in the schema — a deployment can accumulate millions of rows before
+    /// retention is first switched on, and one unbounded delete would hold locks
+    /// and bloat the table for the duration.
+    ///
+    /// An execution's output is eligible only after its completion time passes
+    /// the cutoff, preserving early output for the full retention window after
+    /// completion. Events without an execution are eligible by event age alone.
+    pub async fn delete_stdout_events_older_than(
+        &self,
+        cutoff: std::time::SystemTime,
+        batch_limit: i64,
+    ) -> Result<u64, SessionStoreError> {
+        let cutoff = OffsetDateTime::from(cutoff);
+        let result = sqlx::query(
+            r#"
+            with doomed as (
+                select e.event_id
+                from session_events e
+                left join session_executions x on x.execution_id = e.execution_id
+                where e.created_at < $1
+                  and e.event_type = 'session.output.line'
+                  and (
+                      e.execution_id is null
+                      or x.completed_at < $1
+                )
+                order by e.created_at
+                limit $2
+                for update of e skip locked
+            )
+            delete from session_events
+            where event_id in (select event_id from doomed)
+            "#,
+        )
+        .bind(cutoff)
+        .bind(batch_limit)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     pub async fn list_sandbox_capacity_candidates(
@@ -1901,8 +1968,8 @@ struct IdleSandboxCandidateRow {
     thread_key: String,
     sandbox_id: String,
     execution_id: String,
-    completed_at: OffsetDateTime,
     metadata: Value,
+    last_active_at: OffsetDateTime,
 }
 
 fn idle_candidate_from_row(
@@ -1911,7 +1978,7 @@ fn idle_candidate_from_row(
     now: OffsetDateTime,
 ) -> Result<Option<IdleSandboxCandidate>, SessionStoreError> {
     let idle_timeout = effective_idle_timeout(&row.metadata, idle_backstop);
-    if !idle_deadline_elapsed(row.completed_at, idle_timeout, now) {
+    if !idle_deadline_elapsed(row.last_active_at, idle_timeout, now) {
         return Ok(None);
     }
     Ok(Some(IdleSandboxCandidate {
@@ -2088,7 +2155,10 @@ fn stdout_lease_expires_at(lease: Duration) -> OffsetDateTime {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, time::Duration};
+    use std::{
+        collections::BTreeMap,
+        time::{Duration, UNIX_EPOCH},
+    };
 
     use centaur_session_core::{HarnessType, ThreadKey};
     use serde_json::json;
@@ -2125,14 +2195,14 @@ mod tests {
 
     fn idle_row(
         metadata: serde_json::Value,
-        completed_at: OffsetDateTime,
+        last_active_at: OffsetDateTime,
     ) -> IdleSandboxCandidateRow {
         IdleSandboxCandidateRow {
             thread_key: "test:idle-row".to_owned(),
             sandbox_id: "sbx-idle-row".to_owned(),
             execution_id: "exe-idle-row".to_owned(),
-            completed_at,
             metadata,
+            last_active_at,
         }
     }
 
@@ -2409,6 +2479,17 @@ mod tests {
         .execute(store.pool())
         .await
         .expect("age execution");
+        sqlx::query(
+            r#"
+            update sessions
+            set sandbox_last_active_at = now() - interval '2 seconds'
+            where thread_key = $1
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .execute(store.pool())
+        .await
+        .expect("age sandbox activity");
 
         let candidates = store
             .list_idle_sandbox_candidates(Duration::from_secs(3600))
@@ -2422,6 +2503,217 @@ mod tests {
         assert_eq!(candidate.sandbox_id, sandbox_id);
         assert_eq!(candidate.execution_id, execution_id);
         assert_eq!(candidate.idle_timeout, Duration::from_secs(1));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn idle_candidates_never_precede_execution_completion_deadline() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key = ThreadKey::parse(format!("test:idle-floor-{}", Uuid::new_v4())).unwrap();
+        let sandbox_id = format!("sbx-idle-floor-{}", Uuid::new_v4());
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        store
+            .update_sandbox_id(&thread_key, Some(&sandbox_id))
+            .await
+            .expect("set sandbox id");
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({"idle_timeout_ms": 1000}))
+            .await
+            .expect("create execution")
+            .execution
+            .execution_id;
+        store
+            .complete_execution(&execution_id)
+            .await
+            .expect("complete execution");
+        sqlx::query(
+            r#"
+            update session_executions
+            set completed_at = now() - interval '500 milliseconds', updated_at = now()
+            where execution_id = $1
+            "#,
+        )
+        .bind(&execution_id)
+        .execute(store.pool())
+        .await
+        .expect("set recent execution completion");
+        sqlx::query(
+            r#"
+            update sessions
+            set sandbox_last_active_at = now() - interval '2 seconds'
+            where thread_key = $1
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .execute(store.pool())
+        .await
+        .expect("set older sandbox activity");
+
+        let candidates = store
+            .list_idle_sandbox_candidates(Duration::from_secs(3600))
+            .await
+            .expect("list idle sandbox candidates");
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.thread_key != thread_key),
+            "execution completion must remain the earliest idle deadline"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stdout_retention_is_bounded_and_waits_for_execution_completion_cutoff() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        for active_status in ["queued", "running"] {
+            let thread_key =
+                ThreadKey::parse(format!("test:event-retention-{}", Uuid::new_v4())).unwrap();
+            store
+                .create_or_get_session(
+                    &thread_key,
+                    &HarnessType::Codex,
+                    None,
+                    json!({}),
+                    Default::default(),
+                )
+                .await
+                .expect("create session");
+
+            let old = OffsetDateTime::from_unix_timestamp(946_684_800).expect("valid timestamp");
+            let cutoff = UNIX_EPOCH + Duration::from_secs(978_307_200);
+            let retained =
+                OffsetDateTime::from_unix_timestamp(1_009_843_200).expect("valid timestamp");
+            let mut completed_execution_ids = Vec::new();
+            for completed_at in [old, OffsetDateTime::from(cutoff), retained] {
+                let execution_id = store
+                    .create_execution(&thread_key, None, json!({}))
+                    .await
+                    .expect("create execution")
+                    .execution
+                    .execution_id;
+                store
+                    .complete_execution(&execution_id)
+                    .await
+                    .expect("complete execution");
+                sqlx::query(
+                    "update session_executions set completed_at = $2 where execution_id = $1",
+                )
+                .bind(&execution_id)
+                .bind(completed_at)
+                .execute(store.pool())
+                .await
+                .expect("set execution completion time");
+                completed_execution_ids.push(execution_id);
+            }
+            let active_execution_id = store
+                .create_execution(&thread_key, None, json!({}))
+                .await
+                .expect("create queued execution")
+                .execution
+                .execution_id;
+            if active_status == "running" {
+                store
+                    .mark_execution_running(&active_execution_id)
+                    .await
+                    .expect("mark execution running");
+            }
+
+            let completed = Some(completed_execution_ids[0].as_str());
+            let completed_at_cutoff = Some(completed_execution_ids[1].as_str());
+            let recently_completed = Some(completed_execution_ids[2].as_str());
+            let active = Some(active_execution_id.as_str());
+            let mut expected_retained_ids = Vec::new();
+            for (execution_id, event_type, created_at, preserve) in [
+                (completed, "session.output.line", old, false),
+                (completed, "session.output.line", old, false),
+                (None, "session.output.line", old, false),
+                (active, "session.output.line", old, true),
+                (completed_at_cutoff, "session.output.line", old, true),
+                (recently_completed, "session.output.line", old, true),
+                (recently_completed, "session.output.line", retained, true),
+                (completed, "session.output.line", retained, true),
+                (completed, "session.execution_completed", old, true),
+                (completed, "session.execution_failed", old, true),
+                (completed, "session.execution_cancelled", old, true),
+                (completed, "session.activity_summary", old, true),
+                (None, "session.sandbox_paused", old, true),
+                (None, "session.sandbox_ready", old, true),
+                (None, "session.sandbox_resumed", old, true),
+            ] {
+                let payload = if event_type == "session.output.line" {
+                    json!(r#"{"method":"turn/started","params":{}}"#)
+                } else {
+                    json!({})
+                };
+                let event_id = sqlx::query_scalar::<_, i64>(
+                    r#"
+                    insert into session_events
+                        (thread_key, execution_id, event_type, payload, created_at)
+                    values ($1, $2, $3, $4, $5)
+                    returning event_id
+                    "#,
+                )
+                .bind(thread_key.as_str())
+                .bind(execution_id)
+                .bind(event_type)
+                .bind(payload)
+                .bind(created_at)
+                .fetch_one(store.pool())
+                .await
+                .expect("insert retention event");
+                if preserve {
+                    expected_retained_ids.push(event_id);
+                }
+            }
+
+            assert_eq!(
+                store
+                    .delete_stdout_events_older_than(cutoff, 2)
+                    .await
+                    .expect("delete first retention batch"),
+                2
+            );
+            assert_eq!(
+                store
+                    .delete_stdout_events_older_than(cutoff, 10)
+                    .await
+                    .expect("delete remaining retention batch"),
+                1
+            );
+            assert_eq!(
+                store
+                    .delete_stdout_events_older_than(cutoff, 10)
+                    .await
+                    .expect("sweep drained backlog"),
+                0
+            );
+
+            let retained_ids = sqlx::query_scalar::<_, i64>(
+                "select event_id from session_events where thread_key = $1 order by event_id",
+            )
+            .bind(thread_key.as_str())
+            .fetch_all(store.pool())
+            .await
+            .expect("load retained events");
+            assert_eq!(retained_ids, expected_retained_ids, "{active_status}");
+
+            sqlx::query("delete from sessions where thread_key = $1")
+                .bind(thread_key.as_str())
+                .execute(store.pool())
+                .await
+                .expect("delete test session");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

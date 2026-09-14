@@ -22,6 +22,9 @@ pub enum SandboxError {
     #[error("sandbox is not ready: {0}")]
     NotReady(String),
 
+    #[error("artifact could not be retrieved: {0}")]
+    ArtifactRejected(String),
+
     #[error("sandbox I/O failed: {context}")]
     Io {
         context: String,

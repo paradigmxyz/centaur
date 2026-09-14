@@ -112,6 +112,7 @@ export type SlackbotV2InterruptSessionResponse = {
 export type SlackbotV2Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
 export type SlackbotV2BlockActionPayload = {
+  workflow_message?: JsonObject
   action_id: string
   action_ts?: string
   block_id?: string
@@ -131,6 +132,8 @@ export type SlackbotV2Options = {
   allowedExternalTeamIds?: readonly string[]
   apiKey?: string
   apiUrl: string
+  /** Enable Slack's Agent messaging experience. Must match the app manifest. */
+  agentViewEnabled?: boolean
   assistantStatus?: string
   /**
    * When enabled, session.activity_summary events update Slack's assistant

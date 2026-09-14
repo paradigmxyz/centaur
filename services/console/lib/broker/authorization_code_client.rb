@@ -1,5 +1,6 @@
 require "base64"
 require "json"
+require "uri"
 
 module Broker
   # Performs the RFC 6749 4.1.3 authorization_code grant POST (optionally with PKCE) and
@@ -37,8 +38,8 @@ module Broker
     # the app is misconfigured. The console-login flow passes false: it requests no
     # offline access and only needs the id_token to identify the operator.
     def exchange(token_endpoint:, client_id:, client_secret:, code:, redirect_uri:,
-                 code_verifier:, timeout: DEFAULT_TIMEOUT, require_refresh_token: true,
-                 token_endpoint_auth_method: :client_secret_post)
+                 code_verifier:, client_auth_method: "client_secret_post",
+                 timeout: DEFAULT_TIMEOUT, require_refresh_token: true)
       raise ArgumentError, "token endpoint is required" if token_endpoint.blank?
       raise ArgumentError, "client_id is required" if client_id.blank?
       raise ArgumentError, "code is required" if code.blank?
@@ -46,20 +47,9 @@ module Broker
       form = {
         "grant_type" => "authorization_code",
         "code" => code,
-        "client_id" => client_id,
         "redirect_uri" => redirect_uri
       }
-      headers = {}
-      case token_endpoint_auth_method.to_sym
-      when :client_secret_post
-        form["client_secret"] = client_secret if client_secret.present?
-      when :client_secret_basic
-        raise ArgumentError, "client_secret is required" if client_secret.blank?
-        form.delete("client_id")
-        headers["Authorization"] = "Basic #{Base64.strict_encode64("#{client_id}:#{client_secret}")}"
-      else
-        raise ArgumentError, "unsupported token endpoint auth method"
-      end
+      headers = client_auth(client_auth_method, client_id, client_secret, form)
       form["code_verifier"] = code_verifier if code_verifier.present?
 
       response = perform(token_endpoint, form, headers, timeout)
@@ -70,6 +60,22 @@ module Broker
     end
 
     private
+
+    def client_auth(method, client_id, client_secret, form)
+      case method.to_s
+      when "client_secret_post"
+        form["client_id"] = client_id
+        form["client_secret"] = client_secret if client_secret.present?
+        {}
+      when "client_secret_basic"
+        raise ArgumentError, "client_secret is required for client_secret_basic" if client_secret.blank?
+
+        credentials = [ client_id, client_secret ].map { |value| URI.encode_www_form_component(value) }.join(":")
+        { "Authorization" => "Basic #{Base64.strict_encode64(credentials)}" }
+      else
+        raise ArgumentError, "unsupported client authentication method: #{method}"
+      end
+    end
 
     def perform(url, form, headers, timeout)
       if @http

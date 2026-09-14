@@ -69,11 +69,15 @@ for the operator workflow.
 | `CENTAUR_JWT_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Signs Console-issued MCP tokens, Console service tokens, and sandbox api-rs principal tokens. |
 | `console.publicUrl` | Helm value. | Public Console origin used for links and MCP authorization metadata. |
 | `console.passwordLoginEnabled` | Helm value, default `true`. | Enables the break-glass email and password login. Disable after SSO is configured for a public Console. |
-| `console.ssoEmailDomains` | Helm value. | Limits Google or Slack SSO admission by email domain. Empty accepts any IdP-authenticated email. |
+| `console.ssoEmailDomains` | Helm value. | Limits Google, Slack, or Okta SSO admission by email domain. Empty accepts any IdP-authenticated email. |
 | `console.sqlExporter.enabled` | Helm value, default `false`. | Runs one internal SQL Exporter replica, initially configured with Solid Queue collectors. Enable it after the read-only database role and Secret key exist. |
 | `console.sqlExporter.metrics.*` | Helm values. | Configures the SQL Exporter metrics path and Prometheus-compatible scrape annotations. |
 | `console.sqlExporter.databaseUrlSecretKey` | Helm value, default `CONSOLE_SQLEXPORTER_DATABASE_URL`. | Selects the key in `secretManager.existingSecretName` containing the database URL for a dedicated read-only PostgreSQL role. |
 | `networkPolicy.metricsIngressSourceNamespaces` | Helm value. | Allows Prometheus-compatible collectors in the listed namespaces to scrape internal metrics Services. Collectors in the Centaur namespace are always allowed. |
+| `console.oktaOauth.enabled` | Helm value, default `false`. | Enables Okta OIDC login for the Console. |
+| `console.oktaOauth.issuer` | Helm value. | Okta organization or custom authorization-server issuer used for OIDC discovery. |
+| `console.oktaOauth.tokenEndpointAuthMethod` | Helm value, default `client_secret_basic`. | Client authentication method configured on the Okta application: `client_secret_basic` or `client_secret_post`. |
+| `CENTAUR_CONSOLE_OKTA_CLIENT_ID`, `CENTAUR_CONSOLE_OKTA_CLIENT_SECRET` | `secretManager.existingSecretName` when Okta login is enabled. | Okta OIDC web application credentials. |
 | `apiRs.syncInfraSecrets`, `IRON_CONTROL_SYNC_INFRA_SECRETS` | Helm value, default `true`. | Upserts the shared `infra` role and its harness/platform secrets. Set false only when another process owns that shared Console state. |
 | `IRON_CONTROL_URL`, `IRON_CONTROL_API_KEY` | Chart-rendered for api-rs; operator shell for `centaur-perms`. | Connects the runtime or CLI to the Console. |
 
@@ -128,6 +132,8 @@ Sandbox lifecycle:
 | `SESSION_IDLE_TIMEOUT_MS` | `slackbotv2.extraEnv`; default is up to 3 hours. | Slackbot v2 execute idle timeout. After an execution reaches a terminal state, api-rs pauses the sandbox if no newer execution has used that sandbox. If `SESSION_MAX_DURATION_MS` is lower than 3 hours and this value is unset, Slackbot v2 caps the default idle timeout to the max duration. |
 | `SESSION_MAX_DURATION_MS` | `slackbotv2.extraEnv`. | Optional per-execution max duration forwarded to api-rs. api-rs rejects requests where `idle_timeout_ms` is greater than `max_duration_ms`. |
 | `apiRs.sandboxMaxLifetimeSecs` / `SESSION_SANDBOX_MAX_LIFETIME_SECS` | Helm value, default `259200` (72 hours). | Restart-surviving sandbox deletion backstop. The reaper stops any non-terminal sandbox older than this, regardless of whether it is running or suspended. Set `0` to disable max-lifetime reaping. |
+| `apiRs.sessionEventsRetentionDays` / `SESSION_EVENTS_RETENTION_DAYS` | Helm value, default `0` (disabled); range `0` through `3650`. | Deletes only `session.output.line` events older than this many days, once their execution also completed before the cutoff. Other session event types are preserved. Events without an execution expire by event age alone. Requires the [manual retention index](#stdout-event-retention). Sweeps skip deletion when the index is missing or invalid. |
+| `apiRs.sessionEventsRetentionSweepIntervalSecs` / `SESSION_EVENTS_RETENTION_SWEEP_INTERVAL_SECS` | Helm value, default `300`. | How often api-rs runs a session-event retention sweep when retention is enabled. |
 | `apiRs.sandboxReapIntervalSecs` / `SESSION_SANDBOX_REAP_INTERVAL_SECS` | Helm value, default `300`. | How often api-rs sweeps observed sandboxes for max-lifetime expiry and orphaned proxy resources. |
 | `apiRs.sandboxOrphanSweepGraceSecs` / `SESSION_SANDBOX_ORPHAN_SWEEP_GRACE_SECS` | Helm value, default `600`. | Minimum age of an iron-proxy resource with no live Sandbox before the orphan sweep may delete it. |
 | `apiRs.activitySummary.reasoningEffort` / `SESSION_ACTIVITY_SUMMARY_REASONING_EFFORT` | Helm value, default `low`. | Reasoning effort sent with the activity-summary call. The output budget is small, so a server that resolves an absent effort to its highest level spends the whole budget reasoning and returns an `incomplete` response with no message. Set empty to omit the parameter for a server that rejects it. |
@@ -168,6 +174,7 @@ Execution tuning:
 | `SLACK_FEEDBACK_COMMANDS`, `SLACK_FEEDBACK_ALLOWED_CHANNELS` | `slackbot.extraEnv`. | Feedback slash commands and optional channel allowlist. |
 | `SLACK_FEEDBACK_LINEAR_TEAM_ID`, `SLACK_FEEDBACK_LINEAR_PROJECT_ID` | `slackbot.extraEnv`. | Linear destination for feedback issues. |
 | `SLACKBOT_EXTERNAL_ORG_ALLOWLIST` | `slackbot.extraEnv`. | Slack team ids allowed for external org handoff. |
+| `SLACKBOTV2_AGENT_VIEW_ENABLED` | `slackbotv2.agentViewEnabled`. | Enables Slack agent view, threaded DM sessions, and native status and titles. Defaults to `false`. Requires the Slack app migration described in [Quickstart](/quickstart). Native Stop support is deferred. |
 | `SLACKBOTV2_AUTO_JOIN_CREATED_CHANNELS` | `slackbotv2.autoJoinCreatedChannels`. | Joins newly-created public channels after subscribed `channel_created` events. Requires `channels:read` and `channels:join`. Defaults to `false`. |
 | `SLACKBOTV2_STEERING_REACTION_ENABLED` | `slackbotv2.steeringReactionEnabled`. | Reacts to mentioned follow-up messages while an execution is active, then removes their reactions after the assistant response is posted. Requires `reactions:write`. Defaults to `false` and disables itself for the running process if Slack reports the scope is missing. |
 | `SLACKBOTV2_STEERING_REACTION` | `slackbotv2.steeringReaction`. | Slack emoji name used for steering acknowledgements. Defaults to `hourglass_flowing_sand`. |
@@ -322,6 +329,57 @@ Linear ETL workflows:
 | `CENTAUR_RETENTION_ATTACHMENTS_TTL_DAYS`, `CENTAUR_RETENTION_TRANSCRIPTS_TTL_DAYS` | `api.extraEnv`. | Attachment/transcript retention TTLs. |
 | `CENTAUR_RETENTION_SWEEP_INTERVAL_SECONDS`, `CENTAUR_RETENTION_BATCH_SIZE`, `CENTAUR_RETENTION_DRY_RUN` | `api.extraEnv`. | Retention sweep cadence, batch size, and dry-run mode. |
 | `TOOL_CALL_TIMEOUT_S`, `TOOL_BINARY_INLINE_MAX_BYTES`, `TOOL_BINARY_PREVIEW_BYTES` | `api.extraEnv`. | Tool execution timeout and binary result handling. |
+
+### Stdout Event Retention
+
+Retention is disabled by default. Its index is installed separately from API-RS
+startup migrations, so an index build failure does not prevent the API from
+starting. Create the index before enabling retention.
+
+Connect `psql` to the application database with an account that owns
+`session_events`. Use your normal libpq connection settings and credential file.
+From the repository root, run:
+
+```sh
+psql -X --set ON_ERROR_STOP=1 \
+  --file services/api-rs/crates/centaur-session-sqlx/manual-migrations/session_events_retention_index.sql
+```
+
+The script creates a partial index concurrently. Run it outside a transaction;
+do not use `psql --single-transaction`. Ordinary reads and writes can continue,
+but the build adds database load and can wait for existing transactions.
+
+Verify the index after the command succeeds:
+
+```sql
+SELECT indexrelid::regclass AS index_name, indisvalid, indisready, indislive
+FROM pg_catalog.pg_index
+WHERE indexrelid = to_regclass('session_events_stdout_created_at_idx')
+  AND indrelid = 'session_events'::regclass;
+```
+
+Expect one row with all three flags set to `true`. Then set
+`apiRs.sessionEventsRetentionDays` or `SESSION_EVENTS_RETENTION_DAYS` to a value
+from `1` through `3650`. An execution's stdout becomes eligible after its
+completion time passes the retention cutoff. Deletions remain batched, so a
+large backlog can take several sweeps to drain.
+
+If a build fails, inspect the index before retrying. No row means the index is
+absent and the creation script can be retried after addressing the failure.
+If the index exists but is invalid, repair it outside a transaction:
+
+```sql
+REINDEX INDEX CONCURRENTLY session_events_stdout_created_at_idx;
+```
+
+Verify the flags again after repair. The creation script deliberately fails if
+the name already exists, so a retry cannot silently accept an invalid index.
+An already valid index does not need to be recreated.
+
+Each retention sweep checks the index. If it is missing or invalid, the worker
+logs `session_events_retention_skipped` and deletes nothing. API-RS stays
+available. After the index is repaired, the next sweep can proceed without
+another restart. Setting retention back to `0` disables the worker.
 
 ## Local Scripts
 

@@ -179,6 +179,65 @@ as `message.im`, Slack will also require direct-message scopes such as
 
 Save changes and reinstall the app.
 
+### Agent Messaging Experience
+
+Slackbot defaults to the existing messaging behavior. To use Slack's Agent
+messaging experience, set `slackbotv2.agentViewEnabled: true` in your Helm
+values, or `SLACKBOTV2_AGENT_VIEW_ENABLED=true` when running the service directly.
+The setting takes effect when the service restarts.
+
+Configure the Slack app with `features.agent_view` and an `agent_description`.
+For an existing Assistant app, replace `features.assistant_view` and its nested
+`assistant_description`. Keep the existing bot configuration, scopes, and event
+subscriptions. Include these scopes and bot events:
+
+```yaml
+features:
+  agent_view:
+    agent_description: "An assistant for your team's work."
+    suggested_prompts:
+      - title: "Get Started"
+        message: "What can you help me with?"
+oauth_config:
+  scopes:
+    bot:
+      - assistant:write
+      - chat:write
+      - im:history
+      - im:read
+      - users:read
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.im
+      - app_home_opened
+```
+
+This is a fragment to merge into your app manifest. Reinstall the app if its
+scopes change, and refresh Slack after switching the experience. Slack's
+manifest migration is irreversible. The service toggle does not change the
+manifest or restore Slack's old UI. Keep the service setting matched to the
+app, and test the migration with a separate development app first.
+
+In Agent mode, each new top-level DM starts its own session. Replies continue
+that thread's session without a mention. Channel replies still require a
+mention. Existing DM thread replies retain their thread identity. Older
+conversation-wide DM subscriptions do not override Agent mode's thread roots.
+
+Streaming progress and titles continue through the existing renderer. Native
+Stop support is deferred. Do not subscribe to `agent_session_stopped` yet;
+remove it if you previously added it. Without that subscription, Slack shows
+a loading indicator without a Stop button. The existing mentioned `stop`
+command remains available.
+
+Suggested prompts can be configured statically in the manifest. Context-aware
+prompts and synchronization of user-edited Slack session titles are separate
+integrations.
+
+See Slack's [migration guide](https://docs.slack.dev/ai/migrating-to-agent-messaging/)
+for the app-side rollout requirements.
+
 ## 7. Try Slack mentions
 
 Invite the bot to a test channel and mention it:

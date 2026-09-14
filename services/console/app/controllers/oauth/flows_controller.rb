@@ -161,7 +161,7 @@ module Oauth
         redirect_uri: oauth_callback_redirect_uri(@app.slug),
         code_verifier: code_verifier.to_s,
         require_refresh_token: provider_requires_refresh_token?,
-        token_endpoint_auth_method: provider_token_endpoint_auth_method
+        client_auth_method: provider_token_endpoint_auth_method
       )
     end
 

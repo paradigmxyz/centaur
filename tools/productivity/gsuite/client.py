@@ -2244,6 +2244,41 @@ def sheets_read(spreadsheet_id: str, range_notation: str = "A1:Z1000") -> dict:
         .execute()
     )
 
+    return _sheets_read_result(spreadsheet_id, range_notation, result)
+
+
+def sheets_batch_read(spreadsheet_id: str, range_notations: list[str]) -> list[dict]:
+    """Read data from one Google Sheet, across several ranges.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID (from URL)
+        range_notations: A1 notation range (e.g., "Sheet1!A1:D10" or "A1:Z1000")
+
+    Returns:
+        List of dicts in requested order, each with the same spreadsheet_id,
+        range, headers, rows, and raw_values fields as sheets_read.
+        The first row of each range is treated as its headers.
+    """
+    if not range_notations:
+        raise ValueError("Provide at least one range")
+
+    service = get_sheets_service()
+
+    result = (
+        service.spreadsheets()
+        .values()
+        .batchGet(spreadsheetId=spreadsheet_id, ranges=range_notations)
+        .execute()
+    )
+
+    return [
+        _sheets_read_result(spreadsheet_id, range_notation, value_range)
+        for range_notation, value_range in zip(range_notations, result["valueRanges"], strict=True)
+    ]
+
+
+def _sheets_read_result(spreadsheet_id: str, range_notation: str, result: dict) -> dict:
+    """Normalize a values response for single and batch reads."""
     values = result.get("values", [])
 
     if not values:
@@ -3540,6 +3575,15 @@ class GSuiteClient:
             Dict with spreadsheet_id, range, headers, and rows (list of dicts)
         """
         return sheets_read(spreadsheet_id, range_notation=range_notation)
+
+    def sheets_batch_read(self, spreadsheet_id: str, range_notations: list[str]) -> list[dict]:
+        """Read multiple A1 ranges from one spreadsheet in one API request.
+
+        Returns a list of dicts in requested order with the same fields as
+        sheets_read. The range list must be non-empty; the first row of each
+        range is treated as its headers.
+        """
+        return sheets_batch_read(spreadsheet_id, range_notations)
 
     def sheets_update(
         self,

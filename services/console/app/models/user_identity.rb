@@ -7,7 +7,7 @@ class UserIdentity < ApplicationRecord
 
   belongs_to :user
 
-  PROVIDERS = %w[google slack].freeze
+  PROVIDERS = %w[google slack okta].freeze
   SLACK_PROVIDER = "slack".freeze
 
   scope :slack, -> { where(provider: SLACK_PROVIDER) }

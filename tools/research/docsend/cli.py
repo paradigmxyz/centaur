@@ -10,7 +10,13 @@ from pathlib import Path  # noqa: E402
 
 import typer  # noqa: E402
 
-app = typer.Typer(name="docsend", help="DocSend downloader — Browserbase + Playwright")
+app = typer.Typer(
+    name="docsend",
+    help=(
+        "DocSend downloader — Browserbase + Playwright. "
+        "Search for and read the `docsend` skill with `centaur-skills` before use."
+    ),
+)
 
 
 @app.callback()
