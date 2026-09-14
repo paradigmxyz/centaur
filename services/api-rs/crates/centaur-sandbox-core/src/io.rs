@@ -10,6 +10,7 @@ pub struct SandboxIo {
     stdout: SandboxRead,
     stderr: SandboxRead,
     guard: SandboxIoGuard,
+    instance_id: Option<String>,
 }
 
 pub struct SandboxIoParts {
@@ -17,6 +18,7 @@ pub struct SandboxIoParts {
     pub stdout: SandboxRead,
     pub stderr: SandboxRead,
     pub guard: SandboxIoGuard,
+    pub instance_id: Option<String>,
 }
 
 pub struct SandboxIoGuard {
@@ -39,7 +41,13 @@ impl SandboxIo {
             stdout,
             stderr,
             guard: SandboxIoGuard::new(guard),
+            instance_id: None,
         }
+    }
+
+    pub fn with_instance_id(mut self, instance_id: Option<String>) -> Self {
+        self.instance_id = instance_id;
+        self
     }
 
     pub fn into_parts(self) -> SandboxIoParts {
@@ -48,6 +56,7 @@ impl SandboxIo {
             stdout: self.stdout,
             stderr: self.stderr,
             guard: self.guard,
+            instance_id: self.instance_id,
         }
     }
 }
