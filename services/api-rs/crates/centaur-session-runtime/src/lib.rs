@@ -9434,6 +9434,13 @@ mod adoption_tests {
         .expect("timed out waiting for sandbox IO opens");
     }
 
+    async fn claim_test_stdout_owner(runtime: &SessionRuntime, execution_id: &str) {
+        runtime
+            .claim_stdout_owner(execution_id)
+            .await
+            .expect("claim test stdout owner");
+    }
+
     fn completed_output_lines(result_text: &str) -> Vec<String> {
         vec![
             json!({
@@ -11257,13 +11264,15 @@ mod adoption_tests {
         let _serial = TEST_LOCK.lock().await;
         let thread_key =
             ThreadKey::parse(format!("test:eof-recorded-{}", uuid::Uuid::new_v4())).unwrap();
-        orphaned_execution(&store, &thread_key, Some("sbx-recorded"), true).await;
+        let execution_id =
+            orphaned_execution(&store, &thread_key, Some("sbx-recorded"), true).await;
 
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
         let (io, stdout, _stdin) = mock_io();
         backend.push_io(io).await;
 
         let runtime = runtime_with(&store, backend.clone());
+        claim_test_stdout_owner(&runtime, &execution_id).await;
         runtime
             .ensure_session_pipe(&thread_key, "sbx-recorded")
             .await
@@ -11308,7 +11317,8 @@ mod adoption_tests {
         let _serial = TEST_LOCK.lock().await;
         let thread_key =
             ThreadKey::parse(format!("test:eof-reattach-{}", uuid::Uuid::new_v4())).unwrap();
-        orphaned_execution(&store, &thread_key, Some("sbx-reattach"), true).await;
+        let execution_id =
+            orphaned_execution(&store, &thread_key, Some("sbx-reattach"), true).await;
 
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
         let (first_io, mut first_stdout, _first_stdin) = mock_io();
@@ -11317,6 +11327,7 @@ mod adoption_tests {
         backend.push_io(second_io).await;
 
         let runtime = runtime_with(&store, backend.clone());
+        claim_test_stdout_owner(&runtime, &execution_id).await;
         runtime
             .ensure_session_pipe(&thread_key, "sbx-reattach")
             .await
@@ -11360,7 +11371,7 @@ mod adoption_tests {
         let _serial = TEST_LOCK.lock().await;
         let thread_key =
             ThreadKey::parse(format!("test:eof-created-{}", uuid::Uuid::new_v4())).unwrap();
-        orphaned_execution(&store, &thread_key, Some("sbx-created"), true).await;
+        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-created"), true).await;
 
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
         let (first_io, first_stdout, _first_stdin) = mock_io();
@@ -11368,6 +11379,7 @@ mod adoption_tests {
         backend.push_io(first_io).await;
 
         let runtime = runtime_with(&store, backend.clone());
+        claim_test_stdout_owner(&runtime, &execution_id).await;
         runtime
             .ensure_session_pipe(&thread_key, "sbx-created")
             .await
@@ -11404,12 +11416,14 @@ mod adoption_tests {
         let _serial = TEST_LOCK.lock().await;
         let thread_key =
             ThreadKey::parse(format!("test:eof-created-dead-{}", uuid::Uuid::new_v4())).unwrap();
-        orphaned_execution(&store, &thread_key, Some("sbx-created-dead"), true).await;
+        let execution_id =
+            orphaned_execution(&store, &thread_key, Some("sbx-created-dead"), true).await;
 
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
         let (io, stdout, _stdin) = mock_io();
         backend.push_io(io).await;
         let runtime = runtime_with(&store, backend.clone());
+        claim_test_stdout_owner(&runtime, &execution_id).await;
         runtime
             .ensure_session_pipe(&thread_key, "sbx-created-dead")
             .await
@@ -11441,12 +11455,14 @@ mod adoption_tests {
         let _serial = TEST_LOCK.lock().await;
         let thread_key =
             ThreadKey::parse(format!("test:eof-replaced-{}", uuid::Uuid::new_v4())).unwrap();
-        orphaned_execution(&store, &thread_key, Some("sbx-replaced"), true).await;
+        let execution_id =
+            orphaned_execution(&store, &thread_key, Some("sbx-replaced"), true).await;
 
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
         let (io, stdout, _stdin) = mock_io();
         backend.push_io(io).await;
         let runtime = runtime_with(&store, backend.clone());
+        claim_test_stdout_owner(&runtime, &execution_id).await;
         runtime
             .ensure_session_pipe(&thread_key, "sbx-replaced")
             .await
@@ -11551,13 +11567,14 @@ mod adoption_tests {
         let _serial = TEST_LOCK.lock().await;
         let thread_key =
             ThreadKey::parse(format!("test:eof-gone-{}", uuid::Uuid::new_v4())).unwrap();
-        orphaned_execution(&store, &thread_key, Some("sbx-gone"), true).await;
+        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-gone"), true).await;
 
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
         let (io, stdout, _stdin) = mock_io();
         backend.push_io(io).await;
 
         let runtime = runtime_with(&store, backend.clone());
+        claim_test_stdout_owner(&runtime, &execution_id).await;
         runtime
             .ensure_session_pipe(&thread_key, "sbx-gone")
             .await
