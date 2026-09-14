@@ -3430,10 +3430,11 @@ describe('slackbotv2', () => {
         }
       })
     )
+    const finalAnswer = `**EXPIRED_STREAM_FALLBACK_VISIBLE**\n${'x'.repeat(13_000)}`
     codexApi.emitSessionEvent(key, 'session.execution_completed', {
       execution_id: 'exe-stream-expired',
       status: 'completed',
-      result_text: 'EXPIRED_STREAM_FALLBACK_VISIBLE'
+      result_text: finalAnswer
     })
 
     await Promise.all(waits)
@@ -3442,6 +3443,13 @@ describe('slackbotv2', () => {
       text.includes('EXPIRED_STREAM_FALLBACK_VISIBLE')
     )
     expect(visibleFinalReplies).toHaveLength(1)
+    const fallbackPost = slackApi.calls.find(call => call.method === 'chat.postMessage')
+    expect(fallbackPost?.body.text).toBeUndefined()
+    expect(stringField(fallbackPost?.body.markdown_text)).toStartWith(
+      '**EXPIRED_STREAM_FALLBACK_VISIBLE**'
+    )
+    expect(stringField(fallbackPost?.body.markdown_text).length).toBe(12_000)
+    expect(stringField(fallbackPost?.body.markdown_text)).toContain('[truncated ')
     const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
     expect(threadState).toEqual(
       expect.objectContaining({
@@ -6671,6 +6679,7 @@ type StreamCall = {
     | 'agents.sessions.rename'
     | 'assistant.threads.setStatus'
     | 'assistant.threads.setTitle'
+    | 'chat.postMessage'
     | 'chat.startStream'
     | 'chat.appendStream'
     | 'chat.stopStream'
@@ -6967,6 +6976,23 @@ async function handlePatchedSlackRequest(
         : Response.json({ ok: true })
     )
     return
+  }
+  if (path === '/api/chat.postMessage') {
+    const body = await requestBody(request.clone())
+    if (typeof body.markdown_text === 'string') {
+      input.calls.push({ method: 'chat.postMessage', body })
+      const { markdown_text: markdownText, ...legacyBody } = body
+      await sendWebResponse(
+        res,
+        Response.json(
+          await postSlack(input.upstreamUrl, request, path, {
+            ...legacyBody,
+            text: markdownText
+          })
+        )
+      )
+      return
+    }
   }
   if (path === '/api/chat.startStream') {
     await sendWebResponse(
