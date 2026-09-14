@@ -43,6 +43,7 @@ const OBSERVABILITY_ENABLED_LABEL: &str = "centaur.ai/observability-enabled";
 const MANAGED_BY_VALUE: &str = "api-rs";
 const SANDBOX_FILES_VOLUME: &str = "sandbox-files";
 const ARTIFACT_GET_COMMAND: &str = "/usr/local/bin/centaur-artifact-get";
+const ARTIFACT_ERROR_MAX_BYTES: usize = 64 * 1024;
 // iron-control principal OID the sandbox's proxy binds to, stamped at create
 // so resume (which has only the sandbox id) can rebind without the spec or any
 // in-memory state. Survives pause and api-rs restarts.
@@ -706,7 +707,12 @@ impl SandboxBackend for AgentSandboxBackend {
 
 impl AgentSandboxBackend {
     /// Read an artifact through a one-shot pod exec whose stdout is the file body.
-    pub async fn read_artifact(&self, id: &SandboxId, path: &str) -> SandboxResult<Vec<u8>> {
+    pub async fn read_artifact(
+        &self,
+        id: &SandboxId,
+        path: &str,
+        max_bytes: usize,
+    ) -> SandboxResult<Vec<u8>> {
         let params = AttachParams::default()
             .container(self.config.container_name.clone())
             .stdin(false)
@@ -731,14 +737,14 @@ impl AgentSandboxBackend {
         let mut contents = Vec::new();
         let mut error_output = Vec::new();
         let (stdout_result, stderr_result, status) = tokio::join!(
-            stdout.read_to_end(&mut contents),
-            stderr.read_to_end(&mut error_output),
+            read_stream_bounded(&mut stdout, &mut contents, max_bytes),
+            read_stream_bounded(&mut stderr, &mut error_output, ARTIFACT_ERROR_MAX_BYTES),
             status,
         );
-        stdout_result.map_err(|error| {
+        let contents_exceeded = stdout_result.map_err(|error| {
             SandboxError::io_source("read sandbox artifact command stdout", error)
         })?;
-        stderr_result.map_err(|error| {
+        let error_output_exceeded = stderr_result.map_err(|error| {
             SandboxError::io_source("read sandbox artifact command stderr", error)
         })?;
         process.join().await.map_err(|error| {
@@ -748,18 +754,45 @@ impl AgentSandboxBackend {
         if status.as_ref().and_then(|status| status.status.as_deref()) != Some("Success") {
             let stderr = String::from_utf8_lossy(&error_output);
             let detail = stderr.trim();
+            if !error_output_exceeded
+                && let Some(detail) = detail.strip_prefix("centaur-artifact-get: ")
+            {
+                return Err(SandboxError::ArtifactRejected(detail.to_owned()));
+            }
             let detail = if detail.is_empty() {
                 status
                     .and_then(|status| status.message)
                     .unwrap_or_else(|| "artifact reader failed".to_owned())
+            } else if error_output_exceeded {
+                format!("{detail}…")
             } else {
                 detail.to_owned()
             };
             return Err(SandboxError::io(detail));
         }
+        if contents_exceeded {
+            return Err(SandboxError::ArtifactRejected(format!(
+                "artifact exceeds the {max_bytes}-byte size limit"
+            )));
+        }
 
         Ok(contents)
     }
+}
+
+async fn read_stream_bounded(
+    reader: &mut (impl AsyncRead + Unpin),
+    retained: &mut Vec<u8>,
+    max_bytes: usize,
+) -> std::io::Result<bool> {
+    let retained_limit = max_bytes.saturating_add(1) as u64;
+    reader.take(retained_limit).read_to_end(retained).await?;
+    let exceeded = retained.len() > max_bytes;
+    if exceeded {
+        retained.truncate(max_bytes);
+    }
+    tokio::io::copy(reader, &mut tokio::io::sink()).await?;
+    Ok(exceeded)
 }
 
 fn sandbox_pause_patch(paused_at: jiff::Timestamp) -> Value {
@@ -1369,8 +1402,26 @@ mod tests {
     };
     use k8s_openapi::api::core::v1::{PodCondition, PodStatus};
     use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+    use tokio::io::AsyncWriteExt;
 
     use super::*;
+
+    #[tokio::test]
+    async fn bounded_stream_read_caps_retained_bytes_and_drains_the_stream() {
+        let (mut writer, mut reader) = tokio::io::duplex(4);
+        let write = tokio::spawn(async move {
+            writer.write_all(b"abcdef").await.unwrap();
+        });
+        let mut retained = Vec::new();
+
+        let exceeded = read_stream_bounded(&mut reader, &mut retained, 3)
+            .await
+            .unwrap();
+        write.await.unwrap();
+
+        assert!(exceeded);
+        assert_eq!(retained, b"abc");
+    }
 
     #[test]
     fn builds_agent_sandbox_spec_with_state_volume_and_limits() {

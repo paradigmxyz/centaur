@@ -1186,8 +1186,8 @@ impl PgSessionStore {
                 s.thread_key,
                 s.sandbox_id as sandbox_id,
                 latest.execution_id,
-                latest.completed_at,
-                latest.metadata
+                latest.metadata,
+                coalesce(s.sandbox_last_active_at, latest.completed_at) as last_active_at
             from sessions s
             join latest on latest.thread_key = s.thread_key
             where s.sandbox_id is not null
@@ -1965,8 +1965,8 @@ struct IdleSandboxCandidateRow {
     thread_key: String,
     sandbox_id: String,
     execution_id: String,
-    completed_at: OffsetDateTime,
     metadata: Value,
+    last_active_at: OffsetDateTime,
 }
 
 fn idle_candidate_from_row(
@@ -1975,7 +1975,7 @@ fn idle_candidate_from_row(
     now: OffsetDateTime,
 ) -> Result<Option<IdleSandboxCandidate>, SessionStoreError> {
     let idle_timeout = effective_idle_timeout(&row.metadata, idle_backstop);
-    if !idle_deadline_elapsed(row.completed_at, idle_timeout, now) {
+    if !idle_deadline_elapsed(row.last_active_at, idle_timeout, now) {
         return Ok(None);
     }
     Ok(Some(IdleSandboxCandidate {
@@ -2192,14 +2192,14 @@ mod tests {
 
     fn idle_row(
         metadata: serde_json::Value,
-        completed_at: OffsetDateTime,
+        last_active_at: OffsetDateTime,
     ) -> IdleSandboxCandidateRow {
         IdleSandboxCandidateRow {
             thread_key: "test:idle-row".to_owned(),
             sandbox_id: "sbx-idle-row".to_owned(),
             execution_id: "exe-idle-row".to_owned(),
-            completed_at,
             metadata,
+            last_active_at,
         }
     }
 
@@ -2476,6 +2476,17 @@ mod tests {
         .execute(store.pool())
         .await
         .expect("age execution");
+        sqlx::query(
+            r#"
+            update sessions
+            set sandbox_last_active_at = now() - interval '2 seconds'
+            where thread_key = $1
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .execute(store.pool())
+        .await
+        .expect("age sandbox activity");
 
         let candidates = store
             .list_idle_sandbox_candidates(Duration::from_secs(3600))

@@ -13,9 +13,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose};
+use centaur_sandbox_core::SandboxError;
 use centaur_session_runtime::{
-    SessionRuntime, ToolHostCallInput, ToolHostCallOutput, ToolHostCallPolicy, ToolHostInvocation,
-    ToolHostToolFilter, tool_host_thread_key,
+    SessionRuntime, SessionRuntimeError, ToolHostCallInput, ToolHostCallOutput, ToolHostCallPolicy,
+    ToolHostInvocation, ToolHostToolFilter, tool_host_thread_key,
 };
 use hmac::{Hmac, KeyInit, Mac};
 use serde::Deserialize;
@@ -384,8 +385,8 @@ fn mcp_builtin_tools() -> Vec<Value> {
     let mut tools = Vec::new();
     if mcp_v2_enabled() {
         tools.extend(mcp_v2_tools());
+        tools.push(mcp_artifact_get_tool());
     }
-    tools.push(mcp_artifact_get_tool());
     tools.push(mcp_whoami_tool());
     tools
 }
@@ -401,7 +402,10 @@ fn mcp_tool_entries(filter: &SandboxToolFilter) -> Result<Vec<Value>, ApiError> 
 fn mcp_v2_tool_name(name: &str) -> bool {
     matches!(
         name,
-        "centaur_catalog_search" | "centaur_catalog_load" | "centaur_tool_call"
+        "centaur_catalog_search"
+            | "centaur_catalog_load"
+            | "centaur_tool_call"
+            | "centaur_artifact_get"
     )
 }
 
@@ -853,12 +857,31 @@ async fn mcp_artifact_get_result(
         Err(error) => return Ok(invalid_mcp_v2_arguments(error)),
     };
     record_mcp_tool_method(&Span::current(), "centaur_artifact_get", "get");
-    let output = state
+    let output = match state
         .runtime()?
         .read_sandbox_artifact(&principal.principal_id, &args.path, MCP_ARTIFACT_MAX_BYTES)
-        .await?;
+        .await
+    {
+        Ok(output) => output,
+        Err(error) => return mcp_artifact_get_error_result(error),
+    };
     record_mcp_tool_correlation(&Span::current(), None, None, Some(&output.sandbox_id));
     mcp_artifact_get_output_result(&args.path, output.contents)
+}
+
+fn mcp_artifact_get_error_result(
+    error: SessionRuntimeError,
+) -> Result<McpToolCallOutcome, ApiError> {
+    match error {
+        SessionRuntimeError::BadRequest(message)
+        | SessionRuntimeError::Sandbox(SandboxError::ArtifactRejected(message)) => {
+            Ok(McpToolCallOutcome {
+                result: mcp_text_result(format!("artifact retrieval failed: {message}"), true),
+                timed_out: false,
+            })
+        }
+        error => Err(error.into()),
+    }
 }
 
 async fn mcp_v1_tool_result(
@@ -2175,7 +2198,7 @@ def search(query, limit=20):
                         "centaur_whoami",
                     ]
                 } else {
-                    vec!["centaur_artifact_get", "centaur_whoami"]
+                    vec!["centaur_whoami"]
                 }
             );
 
@@ -2255,10 +2278,7 @@ def search(query, limit=20):
                 .into_iter()
                 .map(|tool| tool["name"].as_str().unwrap().to_owned())
                 .collect::<Vec<_>>();
-            assert_eq!(
-                names,
-                vec!["centaur_artifact_get", "centaur_whoami", "demo"]
-            );
+            assert_eq!(names, vec!["centaur_whoami", "demo"]);
         }
 
         let names = mcp_tool_entries(&filter)
@@ -2473,6 +2493,31 @@ def search(query, limit=20):
         assert_eq!(
             outcome.result["structuredContent"]["help"],
             "Usage: demo [OPTIONS]\n"
+        );
+    }
+
+    #[test]
+    fn mcp_artifact_failures_return_tool_errors() {
+        for error in [
+            SessionRuntimeError::BadRequest("no MCP sandbox exists".to_owned()),
+            SessionRuntimeError::Sandbox(SandboxError::ArtifactRejected(
+                "file was not found".to_owned(),
+            )),
+        ] {
+            let outcome = mcp_artifact_get_error_result(error).unwrap();
+            assert!(mcp_result_is_error(&outcome.result));
+            assert!(
+                outcome.result["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("artifact retrieval failed:")
+            );
+        }
+        assert!(
+            mcp_artifact_get_error_result(SessionRuntimeError::Sandbox(SandboxError::io(
+                "pod exec failed"
+            )))
+            .is_err()
         );
     }
 

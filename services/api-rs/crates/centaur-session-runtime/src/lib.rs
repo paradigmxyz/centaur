@@ -88,8 +88,9 @@ const ARTIFACT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 type SandboxSpecFactory = Arc<
     dyn Fn(&ThreadKey, &str, &HarnessType, Option<&PersonaContext>) -> SandboxSpec + Send + Sync,
 >;
-type SandboxArtifactReader =
-    Arc<dyn Fn(SandboxId, String) -> BoxFuture<'static, SandboxResult<Vec<u8>>> + Send + Sync>;
+type SandboxArtifactReader = Arc<
+    dyn Fn(SandboxId, String, usize) -> BoxFuture<'static, SandboxResult<Vec<u8>>> + Send + Sync,
+>;
 type SessionInputSink = FramedWrite<SandboxWrite, LinesCodec>;
 type ExecutionSpanRegistry = Arc<Mutex<HashMap<String, Span>>>;
 type SessionPipeMap = Arc<DashMap<String, SessionPipe>>;
@@ -1118,7 +1119,7 @@ impl SessionRuntime {
     }
 
     /// Read an artifact from an existing principal-bound MCP sandbox.
-    /// This operation does not create an execution, event, or durable message.
+    /// Artifact bytes remain transient, while lifecycle changes are recorded normally.
     pub async fn read_sandbox_artifact(
         &self,
         principal_id: &str,
@@ -1137,7 +1138,36 @@ impl SessionRuntime {
             ));
         }
         let thread_key = tool_host_thread_key(principal_id)?;
-        let session = match self.store.get_session(&thread_key).await {
+        let call_lock = self.tool_host_call_lock(&thread_key);
+        let result = {
+            let _call_guard = call_lock.lock().await;
+            self.locked_read_sandbox_artifact(&thread_key, principal_id, artifact_path, max_bytes)
+                .await
+        };
+        drop(call_lock);
+        self.tool_host_call_locks
+            .remove_if(thread_key.as_str(), |_, lock| Arc::strong_count(lock) == 1);
+        result
+    }
+
+    async fn locked_read_sandbox_artifact(
+        &self,
+        thread_key: &ThreadKey,
+        principal_id: &str,
+        artifact_path: &str,
+        max_bytes: usize,
+    ) -> Result<SandboxArtifactOutput, SessionRuntimeError> {
+        let artifact_reader = self
+            .sandbox_runtime
+            .artifact_reader
+            .clone()
+            .ok_or_else(|| {
+                SessionRuntimeError::BadRequest(
+                    "artifact retrieval is not supported by the configured sandbox backend"
+                        .to_owned(),
+                )
+            })?;
+        let session = match self.store.get_session(thread_key).await {
             Ok(session) => session,
             Err(SessionStoreError::NotFound { .. }) => {
                 return Err(SessionRuntimeError::BadRequest(
@@ -1157,41 +1187,75 @@ impl SessionRuntime {
             ));
         };
         let id = SandboxId::new(&sandbox_id);
+        let operation_id = format!("mcp-artifact-{}", Uuid::new_v4().simple());
         match self.sandbox_runtime.manager.status(&id).await? {
             SandboxStatus::Running => {}
-            SandboxStatus::Suspended => self.sandbox_runtime.manager.resume(&id).await?,
+            SandboxStatus::Created | SandboxStatus::Suspended => {
+                self.sandbox_pipes.remove(&sandbox_id);
+                let resume_id = id.clone();
+                self.run_with_running_capacity(
+                    thread_key,
+                    &operation_id,
+                    "artifact_resume",
+                    || async {
+                        self.sandbox_runtime
+                            .manager
+                            .resume(&resume_id)
+                            .await
+                            .map_err(SessionRuntimeError::Sandbox)
+                    },
+                )
+                .await?;
+                self.store
+                    .append_event(
+                        thread_key,
+                        None,
+                        "session.sandbox_resumed",
+                        json!({
+                            "thread_key": thread_key.as_str(),
+                            "sandbox_id": sandbox_id,
+                            "reason": "artifact_retrieval",
+                            "operation_id": operation_id,
+                        }),
+                    )
+                    .await?;
+            }
             status => {
                 return Err(SessionRuntimeError::BadRequest(format!(
                     "MCP sandbox is not available for artifact retrieval: {status:?}"
                 )));
             }
         }
-        let artifact_reader = self
-            .sandbox_runtime
-            .artifact_reader
-            .as_ref()
-            .ok_or_else(|| {
-                SessionRuntimeError::BadRequest(
-                    "artifact retrieval is not supported by the configured sandbox backend"
-                        .to_owned(),
-                )
-            })?;
+        if !self
+            .store
+            .touch_sandbox_activity(thread_key, &sandbox_id)
+            .await?
+        {
+            return Err(SessionRuntimeError::BadRequest(
+                "MCP sandbox assignment changed during artifact retrieval".to_owned(),
+            ));
+        }
         let artifact = timeout(
             ARTIFACT_READ_TIMEOUT,
-            artifact_reader(id, artifact_path.to_owned()),
+            artifact_reader(id, artifact_path.to_owned(), max_bytes),
         )
         .await
         .map_err(|_| {
-            SessionRuntimeError::Sandbox(SandboxError::io(format!(
-                "sandbox artifact retrieval timed out after {} seconds",
+            SessionRuntimeError::Sandbox(SandboxError::ArtifactRejected(format!(
+                "retrieval timed out after {} seconds",
                 ARTIFACT_READ_TIMEOUT.as_secs()
             )))
         })?;
         let contents = artifact?;
+        self.store
+            .touch_sandbox_activity(thread_key, &sandbox_id)
+            .await?;
         if contents.len() > max_bytes {
-            return Err(SessionRuntimeError::Sandbox(SandboxError::io(format!(
-                "sandbox artifact exceeds the {max_bytes}-byte size limit"
-            ))));
+            return Err(SessionRuntimeError::Sandbox(
+                SandboxError::ArtifactRejected(format!(
+                    "artifact exceeds the {max_bytes}-byte size limit"
+                )),
+            ));
         }
         Ok(SandboxArtifactOutput {
             sandbox_id,
@@ -4316,10 +4380,12 @@ impl SandboxRuntime {
     /// Add an artifact transport without expanding the portable sandbox backend contract.
     pub fn with_artifact_reader<F, Fut>(mut self, reader: F) -> Self
     where
-        F: Fn(SandboxId, String) -> Fut + Send + Sync + 'static,
+        F: Fn(SandboxId, String, usize) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = SandboxResult<Vec<u8>>> + Send + 'static,
     {
-        self.artifact_reader = Some(Arc::new(move |id, path| reader(id, path).boxed()));
+        self.artifact_reader = Some(Arc::new(move |id, path, max_bytes| {
+            reader(id, path, max_bytes).boxed()
+        }));
         self
     }
 }
@@ -5807,6 +5873,16 @@ fn should_pause_idle_sandbox(
     if execution.execution_id != execution_id {
         return false;
     }
+    if session
+        .sandbox_last_active_at
+        .is_some_and(|last_active_at| {
+            execution
+                .completed_at
+                .is_some_and(|completed_at| last_active_at > completed_at)
+        })
+    {
+        return false;
+    }
     matches!(
         execution.status,
         ExecutionStatus::Completed | ExecutionStatus::Failed | ExecutionStatus::Cancelled
@@ -6120,6 +6196,7 @@ fn runtime_error_failure_class(error: &SessionRuntimeError) -> &'static str {
         SessionRuntimeError::Sandbox(SandboxError::NotFound(_)) => "sandbox_not_found",
         SessionRuntimeError::Sandbox(SandboxError::Unsupported { .. }) => "sandbox_unsupported",
         SessionRuntimeError::Sandbox(SandboxError::NotReady(_)) => "sandbox_not_ready",
+        SessionRuntimeError::Sandbox(SandboxError::ArtifactRejected(_)) => "artifact_rejected",
         SessionRuntimeError::Sandbox(SandboxError::Io { .. }) => "sandbox_io",
         SessionRuntimeError::Sandbox(SandboxError::Backend { .. }) => "sandbox_backend",
         SessionRuntimeError::Sandbox(SandboxError::InvalidSpec(_)) => "sandbox_invalid_spec",
@@ -8271,6 +8348,17 @@ mod tests {
             Some(&completed),
             "exe-1",
             "asbx-other"
+        ));
+
+        let mut active_session = session;
+        active_session.sandbox_last_active_at = completed
+            .completed_at
+            .map(|value| value + time::Duration::SECOND);
+        assert!(!should_pause_idle_sandbox(
+            &active_session,
+            Some(&completed),
+            "exe-1",
+            "asbx-1"
         ));
     }
 

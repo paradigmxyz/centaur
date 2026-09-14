@@ -880,9 +880,9 @@ impl SandboxArgs {
                 let artifact_backend = backend.clone();
                 Ok(
                     SandboxRuntime::backend_with_workload(backend, self.container_workload_mode()?)
-                        .with_artifact_reader(move |id, path| {
+                        .with_artifact_reader(move |id, path, max_bytes| {
                             let backend = artifact_backend.clone();
-                            async move { backend.read_artifact(&id, &path).await }
+                            async move { backend.read_artifact(&id, &path, max_bytes).await }
                         }),
                 )
             }
