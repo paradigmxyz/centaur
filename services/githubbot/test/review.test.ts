@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { drainBackgroundWork } from "../src/context";
 import { handleReviewRequest } from "../src/review";
 import type { GithubbotOptions } from "../src/types";
 
@@ -36,6 +37,43 @@ const input = {
   options,
   state: stubState(),
 };
+
+type RecordedExecution = {
+  idempotencyKey: string | undefined;
+  url: string;
+};
+
+function recordingOptions(executions: RecordedExecution[]): GithubbotOptions {
+  return {
+    ...options,
+    fetch: async (request, init) => {
+      const url = request.toString();
+      if (url.includes("/execute")) {
+        const body = JSON.parse(String(init?.body)) as {
+          idempotency_key?: string;
+        };
+        executions.push({ idempotencyKey: body.idempotency_key, url });
+        return Response.json({
+          execution_id: `exe-${executions.length}`,
+          ok: true,
+          status: "queued",
+          thread_key: "github-review:0xSplits/centaur:7",
+        });
+      }
+      if (url.includes("/events?")) {
+        return new Response(
+          "id: 1\nevent: session.execution_completed\ndata: {}\n\n",
+          { status: 200 },
+        );
+      }
+      return Response.json({ harness_switched: false, ok: true });
+    },
+  } as GithubbotOptions;
+}
+
+async function waitForReviewTurn(): Promise<void> {
+  await drainBackgroundWork(1_000);
+}
 
 function reviewRequestedBody(reviewerLogin: string | null): string {
   return JSON.stringify({
@@ -82,18 +120,73 @@ describe("handleReviewRequest", () => {
 
   test("de-duplicates a redelivered review request", async () => {
     const state = stubState();
+    const executions: RecordedExecution[] = [];
+    const recordedOptions = recordingOptions(executions);
     // First delivery claims the dedup key; second (same id) finds it taken.
     await handleReviewRequest(reviewRequestedBody("review-bot"), {
       ...input,
+      options: recordedOptions,
       state,
     });
-    // A second handler with the same delivery id resolves without throwing; the
-    // dedup claim short-circuits the turn (no assertion beyond completion).
     await handleReviewRequest(reviewRequestedBody("review-bot"), {
       ...input,
+      options: recordedOptions,
       state,
     });
-    expect(true).toBe(true);
+    await waitForReviewTurn();
+    expect(executions).toHaveLength(1);
+  });
+
+  test("uses a fresh execution key for a new review request on the same commit", async () => {
+    const executions: RecordedExecution[] = [];
+    const recordedOptions = recordingOptions(executions);
+    const state = stubState();
+
+    await handleReviewRequest(reviewRequestedBody("review-bot"), {
+      ...input,
+      options: recordedOptions,
+      state,
+    });
+    await waitForReviewTurn();
+    await handleReviewRequest(reviewRequestedBody("review-bot"), {
+      ...input,
+      deliveryId: "delivery-2",
+      options: recordedOptions,
+      state,
+    });
+    await waitForReviewTurn();
+
+    expect(executions).toHaveLength(2);
+    expect(executions[0]?.idempotencyKey).not.toBe(
+      executions[1]?.idempotencyKey,
+    );
+    expect(executions[0]?.url).toBe(executions[1]?.url);
+  });
+
+  test("keeps the execution key stable for redelivery when state deduplication fails", async () => {
+    const executions: RecordedExecution[] = [];
+    const recordedOptions = recordingOptions(executions);
+    const unavailableState = {
+      setIfNotExists: () => Promise.reject(new Error("state unavailable")),
+    } as never;
+
+    await handleReviewRequest(reviewRequestedBody("review-bot"), {
+      ...input,
+      options: recordedOptions,
+      state: unavailableState,
+    });
+    await waitForReviewTurn();
+    await handleReviewRequest(reviewRequestedBody("review-bot"), {
+      ...input,
+      options: recordedOptions,
+      state: unavailableState,
+    });
+    await waitForReviewTurn();
+
+    expect(executions).toHaveLength(2);
+    expect(executions[0]?.idempotencyKey).toBe(
+      executions[1]?.idempotencyKey,
+    );
   });
 });
 
