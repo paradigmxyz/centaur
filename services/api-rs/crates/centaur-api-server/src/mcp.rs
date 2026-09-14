@@ -373,7 +373,11 @@ fn mcp_initialize_result(params: &Value) -> Value {
                 "from the short MCP bootstrap tool list. In particular, search when a request ",
                 "involves an external service, private or current data, an external action, or ",
                 "a service URL. Load the selected tool with `centaur_catalog_load`, follow its ",
-                "help and skill instructions, then invoke it with `centaur_tool_call`."
+                "help and skill instructions, then invoke it with `centaur_tool_call`. When the ",
+                "user needs a downloadable artifact, instruct the producing tool to write it ",
+                "beneath `/tmp/downloads`, then immediately call `centaur_artifact_get` with its ",
+                "relative path. Files in `/tmp/downloads` are transient and may not survive a ",
+                "sandbox pause, restart, or replacement."
             )
             .to_owned(),
         );
@@ -2201,6 +2205,15 @@ def search(query, limit=20):
                     vec!["centaur_whoami"]
                 }
             );
+            let initialize = mcp_initialize_result(&json!({}));
+            if enabled {
+                let instructions = initialize["instructions"].as_str().unwrap();
+                assert!(instructions.contains("write it beneath `/tmp/downloads`"));
+                assert!(instructions.contains("`centaur_artifact_get`"));
+                assert!(instructions.contains("transient"));
+            } else {
+                assert!(initialize.get("instructions").is_none());
+            }
 
             // Invalid arguments prove enabled requests reach the dispatcher
             // without requiring a runtime. Disabled cached calls fail earlier.
