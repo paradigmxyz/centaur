@@ -63,7 +63,8 @@ spec:
                   optional: true
 {{- end }}
 {{- if .Values.slackbotv2.socketMode }}
-            # Socket Mode: no public URL needed (set ingress.enabled: false).
+            # Socket Mode: no public URL needed for Slack; the ingress keeps
+            # serving the other bots' webhooks.
             - name: SLACKBOTV2_SOCKET_MODE
               value: "true"
             - name: SLACK_APP_TOKEN

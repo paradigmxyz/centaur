@@ -602,9 +602,11 @@ slackbotv2:
   # Requires the Slack app to grant channels:read and channels:join.
   autoJoinCreatedChannels: false
   # Slack Socket Mode instead of webhooks; no public endpoint needed. When
-  # true: set ingress.enabled: false and add an app-level token (xapp-,
-  # connections:write) as <prefix>SLACK_APP_TOKEN to the infra secret.
-  # SLACK_SIGNING_SECRET becomes optional. Keep replicaCount: 1.
+  # true: add an app-level token (xapp-, connections:write) as
+  # <prefix>SLACK_APP_TOKEN to the infra secret; SLACK_SIGNING_SECRET becomes
+  # optional. The Slackbot drops out of the shared ingress on its own, so keep
+  # ingress.enabled as is while githubbot or linearbot need it.
+  # Keep replicaCount: 1.
   socketMode: false
   # Sticky percentage of otherwise-default Codex Slack threads assigned to
   # Nanocodex. A non-default model selection bypasses the rollout.

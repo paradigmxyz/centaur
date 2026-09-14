@@ -1,4 +1,7 @@
-{{- if and .Values.ingress.enabled (or .Values.slackbotv2.enabled .Values.linearbot.enabled .Values.githubbot.enabled) }}
+{{- /* Socket Mode needs no inbound route, so the slackbotv2 backend is dropped
+       there while the ingress stays up for the webhook-driven bots. */ -}}
+{{- $slackbotV2Ingress := and .Values.slackbotv2.enabled (not .Values.slackbotv2.socketMode) -}}
+{{- if and .Values.ingress.enabled (or $slackbotV2Ingress .Values.linearbot.enabled .Values.githubbot.enabled) }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -16,7 +19,13 @@ spec:
   {{- if .Values.ingress.defaultBackend }}
   defaultBackend:
     service:
+      {{- if $slackbotV2Ingress }}
       name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2") }}
+      {{- else if .Values.githubbot.enabled }}
+      name: {{ include "centaur.componentName" (dict "root" . "component" "githubbot") }}
+      {{- else }}
+      name: {{ include "centaur.componentName" (dict "root" . "component" "linearbot") }}
+      {{- end }}
       port:
         number: 3001
   {{- else }}
@@ -50,7 +59,7 @@ spec:
                 port:
                   number: 3001
 {{- end }}
-{{- if .Values.slackbotv2.enabled }}
+{{- if $slackbotV2Ingress }}
           - path: /
             pathType: Prefix
             backend:

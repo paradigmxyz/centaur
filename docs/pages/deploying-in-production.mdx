@@ -370,9 +370,13 @@ Mode connection instead of webhooks:
 1. In the Slack app, enable **Socket Mode** and generate an **app-level token**
    (`xapp-...`) with the `connections:write` scope.
 2. Store the token as `SLACK_APP_TOKEN` in the infra Secret.
-3. Set `slackbotv2.socketMode: true` and `ingress.enabled: false`. The
-   Request URLs can be removed and `SLACK_SIGNING_SECRET` becomes optional;
-   webhook routes stay in place but go unused.
+3. Set `slackbotv2.socketMode: true`. The Request URLs can be removed and
+   `SLACK_SIGNING_SECRET` becomes optional.
+
+The chart drops the Slackbot from the shared ingress on its own, so leave
+`ingress.enabled` alone unless nothing else needs it: the same ingress carries
+the GitHub and Linear webhook paths, and turning it off takes those bots down
+with it.
 
 Event subscriptions are unchanged. Socket Mode is single-consumer (one
 connection per app-level token), so keep `slackbotv2.replicaCount: 1`. Slack
