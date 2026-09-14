@@ -340,6 +340,12 @@ const INGRESS_SPECS: &[IngressSpec] = &[
         platform_prefixes: &["teams:"],
         workflow_events: false,
     },
+    IngressSpec {
+        env_var: "GOOGLECHATBOT_API_KEY",
+        identity: "googlechatbot",
+        platform_prefixes: &["gchat:"],
+        workflow_events: false,
+    },
 ];
 
 struct IngressSpec {

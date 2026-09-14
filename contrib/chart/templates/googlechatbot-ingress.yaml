@@ -1,0 +1,33 @@
+{{- if and .Values.googlechatbot.enabled .Values.googlechatbot.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "googlechatbot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "googlechatbot") | nindent 4 }}
+  {{- with .Values.googlechatbot.ingress.annotations }}
+  annotations:
+{{ toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.googlechatbot.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    - {{- if .Values.googlechatbot.ingress.host }}
+      host: {{ .Values.googlechatbot.ingress.host | quote }}
+      {{- end }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "centaur.componentName" (dict "root" . "component" "googlechatbot") }}
+                port:
+                  number: 3101
+  {{- with .Values.googlechatbot.ingress.tls }}
+  tls:
+{{ toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

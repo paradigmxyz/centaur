@@ -4,7 +4,8 @@
 //! the principal is the conversation: a Discord **channel** (every thread in it
 //! shares one principal), a Linear **issue** (every agent session on it shares
 //! one principal), a Microsoft Teams **channel/conversation** (or **user** for
-//! a personal/user-scoped run when the acting user is known), or — for Slack —
+//! a personal/user-scoped run when the acting user is known), a Google Chat
+//! **space** (or **user** for a DM space), or — for Slack —
 //! a **user** for a 1:1 DM and a **channel** for a multi-party channel/group
 //! thread. The Slack thread key is
 //! ``<source>:[<team_id>:]<conversation_id>[:<thread_ts>]`` — segments are
@@ -41,6 +42,8 @@ const GITHUB_THREAD_PREFIXES: &[&str] = &[
 const LINEAR_ISSUE_KIND: &str = "linear_issue";
 const TEAMS_USER_KIND: &str = "teams_user";
 const TEAMS_CONVERSATION_KIND: &str = "teams_conversation";
+const GOOGLE_CHAT_USER_KIND: &str = "google_chat_user";
+const GOOGLE_CHAT_SPACE_KIND: &str = "google_chat_space";
 
 /// The principal a session resolves to, as a stable upsert key plus identity
 /// fields and extensible labels.
@@ -199,6 +202,43 @@ pub fn derive_principal_with_slack_team(
                 .map(|name| format!("Teams Conversation {name}"))
                 .unwrap_or_else(|| format!("Teams Conversation {conversation_id}")),
             kind: Some(TEAMS_CONVERSATION_KIND.to_owned()),
+            slack_user_id: None,
+            slack_channel_id: None,
+            slack_team_id: None,
+            labels,
+        });
+    }
+
+    // Google Chat sessions key on the space, so every thread in a space shares
+    // one principal (mirrors the Discord channel and Teams conversation models).
+    // A DM space has no shared membership to key on, so — like a Teams personal
+    // chat — it keys on the acting user when the ingress carried one.
+    if let Some((space_name, thread_name, is_dm)) = parse_google_chat_segments(thread_key) {
+        let mut labels = BTreeMap::new();
+        labels.insert("google_chat_space".to_owned(), space_name.to_owned());
+        if let Some(thread) = thread_name.as_deref() {
+            labels.insert("google_chat_thread".to_owned(), thread.to_owned());
+        }
+        if is_dm && let Some(user) = actor_user_id.map(str::trim).filter(|user| !user.is_empty()) {
+            labels.insert("google_chat_user".to_owned(), user.to_owned());
+            return Ok(PrincipalRef {
+                foreign_id: format!("google-chat-user-{}", slugify(user)),
+                name: display_name
+                    .map(|name| format!("Google Chat User @{name}"))
+                    .unwrap_or_else(|| format!("Google Chat User {user}")),
+                kind: Some(GOOGLE_CHAT_USER_KIND.to_owned()),
+                slack_user_id: None,
+                slack_channel_id: None,
+                slack_team_id: None,
+                labels,
+            });
+        }
+        return Ok(PrincipalRef {
+            foreign_id: format!("google-chat-space-{}", slugify(space_name)),
+            name: display_name
+                .map(|name| format!("Google Chat Space #{name}"))
+                .unwrap_or_else(|| format!("Google Chat Space {space_name}")),
+            kind: Some(GOOGLE_CHAT_SPACE_KIND.to_owned()),
             slack_user_id: None,
             slack_channel_id: None,
             slack_team_id: None,
@@ -430,6 +470,36 @@ fn parse_teams_adapter_segments(thread_key: &str) -> Option<(String, String, Opt
     Some((conversation_id, service_url, thread_id))
 }
 
+/// Parse the official Chat SDK Google Chat adapter key:
+/// ``gchat:<spaces/ID>[:<base64url thread resource name>][:dm]``. The space
+/// resource name contains ``/`` but never ``:``, so the segments stay
+/// unambiguous. The thread segment is decoded for labels only — the principal
+/// keys on the space.
+fn parse_google_chat_segments(thread_key: &str) -> Option<(&str, Option<String>, bool)> {
+    let (rest, is_dm) = match thread_key.strip_suffix(":dm") {
+        Some(rest) => (rest, true),
+        None => (thread_key, false),
+    };
+    let rest = rest.strip_prefix("gchat:")?;
+    let mut segments = rest.split(':');
+    let space_name = segments
+        .next()
+        .map(str::trim)
+        .filter(|space| !space.is_empty())?;
+    let thread_name = match segments.next() {
+        Some(encoded) if !encoded.is_empty() => {
+            let decoded = String::from_utf8(URL_SAFE_NO_PAD.decode(encoded).ok()?).ok()?;
+            (!decoded.is_empty()).then_some(decoded)
+        }
+        Some(_) => return None,
+        None => None,
+    };
+    if segments.next().is_some() {
+        return None;
+    }
+    Some((space_name, thread_name, is_dm))
+}
+
 /// Slack direct-message conversation ids start with ``D``.
 pub(crate) fn is_direct_message(conversation_id: Option<&str>) -> bool {
     conversation_id
@@ -653,6 +723,56 @@ mod tests {
     fn linear_issue_level_thread_keys_on_the_issue() {
         let principal = derive_principal("linear:issue-1", None, None);
         assert_eq!(principal.foreign_id, "linear-issue-issue-1");
+    }
+
+    #[test]
+    fn google_chat_space_thread_key_keys_on_the_space() {
+        let principal = derive_principal(
+            "gchat:spaces/AAAA1111:c3BhY2VzL0FBQUExMTExL3RocmVhZHMvVFRUVA",
+            Some("users/123"),
+            None,
+        );
+        assert_eq!(principal.foreign_id, "google-chat-space-spaces-aaaa1111");
+        assert_eq!(principal.kind.as_deref(), Some("google_chat_space"));
+        assert_eq!(
+            principal
+                .labels
+                .get("google_chat_thread")
+                .map(String::as_str),
+            Some("spaces/AAAA1111/threads/TTTT")
+        );
+    }
+
+    #[test]
+    fn google_chat_threads_in_one_space_share_a_principal() {
+        let first = derive_principal(
+            "gchat:spaces/AAAA1111:c3BhY2VzL0FBQUExMTExL3RocmVhZHMvVFRUVA",
+            None,
+            None,
+        );
+        let second = derive_principal("gchat:spaces/AAAA1111", None, None);
+        assert_eq!(first.foreign_id, second.foreign_id);
+    }
+
+    #[test]
+    fn google_chat_dm_keys_on_the_acting_user() {
+        let principal = derive_principal("gchat:spaces/DDDD:dm", Some("users/123"), Some("Casey"));
+        assert_eq!(principal.foreign_id, "google-chat-user-users-123");
+        assert_eq!(principal.kind.as_deref(), Some("google_chat_user"));
+        assert_eq!(principal.name, "Google Chat User @Casey");
+    }
+
+    #[test]
+    fn google_chat_dm_without_an_actor_falls_back_to_the_space() {
+        let principal = derive_principal("gchat:spaces/DDDD:dm", None, None);
+        assert_eq!(principal.foreign_id, "google-chat-space-spaces-dddd");
+    }
+
+    #[test]
+    fn google_chat_space_display_name_is_cosmetic_only() {
+        let named = derive_principal("gchat:spaces/AAAA1111", None, Some("Centaur Demo"));
+        assert_eq!(named.name, "Google Chat Space #Centaur Demo");
+        assert_eq!(named.foreign_id, "google-chat-space-spaces-aaaa1111");
     }
 
     #[test]

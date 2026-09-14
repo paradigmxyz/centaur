@@ -27,6 +27,7 @@ jobs:
       discordbot_checks: ${{ steps.filter.outputs.discordbot_checks }}
       githubbot_checks: ${{ steps.filter.outputs.githubbot_checks }}
       teamsbot_checks: ${{ steps.filter.outputs.teamsbot_checks }}
+      googlechatbot_checks: ${{ steps.filter.outputs.googlechatbot_checks }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -112,6 +113,12 @@ jobs:
             '^\.github/workflows/ci\.yml$'
           set_output teamsbot_checks \
             '^services/teamsbot/' \
+            '^package\.json$' \
+            '^pnpm-lock\.yaml$' \
+            '^pnpm-workspace\.yaml$' \
+            '^\.github/workflows/ci\.yml$'
+          set_output googlechatbot_checks \
+            '^services/googlechatbot/' \
             '^package\.json$' \
             '^pnpm-lock\.yaml$' \
             '^pnpm-workspace\.yaml$' \
@@ -525,6 +532,38 @@ jobs:
         working-directory: services/teamsbot
         run: bun run test
 
+  googlechatbot-checks:
+    name: Googlechatbot typecheck and tests
+    runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.googlechatbot_checks == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 10.28.1
+          run_install: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck Googlechatbot
+        working-directory: services/googlechatbot
+        run: bun run check:types
+
+      - name: Googlechatbot tests
+        working-directory: services/googlechatbot
+        run: bun run test
+
   ci-success:
     name: CI success
     runs-on: ubuntu-latest
@@ -541,10 +580,11 @@ jobs:
       - discordbot-checks
       - githubbot-checks
       - teamsbot-checks
+      - googlechatbot-checks
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
-          allowed-skips: migration-order, harness-server-checks, rust-api, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
+          allowed-skips: migration-order, harness-server-checks, rust-api, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks, googlechatbot-checks
           jobs: ${{ toJSON(needs) }}

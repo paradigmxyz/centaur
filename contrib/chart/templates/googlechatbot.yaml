@@ -1,0 +1,122 @@
+{{- if .Values.googlechatbot.enabled }}
+{{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "googlechatbot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "googlechatbot") | nindent 4 }}
+spec:
+  replicas: {{ .Values.googlechatbot.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "googlechatbot") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "googlechatbot") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: googlechatbot
+          image: {{ printf "%s:%s" .Values.googlechatbot.image.repository .Values.googlechatbot.image.tag | quote }}
+          imagePullPolicy: {{ .Values.googlechatbot.image.pullPolicy }}
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3101"
+            - name: CENTAUR_API_URL
+              value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+            - name: GCHAT_DEFAULT_HARNESS_TYPE
+              value: {{ .Values.sandbox.harnessEngine | quote }}
+            - name: GOOGLE_CHAT_CREDENTIALS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sGOOGLE_CHAT_CREDENTIALS" .Values.secretManager.envPrefix }}
+            - name: GOOGLECHATBOT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sGOOGLECHATBOT_API_KEY" .Values.secretManager.envPrefix }}
+            - name: GOOGLECHATBOT_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+            - name: GOOGLE_CHAT_PROJECT_NUMBER
+              value: {{ .Values.googlechatbot.projectNumber | quote }}
+            - name: GOOGLE_CHAT_ENDPOINT_URL
+              value: {{ .Values.googlechatbot.endpointUrl | quote }}
+            - name: GOOGLE_CHAT_BOT_USER_ID
+              value: {{ .Values.googlechatbot.botUserId | quote }}
+{{- if .Values.googlechatbot.pubsub.topic }}
+            - name: GOOGLE_CHAT_PUBSUB_TOPIC
+              value: {{ .Values.googlechatbot.pubsub.topic | quote }}
+            - name: GOOGLE_CHAT_PUBSUB_AUDIENCE
+              value: {{ .Values.googlechatbot.pubsub.audience | quote }}
+            - name: GOOGLE_CHAT_PUBSUB_SERVICE_ACCOUNT_EMAIL
+              value: {{ .Values.googlechatbot.pubsub.serviceAccountEmail | quote }}
+{{- end }}
+{{- if .Values.googlechatbot.impersonateUser }}
+            - name: GOOGLE_CHAT_IMPERSONATE_USER
+              value: {{ .Values.googlechatbot.impersonateUser | quote }}
+{{- end }}
+            - name: GCHAT_ALLOWED_SPACE_IDS
+              value: {{ .Values.googlechatbot.allowedSpaceIds | quote }}
+            - name: GCHAT_ALLOWED_DOMAINS
+              value: {{ .Values.googlechatbot.allowedDomains | quote }}
+            - name: GCHAT_ALLOWED_SENDER_EMAILS
+              value: {{ .Values.googlechatbot.allowedSenderEmails | quote }}
+            - name: GCHAT_ALLOW_DIRECT_MESSAGES
+              value: {{ .Values.googlechatbot.allowDirectMessages | quote }}
+            - name: GCHAT_REQUIRE_MENTION
+              value: {{ .Values.googlechatbot.requireMention | quote }}
+            - name: GCHAT_DOWNLOAD_ATTACHMENTS
+              value: {{ .Values.googlechatbot.downloadAttachments | quote }}
+{{- range $name, $value := .Values.googlechatbot.extraEnv }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+{{- end }}
+          ports:
+            - containerPort: 3101
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3101
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 3101
+            timeoutSeconds: 5
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          resources:
+{{ toYaml .Values.googlechatbot.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "googlechatbot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "googlechatbot") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "googlechatbot") | nindent 4 }}
+  ports:
+    - name: http
+      port: 3101
+      targetPort: 3101
+{{- end }}
