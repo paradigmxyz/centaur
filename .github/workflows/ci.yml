@@ -210,8 +210,7 @@ jobs:
 
           PGPASSWORD=postgres createdb --host localhost --username postgres session_runtime
           SESSION_RUNTIME_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/session_runtime \
-            cargo test -p centaur-session-runtime -- \
-              --test-threads=1 --skip 'adoption_tests::stdout_eof_'
+            cargo test -p centaur-session-runtime -- --test-threads=1
 
       - name: Run API integration test
         working-directory: services/api-rs

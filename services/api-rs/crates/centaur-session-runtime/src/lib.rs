@@ -11406,6 +11406,7 @@ mod adoption_tests {
                 .any(|event| event.event_type == "session.execution_failed"),
             "a transitional Created status should not fail the execution"
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11445,6 +11446,7 @@ mod adoption_tests {
                 .is_some_and(|error| error.contains("OOMKilled")),
             "terminal backend reason should fail immediately and remain visible"
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11486,6 +11488,7 @@ mod adoption_tests {
                 .is_some_and(|error| error.contains("sandbox instance changed")),
             "replacement should fail rather than inherit the active execution"
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
