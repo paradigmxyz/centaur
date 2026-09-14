@@ -752,23 +752,10 @@ impl AgentSandboxBackend {
         })?;
 
         if status.as_ref().and_then(|status| status.status.as_deref()) != Some("Success") {
-            let stderr = String::from_utf8_lossy(&error_output);
-            let detail = stderr.trim();
-            if !error_output_exceeded
-                && let Some(detail) = detail.strip_prefix("centaur-artifact-get: ")
-            {
-                return Err(SandboxError::ArtifactRejected(detail.to_owned()));
-            }
-            let detail = if detail.is_empty() {
-                status
-                    .and_then(|status| status.message)
-                    .unwrap_or_else(|| "artifact reader failed".to_owned())
-            } else if error_output_exceeded {
-                format!("{detail}…")
-            } else {
-                detail.to_owned()
-            };
-            return Err(SandboxError::io(detail));
+            return Err(artifact_command_rejection(
+                &error_output,
+                error_output_exceeded,
+            ));
         }
         if contents_exceeded {
             return Err(SandboxError::ArtifactRejected(format!(
@@ -778,6 +765,20 @@ impl AgentSandboxBackend {
 
         Ok(contents)
     }
+}
+
+fn artifact_command_rejection(error_output: &[u8], truncated: bool) -> SandboxError {
+    if !truncated {
+        let stderr = String::from_utf8_lossy(error_output);
+        if let Some(detail) = stderr.trim().strip_prefix("centaur-artifact-get: ")
+            && !detail.is_empty()
+        {
+            return SandboxError::ArtifactRejected(detail.to_owned());
+        }
+    }
+    SandboxError::ArtifactRejected(
+        "artifact retrieval is unavailable in the current sandbox".to_owned(),
+    )
 }
 
 async fn read_stream_bounded(
@@ -1405,6 +1406,28 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     use super::*;
+
+    #[test]
+    fn artifact_command_failures_are_safe_tool_rejections() {
+        let expected =
+            artifact_command_rejection(b"centaur-artifact-get: artifact does not exist\n", false);
+        assert!(matches!(
+            expected,
+            SandboxError::ArtifactRejected(message) if message == "artifact does not exist"
+        ));
+
+        for (stderr, truncated) in [
+            (b"executable file not found".as_slice(), false),
+            (b"centaur-artifact-get: partial".as_slice(), true),
+        ] {
+            let error = artifact_command_rejection(stderr, truncated);
+            assert!(matches!(
+                error,
+                SandboxError::ArtifactRejected(message)
+                    if message == "artifact retrieval is unavailable in the current sandbox"
+            ));
+        }
+    }
 
     #[tokio::test]
     async fn bounded_stream_read_caps_retained_bytes_and_drains_the_stream() {
