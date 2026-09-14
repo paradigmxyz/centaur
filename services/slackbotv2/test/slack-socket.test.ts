@@ -196,6 +196,31 @@ describe('Slackbot socket mode', () => {
 })
 
 describe('Slack socket runner', () => {
+  it('waits for the state backend before connecting', async () => {
+    let release = (): void => {}
+    const ready = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const fake = fakeTransport()
+    const socket = createSlackSocketRunner({
+      ...fake.transport,
+      dispatch: async () => new Response('ok'),
+      logger: silentLogger,
+      loopbackToken: 'token-abc',
+      ready
+    })
+
+    const started = socket.start()
+    await Bun.sleep(0)
+    // Slack never redelivers a socket event, so connecting before Postgres is
+    // up would lose every event that arrives meanwhile.
+    expect(socket.status().attempts).toBe(0)
+
+    release()
+    await started
+    expect(socket.status().connected).toBe(true)
+  })
+
   it('replays an events_api envelope verbatim onto the events route', async () => {
     const fake = fakeTransport()
     const replayed: Request[] = []

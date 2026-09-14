@@ -331,15 +331,19 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   const stateConnectionStatus: StateConnectionStatus = { attempts: 0, connected: false }
   const stateConnected = ensureStateConnected(state, options, stateConnectionStatus)
   backgroundWaitUntil(stateConnected)
-  if (options.socketMode) {
-    // Socket mode has no inbound webhooks to trigger the Chat SDK's lazy
-    // adapter init, which is what opens the socket; do it eagerly.
-    backgroundWaitUntil(
-      chat.initialize().catch(error => {
-        logger.error('slackbotv2 socket mode connect failed', { error })
-      })
-    )
-  }
+  // Socket Mode delivers events the moment the connection opens and Slack never
+  // redelivers them, unlike a webhook POST it can retry. Connect only once the
+  // state backend is up, so a slow or briefly failing Postgres cannot cost
+  // events; and initialize the Chat SDK first, since socket mode has no inbound
+  // webhook to trigger its lazy init.
+  const socketReady = options.socketMode
+    ? (async () => {
+        await stateConnected
+        await chat.initialize().catch(error => {
+          logger.error('slackbotv2_chat_initialize_failed', { error: errorMessage(error) })
+        })
+      })()
+    : undefined
 
   chat.onAction(async event => {
     const payload = slackBlockActionPayload(event)
@@ -467,7 +471,8 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
         }),
         dispatch: async request => await app.fetch(request),
         loopbackToken: socketLoopbackToken,
-        logger
+        logger,
+        ready: socketReady
       })
     : undefined
   app.get('/health', c => healthResponse(c, stateConnectionStatus))

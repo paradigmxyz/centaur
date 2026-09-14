@@ -37,8 +37,8 @@ export type SlackSocketTransport = {
 
 export type SlackSocketRunner = {
   /**
-   * Connects. Settles after the first attempt and never rejects; a failed
-   * attempt keeps retrying with capped exponential backoff.
+   * Waits for `ready`, then connects. Settles after the first attempt and never
+   * rejects; a failed attempt keeps retrying with capped exponential backoff.
    */
   start(): Promise<void>
   status(): SlackSocketStatus
@@ -51,6 +51,8 @@ export function createSlackSocketRunner(
     dispatch: (request: Request) => Promise<Response>
     logger: Logger
     loopbackToken: string
+    /** Gate on the state backend so events never land on a disconnected database. */
+    ready?: Promise<unknown>
   }
 ): SlackSocketRunner {
   const { logger } = input
@@ -129,6 +131,8 @@ export function createSlackSocketRunner(
   return {
     start(): Promise<void> {
       startPromise ??= (async () => {
+        if (input.ready) await input.ready.catch(() => undefined)
+        if (stopped) return
         if (!(await connect())) void retryConnect()
       })()
       return startPromise
