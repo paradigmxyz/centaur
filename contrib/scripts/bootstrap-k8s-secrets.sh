@@ -14,6 +14,12 @@ OP_SERVICE_ACCOUNT_TOKEN, OP_VAULT, SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET,
 and SLACKBOT_API_KEY in the shell environment. Existing Secrets are only topped
 up with newly generated optional keys when absent.
 
+Optional Slack Socket Mode bootstrap (consumed when slackbotv2.socketMode=true):
+  SLACK_APP_TOKEN              app-level token (xapp-..., connections:write)
+                               for the Slackbot's outbound socket connection.
+                               Set on every run so it rotates; when present,
+                               SLACK_SIGNING_SECRET is no longer required.
+
 Optional 1Password Connect bootstrap (when ironProxy.manager.secretSource is
 set to onepassword-connect in the Helm values):
   OP_CONNECT_CREDENTIALS_FILE  path to 1password-credentials.json; if set,
@@ -187,7 +193,11 @@ if ! secret_exists centaur-infra-env; then
   require_env OP_SERVICE_ACCOUNT_TOKEN
   require_env OP_VAULT
   require_env SLACK_BOT_TOKEN
-  require_env SLACK_SIGNING_SECRET
+  # Socket Mode verifies nothing inbound, so the signing secret is only required
+  # when no app-level token is supplied.
+  if [[ -z "${SLACK_APP_TOKEN:-}" ]]; then
+    require_env SLACK_SIGNING_SECRET
+  fi
   require_env SLACKBOT_API_KEY
 fi
 
@@ -323,7 +333,7 @@ else
     --from-literal=OP_SERVICE_ACCOUNT_TOKEN="$OP_SERVICE_ACCOUNT_TOKEN"
     --from-literal=OP_VAULT="$OP_VAULT"
     --from-literal=SLACK_BOT_TOKEN="$SLACK_BOT_TOKEN"
-    --from-literal=SLACK_SIGNING_SECRET="$SLACK_SIGNING_SECRET"
+    --from-literal=SLACK_SIGNING_SECRET="${SLACK_SIGNING_SECRET:-}"
     --from-literal=SLACKBOT_API_KEY="$SLACKBOT_API_KEY"
     --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
     --from-literal=DATABASE_URL="$DATABASE_URL"
@@ -373,6 +383,9 @@ else
     secret_args+=(--from-literal=GITHUBBOT_TOKEN="$GITHUBBOT_TOKEN")
     secret_args+=(--from-literal=GITHUBBOT_WEBHOOK_SECRET="$GITHUBBOT_WEBHOOK_SECRET")
     secret_args+=(--from-literal=GITHUBBOT_API_KEY="${GITHUBBOT_API_KEY:-$(rand_hex)}")
+  fi
+  if [[ -n "${SLACK_APP_TOKEN:-}" ]]; then
+    secret_args+=(--from-literal=SLACK_APP_TOKEN="$SLACK_APP_TOKEN")
   fi
   kubectl "${secret_args[@]}" >/dev/null
   echo "Created Secret centaur-infra-env in namespace $NAMESPACE"
