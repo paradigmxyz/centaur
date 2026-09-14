@@ -776,21 +776,32 @@ fn centaur_tool_labels(item: &Value, centaur_tool_names: &BTreeSet<String>) -> O
     let words = unwrap_shell_words(&command)?;
     let executable = executable_name(words.first()?);
 
-    let (name, method) = if executable == "centaur-tools" {
-        match words.get(1).map(String::as_str) {
-            Some("call") => (words.get(2)?, words.get(3).map_or("call", String::as_str)),
-            Some("run") => (words.get(2)?, "cli"),
-            _ => return None,
-        }
-    } else {
-        (words.first()?, "cli")
-    };
-    let name = executable_name(name);
-    if !centaur_tool_names.contains(name) {
-        return None;
+    if executable == "centaur-tools" {
+        return match words.get(1).map(String::as_str) {
+            Some(method @ ("list" | "json" | "refresh" | "which")) => Some(ToolLabels {
+                kind: "centaur".to_owned(),
+                name: "centaur-tools".to_owned(),
+                method: method.to_owned(),
+            }),
+            Some("call") => centaur_catalog_tool_labels(
+                words.get(2)?,
+                words.get(3).map_or("call", String::as_str),
+                centaur_tool_names,
+            ),
+            Some("run") => centaur_catalog_tool_labels(words.get(2)?, "cli", centaur_tool_names),
+            _ => None,
+        };
     }
+    centaur_catalog_tool_labels(words.first()?, "cli", centaur_tool_names)
+}
 
-    Some(ToolLabels {
+fn centaur_catalog_tool_labels(
+    name: &str,
+    method: &str,
+    centaur_tool_names: &BTreeSet<String>,
+) -> Option<ToolLabels> {
+    let name = executable_name(name);
+    centaur_tool_names.contains(name).then(|| ToolLabels {
         kind: "centaur".to_owned(),
         name: name.to_owned(),
         method: method.to_owned(),
@@ -1509,6 +1520,39 @@ mod tests {
 
         assert!(bounded.ends_with(TRUNCATION_SUFFIX));
         assert!(bounded.len() <= MAX_TOOL_COMMAND_BYTES);
+    }
+
+    #[test]
+    fn centaur_tools_list_exports_catalog_tool_span() {
+        let (exporter, provider, tracer) = test_telemetry();
+        let mut turn = test_turn(tracer);
+        for method in ["item/started", "item/completed"] {
+            turn.observe_wire_value(&json!({
+                "method": method,
+                "params": {"item": {
+                    "id": "tool-1",
+                    "type": "commandExecution",
+                    "command": "centaur-tools list",
+                    "exitCode": 0
+                }}
+            }));
+        }
+        provider.force_flush().expect("flush");
+
+        let spans = exporter.get_finished_spans().expect("spans");
+        assert_eq!(spans.len(), 1);
+        let tool = &spans[0];
+        assert_eq!(tool.name, "codex.tool.centaur-tools");
+        assert_eq!(attribute(tool, "tool.kind").as_deref(), Some("centaur"));
+        assert_eq!(
+            attribute(tool, "tool.name").as_deref(),
+            Some("centaur-tools")
+        );
+        assert_eq!(attribute(tool, "tool.method").as_deref(), Some("list"));
+        assert_eq!(
+            attribute(tool, "tool.executable").as_deref(),
+            Some("centaur-tools")
+        );
     }
 
     #[test]
