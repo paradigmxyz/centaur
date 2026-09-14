@@ -1,3 +1,4 @@
+import { TurnCompletionFilter } from '@centaur/harness-events'
 import type { RustSessionStreamEvent } from '@centaur/harness-events'
 import {
   ChatSDKRenderer,
@@ -89,6 +90,7 @@ export class CodexAppServerRendererEventMapper
   implements RendererSourceMapper<ServerNotification | RustSessionStreamEvent | unknown>
 {
   private readonly state: CodexMapperState = newState()
+  private readonly turnFilter = new TurnCompletionFilter()
   private readonly sessionId: string
   private readonly logInfo?: RendererLogInfo
   private readonly unknownAgentMessagePhase: AgentMessagePhase
@@ -164,6 +166,8 @@ export class CodexAppServerRendererEventMapper
   private processNotification(rawEvent: ServerNotification): RendererEvent[] {
     const event = normalizeServerNotification(rawEvent)
     if (!event) return []
+    this.turnFilter.noteLine(event)
+    const isChildTerminal = this.turnFilter.isChildTurnCompletion(event)
 
     const out: RendererEvent[] = []
     if (event?.session_id) this.state.threadId = String(event.session_id)
@@ -171,7 +175,7 @@ export class CodexAppServerRendererEventMapper
     if (event?.threadId) this.state.threadId = String(event.threadId)
 
     const error = errorMessage(event)
-    if (error) return this.fail(error)
+    if (error && !isChildTerminal) return this.fail(error)
 
     const title = threadTitleUpdate(event)
     if (title) out.push({ type: 'renderer.title.update', title })
@@ -291,7 +295,9 @@ export class CodexAppServerRendererEventMapper
     }
 
     if (eventCarriesAgentMessageText(event)) {
-      const buffer = this.activeAssistantBuffer(event)
+      const buffer = this.turnFilter.isChildTurnLine(event)
+        ? 'commentary'
+        : this.activeAssistantBuffer(event)
       const update = this.applyAgentMessageUpdate(event, buffer)
       if (update.bufferChanged) {
         this.emitPendingAssistantText(out)
@@ -301,7 +307,7 @@ export class CodexAppServerRendererEventMapper
       }
     }
 
-    if (isTerminalCodexAppServerEvent(event)) {
+    if (isTerminalCodexAppServerEvent(event) && !isChildTerminal) {
       const resultText = terminalResultText(event)
       const willClose = Boolean(resultText || event?.type !== 'result')
       this.logCodexTerminalEventReceived(event, {

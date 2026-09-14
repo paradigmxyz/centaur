@@ -346,3 +346,11 @@ export type RustSessionStreamEvent = {
   event?: string;
   data?: unknown;
 };
+
+export {
+  TurnCompletionFilter,
+  isTurnStartedNotification,
+  isTurnTerminalNotification,
+  threadIds,
+  turnIds,
+} from "./turn-filter";
