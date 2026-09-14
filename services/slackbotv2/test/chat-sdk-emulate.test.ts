@@ -3430,7 +3430,7 @@ describe('slackbotv2', () => {
         }
       })
     )
-    const finalAnswer = `**EXPIRED_STREAM_FALLBACK_VISIBLE**\n${'x'.repeat(13_000)}`
+    const finalAnswer = `**EXPIRED_STREAM_FALLBACK_VISIBLE**\n${'@tester '.repeat(25)}${'x'.repeat(13_000)}`
     codexApi.emitSessionEvent(key, 'session.execution_completed', {
       execution_id: 'exe-stream-expired',
       status: 'completed',
@@ -3448,7 +3448,9 @@ describe('slackbotv2', () => {
     expect(stringField(fallbackPost?.body.markdown_text)).toStartWith(
       '**EXPIRED_STREAM_FALLBACK_VISIBLE**'
     )
-    expect(stringField(fallbackPost?.body.markdown_text).length).toBe(12_000)
+    // The fallback budget leaves room for the adapter to expand bare mentions
+    // without crossing Slack's 12,000-character markdown_text limit.
+    expect(stringField(fallbackPost?.body.markdown_text).length).toBeLessThanOrEqual(12_000)
     expect(stringField(fallbackPost?.body.markdown_text)).toContain('[truncated ')
     const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
     expect(threadState).toEqual(

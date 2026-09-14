@@ -167,7 +167,8 @@ const RENDER_RETRY_MAX_DELAY_MS = 5_000
 const ASSISTANT_STATUS_MAX_CHARS = 50
 const SLACK_TASK_DETAILS_MAX_CHARS = 256
 const SLACK_FALLBACK_TEXT_MAX_CHARS = 35_000
-const SLACK_MARKDOWN_TEXT_MAX_CHARS = 12_000
+// Leave room below Slack's 12,000-character limit for adapter mention and emoji expansion.
+const SLACK_FALLBACK_MARKDOWN_MAX_CHARS = 11_500
 const POSTGRES_CONNECT_INITIAL_DELAY_MS = 250
 const POSTGRES_CONNECT_MAX_DELAY_MS = 10_000
 const HANDOFF_RETRY_DELAYS_MS: readonly number[] = [5_000, 30_000, 120_000]
@@ -2058,7 +2059,7 @@ async function renderFallbackFinalAnswer(
     } else {
       const fallbackMarkdown = truncateSlackText(
         text,
-        SLACK_MARKDOWN_TEXT_MAX_CHARS,
+        SLACK_FALLBACK_MARKDOWN_MAX_CHARS,
         'Slack final answer'
       )
       await thread.post({ markdown: fallbackMarkdown })
