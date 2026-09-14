@@ -3334,7 +3334,7 @@ describe('slackbotv2', () => {
     await waitFor(() => codexApi.streamCount === 1)
 
     const draft = 'Draft answer from the live deltas.'
-    const finalAnswer = 'Final reconciled answer from the result.'
+    const finalAnswer = `**Final reconciled answer from the result.**\n${'@tester '.repeat(25)}${'x'.repeat(13_000)}`
     // Stream a plan + the draft answer (so the answer delta reaches Slack), then
     // seal the answer item with a DIFFERENT canonical text. The recomposed
     // answer no longer extends the already-streamed text, so the renderer
@@ -3375,9 +3375,16 @@ describe('slackbotv2', () => {
 
     const texts = await threadTexts(parent.ts)
     // The streamed message was replaced in place with the durable final answer...
-    expect(texts.filter(text => text.includes(finalAnswer))).toHaveLength(1)
+    expect(texts.filter(text => text.includes('Final reconciled answer from the result.'))).toHaveLength(1)
     // ...and the diverging live draft is gone (neither interleaved nor left behind).
     expect(texts.some(text => text.includes('Draft answer from the live deltas'))).toBe(false)
+    const replacementUpdate = slackApi.calls.find(call => call.method === 'chat.update')
+    expect(replacementUpdate?.body.text).toBeUndefined()
+    expect(stringField(replacementUpdate?.body.markdown_text)).toStartWith(
+      '**Final reconciled answer from the result.**'
+    )
+    expect(stringField(replacementUpdate?.body.markdown_text).length).toBeLessThanOrEqual(12_000)
+    expect(stringField(replacementUpdate?.body.markdown_text)).toContain('[truncated ')
   })
 
   it('reposts the durable final answer when the Slack stream expires mid-render', async () => {
@@ -6682,6 +6689,7 @@ type StreamCall = {
     | 'assistant.threads.setStatus'
     | 'assistant.threads.setTitle'
     | 'chat.postMessage'
+    | 'chat.update'
     | 'chat.startStream'
     | 'chat.appendStream'
     | 'chat.stopStream'
@@ -6979,10 +6987,13 @@ async function handlePatchedSlackRequest(
     )
     return
   }
-  if (path === '/api/chat.postMessage') {
+  if (path === '/api/chat.postMessage' || path === '/api/chat.update') {
     const body = await requestBody(request.clone())
     if (typeof body.markdown_text === 'string') {
-      input.calls.push({ method: 'chat.postMessage', body })
+      input.calls.push({
+        method: path === '/api/chat.postMessage' ? 'chat.postMessage' : 'chat.update',
+        body
+      })
       const { markdown_text: markdownText, ...legacyBody } = body
       await sendWebResponse(
         res,

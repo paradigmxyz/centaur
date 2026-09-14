@@ -2049,19 +2049,18 @@ async function renderFallbackFinalAnswer(
       return null
     }
     const text = fallback.textOrDefault()
+    const fallbackMarkdown = truncateSlackText(
+      text,
+      SLACK_FALLBACK_MARKDOWN_MAX_CHARS,
+      'Slack final answer'
+    )
     if (replacement) {
-      const fallbackText = truncateSlackText(
-        text,
-        SLACK_FALLBACK_TEXT_MAX_CHARS,
-        'Slack final answer'
+      await thread.adapter.editMessage(
+        thread.id,
+        replacement.replaceMessageId,
+        { markdown: fallbackMarkdown }
       )
-      await thread.adapter.editMessage(thread.id, replacement.replaceMessageId, fallbackText)
     } else {
-      const fallbackMarkdown = truncateSlackText(
-        text,
-        SLACK_FALLBACK_MARKDOWN_MAX_CHARS,
-        'Slack final answer'
-      )
       await thread.post({ markdown: fallbackMarkdown })
     }
     traceLog(options, 'slackbotv2_render_fallback_complete', trace, {
