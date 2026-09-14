@@ -5615,28 +5615,12 @@ async fn record_terminal_output(
     )
     .await;
     if let Some(idle_timeout) = idle_timeout_from_execution(&terminal_execution) {
-        let expected_activity_version = match ctx.store.get_session(thread_key).await {
-            Ok(session) => sandbox_activity_version(&session),
-            Err(error) => {
-                warn!(
-                    component = COMPONENT_SESSION_RUNTIME,
-                    event = "session_sandbox_activity_snapshot_failed",
-                    thread_key = %thread_key,
-                    execution_id,
-                    sandbox_id,
-                    %error,
-                    "failed to snapshot sandbox activity before scheduling idle pause"
-                );
-                None
-            }
-        };
         spawn_idle_pause(
             ctx.clone(),
             thread_key.clone(),
             terminal_execution.execution_id,
             sandbox_id.to_owned(),
             idle_timeout,
-            expected_activity_version,
         );
     }
     Ok(())
@@ -5743,19 +5727,16 @@ async fn record_max_duration_failure(
         Some("timeout"),
     )
     .await;
-    if let Some(idle_timeout) = idle_timeout.or_else(|| idle_timeout_from_execution(&execution)) {
-        let session = ctx.store.get_session(thread_key).await?;
-        let expected_activity_version = sandbox_activity_version(&session);
-        if let Some(sandbox_id) = session.sandbox_id {
-            spawn_idle_pause(
-                ctx.clone(),
-                thread_key.clone(),
-                execution_id.to_owned(),
-                sandbox_id,
-                idle_timeout,
-                expected_activity_version,
-            );
-        }
+    if let Some(idle_timeout) = idle_timeout.or_else(|| idle_timeout_from_execution(&execution))
+        && let Some(sandbox_id) = ctx.store.get_session(thread_key).await?.sandbox_id
+    {
+        spawn_idle_pause(
+            ctx.clone(),
+            thread_key.clone(),
+            execution_id.to_owned(),
+            sandbox_id,
+            idle_timeout,
+        );
     }
     Ok(())
 }
@@ -5766,19 +5747,11 @@ fn spawn_idle_pause(
     execution_id: String,
     sandbox_id: String,
     idle_timeout: Duration,
-    expected_activity_version: Option<i128>,
 ) {
     tokio::spawn(async move {
         sleep(idle_timeout).await;
-        if let Err(error) = record_idle_pause(
-            &ctx,
-            &thread_key,
-            &execution_id,
-            &sandbox_id,
-            idle_timeout,
-            expected_activity_version,
-        )
-        .await
+        if let Err(error) =
+            record_idle_pause(&ctx, &thread_key, &execution_id, &sandbox_id, idle_timeout).await
         {
             warn!(%thread_key, %execution_id, %sandbox_id, %error, "idle pause task failed");
         }
@@ -5791,7 +5764,6 @@ async fn record_idle_pause(
     execution_id: &str,
     sandbox_id: &str,
     idle_timeout: Duration,
-    expected_activity_version: Option<i128>,
 ) -> Result<(), SessionRuntimeError> {
     let latest_execution = ctx.store.latest_execution_for_thread(thread_key).await?;
     let session = ctx.store.get_session(thread_key).await?;
@@ -5800,7 +5772,6 @@ async fn record_idle_pause(
         latest_execution.as_ref(),
         execution_id,
         sandbox_id,
-        expected_activity_version,
     ) {
         return Ok(());
     }
@@ -5892,7 +5863,6 @@ fn should_pause_idle_sandbox(
     latest_execution: Option<&SessionExecution>,
     execution_id: &str,
     sandbox_id: &str,
-    expected_activity_version: Option<i128>,
 ) -> bool {
     if session.sandbox_id.as_deref() != Some(sandbox_id) {
         return false;
@@ -5903,21 +5873,10 @@ fn should_pause_idle_sandbox(
     if execution.execution_id != execution_id {
         return false;
     }
-    if expected_activity_version.is_some()
-        && sandbox_activity_version(session) != expected_activity_version
-    {
-        return false;
-    }
     matches!(
         execution.status,
         ExecutionStatus::Completed | ExecutionStatus::Failed | ExecutionStatus::Cancelled
     )
-}
-
-fn sandbox_activity_version(session: &Session) -> Option<i128> {
-    session
-        .sandbox_last_active_at
-        .map(|last_active_at| last_active_at.unix_timestamp_nanos())
 }
 
 fn duration_millis_u64(duration: Duration) -> u64 {
@@ -8356,53 +8315,29 @@ mod tests {
         let running = session_execution("exe-1", ExecutionStatus::Running, json!({}));
         let newer = session_execution("exe-2", ExecutionStatus::Completed, json!({}));
 
-        let scheduled_activity = session.sandbox_last_active_at;
-        let scheduled_activity_version = sandbox_activity_version(&session);
         assert!(should_pause_idle_sandbox(
             &session,
             Some(&completed),
             "exe-1",
-            "asbx-1",
-            scheduled_activity_version,
+            "asbx-1"
         ));
         assert!(!should_pause_idle_sandbox(
             &session,
             Some(&running),
             "exe-1",
-            "asbx-1",
-            scheduled_activity_version,
+            "asbx-1"
         ));
         assert!(!should_pause_idle_sandbox(
             &session,
             Some(&newer),
             "exe-1",
-            "asbx-1",
-            scheduled_activity_version,
+            "asbx-1"
         ));
         assert!(!should_pause_idle_sandbox(
             &session,
             Some(&completed),
             "exe-1",
-            "asbx-other",
-            scheduled_activity_version,
-        ));
-
-        let mut active_session = session;
-        active_session.sandbox_last_active_at =
-            scheduled_activity.map(|value| value + time::Duration::SECOND);
-        assert!(!should_pause_idle_sandbox(
-            &active_session,
-            Some(&completed),
-            "exe-1",
-            "asbx-1",
-            scheduled_activity_version,
-        ));
-        assert!(should_pause_idle_sandbox(
-            &active_session,
-            Some(&completed),
-            "exe-1",
-            "asbx-1",
-            None,
+            "asbx-other"
         ));
     }
 
