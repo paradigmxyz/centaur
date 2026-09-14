@@ -39,6 +39,7 @@ const TEAM_ID = 'T000000001'
 const CHANNEL_ID = 'C000000001'
 /** How real Slack renders a streamed message whose stream broke or was never stopped. */
 const BROKEN_STREAM_TEXT = ':warning: Something went wrong'
+const SLACK_MARKDOWN_TEXT_MAX_CHARS = 12_000
 
 function contentTextWithHeading(
   content: Array<{ text?: string; type: string }>,
@@ -3379,11 +3380,14 @@ describe('slackbotv2', () => {
     // ...and the diverging live draft is gone (neither interleaved nor left behind).
     expect(texts.some(text => text.includes('Draft answer from the live deltas'))).toBe(false)
     const replacementUpdate = slackApi.calls.find(call => call.method === 'chat.update')
+    expect(replacementUpdate).toBeDefined()
     expect(replacementUpdate?.body.text).toBeUndefined()
     expect(stringField(replacementUpdate?.body.markdown_text)).toStartWith(
       '**Final reconciled answer from the result.**'
     )
-    expect(stringField(replacementUpdate?.body.markdown_text).length).toBeLessThanOrEqual(12_000)
+    expect(stringField(replacementUpdate?.body.markdown_text).length).toBeLessThanOrEqual(
+      SLACK_MARKDOWN_TEXT_MAX_CHARS
+    )
     expect(stringField(replacementUpdate?.body.markdown_text)).toContain('[truncated ')
   })
 
@@ -3451,13 +3455,16 @@ describe('slackbotv2', () => {
     )
     expect(visibleFinalReplies).toHaveLength(1)
     const fallbackPost = slackApi.calls.find(call => call.method === 'chat.postMessage')
+    expect(fallbackPost).toBeDefined()
     expect(fallbackPost?.body.text).toBeUndefined()
     expect(stringField(fallbackPost?.body.markdown_text)).toStartWith(
       '**EXPIRED_STREAM_FALLBACK_VISIBLE**'
     )
     // The fallback budget leaves room for the adapter to expand bare mentions
     // without crossing Slack's 12,000-character markdown_text limit.
-    expect(stringField(fallbackPost?.body.markdown_text).length).toBeLessThanOrEqual(12_000)
+    expect(stringField(fallbackPost?.body.markdown_text).length).toBeLessThanOrEqual(
+      SLACK_MARKDOWN_TEXT_MAX_CHARS
+    )
     expect(stringField(fallbackPost?.body.markdown_text)).toContain('[truncated ')
     const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
     expect(threadState).toEqual(
@@ -6994,6 +7001,10 @@ async function handlePatchedSlackRequest(
         method: path === '/api/chat.postMessage' ? 'chat.postMessage' : 'chat.update',
         body
       })
+      if (body.markdown_text.length > SLACK_MARKDOWN_TEXT_MAX_CHARS) {
+        await sendWebResponse(res, Response.json({ ok: false, error: 'msg_too_long' }))
+        return
+      }
       const { markdown_text: markdownText, ...legacyBody } = body
       await sendWebResponse(
         res,
