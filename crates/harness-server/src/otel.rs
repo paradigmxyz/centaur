@@ -1022,6 +1022,7 @@ fn harness_name(kind: HarnessKind) -> &'static str {
         HarnessKind::Codex => "codex",
         HarnessKind::ClaudeCode => "claude",
         HarnessKind::Amp => "amp",
+        HarnessKind::Omp => "omp",
     }
 }
 
@@ -1033,6 +1034,8 @@ fn gen_ai_system(kind: HarnessKind, model_provider: &str) -> &'static str {
         "openai"
     } else if provider.contains("amp") || matches!(kind, HarnessKind::Amp) {
         "amp"
+    } else if provider.contains("omp") || matches!(kind, HarnessKind::Omp) {
+        "omp"
     } else {
         "unknown"
     }

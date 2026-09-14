@@ -221,7 +221,7 @@ impl HarnessServer for ClaudeCodeHarness {
         "anthropic"
     }
 
-    fn command_for_turn(&self, state: &ThreadState) -> ProcessCommand {
+    fn command_for_turn(&self, state: &ThreadState, _input: &[UserInput]) -> ProcessCommand {
         if let Some(command) = command_from_override("CENTAUR_CLAUDE_APP_BRIDGE_COMMAND") {
             return command;
         }
