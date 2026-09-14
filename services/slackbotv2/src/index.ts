@@ -75,6 +75,7 @@ import {
   isAllowedSlackWebhookBody,
   parseSlackWebhookPayload
 } from './slack-events'
+import { createSlackSocketRunner, slackSocketLoopbackVerifier } from './slack-socket'
 import { isSlackStopCommand } from './stop-command'
 import {
   createSteeringReactionController,
@@ -302,13 +303,18 @@ function stickyOverrideRaw(
 export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   const userName = options.userName ?? 'centaur'
   const logger = options.logger ?? noopLogger
+  // Socket Mode events arrive unsigned over an authenticated WebSocket and are
+  // replayed into the webhook routes below, so signature verification is
+  // replaced by a token only this process's own replays carry.
+  const socketLoopbackToken = options.socketMode ? randomUUID() : undefined
   const slack = createSlackAdapter({
     apiUrl: options.slackApiUrl,
     botToken: options.botToken,
     botUserId: options.botUserId,
-    signingSecret: options.signingSecret,
-    mode: options.socketMode ? 'socket' : undefined,
-    appToken: options.appToken,
+    signingSecret: socketLoopbackToken ? undefined : options.signingSecret,
+    webhookVerifier: socketLoopbackToken
+      ? slackSocketLoopbackVerifier(socketLoopbackToken)
+      : undefined,
     userName,
     logger
   })
@@ -453,6 +459,17 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   })
 
   const app = new Hono()
+  const socket = socketLoopbackToken
+    ? createSlackSocketRunner({
+        ...(options.socketTransport ?? {
+          connect: handlers => slack.connectSocketMode(handlers),
+          disconnect: () => slack.disconnect()
+        }),
+        dispatch: async request => await app.fetch(request),
+        loopbackToken: socketLoopbackToken,
+        logger
+      })
+    : undefined
   app.get('/health', c => healthResponse(c, stateConnectionStatus))
   app.get('/metrics', c =>
     c.text(slackbotMetrics.expose(), 200, {
@@ -556,8 +573,9 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   if (options.recoverRenderObligationsOnStart !== false) {
     scheduleRenderObligationRecovery(chat, state, options, stateConnected)
   }
+  if (socket) backgroundWaitUntil(socket.start())
 
-  return { app, chat }
+  return { app, chat, socket }
 }
 
 async function handleSlackMessageHandoff(

@@ -5,6 +5,7 @@ import type { Hono } from 'hono'
 import type { ChannelDefaults } from './channel-defaults'
 import type { HarnessOverrides } from './overrides'
 import type { SlackDisplayTextSource } from './slack-display-text'
+import type { SlackSocketRunner, SlackSocketTransport } from './slack-socket'
 
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[]
@@ -131,6 +132,7 @@ export type SlackbotV2Options = {
   allowedExternalTeamIds?: readonly string[]
   apiKey?: string
   apiUrl: string
+  /** Slack app-level token (`xapp-...`); required when socketMode is set. */
   appToken?: string
   assistantStatus?: string
   /**
@@ -213,6 +215,8 @@ export type SlackbotV2Options = {
   slackApiTimeoutMs?: number
   /** Socket Mode instead of webhooks; requires appToken. Keep one replica. */
   socketMode?: boolean
+  /** Opens the Socket Mode connection; defaults to the adapter's own WebSocket. */
+  socketTransport?: SlackSocketTransport
   state?: StateAdapter
   stateKeyPrefix?: string
   /** React to mentioned messages that are forwarded into an active execution. */
@@ -239,6 +243,8 @@ export type MessageOverridesStrategy = (
 export type SlackbotV2 = {
   app: Hono
   chat: Chat
+  /** Present only in Socket Mode; owns the Slack WebSocket and its health. */
+  socket?: SlackSocketRunner
 }
 
 export type SlackbotV2ThreadState = {

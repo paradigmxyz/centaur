@@ -1,5 +1,60 @@
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index 2a2330e6fd397fb18b42242fedef682fd57122e8..29e97bbe83e71d23d1c1ae4782f9dae63a8b0141 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -219,6 +219,20 @@ interface SlackAdapterConfig {
+     webhookVerifier?: SlackWebhookVerifier;
+ }
+ 
++/** One Socket Mode envelope handed to `connectSocketMode`'s `onEvent`. */
++interface SlackSocketModeEvent {
++    ack: (response?: Record<string, unknown>) => Promise<void>;
++    body: Record<string, unknown>;
++    eventType: string;
++    /** Set above 0 when Slack redelivers an envelope it saw no ack for. */
++    retryNum?: number;
++}
++/** Callbacks for a caller-routed Socket Mode connection. */
++interface SlackSocketModeHandlers {
++    onEvent: (event: SlackSocketModeEvent) => unknown;
++    /** "authenticated" | "connected" | "reconnecting" | "disconnected" */
++    onStateChange?: (state: string) => void;
++}
+ /** Envelope for events forwarded from a socket mode listener via HTTP POST */
+ interface SlackForwardedSocketEvent {
+     body: Record<string, unknown>;
+@@ -669,6 +683,23 @@ declare class SlackAdapter implements Adapter<SlackThreadId, unknown> {
+      * Creates a SocketModeClient, registers event handlers, and connects.
+      */
+     protected startSocketMode(): Promise<void>;
++    /**
++     * Open a Socket Mode connection whose envelopes are handed to the caller
++     * instead of being routed inside the adapter.
++     *
++     * `mode: "socket"` dispatches straight to the adapter's own handlers, which
++     * skips everything a host application layers on its own webhook route
++     * (allowlists, side effects, metrics), and it disables `handleWebhook`
++     * entirely so those events cannot be replayed back through it. This keeps
++     * the adapter in webhook mode and only owns the WebSocket: `onEvent`
++     * receives every envelope with its ack, and `onStateChange` reports
++     * connection transitions so the host can gate readiness on them.
++     *
++     * Rejects when the app-level token is missing or Slack refuses it
++     * (`invalid_auth`, `not_authed`, ...); recoverable failures are retried by
++     * the underlying client.
++     */
++    connectSocketMode(handlers: SlackSocketModeHandlers): Promise<unknown>;
+     /**
+      * Route a socket mode event to the appropriate handler.
+      */
+@@ -972,4 +1003,4 @@ declare class SlackAdapter implements Adapter<SlackThreadId, unknown> {
+ }
+ declare function createSlackAdapter(config?: SlackAdapterConfig): SlackAdapter;
+ 
+-export { SlackAdapter, type SlackAdapterConfig, type SlackAdapterMode, type SlackBotToken, type SlackEvent, SlackFormatConverter, type SlackInstallation, SlackFormatConverter as SlackMarkdownConverter, type SlackOAuthCallbackOptions, type SlackReactionEvent, type SlackThreadId, cardToBlockKit, cardToFallbackText, createSlackAdapter };
++export { SlackAdapter, type SlackAdapterConfig, type SlackAdapterMode, type SlackBotToken, type SlackEvent, SlackFormatConverter, type SlackInstallation, SlackFormatConverter as SlackMarkdownConverter, type SlackOAuthCallbackOptions, type SlackReactionEvent, type SlackSocketModeEvent, type SlackSocketModeHandlers, type SlackThreadId, cardToBlockKit, cardToFallbackText, createSlackAdapter };
 diff --git a/dist/index.js b/dist/index.js
-index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f32ccc951 100644
+index a7048fd884020cfd96a51c48b7071fa7293f3dc4..a04792ab7057e0d954f01ee23a79cf6201020307 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -31,6 +31,216 @@ import {
@@ -253,7 +308,57 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
    /**
     * Build the Slack API payload fields for a message.
     *
-@@ -2004,7 +2234,10 @@ var SlackAdapter = class _SlackAdapter {
+@@ -1728,6 +1958,49 @@ var SlackAdapter = class _SlackAdapter {
+     await this.socketClient.start();
+     this.logger.info("Slack socket mode connected");
+   }
++  /**
++   * Open a Socket Mode connection whose envelopes are handed to the caller
++   * instead of being routed inside the adapter.
++   *
++   * `mode: "socket"` dispatches straight to the adapter's own handlers, which
++   * skips everything a host application layers on its own webhook route
++   * (allowlists, side effects, metrics), and it disables `handleWebhook`
++   * entirely so those events cannot be replayed back through it. This keeps the
++   * adapter in webhook mode and only owns the WebSocket: `onEvent` receives
++   * every envelope with its ack, and `onStateChange` reports connection
++   * transitions so the host can gate readiness on them.
++   *
++   * Rejects when the app-level token is missing or Slack refuses it
++   * (`invalid_auth`, `not_authed`, ...); recoverable failures are retried by the
++   * underlying client.
++   *
++   * @param {{ onEvent: (event: { ack: Function, body: Record<string, unknown>, eventType: string, retryNum?: number }) => unknown, onStateChange?: (state: string) => void }} handlers
++   */
++  async connectSocketMode(handlers) {
++    if (!this.appToken) {
++      throw new ValidationError(
++        "slack",
++        "appToken is required for socket mode. Set SLACK_APP_TOKEN or provide it in config."
++      );
++    }
++    const client = new SocketModeClient({ appToken: this.appToken });
++    if (handlers.onStateChange) {
++      for (const state of ["authenticated", "connected", "reconnecting", "disconnected"]) {
++        client.on(state, () => handlers.onStateChange(state));
++      }
++    }
++    client.on("slack_event", async ({ ack, body, type, retry_num }) => {
++      try {
++        await handlers.onEvent({ ack, body, eventType: type, retryNum: retry_num });
++      } catch (error) {
++        this.logger.error("Error in socket mode event handler", { error });
++      }
++    });
++    this.socketClient = client;
++    await client.start();
++    this.logger.info("Slack socket mode connected");
++    return client;
++  }
+   /**
+    * Route a socket mode event to the appropriate handler.
+    */
+@@ -2004,7 +2277,10 @@ var SlackAdapter = class _SlackAdapter {
        channel: event.channel,
        threadTs
      });
@@ -265,7 +370,7 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
      const factory = async () => {
        const msg = await this.parseSlackMessage(event, threadId);
        if (isMention) {
-@@ -2520,10 +2753,10 @@ var SlackAdapter = class _SlackAdapter {
+@@ -2520,10 +2796,10 @@ var SlackAdapter = class _SlackAdapter {
        formatted: this.formatConverter.toAst(text),
        raw: event,
        author: {
@@ -278,7 +383,7 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
          isMe
        },
        metadata: {
-@@ -3452,26 +3685,251 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3452,26 +3728,251 @@ var SlackAdapter = class _SlackAdapter {
      }
      this.logger.debug("Slack: starting stream", { channel, threadTs });
      const token = await this.getToken();
@@ -539,7 +644,7 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
      const sendStructuredChunk = async (chunk) => {
        if (!structuredChunksSupported) {
          return;
-@@ -3481,8 +3939,45 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3481,8 +3982,45 @@ var SlackAdapter = class _SlackAdapter {
        await flushMarkdownDelta(delta);
        lastAppended = committable;
        try {
@@ -586,7 +691,7 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
          structuredChunksSupported = false;
          this.logger.warn(
            "Structured streaming chunk failed, falling back to text-only streaming. Ensure your Slack app manifest includes assistant_view, assistant:write scope, and @slack/web-api >= 7.14.0",
-@@ -3497,31 +3992,91 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3497,31 +4035,91 @@ var SlackAdapter = class _SlackAdapter {
        await flushMarkdownDelta(delta);
        lastAppended = committable;
      };
@@ -606,7 +711,7 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
 +        } else {
 +          await sendStructuredChunk(chunk);
 +        }
-       }
++      }
 +      renderer.finish();
 +      const finalCommittable = renderer.getCommittableText();
 +      const finalDelta = finalCommittable.slice(lastAppended.length);
@@ -640,7 +745,7 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
 +            error: stopError
 +          });
 +        }
-+      }
+       }
 +    } catch (error) {
 +      const segments = /* @__PURE__ */ new Set([...structured, current]);
 +      fence.finish();
@@ -697,7 +802,7 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
      };
    }
    /**
-@@ -3798,10 +4353,10 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3798,10 +4396,10 @@ var SlackAdapter = class _SlackAdapter {
        formatted: this.formatConverter.toAst(text),
        raw: event,
        author: {
