@@ -1278,6 +1278,63 @@ def docs_read(
         raise typer.Exit(1)
 
 
+@docs_app.command("comments")
+def docs_comments(
+    doc_id: str = typer.Argument(..., help="Document ID or Google Docs URL"),
+    limit: int = typer.Option(100, "--limit", "-n", help="Max comments"),
+    include_deleted: bool = typer.Option(
+        False,
+        "--include-deleted",
+        help="Include deleted comments and replies",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """Read comments and replies on a Google Doc.
+
+    Examples:
+        gsuite docs comments "1abc123"
+        gsuite docs comments "https://docs.google.com/document/d/1abc123/edit" --json
+    """
+    from .client import docs_list_comments
+
+    try:
+        document_id = extract_doc_id(doc_id)
+        comments = docs_list_comments(
+            document_id,
+            max_results=limit,
+            include_deleted=include_deleted,
+        )
+        if json_output:
+            print(json.dumps(comments, indent=2, ensure_ascii=False))
+            return
+        if not comments:
+            console.print("[yellow]No comments found.[/]")
+            return
+
+        for comment in comments:
+            author = comment["author"]["display_name"] or "Unknown author"
+            status = (
+                "deleted" if comment["deleted"] else "resolved" if comment["resolved"] else "open"
+            )
+            console.print(f"Comment {comment['id']} by {author} [{status}]", markup=False)
+            quoted_text = comment["quoted_file_content"]["value"]
+            if quoted_text:
+                console.print(f"  Quoted: {quoted_text}", markup=False)
+            if comment["content"]:
+                console.print(f"  {comment['content']}", markup=False)
+            for reply in comment["replies"]:
+                reply_author = reply["author"]["display_name"] or "Unknown author"
+                reply_action = f" [{reply['action']}]" if reply["action"] else ""
+                console.print(
+                    f"  Reply {reply['id']} by {reply_author}{reply_action}: {reply['content']}",
+                    markup=False,
+                )
+            console.print()
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+
 @docs_app.command("replace")
 def docs_replace_cmd(
     doc_id: str = typer.Argument(..., help="Document ID or Google Docs URL"),
@@ -1453,7 +1510,9 @@ def _get_channel_member_emails_via_cli(channel: str) -> list[str]:
 @docs_app.command("create")
 def docs_create_cmd(
     title: str = typer.Argument(..., help="Document title"),
-    channel: str = typer.Option(..., "--channel", help="Slack channel to share with (required)"),
+    channel: str | None = typer.Option(
+        None, "--channel", help="Optional Slack channel to share with"
+    ),
     owner: str = typer.Option(..., "--owner", help="Email of new owner (required)"),
     content: str = typer.Option(None, "--content", "-c", help="Initial content"),
 ):
@@ -1461,7 +1520,7 @@ def docs_create_cmd(
 
     This command:
     1. Creates the document
-    2. Shares with all channel members (writer role)
+    2. Shares with all channel members when --channel is provided (writer role)
     3. Transfers ownership to the specified owner
 
     The original owner (service account) is automatically downgraded to editor
@@ -1469,6 +1528,7 @@ def docs_create_cmd(
     removes the service account's editor role permissions after 7 days.
 
     Examples:
+        gsuite docs create "Personal Notes" --owner alice@paradigm.xyz
         gsuite docs create "Meeting Notes" --channel eng-ai --owner alice@paradigm.xyz
         gsuite docs create "Doc Title" --channel ai-agent --owner bob@paradigm.xyz --content "Hello"
     """
@@ -1480,8 +1540,11 @@ def docs_create_cmd(
         console.print(f"[cyan]URL: {result['url']}[/]", soft_wrap=True)
         console.print(f"[dim]ID: {result['document_id']}[/]")
 
-        member_emails = _get_channel_member_emails_via_cli(channel)
-        console.print(f"[dim]Setting up permissions for {len(member_emails)} channel members...[/]")
+        member_emails = _get_channel_member_emails_via_cli(channel) if channel else []
+        if channel:
+            console.print(
+                f"[dim]Setting up permissions for {len(member_emails)} channel members...[/]"
+            )
 
         perm_result = drive_setup_channel_permissions(
             file_id=result["document_id"],
@@ -1489,7 +1552,10 @@ def docs_create_cmd(
             requester_email=owner,
         )
 
-        console.print(f"[green]✓ Shared with {len(perm_result['shared_with'])} channel members[/]")
+        if channel:
+            console.print(
+                f"[green]✓ Shared with {len(perm_result['shared_with'])} channel members[/]"
+            )
         console.print(f"[green]✓ Ownership transferred to {owner}[/]")
 
     except Exception as e:
@@ -1542,6 +1608,48 @@ def sheets_read_cmd(
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
+
+
+@sheets_app.command("batch-read")
+def sheets_batch_read_cmd(
+    spreadsheet_id: str = typer.Argument(..., help="Spreadsheet ID (from URL)"),
+    range_notations: list[str] = typer.Option(..., "--range", "-r", help="A1 notation range"),  # noqa: B008
+    output_json: bool = typer.Option(False, "--json", "-o", help="Output as JSON"),
+):
+    """Read data from a Google Sheet, across several ranges.
+
+    Example:
+        gsuite sheets batch-read "1Abc..." --range "Sheet1!A1:D10" --range "Sheet2!A1:B5"
+        gsuite sheets batch-read "1Abc..." --range "Sheet1!A1:D10" --json
+    """
+    from .client import sheets_batch_read
+
+    try:
+        result = sheets_batch_read(spreadsheet_id, range_notations)
+
+        if output_json:
+            console.print(json.dumps(result, indent=2), markup=False, soft_wrap=True)
+            return
+
+        for value_range in result:
+            if not value_range["rows"]:
+                console.print(f"[yellow]{value_range['range']}: No data found.[/]")
+                continue
+
+            table = Table(title=f"{value_range['range']} ({len(value_range['rows'])} rows)")
+            for header in value_range["headers"]:
+                table.add_column(header, style="cyan", max_width=30)
+
+            for row in value_range["rows"][:50]:
+                values = [str(row.get(h, ""))[:30] for h in value_range["headers"]]
+                table.add_row(*values)
+
+            console.print(table)
+            if len(value_range["rows"]) > 50:
+                console.print(f"[dim]... and {len(value_range['rows']) - 50} more rows[/]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
 
 
 @sheets_app.command("update")

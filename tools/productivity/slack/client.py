@@ -2568,6 +2568,11 @@ def get_user_cache(client: SlackClient | None = None) -> dict[str, str]:
     return slack_client._get_user_cache()
 
 
+def resolve_channel(channel: str) -> str:
+    """Resolve a destination using the same channel cache as send_message."""
+    return _client()._resolve_channel(channel)
+
+
 def list_bot_channels(*args, **kwargs):
     return _client().list_bot_channels(*args, **kwargs)
 

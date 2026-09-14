@@ -15,6 +15,8 @@ import {
   type Thread,
 } from "chat";
 import { Hono, type Context } from "hono";
+
+import { reasoningEffortFor } from "./reasoning-effort";
 import pg from "pg";
 import {
   parseIssueAssignmentWebhook,
@@ -521,6 +523,7 @@ function handleCommentMention(
           harnessType: overrides.harnessType,
           model: overrides.model,
           provider: overrides.provider,
+          reasoning: reasoningEffortFor(options.reasoningEffort, "comment"),
         },
         parentCommentId: rootCommentId,
         reactCommentId: event.commentId,
@@ -697,7 +700,9 @@ function handleIssueAssignment(
         executeMessage: assignmentInstructionMessage(event, threadKey),
         issueId: event.issueId,
         options,
-        overrides: {},
+        overrides: {
+          reasoning: reasoningEffortFor(options.reasoningEffort, "assignment"),
+        },
         thread,
         threadKey,
         trace,
@@ -729,7 +734,12 @@ async function runThreadTurn(input: {
   executeMessage: LinearbotApiMessage;
   issueId: string;
   options: LinearbotOptions;
-  overrides: { harnessType?: string; model?: string; provider?: string };
+  overrides: {
+    harnessType?: string;
+    model?: string;
+    provider?: string;
+    reasoning?: string;
+  };
   parentCommentId?: string;
   /** Comment to react to (👀 → ✅/❌); the triggering mention, if any. */
   reactCommentId?: string;
@@ -839,6 +849,7 @@ async function runThreadTurn(input: {
     messages: [],
     model: overrides.model,
     provider: provider.provider,
+    reasoning: overrides.reasoning,
     onEventId: (eventId) => {
       lastEventId = Math.max(lastEventId, eventId);
       // Keep afterEventId in sync so a mid-stream retry resumes after the last

@@ -17,7 +17,11 @@ load_dotenv()
 
 app = typer.Typer(
     name="company_context",
-    help="Search or run scoped SQL over company history, Slack DMs, Google Docs, and Granola notes.",
+    help=(
+        "Search or run scoped SQL over company history, Slack DMs, Google Docs, and "
+        "Granola notes. Search for and read the `company-context` skill with "
+        "`centaur-skills` before use."
+    ),
 )
 
 
@@ -77,7 +81,11 @@ def query(
         "--timeout-seconds",
         help="Query timeout in seconds, capped at 30.",
     ),
-    json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or human-readable text.",
+    ),
 ) -> None:
     """Run raw read-only SQL against the scoped company-context database."""
     result = CompanyContextClient().query(
@@ -134,7 +142,11 @@ def search(
         "--hybrid/--no-hybrid",
         help="Fuse keyword and vector results when embeddings are enabled.",
     ),
-    json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or human-readable text.",
+    ),
 ) -> None:
     """Search indexed company context, including Google Docs and Granola notes."""
     result = CompanyContextClient().search(
@@ -171,7 +183,11 @@ def search(
 def search_dm_conversations(
     query: str = typer.Argument(..., help="Person, user id, or conversation search query."),
     limit: int = typer.Option(10, "--limit", "-n", help="Max conversations."),
-    json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or human-readable text.",
+    ),
 ) -> None:
     """Find Slack DM/group DM conversations visible to the current user."""
     result = CompanyContextClient().search_dm_conversations(query=query, limit=limit)
@@ -217,7 +233,11 @@ def search_dms(
     occurred_before: str | None = typer.Option(
         None, "--before", help="Only results before this time."
     ),
-    json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or human-readable text.",
+    ),
 ) -> None:
     """Search Slack DMs and group DMs visible to the current user."""
     result = CompanyContextClient().search_dms(
@@ -271,7 +291,11 @@ def list_documents(
     occurred_before: str | None = typer.Option(
         None, "--before", help="Only documents before this time."
     ),
-    json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or human-readable text.",
+    ),
 ) -> None:
     """List indexed company context documents, including Google Docs and Granola notes."""
     result = CompanyContextClient().list_documents(
@@ -312,7 +336,11 @@ def read_document(
     max_related_children: int = typer.Option(
         10, "--max-related-children", help="Max related children."
     ),
-    json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or human-readable text.",
+    ),
 ) -> None:
     """Read a company context document returned by search, including Granola notes."""
     result = CompanyContextClient().read_document(

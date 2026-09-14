@@ -3,6 +3,7 @@ import email.message
 import json
 
 import pytest
+import slack.client as slack_client
 from slack.client import SlackAuthError, SlackClient, SlackRateLimitError
 from slack_sdk.errors import SlackApiError
 
@@ -260,12 +261,13 @@ def test_resolve_channel_rejects_unknown_at_username() -> None:
         client._resolve_channel("@nobody")
 
 
-def test_resolve_channel_still_resolves_channel_names() -> None:
+def test_resolve_channel_still_resolves_channel_names(monkeypatch: pytest.MonkeyPatch) -> None:
     client, fake_web_client = _make_client()
     _restore_real_resolve_channel(client)
 
-    assert client._resolve_channel("paradigm-pulse") == "C123"
-    assert client._resolve_channel("C456DEF") == "C456DEF"
+    monkeypatch.setattr(slack_client, "_client", lambda: client)
+    assert slack_client.resolve_channel("paradigm-pulse") == "C123"
+    assert slack_client.resolve_channel("C456DEF") == "C456DEF"
     assert fake_web_client.open_calls == []
 
 

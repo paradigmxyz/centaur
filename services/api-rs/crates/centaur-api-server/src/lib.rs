@@ -440,6 +440,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workflow_actions_require_trusted_ingress_capability() {
+        let mut message = json!({"channel": "C1", "blocks": [{"type": "actions", "elements": [{
+            "type": "button", "action_id": "centaur.workflow.action:00000000-0000-0000-0000-000000000001:approve",
+            "value": json!({"workflow_name": "review", "input": {"release_id": "r1"}}).to_string(),
+        }]}]});
+        centaur_workflows::slack_buttons::sign_message(&mut message, b"test-secret").unwrap();
+        let signed = message["blocks"][0]["elements"][0]["value"]
+            .as_str()
+            .unwrap();
+        for (token, button, expected) in [
+            (
+                "test-slackbot-key".to_owned(),
+                signed,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                "test-slackbot-key".to_owned(),
+                r#"{"workflow_name":"review","input":{}}"#,
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                principal_token("prn_sandbox"),
+                signed,
+                StatusCode::FORBIDDEN,
+            ),
+        ] {
+            let request = json!({"button": button, "idempotency_key": "click-1", "click": {
+                "id": "00000000-0000-0000-0000-000000000001", "action": "approve", "channel_id": "C1", "user_id": "U1",
+            }});
+            let response = build_router_with_app_state(AppState::unready(test_auth_with_slack()))
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/api/workflows/actions/invoke")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(request.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+    }
+
+    #[tokio::test]
     async fn principal_jwt_is_capability_scoped_and_archive_exception_is_subject_scoped() {
         let principal = principal_token("prn_sandbox");
         let write_response = build_router_with_app_state(AppState::unready(test_auth()))
@@ -694,35 +740,43 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn mcp_requires_bearer_before_runtime_is_ready() {
-        let app = build_router_with_app_state(AppState::unready(test_auth()));
+    #[test]
+    fn mcp_requires_bearer_before_runtime_is_ready() {
+        // MCP tests vary public URL configuration through process environment.
+        let _lock = crate::mcp::MCP_ENV_LOCK.lock().unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let app = build_router_with_app_state(AppState::unready(test_auth()));
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/mcp")
-                    .header(header::HOST, "centaur.local")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .method(Method::POST)
+                            .uri("/mcp")
+                            .header(header::HOST, "centaur.local")
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(Body::from(
+                                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+                            ))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
 
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let challenge = response
-            .headers()
-            .get(header::WWW_AUTHENTICATE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap();
-        assert!(challenge.contains("Bearer"));
-        assert!(challenge.contains(
-            "resource_metadata=\"http://centaur.local/.well-known/oauth-protected-resource/mcp\""
-        ));
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+                let challenge = response
+                    .headers()
+                    .get(header::WWW_AUTHENTICATE)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap();
+                assert!(challenge.contains("Bearer"));
+                assert!(challenge.contains(
+                    "resource_metadata=\"http://centaur.local/.well-known/oauth-protected-resource/mcp\""
+                ));
+            });
     }
 
     #[tokio::test]

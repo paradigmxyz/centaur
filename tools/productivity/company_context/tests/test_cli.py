@@ -11,6 +11,40 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 from company_context import cli
 
 
+def test_help_links_company_context_skill() -> None:
+    result = CliRunner().invoke(cli.app, ["--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "company-context" in result.output
+    assert "centaur-skills" in result.output
+
+
+def test_search_table_flag_uses_human_readable_output(monkeypatch):
+    class FakeClient:
+        def search(self, **kwargs):
+            return {
+                "status": "ok",
+                "results": [
+                    {
+                        "document_id": "doc-1",
+                        "source": "slack",
+                        "source_type": "message",
+                        "occurred_at": "2026-09-10",
+                        "title": "Roadmap",
+                        "preview": "Launch plans",
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(cli, "CompanyContextClient", FakeClient)
+
+    result = CliRunner().invoke(cli.app, ["search", "roadmap", "--table"])
+
+    assert result.exit_code == 0, result.output
+    assert "Company Context Search (1)" in result.output
+    assert "Roadmap" in result.output
+
+
 def test_search_no_hybrid_flag_forces_keyword_mode(monkeypatch):
     calls = []
 

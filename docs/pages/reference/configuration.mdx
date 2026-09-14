@@ -132,7 +132,12 @@ Sandbox lifecycle:
 | `SESSION_IDLE_TIMEOUT_MS` | `slackbotv2.extraEnv`; default is up to 3 hours. | Slackbot v2 execute idle timeout. After an execution reaches a terminal state, api-rs pauses the sandbox if no newer execution has used that sandbox. If `SESSION_MAX_DURATION_MS` is lower than 3 hours and this value is unset, Slackbot v2 caps the default idle timeout to the max duration. |
 | `SESSION_MAX_DURATION_MS` | `slackbotv2.extraEnv`. | Optional per-execution max duration forwarded to api-rs. api-rs rejects requests where `idle_timeout_ms` is greater than `max_duration_ms`. |
 | `apiRs.sandboxMaxLifetimeSecs` / `SESSION_SANDBOX_MAX_LIFETIME_SECS` | Helm value, default `259200` (72 hours). | Restart-surviving sandbox deletion backstop. The reaper stops any non-terminal sandbox older than this, regardless of whether it is running or suspended. Set `0` to disable max-lifetime reaping. |
-| `apiRs.sandboxReapIntervalSecs` / `SESSION_SANDBOX_REAP_INTERVAL_SECS` | Helm value, default `300`. | How often api-rs sweeps observed sandboxes for max-lifetime expiry. |
+| `apiRs.sessionEventsRetentionDays` / `SESSION_EVENTS_RETENTION_DAYS` | Helm value, default `0` (disabled); range `0` through `3650`. | Deletes only `session.output.line` events older than this many days, once their execution also completed before the cutoff. Other session event types are preserved. Events without an execution expire by event age alone. Requires the [manual retention index](#stdout-event-retention). Sweeps skip deletion when the index is missing or invalid. |
+| `apiRs.sessionEventsRetentionSweepIntervalSecs` / `SESSION_EVENTS_RETENTION_SWEEP_INTERVAL_SECS` | Helm value, default `300`. | How often api-rs runs a session-event retention sweep when retention is enabled. |
+| `apiRs.sandboxReapIntervalSecs` / `SESSION_SANDBOX_REAP_INTERVAL_SECS` | Helm value, default `300`. | How often api-rs sweeps observed sandboxes for max-lifetime expiry and orphaned proxy resources. |
+| `apiRs.sandboxOrphanSweepGraceSecs` / `SESSION_SANDBOX_ORPHAN_SWEEP_GRACE_SECS` | Helm value, default `600`. | Minimum age of an iron-proxy resource with no live Sandbox before the orphan sweep may delete it. |
+| `apiRs.activitySummary.reasoningEffort` / `SESSION_ACTIVITY_SUMMARY_REASONING_EFFORT` | Helm value, default `low`. | Reasoning effort sent with the activity-summary call. The output budget is small, so a server that resolves an absent effort to its highest level spends the whole budget reasoning and returns an `incomplete` response with no message. Set empty to omit the parameter for a server that rejects it. |
+| `SESSION_TITLE_REASONING_EFFORT` | Env on api-rs, default `low`. | The same, for the session-title call, whose budget is 24 output tokens. Set empty to omit the parameter. |
 
 There is no separate suspended-only delete timer. Pausing is controlled by the
 per-execution idle timeout; deletion is controlled by sandbox max lifetime.
@@ -169,6 +174,7 @@ Execution tuning:
 | `SLACK_FEEDBACK_COMMANDS`, `SLACK_FEEDBACK_ALLOWED_CHANNELS` | `slackbot.extraEnv`. | Feedback slash commands and optional channel allowlist. |
 | `SLACK_FEEDBACK_LINEAR_TEAM_ID`, `SLACK_FEEDBACK_LINEAR_PROJECT_ID` | `slackbot.extraEnv`. | Linear destination for feedback issues. |
 | `SLACKBOT_EXTERNAL_ORG_ALLOWLIST` | `slackbot.extraEnv`. | Slack team ids allowed for external org handoff. |
+| `SLACKBOTV2_AGENT_VIEW_ENABLED` | `slackbotv2.agentViewEnabled`. | Enables Slack agent view, threaded DM sessions, and native status and titles. Defaults to `false`. Requires the Slack app migration described in [Quickstart](/quickstart). Native Stop support is deferred. |
 | `SLACKBOTV2_AUTO_JOIN_CREATED_CHANNELS` | `slackbotv2.autoJoinCreatedChannels`. | Joins newly-created public channels after subscribed `channel_created` events. Requires `channels:read` and `channels:join`. Defaults to `false`. |
 | `SLACKBOTV2_STEERING_REACTION_ENABLED` | `slackbotv2.steeringReactionEnabled`. | Reacts to mentioned follow-up messages while an execution is active, then removes their reactions after the assistant response is posted. Requires `reactions:write`. Defaults to `false` and disables itself for the running process if Slack reports the scope is missing. |
 | `SLACKBOTV2_STEERING_REACTION` | `slackbotv2.steeringReaction`. | Slack emoji name used for steering acknowledgements. Defaults to `hourglass_flowing_sand`. |
@@ -286,12 +292,17 @@ Slack ETL workflows:
 | `COMPANY_CONTEXT_EMBEDDINGS_INTERVAL_SECONDS` | `apiRs.etl.companyContextEmbeddings.intervalSeconds`, default `300`. | Delay between scans for missing or stale document embeddings. |
 | `COMPANY_CONTEXT_EMBEDDINGS_BATCH_SIZE` | `apiRs.etl.companyContextEmbeddings.batchSize`, default `250`. | Maximum documents claimed by one embedding workflow run. |
 | `COMPANY_CONTEXT_EMBEDDINGS_MAX_INPUT_CHARS` | `apiRs.etl.companyContextEmbeddings.maxInputChars`, default `8192`. | Maximum characters embedded from each document. Values cannot exceed `8192`. |
-| `COMPANY_CONTEXT_EMBEDDINGS_MODEL` | `apiRs.etl.companyContextEmbeddings.model`, default `text-embedding-3-small`. | Embedding model shared by document generation and hybrid queries. The model must support the chart's 1536-dimension vector schema. |
+| `COMPANY_CONTEXT_EMBEDDINGS_MODEL` | `apiRs.etl.companyContextEmbeddings.model`, default `text-embedding-3-small`. | Embedding model shared by document generation and hybrid queries. |
+| `COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS` | `apiRs.etl.companyContextEmbeddings.dimensions`, default `1536`. | Vector width requested by document generation and hybrid queries. It must match the database column width. |
 
 The bundled PostgreSQL image provides pgvector. External PostgreSQL deployments
 must make the `vector` extension available before migrations run. The workflow
 uses the shared Python workflow-host database connection, OpenAI credential,
 and `OPENAI_BASE_URL`. No workflow-specific PostgreSQL role or DSN is required.
+The database migration creates the embedding column as `vector(1536)`. Before
+using another dimension, migrate that column and rebuild its HNSW index, then
+re-embed the stored documents. Changing the chart value does not alter the
+database schema.
 
 Google Workspace ETL workflows:
 
@@ -318,6 +329,57 @@ Linear ETL workflows:
 | `CENTAUR_RETENTION_ATTACHMENTS_TTL_DAYS`, `CENTAUR_RETENTION_TRANSCRIPTS_TTL_DAYS` | `api.extraEnv`. | Attachment/transcript retention TTLs. |
 | `CENTAUR_RETENTION_SWEEP_INTERVAL_SECONDS`, `CENTAUR_RETENTION_BATCH_SIZE`, `CENTAUR_RETENTION_DRY_RUN` | `api.extraEnv`. | Retention sweep cadence, batch size, and dry-run mode. |
 | `TOOL_CALL_TIMEOUT_S`, `TOOL_BINARY_INLINE_MAX_BYTES`, `TOOL_BINARY_PREVIEW_BYTES` | `api.extraEnv`. | Tool execution timeout and binary result handling. |
+
+### Stdout Event Retention
+
+Retention is disabled by default. Its index is installed separately from API-RS
+startup migrations, so an index build failure does not prevent the API from
+starting. Create the index before enabling retention.
+
+Connect `psql` to the application database with an account that owns
+`session_events`. Use your normal libpq connection settings and credential file.
+From the repository root, run:
+
+```sh
+psql -X --set ON_ERROR_STOP=1 \
+  --file services/api-rs/crates/centaur-session-sqlx/manual-migrations/session_events_retention_index.sql
+```
+
+The script creates a partial index concurrently. Run it outside a transaction;
+do not use `psql --single-transaction`. Ordinary reads and writes can continue,
+but the build adds database load and can wait for existing transactions.
+
+Verify the index after the command succeeds:
+
+```sql
+SELECT indexrelid::regclass AS index_name, indisvalid, indisready, indislive
+FROM pg_catalog.pg_index
+WHERE indexrelid = to_regclass('session_events_stdout_created_at_idx')
+  AND indrelid = 'session_events'::regclass;
+```
+
+Expect one row with all three flags set to `true`. Then set
+`apiRs.sessionEventsRetentionDays` or `SESSION_EVENTS_RETENTION_DAYS` to a value
+from `1` through `3650`. An execution's stdout becomes eligible after its
+completion time passes the retention cutoff. Deletions remain batched, so a
+large backlog can take several sweeps to drain.
+
+If a build fails, inspect the index before retrying. No row means the index is
+absent and the creation script can be retried after addressing the failure.
+If the index exists but is invalid, repair it outside a transaction:
+
+```sql
+REINDEX INDEX CONCURRENTLY session_events_stdout_created_at_idx;
+```
+
+Verify the flags again after repair. The creation script deliberately fails if
+the name already exists, so a retry cannot silently accept an invalid index.
+An already valid index does not need to be recreated.
+
+Each retention sweep checks the index. If it is missing or invalid, the worker
+logs `session_events_retention_skipped` and deletes nothing. API-RS stays
+available. After the index is repaired, the next sweep can proceed without
+another restart. Setting retention back to `0` disables the worker.
 
 ## Local Scripts
 

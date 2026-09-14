@@ -198,6 +198,114 @@ curl -s "$CENTAUR_API_URL/api/workflows/runs?workflow_name=nightly_report&limit=
   -H "Authorization: Bearer $CENTAUR_API_TOKEN" | jq
 ```
 
+## Start Workflows From Slack Buttons
+
+Use `ctx.slack_buttons` to post a message whose buttons start a named workflow.
+The posting workflow receives the Slack message response and continues immediately.
+
+```python
+from api.workflow_engine import Button
+
+await ctx.slack_buttons(
+    "release-review",
+    channel="releases",
+    text="Approve this release?",
+    workflow="review_release",
+    input={"release_id": "release-42"},
+    buttons={
+        "approve": Button("Approve", style="primary"),
+        "reject": Button("Reject", style="danger"),
+    },
+)
+```
+
+`primary` uses Slack's green style, and `danger` uses its red style. Omit `style`
+for the default appearance. Plain string labels are still supported and can be
+mixed with `Button` values. Slack does not support arbitrary button colors.
+
+Each click starts `review_release` with the supplied input and a `click` field.
+The Rust workflow context signs the target workflow, input, action, group, and
+destination channel before posting. The invoke endpoint verifies that signature
+before creating a run. Posting a lookalike button through the agent Slack tool
+does not grant permission to start workflows. Set `channel` to a channel name
+such as `releases`, or a Slack conversation ID such as `C123` or `D123`. Names
+are resolved through the Slack tool's existing channel resolver before signing,
+so name lookup uses the same tool access as `slack.send_message`.
+
+Slackbot supplies `click` from the verified Slack interaction, and the API uses it
+instead of any `click` field in the signed input. It contains `id` (the button group ID),
+`action`, `user_id`, `team_id`, `channel_id`, `message_ts`, and `action_ts`.
+A workflow using a dataclass `Input` can type this field as `ButtonClick` from
+`api.workflow_engine`.
+
+The receiving workflow owns authorization, the message update, and the action:
+
+```python
+WORKFLOW_NAME = "review_release"
+
+async def handler(inp, ctx):
+    click = inp["click"]
+    if click["user_id"] != "U123" or click["action"] not in {"approve", "reject"}:
+        return
+
+    await ctx.step(
+        "update-message",
+        lambda: ctx.update_slack(
+            click["channel_id"], click["message_ts"],
+            text=f"Release {inp['release_id']}: {click['action']} selected.",
+            blocks=[],
+        ),
+    )
+    if click["action"] == "approve":
+        await ctx.start_workflow(
+            "deploy_release",
+            {"release_id": inp["release_id"]},
+            idempotency_key=f"deploy:{inp['release_id']}",
+        )
+```
+
+Check team and channel as well when your authorization policy requires them.
+An unauthorized click can return without updating the message, leaving its
+buttons available to an authorized user. The receiving workflow must update
+or remove buttons explicitly. There is no automatic expiration or cancellation
+cleanup after posting.
+
+Slack redelivery of the same click reuses the workflow execution through the
+engine's existing idempotency support. Distinct clicks start distinct executions,
+including clicks on different buttons in the same group. If only one operation
+should take effect, enforce that in the action, such as the stable child-workflow
+idempotency key above. External side effects inside steps must also be idempotent.
+Removing buttons does not cancel clicks that are already in flight.
+
+Signatures do not prevent replay. Anyone who can read a signed button and post
+as the bot can copy it into another message in the same channel. Clicking that
+copy can start another execution with the same workflow and input. Signatures
+have no expiry and are not bound to the original message timestamp. The receiving
+workflow must check whether the action is still valid. For actions that should
+only happen once, use an idempotency key based on the business operation, such as
+`deploy:release-42`, rather than the click or receiving workflow execution.
+
+Keep posting step names stable and unique. Posting uses an ordinary checkpoint
+and a stable Slack `client_msg_id`; an ambiguous Slack failure can still produce
+duplicate messages. All copies carry the same workflow target and group ID.
+Groups support one to five buttons. Action keys use letters, digits, underscores,
+or hyphens and contain at most 64 characters. Labels contain at most 75 characters.
+The signed button value, including its authentication envelope, must fit within
+2000 bytes. The API rejects oversized values before posting. Pass record
+IDs rather than large or sensitive data because this input is stored in Slack.
+
+This uses the existing Slackbot interactivity endpoint and API Slack bot token.
+Slackbot needs its dedicated `SLACKBOT_API_KEY` to start workflows through the
+button endpoint. The signing key stays in Rust and is derived specifically for
+workflow buttons from `CENTAUR_JWT_SIGNING_SECRET`. Unsigned buttons are rejected;
+rotating that secret invalidates previously signed buttons. Signatures authenticate
+the button configuration, while user authorization and duplicate-action policy
+remain the receiving workflow's responsibility.
+Workflow-start permissions still govern ordinary API callers.
+Existing custom Slack action IDs continue to emit raw workflow events.
+The `centaur.workflow.action:` namespace is reserved for workflow buttons.
+`SLACK_API_URL` can target a local Slack emulator in the API and Slackbot.
+
 ## Schedule a workflow
 
 Workflows can run from schedule metadata declared beside the handler. Use this

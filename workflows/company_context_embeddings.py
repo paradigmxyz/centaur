@@ -16,7 +16,12 @@ DEFAULT_BATCH_SIZE = 250
 DEFAULT_INTERVAL_SECONDS = 5 * 60
 DEFAULT_MAX_INPUT_CHARS = 8_192
 DEFAULT_MODEL = "text-embedding-3-small"
-EMBEDDING_DIMENSIONS = 1_536
+DEFAULT_EMBEDDING_DIMENSIONS = 1_536
+EMBEDDING_DIMENSIONS_ENV = "COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS"
+# pgvector will not build an HNSW or IVFFlat index above 2000 dimensions, so a
+# larger vector is storable but not searchable. Refuse it here rather than let
+# the index build fail later against a table that is already populated.
+MAX_EMBEDDING_DIMENSIONS = 2_000
 OPENAI_BATCH_SIZE = 25
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 EMBEDDING_UPSERTS = {
@@ -149,6 +154,31 @@ def _model(value: str | None) -> str:
     return configured.strip() or DEFAULT_MODEL
 
 
+def _embedding_dimensions(value: int | str | None = None) -> int:
+    """Vector width to request, which must match the embedding column.
+
+    The write side (this workflow) and the query side (the company_context
+    tool) read the same variable for that reason: a mismatch is not a
+    degraded search, it is an insert that fails or a query that compares
+    vectors of different widths.
+    """
+    configured = value if value is not None else os.getenv(EMBEDDING_DIMENSIONS_ENV)
+    if configured is None or (isinstance(configured, str) and not configured.strip()):
+        return DEFAULT_EMBEDDING_DIMENSIONS
+    try:
+        dimensions = int(configured)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"{EMBEDDING_DIMENSIONS_ENV} must be an integer, got {configured!r}"
+        ) from error
+    if not 1 <= dimensions <= MAX_EMBEDDING_DIMENSIONS:
+        raise ValueError(
+            f"{EMBEDDING_DIMENSIONS_ENV} must be between 1 and "
+            f"{MAX_EMBEDDING_DIMENSIONS}, got {dimensions}"
+        )
+    return dimensions
+
+
 def _embedding_text(row: Any, max_chars: int) -> str:
     parts = [
         text
@@ -255,7 +285,7 @@ async def _generate_embeddings(
     response = await client.embeddings.create(
         model=model,
         input=inputs,
-        dimensions=EMBEDDING_DIMENSIONS,
+        dimensions=_embedding_dimensions(),
         encoding_format="float",
     )
     embeddings_by_index = {item.index: item.embedding for item in response.data}

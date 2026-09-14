@@ -231,3 +231,32 @@ jobs:
       - name: Inspect manifest
         run: |
           docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ steps.meta.outputs.version }}
+
+  notify-centaur-paradigm:
+    name: Notify Paradigm Overlay
+    needs: merge
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: centaur-paradigm-dispatch
+    permissions: {}
+    steps:
+      - name: Dispatch sandbox update
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.CENTAUR_PARADIGM_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "CENTAUR_PARADIGM_DISPATCH_TOKEN is required." >&2
+            exit 1
+          fi
+
+          jq -n \
+            --arg sha "$GITHUB_SHA" \
+            '{
+              event_type: "centaur-sandbox-published",
+              client_payload: {sha: $sha}
+            }' |
+            gh api \
+              --method POST \
+              repos/paradigmxyz/centaur-paradigm/dispatches \
+              --input -
