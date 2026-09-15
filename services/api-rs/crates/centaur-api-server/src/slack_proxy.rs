@@ -869,6 +869,24 @@ fn slack_channel_info_form(channel_id: &str) -> Vec<(&'static str, String)> {
     ]
 }
 
+pub(crate) fn warm_slack_public_channel_cache() {
+    if slack_proxy_config().is_err() {
+        return;
+    }
+    tokio::spawn(async {
+        match slack_public_channels().await {
+            Ok(channels) => tracing::info!(
+                channel_count = channels.len(),
+                "warmed Slack public channel cache"
+            ),
+            Err(error) => tracing::warn!(
+                error = %error,
+                "failed to warm Slack public channel cache"
+            ),
+        }
+    });
+}
+
 async fn slack_public_channels() -> Result<Vec<SlackChannel>, ApiError> {
     let mut cache = slack_public_channel_cache().lock().await;
     let now = Instant::now();
