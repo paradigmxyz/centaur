@@ -15,7 +15,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libcairo2-dev libpango1.0-dev \
     ripgrep fd-find jq tree tmux unzip xz-utils gettext-base vim \
     postgresql-client libpq-dev \
-    python3 python3-pip python3-venv python3-dev \
+    python3 python3-pip python3-venv python3-dev python3-yaml \
     texlive texlive-latex-base texlive-latex-extra \
     texlive-latex-recommended texlive-fonts-recommended \
     texlive-plain-generic texlive-science tipa cm-super \
@@ -300,6 +300,7 @@ COPY --link --chmod=755 services/sandbox/seed_hermes_codex_auth.py /usr/local/bi
 COPY --link --chmod=755 services/sandbox/centaur_artifact_get.py /usr/local/bin/centaur-artifact-get
 COPY --link --chmod=755 services/sandbox/centaur_tool_host.py /usr/local/bin/centaur-tool-host
 COPY --link --chmod=755 services/sandbox/compose_system_prompt.py /usr/local/bin/compose-system-prompt
+COPY --link --chmod=755 services/sandbox/compose_hermes_config.py /usr/local/bin/compose-hermes-config
 COPY --link --chmod=755 services/sandbox/repo_cache_sync.py /usr/local/bin/repo-cache-sync
 COPY --link --chmod=755 services/sandbox/repo_cache_watch.py /usr/local/bin/repo-cache-watch
 COPY --link --chmod=755 services/sandbox/entrypoint.sh /entrypoint.sh
