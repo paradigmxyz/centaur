@@ -37,13 +37,11 @@ POSTGRES_DSN = "CENTAUR_POSTGRES_DSN"
 ZOOM_ACCESS_TOKEN = "ZOOM_ACCESS_TOKEN"
 SCHEDULER_ENABLED = "MEETING_SCHEDULER_ENABLED"
 ORGANIZER_CALENDARS = "MEETING_ORGANIZER_CALENDARS"
-ZOOM_HOST_USER_ID = "MEETING_ZOOM_HOST_USER_ID"
 DEFAULT_DATABASE = "ai_v2"
 DEFAULT_TIME_ZONE = "UTC"
 MAX_CANDIDATES = 32
 SCHEDULER_STATUSES = {"pending", "booked", "blocked", "completed", "cancelled"}
 EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
-WRITABLE_CALENDAR_ACCESS_ROLES = frozenset({"writer", "owner"})
 MAX_TRANSCRIPT_BYTES = 10 * 1024 * 1024
 ZOOM_TRANSCRIPT_DOWNLOAD_TIMEOUT_SECONDS = 30.0
 MAX_MEETING_ID_LENGTH = 128
@@ -253,33 +251,7 @@ def _resolve_organizer(alias: str) -> str:
     calendar_id = _organizer_calendar_map().get(alias)
     if calendar_id:
         return calendar_id
-    if not EMAIL_RE.fullmatch(alias):
-        raise MeetingSchedulerError(f"organizer calendar {alias!r} is not allowlisted")
-
-    # Manual Slack scheduling supplies the verified proposer's email after the
-    # workflow has resolved it from Slack. Require an exact, writable calendar
-    # match before allowing that identity to become the event organizer.
-    try:
-        calendars = (
-            get_calendar_service().calendarList().list(showHidden=False).execute().get("items", [])
-        )
-    except Exception as error:
-        raise MeetingSchedulerError("Google Calendar organizer lookup failed") from error
-    matching = next(
-        (
-            calendar
-            for calendar in calendars
-            if isinstance(calendar, dict)
-            and str(calendar.get("id") or "").strip().lower() == alias.lower()
-        ),
-        None,
-    )
-    if matching is None:
-        raise MeetingSchedulerError(f"organizer calendar {alias!r} is not visible to Centaur")
-    access_role = str(matching.get("accessRole") or "").strip().lower()
-    if access_role not in WRITABLE_CALENDAR_ACCESS_ROLES:
-        raise MeetingSchedulerError(f"organizer calendar {alias!r} requires writer or owner access")
-    return str(matching["id"])
+    raise MeetingSchedulerError(f"organizer calendar {alias!r} is not allowlisted")
 
 
 def _database_url() -> str:
@@ -837,12 +809,7 @@ class MeetingSchedulerClient:
         duration: int,
         time_zone: str,
         occurrence_key: str,
-        organizer_calendar_key: str,
-        alternative_host_email: str = "",
     ) -> dict[str, Any]:
-        host = _config_value(ZOOM_HOST_USER_ID).strip()
-        if not host:
-            raise MeetingSchedulerError(f"{ZOOM_HOST_USER_ID} is required")
         payload: dict[str, Any] = {
             "topic": title,
             "type": 2,
@@ -861,43 +828,12 @@ class MeetingSchedulerClient:
                 "waiting_room": False,
             },
         }
-        if alternative_host_email:
-            payload["settings"]["alternative_hosts"] = alternative_host_email
         return self._zoom_request(
             "POST",
             "/users/me/meetings",
             occurrence_key=occurrence_key,
             payload=payload,
         )
-
-    @staticmethod
-    def _zoom_alternative_hosts(meeting: dict[str, Any]) -> list[str]:
-        value = (meeting.get("settings") or {}).get("alternative_hosts") or ""
-        return [item.strip().lower() for item in str(value).split(";") if item.strip()]
-
-    def _ensure_zoom_alternative_host(
-        self, meeting: dict[str, Any], alternative_host_email: str
-    ) -> dict[str, Any]:
-        """Make the authenticated proposer a verified Zoom alternative host."""
-        alternative_host = alternative_host_email.strip().lower()
-        if not alternative_host:
-            return meeting
-        meeting_id = _require_zoom_meeting_id(meeting.get("id"))
-        current = meeting
-        if alternative_host not in self._zoom_alternative_hosts(current):
-            current = self._zoom_request("GET", f"/meetings/{_zoom_meeting_path_id(meeting_id)}")
-        if alternative_host not in self._zoom_alternative_hosts(current):
-            self._zoom_request(
-                "PATCH",
-                f"/meetings/{_zoom_meeting_path_id(meeting_id)}",
-                payload={"settings": {"alternative_hosts": alternative_host}},
-            )
-            current = self._zoom_request("GET", f"/meetings/{_zoom_meeting_path_id(meeting_id)}")
-        if alternative_host not in self._zoom_alternative_hosts(current):
-            raise MeetingSchedulerError(
-                "Zoom did not assign the authenticated proposer as alternative host"
-            )
-        return current
 
     def get_recording(self, meeting_id: str) -> dict[str, Any]:
         """Return recording metadata and the bounded VTT transcript, when ready."""
@@ -1162,8 +1098,8 @@ class MeetingSchedulerClient:
                 active_states = {
                     "processing",
                     "summarizing",
-                    "publishing_notion",
-                    "notifying_participants",
+                    "publishing",
+                    "delivering",
                 }
                 patch = {
                     "post_meeting_status": "failed_terminal" if terminal else normalized_state,
@@ -1306,8 +1242,8 @@ class MeetingSchedulerClient:
                         in {
                             "processing",
                             "summarizing",
-                            "publishing_notion",
-                            "notifying_participants",
+                            "publishing",
+                            "delivering",
                         }
                         and active_until > now
                     ):
@@ -1419,11 +1355,12 @@ class MeetingSchedulerClient:
         self,
         occurrence_key: str,
         *,
-        notion_page_id: str | None = None,
-        delivered_to: list[str] | None = None,
+        publication_reference: str | None = None,
+        delivery_recipients: list[str] | None = None,
         lease_token: str,
     ) -> dict[str, Any]:
         """Persist the terminal idempotency marker after publication and delivery."""
+        _require_enabled()
         key = _require_occurrence_key(occurrence_key)
         normalized_lease_token = str(lease_token or "").strip()
         if not normalized_lease_token:
@@ -1434,8 +1371,8 @@ class MeetingSchedulerClient:
             raise MeetingSchedulerError("lease_token must be a bounded token")
         patch = {
             "post_meeting_status": "delivered",
-            "post_meeting_notion_page_id": str(notion_page_id or ""),
-            "post_meeting_delivered_to": sorted(set(delivered_to or [])),
+            "post_meeting_publication_reference": str(publication_reference or ""),
+            "post_meeting_delivery_recipients": sorted(set(delivery_recipients or [])),
             "post_meeting_delivered_at": dt.datetime.now(dt.UTC).isoformat(),
             "post_meeting_lease_until": "",
             "post_meeting_lease_token": "",
@@ -1571,8 +1508,6 @@ class MeetingSchedulerClient:
         )
 
     def _zoom_find_by_occurrence(self, key: str) -> dict[str, Any] | None:
-        if not _config_value(ZOOM_HOST_USER_ID).strip():
-            return None
         next_page_token = ""
         # The occurrence key is the retry identity. Search all bounded pages so
         # an older occurrence cannot be missed and recreated after a partial
@@ -1581,10 +1516,7 @@ class MeetingSchedulerClient:
             query = "/users/me/meetings?type=scheduled&page_size=300"
             if next_page_token:
                 query += f"&next_page_token={quote(next_page_token, safe='')}"
-            try:
-                response = self._zoom_request("GET", query)
-            except Exception:
-                return None
+            response = self._zoom_request("GET", query)
             meetings = response.get("meetings") if isinstance(response, dict) else None
             for meeting in meetings if isinstance(meetings, list) else []:
                 if not isinstance(meeting, dict):
@@ -1614,7 +1546,6 @@ class MeetingSchedulerClient:
         request_id: str | None = None,
         mode: str = "cadence",
         confirmation_token: str | None = None,
-        alternative_host_email: str | None = None,
         visibility: str = "public",
     ) -> dict[str, Any]:
         """Create or reuse one Zoom + Calendar meeting occurrence."""
@@ -1628,15 +1559,6 @@ class MeetingSchedulerClient:
         visibility = str(visibility or "").strip().lower()
         if visibility not in {"public", "private"}:
             raise MeetingSchedulerError("visibility must be public or private")
-        alternative_host = ""
-        if alternative_host_email:
-            alternative_host = _email_list([alternative_host_email])[0]
-            if mode != "ad_hoc":
-                raise MeetingSchedulerError(
-                    "alternative hosts are only supported for confirmed ad-hoc meetings"
-                )
-            if alternative_host not in attendees:
-                raise MeetingSchedulerError("alternative host must be a meeting attendee")
         start_at = _parse_rfc3339(start, field="start")
         duration = _positive_int(duration_minutes, "duration_minutes")
         organizer_id, _ = self._calendar_ids(organizer_calendar_key, attendees)
@@ -1666,9 +1588,7 @@ class MeetingSchedulerClient:
                 _matches_confirmation(confirmation_token, expected_confirmation)
                 or (
                     legacy_public_confirmation
-                    and _matches_confirmation(
-                        confirmation_token, legacy_public_confirmation
-                    )
+                    and _matches_confirmation(confirmation_token, legacy_public_confirmation)
                 )
             ):
                 raise MeetingSchedulerError(
@@ -1692,7 +1612,6 @@ class MeetingSchedulerClient:
                 organizer_calendar_key=organizer_calendar_key,
                 organizer_id=organizer_id,
                 attendees=attendees,
-                alternative_host_email=alternative_host,
                 visibility=visibility,
                 allow_parameter_update=mode == "cadence",
                 check_slot_free=mode == "ad_hoc",
@@ -1720,7 +1639,6 @@ class MeetingSchedulerClient:
         attendees: list[str],
         allow_parameter_update: bool,
         check_slot_free: bool,
-        alternative_host_email: str = "",
         visibility: str = "public",
     ) -> dict[str, Any] | _OperationFailure:
         async def operation(connection: asyncpg.Connection) -> dict[str, Any] | _OperationFailure:
@@ -1802,19 +1720,10 @@ class MeetingSchedulerClient:
                 zoom_id = str(state.get("zoom_meeting_id") or "").strip()
                 join_url = str(state.get("zoom_join_url") or "").strip()
                 if zoom_id:
-                    try:
-                        existing_zoom = self._zoom_request(
-                            "GET", f"/meetings/{quote(zoom_id, safe='')}"
-                        )
-                    except Exception:
-                        # A stale provider ID must not be treated as a valid
-                        # meeting. Reconcile by occurrence or create a new
-                        # Zoom meeting under the same stable key below.
-                        zoom_id = ""
-                        join_url = ""
-                    else:
-                        join_url = str(existing_zoom.get("join_url") or join_url).strip()
-                        self._ensure_zoom_alternative_host(existing_zoom, alternative_host_email)
+                    existing_zoom = self._zoom_request(
+                        "GET", f"/meetings/{quote(zoom_id, safe='')}"
+                    )
+                    join_url = str(existing_zoom.get("join_url") or join_url).strip()
                 if not zoom_id:
                     existing_zoom = self._zoom_find_by_occurrence(key)
                     if existing_zoom:
@@ -1826,10 +1735,7 @@ class MeetingSchedulerClient:
                             duration=duration,
                             time_zone=time_zone,
                             occurrence_key=key,
-                            organizer_calendar_key=organizer_calendar_key,
-                            alternative_host_email=alternative_host_email,
                         )
-                    zoom = self._ensure_zoom_alternative_host(zoom, alternative_host_email)
                     join_url = str(zoom.get("join_url") or "").strip()
                     zoom_id = str(zoom.get("id") or "").strip()
                 if not join_url or not zoom_id:
@@ -2787,7 +2693,6 @@ def book_meeting(
     request_id: str | None = None,
     mode: str = "cadence",
     confirmation_token: str | None = None,
-    alternative_host_email: str | None = None,
     visibility: str = "public",
 ) -> dict[str, Any]:
     return _client().book_meeting(
@@ -2802,7 +2707,6 @@ def book_meeting(
         request_id,
         mode,
         confirmation_token,
-        alternative_host_email=alternative_host_email,
         visibility=visibility,
     )
 

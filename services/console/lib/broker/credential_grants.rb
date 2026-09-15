@@ -1,4 +1,5 @@
 require "base64"
+require "uri"
 
 module Broker
   # Registry for broker credential token-exchange strategies. BrokerCredential
@@ -147,7 +148,9 @@ module Broker
           client_secret = credential.effective_client_secret
           require_value!("client_id", client_id)
           require_value!("client_secret", client_secret)
-          headers["Authorization"] = "Basic #{Base64.strict_encode64("#{client_id}:#{client_secret}")}"
+          encoded_client_id = URI.encode_www_form_component(client_id)
+          encoded_client_secret = URI.encode_www_form_component(client_secret)
+          headers["Authorization"] = "Basic #{Base64.strict_encode64("#{encoded_client_id}:#{encoded_client_secret}")}"
           form = form.except("client_id", "client_secret")
         end
         credential.refresh_client.refresh(

@@ -43,7 +43,6 @@ def test_serialize_row_preserves_unrecognized_jsonb_metadata(metadata):
 
 
 def test_zoom_create_defaults_to_centaur_join_anytime_and_cloud_recording(monkeypatch):
-    monkeypatch.setenv("MEETING_ZOOM_HOST_USER_ID", "centaur@example.com")
     monkeypatch.setenv("MEETING_ZOOM_SCHEDULE_FOR_USERS", "{}")
     scheduler = client.MeetingSchedulerClient()
     calls = []
@@ -59,7 +58,6 @@ def test_zoom_create_defaults_to_centaur_join_anytime_and_cloud_recording(monkey
         duration=30,
         time_zone="UTC",
         occurrence_key="cadence:1",
-        organizer_calendar_key="default",
     )
 
     payload = calls[0][2]["payload"]
@@ -77,8 +75,9 @@ def test_zoom_create_defaults_to_centaur_join_anytime_and_cloud_recording(monkey
 
 
 def test_zoom_create_never_delegates_to_another_user(monkeypatch):
-    monkeypatch.setenv("MEETING_ZOOM_HOST_USER_ID", "centaur@example.com")
-    monkeypatch.setenv("MEETING_ZOOM_SCHEDULE_FOR_USERS", json.dumps({"default": "delegate@example.com"}))
+    monkeypatch.setenv(
+        "MEETING_ZOOM_SCHEDULE_FOR_USERS", json.dumps({"default": "delegate@example.com"})
+    )
     scheduler = client.MeetingSchedulerClient()
     calls = []
     monkeypatch.setattr(
@@ -93,16 +92,12 @@ def test_zoom_create_never_delegates_to_another_user(monkeypatch):
         duration=30,
         time_zone="UTC",
         occurrence_key="cadence:1",
-        organizer_calendar_key="default",
     )
 
     assert "schedule_for" not in calls[0]["payload"]
 
 
-def test_zoom_create_assigns_requester_as_alternative_host_without_delegating(
-    monkeypatch,
-):
-    monkeypatch.setenv("MEETING_ZOOM_HOST_USER_ID", "centaur@example.com")
+def test_zoom_create_never_sends_requester_identity(monkeypatch):
     scheduler = client.MeetingSchedulerClient()
     calls = []
     monkeypatch.setattr(
@@ -117,66 +112,14 @@ def test_zoom_create_assigns_requester_as_alternative_host_without_delegating(
         duration=30,
         time_zone="UTC",
         occurrence_key="request:1",
-        organizer_calendar_key="centaur",
-        alternative_host_email="proposer@example.com",
     )
 
     payload = calls[0][2]["payload"]
-    assert payload["settings"]["alternative_hosts"] == "proposer@example.com"
+    assert "alternative_hosts" not in payload["settings"]
     assert "schedule_for" not in payload
 
 
-def test_ensure_zoom_alternative_host_repairs_and_verifies_provider_state(monkeypatch):
-    scheduler = client.MeetingSchedulerClient()
-    calls = []
-    responses = iter(
-        [
-            {"id": "1", "settings": {"alternative_hosts": ""}},
-            {},
-            {
-                "id": "1",
-                "join_url": "https://zoom.example/j/1",
-                "settings": {"alternative_hosts": "proposer@example.com"},
-            },
-        ]
-    )
-    monkeypatch.setattr(
-        scheduler,
-        "_zoom_request",
-        lambda method, path, **kwargs: calls.append((method, path, kwargs)) or next(responses),
-    )
-
-    result = scheduler._ensure_zoom_alternative_host(
-        {"id": "1", "join_url": "https://zoom.example/j/1"},
-        "PROPOSER@example.com",
-    )
-
-    assert [call[:2] for call in calls] == [
-        ("GET", "/meetings/1"),
-        ("PATCH", "/meetings/1"),
-        ("GET", "/meetings/1"),
-    ]
-    assert calls[1][2]["payload"] == {"settings": {"alternative_hosts": "proposer@example.com"}}
-    assert result["settings"]["alternative_hosts"] == "proposer@example.com"
-
-
-def test_ensure_zoom_alternative_host_fails_when_zoom_does_not_apply_it(monkeypatch):
-    scheduler = client.MeetingSchedulerClient()
-    monkeypatch.setattr(
-        scheduler,
-        "_zoom_request",
-        lambda method, path, **kwargs: {} if method == "PATCH" else {"id": "1", "settings": {}},
-    )
-
-    with pytest.raises(client.MeetingSchedulerError, match="did not assign"):
-        scheduler._ensure_zoom_alternative_host(
-            {"id": "1", "join_url": "https://zoom.example/j/1"},
-            "proposer@example.com",
-        )
-
-
 def test_zoom_find_by_occurrence_uses_agenda_marker(monkeypatch):
-    monkeypatch.setenv("MEETING_ZOOM_HOST_USER_ID", "centaur@example.com")
     scheduler = client.MeetingSchedulerClient()
     key = "request:agenda-marker"
     monkeypatch.setattr(
@@ -191,6 +134,20 @@ def test_zoom_find_by_occurrence_uses_agenda_marker(monkeypatch):
     )
 
     assert scheduler._zoom_find_by_occurrence(key)["id"] == "expected"
+
+
+def test_zoom_find_by_occurrence_fails_closed_on_inconclusive_provider_read(monkeypatch):
+    scheduler = client.MeetingSchedulerClient()
+    monkeypatch.setattr(
+        scheduler,
+        "_zoom_request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            client.MeetingSchedulerError("Zoom request failed with HTTP 503")
+        ),
+    )
+
+    with pytest.raises(client.MeetingSchedulerError, match="HTTP 503"):
+        scheduler._zoom_find_by_occurrence("request:provider-timeout")
 
 
 def test_get_recording_fetches_transcript_without_returning_signed_urls(monkeypatch):
@@ -1029,10 +986,7 @@ def test_claim_post_meeting_processing_persists_authenticated_webhook_uuid(monke
     assert patch["post_meeting_zoom_uuid"] == "/abc+def=="
 
 
-@pytest.mark.parametrize(
-    "active_state",
-    ["processing", "summarizing", "publishing_notion", "notifying_participants"],
-)
+@pytest.mark.parametrize("active_state", ["processing", "summarizing", "publishing", "delivering"])
 def test_claim_post_meeting_processing_rejects_active_lease(monkeypatch, active_state):
     monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
     scheduler = client.MeetingSchedulerClient()
@@ -1091,7 +1045,7 @@ def test_claim_post_meeting_processing_resumes_same_durable_owner(monkeypatch):
                 "occurrence_key": "occurrence:1",
                 "status": "booked",
                 "metadata": {
-                    "post_meeting_status": "publishing_notion",
+                    "post_meeting_status": "publishing",
                     "post_meeting_attempt": 3,
                     "post_meeting_lease_token": owner_token,
                     "post_meeting_lease_until": "2999-01-01T00:00:00Z",
@@ -1113,7 +1067,7 @@ def test_claim_post_meeting_processing_resumes_same_durable_owner(monkeypatch):
     assert result["resumed"] is True
     assert result["lease_token"] == owner_token
     assert result["attempt"] == 3
-    assert result["occurrence"]["metadata"]["post_meeting_status"] == "publishing_notion"
+    assert result["occurrence"]["metadata"]["post_meeting_status"] == "publishing"
     assert len(calls) == 2
 
 
@@ -1147,7 +1101,7 @@ def test_record_post_meeting_processing_rejects_stale_lease_owner(monkeypatch):
     with pytest.raises(client.MeetingSchedulerError, match="lease was lost"):
         scheduler.record_post_meeting_processing(
             "occurrence:1",
-            state="publishing_notion",
+            state="publishing",
             event="artifact_poll",
             lease_token="stale-owner",
         )
@@ -1208,6 +1162,40 @@ def test_mark_post_meeting_delivered_requires_lease(monkeypatch):
         )
 
 
+def test_mark_post_meeting_delivered_respects_scheduler_kill_switch(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "false")
+
+    with pytest.raises(client.MeetingSchedulerError, match="disabled"):
+        client.MeetingSchedulerClient().mark_post_meeting_delivered(
+            "occurrence:1", lease_token="lease-owner"
+        )
+
+
+def test_mark_post_meeting_delivered_persists_provider_neutral_references(monkeypatch):
+    monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
+    captured = {}
+
+    class Connection:
+        async def fetchrow(self, _query, *_args):
+            captured.update(json.loads(_args[1]))
+            return {"occurrence_key": "occurrence:1", "status": "completed"}
+
+    async def with_connection(operation):
+        return await operation(Connection())
+
+    monkeypatch.setattr(client, "_with_connection", with_connection)
+    client.MeetingSchedulerClient().mark_post_meeting_delivered(
+        "occurrence:1",
+        publication_reference="destination:item-1",
+        delivery_recipients=["participant:2", "participant:1", "participant:2"],
+        lease_token="lease-owner",
+    )
+
+    assert captured["post_meeting_publication_reference"] == "destination:item-1"
+    assert captured["post_meeting_delivery_recipients"] == ["participant:1", "participant:2"]
+    assert all("notion" not in key for key in captured)
+
+
 def test_mark_post_meeting_delivered_cannot_revive_cancelled_occurrence(monkeypatch):
     monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
     queries = []
@@ -1232,7 +1220,9 @@ def test_mark_post_meeting_delivered_cannot_revive_cancelled_occurrence(monkeypa
 
 def test_find_availability_uses_freebusy_only_and_returns_slots(monkeypatch):
     monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
-    monkeypatch.setenv("MEETING_ORGANIZER_CALENDARS", json.dumps({"default": "organizer@example.com"}))
+    monkeypatch.setenv(
+        "MEETING_ORGANIZER_CALENDARS", json.dumps({"default": "organizer@example.com"})
+    )
     calls = []
 
     class FakeFreebusy:
@@ -1271,55 +1261,23 @@ def test_find_availability_uses_freebusy_only_and_returns_slots(monkeypatch):
     assert "summary" not in calls[0]
 
 
-def test_email_organizer_requires_a_visible_writable_calendar(monkeypatch):
+def test_email_organizer_cannot_bypass_managed_alias_allowlist(monkeypatch):
     monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
     monkeypatch.setenv("MEETING_ORGANIZER_CALENDARS", "{}")
-    calls = []
-
-    class FakeCalendarList:
-        def list(self, **kwargs):
-            calls.append(("list", kwargs))
-            return self
-
-        def execute(self):
-            return {
-                "items": [
-                    {"id": "owner@example.com", "accessRole": "writer"},
-                ]
-            }
-
-    class FakeFreebusy:
-        def query(self, **kwargs):
-            calls.append(("freebusy", kwargs))
-            return self
-
-        def execute(self):
-            return {
-                "calendars": {
-                    "owner@example.com": {"busy": []},
-                    "person@example.com": {"busy": []},
-                }
-            }
-
-    class FakeService:
-        def calendarList(self):
-            return FakeCalendarList()
-
-        def freebusy(self):
-            return FakeFreebusy()
-
-    monkeypatch.setattr(client, "get_calendar_service", lambda: FakeService())
-    result = client.MeetingSchedulerClient().find_availability(
-        "OWNER@example.com",
-        ["person@example.com"],
-        "2026-08-17T09:00:00Z",
-        "2026-08-17T10:00:00Z",
-        30,
+    monkeypatch.setattr(
+        client,
+        "get_calendar_service",
+        lambda: pytest.fail("unmanaged organizers must be rejected before Calendar access"),
     )
 
-    assert result["candidates"]
-    assert calls[0][0] == "list"
-    assert calls[1][0] == "freebusy"
+    with pytest.raises(client.MeetingSchedulerError, match="not allowlisted"):
+        client.MeetingSchedulerClient().find_availability(
+            "owner@example.com",
+            ["person@example.com"],
+            "2026-08-17T09:00:00Z",
+            "2026-08-17T10:00:00Z",
+            30,
+        )
 
 
 def test_ad_hoc_booking_requires_confirmation(monkeypatch):
@@ -1388,7 +1346,7 @@ def test_ad_hoc_booking_rechecks_a_confirmed_slot_for_staleness(monkeypatch):
         )
 
 
-def test_slot_confirmation_binds_explicit_visibility_for_slack_bookings():
+def test_slot_confirmation_binds_explicit_visibility_for_ad_hoc_bookings():
     common = {
         "start": client._parse_rfc3339("2099-08-17T10:00:00Z", field="start"),
         "duration": 30,
@@ -1475,7 +1433,9 @@ def test_ad_hoc_reschedule_and_cancel_require_confirmation(monkeypatch):
         lambda _key: None,
     )
     with pytest.raises(client.MeetingSchedulerError, match="explicit confirmation"):
-        scheduler.reschedule_meeting("request:1", "2026-08-17T10:00:00Z", 1, "default", mode="ad_hoc")
+        scheduler.reschedule_meeting(
+            "request:1", "2026-08-17T10:00:00Z", 1, "default", mode="ad_hoc"
+        )
     with pytest.raises(client.MeetingSchedulerError, match="explicit confirmation"):
         scheduler.cancel_meeting("request:1", "default")
     with pytest.raises(client.MeetingSchedulerError, match="explicit confirmation"):
@@ -1520,7 +1480,9 @@ def test_end_meeting_uses_centaur_zoom_owner_and_keeps_calendar_event(monkeypatc
     result = scheduler.end_meeting(
         "request:1",
         "default",
-        client._end_confirmation_token(occurrence_key="request:1", organizer_calendar_key="default"),
+        client._end_confirmation_token(
+            occurrence_key="request:1", organizer_calendar_key="default"
+        ),
     )
 
     assert result == {
@@ -1901,7 +1863,6 @@ def test_scheduler_lock_is_transaction_scoped(monkeypatch):
 def test_book_meeting_reuses_deterministic_calendar_id_after_partial_insert(monkeypatch):
     monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
     monkeypatch.setenv("MEETING_ORGANIZER_CALENDARS", '{"default":"organizer@example.com"}')
-    monkeypatch.setenv("MEETING_ZOOM_HOST_USER_ID", "host-1")
     scheduler = client.MeetingSchedulerClient()
     state = {
         "status": "pending",
@@ -2286,7 +2247,7 @@ def test_public_scheduler_methods_have_explicit_tool_signatures():
     assert "**kwargs" not in str(inspect.signature(client.end_meeting))
 
 
-def test_public_book_meeting_forwards_alternative_host_email(monkeypatch):
+def test_public_book_meeting_does_not_accept_requester_zoom_identity(monkeypatch):
     calls = []
 
     class FakeClient:
@@ -2306,13 +2267,11 @@ def test_public_book_meeting_forwards_alternative_host_email(monkeypatch):
         organizer_calendar_key="default",
         mode="ad_hoc",
         confirmation_token="confirmed",
-        alternative_host_email="proposer@example.com",
         visibility="private",
     )
 
     assert result == {"status": "booked"}
-    assert "alternative_host_email" in inspect.signature(client.book_meeting).parameters
-    assert calls[0][1]["alternative_host_email"] == "proposer@example.com"
+    assert "alternative_host_email" not in inspect.signature(client.book_meeting).parameters
     assert calls[0][1]["visibility"] == "private"
 
 
@@ -2461,7 +2420,6 @@ def test_zoom_request_delete_404_still_returns_empty(monkeypatch):
 
 def test_booking_persists_sanitized_zoom_reason_in_last_error(monkeypatch):
     monkeypatch.setenv("MEETING_SCHEDULER_ENABLED", "true")
-    monkeypatch.setenv("MEETING_ZOOM_HOST_USER_ID", "centaur@example.com")
     scheduler = client.MeetingSchedulerClient()
     executed = []
 
@@ -2512,3 +2470,68 @@ def test_booking_persists_sanitized_zoom_reason_in_last_error(monkeypatch):
     assert "zoom code 300" in stored_error
     assert "Invalid tracking field" in stored_error
     assert "zoom.us" not in stored_error
+
+
+def test_booking_fails_closed_when_stored_zoom_meeting_read_is_inconclusive(monkeypatch):
+    scheduler = client.MeetingSchedulerClient()
+    executed = []
+
+    class Connection:
+        async def execute(self, query, *args):
+            executed.append((query, args))
+
+    async def claim(_connection, **_kwargs):
+        return {
+            "status": "pending",
+            "organizer_calendar_key": "default",
+            "zoom_meeting_id": "zoom-1",
+            "zoom_join_url": "https://zoom.example/j/1",
+        }, False
+
+    async def lock(_key, operation):
+        return await operation(Connection())
+
+    monkeypatch.setattr(scheduler, "_claim_occurrence_row", claim)
+    monkeypatch.setattr(client, "_with_occurrence_lock", lock)
+    monkeypatch.setattr(
+        scheduler,
+        "_zoom_request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            client.MeetingSchedulerError("Zoom request failed with HTTP 503")
+        ),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_zoom_find_by_occurrence",
+        lambda _key: pytest.fail("discovery must not run after an inconclusive stored-ID read"),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_zoom_create",
+        lambda **_kwargs: pytest.fail("a replacement Zoom room must not be created"),
+    )
+    monkeypatch.setattr(
+        client, "get_calendar_service", lambda: pytest.fail("calendar must not be touched")
+    )
+
+    result = asyncio.run(
+        scheduler._book_meeting_locked(
+            key="request:stored-zoom",
+            cadence_id=None,
+            request_id="request:stored-zoom",
+            title="Planning",
+            start_at=client._parse_rfc3339("2099-08-17T10:00:00Z", field="start"),
+            duration=30,
+            time_zone="UTC",
+            organizer_calendar_key="default",
+            organizer_id="organizer@example.com",
+            attendees=["person@example.com"],
+            allow_parameter_update=False,
+            check_slot_free=False,
+        )
+    )
+
+    assert isinstance(result, client._OperationFailure)
+    blocked = [item for item in executed if "status = 'blocked'" in item[0]]
+    assert len(blocked) == 1
+    assert blocked[0][1][1] == "Zoom request failed with HTTP 503"

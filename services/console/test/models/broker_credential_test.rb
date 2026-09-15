@@ -184,6 +184,22 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     client.verify
   end
 
+  test "refresh percent-encodes HTTP Basic client credentials" do
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result) do |request|
+      expected = Base64.strict_encode64("app%3Aid:secret%2Bvalue")
+      assert_equal "Basic #{expected}", request[:headers]["Authorization"]
+    end
+    app = build_app(provider: "zoom", client_id: "app:id", client_secret: "secret+value",
+                    allowed_scopes: %w[meeting:write])
+    bc = create_credential(client_id: nil, client_secret: nil, oauth_app: app,
+                           provider_subject: "zoom-user-special", created_by: nil,
+                           refresh_token: "rt")
+    bc.refresh_client = client
+    bc.refresh!
+    client.verify
+  end
+
   test "external_user_key must be url-safe and bounded" do
     app = build_app
     bc = build_credential(oauth_app: app, provider_subject: "sub-5", created_by: nil, client_id: nil)
