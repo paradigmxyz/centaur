@@ -26,18 +26,4 @@ module SecretKinds
     "1password" => "secret_ref", "1password_connect" => "secret_ref",
     "token_broker" => "credential_id"
   }.freeze
-
-  included do
-    helper_method :secret_kind_label, :secret_form_kinds
-  end
-
-  def secret_kind_label(slug)
-    SECRET_KINDS.dig(slug, :label) || slug
-  end
-
-  # Kinds with an implemented create/edit form, in registry order. Drives the
-  # "Add Secret" dropdown on the secrets index.
-  def secret_form_kinds
-    SECRET_KINDS.select { |_, cfg| cfg[:form] }
-  end
 end

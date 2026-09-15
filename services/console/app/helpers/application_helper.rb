@@ -1,6 +1,20 @@
 require "cgi"
 
 module ApplicationHelper
+  # Presentation helpers for the secret-kind registry shared by the console's
+  # list, detail, and assignment views.
+  def secret_kind_label(slug)
+    SecretKinds::SECRET_KINDS.dig(slug, :label) || slug
+  end
+
+  def secret_kind_options
+    SecretKinds::SECRET_KINDS.map { |slug, config| [ config[:label], slug ] }
+  end
+
+  def secret_form_kinds
+    SecretKinds::SECRET_KINDS.select { |_slug, config| config[:form] }
+  end
+
   MARKDOWN_ALLOWED_TAGS = %w[
     a blockquote br code del div em h1 h2 h3 h4 li ol p pre strong
     table tbody td th thead tr ul
