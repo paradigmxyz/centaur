@@ -136,8 +136,6 @@ struct SlackFileProxyClaims {
 #[derive(Debug, Deserialize)]
 struct SlackProxyClaims {
     #[serde(default)]
-    team_id: Option<String>,
-    #[serde(default)]
     upload_channels: Vec<String>,
     #[serde(default)]
     download_channels: Vec<String>,
@@ -406,16 +404,14 @@ async fn get_slack_channels(headers: HeaderMap) -> Result<Json<SlackChannelsResp
     let config = slack_proxy_config()?;
     let client = http_client();
     let mut channels_by_id = BTreeMap::new();
-    if let Some(team_id) = claims.slack.team_id.as_deref() {
-        for channel in slack_public_channels(client, config).await? {
-            let Some(channel_id) = channel.get("id").and_then(Value::as_str) else {
-                continue;
-            };
-            if validate_slack_channel_id(channel_id).is_ok()
-                && slack_channel_has_default_history_access(&channel, team_id)
-            {
-                channels_by_id.insert(channel_id.to_owned(), channel);
-            }
+    for channel in slack_public_channels(client, config).await? {
+        let Some(channel_id) = channel.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if validate_slack_channel_id(channel_id).is_ok()
+            && slack_channel_has_default_history_access(&channel)
+        {
+            channels_by_id.insert(channel_id.to_owned(), channel);
         }
     }
     for channel_id in channel_ids {
@@ -940,13 +936,10 @@ async fn ensure_history_channel_allowed(
     {
         return Ok(());
     }
-    let Some(team_id) = claims.slack.team_id.as_deref() else {
-        return Err(slack_history_forbidden());
-    };
     let channel = slack_channel_info(client, config, channel_id)
         .await
         .map_err(|_| slack_history_forbidden())?;
-    if slack_channel_has_default_history_access(&channel, team_id) {
+    if slack_channel_has_default_history_access(&channel) {
         return Ok(());
     }
     Err(slack_history_forbidden())
@@ -956,18 +949,9 @@ fn slack_history_forbidden() -> ApiError {
     ApiError::Forbidden("JWT is not authorized to read history from this Slack channel".to_owned())
 }
 
-fn slack_channel_has_default_history_access(channel: &Value, team_id: &str) -> bool {
-    let is_public = channel.get("is_private") == Some(&Value::Bool(false));
-    let is_member = channel.get("is_member") == Some(&Value::Bool(true));
-    let belongs_to_team = channel
-        .get("context_team_id")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value == team_id)
-        || channel
-            .get("shared_team_ids")
-            .and_then(Value::as_array)
-            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some(team_id)));
-    is_public && is_member && belongs_to_team
+fn slack_channel_has_default_history_access(channel: &Value) -> bool {
+    channel.get("is_private") == Some(&Value::Bool(false))
+        && channel.get("is_member") == Some(&Value::Bool(true))
 }
 
 fn ensure_channel_allowed(
@@ -1045,11 +1029,7 @@ fn slack_channel_item(
             .history_channels
             .iter()
             .any(|allowed| allowed == channel_id)
-            || claims
-                .slack
-                .team_id
-                .as_deref()
-                .is_some_and(|team_id| slack_channel_has_default_history_access(channel, team_id)),
+            || slack_channel_has_default_history_access(channel),
     }
 }
 
@@ -1301,7 +1281,6 @@ mod tests {
                 "iat": 1_700_000_000i64,
                 "exp": 4_102_444_800i64,
                 "slack": {
-                    "team_id": "T123456789",
                     "upload_channels": ["C123456789"],
                     "download_channels": ["C987654321"],
                     "history_channels": ["C111111111"]
@@ -1315,7 +1294,6 @@ mod tests {
             "centaur-console",
         )
         .unwrap();
-        assert_eq!(claims.slack.team_id.as_deref(), Some("T123456789"));
         ensure_upload_channel_allowed(&claims, "C123456789").unwrap();
         ensure_download_channel_allowed(&claims, "C987654321").unwrap();
         ensure_channel_allowed(&claims.slack.history_channels, "C111111111", "forbidden").unwrap();
@@ -1338,7 +1316,6 @@ mod tests {
     fn extracts_deduped_channel_ids_from_all_slack_claims() {
         let claims = SlackFileProxyClaims {
             slack: SlackProxyClaims {
-                team_id: Some("T123456789".to_owned()),
                 upload_channels: vec!["C123456789".to_owned()],
                 download_channels: vec!["G123456789".to_owned(), "C123456789".to_owned()],
                 history_channels: vec!["D123456789".to_owned(), "G123456789".to_owned()],
@@ -1359,7 +1336,6 @@ mod tests {
     fn channel_item_enriches_slack_metadata_with_permissions() {
         let claims = SlackFileProxyClaims {
             slack: SlackProxyClaims {
-                team_id: Some("T123456789".to_owned()),
                 upload_channels: vec!["C123456789".to_owned()],
                 download_channels: vec![],
                 history_channels: vec!["C123456789".to_owned()],
@@ -1372,8 +1348,7 @@ mod tests {
             "topic": {"value": "Announcements"},
             "num_members": 42,
             "is_private": false,
-            "is_member": true,
-            "context_team_id": "T123456789"
+            "is_member": true
         });
 
         let item = slack_channel_item(&claims, "C123456789", &channel);
@@ -1391,41 +1366,19 @@ mod tests {
     }
 
     #[test]
-    fn public_channel_history_defaults_require_membership_and_workspace_match() {
+    fn public_channel_history_defaults_require_bot_membership() {
         let accessible = json!({
             "is_private": false,
-            "is_member": true,
-            "context_team_id": "T123456789"
+            "is_member": true
         });
-        assert!(slack_channel_has_default_history_access(
-            &accessible,
-            "T123456789"
-        ));
+        assert!(slack_channel_has_default_history_access(&accessible));
 
         for inaccessible in [
-            json!({"is_private": true, "is_member": true, "context_team_id": "T123456789"}),
-            json!({"is_private": false, "is_member": false, "context_team_id": "T123456789"}),
-            json!({"is_private": false, "is_member": true, "context_team_id": "T987654321"}),
+            json!({"is_private": true, "is_member": true}),
+            json!({"is_private": false, "is_member": false}),
         ] {
-            assert!(!slack_channel_has_default_history_access(
-                &inaccessible,
-                "T123456789"
-            ));
+            assert!(!slack_channel_has_default_history_access(&inaccessible));
         }
-    }
-
-    #[test]
-    fn public_shared_channel_history_accepts_principal_workspace() {
-        let channel = json!({
-            "is_private": false,
-            "is_member": true,
-            "context_team_id": "T987654321",
-            "shared_team_ids": ["T987654321", "T123456789"]
-        });
-        assert!(slack_channel_has_default_history_access(
-            &channel,
-            "T123456789"
-        ));
     }
 
     #[test]

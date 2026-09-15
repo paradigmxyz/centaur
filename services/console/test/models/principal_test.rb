@@ -392,10 +392,8 @@ class PrincipalTest < ActiveSupport::TestCase
         upload_enabled: true,
         history_enabled: true
       )
-      principal.update!(slack_team_id: "T0123456789")
 
       claims = jwt_payload(ApiServer::Jwt.encode_for_principal(principal))
-      assert_equal "T0123456789", claims.dig("slack", "team_id")
       assert_equal [ "C0123456789" ], claims.dig("slack", "upload_channels")
       assert_equal [ "C0123456789" ], claims.dig("slack", "history_channels")
     end
@@ -407,7 +405,6 @@ class PrincipalTest < ActiveSupport::TestCase
       principal.update!(slack_channel_id: "C0123456789")
 
       claims = jwt_payload(ApiServer::Jwt.encode_for_principal(principal))
-      assert_nil claims.dig("slack", "team_id")
       assert_empty claims.dig("slack", "upload_channels")
       assert_empty claims.dig("slack", "download_channels")
       assert_empty claims.dig("slack", "history_channels")
