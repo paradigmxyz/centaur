@@ -1167,6 +1167,7 @@ fn build_agent_sandbox(
             .map(str::trim)
             .filter(|name| !name.is_empty()),
     );
+    dedupe_shared_pvc_volumes(&mut pod_spec);
 
     let mut agent_spec = json!({
         "replicas": 1,
@@ -1244,6 +1245,85 @@ fn mount_json(spec: &SandboxSpec) -> (Vec<Value>, Vec<Value>) {
         });
     }
     (volumes, mounts)
+}
+
+/// Collapse volumes referencing the same PVC claim into the first one, keeping
+/// every mount. Each `Volume` is published independently, so one claim behind
+/// two volumes doubles CSI attach work; one volume with two mounts is enough.
+/// A merged volume stays writable when any duplicate is writable; per-mount
+/// `readOnly` still applies.
+fn dedupe_shared_pvc_volumes(pod_spec: &mut Value) {
+    let renames = {
+        let Some(volumes) = pod_spec.get_mut("volumes").and_then(Value::as_array_mut) else {
+            return;
+        };
+        let mut canonical: HashMap<String, (String, usize)> = HashMap::new();
+        let mut deduped: Vec<Value> = Vec::with_capacity(volumes.len());
+        let mut renames: HashMap<String, String> = HashMap::new();
+        for volume in volumes.drain(..) {
+            let claim = volume
+                .get("persistentVolumeClaim")
+                .and_then(|pvc| pvc.get("claimName"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let Some(claim) = claim else {
+                deduped.push(volume);
+                continue;
+            };
+            let name = volume
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            if let Some((canonical_name, index)) = canonical.get(&claim) {
+                let read_only = volume
+                    .get("persistentVolumeClaim")
+                    .and_then(|pvc| pvc.get("readOnly"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if !read_only
+                    && let Some(pvc) = deduped
+                        .get_mut(*index)
+                        .and_then(|volume| volume.get_mut("persistentVolumeClaim"))
+                    && let Some(obj) = pvc.as_object_mut()
+                {
+                    obj.insert("readOnly".to_owned(), Value::Bool(false));
+                }
+                if name != *canonical_name {
+                    renames.insert(name, canonical_name.clone());
+                }
+            } else {
+                let index = deduped.len();
+                canonical.insert(claim, (name, index));
+                deduped.push(volume);
+            }
+        }
+        *volumes = deduped;
+        renames
+    };
+    if renames.is_empty() {
+        return;
+    }
+    for key in ["containers", "initContainers", "ephemeralContainers"] {
+        let Some(containers) = pod_spec.get_mut(key).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for container in containers.iter_mut() {
+            let Some(mounts) = container
+                .get_mut("volumeMounts")
+                .and_then(Value::as_array_mut)
+            else {
+                continue;
+            };
+            for mount in mounts.iter_mut() {
+                if let Some(name) = mount.get("name").and_then(Value::as_str)
+                    && let Some(canonical) = renames.get(name)
+                {
+                    mount["name"] = Value::String(canonical.clone());
+                }
+            }
+        }
+    }
 }
 
 fn sandbox_files_config_map_name(id: &SandboxId) -> String {
@@ -2007,6 +2087,131 @@ mod tests {
                 .iter()
                 .any(|volume| volume.name == "tools-root" || volume.name == "tools-repo-cache")
         }));
+    }
+
+    #[test]
+    fn shared_pvc_claim_uses_single_volume_with_two_mounts() {
+        let spec = SandboxSpec::new("centaur-agent:latest").mount(
+            centaur_sandbox_core::Mount::new(
+                MountKind::NamedVolume("shared-cache".to_owned()),
+                "/home/agent/github",
+            )
+            .read_only(),
+        );
+        let mut tools = ToolsConfig::new("paradigmxyz/centaur", "api:test");
+        tools.repo_cache_path = Some("/var/lib/centaur/repos".to_owned());
+        tools.repo_cache_pvc = Some("shared-cache".to_owned());
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings()).tools(tools);
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        let pod_spec = &sandbox.spec.pod_template.spec;
+
+        let claim_volumes: Vec<_> = pod_spec
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|volume| {
+                volume
+                    .persistent_volume_claim
+                    .as_ref()
+                    .is_some_and(|pvc| pvc.claim_name == "shared-cache")
+            })
+            .collect();
+        assert_eq!(claim_volumes.len(), 1);
+        let volume_name = claim_volumes[0].name.clone();
+
+        let mounts = pod_spec.containers[0].volume_mounts.as_ref().unwrap();
+        for path in ["/home/agent/github", "/var/lib/centaur/repos"] {
+            let mount = mounts
+                .iter()
+                .find(|mount| mount.mount_path == path)
+                .unwrap_or_else(|| panic!("missing agent mount at {path}"));
+            assert_eq!(mount.name, volume_name);
+        }
+
+        let bootstrap = &pod_spec.init_containers.as_ref().unwrap()[0];
+        let init_mount = bootstrap
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|mount| mount.mount_path == "/var/lib/centaur/repos")
+            .expect("init repo-cache mount");
+        assert_eq!(init_mount.name, volume_name);
+    }
+
+    #[test]
+    fn distinct_pvc_claims_keep_separate_volumes() {
+        let spec = SandboxSpec::new("centaur-agent:latest").mount(
+            centaur_sandbox_core::Mount::new(
+                MountKind::NamedVolume("repos-cache".to_owned()),
+                "/home/agent/github",
+            )
+            .read_only(),
+        );
+        let mut tools = ToolsConfig::new("paradigmxyz/centaur", "api:test");
+        tools.repo_cache_path = Some("/var/lib/centaur/repos".to_owned());
+        tools.repo_cache_pvc = Some("tools-cache".to_owned());
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings()).tools(tools);
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        let pod_spec = &sandbox.spec.pod_template.spec;
+
+        let claims: Vec<_> = pod_spec
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter_map(|volume| {
+                volume
+                    .persistent_volume_claim
+                    .as_ref()
+                    .map(|pvc| pvc.claim_name.clone())
+            })
+            .collect();
+        assert!(claims.contains(&"repos-cache".to_owned()));
+        assert!(claims.contains(&"tools-cache".to_owned()));
+
+        let mounts = pod_spec.containers[0].volume_mounts.as_ref().unwrap();
+        let github = mounts
+            .iter()
+            .find(|mount| mount.mount_path == "/home/agent/github")
+            .unwrap();
+        let repos = mounts
+            .iter()
+            .find(|mount| mount.mount_path == "/var/lib/centaur/repos")
+            .unwrap();
+        assert_ne!(github.name, repos.name);
+    }
+
+    #[test]
+    fn shared_pvc_volume_stays_writable_when_any_mount_is_writable() {
+        let mut pod_spec = json!({
+            "containers": [{
+                "name": "agent",
+                "volumeMounts": [
+                    {"name": "mount-0", "mountPath": "/a", "readOnly": true},
+                    {"name": "mount-1", "mountPath": "/b"},
+                ],
+            }],
+            "volumes": [
+                {"name": "mount-0", "persistentVolumeClaim": {"claimName": "shared", "readOnly": true}},
+                {"name": "mount-1", "persistentVolumeClaim": {"claimName": "shared", "readOnly": false}},
+            ],
+        });
+
+        dedupe_shared_pvc_volumes(&mut pod_spec);
+
+        let volumes = pod_spec["volumes"].as_array().unwrap();
+        assert_eq!(volumes.len(), 1);
+        assert_eq!(volumes[0]["name"], "mount-0");
+        assert_eq!(volumes[0]["persistentVolumeClaim"]["readOnly"], false);
+        let mounts = pod_spec["containers"][0]["volumeMounts"]
+            .as_array()
+            .unwrap();
+        assert!(mounts.iter().all(|mount| mount["name"] == "mount-0"));
+        assert_eq!(mounts[0]["readOnly"], true);
     }
 
     #[test]
