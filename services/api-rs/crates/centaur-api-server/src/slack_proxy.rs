@@ -666,6 +666,11 @@ impl SlackPublicChannelCacheState {
     fn can_refresh(&self, now: Instant) -> bool {
         !self.refreshing && !self.retry_refresh_at.is_some_and(|retry_at| retry_at > now)
     }
+
+    fn mark_refresh_failed(&mut self, now: Instant) {
+        self.refreshing = false;
+        self.retry_refresh_at = Some(now + SLACK_CHANNEL_REFRESH_RETRY_DELAY);
+    }
 }
 
 fn slack_channel_info_cache() -> &'static SlackChannelInfoCache {
@@ -911,10 +916,9 @@ async fn slack_public_channels() -> Result<Vec<SlackChannel>, ApiError> {
         Ok(result) => result,
         Err(error) => {
             let mut cache = slack_public_channel_cache().lock().await;
-            cache.refreshing = false;
-            cache.retry_refresh_at = Some(Instant::now() + SLACK_CHANNEL_REFRESH_RETRY_DELAY);
+            cache.mark_refresh_failed(Instant::now());
             Err(ApiError::Internal(format!(
-                "Slack channel refresh task failed: {error}"
+                "Slack channel refresh monitor failed: {error}"
             )))
         }
     }
@@ -947,9 +951,9 @@ async fn await_slack_public_channel_refresh(
             result
         }
         Err(error) => {
+            tracing::warn!(error = %error, "Slack channel cache refresh task failed");
             let mut cache = cache.lock().await;
-            cache.refreshing = false;
-            cache.retry_refresh_at = Some(Instant::now() + SLACK_CHANNEL_REFRESH_RETRY_DELAY);
+            cache.mark_refresh_failed(Instant::now());
             Err(ApiError::Internal(format!(
                 "Slack channel refresh task failed: {error}"
             )))
@@ -964,8 +968,7 @@ async fn complete_slack_public_channel_refresh(
         Ok(channels) => channels,
         Err(error) => {
             let mut cache = slack_public_channel_cache().lock().await;
-            cache.refreshing = false;
-            cache.retry_refresh_at = Some(Instant::now() + SLACK_CHANNEL_REFRESH_RETRY_DELAY);
+            cache.mark_refresh_failed(Instant::now());
             return Err(error);
         }
     };
@@ -1924,11 +1927,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aborted_public_channel_refresh_clears_refreshing_state() {
+    async fn panicked_public_channel_refresh_clears_refreshing_state() {
+        async fn panic_during_refresh() -> Result<Vec<SlackChannel>, ApiError> {
+            panic!("simulated Slack channel refresh panic");
+        }
+
         let cache = SlackPublicChannelCache::default();
         cache.lock().await.refreshing = true;
-        let refresh = tokio::spawn(std::future::pending::<Result<Vec<SlackChannel>, ApiError>>());
-        refresh.abort();
+        let refresh = tokio::spawn(panic_during_refresh());
 
         assert!(
             await_slack_public_channel_refresh(refresh, &cache)
