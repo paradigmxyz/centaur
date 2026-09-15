@@ -1,5 +1,5 @@
-require "json"
 require "base64"
+require "json"
 require "uri"
 
 module Broker
@@ -62,7 +62,7 @@ module Broker
     private
 
     def client_auth(method, client_id, client_secret, form)
-      case method
+      case method.to_s
       when "client_secret_post"
         form["client_id"] = client_id
         form["client_secret"] = client_secret if client_secret.present?

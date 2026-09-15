@@ -54,6 +54,13 @@ module Broker
       http.verify
     end
 
+    test "rejects unsupported client authentication" do
+      client, = client_with(status: 200, body: success_body)
+      assert_raises(ArgumentError) do
+        client.exchange(**base_args(client_auth_method: :private_key_jwt))
+      end
+    end
+
     test "missing expires_in yields nil" do
       client, http = client_with(status: 200, body: success_body(expires_in: nil))
       assert_nil client.exchange(**base_args).expires_in

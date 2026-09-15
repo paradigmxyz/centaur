@@ -166,6 +166,40 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     client.verify
   end
 
+  test "refresh uses HTTP Basic authentication when required by the provider" do
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result) do |request|
+      assert_equal "Basic YXBwLWNpZDphcHAtc2VjcmV0", request[:headers]["Authorization"]
+      assert_nil request[:form]["client_id"]
+      assert_nil request[:form]["client_secret"]
+      refute request[:form].key?("scope")
+    end
+    app = build_app(provider: "zoom", client_id: "app-cid", client_secret: "app-secret",
+                    allowed_scopes: %w[meeting:write])
+    bc = create_credential(client_id: nil, client_secret: nil, oauth_app: app,
+                           provider_subject: "zoom-user", created_by: nil, refresh_token: "rt",
+                           scopes: %w[meeting:write])
+    bc.refresh_client = client
+    bc.refresh!
+    client.verify
+  end
+
+  test "refresh percent-encodes HTTP Basic client credentials" do
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result) do |request|
+      expected = Base64.strict_encode64("app%3Aid:secret%2Bvalue")
+      assert_equal "Basic #{expected}", request[:headers]["Authorization"]
+    end
+    app = build_app(provider: "zoom", client_id: "app:id", client_secret: "secret+value",
+                    allowed_scopes: %w[meeting:write])
+    bc = create_credential(client_id: nil, client_secret: nil, oauth_app: app,
+                           provider_subject: "zoom-user-special", created_by: nil,
+                           refresh_token: "rt")
+    bc.refresh_client = client
+    bc.refresh!
+    client.verify
+  end
+
   test "external_user_key must be url-safe and bounded" do
     app = build_app
     bc = build_credential(oauth_app: app, provider_subject: "sub-5", created_by: nil, client_id: nil)
