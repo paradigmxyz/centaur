@@ -318,7 +318,8 @@ impl AgentSandboxBackend {
             .with_labels(sandbox.metadata.labels.clone().unwrap_or_default())
             .with_created_at(sandbox_creation_time(sandbox))
             .with_suspended_since(sandbox_paused_at(sandbox))
-            .with_reason(pod.as_ref().and_then(pod_termination_reason)))
+            .with_reason(pod.as_ref().and_then(pod_termination_reason))
+            .with_instance_id(pod.as_ref().and_then(|pod| pod.metadata.uid.clone())))
     }
 
     async fn patch_sandbox_merge(&self, id: &SandboxId, patch: Value) -> SandboxResult<()> {
@@ -421,12 +422,14 @@ impl AgentSandboxBackend {
     }
 
     async fn attach_io(&self, id: &SandboxId) -> SandboxResult<SandboxIo> {
-        if self.status(id).await? != SandboxStatus::Running {
+        let observed = self.observe(id).await?;
+        if observed.status != SandboxStatus::Running {
             return Err(SandboxError::NotReady(format!(
                 "agent sandbox {} is not running",
                 id.as_str()
             )));
         }
+        let instance_id = observed.instance_id;
         let params = AttachParams::default()
             .container(self.config.container_name.clone())
             .stdin(true)
@@ -450,8 +453,16 @@ impl AgentSandboxBackend {
         let stdin = stdin.ok_or_else(|| SandboxError::io("stdin was not attached"))?;
         let stdout = stdout.ok_or_else(|| SandboxError::io("stdout was not attached"))?;
         let stderr = stderr.ok_or_else(|| SandboxError::io("stderr was not attached"))?;
+        let attached_instance_id = self.observe(id).await?.instance_id;
+        if attached_instance_id != instance_id {
+            return Err(SandboxError::NotReady(format!(
+                "agent sandbox {} changed instances while attaching",
+                id.as_str()
+            )));
+        }
         // Keep kube's attach process alive as long as the returned streams are in use.
-        Ok(SandboxIo::with_guard(stdin, stdout, stderr, attached))
+        Ok(SandboxIo::with_guard(stdin, stdout, stderr, attached)
+            .with_instance_id(attached_instance_id))
     }
 }
 

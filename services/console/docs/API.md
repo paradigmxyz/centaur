@@ -1084,11 +1084,12 @@ Returns enabled OAuth apps and the console URLs a sandbox user can open to start
 
 `GET /api/v1/sandbox/permissions`
 
-The sandbox permissions response includes an `oauth_credentials` array with non-secret metadata for OAuth-flow credentials currently granted to the sandbox principal. Use it to confirm that a user completed consent for the expected app and personal email.
+The sandbox permissions response includes an `oauth_credentials` array with non-secret metadata for OAuth-flow credentials currently granted to the sandbox principal. Use it to confirm that a user completed consent for the expected app and personal email. It also includes a sorted `connected_tools` array derived from the `centaur-tool` labels on credentials granted directly or through roles.
 
 ```json
 {
   "data": {
+    "connected_tools": ["gsuite"],
     "oauth_credentials": [
       {
         "id": "bcr_...",

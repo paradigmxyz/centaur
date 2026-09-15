@@ -224,7 +224,7 @@ Initial span set:
 | `centaur.api_rs.session.events.stream` | `centaur-session-runtime` |
 | `centaur.api_rs.mcp.tool` | `centaur-api-server` |
 | `<harness>.session_task.turn` | `harness-server` |
-| `<harness>.tool.<name>` | `harness-server` |
+| `<harness>.tool.<name>[ <subcommand>]` | `harness-server` |
 
 Spans may carry:
 

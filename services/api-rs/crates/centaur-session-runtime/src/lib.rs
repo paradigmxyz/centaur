@@ -67,6 +67,7 @@ const STEERING_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const STEERING_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
 const SESSION_PIPE_MAX_REATTACH_ATTEMPTS: u32 = 3;
 const SESSION_PIPE_REATTACH_DELAY: Duration = Duration::from_millis(500);
+const SESSION_PIPE_CREATED_REATTACH_TIMEOUT: Duration = Duration::from_secs(15);
 const STDOUT_OWNER_LEASE: Duration = Duration::from_secs(45);
 const STDOUT_OWNER_RENEW_INTERVAL: Duration = Duration::from_secs(10);
 const EXECUTION_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -534,6 +535,7 @@ impl SessionExecutionAttemptError {
 #[derive(Clone)]
 struct SessionPipe {
     stdin: Arc<Mutex<SessionInputSink>>,
+    instance_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -3526,7 +3528,7 @@ impl SessionRuntime {
                 .open_io(&SandboxId::new(sandbox_id))
                 .await?
                 .into_parts();
-            let pipe = session_pipe_from_stdin(io.stdin);
+            let pipe = session_pipe_from_parts(io.stdin, io.instance_id);
 
             self.sandbox_pipes
                 .insert(sandbox_id.to_owned(), pipe.clone());
@@ -4651,9 +4653,10 @@ enum ReattachOutcome {
     Dead(String),
 }
 
-fn session_pipe_from_stdin(stdin: SandboxWrite) -> SessionPipe {
+fn session_pipe_from_parts(stdin: SandboxWrite, instance_id: Option<String>) -> SessionPipe {
     SessionPipe {
         stdin: Arc::new(Mutex::new(FramedWrite::new(stdin, LinesCodec::new()))),
+        instance_id,
     }
 }
 
@@ -4766,7 +4769,16 @@ fn spawn_stdout_pump_loop(state: StdoutPumpLoop) {
                     sleep(SESSION_PIPE_REATTACH_DELAY).await;
                 }
 
-                match reattach_session_pipe(&ctx, &open_lock, &sandbox_id, &pipe).await {
+                match reattach_session_pipe(
+                    &ctx,
+                    &open_lock,
+                    &thread_key,
+                    &sandbox_id,
+                    &execution.execution_id,
+                    &pipe,
+                )
+                .await
+                {
                     ReattachOutcome::Reattached {
                         pipe: new_pipe,
                         stdout: new_stdout,
@@ -4834,7 +4846,9 @@ fn spawn_stdout_pump_loop(state: StdoutPumpLoop) {
 async fn reattach_session_pipe(
     ctx: &RuntimeContext,
     open_lock: &Arc<Mutex<()>>,
+    thread_key: &ThreadKey,
     sandbox_id: &str,
+    execution_id: &str,
     pipe: &SessionPipe,
 ) -> ReattachOutcome {
     let _open_guard = open_lock.lock().await;
@@ -4847,32 +4861,95 @@ async fn reattach_session_pipe(
     }
 
     let id = SandboxId::new(sandbox_id);
-    match ctx.manager.observe(&id).await {
-        Ok(observed) if observed.status.can_open_io() => match ctx.manager.open_io(&id).await {
-            Ok(io) => {
-                let parts = io.into_parts();
-                let new_pipe = session_pipe_from_stdin(parts.stdin);
-                ctx.sandbox_pipes
-                    .insert(sandbox_id.to_owned(), new_pipe.clone());
-                spawn_stderr_drain(sandbox_id.to_owned(), parts.stderr);
-                ReattachOutcome::Reattached {
-                    pipe: new_pipe,
-                    stdout: parts.stdout,
-                    guard: parts.guard,
+    let mut created_wait_started: Option<Instant> = None;
+    loop {
+        match ctx.manager.observe(&id).await {
+            Ok(observed)
+                if pipe.instance_id.is_some() && observed.instance_id != pipe.instance_id =>
+            {
+                return ReattachOutcome::Dead(format!(
+                    "sandbox instance changed while reattaching stdout (status {:?})",
+                    observed.status
+                ));
+            }
+            Ok(observed) if observed.status.can_open_io() => {
+                return match ctx.manager.open_io(&id).await {
+                    Ok(io) => {
+                        let parts = io.into_parts();
+                        if pipe.instance_id.is_some() && parts.instance_id != pipe.instance_id {
+                            return ReattachOutcome::Dead(
+                                "sandbox instance changed while opening stdout".to_owned(),
+                            );
+                        }
+                        if let Some(wait_started) = created_wait_started {
+                            info!(
+                                component = COMPONENT_SESSION_RUNTIME,
+                                event = "session_stdout_pump_created_recovered",
+                                thread_key = %thread_key,
+                                sandbox_id,
+                                execution_id,
+                                wait_ms = duration_millis_u64(wait_started.elapsed()),
+                                "sandbox became ready while reattaching session stdout pump"
+                            );
+                        }
+                        let new_pipe = session_pipe_from_parts(parts.stdin, parts.instance_id);
+                        ctx.sandbox_pipes
+                            .insert(sandbox_id.to_owned(), new_pipe.clone());
+                        spawn_stderr_drain(sandbox_id.to_owned(), parts.stderr);
+                        ReattachOutcome::Reattached {
+                            pipe: new_pipe,
+                            stdout: parts.stdout,
+                            guard: parts.guard,
+                        }
+                    }
+                    Err(error) => ReattachOutcome::Retryable(format!(
+                        "sandbox stdout reattach failed: {error}"
+                    )),
+                };
+            }
+            Ok(observed)
+                if observed.status == SandboxStatus::Created
+                    && observed.reason.is_none()
+                    && pipe.instance_id.is_some() =>
+            {
+                let wait_started = *created_wait_started.get_or_insert_with(|| {
+                    warn!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "session_stdout_pump_waiting_for_created",
+                        thread_key = %thread_key,
+                        sandbox_id,
+                        execution_id,
+                        timeout_ms = duration_millis_u64(SESSION_PIPE_CREATED_REATTACH_TIMEOUT),
+                        "sandbox is temporarily not ready while reattaching session stdout pump"
+                    );
+                    Instant::now()
+                });
+                let elapsed = wait_started.elapsed();
+                if elapsed >= SESSION_PIPE_CREATED_REATTACH_TIMEOUT {
+                    return ReattachOutcome::Dead(format!(
+                        "sandbox remained in transitional Created state for {} ms while reattaching stdout",
+                        duration_millis_u64(SESSION_PIPE_CREATED_REATTACH_TIMEOUT)
+                    ));
                 }
+                sleep(
+                    SESSION_PIPE_REATTACH_DELAY
+                        .min(SESSION_PIPE_CREATED_REATTACH_TIMEOUT - elapsed),
+                )
+                .await;
+            }
+            Ok(observed) => {
+                return ReattachOutcome::Dead(sandbox_dead_detail(
+                    &observed.status,
+                    observed.reason.as_deref(),
+                ));
+            }
+            Err(SandboxError::NotFound(_)) => {
+                return ReattachOutcome::Dead("sandbox no longer exists".to_owned());
             }
             Err(error) => {
-                ReattachOutcome::Retryable(format!("sandbox stdout reattach failed: {error}"))
+                return ReattachOutcome::Retryable(format!("sandbox status check failed: {error}"));
             }
-        },
-        Ok(observed) => ReattachOutcome::Dead(sandbox_dead_detail(
-            &observed.status,
-            observed.reason.as_deref(),
-        )),
-        Err(SandboxError::NotFound(_)) => {
-            ReattachOutcome::Dead("sandbox no longer exists".to_owned())
         }
-        Err(error) => ReattachOutcome::Retryable(format!("sandbox status check failed: {error}")),
     }
 }
 
@@ -9124,6 +9201,9 @@ mod adoption_tests {
         create_started: tokio::sync::Notify,
         create_gate: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
         status: std::sync::Mutex<SandboxStatus>,
+        reason: std::sync::Mutex<Option<String>>,
+        instance_id: std::sync::Mutex<String>,
+        created_observed: tokio::sync::Notify,
         observed_statuses: std::sync::Mutex<BTreeMap<String, SandboxStatus>>,
         create_id: String,
         created_specs: std::sync::Mutex<Vec<SandboxSpec>>,
@@ -9142,6 +9222,9 @@ mod adoption_tests {
                 create_started: tokio::sync::Notify::new(),
                 create_gate: std::sync::Mutex::new(None),
                 status: std::sync::Mutex::new(status),
+                reason: std::sync::Mutex::new(None),
+                instance_id: std::sync::Mutex::new("mock-instance".to_owned()),
+                created_observed: tokio::sync::Notify::new(),
                 observed_statuses: std::sync::Mutex::new(BTreeMap::new()),
                 create_id: "mock-sbx".to_owned(),
                 created_specs: std::sync::Mutex::new(Vec::new()),
@@ -9172,6 +9255,14 @@ mod adoption_tests {
 
         fn set_status(&self, status: SandboxStatus) {
             *self.status.lock().unwrap() = status;
+        }
+
+        fn set_reason(&self, reason: Option<&str>) {
+            *self.reason.lock().unwrap() = reason.map(str::to_owned);
+        }
+
+        fn set_instance_id(&self, instance_id: &str) {
+            *self.instance_id.lock().unwrap() = instance_id.to_owned();
         }
 
         fn set_observed_status(&self, sandbox_id: &str, status: SandboxStatus) {
@@ -9259,7 +9350,12 @@ mod adoption_tests {
 
         async fn observe(&self, id: &SandboxId) -> SandboxResult<ObservedSandbox> {
             let status = self.status(id).await?;
-            Ok(ObservedSandbox::new(id.clone(), "mock", status))
+            if status == SandboxStatus::Created {
+                self.created_observed.notify_one();
+            }
+            Ok(ObservedSandbox::new(id.clone(), "mock", status)
+                .with_reason(self.reason.lock().unwrap().clone())
+                .with_instance_id(Some(self.instance_id.lock().unwrap().clone())))
         }
 
         async fn list_observed(&self) -> SandboxResult<Vec<ObservedSandbox>> {
@@ -9312,6 +9408,10 @@ mod adoption_tests {
     }
 
     fn mock_io() -> (SandboxIo, DuplexStream, DuplexStream) {
+        mock_io_for_instance("mock-instance")
+    }
+
+    fn mock_io_for_instance(instance_id: &str) -> (SandboxIo, DuplexStream, DuplexStream) {
         let (stdin_near, stdin_far) = tokio::io::duplex(64 * 1024);
         let (stdout_near, stdout_far) = tokio::io::duplex(64 * 1024);
         let (stderr_near, _stderr_far) = tokio::io::duplex(1024);
@@ -9319,8 +9419,26 @@ mod adoption_tests {
             Box::pin(stdin_near),
             Box::pin(stdout_near),
             Box::pin(stderr_near),
-        );
+        )
+        .with_instance_id(Some(instance_id.to_owned()));
         (io, stdout_far, stdin_far)
+    }
+
+    async fn wait_for_opens(backend: &MockBackend, expected: usize) {
+        timeout(Duration::from_secs(10), async {
+            while backend.opens() < expected {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for sandbox IO opens");
+    }
+
+    async fn claim_test_stdout_owner(runtime: &SessionRuntime, execution_id: &str) {
+        runtime
+            .claim_stdout_owner(execution_id)
+            .await
+            .expect("claim test stdout owner");
     }
 
     fn completed_output_lines(result_text: &str) -> Vec<String> {
@@ -9356,6 +9474,13 @@ mod adoption_tests {
             .expect("connect test db");
         store.run_migrations().await.expect("run migrations");
         Some(store)
+    }
+
+    async fn reset_test_store(store: &PgSessionStore) {
+        sqlx::query("truncate table sessions restart identity cascade")
+            .execute(store.pool())
+            .await
+            .expect("reset test db");
     }
 
     async fn orphaned_execution(
@@ -9568,6 +9693,7 @@ mod adoption_tests {
                 .iter()
                 .any(|event| event.event_type == "session.harness_switched")
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -9611,6 +9737,7 @@ mod adoption_tests {
             session_metadata(&store, &thread_key).await["persona"]["persona_id"],
             "old"
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -9669,6 +9796,7 @@ mod adoption_tests {
                 .as_deref(),
             Some("finance-automation")
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -9743,6 +9871,7 @@ mod adoption_tests {
             .expect("execution exists");
         assert_eq!(latest.execution_id, execution.execution_id);
         assert_eq!(latest.status, ExecutionStatus::Completed);
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -9821,6 +9950,7 @@ mod adoption_tests {
                 .is_err(),
             "unscoped stream should stay open after a terminal event"
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -9937,6 +10067,7 @@ mod adoption_tests {
         let session = store.get_session(&thread_key).await.unwrap();
         assert_eq!(session.title.as_deref(), Some("Fix worker memory leak"));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        reset_test_store(&store).await;
     }
 
     fn env_value<'a>(spec: &'a SandboxSpec, name: &str) -> Option<&'a str> {
@@ -10077,6 +10208,7 @@ mod adoption_tests {
             all.iter()
                 .any(|event| event.event_type == "session.sandbox_capabilities_replaced")
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10150,6 +10282,7 @@ mod adoption_tests {
         let spec = backend.created_specs().pop().expect("created cold spec");
         assert!(!spec.capabilities.repo_cache.enabled());
         assert!(!spec.capabilities.observability_enabled);
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10207,6 +10340,7 @@ mod adoption_tests {
                 proxy_labels
             )]
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10278,6 +10412,7 @@ mod adoption_tests {
                 ),
             ]
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10329,6 +10464,7 @@ mod adoption_tests {
             spec.iron_control_requester_principal.as_deref(),
             Some("prn_req")
         );
+        reset_test_store(&store).await;
     }
 
     fn requester_test_registrar(base_url: String) -> SessionRegistrar {
@@ -10454,6 +10590,7 @@ mod adoption_tests {
             )]
         );
         server.abort();
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10512,6 +10649,7 @@ mod adoption_tests {
             "Slack Connect executes must not upsert a requester principal"
         );
         server.abort();
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10568,6 +10706,7 @@ mod adoption_tests {
             .count();
         assert_eq!(user_upserts, 1, "only session create upserts the user");
         server.abort();
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10622,6 +10761,7 @@ mod adoption_tests {
             "non-Slack executes must not upsert a Slack requester principal"
         );
         server.abort();
+        reset_test_store(&store).await;
     }
 
     /// Minimal raw-TCP iron-control stub for execute-level requester tests:
@@ -10858,6 +10998,7 @@ mod adoption_tests {
             event.event_type == "session.sandbox_paused"
                 && event.payload.get("reason").and_then(Value::as_str) == Some("capacity_pressure")
         }));
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10932,6 +11073,7 @@ mod adoption_tests {
                 && event.payload["workflow_run_id"] == json!(workflow_run_id)
                 && event.payload["cleared"] == json!(true)
         }));
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10974,6 +11116,7 @@ mod adoption_tests {
             store.get_session(&thread_key).await.unwrap().sandbox_id,
             Some("sbx-explicit".to_owned())
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11017,6 +11160,7 @@ mod adoption_tests {
             store.get_session(&thread_key).await.unwrap().sandbox_id,
             None
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11083,6 +11227,7 @@ mod adoption_tests {
             all.iter()
                 .any(|event| event.event_type == "session.sandbox_resume_failed")
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11108,6 +11253,7 @@ mod adoption_tests {
         first.expect("first pipe ensure should succeed");
         second.expect("second pipe ensure should reuse the first pipe");
         assert_eq!(backend.opens(), 1);
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11118,13 +11264,15 @@ mod adoption_tests {
         let _serial = TEST_LOCK.lock().await;
         let thread_key =
             ThreadKey::parse(format!("test:eof-recorded-{}", uuid::Uuid::new_v4())).unwrap();
-        orphaned_execution(&store, &thread_key, Some("sbx-recorded"), true).await;
+        let execution_id =
+            orphaned_execution(&store, &thread_key, Some("sbx-recorded"), true).await;
 
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
         let (io, stdout, _stdin) = mock_io();
         backend.push_io(io).await;
 
         let runtime = runtime_with(&store, backend.clone());
+        claim_test_stdout_owner(&runtime, &execution_id).await;
         runtime
             .ensure_session_pipe(&thread_key, "sbx-recorded")
             .await
@@ -11158,6 +11306,7 @@ mod adoption_tests {
             Some("Recovered from pod logs.")
         );
         assert_eq!(backend.opens(), 1);
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11168,7 +11317,8 @@ mod adoption_tests {
         let _serial = TEST_LOCK.lock().await;
         let thread_key =
             ThreadKey::parse(format!("test:eof-reattach-{}", uuid::Uuid::new_v4())).unwrap();
-        orphaned_execution(&store, &thread_key, Some("sbx-reattach"), true).await;
+        let execution_id =
+            orphaned_execution(&store, &thread_key, Some("sbx-reattach"), true).await;
 
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
         let (first_io, mut first_stdout, _first_stdin) = mock_io();
@@ -11177,6 +11327,7 @@ mod adoption_tests {
         backend.push_io(second_io).await;
 
         let runtime = runtime_with(&store, backend.clone());
+        claim_test_stdout_owner(&runtime, &execution_id).await;
         runtime
             .ensure_session_pipe(&thread_key, "sbx-reattach")
             .await
@@ -11209,6 +11360,135 @@ mod adoption_tests {
             Some("Completed after reattach.")
         );
         assert_eq!(backend.opens(), 2);
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stdout_eof_waits_for_created_sandbox_to_become_running() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:eof-created-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-created"), true).await;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let (first_io, first_stdout, _first_stdin) = mock_io();
+        let (second_io, mut second_stdout, _second_stdin) = mock_io();
+        backend.push_io(first_io).await;
+
+        let runtime = runtime_with(&store, backend.clone());
+        claim_test_stdout_owner(&runtime, &execution_id).await;
+        runtime
+            .ensure_session_pipe(&thread_key, "sbx-created")
+            .await
+            .expect("open initial pipe");
+        drop(first_stdout);
+
+        // Reproduce the observed sequence: two failed live reattachments, then
+        // a Created observation while the same pod instance is temporarily unready.
+        wait_for_opens(&backend, 3).await;
+        backend.set_status(SandboxStatus::Created);
+        backend.created_observed.notified().await;
+        backend.push_io(second_io).await;
+        backend.set_status(SandboxStatus::Running);
+        wait_for_event(&store, &thread_key, "session.stdout_pump_reattached").await;
+        second_stdout
+            .write_all(&completed_output_bytes("Completed after pod transition."))
+            .await
+            .unwrap();
+
+        wait_for_event(&store, &thread_key, "session.execution_completed").await;
+        let all = events(&store, &thread_key).await;
+        assert!(
+            !all.iter()
+                .any(|event| event.event_type == "session.execution_failed"),
+            "a transitional Created status should not fail the execution"
+        );
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stdout_eof_fails_created_sandbox_with_terminal_reason() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:eof-created-dead-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id =
+            orphaned_execution(&store, &thread_key, Some("sbx-created-dead"), true).await;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let (io, stdout, _stdin) = mock_io();
+        backend.push_io(io).await;
+        let runtime = runtime_with(&store, backend.clone());
+        claim_test_stdout_owner(&runtime, &execution_id).await;
+        runtime
+            .ensure_session_pipe(&thread_key, "sbx-created-dead")
+            .await
+            .expect("open initial pipe");
+
+        backend.set_reason(Some("OOMKilled"));
+        backend.set_status(SandboxStatus::Created);
+        drop(stdout);
+
+        wait_for_event(&store, &thread_key, "session.execution_failed").await;
+        let all = events(&store, &thread_key).await;
+        let failed = all
+            .iter()
+            .find(|event| event.event_type == "session.execution_failed")
+            .expect("failed event");
+        assert!(
+            failed.payload["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("OOMKilled")),
+            "terminal backend reason should fail immediately and remain visible"
+        );
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stdout_eof_does_not_reattach_to_replaced_sandbox_instance() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:eof-replaced-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id =
+            orphaned_execution(&store, &thread_key, Some("sbx-replaced"), true).await;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let (io, stdout, _stdin) = mock_io();
+        backend.push_io(io).await;
+        let runtime = runtime_with(&store, backend.clone());
+        claim_test_stdout_owner(&runtime, &execution_id).await;
+        runtime
+            .ensure_session_pipe(&thread_key, "sbx-replaced")
+            .await
+            .expect("open initial pipe");
+
+        backend.set_status(SandboxStatus::Created);
+        drop(stdout);
+        backend.created_observed.notified().await;
+        backend.set_instance_id("replacement-instance");
+        backend.set_status(SandboxStatus::Running);
+
+        wait_for_event(&store, &thread_key, "session.execution_failed").await;
+        let all = events(&store, &thread_key).await;
+        let failed = all
+            .iter()
+            .find(|event| event.event_type == "session.execution_failed")
+            .expect("failed event");
+        assert!(
+            failed.payload["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("sandbox instance changed")),
+            "replacement should fail rather than inherit the active execution"
+        );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11279,6 +11559,7 @@ mod adoption_tests {
             completed.payload["result_text"].as_str(),
             Some("Completed after ownership handoff.")
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11289,13 +11570,14 @@ mod adoption_tests {
         let _serial = TEST_LOCK.lock().await;
         let thread_key =
             ThreadKey::parse(format!("test:eof-gone-{}", uuid::Uuid::new_v4())).unwrap();
-        orphaned_execution(&store, &thread_key, Some("sbx-gone"), true).await;
+        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-gone"), true).await;
 
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
         let (io, stdout, _stdin) = mock_io();
         backend.push_io(io).await;
 
         let runtime = runtime_with(&store, backend.clone());
+        claim_test_stdout_owner(&runtime, &execution_id).await;
         runtime
             .ensure_session_pipe(&thread_key, "sbx-gone")
             .await
@@ -11324,6 +11606,7 @@ mod adoption_tests {
             "gone sandbox should not reattach"
         );
         assert_eq!(backend.opens(), 1);
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11365,6 +11648,7 @@ mod adoption_tests {
         assert_eq!(backend.opens(), 0);
         let session = store.get_session(&thread_key).await.unwrap();
         assert_ne!(session.status.as_ref(), "failed");
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11400,6 +11684,7 @@ mod adoption_tests {
             }),
             "expected a live adoption event"
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11432,6 +11717,7 @@ mod adoption_tests {
             "expected status detail: {error}"
         );
         assert_eq!(backend.opens(), 0);
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11479,6 +11765,7 @@ mod adoption_tests {
             .expect("execution exists");
         assert_eq!(latest.execution_id, execution_id);
         assert_eq!(latest.status, ExecutionStatus::Completed);
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11539,6 +11826,7 @@ mod adoption_tests {
             .fail_execution(&execution_id, "test cleanup")
             .await
             .expect("terminalize legacy execution");
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11569,6 +11857,7 @@ mod adoption_tests {
             .run_orphan_adoption_scan(&mut state, Some(PRE_SANDBOX_ORPHAN_GRACE))
             .await;
         wait_for_event(&store, &running_thread, "session.execution_failed").await;
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11617,6 +11906,7 @@ mod adoption_tests {
         runtime.adopt_orphaned_executions().await;
         wait_for_event(&store, &thread_key, "session.execution_adopted").await;
         wait_for_event(&store, &thread_key, "session.execution_completed").await;
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11664,6 +11954,7 @@ mod adoption_tests {
             .fail_execution_if_active(&execution_id, "test cleanup")
             .await
             .expect("terminalize execution");
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11688,6 +11979,7 @@ mod adoption_tests {
 
         wait_for_event(&store, &thread_key, "session.execution_adopted").await;
         wait_for_event(&store, &thread_key, "session.execution_completed").await;
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11744,6 +12036,7 @@ mod adoption_tests {
             .run_orphan_adoption_scan(&mut state, Some(PRE_SANDBOX_ORPHAN_GRACE))
             .await;
         wait_for_event(&store, &thread_key, "session.execution_completed").await;
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11783,6 +12076,7 @@ mod adoption_tests {
             .fail_execution_if_active(&execution_id, "test cleanup")
             .await
             .expect("terminalize execution");
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11833,6 +12127,7 @@ mod adoption_tests {
                 .all(|event| event.event_type != "session.stdout_owner_released"),
             "finished execution must not be handed off"
         );
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11874,5 +12169,6 @@ mod adoption_tests {
             .fail_execution_if_active(&execution_id, "test cleanup")
             .await
             .expect("terminalize execution");
+        reset_test_store(&store).await;
     }
 }
