@@ -43,13 +43,12 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "th", text: "Name"
     assert_select "th", text: "Type"
     assert_select "th", text: "Source"
-    assert_select "th", text: "Enabled"
+    assert_select "th", text: "Created"
     # Source column shows only the backend label, not the underlying reference.
     assert_select "td span", text: "Env"
     assert_select "body", text: /GITHUB_TOKEN/, count: 0
     assert_select "a[href=?][title=?]", console_secret_path("static", secret.oid), secret.name
-    assert_select "span", text: "enabled"
-    assert_select "span", text: "disabled"
+    assert_select "time[datetime=?]", secret.created_at.iso8601
   end
 
   test "secrets table filters by type and searches by name" do

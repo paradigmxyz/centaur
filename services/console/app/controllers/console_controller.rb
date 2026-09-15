@@ -193,22 +193,6 @@ class ConsoleController < ApplicationController
     secret_source_segments(record).map { |seg| source_type_label(seg[:type]) }.uniq
   end
 
-  # A configured secret is enabled when its source can currently supply a value.
-  # Workload identity has no SecretSource record and is always available.
-  helper_method :secret_enabled?
-  def secret_enabled?(record)
-    sources = case record
-    when StaticSecret then [ record.source ]
-    when PgDsnSecret then [ record.dsn_source ]
-    when GcpIdTokenSecret then [ record.keyfile_source ]
-    when GcpAuthSecret then record.credentials_provider.present? ? [] : [ record.keyfile_source ]
-    when OauthTokenSecret, HmacSecret, AwsAuthSecret then record.sources
-    else []
-    end
-
-    (sources.any? || record.is_a?(GcpAuthSecret)) && sources.compact.size == sources.size && sources.all?(&:deliverable?)
-  end
-
   # Friendly label for a source backend / provider type, falling back to the raw
   # value for anything not in the table.
   helper_method :source_type_label
