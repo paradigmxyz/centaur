@@ -8970,7 +8970,7 @@ mod tests {
         assert_eq!(content.len(), 2);
         let note = content[0]["text"].as_str().unwrap();
         assert!(note.contains("Slack channel"));
-        assert!(note.contains("always use proxied methods"));
+        assert!(note.contains("Use proxied Slack methods"));
         assert_eq!(content[1]["text"], "hi");
     }
 
@@ -8989,8 +8989,8 @@ mod tests {
 
         assert_eq!(content.len(), 2);
         let note = content[0]["text"].as_str().unwrap();
-        assert!(note.contains("Slack direct message"));
-        assert!(note.contains("always use direct methods"));
+        assert!(note.contains("Slack DM"));
+        assert!(note.contains("Use direct Slack methods"));
         assert_eq!(content[1]["text"], "hi");
     }
 

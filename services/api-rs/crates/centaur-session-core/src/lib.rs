@@ -193,31 +193,19 @@ impl ChatDestination {
                 channel_id,
                 thread_ts,
             } => {
-                let (surface, methods, command_form, forbidden_methods, upload_command) =
-                    if channel_id.starts_with('D') {
-                        (
-                            "direct message",
-                            "direct",
-                            "ending in `-direct`",
-                            "proxied",
-                            "slack upload-direct",
-                        )
-                    } else {
-                        (
-                            "channel",
-                            "proxied",
-                            "without `-direct`",
-                            "direct",
-                            "slack upload",
-                        )
-                    };
-                format!(
-                    "[chat surface: Slack {surface} · conversation {channel_id} · thread {thread_ts}. \
-                     Centaur delivers your reply to this thread automatically — do not repost it with the slack tool. \
-                     For Slack reads, downloads, and uploads in this conversation, always use {methods} methods \
-                     (commands {command_form}); never use or fall back to {forbidden_methods} methods. \
-                     Send files here with `{upload_command}`.]"
-                )
+                if channel_id.starts_with('D') {
+                    format!(
+                        "[chat surface: Slack DM · conversation {channel_id} · thread {thread_ts}. \
+                         Use direct Slack methods (`*-direct`). Centaur delivers your reply automatically; \
+                         upload files with `slack upload-direct`.]"
+                    )
+                } else {
+                    format!(
+                        "[chat surface: Slack channel · channel {channel_id} · thread {thread_ts}. \
+                         Use proxied Slack methods (without `-direct`). Centaur delivers your reply automatically; \
+                         upload files with `slack upload`.]"
+                    )
+                }
             }
             Self::Discord {
                 guild_id,
@@ -812,7 +800,7 @@ mod tests {
             .context_line();
         assert!(slack_channel.contains("Slack channel"));
         assert!(slack_channel.contains("C123"));
-        assert!(slack_channel.contains("always use proxied methods"));
+        assert!(slack_channel.contains("Use proxied Slack methods"));
         assert!(slack_channel.contains("slack upload"));
         assert!(!slack_channel.contains("slack upload-direct"));
 
@@ -821,9 +809,9 @@ mod tests {
             .chat_destination()
             .unwrap()
             .context_line();
-        assert!(slack_dm.contains("Slack direct message"));
+        assert!(slack_dm.contains("Slack DM"));
         assert!(slack_dm.contains("D123"));
-        assert!(slack_dm.contains("always use direct methods"));
+        assert!(slack_dm.contains("Use direct Slack methods"));
         assert!(slack_dm.contains("slack upload-direct"));
 
         let discord = ThreadKey::parse("discord:111:222:333")
