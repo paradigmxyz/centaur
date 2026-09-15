@@ -29,13 +29,14 @@ ironProxy:
     # one port so callers can reach it.
     pgPort: 5432
   # CIDRs iron-proxy must never dial upstream, even when the host allowlist
-  # matches. Keep the local/IMDS defaults; Kubernetes NetworkPolicies restrict
-  # proxy access to in-cluster services.
+  # matches. Block the default k3s pod range so upstreams must use Services;
+  # Kubernetes NetworkPolicies restrict which Service backends are reachable.
   upstreamDenyCidrs:
     - "169.254.169.254/32"
     - "fd00:ec2::254/128"
     - "127.0.0.0/8"
     - "::1/128"
+    - "10.42.0.0/16"
   secretSource: onepassword
   secretTtl: 10m
   # Requests/limits for each per-sandbox iron-proxy pod (k8s resources map).
