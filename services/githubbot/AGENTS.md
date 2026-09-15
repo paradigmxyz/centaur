@@ -26,6 +26,9 @@ behavioral contract and supported webhook events are documented in `README.md`.
 - Automated merge behavior applies only to explicitly owned PRs and must honor
   draft, hold, mergeability, settled-check, attempt-limit, and human-handoff
   gates. Keep deterministic merge decisions outside the agent prompt.
+- The Actions fallback may stand in for unreadable check detail only when it
+  accounts for every context GitHub counted. An unseen check must never read as
+  green.
 - Bundled prompts remain generic and fully overrideable. Do not embed private
   review rules, repositories, user handles, or deployment behavior in defaults.
 - Unit tests must not write to real repositories, comments, branches, or PRs.
