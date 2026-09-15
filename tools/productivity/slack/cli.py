@@ -596,20 +596,11 @@ def _render_channels(results: list[dict], title: str, include_access: bool = Fal
 def channels(
     limit: int = typer.Option(100, "--limit", "-n", help="Max channels"),
     query: str = typer.Option(None, "--query", "-q", help="Filter by name"),
-    bot_member_only: bool = typer.Option(
-        False,
-        "--bot-member-only",
-        help="Only list public or explicitly granted channels with history access",
-    ),
 ):
-    """List public and explicitly granted channels exposed by the proxy."""
+    """List bot-readable public and explicitly granted channels from the proxy."""
     from .client import list_channels_proxy
 
-    results = list_channels_proxy(
-        limit=limit,
-        history_only=bot_member_only,
-        query=query,
-    )
+    results = list_channels_proxy(limit=limit, query=query)
 
     _render_channels(results, f"Channels ({len(results)})", include_access=True)
 
