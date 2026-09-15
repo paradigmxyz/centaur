@@ -26,6 +26,8 @@ impl SessionSandboxCleanupConfig {
 
 #[derive(Debug, Default)]
 pub struct SessionSandboxCleanupReport {
+    pub retired_vacant: usize,
+    pub failed_vacant_retirements: usize,
     pub stopped_orphans: usize,
     pub failed_orphans: usize,
     pub idle_pause_attempts: usize,
@@ -36,6 +38,7 @@ pub struct SessionSandboxCleanupWorker {
     ctx: RuntimeContext,
     config: SessionSandboxCleanupConfig,
     pending_orphans: BTreeSet<String>,
+    pending_vacant: BTreeSet<String>,
 }
 
 impl SessionSandboxCleanupWorker {
@@ -44,6 +47,7 @@ impl SessionSandboxCleanupWorker {
             ctx,
             config,
             pending_orphans: BTreeSet::new(),
+            pending_vacant: BTreeSet::new(),
         }
     }
 
@@ -67,13 +71,67 @@ impl SessionSandboxCleanupWorker {
         &mut self,
     ) -> Result<SessionSandboxCleanupReport, SessionRuntimeError> {
         let mut report = SessionSandboxCleanupReport::default();
-        self.reap_unreferenced_sandboxes(&mut report).await?;
+        // One observation for both sandbox arms. They do different things to
+        // a sandbox, so they must not disagree about what they saw.
+        let observed = self.ctx.manager.list_observed().await?;
+        self.retire_vacant_sandboxes(&observed, &mut report).await?;
+        self.reap_unreferenced_sandboxes(&observed, &mut report)
+            .await?;
         self.pause_idle_sandboxes(&mut report).await?;
         Ok(report)
     }
 
+    /// Pause sandboxes whose record asks for a process the backend does not
+    /// have.
+    ///
+    /// Not counting a vacant sandbox against the running cap is the actual
+    /// capacity fix; this is the other half. Left alone the record keeps
+    /// requesting a replica that never arrives, so reconciliation reports
+    /// drift on every pass and the CR never settles.
+    ///
+    /// Pausing sets `replicas: 0`, which keeps the CR, its state volume and
+    /// its proxy, so the owning session resumes with its workspace intact.
+    /// Stopping would delete the volume and every uncommitted change on it.
+    /// This path pauses and never stops, whether or not a session still
+    /// references the sandbox.
+    ///
+    /// Two consecutive sweeps, mirroring the orphan arm: a fresh create is
+    /// briefly vacant between the CR landing and its pod being scheduled, and
+    /// pausing that would fight the create it is racing.
+    async fn retire_vacant_sandboxes(
+        &mut self,
+        observed: &[ObservedSandbox],
+        report: &mut SessionSandboxCleanupReport,
+    ) -> Result<(), SessionRuntimeError> {
+        for sandbox_id in select_vacant_retire_candidates(observed, &mut self.pending_vacant) {
+            let id = SandboxId::new(sandbox_id.clone());
+            match self.ctx.manager.pause(&id).await {
+                Ok(()) | Err(SandboxError::NotFound(_)) => {
+                    self.ctx.sandbox_pipes.remove(&sandbox_id);
+                    self.pending_vacant.remove(&sandbox_id);
+                    report.retired_vacant += 1;
+                    info!(
+                        sandbox_id,
+                        reason = "pod_absent",
+                        "session sandbox cleanup worker paused vacant sandbox"
+                    );
+                }
+                Err(error) => {
+                    report.failed_vacant_retirements += 1;
+                    warn!(
+                        sandbox_id,
+                        %error,
+                        "session sandbox cleanup worker failed to pause vacant sandbox"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn reap_unreferenced_sandboxes(
         &mut self,
+        observed: &[ObservedSandbox],
         report: &mut SessionSandboxCleanupReport,
     ) -> Result<(), SessionRuntimeError> {
         let referenced = self
@@ -83,9 +141,8 @@ impl SessionSandboxCleanupWorker {
             .await?
             .into_iter()
             .collect::<BTreeSet<_>>();
-        let observed = self.ctx.manager.list_observed().await?;
         let candidates =
-            select_orphan_reap_candidates(&observed, &referenced, &mut self.pending_orphans);
+            select_orphan_reap_candidates(observed, &referenced, &mut self.pending_orphans);
 
         for sandbox_id in candidates {
             let id = SandboxId::new(sandbox_id.clone());
@@ -151,6 +208,24 @@ impl SessionSandboxCleanupWorker {
     }
 }
 
+fn select_vacant_retire_candidates(
+    observed: &[ObservedSandbox],
+    pending_vacant: &mut BTreeSet<String>,
+) -> Vec<String> {
+    let current = observed
+        .iter()
+        .filter(|sandbox| matches!(sandbox.status, SandboxStatus::Vacant))
+        .map(|sandbox| sandbox.id.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+
+    let candidates = current
+        .intersection(pending_vacant)
+        .cloned()
+        .collect::<Vec<_>>();
+    *pending_vacant = current;
+    candidates
+}
+
 fn select_orphan_reap_candidates(
     observed: &[ObservedSandbox],
     referenced: &BTreeSet<String>,
@@ -177,9 +252,16 @@ fn orphan_reap_eligible(sandbox: &ObservedSandbox, referenced: &BTreeSet<String>
     if sandbox.labels.get(COMPONENT_LABEL).map(String::as_str) == Some(WORKFLOW_RUN_COMPONENT) {
         return false;
     }
+    // Vacant belongs to the retire arm, which pauses rather than stops so the
+    // state volume survives. Once that arm has run the CR reads Suspended,
+    // and this arm can reap it on the usual two passes if nothing references
+    // it by then.
     !matches!(
         sandbox.status,
-        SandboxStatus::Created | SandboxStatus::Stopped | SandboxStatus::Gone
+        SandboxStatus::Created
+            | SandboxStatus::Stopped
+            | SandboxStatus::Gone
+            | SandboxStatus::Vacant
     )
 }
 
@@ -202,6 +284,68 @@ mod tests {
 
     fn referenced(ids: &[&str]) -> BTreeSet<String> {
         ids.iter().map(|id| (*id).to_owned()).collect()
+    }
+
+    #[test]
+    fn vacant_retire_requires_two_consecutive_passes() {
+        // A fresh create is briefly vacant between the CR landing and its pod
+        // being scheduled; one pass must not pause the create it is racing.
+        let observed = [observed("asbx-1", SandboxStatus::Vacant)];
+        let mut pending = BTreeSet::new();
+
+        assert_eq!(
+            select_vacant_retire_candidates(&observed, &mut pending),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            select_vacant_retire_candidates(&observed, &mut pending),
+            vec!["asbx-1".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_sandbox_that_gets_its_pod_back_is_not_retired() {
+        let mut pending = BTreeSet::new();
+        select_vacant_retire_candidates(&[observed("asbx-1", SandboxStatus::Vacant)], &mut pending);
+        assert_eq!(
+            select_vacant_retire_candidates(
+                &[observed("asbx-1", SandboxStatus::Running)],
+                &mut pending
+            ),
+            Vec::<String>::new()
+        );
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn only_vacant_sandboxes_are_retired() {
+        let observed = [
+            observed("asbx-running", SandboxStatus::Running),
+            observed("asbx-created", SandboxStatus::Created),
+            observed("asbx-suspended", SandboxStatus::Suspended),
+            observed("asbx-vacant", SandboxStatus::Vacant),
+        ];
+        let mut pending = BTreeSet::new();
+        select_vacant_retire_candidates(&observed, &mut pending);
+        assert_eq!(
+            select_vacant_retire_candidates(&observed, &mut pending),
+            vec!["asbx-vacant".to_owned()]
+        );
+    }
+
+    #[test]
+    fn vacant_sandboxes_are_left_to_the_retire_arm() {
+        // The orphan arm stops, which deletes the state volume. A vacant
+        // sandbox is paused instead, and only becomes reapable here once it
+        // reads Suspended.
+        let observed = [observed("asbx-vacant", SandboxStatus::Vacant)];
+        let mut pending = BTreeSet::new();
+
+        select_orphan_reap_candidates(&observed, &referenced(&[]), &mut pending);
+        assert_eq!(
+            select_orphan_reap_candidates(&observed, &referenced(&[]), &mut pending),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
