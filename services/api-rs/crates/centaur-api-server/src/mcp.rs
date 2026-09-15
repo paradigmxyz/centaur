@@ -1199,6 +1199,32 @@ fn mcp_v2_load_output_result(
     })
 }
 
+fn mcp_artifact_mime_type(artifact_path: &str) -> &'static str {
+    match Path::new(artifact_path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("pdf") => "application/pdf",
+        Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        Some("csv") => "text/csv",
+        Some("html" | "htm") => "text/html",
+        Some("json") => "application/json",
+        Some("md" | "markdown") => "text/markdown",
+        Some("txt") => "text/plain",
+        Some("gif") => "image/gif",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("svg") => "image/svg+xml",
+        Some("webp") => "image/webp",
+        Some("zip") => "application/zip",
+        _ => "application/octet-stream",
+    }
+}
+
 fn mcp_artifact_get_output_result(
     artifact_path: &str,
     contents: Vec<u8>,
@@ -1218,7 +1244,7 @@ fn mcp_artifact_get_output_result(
     let metadata = json!({
         "path": artifact_path,
         "filename": filename,
-        "mime_type": "application/octet-stream",
+        "mime_type": mcp_artifact_mime_type(artifact_path),
         "size_bytes": contents.len(),
     });
     Ok(McpToolCallOutcome {
@@ -2535,33 +2561,52 @@ def search(query, limit=20):
     }
 
     #[test]
-    fn mcp_artifact_get_returns_an_embedded_resource() {
-        let contents = b"sandbox report\n";
-        let outcome =
-            mcp_artifact_get_output_result("reports/quarterly report.txt", contents.to_vec())
-                .unwrap();
+    fn mcp_artifact_get_returns_an_embedded_resource_with_its_mime_type() {
+        for (path, contents, mime_type) in [
+            (
+                "reports/quarterly report.PDF",
+                b"%PDF-1.7\n".as_slice(),
+                "application/pdf",
+            ),
+            (
+                "reports/quarterly report.docx",
+                b"PK\x03\x04\0binary".as_slice(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+        ] {
+            let outcome = mcp_artifact_get_output_result(path, contents.to_vec()).unwrap();
 
-        assert!(!mcp_result_is_error(&outcome.result));
+            assert!(!mcp_result_is_error(&outcome.result));
+            assert_eq!(
+                outcome.result["content"][0]["resource"]["uri"],
+                format!("file:///tmp/downloads/{}", path.replace(' ', "%20"))
+            );
+            assert_eq!(
+                outcome.result["content"][0]["resource"]["mimeType"],
+                mime_type
+            );
+            assert_eq!(
+                outcome.result["content"][0]["resource"]["blob"],
+                general_purpose::STANDARD.encode(contents)
+            );
+            assert_eq!(outcome.result["structuredContent"]["path"], path);
+            assert_eq!(
+                outcome.result["structuredContent"]["filename"],
+                Path::new(path).file_name().unwrap().to_str().unwrap()
+            );
+            assert_eq!(outcome.result["structuredContent"]["mime_type"], mime_type);
+            assert_eq!(
+                outcome.result["structuredContent"]["size_bytes"],
+                contents.len()
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_artifact_get_uses_octet_stream_for_unknown_extensions() {
         assert_eq!(
-            outcome.result["content"][0]["resource"]["uri"],
-            "file:///tmp/downloads/reports/quarterly%20report.txt"
-        );
-        assert_eq!(
-            outcome.result["content"][0]["resource"]["mimeType"],
+            mcp_artifact_mime_type("exports/archive.unknown"),
             "application/octet-stream"
-        );
-        assert_eq!(
-            outcome.result["content"][0]["resource"]["blob"],
-            general_purpose::STANDARD.encode(contents)
-        );
-        assert_eq!(
-            outcome.result["structuredContent"],
-            json!({
-                "path": "reports/quarterly report.txt",
-                "filename": "quarterly report.txt",
-                "mime_type": "application/octet-stream",
-                "size_bytes": contents.len(),
-            })
         );
     }
 
