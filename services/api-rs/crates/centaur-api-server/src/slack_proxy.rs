@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::OnceLock,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -27,6 +27,7 @@ const DEFAULT_SLACK_FILES_LIST_LIMIT: u16 = 100;
 const MAX_SLACK_FILES_LIST_LIMIT: u16 = 200;
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(60);
+const SLACK_CHANNEL_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -512,6 +513,35 @@ fn upstream_body_is_unexpected_html(
     upstream_is_html && !file_is_html
 }
 
+struct CachedSlackValue<T> {
+    fetched_at: Instant,
+    value: T,
+}
+
+impl<T: Clone> CachedSlackValue<T> {
+    fn new(fetched_at: Instant, value: T) -> Self {
+        Self { fetched_at, value }
+    }
+
+    fn get_if_fresh(&self, now: Instant) -> Option<T> {
+        (now.saturating_duration_since(self.fetched_at) < SLACK_CHANNEL_CACHE_TTL)
+            .then(|| self.value.clone())
+    }
+}
+
+type SlackChannelInfoCache = tokio::sync::Mutex<BTreeMap<String, CachedSlackValue<Value>>>;
+type SlackPublicChannelCache = tokio::sync::Mutex<Option<CachedSlackValue<Vec<Value>>>>;
+
+fn slack_channel_info_cache() -> &'static SlackChannelInfoCache {
+    static CACHE: OnceLock<SlackChannelInfoCache> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn slack_public_channel_cache() -> &'static SlackPublicChannelCache {
+    static CACHE: OnceLock<SlackPublicChannelCache> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
 // No Debug derive: bot_token must not end up in logs via {:?} formatting.
 struct SlackFileProxyConfig {
     api_url: String,
@@ -656,6 +686,28 @@ async fn slack_channel_info(
     config: &SlackFileProxyConfig,
     channel_id: &str,
 ) -> Result<Value, ApiError> {
+    let mut entries = slack_channel_info_cache().lock().await;
+    let now = Instant::now();
+    if let Some(channel) = entries
+        .get(channel_id)
+        .and_then(|entry| entry.get_if_fresh(now))
+    {
+        return Ok(channel);
+    }
+
+    let channel = fetch_slack_channel_info(client, config, channel_id).await?;
+    entries.insert(
+        channel_id.to_owned(),
+        CachedSlackValue::new(Instant::now(), channel.clone()),
+    );
+    Ok(channel)
+}
+
+async fn fetch_slack_channel_info(
+    client: &reqwest::Client,
+    config: &SlackFileProxyConfig,
+    channel_id: &str,
+) -> Result<Value, ApiError> {
     let value = slack_api_post_form(
         client,
         config,
@@ -676,6 +728,33 @@ fn slack_channel_info_form(channel_id: &str) -> Vec<(&'static str, String)> {
 }
 
 async fn slack_public_channels(
+    client: &reqwest::Client,
+    config: &SlackFileProxyConfig,
+) -> Result<Vec<Value>, ApiError> {
+    let mut entry = slack_public_channel_cache().lock().await;
+    let now = Instant::now();
+    if let Some(channels) = entry.as_ref().and_then(|cached| cached.get_if_fresh(now)) {
+        return Ok(channels);
+    }
+
+    let channels = fetch_slack_public_channels(client, config).await?;
+    let fetched_at = Instant::now();
+    {
+        let mut channel_info = slack_channel_info_cache().lock().await;
+        for channel in &channels {
+            if let Some(channel_id) = channel.get("id").and_then(Value::as_str) {
+                channel_info.insert(
+                    channel_id.to_owned(),
+                    CachedSlackValue::new(fetched_at, channel.clone()),
+                );
+            }
+        }
+    }
+    *entry = Some(CachedSlackValue::new(fetched_at, channels.clone()));
+    Ok(channels)
+}
+
+async fn fetch_slack_public_channels(
     client: &reqwest::Client,
     config: &SlackFileProxyConfig,
 ) -> Result<Vec<Value>, ApiError> {
@@ -1379,6 +1458,16 @@ mod tests {
         ] {
             assert!(!slack_channel_has_default_history_access(&inaccessible));
         }
+    }
+
+    #[test]
+    fn channel_cache_entries_expire_after_five_minutes() {
+        let now = Instant::now();
+        let fresh = CachedSlackValue::new(now, "channel");
+        assert_eq!(fresh.get_if_fresh(now), Some("channel"));
+
+        let expired = CachedSlackValue::new(now - SLACK_CHANNEL_CACHE_TTL, "channel");
+        assert_eq!(expired.get_if_fresh(now), None);
     }
 
     #[test]
