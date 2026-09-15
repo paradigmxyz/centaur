@@ -392,10 +392,39 @@ async function createSession(
   threadId: string,
   conversationName?: string,
 ): Promise<void> {
+  const requested = options.defaultHarnessType ?? "codex";
+  let response = await postCreateSession(
+    options,
+    threadId,
+    requested,
+    conversationName,
+  );
+  // Changing the deployment default must not restart or break existing threads.
+  // Match the other ingresses: retry a harness conflict using the pinned harness.
+  if (response.status === 409) {
+    const existing = existingHarnessFromConflict(await response.clone().text());
+    if (existing && existing !== requested) {
+      response = await postCreateSession(
+        options,
+        threadId,
+        existing,
+        conversationName,
+      );
+    }
+  }
+  await ensureApiOk(response, "create session", options);
+}
+
+async function postCreateSession(
+  options: DiscordbotOptions,
+  threadId: string,
+  harnessType: string,
+  conversationName?: string,
+): Promise<Response> {
   const fetchFn = options.fetch ?? fetch;
   const name = conversationName?.trim();
   const body: DiscordbotCreateSessionRequest = {
-    harness_type: "codex",
+    harness_type: harnessType,
     metadata: {
       source: "discordbot",
       platform: "discord",
@@ -404,12 +433,24 @@ async function createSession(
       ...(name ? { discord_conversation_name: name } : {}),
     },
   };
-  const response = await fetchFn(apiSessionUrl(options.apiUrl, threadId), {
+  return fetchFn(apiSessionUrl(options.apiUrl, threadId), {
     method: "POST",
     headers: apiHeaders(options),
     body: JSON.stringify(body),
   });
-  await ensureApiOk(response, "create session", options);
+}
+
+function existingHarnessFromConflict(body: string): string | undefined {
+  try {
+    const payload: unknown = JSON.parse(body);
+    if (isJsonObject(payload)) {
+      const existing = stringValue(payload.existing_harness);
+      if (existing) return existing;
+    }
+  } catch {
+    // Older API versions report the conflict as plain text.
+  }
+  return /already exists with harness_type ([A-Za-z0-9_-]+)/.exec(body)?.[1];
 }
 
 async function appendSessionMessages(
