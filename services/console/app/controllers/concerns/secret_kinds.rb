@@ -6,6 +6,10 @@
 module SecretKinds
   extend ActiveSupport::Concern
 
+  included do
+    helper ConsoleHelper
+  end
+
   # `form:` gates which kinds expose a create/edit form (and so appear in the "Add
   # Secret" menu). The remaining kinds are read-only until their form is built.
   SECRET_KINDS = {
