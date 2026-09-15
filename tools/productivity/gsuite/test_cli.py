@@ -1,5 +1,7 @@
 import json
+from unittest.mock import Mock
 
+import pytest
 from typer.testing import CliRunner
 
 from gsuite import client
@@ -482,3 +484,151 @@ def test_drive_download_revision_command_writes_original_binary(tmp_path, monkey
     assert result.exit_code == 0
     assert output_path.read_bytes() == b"historical image"
     assert "Downloaded revision rev-42" in result.output
+
+
+@pytest.mark.parametrize("json_flag", ["--json", "-o"])
+def test_directory_search_json_and_limit(monkeypatch, json_flag):
+    expected = [
+        {
+            "resource_name": "people/123",
+            "name": "[bold]Alex",
+            "email_addresses": ["alex@example.com"],
+        }
+    ]
+    search = Mock(return_value=expected)
+    monkeypatch.setattr(client, "directory_search", search)
+    result = runner.invoke(app, ["directory", "search", "Alex", "-n", "7", json_flag])
+
+    assert result.exit_code == 0
+    search.assert_called_once_with("Alex", max_results=7)
+    assert json.loads(result.stdout) == expected
+
+
+def test_directory_table_preserves_names_and_all_emails(monkeypatch):
+    monkeypatch.setattr(
+        client,
+        "directory_list",
+        lambda *args, **kwargs: [
+            {
+                "resource_name": "people/123",
+                "name": "Alex",
+                "email_addresses": ["alex@example.com", "alias@example.com"],
+            },
+            {"resource_name": "people/456", "name": "No email", "email_addresses": []},
+        ],
+    )
+
+    result = runner.invoke(app, ["directory", "list"])
+
+    assert result.exit_code == 0
+    for text in ["Alex", "alex@example.com", "alias@example.com", "No email"]:
+        assert text in result.stdout
+
+
+def test_directory_markdown_escapes_cells(monkeypatch):
+    monkeypatch.setattr(
+        client,
+        "directory_list",
+        lambda *args, **kwargs: [
+            {
+                "resource_name": "people/123",
+                "name": "Alex|Example\nTeam",
+                "email_addresses": ["alex@example.com", "alias@example.com"],
+            },
+        ],
+    )
+
+    result = runner.invoke(app, ["directory", "list", "--markdown"])
+
+    assert result.exit_code == 0
+    assert result.stdout == (
+        "| Name | Email addresses |\n| --- | --- |\n"
+        "| Alex\\|Example Team | alex@example.com, alias@example.com |\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "flags,expected",
+    [
+        ([], "No people found."),
+        (["--json"], "[]"),
+        (["--markdown"], "| Name | Email addresses |\n| --- | --- |"),
+    ],
+)
+def test_directory_empty_output(monkeypatch, flags, expected):
+    monkeypatch.setattr(client, "directory_list", lambda *args, **kwargs: [])
+
+    result = runner.invoke(app, ["directory", "list", *flags])
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == expected
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        [],
+        ["Alex", "--limit", "0"],
+        ["Alex", "--limit", "-1"],
+    ],
+)
+def test_directory_search_cli_rejects_invalid_arguments(monkeypatch, args):
+    search = Mock()
+    monkeypatch.setattr(client, "directory_search", search)
+
+    assert runner.invoke(app, ["directory", "search", *args]).exit_code == 2
+    search.assert_not_called()
+
+
+@pytest.mark.parametrize("command", [["list"], ["search", "Alex"]])
+def test_directory_cli_reports_api_error(monkeypatch, command):
+    search = Mock(side_effect=RuntimeError("Insufficient authentication scopes"))
+    monkeypatch.setattr(client, f"directory_{command[0]}", search)
+    result = runner.invoke(app, ["directory", *command, "--json"])
+
+    assert result.exit_code == 1
+    assert "Insufficient authentication scopes" in result.stdout
+
+
+def test_directory_is_discoverable_in_help():
+    for args, expected in [
+        (["--help"], ["directory"]),
+        (["directory", "--help"], ["search", "list"]),
+    ]:
+        result = runner.invoke(app, args)
+        assert result.exit_code == 0
+        for command in expected:
+            assert command in result.stdout
+
+
+@pytest.mark.parametrize("json_flag", ["--json", "-o"])
+def test_directory_list_outputs_json(monkeypatch, json_flag):
+    expected = [
+        {
+            "resource_name": "people/1",
+            "name": "Alex",
+            "email_addresses": ["alex@example.com"],
+        }
+    ]
+
+    list_people = Mock(return_value=expected)
+    monkeypatch.setattr(client, "directory_list", list_people)
+    result = runner.invoke(app, ["directory", "list", json_flag])
+
+    assert result.exit_code == 0
+    list_people.assert_called_once_with()
+    assert json.loads(result.stdout) == expected
+
+
+@pytest.mark.parametrize("args", [["--limit", "100"], ["-n", "100"], ["Alex"]])
+def test_directory_list_rejects_invalid_arguments(args):
+    assert runner.invoke(app, ["directory", "list", *args]).exit_code == 2
+
+
+def test_directory_json_takes_precedence_over_markdown(monkeypatch):
+    monkeypatch.setattr(client, "directory_list", lambda *args, **kwargs: [])
+
+    result = runner.invoke(app, ["directory", "list", "--json", "--markdown"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == []

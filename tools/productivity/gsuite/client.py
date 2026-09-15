@@ -1,4 +1,4 @@
-"""GSuite API client for Gmail, Calendar, and Drive."""
+"""GSuite API client for Gmail, Calendar, Directory, and Drive."""
 
 import base64
 import io
@@ -6,6 +6,7 @@ import mimetypes
 import os
 import re
 import urllib.request
+from collections.abc import Callable
 from email.mime.text import MIMEText
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse, urlsplit
@@ -14,7 +15,7 @@ import httplib2
 import socks
 from google.auth.credentials import AnonymousCredentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+from googleapiclient.http import HttpRequest, MediaIoBaseDownload, MediaIoBaseUpload
 
 from centaur_sdk import current_thread_key, save_attachment, secret
 
@@ -83,6 +84,11 @@ def get_gmail_service():
 def get_calendar_service():
     """Get authenticated Calendar service."""
     return build("calendar", "v3", http=_build_http())
+
+
+def get_people_service():
+    """Get the People service using the shared proxy transport."""
+    return build("people", "v1", http=_build_http())
 
 
 def get_drive_service():
@@ -2792,8 +2798,89 @@ def analytics_get_daily_users(
     )
 
 
+# Directory functions
+
+
+def directory_list() -> list[dict]:
+    """List all visible Directory profiles.
+
+    Returns:
+        People with resource_name, name, and email_addresses
+    """
+    service = get_people_service()
+    request_args = {
+        "readMask": "names,emailAddresses",
+        "sources": ["DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE"],
+        "pageSize": 1000,
+    }
+
+    return _paginate_directory_people(service.people().listDirectoryPeople, request_args)
+
+
+def directory_search(query: str, max_results: int = 20) -> list[dict]:
+    """Search Directory profiles.
+
+    Args:
+        query: People API prefix search query, e.g. name, email
+        max_results: Maximum number of people to return
+
+    Returns:
+        People with resource_name, name, and email_addresses.
+    """
+    service = get_people_service()
+    request_args = {
+        "readMask": "names,emailAddresses",
+        "sources": ["DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE"],
+        "query": query,
+        "pageSize": max_results,
+    }
+
+    return _paginate_directory_people(
+        service.people().searchDirectoryPeople, request_args, max_results=max_results
+    )
+
+
+def _paginate_directory_people(
+    request: Callable[..., HttpRequest],
+    request_args: dict,
+    max_results: int | None = None,
+) -> list[dict]:
+    """Execute directory requests, paginate, and return normalized people."""
+    people: list[dict] = []
+
+    while max_results is None or len(people) < max_results:
+        result = request(**request_args).execute()
+
+        for person in result.get("people") or []:
+            names = person.get("names") or []
+            primary_name = next(
+                (name for name in names if (name.get("metadata") or {}).get("primary")),
+                names[0] if names else {},
+            )
+            people.append(
+                {
+                    "resource_name": person.get("resourceName", ""),
+                    "name": primary_name.get("displayName", ""),
+                    "email_addresses": [
+                        email["value"]
+                        for email in person.get("emailAddresses") or []
+                        if email.get("value")
+                    ],
+                }
+            )
+
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+        # People requires every other parameter, including pageSize, to stay
+        # unchanged while following a page token.
+        request_args["pageToken"] = page_token
+
+    return people[:max_results]
+
+
 class GSuiteClient:
-    """GSuite API client wrapping Gmail, Calendar, Drive, Docs, Sheets, Slides, and Analytics."""
+    """GSuite client for Gmail, Calendar, Directory, Drive, Docs, Sheets, Slides, and Analytics."""
 
     # --- Gmail ---
 
@@ -3797,6 +3884,16 @@ class GSuiteClient:
     ) -> dict:
         """Get daily active users over time."""
         return analytics_get_daily_users(start_date=start_date, end_date=end_date)
+
+    # --- Directory ---
+
+    def directory_list(self) -> list[dict]:
+        """List all visible Workspace directory profiles with names and emails."""
+        return directory_list()
+
+    def directory_search(self, query: str, max_results: int = 20) -> list[dict]:
+        """Search Workspace directory profiles by prefix query."""
+        return directory_search(query, max_results=max_results)
 
 
 def _client() -> GSuiteClient:

@@ -1409,3 +1409,142 @@ def test_docs_insert_passes_expected_revision_id_through(monkeypatch):
     assert len(calls) == 2
     assert "writeControl" not in calls[0]["body"]
     assert calls[1]["body"]["writeControl"] == {"requiredRevisionId": "rev-99"}
+
+
+def test_people_service_uses_proxy_transport(monkeypatch):
+    transport = object()
+    build = Mock()
+    monkeypatch.setattr(client, "_build_http", lambda: transport)
+    monkeypatch.setattr(client, "build", build)
+
+    assert client.get_people_service() is build.return_value
+    build.assert_called_once_with("people", "v1", http=transport)
+
+
+def test_directory_host_is_allowed_and_authenticated():
+    config = tomllib.loads(Path(client.__file__).with_name("pyproject.toml").read_text())
+    tool = config["tool"]["centaur"]
+
+    assert "people.googleapis.com" in tool["hosts"]
+    assert "people.googleapis.com" in tool["secrets"][0]["hosts"]
+
+
+def test_directory_normalizes_profiles(monkeypatch):
+    service = Mock()
+    service.people.return_value.listDirectoryPeople.return_value.execute.return_value = {
+        "people": [
+            {
+                "resourceName": "people/123",
+                "names": [
+                    {"displayName": "Alternate name"},
+                    {"displayName": "Alex Example", "metadata": {"primary": True}},
+                ],
+                "emailAddresses": [
+                    {"value": "alex@example.com"},
+                    {"value": "alex.alias@example.com"},
+                    {},
+                ],
+            },
+            {"names": [{"displayName": "Fallback name"}]},
+            {},
+            {"names": None, "emailAddresses": None},
+        ]
+    }
+    monkeypatch.setattr(client, "get_people_service", lambda: service)
+
+    results = client.directory_list()
+
+    assert results == [
+        {
+            "resource_name": "people/123",
+            "name": "Alex Example",
+            "email_addresses": ["alex@example.com", "alex.alias@example.com"],
+        },
+        {"resource_name": "", "name": "Fallback name", "email_addresses": []},
+        {"resource_name": "", "name": "", "email_addresses": []},
+        {"resource_name": "", "name": "", "email_addresses": []},
+    ]
+
+
+def test_directory_search_keeps_parameters_stable_and_stops_at_limit(monkeypatch):
+    service = Mock()
+    search = service.people.return_value.searchDirectoryPeople
+    search.return_value.execute.side_effect = [
+        {"people": [{"resourceName": "people/1"}], "nextPageToken": "second"},
+        {"people": [], "nextPageToken": "third"},
+        {
+            "people": [{"resourceName": "people/2"}, {"resourceName": "people/3"}],
+            "nextPageToken": "unused",
+        },
+    ]
+    monkeypatch.setattr(client, "get_people_service", lambda: service)
+
+    results = client.directory_search("Alex", max_results=2)
+
+    assert [person["resource_name"] for person in results] == ["people/1", "people/2"]
+    calls = [call.kwargs for call in search.call_args_list]
+    first = {
+        "readMask": "names,emailAddresses",
+        "sources": ["DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE"],
+        "query": "Alex",
+        "pageSize": 2,
+    }
+    assert calls == [
+        first,
+        {**first, "pageToken": "second"},
+        {**first, "pageToken": "third"},
+    ]
+
+
+@pytest.mark.parametrize("response", [{}, {"people": []}, {"people": None}])
+def test_directory_empty_results(monkeypatch, response):
+    service = Mock()
+    request = service.people.return_value.listDirectoryPeople
+    request.return_value.execute.return_value = response
+    monkeypatch.setattr(client, "get_people_service", lambda: service)
+
+    results = client.directory_list()
+
+    assert results == []
+    request.assert_called_once()
+
+
+def test_directory_list_fetches_every_page_including_empty_pages(monkeypatch):
+    service = Mock()
+    request = service.people.return_value.listDirectoryPeople
+    profiles = [{"resourceName": f"people/{index}"} for index in range(1002)]
+    request.return_value.execute.side_effect = [
+        {"people": profiles[:1000], "nextPageToken": "second"},
+        {"people": [], "nextPageToken": "third"},
+        {"people": profiles[1000:]},
+    ]
+    monkeypatch.setattr(client, "get_people_service", lambda: service)
+
+    results = client.directory_list()
+
+    assert [person["resource_name"] for person in results] == [
+        profile["resourceName"] for profile in profiles
+    ]
+    first = {
+        "readMask": "names,emailAddresses",
+        "sources": ["DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE"],
+        "pageSize": 1000,
+    }
+    assert [call.kwargs for call in request.call_args_list] == [
+        first,
+        {**first, "pageToken": "second"},
+        {**first, "pageToken": "third"},
+    ]
+
+
+def test_directory_list_does_not_return_partial_results_on_page_failure(monkeypatch):
+    service = Mock()
+    request = service.people.return_value.listDirectoryPeople
+    request.return_value.execute.side_effect = [
+        {"people": [{"resourceName": "people/1"}], "nextPageToken": "second"},
+        RuntimeError("Page request failed"),
+    ]
+    monkeypatch.setattr(client, "get_people_service", lambda: service)
+
+    with pytest.raises(RuntimeError, match="Page request failed"):
+        client.directory_list()
