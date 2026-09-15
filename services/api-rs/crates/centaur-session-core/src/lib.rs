@@ -192,9 +192,21 @@ impl ChatDestination {
             Self::Slack {
                 channel_id,
                 thread_ts,
-            } => format!(
-                "[chat surface: Slack · channel {channel_id} · thread {thread_ts}. \
+            } if channel_id.starts_with('D') => format!(
+                "[chat surface: Slack direct message · conversation {channel_id} · thread {thread_ts}. \
                  Centaur delivers your reply to this thread automatically — do not repost it with the slack tool. \
+                 For Slack reads, downloads, and uploads in this conversation, always use direct methods \
+                 (commands ending in `-direct`); never use or fall back to proxied methods. \
+                 Send files here with `slack upload-direct`.]"
+            ),
+            Self::Slack {
+                channel_id,
+                thread_ts,
+            } => format!(
+                "[chat surface: Slack channel · channel {channel_id} · thread {thread_ts}. \
+                 Centaur delivers your reply to this thread automatically — do not repost it with the slack tool. \
+                 For Slack reads, downloads, and uploads in this channel, always use proxied methods \
+                 (commands without `-direct`); never use or fall back to direct methods. \
                  Send files here with `slack upload`.]"
             ),
             Self::Discord {
@@ -783,14 +795,26 @@ mod tests {
 
     #[test]
     fn chat_destination_renders_a_platform_context_line() {
-        let slack = ThreadKey::parse("slack:C123:123.456")
+        let slack_channel = ThreadKey::parse("slack:C123:123.456")
             .unwrap()
             .chat_destination()
             .unwrap()
             .context_line();
-        assert!(slack.contains("Slack"));
-        assert!(slack.contains("C123"));
-        assert!(slack.contains("slack upload"));
+        assert!(slack_channel.contains("Slack channel"));
+        assert!(slack_channel.contains("C123"));
+        assert!(slack_channel.contains("always use proxied methods"));
+        assert!(slack_channel.contains("slack upload"));
+        assert!(!slack_channel.contains("slack upload-direct"));
+
+        let slack_dm = ThreadKey::parse("slack:D123:123.456")
+            .unwrap()
+            .chat_destination()
+            .unwrap()
+            .context_line();
+        assert!(slack_dm.contains("Slack direct message"));
+        assert!(slack_dm.contains("D123"));
+        assert!(slack_dm.contains("always use direct methods"));
+        assert!(slack_dm.contains("slack upload-direct"));
 
         let discord = ThreadKey::parse("discord:111:222:333")
             .unwrap()
