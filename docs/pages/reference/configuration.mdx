@@ -269,6 +269,7 @@ Sandbox entrypoint and wrappers:
 | `WORKFLOW_RECONCILE_INTERVAL_S`, `WORKFLOW_RESUSPEND_BACKOFF_S` | `api.extraEnv`. | Workflow claim/reclaim cadence. |
 | `WORKFLOW_SCHEDULE_TICK_INTERVAL_S`, `WORKFLOW_SCHEDULE_CATCHUP_LIMIT`, `WORKFLOW_SCHEDULE_MISFIRE_GRACE_S` | `api.extraEnv`. | Scheduled workflow timing and catch-up behavior. |
 | `MY_THREAD_KEY`, `<WORKFLOW_NAME>_THREAD_KEY`, `<WORKFLOW_NAME>_SLACK_CHANNEL` | Workflow-specific env. | Fallback thread/channel targets for workflow agent steps. |
+| `CONSOLE_WORKFLOW_HARNESS` | `apiRs.extraEnv`, plus the same name in `SESSION_SANDBOX_PASSTHROUGH_ENV` so the workflow host inherits it. | Harness Console scheduled tasks run on (`claudecode`, `codex`, `amp`). Unset keeps the workflow-run default (`codex`); set it when the deployment's default harness is not codex, otherwise scheduled-task runs fail with the other harness's missing credential. |
 | `<WEBHOOK_SECRET_REF>` | API env or Secret named by a workflow `WebhookSpec`. | Signing secret or bearer token for public workflow webhooks, for example `GITHUB_WEBHOOK_SECRET` or a Standard Webhooks `whsec_...` value. |
 
 Slack ETL workflows:
