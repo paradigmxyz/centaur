@@ -192,23 +192,33 @@ impl ChatDestination {
             Self::Slack {
                 channel_id,
                 thread_ts,
-            } if channel_id.starts_with('D') => format!(
-                "[chat surface: Slack direct message · conversation {channel_id} · thread {thread_ts}. \
-                 Centaur delivers your reply to this thread automatically — do not repost it with the slack tool. \
-                 For Slack reads, downloads, and uploads in this conversation, always use direct methods \
-                 (commands ending in `-direct`); never use or fall back to proxied methods. \
-                 Send files here with `slack upload-direct`.]"
-            ),
-            Self::Slack {
-                channel_id,
-                thread_ts,
-            } => format!(
-                "[chat surface: Slack channel · channel {channel_id} · thread {thread_ts}. \
-                 Centaur delivers your reply to this thread automatically — do not repost it with the slack tool. \
-                 For Slack reads, downloads, and uploads in this channel, always use proxied methods \
-                 (commands without `-direct`); never use or fall back to direct methods. \
-                 Send files here with `slack upload`.]"
-            ),
+            } => {
+                let (surface, methods, command_form, forbidden_methods, upload_command) =
+                    if channel_id.starts_with('D') {
+                        (
+                            "direct message",
+                            "direct",
+                            "ending in `-direct`",
+                            "proxied",
+                            "slack upload-direct",
+                        )
+                    } else {
+                        (
+                            "channel",
+                            "proxied",
+                            "without `-direct`",
+                            "direct",
+                            "slack upload",
+                        )
+                    };
+                format!(
+                    "[chat surface: Slack {surface} · conversation {channel_id} · thread {thread_ts}. \
+                     Centaur delivers your reply to this thread automatically — do not repost it with the slack tool. \
+                     For Slack reads, downloads, and uploads in this conversation, always use {methods} methods \
+                     (commands {command_form}); never use or fall back to {forbidden_methods} methods. \
+                     Send files here with `{upload_command}`.]"
+                )
+            }
             Self::Discord {
                 guild_id,
                 channel_id,
