@@ -1,12 +1,14 @@
 #!/bin/bash
-# git-branch — create a writable working copy from a read-only mounted repo.
+# git-branch — create a writable working copy of a GitHub repo.
 #
 # Usage:  git-branch <org/repo> <branch slug>
 # Example: git-branch owner/centaur fix-flaky-slack-delivery
 #
-# Creates ~/branches/<org>/<repo> as a --shared clone from ~/github/<org>/<repo>
-# with a unique agent branch checked out. The resulting directory is fully writable
-# and supports commit, push, and PR workflows.
+# Creates ~/branches/<org>/<repo> with a unique agent branch checked out: a
+# --shared clone from the read-only mount at ~/github/<org>/<repo> when the repo
+# is cached there, otherwise a clone straight from GitHub using the sandbox's
+# git credentials. The resulting directory is fully writable and supports
+# commit, push, and PR workflows.
 
 set -euo pipefail
 
@@ -69,11 +71,6 @@ if [[ ! "$SLUG" =~ ^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$ ]]; then
     exit 1
 fi
 
-if [ ! -d "$SRC/.git" ] && ! git -C "$SRC" rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: $SRC is not a valid git repository" >&2
-    exit 1
-fi
-
 if [ -d "$DEST/.git" ]; then
     echo "$DEST already exists — reusing" >&2
     configure_git_identity
@@ -83,17 +80,26 @@ fi
 
 mkdir -p "$(dirname "$DEST")"
 
-if ! git clone --quiet --shared "$SRC" "$DEST"; then
-    echo "shared clone failed; retrying with regular clone" >&2
-    rm -rf "$DEST"
-    git clone --quiet "$SRC" "$DEST"
-fi
+if [ -d "$SRC/.git" ] || git -C "$SRC" rev-parse --git-dir >/dev/null 2>&1; then
+    if ! git clone --quiet --shared "$SRC" "$DEST"; then
+        echo "shared clone failed; retrying with regular clone" >&2
+        rm -rf "$DEST"
+        git clone --quiet "$SRC" "$DEST"
+    fi
 
-# --shared clones set origin to the local path; fix it to the upstream URL
-# so that git push and gh pr create target the real GitHub remote.
-UPSTREAM_URL=$(git -C "$SRC" config --get remote.origin.url 2>/dev/null || echo "")
-if [ -n "$UPSTREAM_URL" ]; then
-    git -C "$DEST" remote set-url origin "$UPSTREAM_URL"
+    # --shared clones set origin to the local path; fix it to the upstream URL
+    # so that git push and gh pr create target the real GitHub remote.
+    UPSTREAM_URL=$(git -C "$SRC" config --get remote.origin.url 2>/dev/null || echo "")
+    if [ -n "$UPSTREAM_URL" ]; then
+        git -C "$DEST" remote set-url origin "$UPSTREAM_URL"
+    fi
+else
+    echo "$REPO is not in the local repo cache; cloning from GitHub" >&2
+    if ! git clone --quiet "https://github.com/$REPO" "$DEST"; then
+        rm -rf "$DEST"
+        echo "Error: could not clone $REPO from GitHub — check the org/repo name and that the active GitHub credential can read it" >&2
+        exit 1
+    fi
 fi
 
 BRANCH="centaur/$SLUG-$(date +%s)"
