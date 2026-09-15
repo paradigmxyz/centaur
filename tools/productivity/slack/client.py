@@ -1238,7 +1238,8 @@ class SlackClient:
         This maps to Slack's documented `conversations.history` arguments,
         except `token` is intentionally omitted because the API server supplies
         Slack credentials. `channel_id` must be an explicit Slack conversation
-        ID authorized by the principal's `slack.history_channels` claim.
+        ID that is either a bot-readable public channel in the principal's
+        workspace or authorized by the principal's `slack.history_channels` claim.
         """
         normalized_channel_id = self._clean_channel_ref(channel_id).upper()
         if len(normalized_channel_id) < 9 or not self._looks_like_channel_id(normalized_channel_id):

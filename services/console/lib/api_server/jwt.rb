@@ -29,6 +29,7 @@ module ApiServer
             "workflows_write" => principal.sandbox_workflows_write_enabled
           },
           "slack" => {
+            "team_id" => principal.slack_team_id,
             "upload_channels" => upload_channels,
             "download_channels" => download_channels,
             "history_channels" => history_channels

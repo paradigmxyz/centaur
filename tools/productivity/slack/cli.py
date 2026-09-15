@@ -599,7 +599,7 @@ def channels(
     bot_member_only: bool = typer.Option(
         False,
         "--bot-member-only",
-        help="Only list JWT-authorized channels with history access",
+        help="Only list public or explicitly granted channels with history access",
     ),
 ):
     """List Slack channels authorized by the Centaur API server proxy JWT."""
