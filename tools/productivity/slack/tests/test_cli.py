@@ -509,7 +509,7 @@ def test_help_explains_channel_and_dm_access_paths() -> None:
     assert result.exit_code == 0
     assert "proxy-backed commands" in result.output
     assert "Slack channels" in result.output
-    assert "*-direct" in result.output
+    assert "Use commands ending in" in result.output
     assert "Slack DMs" in result.output
 
 
