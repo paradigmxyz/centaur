@@ -10,7 +10,14 @@ from rich.table import Table
 
 load_dotenv()
 
-app = typer.Typer(name="slack", help="Slack CLI for AI agents")
+app = typer.Typer(
+    name="slack",
+    help=(
+        "Slack CLI for AI agents. Use proxy-backed commands such as `thread` and `upload` "
+        "in Slack channels. Use `*-direct` variants such as `thread-direct` and "
+        "`upload-direct` in Slack DMs."
+    ),
+)
 
 
 @app.command("health")
@@ -354,7 +361,9 @@ def thread(
     ),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
-    """Get all replies in a thread.
+    """Get all replies through the Centaur API server Slack proxy.
+
+    Use this command for Slack channels. Use thread-direct for Slack DMs.
 
     Examples:
         slack thread "https://slack.com/archives/C01234567/p1234567890123456"
@@ -363,7 +372,7 @@ def thread(
     """
     import sys
 
-    from .client import get_thread_replies_page, get_thread_replies_proxy
+    from .client import get_thread_replies_proxy
 
     channel_id, thread_ts = _parse_thread_ref(permalink)
 
@@ -377,20 +386,9 @@ def thread(
             latest=latest,
             inclusive=inclusive,
         )
-    except (RuntimeError, ValueError):
-        try:
-            page = get_thread_replies_page(
-                channel_id,
-                thread_ts,
-                limit=limit,
-                cursor=cursor,
-                oldest=oldest,
-                latest=latest,
-                inclusive=inclusive,
-            )
-        except (RuntimeError, ValueError) as direct_error:
-            stderr_console.print(f"[red]Error: {direct_error}[/]")
-            raise typer.Exit(1) from direct_error
+    except (RuntimeError, ValueError) as e:
+        stderr_console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
 
     messages = page.get("messages", [])
 
@@ -438,7 +436,9 @@ def thread_direct(
     ),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
-    """Get all replies in a thread directly with the Slack SDK.
+    """Get all replies directly with the Slack SDK.
+
+    Use this command for Slack DMs. Use thread for Slack channels.
 
     Examples:
         slack thread-direct "https://slack.com/archives/C01234567/p1234567890123456"
