@@ -1527,12 +1527,31 @@ class SlackClient:
 
         return sorted(channels, key=lambda x: x["name"])
 
-    def list_channels_proxy(self, limit: int = 200, history_only: bool = False) -> list[dict]:
-        """List Slack channels exposed by the Centaur API server proxy JWT."""
-        response = self._centaur_api_get_json("/api/slack/channels", {})
-        channels = response.get("channels", []) or []
-        if history_only:
-            channels = [channel for channel in channels if channel.get("can_read_history")]
+    def list_channels_proxy(
+        self,
+        limit: int = 200,
+        history_only: bool = False,
+        query: str | None = None,
+    ) -> list[dict]:
+        """List Slack channels exposed by the Centaur API server proxy."""
+        requested_limit = max(int(limit), 0)
+
+        def fetch_page(cursor: str | None, page_limit: int) -> dict[str, Any]:
+            return self._centaur_api_get_json(
+                "/api/slack/channels",
+                {
+                    "limit": page_limit,
+                    "cursor": cursor,
+                    "query": query,
+                    "history_only": history_only,
+                },
+            )
+
+        channels, _, _ = self._collect_cursor_pages(
+            fetch_page,
+            result_key="channels",
+            limit=requested_limit,
+        )
         normalized_channels = [
             {
                 "id": channel.get("id", ""),
@@ -1549,7 +1568,7 @@ class SlackClient:
             for channel in channels
         ]
         normalized_channels.sort(key=lambda channel: (channel["name"].lower(), channel["id"]))
-        return normalized_channels[:limit]
+        return normalized_channels[:requested_limit]
 
     def list_files_proxy(
         self,

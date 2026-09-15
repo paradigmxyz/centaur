@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::Future,
     sync::OnceLock,
     time::{Duration, Instant},
 };
@@ -25,10 +26,14 @@ const DEFAULT_SLACK_API_URL: &str = "https://slack.com/api";
 const DEFAULT_MAX_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 const DEFAULT_SLACK_FILES_LIST_LIMIT: u16 = 100;
 const MAX_SLACK_FILES_LIST_LIMIT: u16 = 200;
+const DEFAULT_SLACK_CHANNELS_LIMIT: u16 = 100;
+const MAX_SLACK_CHANNELS_LIMIT: u16 = 200;
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const SLACK_CHANNEL_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const SLACK_CHANNEL_REFRESH_RETRY_DELAY: Duration = Duration::from_secs(60);
+const SLACK_RATE_LIMIT_MAX_RETRIES: u32 = 2;
+const SLACK_RATE_LIMIT_MAX_DELAY: Duration = Duration::from_secs(60);
 
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -107,6 +112,18 @@ struct SlackFilesListQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct SlackChannelsQuery {
+    #[serde(default)]
+    limit: Option<u16>,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    history_only: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct SlackChannelHistoryQuery {
     #[serde(default)]
     latest: Option<String>,
@@ -159,6 +176,13 @@ struct SlackChannelsResponse {
     ok: bool,
     channels: Vec<SlackChannelItem>,
     count: usize,
+    total_count: usize,
+    response_metadata: SlackChannelsResponseMetadata,
+}
+
+#[derive(Debug, Serialize)]
+struct SlackChannelsResponseMetadata {
+    next_cursor: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -440,16 +464,30 @@ async fn authorized_slack_file_info(
     Ok((config, file))
 }
 
-async fn get_slack_channels(headers: HeaderMap) -> Result<Json<SlackChannelsResponse>, ApiError> {
+async fn get_slack_channels(
+    headers: HeaderMap,
+    Query(query): Query<SlackChannelsQuery>,
+) -> Result<Json<SlackChannelsResponse>, ApiError> {
     let claims = authorize_slack_file_proxy(&headers)?;
     let channel_ids = slack_channel_ids_from_claims(&claims)?;
+    let (limit, offset) = validate_slack_channels_query(&query)?;
 
     let config = slack_proxy_config()?;
     let client = http_client();
     let mut channels_by_id = BTreeMap::new();
-    for channel in slack_public_channels(client, config).await? {
-        if slack_channel_has_default_history_access(&channel) {
-            channels_by_id.insert(channel.id.clone(), channel);
+    match slack_public_channels(client, config).await {
+        Ok(channels) => {
+            for channel in channels {
+                if slack_channel_has_default_history_access(&channel) {
+                    channels_by_id.insert(channel.id.clone(), channel);
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "listing explicitly granted Slack channels without public channel metadata"
+            );
         }
     }
     for channel_id in channel_ids {
@@ -469,10 +507,40 @@ async fn get_slack_channels(headers: HeaderMap) -> Result<Json<SlackChannelsResp
             }
         }
     }
-    let mut channels = channels_by_id
+    let channels = channels_by_id
         .into_iter()
         .map(|(channel_id, channel)| slack_channel_item(&claims, &channel_id, &channel))
         .collect::<Vec<_>>();
+    let (channels, total_count, next_cursor) =
+        paginate_slack_channels(channels, &query, limit, offset);
+
+    Ok(Json(SlackChannelsResponse {
+        ok: true,
+        count: channels.len(),
+        total_count,
+        channels,
+        response_metadata: SlackChannelsResponseMetadata { next_cursor },
+    }))
+}
+
+fn paginate_slack_channels(
+    mut channels: Vec<SlackChannelItem>,
+    query: &SlackChannelsQuery,
+    limit: usize,
+    offset: usize,
+) -> (Vec<SlackChannelItem>, usize, String) {
+    if query.history_only {
+        channels.retain(|channel| channel.can_read_history);
+    }
+    if let Some(search) = query
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+    {
+        let search = search.to_ascii_lowercase();
+        channels.retain(|channel| channel.name.to_ascii_lowercase().contains(&search));
+    }
     channels.sort_by(|left, right| {
         left.name
             .to_ascii_lowercase()
@@ -480,11 +548,19 @@ async fn get_slack_channels(headers: HeaderMap) -> Result<Json<SlackChannelsResp
             .then_with(|| left.id.cmp(&right.id))
     });
 
-    Ok(Json(SlackChannelsResponse {
-        ok: true,
-        count: channels.len(),
-        channels,
-    }))
+    let total_count = channels.len();
+    let channels = channels
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    let next_offset = offset.saturating_add(channels.len());
+    let next_cursor = if next_offset < total_count {
+        next_offset.to_string()
+    } else {
+        String::new()
+    };
+    (channels, total_count, next_cursor)
 }
 
 async fn get_slack_channel_history(
@@ -577,12 +653,13 @@ struct SlackPublicChannelCacheState {
 
 impl SlackPublicChannelCacheState {
     fn channels_to_serve(&self, now: Instant) -> Option<Vec<SlackChannel>> {
-        let channels = self.channels.as_ref()?;
-        channels.get_if_fresh(now).or_else(|| {
-            self.retry_refresh_at
-                .is_some_and(|retry_at| retry_at > now)
-                .then(|| channels.value.clone())
-        })
+        let retry_deferred = self.retry_refresh_at.is_some_and(|retry_at| retry_at > now);
+        match self.channels.as_ref() {
+            Some(channels) => channels
+                .get_if_fresh(now)
+                .or_else(|| retry_deferred.then(|| channels.value.clone())),
+            None => retry_deferred.then(Vec::new),
+        }
     }
 }
 
@@ -740,17 +817,19 @@ async fn slack_channel_info(
     config: &SlackFileProxyConfig,
     channel_id: &str,
 ) -> Result<SlackChannel, ApiError> {
-    let mut entries = slack_channel_info_cache().lock().await;
-    let now = Instant::now();
-    if let Some(channel) = entries
-        .get(channel_id)
-        .and_then(|entry| entry.get_if_fresh(now))
     {
-        return Ok(channel);
+        let entries = slack_channel_info_cache().lock().await;
+        let now = Instant::now();
+        if let Some(channel) = entries
+            .get(channel_id)
+            .and_then(|entry| entry.get_if_fresh(now))
+        {
+            return Ok(channel);
+        }
     }
 
     let channel = fetch_slack_channel_info(client, config, channel_id).await?;
-    entries.insert(
+    slack_channel_info_cache().lock().await.insert(
         channel_id.to_owned(),
         CachedSlackValue::new(Instant::now(), channel.clone()),
     );
@@ -798,8 +877,8 @@ async fn slack_public_channels(
     let channels = match fetch_slack_public_channels(client, config).await {
         Ok(channels) => channels,
         Err(error) => {
+            cache.retry_refresh_at = Some(Instant::now() + SLACK_CHANNEL_REFRESH_RETRY_DELAY);
             if let Some(stale) = cache.channels.as_ref().map(|entry| entry.value.clone()) {
-                cache.retry_refresh_at = Some(Instant::now() + SLACK_CHANNEL_REFRESH_RETRY_DELAY);
                 tracing::warn!(
                     error = %error,
                     "serving stale Slack channel list after refresh failure"
@@ -1024,28 +1103,58 @@ async fn slack_api_post_form(
     method: &str,
     form: &[(&str, String)],
 ) -> Result<Value, ApiError> {
-    let response = client
-        .post(format!("{}/{}", config.api_url, method))
-        .bearer_auth(&config.bot_token)
-        .form(form)
-        .send()
-        .await
-        .map_err(|error| ApiError::Internal(format!("Slack API request failed: {error}")))?;
-    let status = response.status();
-    let value = response
-        .json::<Value>()
-        .await
-        .map_err(|error| ApiError::Internal(format!("Slack API response was not JSON: {error}")))?;
-    if !status.is_success() || value.get("ok") != Some(&Value::Bool(true)) {
-        let slack_error = value
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown_error");
-        return Err(ApiError::BadRequest(format!(
-            "Slack {method} failed: {slack_error}"
-        )));
+    let mut retry_count = 0;
+    loop {
+        let response = client
+            .post(format!("{}/{}", config.api_url, method))
+            .bearer_auth(&config.bot_token)
+            .form(form)
+            .send()
+            .await
+            .map_err(|error| ApiError::Internal(format!("Slack API request failed: {error}")))?;
+        let status = response.status();
+        if status.as_u16() == 429 {
+            if retry_count >= SLACK_RATE_LIMIT_MAX_RETRIES {
+                return Err(ApiError::ServiceUnavailable(format!(
+                    "Slack {method} remained rate limited after retries"
+                )));
+            }
+            let retry_after = response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok());
+            let delay = slack_rate_limit_retry_delay(retry_count, retry_after);
+            tracing::warn!(
+                method,
+                retry_count,
+                retry_after_ms = delay.as_millis(),
+                "Slack API rate limited; retrying"
+            );
+            tokio::time::sleep(delay).await;
+            retry_count += 1;
+            continue;
+        }
+
+        let value = response.json::<Value>().await.map_err(|error| {
+            ApiError::Internal(format!("Slack API response was not JSON: {error}"))
+        })?;
+        if !status.is_success() || value.get("ok") != Some(&Value::Bool(true)) {
+            let slack_error = value
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown_error");
+            return Err(ApiError::BadRequest(format!(
+                "Slack {method} failed: {slack_error}"
+            )));
+        }
+        return Ok(value);
     }
-    Ok(value)
+}
+
+fn slack_rate_limit_retry_delay(retry_count: u32, retry_after: Option<u64>) -> Duration {
+    let seconds = retry_after.unwrap_or_else(|| 1_u64 << retry_count.min(6));
+    Duration::from_secs(seconds).min(SLACK_RATE_LIMIT_MAX_DELAY)
 }
 
 fn authorize_slack_file_proxy(headers: &HeaderMap) -> Result<SlackFileProxyClaims, ApiError> {
@@ -1081,6 +1190,21 @@ async fn ensure_history_channel_allowed(
     config: &SlackFileProxyConfig,
     channel_id: &str,
 ) -> Result<(), ApiError> {
+    ensure_history_channel_allowed_with(claims, channel_id, || {
+        slack_channel_info(client, config, channel_id)
+    })
+    .await
+}
+
+async fn ensure_history_channel_allowed_with<F, Fut>(
+    claims: &SlackFileProxyClaims,
+    channel_id: &str,
+    fetch_channel: F,
+) -> Result<(), ApiError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<SlackChannel, ApiError>>,
+{
     if claims
         .slack
         .history_channels
@@ -1089,9 +1213,7 @@ async fn ensure_history_channel_allowed(
     {
         return Ok(());
     }
-    let channel = slack_channel_info(client, config, channel_id)
-        .await
-        .map_err(|_| slack_history_forbidden())?;
+    let channel = fetch_channel().await?;
     if slack_channel_has_default_history_access(&channel) {
         return Ok(());
     }
@@ -1266,6 +1388,22 @@ fn validate_slack_file_id(file_id: &str) -> Result<(), ApiError> {
     Err(ApiError::BadRequest("invalid Slack file ID".to_owned()))
 }
 
+fn validate_slack_channels_query(query: &SlackChannelsQuery) -> Result<(usize, usize), ApiError> {
+    let limit = query.limit.unwrap_or(DEFAULT_SLACK_CHANNELS_LIMIT);
+    if !(1..=MAX_SLACK_CHANNELS_LIMIT).contains(&limit) {
+        return Err(ApiError::BadRequest(format!(
+            "Slack channels limit must be between 1 and {MAX_SLACK_CHANNELS_LIMIT}"
+        )));
+    }
+    let offset = match query.cursor.as_deref() {
+        Some(cursor) if !cursor.is_empty() => cursor
+            .parse::<usize>()
+            .map_err(|_| ApiError::BadRequest("invalid Slack channels cursor".to_owned()))?,
+        _ => 0,
+    };
+    Ok((usize::from(limit), offset))
+}
+
 fn validate_slack_channel_history_query(query: &SlackChannelHistoryQuery) -> Result<(), ApiError> {
     if let Some(latest) = query.latest.as_deref() {
         validate_slack_timestamp(latest)?;
@@ -1393,6 +1531,11 @@ fn content_disposition_filename(filename: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     use super::*;
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 
@@ -1407,6 +1550,21 @@ mod tests {
 
     fn test_channel(value: Value) -> SlackChannel {
         serde_json::from_value(value).unwrap()
+    }
+
+    fn test_channel_item(id: &str, name: &str, can_read_history: bool) -> SlackChannelItem {
+        SlackChannelItem {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            purpose: String::new(),
+            topic: String::new(),
+            member_count: 0,
+            is_private: false,
+            is_member: true,
+            can_upload: false,
+            can_download: false,
+            can_read_history,
+        }
     }
 
     #[test]
@@ -1515,6 +1673,59 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn history_authorization_covers_grants_public_channels_and_upstream_errors() {
+        let granted = SlackFileProxyClaims {
+            slack: SlackProxyClaims {
+                upload_channels: vec![],
+                download_channels: vec![],
+                history_channels: vec!["G123456789".to_owned()],
+            },
+        };
+        ensure_history_channel_allowed_with(&granted, "G123456789", || async {
+            Err(ApiError::Internal("must not fetch".to_owned()))
+        })
+        .await
+        .unwrap();
+
+        let ungranted = SlackFileProxyClaims {
+            slack: SlackProxyClaims {
+                upload_channels: vec![],
+                download_channels: vec![],
+                history_channels: vec![],
+            },
+        };
+        ensure_history_channel_allowed_with(&ungranted, "C123456789", || async {
+            Ok(test_channel(json!({
+                "id": "C123456789",
+                "is_private": false,
+                "is_member": true
+            })))
+        })
+        .await
+        .unwrap();
+
+        let private_error =
+            ensure_history_channel_allowed_with(&ungranted, "G123456789", || async {
+                Ok(test_channel(json!({
+                    "id": "G123456789",
+                    "is_private": true,
+                    "is_member": true
+                })))
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(private_error, ApiError::Forbidden(_)));
+
+        let upstream_error =
+            ensure_history_channel_allowed_with(&ungranted, "C123456789", || async {
+                Err(ApiError::ServiceUnavailable("rate limited".to_owned()))
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(upstream_error, ApiError::ServiceUnavailable(_)));
+    }
+
     #[test]
     fn public_channel_history_defaults_require_bot_membership() {
         let accessible = test_channel(json!({
@@ -1530,6 +1741,70 @@ mod tests {
         ] {
             assert!(!slack_channel_has_default_history_access(&inaccessible));
         }
+    }
+
+    #[tokio::test]
+    async fn slack_api_retries_rate_limits() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let handler_attempts = attempts.clone();
+        let app = axum::Router::new().route(
+            "/conversations.info",
+            axum::routing::post(move || {
+                let attempts = handler_attempts.clone();
+                async move {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        return (
+                            axum::http::StatusCode::TOO_MANY_REQUESTS,
+                            [(axum::http::header::RETRY_AFTER, "0")],
+                            axum::Json(json!({"ok": false, "error": "ratelimited"})),
+                        )
+                            .into_response();
+                    }
+                    axum::Json(json!({"ok": true, "channel": {"id": "C123456789"}})).into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = SlackFileProxyConfig {
+            api_url: format!("http://{address}"),
+            bot_token: "test-token".to_owned(),
+            max_upload_bytes: 1,
+        };
+
+        let value = slack_api_post_form(
+            http_client(),
+            &config,
+            "conversations.info",
+            &[("channel", "C123456789".to_owned())],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(value.get("ok"), Some(&Value::Bool(true)));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[test]
+    fn slack_rate_limit_delay_honors_retry_after_and_caps_it() {
+        assert_eq!(
+            slack_rate_limit_retry_delay(0, None),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            slack_rate_limit_retry_delay(1, None),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            slack_rate_limit_retry_delay(0, Some(30)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            slack_rate_limit_retry_delay(0, Some(600)),
+            SLACK_RATE_LIMIT_MAX_DELAY
+        );
     }
 
     #[test]
@@ -1560,10 +1835,65 @@ mod tests {
 
         assert_eq!(cache.channels_to_serve(now).unwrap()[0].id, "C123456789");
         assert!(
+            SlackPublicChannelCacheState {
+                channels: None,
+                retry_refresh_at: Some(now + SLACK_CHANNEL_REFRESH_RETRY_DELAY),
+            }
+            .channels_to_serve(now)
+            .is_some_and(|channels| channels.is_empty())
+        );
+        assert!(
             cache
                 .channels_to_serve(now + SLACK_CHANNEL_REFRESH_RETRY_DELAY)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn proxy_channel_pagination_filters_before_slicing() {
+        let query = SlackChannelsQuery {
+            limit: Some(1),
+            cursor: None,
+            query: Some("a".to_owned()),
+            history_only: true,
+        };
+        let (page, total_count, next_cursor) = paginate_slack_channels(
+            vec![
+                test_channel_item("C333333333", "Zulu", true),
+                test_channel_item("G111111111", "Alpha private", true),
+                test_channel_item("C222222222", "Beta", false),
+            ],
+            &query,
+            1,
+            0,
+        );
+
+        assert_eq!(page[0].id, "G111111111");
+        assert_eq!(total_count, 1);
+        assert_eq!(next_cursor, "");
+    }
+
+    #[test]
+    fn proxy_channel_pagination_returns_a_next_cursor() {
+        let query = SlackChannelsQuery {
+            limit: Some(1),
+            cursor: None,
+            query: None,
+            history_only: false,
+        };
+        let (page, total_count, next_cursor) = paginate_slack_channels(
+            vec![
+                test_channel_item("C222222222", "Beta", true),
+                test_channel_item("C111111111", "Alpha", true),
+            ],
+            &query,
+            1,
+            0,
+        );
+
+        assert_eq!(page[0].id, "C111111111");
+        assert_eq!(total_count, 2);
+        assert_eq!(next_cursor, "1");
     }
 
     #[test]

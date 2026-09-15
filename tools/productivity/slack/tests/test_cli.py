@@ -126,11 +126,11 @@ def test_channels_calls_proxy_client(monkeypatch) -> None:
 
     result = CliRunner().invoke(
         app,
-        ["channels", "--limit", "10", "--bot-member-only"],
+        ["channels", "--limit", "10", "--bot-member-only", "--query", "general"],
     )
 
     assert result.exit_code == 0
-    assert calls == [((), {"limit": 10, "history_only": True})]
+    assert calls == [((), {"limit": 10, "history_only": True, "query": "general"})]
     assert "general" in result.output
 
 
