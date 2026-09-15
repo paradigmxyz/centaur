@@ -1,4 +1,5 @@
 import base64
+import json
 import sys
 import types
 from pathlib import Path
@@ -47,6 +48,7 @@ def test_channel_calls_proxy_client(monkeypatch) -> None:
     )
 
     assert result.exit_code == 0
+    assert json.loads(result.output)["messages"][0]["text"] == "root"
     assert calls == [
         (
             ("C1234567890",),
@@ -88,6 +90,7 @@ def test_channel_direct_calls_direct_client(monkeypatch) -> None:
     )
 
     assert result.exit_code == 0
+    assert json.loads(result.output)["messages"][0]["text"] == "root"
     assert calls == [
         (
             ("C1234567890",),
@@ -418,6 +421,7 @@ def test_download_writes_file_with_proxy(monkeypatch, tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert calls == [{"file_id": "F1234567890", "channel_id": "C1234567890"}]
     assert (tmp_path / "report.pdf").read_bytes() == b"%PDF"
+    assert json.loads(result.output)["output_path"] == str((tmp_path / "report.pdf").absolute())
 
 
 def test_file_info_calls_proxy_client(monkeypatch) -> None:
@@ -447,8 +451,9 @@ def test_file_info_calls_proxy_client(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert calls == [{"file_id": "F1234567890", "channel_id": "C1234567890"}]
-    assert "report.pdf" in result.output
-    assert "1KB" in result.output
+    payload = json.loads(result.output)
+    assert payload["file"]["name"] == "report.pdf"
+    assert payload["file"]["size"] == 1234
 
 
 def test_thread_calls_api_server_client(monkeypatch) -> None:

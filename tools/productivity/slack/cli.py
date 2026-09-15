@@ -199,7 +199,9 @@ def channel_direct(
         "--allow-name-resolution",
         help="Allow resolving a channel name instead of requiring an explicit Slack channel ID",
     ),
-    json_output: bool = typer.Option(False, "--json", help="Output full page metadata as JSON"),
+    json_output: bool = typer.Option(
+        True, "--json/--no-json", help="Output full page metadata as JSON (default)"
+    ),
 ):
     """Get recent messages from a channel directly with the Slack SDK."""
     import sys
@@ -273,7 +275,9 @@ def channel(
         help="Ask Slack to return all message metadata",
     ),
     full: bool = typer.Option(False, "--full", "-f", help="Show full message text"),
-    json_output: bool = typer.Option(False, "--json", help="Output raw proxy response as JSON"),
+    json_output: bool = typer.Option(
+        True, "--json/--no-json", help="Output raw proxy response as JSON (default)"
+    ),
 ):
     """Get channel history through the Centaur API server proxy."""
     import sys
@@ -359,7 +363,7 @@ def thread(
     inclusive: bool = typer.Option(
         True, "--inclusive/--exclusive", help="Include the boundary timestamps"
     ),
-    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+    json_output: bool = typer.Option(True, "--json/--no-json", help="Output as JSON (default)"),
 ):
     """Get all replies through the Centaur API server Slack proxy.
 
@@ -434,7 +438,7 @@ def thread_direct(
     inclusive: bool = typer.Option(
         True, "--inclusive/--exclusive", help="Include the boundary timestamps"
     ),
-    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+    json_output: bool = typer.Option(True, "--json/--no-json", help="Output as JSON (default)"),
 ):
     """Get all replies directly with the Slack SDK.
 
@@ -516,7 +520,9 @@ def sync_history(
         "--latest",
         help="Override the latest boundary: Slack ts, epoch, ISO datetime, or YYYY-MM-DD",
     ),
-    json_output: bool = typer.Option(False, "--json", help="Output the sync payload as JSON"),
+    json_output: bool = typer.Option(
+        True, "--json/--no-json", help="Output the sync payload as JSON (default)"
+    ),
 ):
     """Run an incremental channel-history sync suitable for ETL jobs."""
     from pathlib import Path
@@ -1074,7 +1080,9 @@ def file_info(
     channel_id: str = typer.Argument(
         ..., help="Slack channel/conversation ID that the file is shared in"
     ),
-    json_output: bool = typer.Option(False, "--json", help="Output raw metadata as JSON"),
+    json_output: bool = typer.Option(
+        True, "--json/--no-json", help="Output raw metadata as JSON (default)"
+    ),
 ):
     """Fetch Slack file metadata through the Centaur API server Slack proxy."""
     import sys
@@ -1336,7 +1344,9 @@ def download(
         ..., help="Slack channel/conversation ID that the file is shared in"
     ),
     output: str = typer.Option(".", "--output", "-o", help="Output directory for downloads"),
-    json_output: bool = typer.Option(False, "--json", help="Print metadata as JSON"),
+    json_output: bool = typer.Option(
+        True, "--json/--no-json", help="Print downloaded file metadata as JSON (default)"
+    ),
 ):
     """Download a Slack file through the Centaur API server Slack proxy."""
     import base64
@@ -1351,15 +1361,17 @@ def download(
         console.print(f"[red]Error downloading Slack file: {e}[/]")
         raise typer.Exit(1) from e
 
-    if json_output:
-        metadata = {key: value for key, value in result.items() if key != "content_base64"}
-        print(json.dumps(metadata, indent=2, ensure_ascii=False), file=sys.stdout)
-        raise typer.Exit()
-
     output_dir = Path(output)
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / result["filename"]
     out_path.write_bytes(base64.b64decode(result["content_base64"]))
+
+    if json_output:
+        metadata = {key: value for key, value in result.items() if key != "content_base64"}
+        metadata["output_path"] = str(out_path.absolute())
+        print(json.dumps(metadata, indent=2, ensure_ascii=False), file=sys.stdout)
+        return
+
     console.print(f"[green]✓ Downloaded {result['filename']}[/] ({result['size_bytes']} bytes)")
     console.print(f"[dim]{out_path.absolute()}[/]")
 
