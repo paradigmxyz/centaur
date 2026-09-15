@@ -65,6 +65,32 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "a[href=?]", console_secret_path("pg_dsn", excluded_by_type.oid), count: 0
   end
 
+  test "secrets table paginates fifty filtered records per page" do
+    now = Time.current
+    StaticSecret.insert_all!((1..51).map do |number|
+      {
+        created_at: now,
+        updated_at: now,
+        name: "Pagination secret #{number}",
+        inject_config: { header: "Authorization" }
+      }
+    end)
+
+    filters = { q: "Pagination secret", type: "static" }
+    get console_secrets_url, params: filters
+
+    assert_response :ok
+    assert_select "tbody tr", count: 50
+    assert_select "a[href*='page=2'][href*='type=static']", text: "Next"
+    assert_select "div", text: /51 secrets.*page 1 of 2/
+
+    get console_secrets_url, params: filters.merge(page: 2)
+
+    assert_response :ok
+    assert_select "tbody tr", count: 1
+    assert_select "a[href*='page=1']", text: "Previous"
+  end
+
   test "secret detail page offers delete for an editable kind but not for others" do
     static = static_secrets(:acme_prod_api_key)
     get console_secret_url("static", static.oid)

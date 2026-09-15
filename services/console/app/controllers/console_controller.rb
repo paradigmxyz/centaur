@@ -12,6 +12,7 @@ class ConsoleController < ApplicationController
 
   PRINCIPALS_PER_PAGE = 50
   PRINCIPAL_DETAIL_PER_PAGE = 50
+  SECRETS_PER_PAGE = 50
 
   # Friendly labels for the source backend (and the gcp_auth credentials_provider
   # type). The secrets table shows only this -- the full reference lives on the
@@ -117,6 +118,10 @@ class ConsoleController < ApplicationController
       rel.map { |secret| [ kind, secret ] }
     end
     @secrets.sort_by! { |_kind, secret| [ secret.name.to_s.downcase, secret.created_at, secret.id ] }
+    @total_count = @secrets.size
+    @total_pages = total_pages(@total_count, SECRETS_PER_PAGE)
+    @page = bounded_page(params[:page], @total_pages)
+    @secrets = @secrets.slice((@page - 1) * SECRETS_PER_PAGE, SECRETS_PER_PAGE) || []
   end
 
   def secret
