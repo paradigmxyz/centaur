@@ -1,4 +1,5 @@
 import base64
+import json
 import sys
 import types
 from pathlib import Path
@@ -47,6 +48,7 @@ def test_channel_calls_proxy_client(monkeypatch) -> None:
     )
 
     assert result.exit_code == 0
+    assert json.loads(result.output)["messages"][0]["text"] == "root"
     assert calls == [
         (
             ("C1234567890",),
@@ -88,6 +90,7 @@ def test_channel_direct_calls_direct_client(monkeypatch) -> None:
     )
 
     assert result.exit_code == 0
+    assert json.loads(result.output)["messages"][0]["text"] == "root"
     assert calls == [
         (
             ("C1234567890",),
@@ -418,6 +421,7 @@ def test_download_writes_file_with_proxy(monkeypatch, tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert calls == [{"file_id": "F1234567890", "channel_id": "C1234567890"}]
     assert (tmp_path / "report.pdf").read_bytes() == b"%PDF"
+    assert json.loads(result.output)["output_path"] == str((tmp_path / "report.pdf").absolute())
 
 
 def test_file_info_calls_proxy_client(monkeypatch) -> None:
@@ -447,8 +451,9 @@ def test_file_info_calls_proxy_client(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert calls == [{"file_id": "F1234567890", "channel_id": "C1234567890"}]
-    assert "report.pdf" in result.output
-    assert "1KB" in result.output
+    payload = json.loads(result.output)
+    assert payload["file"]["name"] == "report.pdf"
+    assert payload["file"]["size"] == 1234
 
 
 def test_thread_calls_api_server_client(monkeypatch) -> None:
@@ -498,51 +503,34 @@ def test_thread_calls_api_server_client(monkeypatch) -> None:
     ]
 
 
-def test_thread_falls_back_to_direct_client_when_api_server_fails(monkeypatch) -> None:
+def test_help_explains_channel_and_dm_access_paths() -> None:
+    result = CliRunner().invoke(app, ["--help"])
+
+    assert result.exit_code == 0
+    assert "proxy-backed commands" in result.output
+    assert "Slack channels" in result.output
+    assert "Use commands ending in" in result.output
+    assert "Slack DMs" in result.output
+
+
+def test_thread_does_not_fall_back_when_api_server_fails(monkeypatch) -> None:
     proxy_calls = []
-    direct_calls = []
 
     def fake_get_thread_replies_proxy(*args, **kwargs):
         proxy_calls.append((args, kwargs))
         raise RuntimeError("proxy unavailable")
 
-    def fake_get_thread_replies_page(*args, **kwargs):
-        direct_calls.append((args, kwargs))
-        return {
-            "messages": [{"user": "alice", "text": "root"}],
-            "has_more": False,
-            "window": {"oldest": None, "latest": None, "inclusive": True},
-        }
-
-    fake_client = types.SimpleNamespace(
-        get_thread_replies_page=fake_get_thread_replies_page,
-        get_thread_replies_proxy=fake_get_thread_replies_proxy,
-    )
+    fake_client = types.SimpleNamespace(get_thread_replies_proxy=fake_get_thread_replies_proxy)
     monkeypatch.setitem(sys.modules, "slack.client", fake_client)
 
     result = CliRunner().invoke(
         app,
-        [
-            "thread",
-            "C1234567890:1780000000.000000",
-            "--limit",
-            "10",
-        ],
+        ["thread", "C1234567890:1780000000.000000", "--limit", "10"],
     )
 
-    expected_call = (
-        ("C1234567890", "1780000000.000000"),
-        {
-            "limit": 10,
-            "cursor": None,
-            "oldest": None,
-            "latest": None,
-            "inclusive": True,
-        },
-    )
-    assert result.exit_code == 0
-    assert proxy_calls == [expected_call]
-    assert direct_calls == [expected_call]
+    assert result.exit_code == 1
+    assert len(proxy_calls) == 1
+    assert "proxy unavailable" in result.output
 
 
 def test_thread_direct_calls_direct_client(monkeypatch) -> None:

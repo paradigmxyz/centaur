@@ -8955,7 +8955,7 @@ mod tests {
     }
 
     #[test]
-    fn input_line_prepends_slack_chat_surface_note_to_user_content() {
+    fn input_line_prepends_slack_channel_tool_policy_to_user_content() {
         let thread_key = ThreadKey::parse("slack:C123:123.456").unwrap();
         let trace = SessionTraceContext::new(None, None);
 
@@ -8968,7 +8968,29 @@ mod tests {
         let content = value["message"]["content"].as_array().unwrap();
 
         assert_eq!(content.len(), 2);
-        assert!(content[0]["text"].as_str().unwrap().contains("Slack"));
+        let note = content[0]["text"].as_str().unwrap();
+        assert!(note.contains("Slack channel"));
+        assert!(note.contains("use proxied methods"));
+        assert_eq!(content[1]["text"], "hi");
+    }
+
+    #[test]
+    fn input_line_prepends_slack_dm_tool_policy_to_user_content() {
+        let thread_key = ThreadKey::parse("slack:D123:123.456").unwrap();
+        let trace = SessionTraceContext::new(None, None);
+
+        let line = input_line_with_session_context(
+            &thread_key,
+            &trace,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
+        );
+        let value: Value = serde_json::from_str(&line).unwrap();
+        let content = value["message"]["content"].as_array().unwrap();
+
+        assert_eq!(content.len(), 2);
+        let note = content[0]["text"].as_str().unwrap();
+        assert!(note.contains("Slack DM"));
+        assert!(note.contains("use direct (`*-direct`) methods"));
         assert_eq!(content[1]["text"], "hi");
     }
 
