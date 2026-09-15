@@ -27,17 +27,22 @@ module Console
     test "show renders role details and editable secret grants" do
       role = roles(:acme_infra)
       grant = grants(:acme_infra_prod_api_key)
+      granted_secret = static_secrets(:acme_prod_api_key)
+      disabled_ungranted = static_secrets(:globex_prod_secret)
+      granted_secret.update_attribute(:enabled, false)
+      disabled_ungranted.update_attribute(:enabled, false)
       get console_role_url(role.oid)
       assert_response :ok
       assert_select "h1", text: role.name
       assert_select "a[href=?]", edit_console_role_path(role.oid), text: "Edit"
       assert_select "form[action=?]", slack_channel_permissions_console_role_path(role.oid)
-      assert_select "a[href=?]", console_secret_path("static", static_secrets(:acme_prod_api_key).oid)
+      assert_select "a[href=?]", console_secret_path("static", granted_secret.oid)
+      assert_select "span", text: "Disabled"
       assert_select "form[action=?]", grant_secret_console_role_path(role.oid) do
         assert_select "select[name=grantable][aria-label=?]", "Secret to grant"
         assert_select "option[value=?]", "static:#{static_secrets(:acme_staging_api_key).oid}"
-        assert_select "option[value=?]", "static:#{static_secrets(:acme_prod_api_key).oid}", count: 0
-        assert_select "option[value=?]", "static:#{static_secrets(:globex_prod_secret).oid}", count: 1
+        assert_select "option[value=?]", "static:#{granted_secret.oid}", count: 0
+        assert_select "option[value=?]", "static:#{disabled_ungranted.oid}", count: 0
       end
       assert_select "form[action=?]", revoke_grant_console_role_path(role.oid, grant.oid) do
         assert_select "button[type=submit]", "Revoke"
@@ -275,6 +280,19 @@ module Console
       grant = role.grants.find_by(static_secret: secret)
       assert_not_nil grant
       assert_equal Grant::DEFAULT_ROLE_PRIORITY, grant.priority
+    end
+
+    test "grant_secret rejects a disabled secret" do
+      role = roles(:acme_admin_role)
+      secret = static_secrets(:acme_staging_api_key)
+      secret.update_attribute(:enabled, false)
+
+      assert_no_difference -> { role.grants.count } do
+        post grant_secret_console_role_url(role.oid), params: { grantable: "static:#{secret.oid}" }
+      end
+
+      assert_redirected_to console_role_path(role.oid)
+      assert_equal "Pick a secret to grant.", flash[:alert]
     end
 
     test "grant_secret is idempotent" do

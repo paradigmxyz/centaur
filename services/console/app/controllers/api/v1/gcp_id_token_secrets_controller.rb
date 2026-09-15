@@ -41,7 +41,7 @@ module Api
       private
 
       def assign_and_save!(ref, attrs)
-        base = permit_document(ref, attrs, :name, :description, :audience, :header, labels: {})
+        base = permit_document(ref, attrs, :name, :description, :audience, :header, :enabled, labels: {})
 
         keyfile_attrs = if attrs.key?(:keyfile) && attrs[:keyfile].present?
           attrs.require(:keyfile).permit(:source_type, :secret, config: {})
@@ -67,6 +67,7 @@ module Api
           foreign_id: ref.foreign_id,
           name: ref.name,
           description: ref.description,
+          enabled: ref.enabled,
           labels: ref.labels,
           audience: ref.audience,
           header: ref.header,

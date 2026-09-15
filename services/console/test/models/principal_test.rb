@@ -550,6 +550,27 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_includes principals(:acme_channel).granted_static_secrets, static_secrets(:acme_prod_api_key)
   end
 
+  test "granted_static_secrets excludes disabled secrets without removing their grants" do
+    principal = principals(:acme_channel)
+    secret = static_secrets(:github_token_inject)
+    grant = grants(:acme_channel_github_token)
+
+    secret.update!(enabled: false)
+
+    assert_not_includes principal.granted_static_secrets, secret
+    assert Grant.exists?(grant.id)
+  end
+
+  test "granted secret relations exclude disabled non-static secrets" do
+    principal = principals(:acme_channel)
+    secret = pg_dsn_secrets(:acme_analytics_pg)
+
+    secret.update!(enabled: false)
+
+    assert_not_includes principal.granted_pg_dsn_secrets, secret
+    assert Grant.exists?(grants(:acme_channel_analytics_pg).id)
+  end
+
   test "effective grants dedupe a secret reachable both directly and via a role" do
     principal = principals(:acme_channel)
     # acme_prod_api_key already reaches the principal through the acme_infra role;

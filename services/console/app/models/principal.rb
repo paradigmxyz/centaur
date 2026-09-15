@@ -79,6 +79,8 @@ class Principal < ApplicationRecord
       .includes(*Grant::GRANTABLE_ASSOCIATIONS)
       .filter_map(&:grantable)
       .filter_map do |credential|
+        next unless credential.enabled?
+
         label = credential.labels.to_h[TOOL_LABEL]
         label.strip if label.is_a?(String)
       end
@@ -107,7 +109,7 @@ class Principal < ApplicationRecord
       .joins("INNER JOIN (#{priorities.to_sql}) granted_priorities " \
              "ON granted_priorities.secret_id = static_secrets.id")
       .joins(broker_credential: :oauth_app)
-      .where(oauth_apps: { always_available: true })
+      .where(enabled: true, oauth_apps: { always_available: true })
       .select("static_secrets.*", "granted_priorities.effective_priority")
       .includes(:source, :rules)
       .order(Arel.sql("granted_priorities.effective_priority ASC, static_secrets.id ASC"))
@@ -388,6 +390,7 @@ class Principal < ApplicationRecord
     model
       .joins("INNER JOIN (#{priorities.to_sql}) granted_priorities " \
              "ON granted_priorities.secret_id = #{model.table_name}.id")
+      .where(model.table_name => { enabled: true })
       .select("#{model.table_name}.*", "granted_priorities.effective_priority")
       .includes(*includes)
       .order(Arel.sql("granted_priorities.effective_priority ASC, #{model.table_name}.id ASC"))

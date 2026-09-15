@@ -50,7 +50,7 @@ module Api
       # Builds the whole credential graph in memory and saves once so the
       # cross-record validations (exactly_one_credential) see the keyfile source.
       def assign_and_save!(ref, attrs)
-        base = permit_document(ref, attrs, :name, :description, :subject,
+        base = permit_document(ref, attrs, :name, :description, :subject, :enabled,
                                labels: {}, credentials_provider: {}, scopes: [])
 
         keyfile_attrs = if attrs.key?(:keyfile) && attrs[:keyfile].present?
@@ -77,6 +77,7 @@ module Api
           foreign_id: ref.foreign_id,
           name: ref.name,
           description: ref.description,
+          enabled: ref.enabled,
           labels: ref.labels,
           credentials_provider: ref.credentials_provider,
           subject: ref.subject,

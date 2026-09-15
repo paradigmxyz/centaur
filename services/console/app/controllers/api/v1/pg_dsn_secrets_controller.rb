@@ -48,7 +48,7 @@ module Api
 
       def assign_and_save!(ref, attrs)
         base = permit_document(
-          ref, attrs, :name, :description, :database, :role,
+          ref, attrs, :name, :description, :database, :role, :enabled,
           labels: {}, settings: [ :name, :value, { value_from: {} } ]
         )
         # settings is normalized to the array of { "name", "value" } or
@@ -80,6 +80,7 @@ module Api
           foreign_id: ref.foreign_id,
           name: ref.name,
           description: ref.description,
+          enabled: ref.enabled,
           labels: ref.labels,
           database: ref.database,
           role: ref.role,

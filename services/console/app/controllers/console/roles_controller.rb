@@ -26,7 +26,7 @@ module Console
         granted_ids[assoc.to_s.delete_suffix("_secret")] << grant.public_send("#{assoc}_id")
       end
       @assignable_secrets = SECRET_KINDS.each_with_object({}) do |(kind, cfg), acc|
-        acc[kind] = cfg[:model].where.not(id: granted_ids[kind]).order(:id)
+        acc[kind] = cfg[:model].where(enabled: true).where.not(id: granted_ids[kind]).order(:id)
       end
     end
 
@@ -103,7 +103,8 @@ module Console
       kind, oid = value.to_s.split(":", 2)
       cfg = SECRET_KINDS[kind]
       return nil if cfg.nil? || oid.blank?
-      cfg[:model].find_by_oid!(oid)
+      secret = cfg[:model].find_by_oid!(oid)
+      secret if secret.enabled?
     end
 
     def grantable_assoc(secret)

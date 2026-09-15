@@ -42,16 +42,20 @@ module Api
     # semantics: a permitted field that is omitted from the body, or sent as
     # null (which strong params drops for hash and array filters), is reset to
     # its column default rather than retained from the existing record, so the
-    # body always replaces the whole document. The identity column foreign_id
-    # is the exception: an upsert by foreign_id sets it on the
-    # record before assignment, so a blank body value must not wipe them.
+    # body always replaces the whole document. The exceptions are foreign_id,
+    # which an upsert can derive from the URL, and enabled, which is an operator
+    # control that older clients must not reset by omission.
     def permit_document(ref, attrs, *scalars, **filters)
       permitted = attrs.permit(:foreign_id, *scalars, **filters)
       permitted.delete(:foreign_id) if permitted[:foreign_id].blank? && ref.foreign_id.present?
 
       defaults = ref.class.column_defaults
       columns = (scalars + filters.keys).map(&:to_s)
-      permitted.with_defaults(columns.index_with { |c| defaults[c] })
+      permitted = permitted.with_defaults(columns.index_with { |c| defaults[c] })
+      if ref.persisted? && columns.include?("enabled") && !attrs.key?(:enabled)
+        permitted[:enabled] = ref.enabled
+      end
+      permitted
     end
 
     # Resolves the target of a PUT/PATCH write so the verb behaves as an upsert.

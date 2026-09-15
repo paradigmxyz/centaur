@@ -50,7 +50,7 @@ module Api
       # Builds the whole credential graph in memory and saves once so the
       # credential and rule validations see every source at validation time.
       def assign_and_save!(ref, attrs)
-        base = permit_document(ref, attrs, :name, :description,
+        base = permit_document(ref, attrs, :name, :description, :enabled,
                                :timestamp_format, :signature_algorithm, :signature_key_encoding,
                                :signature_output_encoding, :signature_message, :allow_chunked_body,
                                labels: {}, headers: [ :name, :value ])
@@ -88,6 +88,7 @@ module Api
           foreign_id: ref.foreign_id,
           name: ref.name,
           description: ref.description,
+          enabled: ref.enabled,
           labels: ref.labels,
           timestamp_format: ref.timestamp_format,
           signature_algorithm: ref.signature_algorithm,

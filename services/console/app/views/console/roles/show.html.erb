@@ -58,8 +58,9 @@
         <colgroup>
           <col class="w-40">
           <col class="w-32">
-          <col class="w-[28%]">
+          <col class="w-[24%]">
           <col>
+          <col class="w-28">
           <col class="w-28">
         </colgroup>
         <thead class="console-table-head">
@@ -68,6 +69,7 @@
             <th class="console-th">ID</th>
             <th class="console-th">Foreign ID</th>
             <th class="console-th">Name</th>
+            <th class="console-th">Status</th>
             <th class="console-th text-right"></th>
           </tr>
         </thead>
@@ -95,6 +97,9 @@
                 <% else %>
                   <span class="text-zinc-600">unnamed</span>
                 <% end %>
+              </td>
+              <td class="console-td-nowrap">
+                <%= render "console/secret_status_badge", secret: secret %>
               </td>
               <td class="console-td-nowrap text-right">
                 <%= button_to "Revoke", revoke_grant_console_role_path(@role.oid, grant.oid), method: :delete,

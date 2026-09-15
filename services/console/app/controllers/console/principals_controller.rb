@@ -115,7 +115,8 @@ module Console
       kind, oid = value.to_s.split(":", 2)
       cfg = SECRET_KINDS[kind]
       return nil if cfg.nil? || oid.blank?
-      cfg[:model].find_by_oid!(oid)
+      secret = cfg[:model].find_by_oid!(oid)
+      secret if secret.enabled?
     end
 
     # The Grant belongs_to association for a grantable record, e.g. a StaticSecret

@@ -18,6 +18,14 @@
       <%= text_field_tag "secret[description]", secret.description, id: "secret_description", class: "form-input #{field_error_class(secret, :description)}" %>
       <%= field_error(secret, :description) %>
     </div>
+    <div>
+      <%= hidden_field_tag "secret[enabled]", "0" %>
+      <label class="flex cursor-pointer items-center gap-2 text-sm text-zinc-300">
+        <%= check_box_tag "secret[enabled]", "1", secret.enabled? %>
+        <span>Enabled for granted principals</span>
+      </label>
+      <p class="form-hint">Disable this secret to stop delivering it without removing its definition or grants.</p>
+    </div>
   </div>
   <%= field_error(secret, :labels) %>
 </section>

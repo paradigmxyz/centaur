@@ -96,7 +96,7 @@ class ConsoleController < ApplicationController
       end
     end
     @assignable_secrets = SECRET_KINDS.each_with_object({}) do |(kind, cfg), acc|
-      acc[kind] = cfg[:model].where.not(id: granted_ids[kind]).order(:id)
+      acc[kind] = cfg[:model].where(enabled: true).where.not(id: granted_ids[kind]).order(:id)
     end
   end
 

@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
+ActiveRecord::Schema[8.1].define(version: 2026_09_15_040452) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pg_search"
@@ -33,6 +33,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
     t.datetime "created_at", null: false
     t.bigint "created_by_id", null: false
     t.string "description"
+    t.boolean "enabled", default: true, null: false
     t.string "foreign_id"
     t.jsonb "labels", default: {}, null: false
     t.string "name"
@@ -88,6 +89,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
     t.bigint "created_by_id", null: false
     t.jsonb "credentials_provider"
     t.string "description"
+    t.boolean "enabled", default: true, null: false
     t.string "foreign_id"
     t.jsonb "labels", default: {}, null: false
     t.string "name"
@@ -104,6 +106,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
     t.datetime "created_at", null: false
     t.bigint "created_by_id", null: false
     t.string "description"
+    t.boolean "enabled", default: true, null: false
     t.string "foreign_id"
     t.string "header"
     t.jsonb "labels", default: {}, null: false
@@ -157,6 +160,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
     t.datetime "created_at", null: false
     t.bigint "created_by_id", null: false
     t.string "description"
+    t.boolean "enabled", default: true, null: false
     t.string "foreign_id"
     t.jsonb "headers", default: [], null: false
     t.jsonb "labels", default: {}, null: false
@@ -246,6 +250,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
     t.datetime "created_at", null: false
     t.bigint "created_by_id", null: false
     t.string "description"
+    t.boolean "enabled", default: true, null: false
     t.string "foreign_id"
     t.string "grant"
     t.string "header"
@@ -265,6 +270,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
     t.bigint "created_by_id", null: false
     t.string "database", null: false
     t.string "description"
+    t.boolean "enabled", default: true, null: false
     t.string "foreign_id"
     t.jsonb "labels", default: {}, null: false
     t.string "name"
@@ -504,6 +510,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
     t.datetime "created_at", null: false
     t.bigint "created_by_id"
     t.string "description"
+    t.boolean "enabled", default: true, null: false
     t.string "foreign_id"
     t.jsonb "inject_config"
     t.string "kind", default: "custom", null: false

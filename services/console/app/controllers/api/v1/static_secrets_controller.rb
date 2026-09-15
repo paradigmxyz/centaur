@@ -63,7 +63,7 @@ module Api
 
       def assign_and_save!(ref, attrs)
         ss_attrs = permit_document(
-          ref, attrs, :name, :description, :kind,
+          ref, attrs, :name, :description, :kind, :enabled,
           labels: {}, inject_config: {}, replace_config: {}
         )
         # Older clients do not know about kind. Preserve it on update when the
@@ -120,6 +120,7 @@ module Api
           name: ref.name,
           description: ref.description,
           kind: ref.kind,
+          enabled: ref.enabled,
           labels: ref.labels,
           inject_config: ref.inject_config,
           replace_config: ref.replace_config,

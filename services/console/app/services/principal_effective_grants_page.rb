@@ -37,12 +37,7 @@ class PrincipalEffectiveGrantsPage
   end
 
   def effective_secret_counts
-    kinds = relations.keys
-    columns = kinds.map { |kind| GRANT_COLUMN_BY_KIND.fetch(kind) }
-    aggregates = columns.map { |column| Grant.arel_table[column].count(true) }
-    counts = principal.effective_grants.pick(*aggregates)
-
-    kinds.zip(Array(counts)).to_h
+    relations.transform_values { |relation| relation.count(:all) }
   end
 
   def page_records(counts, offset:)

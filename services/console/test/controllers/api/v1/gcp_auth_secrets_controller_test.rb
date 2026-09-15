@@ -26,8 +26,21 @@ module Api
         data = json_body.fetch("data")
         refute data.key?("namespace")
         assert_equal secret.oid, data["id"]
+        assert_equal true, data["enabled"]
         assert_equal({ "source_type" => "env", "config" => { "var" => "GCP_SA_KEYFILE" } }, data["keyfile"])
         assert_equal "storage-bot@acme.example", data["subject"]
+      end
+
+      test "PUT can disable a gcp_auth secret" do
+        secret = gcp_auth_secrets(:acme_gcs_keyfile)
+        get api_v1_gcp_auth_secret_url(id: secret.oid), headers: auth_headers
+        data = json_body.fetch("data").except("id", "created_at", "updated_at").merge("enabled" => false)
+
+        put api_v1_gcp_auth_secret_url(id: secret.oid), params: { data: data }.to_json, headers: auth_headers
+
+        assert_response :ok
+        assert_equal false, json_body.dig("data", "enabled")
+        assert_not secret.reload.enabled?
       end
 
       test "PUT with an unchanged document preserves keyfile and rule records" do

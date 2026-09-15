@@ -51,7 +51,7 @@ module Api
       # Builds the whole credential graph in memory and saves once so the
       # credential and rule validations see every source at validation time.
       def assign_and_save!(ref, attrs)
-        base = permit_document(ref, attrs, :name, :description,
+        base = permit_document(ref, attrs, :name, :description, :enabled,
                                labels: {}, allowed_regions: [], allowed_services: [])
 
         sources = build_credential_sources(attrs)
@@ -91,6 +91,7 @@ module Api
           foreign_id: ref.foreign_id,
           name: ref.name,
           description: ref.description,
+          enabled: ref.enabled,
           labels: ref.labels,
           allowed_regions: ref.allowed_regions,
           allowed_services: ref.allowed_services,

@@ -11,6 +11,16 @@ class SyncConfigCacheInvalidationTest < ActiveSupport::TestCase
     assert_equal version, principal.reload.sync_config_cache_version
   end
 
+  test "disabling a secret bumps the sync config cache version" do
+    principal = principals(:acme_channel)
+    record = static_secrets(:github_token_inject)
+    version = principal.reload.sync_config_cache_version
+
+    record.update_attribute(:enabled, false)
+
+    assert_equal version + 1, principal.reload.sync_config_cache_version
+  end
+
   test "a later touch does not hide an earlier invalidating save in the same transaction" do
     principal = principals(:acme_channel)
     record = static_secrets(:github_token_inject)

@@ -98,6 +98,18 @@ module Api
         assert_equal %w[analytics github], json_body.dig("data", "connected_tools")
       end
 
+      test "omits tools linked only to disabled static secrets" do
+        secret = static_secrets(:github_token_inject)
+        secret.update!(labels: { "centaur-tool" => "github" }, enabled: false)
+
+        with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+          get "/api/v1/sandbox/permissions", headers: auth_headers(token_for(@proxy))
+        end
+
+        assert_response :ok
+        assert_not_includes json_body.dig("data", "connected_tools"), "github"
+      end
+
       test "returns merged role Slack channel permissions" do
         roles(:acme_infra).slack_channel_permissions.create!(
           channel_id: "C0123456789",

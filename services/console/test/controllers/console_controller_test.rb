@@ -49,6 +49,13 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "body", text: /GITHUB_TOKEN/, count: 0
     assert_select "a[href=?][title=?]", console_secret_path("static", secret.oid), secret.name
     assert_select "time[datetime=?]", secret.created_at.iso8601
+    total = SecretKinds::SECRET_KINDS.sum { |_kind, cfg| cfg[:model].count }
+    assert_select "form[action=?][data-controller=bulk-selection]", console_bulk_update_secrets_path do
+      assert_select "input[name='secret_refs[]']", count: [ total, ConsoleController::SECRETS_PER_PAGE ].min
+      assert_select "select[name=operation] option[value=enable]", text: "Enable selected"
+      assert_select "select[name=operation] option[value=disable]", text: "Disable selected"
+      assert_select "div[data-bulk-selection-target=toolbar][hidden]"
+    end
   end
 
   test "secrets table filters by type and searches by name" do
@@ -60,6 +67,10 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_response :ok
 
     assert_select "select[name=type] option[value=static][selected]"
+    assert_select "form[action=?]", console_bulk_update_secrets_path do
+      assert_select "input[type=hidden][name=q][value=?]", "PROD-API"
+      assert_select "input[type=hidden][name=type][value=static]"
+    end
     assert_select "a[href=?]", console_secret_path("static", matching.oid)
     assert_select "a[href=?]", console_secret_path("static", excluded_by_name.oid), count: 0
     assert_select "a[href=?]", console_secret_path("pg_dsn", excluded_by_type.oid), count: 0
@@ -513,13 +524,31 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "a[href=?]", console_secret_path("static", static_secrets(:acme_prod_api_key).oid)
   end
 
-  test "grant dropdown omits secrets already granted directly but keeps the rest" do
-    principal = principals(:acme_channel) # github_token_inject is granted directly
+  test "direct grants badge disabled secrets and effective grants omit them" do
+    principal = principals(:acme_channel)
+    secret = static_secrets(:github_token_inject)
+    secret.update_attribute(:enabled, false)
+
     get console_principal_url(principal.oid)
+
     assert_response :ok
+    assert_select "section#direct-grants" do
+      assert_select "a[href=?]", console_secret_path("static", secret.oid)
+      assert_select "span", text: "Disabled"
+    end
+    assert_select "section#effective-grants a[href=?]", console_secret_path("static", secret.oid), count: 0
+  end
+
+  test "grant dropdown omits secrets already granted directly, disabled secrets, and keeps the rest" do
+    principal = principals(:acme_channel) # github_token_inject is granted directly
     granted = static_secrets(:github_token_inject)
     ungranted = static_secrets(:acme_staging_api_key)
+    disabled = static_secrets(:globex_prod_secret)
+    disabled.update_attribute(:enabled, false)
+    get console_principal_url(principal.oid)
+    assert_response :ok
     assert_select "select[name=grantable] option[value=?]", "static:#{granted.oid}", count: 0
+    assert_select "select[name=grantable] option[value=?]", "static:#{disabled.oid}", count: 0
     assert_select "select[name=grantable] option[value=?]", "static:#{ungranted.oid}"
     # A kind with no direct grant on this principal still lists all its secrets.
     gcp = gcp_auth_secrets(:acme_bigquery)

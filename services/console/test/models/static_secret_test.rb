@@ -30,6 +30,10 @@ class StaticSecretTest < ActiveSupport::TestCase
     assert_equal "custom", StaticSecret.new.kind
   end
 
+  test "enabled defaults to true" do
+    assert StaticSecret.new.enabled?
+  end
+
   test "rejects an unknown credential kind" do
     ref = StaticSecret.new(valid_inject_attrs(kind: "githubish"))
 

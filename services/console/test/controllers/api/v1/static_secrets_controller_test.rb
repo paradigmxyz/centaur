@@ -46,6 +46,7 @@ module Api
         assert_equal ref.oid, data["id"]
         assert_equal ref.name, data["name"]
         assert_equal "custom", data["kind"]
+        assert_equal true, data["enabled"]
         assert_equal({ "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
                      data["inject_config"])
         assert_equal "env", data.dig("source", "source_type")
@@ -78,6 +79,22 @@ module Api
         assert_nil data["inject_config"]
         assert_equal CredentialProfiles::GithubToken::REPLACE_CONFIG, data["replace_config"]
         assert_equal %w[api.github.com github.com api.githubcopilot.com], data["rules"].map { |rule| rule["host"] }
+      end
+
+      test "POST can create a disabled static secret" do
+        body = {
+          data: {
+            name: "disabled secret",
+            enabled: false,
+            inject_config: { header: "X-Disabled" }
+          }
+        }
+
+        post api_v1_static_secrets_url, params: body.to_json, headers: auth_headers
+
+        assert_response :created
+        assert_equal false, json_body.dig("data", "enabled")
+        assert_not StaticSecret.find_by!(name: "disabled secret").enabled?
       end
 
       test "POST rejects configuration that conflicts with the selected profile" do
@@ -322,6 +339,19 @@ module Api
       test "POST returns 400 when the data key is missing" do
         post api_v1_static_secrets_url, params: {}.to_json, headers: auth_headers
         assert_response :bad_request
+      end
+
+      test "PUT preserves enabled when omitted" do
+        ref = static_secrets(:github_token_inject)
+        ref.update_attribute(:enabled, false)
+        get api_v1_static_secret_url(id: ref.oid), headers: auth_headers
+        data = json_body.fetch("data").except("id", "enabled", "created_at", "updated_at")
+
+        put api_v1_static_secret_url(id: ref.oid), params: { data: data }.to_json, headers: auth_headers
+
+        assert_response :ok
+        assert_not ref.reload.enabled?
+        assert_equal false, json_body.dig("data", "enabled")
       end
 
       test "PUT updates SSR fields and replaces source and rules" do

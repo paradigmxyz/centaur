@@ -750,6 +750,16 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     assert_equal baseline.fetch("postgres"), config.fetch("postgres")
   end
 
+  test "a disabled always_available wrapper does not hoist" do
+    requester = build_requester
+    wrapper = build_hoistable_wrapper(granted_to: requester, host: "github.com")
+    wrapper.update_attribute(:enabled, false)
+    proxy = Proxy.create!(name: "disabled-wrapper", principal: principals(:globex_user),
+                          requester_principal: requester)
+
+    assert_empty proxy.sync_config_snapshot.fetch(:config).fetch("secrets")
+  end
+
   test "a wrapper whose oauth app is not always_available does not hoist" do
     requester = build_requester
     build_hoistable_wrapper(granted_to: requester, host: "github.com", always_available: false)

@@ -75,7 +75,7 @@ For the resources with a `foreign_id` (static secrets, GCP auth secrets, GCP ID 
 - **`:id` is an OID** (it starts with the resource's prefix, e.g. `ssr_…`): updates that record. `404` if it does not exist — an OID is server-assigned, so it can't be created at a chosen value.
 - **`:id` is anything else**: it is treated as a globally unique `foreign_id`. The record is **updated if it exists, created if it does not**. Creation responds `201`; update responds `200`.
 
-This makes provisioning idempotent: `PUT /api/v1/roles/infra` converges the `infra` role whether or not it already exists, in one call. Omitting `foreign_id` from the body does not clear it.
+This makes provisioning idempotent: `PUT /api/v1/roles/infra` converges the `infra` role whether or not it already exists, in one call. Omitting `foreign_id` from the body does not clear it. For secret resources, omitting `enabled` from an update preserves its current value so older provisioning clients cannot inadvertently re-enable a secret.
 - **`labels`** is an arbitrary string-keyed object (defaults to `{}`).
 - **Timestamps** are ISO 8601 UTC.
 
@@ -177,6 +177,10 @@ A rule scopes a credential to matching outbound requests. Rules appear as the `r
 
 Rules are positional: a `position` (0-based, assigned from array order) is returned in responses but is not part of the request. On update, the supplied `rules` array fully replaces the existing rules.
 
+## Secret enablement
+
+Every grantable secret type has an optional `enabled` boolean that defaults to `true`. A disabled secret retains its definition and grants and remains visible through list and detail APIs, but is not delivered to principals. Create and update responses include the effective `enabled` value.
+
 ## Static secrets
 
 A static secret injects or replaces a fixed credential value on matching requests. It has a single secret [source](#secret-sources) and a list of [rules](#request-rules), and defines exactly one of `inject_config` or `replace_config`.
@@ -188,6 +192,7 @@ A static secret injects or replaces a fixed credential value on matching request
 | `foreign_id`     | optional    | Globally unique. Immutable after create. |
 | `name`           | optional    | |
 | `description`    | optional    | |
+| `enabled`        | optional    | Boolean; defaults to `true`. See [Secret enablement](#secret-enablement). |
 | `labels`         | optional    | Object; defaults to `{}`. |
 | `inject_config`  | conditional | Define exactly one of `inject_config` / `replace_config`. |
 | `replace_config` | conditional | |
@@ -229,6 +234,7 @@ Both config objects reject unknown keys.
     "foreign_id": "github-token",
     "name": "GitHub Token",
     "description": "Repo access",
+    "enabled": true,
     "labels": { "team": "platform" },
     "inject_config": { "header": "Authorization", "formatter": "Bearer {{ .Value }}" },
     "source": { "source_type": "env", "config": { "var": "GITHUB_TOKEN" } },
@@ -248,6 +254,7 @@ Returns `201` with the created resource. Response shape:
     "foreign_id": "github-token",
     "name": "GitHub Token",
     "description": "Repo access",
+    "enabled": true,
     "labels": { "team": "platform" },
     "inject_config": { "header": "Authorization", "formatter": "Bearer {{ .Value }}" },
     "replace_config": null,

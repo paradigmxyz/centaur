@@ -114,6 +114,7 @@ Rails.application.routes.draw do
     resources :pg_dsn_secrets, only: %i[new create edit update destroy], path: "secrets/pg_dsn"
     resources :gcp_auth_secrets, only: %i[new create edit update destroy], path: "secrets/gcp_auth"
     resources :gcp_id_token_secrets, only: %i[new create edit update destroy], path: "secrets/gcp_id_token"
+    patch  "secrets/bulk_update",               to: "secrets#bulk_update",       as: :bulk_update_secrets
     post   "secrets/:kind/:id/roles",           to: "secrets#grant_role",        as: :secret_grant_role
     delete "secrets/:kind/:id/roles/:grant_id", to: "secrets#revoke_role_grant", as: :secret_revoke_role_grant
   end

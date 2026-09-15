@@ -69,8 +69,9 @@ module Console
     # so the allow_nil validations apply.
     def assign_identity(secret)
       fields = params.fetch(:secret, ActionController::Parameters.new)
-               .permit(:foreign_id, :name, :description)
+               .permit(:foreign_id, :name, :description, :enabled)
       fields[:foreign_id] = fields[:foreign_id].presence
+      fields[:enabled] = ActiveModel::Type::Boolean.new.cast(fields[:enabled]) if fields.key?(:enabled)
       secret.assign_attributes(fields)
       secret.labels = label_params
     end
