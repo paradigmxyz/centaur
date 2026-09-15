@@ -475,7 +475,7 @@ async fn get_slack_channels(
     let config = slack_proxy_config()?;
     let client = http_client();
     let mut channels_by_id = BTreeMap::new();
-    match slack_public_channels(client, config).await {
+    match slack_public_channels().await {
         Ok(channels) => {
             for channel in channels {
                 if slack_channel_has_default_history_access(&channel) {
@@ -869,10 +869,7 @@ fn slack_channel_info_form(channel_id: &str) -> Vec<(&'static str, String)> {
     ]
 }
 
-async fn slack_public_channels(
-    client: &reqwest::Client,
-    config: &SlackFileProxyConfig,
-) -> Result<Vec<SlackChannel>, ApiError> {
+async fn slack_public_channels() -> Result<Vec<SlackChannel>, ApiError> {
     let mut cache = slack_public_channel_cache().lock().await;
     let now = Instant::now();
     if let Some(channels) = cache.fresh_channels(now) {
@@ -892,23 +889,35 @@ async fn slack_public_channels(
     cache.refreshing = true;
     drop(cache);
 
-    let result = fetch_slack_public_channels(client, config).await;
-    complete_slack_public_channel_refresh(result).await
+    match spawn_slack_public_channel_refresh().await {
+        Ok(result) => result,
+        Err(error) => {
+            let mut cache = slack_public_channel_cache().lock().await;
+            cache.refreshing = false;
+            cache.retry_refresh_at = Some(Instant::now() + SLACK_CHANNEL_REFRESH_RETRY_DELAY);
+            Err(ApiError::Internal(format!(
+                "Slack channel refresh task failed: {error}"
+            )))
+        }
+    }
 }
 
-fn spawn_slack_public_channel_refresh() {
+fn spawn_slack_public_channel_refresh()
+-> tokio::task::JoinHandle<Result<Vec<SlackChannel>, ApiError>> {
     tokio::spawn(async {
         let result = match slack_proxy_config() {
             Ok(config) => fetch_slack_public_channels(http_client(), config).await,
             Err(error) => Err(error),
         };
-        if let Err(error) = complete_slack_public_channel_refresh(result).await {
+        let completed = complete_slack_public_channel_refresh(result).await;
+        if let Err(error) = &completed {
             tracing::warn!(
                 error = %error,
                 "serving stale Slack channel list after background refresh failure"
             );
         }
-    });
+        completed
+    })
 }
 
 async fn complete_slack_public_channel_refresh(
