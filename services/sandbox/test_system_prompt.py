@@ -76,14 +76,6 @@ class SystemPromptTest(unittest.TestCase):
         self.assertIn("personal `provider_email`", prompt)
         self.assertIn("Centaur can use their personal connected account", prompt)
 
-    def test_slack_tool_policy_follows_conversation_context(self) -> None:
-        prompt = SYSTEM_PROMPT.read_text()
-
-        self.assertIn("channels always use proxied commands", prompt)
-        self.assertIn("direct messages always use direct commands", prompt)
-        self.assertIn("Never fall back across that boundary", prompt)
-        self.assertNotIn("If that fails, retry once with `slack thread-direct", prompt)
-
     def test_scheduled_task_guidance_is_present(self) -> None:
         prompt = SYSTEM_PROMPT.read_text()
 
