@@ -1084,8 +1084,7 @@ fn workflow_queue_class(workflow_name: &str) -> WorkflowQueueClass {
     match workflow_name {
         "slack_sync" => WorkflowQueueClass::SlackLive,
         "slack_backfill" | "slack_archive_import" => WorkflowQueueClass::EtlBackfill,
-        "attio_sync"
-        | "google_calendar_sync"
+        "google_calendar_sync"
         | "google_drive_sync"
         | "linear_sync"
         | "company_context_documents"
@@ -5038,7 +5037,6 @@ mod tests {
             WorkflowQueueClass::SlackLive
         );
         for workflow_name in [
-            "attio_sync",
             "google_calendar_sync",
             "google_drive_sync",
             "linear_sync",
@@ -5060,10 +5058,6 @@ mod tests {
         );
         assert_eq!(
             workflow_queue_class("github_issue_triage"),
-            WorkflowQueueClass::Standard
-        );
-        assert_eq!(
-            workflow_queue_class("nightly_report"),
             WorkflowQueueClass::Standard
         );
     }
