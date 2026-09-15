@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
 WORKFLOW_NAME = "console_workflow"
+# Console scheduled tasks carry no harness selector, so without this the run
+# inherits the workflow-run default harness (codex) no matter which harness the
+# deployment actually has credentials for. Deployments whose default harness is
+# not codex set CONSOLE_WORKFLOW_HARNESS (claudecode | codex | amp); it must
+# also be listed in SESSION_SANDBOX_PASSTHROUGH_ENV so the workflow host sees it.
+HARNESS_ENV = "CONSOLE_WORKFLOW_HARNESS"
 SLACK_MESSAGE_MAX_LENGTH = 50_000
 # Stay below Slack's 4,000-character soft limit so it cannot create extra roots.
 SLACK_MESSAGE_CHUNK_MAX_LENGTH = 3_800
@@ -23,6 +30,10 @@ Format the final response for Slack using Slack mrkdwn, not standard Markdown.
 Use *bold*, _italics_, ~strikethrough~, `inline code`, and <https://example.com|link text>.
 Use bold text instead of Markdown headings and lists instead of Markdown tables.
 Return only the message that should be posted to Slack."""
+
+
+def _configured_harness() -> str:
+    return (os.getenv(HARNESS_ENV) or "").strip()
 
 
 def _required_string(params: Any, key: str) -> str:
@@ -144,14 +155,18 @@ async def handler(params: Any, ctx: Any) -> dict[str, Any]:
     scheduled_task_id = _required_string(params, "scheduled_task_id")
     slack_user_id = str(params.get("slack_user_id") or "").strip()
 
-    result = await ctx.agent_turn(
-        _prompt_for_slack(prompt),
-        principal=principal,
-        metadata={
+    agent_kwargs: dict[str, Any] = {
+        "principal": principal,
+        "metadata": {
             "scheduled_task_id": scheduled_task_id,
             "scheduled_task_name": str(params.get("scheduled_task_name") or ""),
         },
-    )
+    }
+    harness = _configured_harness()
+    if harness:
+        agent_kwargs["harness"] = harness
+
+    result = await ctx.agent_turn(_prompt_for_slack(prompt), **agent_kwargs)
     response_text = str(result.get("result_text") or "").strip()
     if not response_text:
         response_text = "The task completed without a text response."

@@ -348,3 +348,43 @@ def test_handler_rejects_missing_required_input_before_starting_an_agent():
     assert context.agent_calls == []
     assert context.step_calls == []
     assert context.slack_calls == []
+
+
+def test_handler_pins_the_deployment_harness_when_configured(monkeypatch):
+    monkeypatch.setenv(console_workflow.HARNESS_ENV, " claudecode ")
+    context = FakeContext()
+
+    asyncio.run(
+        console_workflow.handler(
+            {
+                "prompt": "Summarize open incidents",
+                "principal": "console-user-author",
+                "channel": "C0123456789",
+                "scheduled_task_id": "tsk_123",
+            },
+            context,
+        )
+    )
+
+    _prompt, kwargs = context.agent_calls[0]
+    assert kwargs["harness"] == "claudecode"
+
+
+def test_handler_leaves_the_harness_unset_when_not_configured(monkeypatch):
+    monkeypatch.delenv(console_workflow.HARNESS_ENV, raising=False)
+    context = FakeContext()
+
+    asyncio.run(
+        console_workflow.handler(
+            {
+                "prompt": "Summarize open incidents",
+                "principal": "console-user-author",
+                "channel": "C0123456789",
+                "scheduled_task_id": "tsk_123",
+            },
+            context,
+        )
+    )
+
+    _prompt, kwargs = context.agent_calls[0]
+    assert "harness" not in kwargs
