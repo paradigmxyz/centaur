@@ -5337,6 +5337,77 @@ fn first_token_latency(
     (output_event.created_at - started_at).try_into().ok()
 }
 
+fn is_turn_started_notification(value: &Value) -> bool {
+    let method = value.get("method").and_then(Value::as_str);
+    let event_type = value.get("type").and_then(Value::as_str);
+    method == Some("turn/started") || event_type == Some("turn.started")
+}
+
+fn is_turn_terminal_notification(value: &Value) -> bool {
+    let method = value.get("method").and_then(Value::as_str);
+    let event_type = value.get("type").and_then(Value::as_str);
+    matches!(method, Some("turn/completed" | "turn/failed"))
+        || matches!(event_type, Some("turn.completed" | "turn.failed"))
+}
+
+/// Distinguishes an execution's root turn from multiplexed subagent turns:
+/// only the root turn's completion ends the execution. A completion counts
+/// as a child's only when its ids were seen on a prior `turn/started` and
+/// differ from the root; anything else stays terminal.
+#[derive(Default)]
+struct TurnCompletionFilter {
+    root_thread_ids: HashSet<String>,
+    root_turn_ids: HashSet<String>,
+    seen_thread_ids: HashSet<String>,
+    seen_turn_ids: HashSet<String>,
+    root_seen: bool,
+}
+
+impl TurnCompletionFilter {
+    fn note_line(&mut self, value: &Value) {
+        if !is_turn_started_notification(value) {
+            return;
+        }
+        self.seen_thread_ids.extend(thread_ids(value));
+        self.seen_turn_ids.extend(turn_ids(value));
+        if self.root_seen {
+            return;
+        }
+        self.root_thread_ids.extend(thread_ids(value));
+        self.root_turn_ids.extend(turn_ids(value));
+        self.root_seen = true;
+    }
+
+    fn is_child_turn_line(&self, value: &Value) -> bool {
+        if !self.root_seen {
+            return false;
+        }
+        let candidate_turns = turn_ids(value);
+        if !candidate_turns.is_empty() && !self.root_turn_ids.is_empty() {
+            return !candidate_turns
+                .iter()
+                .any(|id| self.root_turn_ids.contains(id))
+                && candidate_turns
+                    .iter()
+                    .any(|id| self.seen_turn_ids.contains(id));
+        }
+        let candidate_threads = thread_ids(value);
+        if !candidate_threads.is_empty() && !self.root_thread_ids.is_empty() {
+            return !candidate_threads
+                .iter()
+                .any(|id| self.root_thread_ids.contains(id))
+                && candidate_threads
+                    .iter()
+                    .any(|id| self.seen_thread_ids.contains(id));
+        }
+        false
+    }
+
+    fn is_child_turn_completion(&self, value: &Value) -> bool {
+        is_turn_terminal_notification(value) && self.is_child_turn_line(value)
+    }
+}
+
 #[derive(Default)]
 struct StdoutPumpState {
     final_answer_text_by_execution: HashMap<String, String>,
@@ -5344,6 +5415,7 @@ struct StdoutPumpState {
     turn_execution_by_id: HashMap<String, String>,
     item_execution_by_id: HashMap<String, String>,
     stdout_span_by_execution: HashMap<String, Span>,
+    turn_filter_by_execution: HashMap<String, TurnCompletionFilter>,
 }
 
 impl StdoutPumpState {
@@ -5382,7 +5454,21 @@ impl StdoutPumpState {
 
     fn observe(&mut self, execution_id: &str, line: &str) -> Option<TerminalOutput> {
         let value: Value = serde_json::from_str(line).ok()?;
-        if let Some(update) = output_line_final_answer_text(&value) {
+        let (is_child_completion, is_child_line) = {
+            let filter = self
+                .turn_filter_by_execution
+                .entry(execution_id.to_owned())
+                .or_default();
+            filter.note_line(&value);
+            (
+                filter.is_child_turn_completion(&value),
+                filter.is_child_turn_line(&value),
+            )
+        };
+        if is_child_completion {
+            return None;
+        }
+        if !is_child_line && let Some(update) = output_line_final_answer_text(&value) {
             let text = self
                 .final_answer_text_by_execution
                 .entry(execution_id.to_owned())
@@ -5416,6 +5502,13 @@ impl StdoutPumpState {
         let Some(value) = value else {
             return false;
         };
+        if self
+            .turn_filter_by_execution
+            .get(execution_id)
+            .is_some_and(|filter| filter.is_child_turn_line(value))
+        {
+            return false;
+        }
         if output_line_final_answer_text(value).is_some() {
             return true;
         }
@@ -5436,6 +5529,7 @@ impl StdoutPumpState {
     fn forget(&mut self, execution_id: &str) {
         self.final_answer_text_by_execution.remove(execution_id);
         self.first_token_recorded_by_execution.remove(execution_id);
+        self.turn_filter_by_execution.remove(execution_id);
         self.turn_execution_by_id
             .retain(|_, mapped_execution_id| mapped_execution_id != execution_id);
         self.item_execution_by_id
@@ -6517,6 +6611,20 @@ fn turn_ids(value: &Value) -> Vec<String> {
     .collect()
 }
 
+fn thread_ids(value: &Value) -> Vec<String> {
+    [
+        &["thread_id"][..],
+        &["threadId"][..],
+        &["thread", "id"][..],
+        &["params", "threadId"][..],
+        &["params", "thread_id"][..],
+        &["params", "thread", "id"][..],
+    ]
+    .into_iter()
+    .filter_map(|path| string_at_path(value, path))
+    .collect()
+}
+
 fn item_ids(value: &Value) -> Vec<String> {
     [
         &["item_id"][..],
@@ -7447,12 +7555,19 @@ fn max_duration_from_execution(execution: &SessionExecution) -> Option<Duration>
 /// returning the first terminal outcome (with its accumulated final answer)
 /// if the recorded history already contains the end of the turn.
 fn terminal_output_from_lines(lines: &[String]) -> Option<TerminalOutput> {
+    let mut filter = TurnCompletionFilter::default();
     let mut final_answer_text = String::new();
     for line in lines {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        if let Some(update) = output_line_final_answer_text(&value) {
+        filter.note_line(&value);
+        if filter.is_child_turn_completion(&value) {
+            continue;
+        }
+        if !filter.is_child_turn_line(&value)
+            && let Some(update) = output_line_final_answer_text(&value)
+        {
             match update {
                 FinalAnswerTextUpdate::Append(delta) => final_answer_text.push_str(&delta),
                 FinalAnswerTextUpdate::Replace(canonical) => final_answer_text = canonical,
@@ -8511,6 +8626,134 @@ mod tests {
                 result_text: Some("Final canonical answer.".to_owned())
             })
         );
+    }
+
+    #[test]
+    fn stdout_state_ignores_collab_child_turn_completion() {
+        let mut state = StdoutPumpState::default();
+        let parent_started = r#"{"method":"turn/started","params":{"threadId":"thread-parent","turn":{"id":"turn-parent"}}}"#;
+        let child_started = r#"{"method":"turn/started","params":{"threadId":"thread-child","turn":{"id":"turn-child"}}}"#;
+        let child_completed = r#"{"method":"turn/completed","params":{"threadId":"thread-child","turn":{"id":"turn-child","status":"completed"}}}"#;
+        let parent_completed = r#"{"method":"turn/completed","params":{"threadId":"thread-parent","turn":{"id":"turn-parent","status":"completed"}}}"#;
+
+        for line in [parent_started, child_started] {
+            assert_eq!(
+                state.execution_for_line(Some("exe-1"), line),
+                Some("exe-1".to_owned())
+            );
+            assert_eq!(state.observe("exe-1", line), None);
+        }
+        assert_eq!(
+            state.execution_for_line(Some("exe-1"), child_completed),
+            Some("exe-1".to_owned())
+        );
+        assert_eq!(state.observe("exe-1", child_completed), None);
+        assert_eq!(
+            state.observe("exe-1", parent_completed),
+            Some(TerminalOutput::Completed {
+                reason: "turn_completed",
+                result_text: None
+            })
+        );
+    }
+
+    #[test]
+    fn stdout_state_ignores_collab_child_turn_failure() {
+        let mut state = StdoutPumpState::default();
+        let parent_started = r#"{"method":"turn/started","params":{"threadId":"thread-parent","turn":{"id":"turn-parent"}}}"#;
+        let child_started = r#"{"method":"turn/started","params":{"threadId":"thread-child","turn":{"id":"turn-child"}}}"#;
+        let child_failed = r#"{"method":"turn/failed","params":{"threadId":"thread-child","turn":{"id":"turn-child","status":"failed"}}}"#;
+        let parent_completed = r#"{"method":"turn/completed","params":{"threadId":"thread-parent","turn":{"id":"turn-parent","status":"completed"}}}"#;
+
+        assert_eq!(state.observe("exe-1", parent_started), None);
+        assert_eq!(state.observe("exe-1", child_started), None);
+        assert_eq!(state.observe("exe-1", child_failed), None);
+        assert!(matches!(
+            state.observe("exe-1", parent_completed),
+            Some(TerminalOutput::Completed { .. })
+        ));
+    }
+
+    #[test]
+    fn stdout_state_turn_completion_without_ids_remains_terminal() {
+        let mut state = StdoutPumpState::default();
+        let terminal = r#"{"type":"turn.completed","turn":{"status":"completed"}}"#;
+        assert!(matches!(
+            state.observe("exe-1", terminal),
+            Some(TerminalOutput::Completed { .. })
+        ));
+    }
+
+    #[test]
+    fn stdout_state_idless_root_start_pins_before_child_start() {
+        let mut state = StdoutPumpState::default();
+        let parent_started = r#"{"method":"turn/started","params":{}}"#;
+        let child_started = r#"{"method":"turn/started","params":{"threadId":"thread-child","turn":{"id":"turn-child"}}}"#;
+        let parent_completed = r#"{"method":"turn/completed","params":{"threadId":"thread-parent","turn":{"id":"turn-parent","status":"completed"}}}"#;
+
+        assert_eq!(state.observe("exe-1", parent_started), None);
+        assert_eq!(state.observe("exe-1", child_started), None);
+        assert!(matches!(
+            state.observe("exe-1", parent_completed),
+            Some(TerminalOutput::Completed { .. })
+        ));
+    }
+
+    #[test]
+    fn stdout_state_unseen_parent_completion_stays_terminal_after_resume() {
+        let mut state = StdoutPumpState::default();
+        let child_started = r#"{"method":"turn/started","params":{"threadId":"thread-child","turn":{"id":"turn-child"}}}"#;
+        let parent_completed = r#"{"method":"turn/completed","params":{"threadId":"thread-parent","turn":{"id":"turn-parent","status":"completed"}}}"#;
+
+        assert_eq!(state.observe("exe-1", child_started), None);
+        assert!(matches!(
+            state.observe("exe-1", parent_completed),
+            Some(TerminalOutput::Completed { .. })
+        ));
+    }
+
+    #[test]
+    fn stdout_state_child_agent_text_does_not_pollute_final_answer() {
+        let mut state = StdoutPumpState::default();
+        let parent_started = r#"{"method":"turn/started","params":{"threadId":"thread-parent","turn":{"id":"turn-parent"}}}"#;
+        let child_started = r#"{"method":"turn/started","params":{"threadId":"thread-child","turn":{"id":"turn-child"}}}"#;
+        let child_delta = r#"{"method":"item/agentMessage/delta","params":{"threadId":"thread-child","turnId":"turn-child","itemId":"msg-child","delta":"child draft"}}"#;
+        let parent_delta = r#"{"method":"item/agentMessage/delta","params":{"threadId":"thread-parent","turnId":"turn-parent","itemId":"msg-parent","delta":"parent answer"}}"#;
+        let child_completed = r#"{"method":"turn/completed","params":{"threadId":"thread-child","turn":{"id":"turn-child","status":"completed"}}}"#;
+        let parent_completed = r#"{"method":"turn/completed","params":{"threadId":"thread-parent","turn":{"id":"turn-parent","status":"completed"}}}"#;
+
+        assert_eq!(state.observe("exe-1", parent_started), None);
+        assert_eq!(state.observe("exe-1", child_started), None);
+        assert_eq!(state.observe("exe-1", child_delta), None);
+        assert_eq!(state.observe("exe-1", parent_delta), None);
+        assert_eq!(state.observe("exe-1", child_completed), None);
+        assert_eq!(
+            state.observe("exe-1", parent_completed),
+            Some(TerminalOutput::Completed {
+                reason: "turn_completed",
+                result_text: Some("parent answer".to_owned())
+            })
+        );
+    }
+
+    #[test]
+    fn terminal_output_from_lines_skips_child_turn_completion() {
+        let lines = [
+            r#"{"method":"turn/started","params":{"threadId":"thread-parent","turn":{"id":"turn-parent"}}}"#.to_owned(),
+            r#"{"method":"turn/started","params":{"threadId":"thread-child","turn":{"id":"turn-child"}}}"#.to_owned(),
+            r#"{"method":"turn/completed","params":{"threadId":"thread-child","turn":{"id":"turn-child","status":"completed"}}}"#.to_owned(),
+            r#"{"method":"turn/completed","params":{"threadId":"thread-parent","turn":{"id":"turn-parent","status":"completed"}}}"#.to_owned(),
+        ];
+        assert!(matches!(
+            terminal_output_from_lines(&lines),
+            Some(TerminalOutput::Completed { .. })
+        ));
+        let child_only = [
+            r#"{"method":"turn/started","params":{"threadId":"thread-parent","turn":{"id":"turn-parent"}}}"#.to_owned(),
+            r#"{"method":"turn/started","params":{"threadId":"thread-child","turn":{"id":"turn-child"}}}"#.to_owned(),
+            r#"{"method":"turn/completed","params":{"threadId":"thread-child","turn":{"id":"turn-child","status":"completed"}}}"#.to_owned(),
+        ];
+        assert_eq!(terminal_output_from_lines(&child_only), None);
     }
 
     #[test]
