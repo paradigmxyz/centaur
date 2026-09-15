@@ -196,14 +196,14 @@ impl ChatDestination {
                 if channel_id.starts_with('D') {
                     format!(
                         "[chat surface: Slack DM · conversation {channel_id} · thread {thread_ts}. \
-                         Use direct Slack methods (`*-direct`). Centaur delivers your reply automatically; \
-                         upload files with `slack upload-direct`.]"
+                         Slack tool policy: use direct (`*-direct`) methods. \
+                         Centaur delivers your reply automatically.]"
                     )
                 } else {
                     format!(
                         "[chat surface: Slack channel · channel {channel_id} · thread {thread_ts}. \
-                         Use proxied Slack methods (without `-direct`). Centaur delivers your reply automatically; \
-                         upload files with `slack upload`.]"
+                         Slack tool policy: use proxied methods (without `-direct`). \
+                         Centaur delivers your reply automatically.]"
                     )
                 }
             }
@@ -800,9 +800,7 @@ mod tests {
             .context_line();
         assert!(slack_channel.contains("Slack channel"));
         assert!(slack_channel.contains("C123"));
-        assert!(slack_channel.contains("Use proxied Slack methods"));
-        assert!(slack_channel.contains("slack upload"));
-        assert!(!slack_channel.contains("slack upload-direct"));
+        assert!(slack_channel.contains("use proxied methods"));
 
         let slack_dm = ThreadKey::parse("slack:D123:123.456")
             .unwrap()
@@ -811,8 +809,7 @@ mod tests {
             .context_line();
         assert!(slack_dm.contains("Slack DM"));
         assert!(slack_dm.contains("D123"));
-        assert!(slack_dm.contains("Use direct Slack methods"));
-        assert!(slack_dm.contains("slack upload-direct"));
+        assert!(slack_dm.contains("use direct (`*-direct`) methods"));
 
         let discord = ThreadKey::parse("discord:111:222:333")
             .unwrap()
