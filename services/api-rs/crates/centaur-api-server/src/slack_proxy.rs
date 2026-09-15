@@ -28,6 +28,7 @@ const MAX_SLACK_FILES_LIST_LIMIT: u16 = 200;
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const SLACK_CHANNEL_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const SLACK_CHANNEL_REFRESH_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -566,7 +567,24 @@ impl<T: Clone> CachedSlackValue<T> {
 }
 
 type SlackChannelInfoCache = tokio::sync::Mutex<BTreeMap<String, CachedSlackValue<SlackChannel>>>;
-type SlackPublicChannelCache = tokio::sync::Mutex<Option<CachedSlackValue<Vec<SlackChannel>>>>;
+type SlackPublicChannelCache = tokio::sync::Mutex<SlackPublicChannelCacheState>;
+
+#[derive(Default)]
+struct SlackPublicChannelCacheState {
+    channels: Option<CachedSlackValue<Vec<SlackChannel>>>,
+    retry_refresh_at: Option<Instant>,
+}
+
+impl SlackPublicChannelCacheState {
+    fn channels_to_serve(&self, now: Instant) -> Option<Vec<SlackChannel>> {
+        let channels = self.channels.as_ref()?;
+        channels.get_if_fresh(now).or_else(|| {
+            self.retry_refresh_at
+                .is_some_and(|retry_at| retry_at > now)
+                .then(|| channels.value.clone())
+        })
+    }
+}
 
 fn slack_channel_info_cache() -> &'static SlackChannelInfoCache {
     static CACHE: OnceLock<SlackChannelInfoCache> = OnceLock::new();
@@ -771,13 +789,26 @@ async fn slack_public_channels(
     client: &reqwest::Client,
     config: &SlackFileProxyConfig,
 ) -> Result<Vec<SlackChannel>, ApiError> {
-    let mut entry = slack_public_channel_cache().lock().await;
+    let mut cache = slack_public_channel_cache().lock().await;
     let now = Instant::now();
-    if let Some(channels) = entry.as_ref().and_then(|cached| cached.get_if_fresh(now)) {
+    if let Some(channels) = cache.channels_to_serve(now) {
         return Ok(channels);
     }
 
-    let channels = fetch_slack_public_channels(client, config).await?;
+    let channels = match fetch_slack_public_channels(client, config).await {
+        Ok(channels) => channels,
+        Err(error) => {
+            if let Some(stale) = cache.channels.as_ref().map(|entry| entry.value.clone()) {
+                cache.retry_refresh_at = Some(Instant::now() + SLACK_CHANNEL_REFRESH_RETRY_DELAY);
+                tracing::warn!(
+                    error = %error,
+                    "serving stale Slack channel list after refresh failure"
+                );
+                return Ok(stale);
+            }
+            return Err(error);
+        }
+    };
     let fetched_at = Instant::now();
     {
         let mut channel_info = slack_channel_info_cache().lock().await;
@@ -788,7 +819,8 @@ async fn slack_public_channels(
             );
         }
     }
-    *entry = Some(CachedSlackValue::new(fetched_at, channels.clone()));
+    cache.channels = Some(CachedSlackValue::new(fetched_at, channels.clone()));
+    cache.retry_refresh_at = None;
     Ok(channels)
 }
 
@@ -800,20 +832,17 @@ async fn fetch_slack_public_channels(
     let mut cursor = String::new();
     let mut seen_cursors = BTreeSet::new();
     loop {
-        let mut form = vec![
-            ("types", "public_channel".to_owned()),
-            ("exclude_archived", "true".to_owned()),
-            ("limit", "200".to_owned()),
-        ];
-        if !cursor.is_empty() {
-            form.push(("cursor", cursor.clone()));
-        }
-        let value = slack_api_post_form(client, config, "conversations.list", &form).await?;
-        let page = serde_json::from_value::<SlackChannelsPage>(value).map_err(|error| {
+        let form = slack_public_channels_form(&cursor);
+        let value = slack_api_post_form(client, config, "users.conversations", &form).await?;
+        let mut page = serde_json::from_value::<SlackChannelsPage>(value).map_err(|error| {
             ApiError::Internal(format!(
-                "Slack conversations.list response was invalid: {error}"
+                "Slack users.conversations response was invalid: {error}"
             ))
         })?;
+        // users.conversations only returns channels the token's bot belongs to.
+        for channel in &mut page.channels {
+            channel.is_member = true;
+        }
         channels.extend(page.channels);
         let next_cursor = page.response_metadata.next_cursor;
         if next_cursor.is_empty() {
@@ -821,12 +850,24 @@ async fn fetch_slack_public_channels(
         }
         if !seen_cursors.insert(next_cursor.clone()) {
             return Err(ApiError::Internal(
-                "Slack conversations.list repeated a pagination cursor".to_owned(),
+                "Slack users.conversations repeated a pagination cursor".to_owned(),
             ));
         }
         cursor = next_cursor;
     }
     Ok(channels)
+}
+
+fn slack_public_channels_form(cursor: &str) -> Vec<(&'static str, String)> {
+    let mut form = vec![
+        ("types", "public_channel".to_owned()),
+        ("exclude_archived", "true".to_owned()),
+        ("limit", "200".to_owned()),
+    ];
+    if !cursor.is_empty() {
+        form.push(("cursor", cursor.to_owned()));
+    }
+    form
 }
 
 async fn slack_channel_history(
@@ -1499,6 +1540,43 @@ mod tests {
 
         let expired = CachedSlackValue::new(now - SLACK_CHANNEL_CACHE_TTL, "channel");
         assert_eq!(expired.get_if_fresh(now), None);
+    }
+
+    #[test]
+    fn public_channel_cache_serves_stale_data_during_refresh_backoff() {
+        let now = Instant::now();
+        let channel = test_channel(json!({
+            "id": "C123456789",
+            "is_private": false,
+            "is_member": true
+        }));
+        let cache = SlackPublicChannelCacheState {
+            channels: Some(CachedSlackValue::new(
+                now - SLACK_CHANNEL_CACHE_TTL,
+                vec![channel],
+            )),
+            retry_refresh_at: Some(now + SLACK_CHANNEL_REFRESH_RETRY_DELAY),
+        };
+
+        assert_eq!(cache.channels_to_serve(now).unwrap()[0].id, "C123456789");
+        assert!(
+            cache
+                .channels_to_serve(now + SLACK_CHANNEL_REFRESH_RETRY_DELAY)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn bot_channel_listing_requests_public_channels_only() {
+        assert_eq!(
+            slack_public_channels_form("cursor-1"),
+            vec![
+                ("types", "public_channel".to_owned()),
+                ("exclude_archived", "true".to_owned()),
+                ("limit", "200".to_owned()),
+                ("cursor", "cursor-1".to_owned()),
+            ]
+        );
     }
 
     #[test]
