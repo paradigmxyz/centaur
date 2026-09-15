@@ -649,17 +649,22 @@ type SlackPublicChannelCache = tokio::sync::Mutex<SlackPublicChannelCacheState>;
 struct SlackPublicChannelCacheState {
     channels: Option<CachedSlackValue<Vec<SlackChannel>>>,
     retry_refresh_at: Option<Instant>,
+    refreshing: bool,
 }
 
 impl SlackPublicChannelCacheState {
-    fn channels_to_serve(&self, now: Instant) -> Option<Vec<SlackChannel>> {
-        let retry_deferred = self.retry_refresh_at.is_some_and(|retry_at| retry_at > now);
-        match self.channels.as_ref() {
-            Some(channels) => channels
-                .get_if_fresh(now)
-                .or_else(|| retry_deferred.then(|| channels.value.clone())),
-            None => retry_deferred.then(Vec::new),
-        }
+    fn fresh_channels(&self, now: Instant) -> Option<Vec<SlackChannel>> {
+        self.channels
+            .as_ref()
+            .and_then(|channels| channels.get_if_fresh(now))
+    }
+
+    fn stale_channels(&self) -> Option<Vec<SlackChannel>> {
+        self.channels.as_ref().map(|entry| entry.value.clone())
+    }
+
+    fn can_refresh(&self, now: Instant) -> bool {
+        !self.refreshing && !self.retry_refresh_at.is_some_and(|retry_at| retry_at > now)
     }
 }
 
@@ -870,25 +875,61 @@ async fn slack_public_channels(
 ) -> Result<Vec<SlackChannel>, ApiError> {
     let mut cache = slack_public_channel_cache().lock().await;
     let now = Instant::now();
-    if let Some(channels) = cache.channels_to_serve(now) {
+    if let Some(channels) = cache.fresh_channels(now) {
         return Ok(channels);
     }
+    if let Some(stale) = cache.stale_channels() {
+        if cache.can_refresh(now) {
+            cache.refreshing = true;
+            drop(cache);
+            spawn_slack_public_channel_refresh();
+        }
+        return Ok(stale);
+    }
+    if !cache.can_refresh(now) {
+        return Ok(Vec::new());
+    }
+    cache.refreshing = true;
+    drop(cache);
 
-    let channels = match fetch_slack_public_channels(client, config).await {
+    let result = fetch_slack_public_channels(client, config).await;
+    complete_slack_public_channel_refresh(result).await
+}
+
+fn spawn_slack_public_channel_refresh() {
+    tokio::spawn(async {
+        let result = match slack_proxy_config() {
+            Ok(config) => fetch_slack_public_channels(http_client(), config).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = complete_slack_public_channel_refresh(result).await {
+            tracing::warn!(
+                error = %error,
+                "serving stale Slack channel list after background refresh failure"
+            );
+        }
+    });
+}
+
+async fn complete_slack_public_channel_refresh(
+    result: Result<Vec<SlackChannel>, ApiError>,
+) -> Result<Vec<SlackChannel>, ApiError> {
+    let channels = match result {
         Ok(channels) => channels,
         Err(error) => {
+            let mut cache = slack_public_channel_cache().lock().await;
+            cache.refreshing = false;
             cache.retry_refresh_at = Some(Instant::now() + SLACK_CHANNEL_REFRESH_RETRY_DELAY);
-            if let Some(stale) = cache.channels.as_ref().map(|entry| entry.value.clone()) {
-                tracing::warn!(
-                    error = %error,
-                    "serving stale Slack channel list after refresh failure"
-                );
-                return Ok(stale);
-            }
             return Err(error);
         }
     };
     let fetched_at = Instant::now();
+    {
+        let mut cache = slack_public_channel_cache().lock().await;
+        cache.channels = Some(CachedSlackValue::new(fetched_at, channels.clone()));
+        cache.retry_refresh_at = None;
+        cache.refreshing = false;
+    }
     {
         let mut channel_info = slack_channel_info_cache().lock().await;
         for channel in &channels {
@@ -898,8 +939,6 @@ async fn slack_public_channels(
             );
         }
     }
-    cache.channels = Some(CachedSlackValue::new(fetched_at, channels.clone()));
-    cache.retry_refresh_at = None;
     Ok(channels)
 }
 
@@ -1809,44 +1848,33 @@ mod tests {
 
     #[test]
     fn channel_cache_entries_expire_after_five_minutes() {
-        let now = Instant::now();
-        let fresh = CachedSlackValue::new(now, "channel");
-        assert_eq!(fresh.get_if_fresh(now), Some("channel"));
-
-        let expired = CachedSlackValue::new(now - SLACK_CHANNEL_CACHE_TTL, "channel");
-        assert_eq!(expired.get_if_fresh(now), None);
+        let fetched_at = Instant::now();
+        let cached = CachedSlackValue::new(fetched_at, "channel");
+        assert_eq!(cached.get_if_fresh(fetched_at), Some("channel"));
+        assert_eq!(
+            cached.get_if_fresh(fetched_at + SLACK_CHANNEL_CACHE_TTL),
+            None
+        );
     }
 
     #[test]
-    fn public_channel_cache_serves_stale_data_during_refresh_backoff() {
-        let now = Instant::now();
+    fn public_channel_cache_serves_stale_data_while_refresh_is_deferred() {
+        let fetched_at = Instant::now();
+        let now = fetched_at + SLACK_CHANNEL_CACHE_TTL;
         let channel = test_channel(json!({
             "id": "C123456789",
             "is_private": false,
             "is_member": true
         }));
         let cache = SlackPublicChannelCacheState {
-            channels: Some(CachedSlackValue::new(
-                now - SLACK_CHANNEL_CACHE_TTL,
-                vec![channel],
-            )),
+            channels: Some(CachedSlackValue::new(fetched_at, vec![channel])),
             retry_refresh_at: Some(now + SLACK_CHANNEL_REFRESH_RETRY_DELAY),
+            refreshing: false,
         };
 
-        assert_eq!(cache.channels_to_serve(now).unwrap()[0].id, "C123456789");
-        assert!(
-            SlackPublicChannelCacheState {
-                channels: None,
-                retry_refresh_at: Some(now + SLACK_CHANNEL_REFRESH_RETRY_DELAY),
-            }
-            .channels_to_serve(now)
-            .is_some_and(|channels| channels.is_empty())
-        );
-        assert!(
-            cache
-                .channels_to_serve(now + SLACK_CHANNEL_REFRESH_RETRY_DELAY)
-                .is_none()
-        );
+        assert_eq!(cache.stale_channels().unwrap()[0].id, "C123456789");
+        assert!(!cache.can_refresh(now));
+        assert!(cache.can_refresh(now + SLACK_CHANNEL_REFRESH_RETRY_DELAY));
     }
 
     #[test]
