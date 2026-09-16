@@ -53,6 +53,10 @@ class _FakeWebClient:
         channel = "D123" if kwargs["channel"].startswith("U") else kwargs["channel"]
         return {"channel": channel, "ts": "123.456"}
 
+    def reactions_add(self, **kwargs):
+        self.last_kwargs = kwargs
+        return {"ok": True}
+
     def chat_getPermalink(self, **kwargs):
         self.permalink_calls.append(kwargs)
         channel = kwargs["channel"]
@@ -146,6 +150,68 @@ def _make_client() -> tuple[SlackClient, _FakeWebClient]:
     client._format_requester_attribution = lambda: ""  # type: ignore[method-assign]
     client.list_bot_channels = lambda **_: [{"id": "C123", "name": "paradigm-pulse"}]  # type: ignore[method-assign]
     return client, fake_web_client
+
+
+@pytest.mark.parametrize("emoji", ["pencil2", ":pencil2:", " :pencil2: "])
+def test_add_reaction_preserves_target_and_normalizes_emoji(emoji) -> None:
+    client, web_client = _make_client()
+
+    result = client.add_reaction("C1234567890", "1789546423.000001", emoji)
+
+    assert web_client.last_kwargs == {
+        "channel": "C1234567890",
+        "timestamp": "1789546423.000001",
+        "name": "pencil2",
+    }
+    assert result == {
+        "ok": True,
+        "channel": "C1234567890",
+        "ts": "1789546423.000001",
+        "name": "pencil2",
+        "added": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("channel", "timestamp", "emoji"),
+    [
+        ("general", "123.456", "pencil2"),
+        ("U1234567890", "123.456", "pencil2"),
+        ("C1234567890", "not-a-timestamp", "pencil2"),
+        ("C1234567890", "123.456", "::"),
+        ("C1234567890", "123.456", "two words"),
+    ],
+)
+def test_add_reaction_rejects_invalid_input_before_request(channel, timestamp, emoji) -> None:
+    client, web_client = _make_client()
+    with pytest.raises(ValueError):
+        client.add_reaction(channel, timestamp, emoji)
+    assert web_client.last_kwargs is None
+
+
+@pytest.mark.parametrize(
+    "error", ["already_reacted", "missing_scope", "message_not_found", "ratelimited"]
+)
+def test_add_reaction_handles_slack_errors(monkeypatch, error) -> None:
+    client, web_client = _make_client()
+    calls = []
+
+    def fail(**kwargs):
+        calls.append(kwargs)
+        raise _make_slack_error(error=error, status_code=429 if error == "ratelimited" else 200)
+
+    monkeypatch.setattr(web_client, "reactions_add", fail)
+    if error == "already_reacted":
+        assert client.add_reaction("C1234567890", "123.456", "pencil2")["added"] is False
+    else:
+        expected = {
+            "missing_scope": SlackAuthError,
+            "message_not_found": RuntimeError,
+            "ratelimited": SlackRateLimitError,
+        }[error]
+        with pytest.raises(expected):
+            client.add_reaction("C1234567890", "123.456", "pencil2")
+    assert len(calls) == 1
 
 
 def _make_slack_error(

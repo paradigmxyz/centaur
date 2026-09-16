@@ -78,6 +78,29 @@ def send(
 
 
 @app.command()
+def react(
+    channel_id: str = typer.Argument(..., help="Slack conversation ID, e.g. C1234567890"),
+    timestamp: str = typer.Argument(..., help="Timestamp of the message to react to"),
+    emoji: str = typer.Argument(..., help="Emoji name, e.g. pencil2 (surrounding colons optional)"),
+):
+    """Add an emoji reaction to a message using the bot's reactions:write scope.
+
+    Example: slack react C1234567890 1234567890.123456 pencil2
+    """
+    from .client import add_reaction
+
+    try:
+        result = add_reaction(channel_id, timestamp, emoji)
+        if result["added"]:
+            console.print("[green]✓ Reaction added[/]")
+        else:
+            console.print("[green]✓ Reaction already present[/]")
+    except (RuntimeError, ValueError) as e:
+        stderr_console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+
+@app.command()
 def dm(
     user_id: str = typer.Argument(..., help="Slack user ID, e.g. U12345678"),
     message: str = typer.Argument(..., help="Message text to send"),

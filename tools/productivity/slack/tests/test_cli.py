@@ -3,8 +3,51 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
 from slack.cli import _channel_arg_is_id, app
 from typer.testing import CliRunner
+
+
+@pytest.mark.parametrize("added", [True, False])
+def test_react_calls_client_and_reports_result(monkeypatch, added) -> None:
+    calls = []
+
+    def fake_add_reaction(*args):
+        calls.append(args)
+        return {"added": added}
+
+    monkeypatch.setitem(
+        sys.modules, "slack.client", types.SimpleNamespace(add_reaction=fake_add_reaction)
+    )
+    result = CliRunner().invoke(app, ["react", "C1234567890", "123.000001", ":pencil2:"])
+
+    assert result.exit_code == 0
+    assert calls == [("C1234567890", "123.000001", ":pencil2:")]
+    assert ("Reaction added" if added else "Reaction already present") in result.output
+
+
+@pytest.mark.parametrize(
+    "error", [RuntimeError("Slack API error: missing_scope"), ValueError("invalid emoji")]
+)
+def test_react_reports_failure(monkeypatch, error) -> None:
+    def fake_add_reaction(*args):
+        raise error
+
+    monkeypatch.setitem(
+        sys.modules, "slack.client", types.SimpleNamespace(add_reaction=fake_add_reaction)
+    )
+    result = CliRunner().invoke(app, ["react", "C1234567890", "123.456", "pencil2"])
+
+    assert result.exit_code == 1
+    assert str(error) in result.output
+    assert "Reaction added" not in result.output
+
+
+def test_react_is_discoverable() -> None:
+    assert "react" in CliRunner().invoke(app, ["--help"]).output
+    result = CliRunner().invoke(app, ["react", "--help"])
+    assert result.exit_code == 0
+    assert "reactions:write" in result.output
 
 
 def test_channel_arg_is_id_accepts_channel_id_forms() -> None:
