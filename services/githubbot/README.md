@@ -76,17 +76,18 @@ management thread (`github-manage:{owner}/{repo}:{n}`); the agent does its GitHu
   the failing head commit was authored by a human (it won't step on someone mid-edit) — except right
   after assignment, where being assigned is an explicit hand-off, so it fixes the PR regardless of who
   pushed last. **`centaur-skip` checks** are excluded from that evaluation — see below.
-- **Skip a check.** Put `centaur-skip` anywhere in a job id and the bot ignores that check: it never
-  counts as red, never triggers a fix turn, and never appears in the escalation comment's "still
-  failing" list.
+- **Skip a check.** Put `centaur-skip` anywhere in a job's display name and the bot ignores that
+  check: it never counts as red, never triggers a fix turn, and never appears in the escalation
+  comment's "still failing" list.
 
   ```yaml
   jobs:
-    agent-pr-rules-centaur-skip:
+    agent-pr-rules:
+      name: Agent PR rules (centaur-skip)
   ```
 
-  The match is case-insensitive. GitHub uses the job id as the check-run name, and recomputes it
-  every run.
+  The match is case-insensitive and applies to the check-run name GitHub reports. When a job has no
+  explicit `name`, GitHub uses its job id as the display name.
 - **Reading checks without the Checks API.** A fine-grained PAT has no Checks permission, so
   `statusCheckRollup` hands it null check nodes and CI collapses to a bare pass/fail with no names —
   and no way to spot a `centaur-skip` check. When the nodes are unreadable, githubbot rebuilds the
