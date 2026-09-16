@@ -68,8 +68,8 @@ const SETTLED_STATUS_STATES = new Set(["ERROR", "FAILURE", "SUCCESS"]);
 const CENTAUR_SKIP_MARKER = "centaur-skip";
 
 /**
- * A check whose job id contains `centaur-skip` is dropped from the CI evaluation:
- * never counted as red, never fixed, never escalated.
+ * A check whose display name contains `centaur-skip` is dropped from the CI
+ * evaluation: never counted as red, never fixed, never escalated.
  */
 export function isCentaurSkipCheck(name: string | null | undefined): boolean {
   return (name ?? "").toLowerCase().includes(CENTAUR_SKIP_MARKER);
@@ -326,7 +326,7 @@ async function evaluateCiViaActions(
   );
 }
 
-/** Every job for a SHA, newest run first, deduped by name like the rollup does. */
+/** Every job for a SHA, newest run first, deduped like the rollup does. */
 async function fetchActionsJobs(
   ctx: WorkflowEventProducerContext,
   owner: string,
@@ -340,8 +340,10 @@ async function fetchActionsJobs(
     repo,
   });
   const latest = new Map<string, { name: string; status: string; conclusion: string | null }>();
-  // Descending id === newest first, so the first job seen for a name wins and a
-  // superseded re-run never overwrites it.
+  // Descending id === newest first, so the first job seen for a workflow,
+  // trigger, and name wins and a superseded run never overwrites it. The
+  // workflow identity prevents same-named jobs in separate workflows from
+  // collapsing into one check.
   for (const run of [...runs.data.workflow_runs].sort((a, b) => b.id - a.id)) {
     const jobs = await ctx.octokit.rest.actions.listJobsForWorkflowRun({
       owner,
@@ -350,8 +352,9 @@ async function fetchActionsJobs(
       run_id: run.id,
     });
     for (const job of jobs.data.jobs) {
-      if (!latest.has(job.name)) {
-        latest.set(job.name, {
+      const key = [run.workflow_id, run.event, job.name].join("\0");
+      if (!latest.has(key)) {
+        latest.set(key, {
           conclusion: job.conclusion ?? null,
           name: job.name,
           status: job.status,

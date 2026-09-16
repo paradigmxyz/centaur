@@ -115,7 +115,7 @@ describe("centaur-skip checks", () => {
     };
   }
 
-  // As the gate really reports it: the check name is the job id.
+  // Without an explicit display name, GitHub reports the job id as the check name.
   const gate = checkRun({ conclusion: "FAILURE", name: "agent-pr-rules-centaur-skip" });
 
   function rollupCtx(rollup: {
@@ -225,6 +225,7 @@ describe("Actions fallback when check nodes are unreadable", () => {
     checkRuns: number;
     statuses: number;
     actionsJobs: Record<number, ReturnType<typeof job>[]>;
+    actionRuns?: Record<number, { event?: string; workflowId: number }>;
   }) {
     const runIds = Object.keys(input.actionsJobs).map(Number);
     return {
@@ -247,7 +248,13 @@ describe("Actions fallback when check nodes are unreadable", () => {
         rest: {
           actions: {
             listWorkflowRunsForRepo: async () => ({
-              data: { workflow_runs: runIds.map((id) => ({ id })) },
+              data: {
+                workflow_runs: runIds.map((id) => ({
+                  event: input.actionRuns?.[id]?.event ?? "pull_request",
+                  id,
+                  workflow_id: input.actionRuns?.[id]?.workflowId ?? 1,
+                })),
+              },
             }),
             listJobsForWorkflowRun: async ({ run_id }: { run_id: number }) => ({
               data: { jobs: input.actionsJobs[run_id] ?? [] },
@@ -260,7 +267,7 @@ describe("Actions fallback when check nodes are unreadable", () => {
   }
 
   test("reconstructs the checks and drops the marked one", async () => {
-    // Exactly what splits-teams reports: 5 null check nodes, Vercel readable.
+    // A typical fine-grained PAT response: check nodes null, commit status readable.
     const ctx = ctxFor({
       nodes: [null, null, null, null, null, statusCtx("Vercel", "SUCCESS")],
       checkRuns: 5,
@@ -329,9 +336,30 @@ describe("Actions fallback when check nodes are unreadable", () => {
     });
   });
 
-  test("a superseded re-run never overwrites the newest job", async () => {
-    // Same job name in two runs; only the newest (higher id) counts, so the
-    // stale failure must not resurface.
+  test("keeps same-named jobs from separate workflows", async () => {
+    const ctx = ctxFor({
+      nodes: [null, null, statusCtx("Vercel", "SUCCESS")],
+      checkRuns: 2,
+      statuses: 1,
+      actionsJobs: {
+        9: [job("build", "success")],
+        4: [job("build", "failure")],
+      },
+      actionRuns: {
+        9: { workflowId: 90 },
+        4: { workflowId: 40 },
+      },
+    });
+    await expect(fetchCiEvaluation(ctx, "base", "repo", "abc123")).resolves.toEqual({
+      failed: true,
+      failingNames: ["build"],
+      settled: true,
+    });
+  });
+
+  test("a superseded run never overwrites the newest job", async () => {
+    // Same job in two runs of one workflow; only the newest (higher id) counts,
+    // so the stale failure must not resurface.
     const ctx = ctxFor({
       nodes: [null, statusCtx("Vercel", "SUCCESS")],
       checkRuns: 1,
