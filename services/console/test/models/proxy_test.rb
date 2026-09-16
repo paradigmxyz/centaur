@@ -280,4 +280,48 @@ class ProxyTest < ActiveSupport::TestCase
     assert_nil proxy.requester_principal_id
     assert_equal principals(:acme_channel), proxy.principal
   end
+
+
+  test "sandbox entitlements hosts default to the console url alone" do
+    with_env("CENTAUR_CONSOLE_URL" => "http://centaur-console:3000",
+             "CENTAUR_CONSOLE_ENTITLEMENTS_HOSTS" => nil) do
+      assert_equal [ "centaur-console" ], Proxy.sandbox_entitlements_hosts
+    end
+  end
+
+  test "configured entitlements hosts add to the console url rather than replacing it" do
+    # The in-cluster address has to keep working: replacing it would break the
+    # sync path that already uses it.
+    with_env("CENTAUR_CONSOLE_URL" => "http://centaur-console:3000",
+             "CENTAUR_CONSOLE_ENTITLEMENTS_HOSTS" => "console.example.com") do
+      assert_equal [ "centaur-console", "console.example.com" ],
+                   Proxy.sandbox_entitlements_hosts
+    end
+  end
+
+  test "configured entitlements hosts accept a url or a bare host" do
+    # The value is most often copied from whatever CENTAUR_CONSOLE_URL is set
+    # to, so accepting a URL avoids a silently non-matching rule.
+    with_env("CENTAUR_CONSOLE_URL" => "http://centaur-console:3000",
+             "CENTAUR_CONSOLE_ENTITLEMENTS_HOSTS" => "https://console.example.com:443, other.example.com") do
+      assert_equal [ "centaur-console", "console.example.com", "other.example.com" ],
+                   Proxy.sandbox_entitlements_hosts
+    end
+  end
+
+  test "configured entitlements hosts are normalized and de-duplicated" do
+    with_env("CENTAUR_CONSOLE_URL" => "http://centaur-console:3000",
+             "CENTAUR_CONSOLE_ENTITLEMENTS_HOSTS" => " CONSOLE.example.com. , , console.example.com , centaur-console ") do
+      assert_equal [ "centaur-console", "console.example.com" ],
+                   Proxy.sandbox_entitlements_hosts
+    end
+  end
+
+  def with_env(values)
+    previous = values.keys.index_with { |key| ENV[key] }
+    values.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+    yield
+  ensure
+    previous.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+  end
 end
