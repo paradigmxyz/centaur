@@ -2,14 +2,11 @@
 
 from typing import Any
 
-from artemis import Artemis, DefaultHttpxClient, omit
+import httpx
+
 from centaur_sdk import secret
 
 BASE_URL = "https://data-svc.artemisxyz.com"
-DEFAULT_TIMEOUT = 30.0
-MAX_RETRIES = 2
-API_KEY_SECRET = "ARTEMIS_API_KEY"
-API_KEY_HEADER = "X-API-Key"
 MARKET_DATA_ENDPOINT = "/data/api/"
 METRICS = ["PRICE", "24H_PRICE_CHG_PCT"]
 
@@ -17,35 +14,29 @@ METRICS = ["PRICE", "24H_PRICE_CHG_PCT"]
 class ArtemisClient:
     """Client for Artemis market data."""
 
-    def __init__(self, api_key: str | None = None, timeout: float = DEFAULT_TIMEOUT):
+    def __init__(self, api_key: str | None = None, timeout: float = 30.0):
         self._api_key = api_key
         self.timeout = timeout
-        self._client: Artemis | None = None
+        self._client: httpx.Client | None = None
 
     @property
-    def client(self) -> Artemis:
+    def client(self) -> httpx.Client:
         if self._client is None:
-            self._client = Artemis(
-                api_key="",
+            api_key = self._api_key or secret("ARTEMIS_API_KEY", "")
+            headers = {"X-API-Key": api_key} if api_key else {}
+
+            self._client = httpx.Client(
                 base_url=BASE_URL,
                 timeout=self.timeout,
-                max_retries=MAX_RETRIES,
-                http_client=DefaultHttpxClient(follow_redirects=False),
+                follow_redirects=False,
+                headers=headers,
             )
         return self._client
 
-    def _request(self, symbols: list[str]) -> dict[str, Any]:
-        endpoint = f"{MARKET_DATA_ENDPOINT}{','.join(METRICS)}/"
-        api_key = self._api_key or secret(API_KEY_SECRET, "")
-        params = {"symbols": ",".join(symbols)}
-        headers = {API_KEY_HEADER: api_key or omit}
-
-        # Uses SDK get() because fetch_metrics() requires start_date/end_date.
-        return self.client.get(
-            endpoint,
-            cast_to=dict[str, Any],
-            options={"params": params, "headers": headers},
-        )
+    def _request(self, path: str, params: dict[str, str]) -> dict[str, Any]:
+        response = self.client.get(path, params=params)
+        response.raise_for_status()
+        return response.json()
 
     def get_market_data(self, symbols: list[str]) -> dict[str, Any]:
         """Return Artemis's data.symbols response for symbols, e.g. BTC, ETH.
@@ -53,7 +44,11 @@ class ArtemisClient:
         Symbols are passed unchanged. PRICE and 24H_PRICE_CHG_PCT retain their
         upstream values, including fractional changes, nulls, and error strings.
         """
-        return self._request(symbols)
+        metric_args = ",".join(METRICS)
+        path = f"{MARKET_DATA_ENDPOINT}{metric_args}/"
+        params = {"symbols": ",".join(symbols)}
+
+        return self._request(path, params)
 
     def close(self) -> None:
         if self._client is not None:

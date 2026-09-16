@@ -1,10 +1,11 @@
 """Shared mocked transport and sample values for Artemis tests."""
 
+from functools import partial
+from unittest.mock import patch
+
 import httpx
 
-from artemis import Artemis
-
-from .client import BASE_URL, ArtemisClient
+from .client import ArtemisClient
 
 TEST_KEY = "test-artemis-key"
 TEST_PRICE = 25.0
@@ -17,12 +18,9 @@ UPSTREAM_ERROR = "Metric not available for asset."
 
 def mock_client(handler, api_key=TEST_KEY):
     client = ArtemisClient(api_key=api_key)
-    client._client = Artemis(
-        api_key="",
-        base_url=BASE_URL,
-        max_retries=0,
-        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
-    )
+    factory = partial(httpx.Client, transport=httpx.MockTransport(handler))
+    with patch.object(httpx, "Client", side_effect=factory):
+        _ = client.client
     return client
 
 

@@ -63,7 +63,7 @@ def test_health_succeeds_with_both_metrics():
 
 
 @pytest.mark.parametrize("command", [["market-data", "BTC"], ["health"]])
-def test_cli_handles_sdk_errors_without_exposing_response_body(command):
+def test_cli_handles_http_errors_without_exposing_response_body(command):
     with patch.object(
         cli,
         "_client",
