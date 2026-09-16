@@ -557,6 +557,48 @@ def test_help_explains_channel_and_dm_access_paths() -> None:
     assert "search-direct" in result.output
 
 
+def test_search_delegates_to_indexed_slack_company_context(monkeypatch) -> None:
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("slack.cli.subprocess.run", fake_run)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "search",
+            "database migration",
+            "--channels",
+            "eng-infra,C1234567890",
+            "--from",
+            "alice",
+            "--limit",
+            "5",
+            "--full",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            [
+                "company_context",
+                "search",
+                "database migration #eng-infra #C1234567890 @alice",
+                "--source",
+                "slack",
+                "--limit",
+                "5",
+                "--json",
+            ],
+            {"check": False},
+        )
+    ]
+
+
 def test_search_direct_calls_native_search_client(monkeypatch) -> None:
     calls = []
 

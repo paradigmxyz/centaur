@@ -1130,153 +1130,8 @@ def test_search_files_direct_uses_direct_files_list() -> None:
     assert results[0]["user"] == "alice"
 
 
-def test_search_messages_with_channel_ids_scans_proxy_history_without_listing() -> None:
-    client, fake_web_client = _make_client()
-    client._get_user_cache = lambda: {"UGZCSQTPE": "matt", "U1": "alice"}  # type: ignore[method-assign]
-    history_by_channel = {
-        "C05HUE4KLF2": {
-            "messages": [
-                {"user": "UGZCSQTPE", "text": "Matt note about inference", "ts": "300.000000"},
-                {"user": "U1", "text": "unrelated", "ts": "299.000000"},
-            ]
-        },
-        "C042WDDP89Y": {
-            "messages": [{"user": "U1", "text": "Matt mentioned here", "ts": "200.000000"}]
-        },
-        "C0A174PPJDS": {
-            "messages": [{"user": "UGZCSQTPE", "text": "nothing relevant", "ts": "100.000000"}]
-        },
-    }
-    proxy_calls: list[dict] = []
-
-    def history_proxy(channel_id: str, **kwargs):
-        proxy_calls.append({"channel_id": channel_id, **kwargs})
-        return history_by_channel[channel_id]
-
-    client.get_channel_history_proxy = history_proxy  # type: ignore[method-assign]
-
-    results = client.search_messages(
-        "Matt",
-        max_results=10,
-        channels=["C05HUE4KLF2", "C042WDDP89Y", "C0A174PPJDS"],
-        messages_per_channel=25,
-    )
-
-    assert fake_web_client.api_calls == []
-    assert fake_web_client.list_calls == []
-    assert fake_web_client.history_calls == []
-    assert sorted(call["channel_id"] for call in proxy_calls) == sorted(
-        [
-            "C05HUE4KLF2",
-            "C042WDDP89Y",
-            "C0A174PPJDS",
-        ]
-    )
-    assert sorted(call["limit"] for call in proxy_calls) == [25, 25, 25]
-    assert sorted(item["channel_id"] for item in results) == ["C042WDDP89Y", "C05HUE4KLF2"]
-    assert sorted(fake_web_client.permalink_calls, key=lambda call: call["channel"]) == [
-        {"channel": "C042WDDP89Y", "message_ts": "200.000000"},
-        {"channel": "C05HUE4KLF2", "message_ts": "300.000000"},
-    ]
-    assert all(result["permalink"].startswith("https://acme.slack.com/") for result in results)
-
-
-def test_search_messages_parses_channel_and_user_modifiers_locally() -> None:
-    client, fake_web_client = _make_client()
-    client._get_user_cache = lambda: {"UGZCSQTPE": "matt", "U1": "alice"}  # type: ignore[method-assign]
-    proxy_calls: list[dict] = []
-
-    def history_proxy(channel_id: str, **kwargs):
-        proxy_calls.append({"channel_id": channel_id, **kwargs})
-        return {
-            "messages": [
-                {"user": "UGZCSQTPE", "text": "Scott Wu on inference", "ts": "300.000000"},
-                {"user": "U1", "text": "also about inference", "ts": "301.000000"},
-            ]
-        }
-
-    client.get_channel_history_proxy = history_proxy  # type: ignore[method-assign]
-
-    results = client.search_messages(
-        "from:<@UGZCSQTPE> in:<#C042WDDP89Y>",
-        max_results=5,
-        messages_per_channel=25,
-    )
-
-    assert fake_web_client.api_calls == []
-    assert fake_web_client.list_calls == []
-    assert fake_web_client.history_calls == []
-    assert proxy_calls == [{"channel_id": "C042WDDP89Y", "limit": 25}]
-    assert len(results) == 1
-    assert results[0]["user_id"] == "UGZCSQTPE"
-
-
-def test_search_messages_falls_back_to_direct_history_and_threads_when_proxy_fails() -> None:
-    client, fake_web_client = _make_client()
-    client._get_user_cache = lambda: {"U1": "alice", "U2": "bob"}  # type: ignore[method-assign]
-    client._resolve_channel = lambda channel: channel  # type: ignore[method-assign]
-
-    def fail_proxy(*args, **kwargs):
-        raise RuntimeError("proxy unavailable")
-
-    client.get_channel_history_proxy = fail_proxy  # type: ignore[method-assign]
-    fake_web_client.history_pages = [
-        {
-            "messages": [
-                {
-                    "user": "U1",
-                    "text": "root without the query",
-                    "ts": "100.000000",
-                    "thread_ts": "100.000000",
-                    "reply_count": 1,
-                }
-            ],
-            "response_metadata": {"next_cursor": ""},
-        }
-    ]
-    fake_web_client.reply_pages = [
-        {
-            "messages": [
-                {
-                    "user": "U1",
-                    "text": "root without the query",
-                    "ts": "100.000000",
-                    "thread_ts": "100.000000",
-                },
-                {
-                    "user": "U2",
-                    "text": "needle is in the direct thread reply",
-                    "ts": "100.000001",
-                    "thread_ts": "100.000000",
-                },
-            ],
-            "response_metadata": {"next_cursor": ""},
-        }
-    ]
-
-    results = client.search_messages(
-        "needle",
-        channels=["C123456789"],
-        messages_per_channel=25,
-    )
-
-    assert fake_web_client.history_calls == [{"channel": "C123456789", "limit": 25}]
-    assert fake_web_client.reply_calls == [
-        {
-            "channel": "C123456789",
-            "ts": "100.000000",
-            "limit": 25,
-            "inclusive": True,
-        }
-    ]
-    assert len(results) == 1
-    assert results[0]["text"] == "needle is in the direct thread reply"
-    assert results[0]["channel"] == "C123456789"
-
-
 def test_search_messages_direct_uses_native_filters_without_scanning_history() -> None:
     client, fake_web_client = _make_client()
-    client._search_messages_local = pytest.fail  # type: ignore[method-assign]
     client._get_user_cache = lambda: {}  # type: ignore[method-assign]
 
     results = client.search_messages_direct(
@@ -1300,29 +1155,6 @@ def test_search_messages_direct_uses_native_filters_without_scanning_history() -
     assert fake_web_client.history_calls == []
 
 
-def test_unscoped_search_uses_restricted_history_fallback_for_bot_token() -> None:
-    client, _ = _make_client()
-    fallback_result = [{"text": "matched through authorized history"}]
-    fallback_calls: list[tuple] = []
-
-    def fail_native_search(method: str, *, params: dict) -> None:
-        assert method == "search.messages"
-        assert params["query"] == "fire-drill after:2026-08-10"
-        raise _make_slack_error(error="not_allowed_token_type", status_code=200)
-
-    def search_local(*args):
-        fallback_calls.append(args)
-        return fallback_result
-
-    client._search_client.api_call = fail_native_search  # type: ignore[method-assign]
-    client._search_messages_local = search_local  # type: ignore[method-assign]
-
-    assert client.search_messages("fire-drill after:2026-08-10") == fallback_result
-    assert fallback_calls == [
-        ("fire-drill after:2026-08-10", 20, None, None, 200),
-    ]
-
-
 def test_unscoped_search_surfaces_missing_user_scope_without_scanning_history() -> None:
     client, _ = _make_client()
     search_client = _FakeWebClient()
@@ -1333,10 +1165,9 @@ def test_unscoped_search_surfaces_missing_user_scope_without_scanning_history() 
 
     search_client.api_call = fail_native_search  # type: ignore[method-assign]
     client._search_client = search_client
-    client._search_messages_local = pytest.fail  # type: ignore[method-assign]
 
     with pytest.raises(SlackAuthError) as exc_info:
-        client.search_messages("fire-drill after:2026-08-10")
+        client.search_messages_direct("fire-drill after:2026-08-10")
 
     assert exc_info.value.payload == {
         "error": "slack_auth_failed",
@@ -1352,14 +1183,13 @@ def test_unscoped_search_surfaces_missing_user_scope_without_scanning_history() 
 
 def test_unscoped_search_surfaces_native_runtime_failure_without_scanning_history() -> None:
     client, fake_web_client = _make_client()
-    client._search_messages_local = pytest.fail  # type: ignore[method-assign]
     fake_web_client.api_call = lambda method, *, params: {  # type: ignore[method-assign]
         "ok": False,
         "error": "internal_error",
     }
 
     with pytest.raises(RuntimeError, match="internal_error"):
-        client.search_messages("fire-drill after:2026-08-10")
+        client.search_messages_direct("fire-drill after:2026-08-10")
 
 
 def test_list_channels_returns_cache_when_slack_rate_limited() -> None:

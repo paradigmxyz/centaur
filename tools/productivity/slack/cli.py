@@ -2,6 +2,7 @@
 
 import json
 import re
+import subprocess
 
 import typer
 from dotenv import load_dotenv
@@ -165,38 +166,51 @@ def _print_message_search_results(query: str, results: list[dict], *, full: bool
 def search(
     query: str = typer.Argument(..., help="Text to search for (supports multiple terms)"),
     limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
-    full: bool = typer.Option(False, "--full", "-f", help="Show full message text"),
+    full: bool = typer.Option(False, "--full", "-f", help="Output full indexed result metadata"),
     channels: str = typer.Option(
-        None, "--channels", "-c", help="Comma-separated channel names to search"
+        None, "--channels", "-c", help="Comma-separated channel names or IDs to target"
     ),
-    from_user: str = typer.Option(None, "--from", help="Filter by username"),
-    depth: int = typer.Option(200, "--depth", "-d", help="Messages per channel to scan"),
+    from_user: str = typer.Option(None, "--from", help="Target messages by this username"),
 ):
-    """Search messages in bot-accessible channels.
+    """Search indexed Slack history through company context.
 
-    Workspace-wide queries use Slack's native search API. Queries with --channels
-    scan proxy-accessible public or explicitly granted channel history and rank
-    results by relevance (exact phrase matches score higher).
-
-    Use search-direct when the current Slack context provides a linked user's
-    credential. It uses Slack's native search for channel-filtered queries too.
+    This command uses the indexed company-context search rather than downloading
+    channel history. Channel and author options are added as search anchors. Use
+    search-direct for exact native Slack modifiers when a linked user credential
+    is available.
 
     Examples:
         slack search "deploy"
         slack search "kubernetes error" --channels eng-infra,eng-ai
-        slack search "database migration" --from alice --depth 500
+        slack search "database migration" --from alice
     """
-    from .client import search_messages
+    search_terms = [query.strip()]
+    if channels:
+        search_terms.extend(
+            f"#{channel.strip().lstrip('#')}"
+            for channel in channels.split(",")
+            if channel.strip().lstrip("#")
+        )
+    if from_user:
+        search_terms.append(f"@{from_user.strip().lstrip('@')}")
 
-    channel_list = [c.strip() for c in channels.split(",")] if channels else None
-    results = search_messages(
-        query,
-        max_results=limit,
-        channels=channel_list,
-        from_user=from_user,
-        messages_per_channel=depth,
-    )
-    _print_message_search_results(query, results, full=full)
+    command = [
+        "company_context",
+        "search",
+        " ".join(search_terms),
+        "--source",
+        "slack",
+        "--limit",
+        str(limit),
+        "--json" if full else "--table",
+    ]
+    try:
+        result = subprocess.run(command, check=False)
+    except FileNotFoundError as e:
+        stderr_console.print("[red]Error: company_context tool is not installed[/]")
+        raise typer.Exit(1) from e
+    if result.returncode:
+        raise typer.Exit(result.returncode)
 
 
 @app.command("search-direct")
