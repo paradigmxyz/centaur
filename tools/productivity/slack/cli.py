@@ -2,7 +2,6 @@
 
 import json
 import re
-import subprocess
 
 import typer
 from dotenv import load_dotenv
@@ -194,23 +193,39 @@ def search(
     if from_user:
         search_terms.append(f"@{from_user.strip().lstrip('@')}")
 
-    command = [
-        "company_context",
-        "search",
-        " ".join(search_terms),
-        "--source",
-        "slack",
-        "--limit",
-        str(limit),
-        "--json" if full else "--table",
-    ]
-    try:
-        result = subprocess.run(command, check=False)
-    except FileNotFoundError as e:
-        stderr_console.print("[red]Error: company_context tool is not installed[/]")
-        raise typer.Exit(1) from e
-    if result.returncode:
-        raise typer.Exit(result.returncode)
+    from tools.productivity.company_context.client import CompanyContextClient
+
+    result = CompanyContextClient().search(
+        query=" ".join(search_terms),
+        limit=limit,
+        source="slack",
+    )
+    if result.get("status") == "error":
+        stderr_console.print(f"[red]Error: {result.get('error', 'unknown error')}[/]")
+        raise typer.Exit(1)
+
+    if full:
+        print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+        return
+
+    results = result.get("results") or []
+    if not results:
+        console.print(f"[yellow]No indexed Slack context found for: {query}[/yellow]")
+        return
+
+    table = Table(title=f"Indexed Slack: '{query}' ({len(results)} results)")
+    table.add_column("Type", style="cyan", max_width=18)
+    table.add_column("Date", style="green", max_width=20)
+    table.add_column("Title", style="bold", max_width=36)
+    table.add_column("Preview", max_width=72)
+    for item in results:
+        table.add_row(
+            str(item.get("source_type") or ""),
+            str(item.get("occurred_at") or ""),
+            str(item.get("title") or ""),
+            str(item.get("preview") or ""),
+        )
+    console.print(table)
 
 
 @app.command("search-direct")

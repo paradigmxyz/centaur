@@ -557,14 +557,29 @@ def test_help_explains_channel_and_dm_access_paths() -> None:
     assert "search-direct" in result.output
 
 
-def test_search_delegates_to_indexed_slack_company_context(monkeypatch) -> None:
+def test_search_uses_indexed_slack_company_context_client(monkeypatch) -> None:
     calls = []
 
-    def fake_run(command, **kwargs):
-        calls.append((command, kwargs))
-        return types.SimpleNamespace(returncode=0)
+    class FakeCompanyContextClient:
+        def search(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "status": "ok",
+                "results": [
+                    {
+                        "source_type": "slack_thread",
+                        "occurred_at": "2026-09-10",
+                        "title": "#eng-infra migration",
+                        "preview": "database migration completed",
+                    }
+                ],
+            }
 
-    monkeypatch.setattr("slack.cli.subprocess.run", fake_run)
+    monkeypatch.setitem(
+        sys.modules,
+        "tools.productivity.company_context.client",
+        types.SimpleNamespace(CompanyContextClient=FakeCompanyContextClient),
+    )
 
     result = CliRunner().invoke(
         app,
@@ -577,25 +592,18 @@ def test_search_delegates_to_indexed_slack_company_context(monkeypatch) -> None:
             "alice",
             "--limit",
             "5",
-            "--full",
         ],
     )
 
     assert result.exit_code == 0
+    assert "Indexed Slack" in result.output
+    assert "completed" in result.output
     assert calls == [
-        (
-            [
-                "company_context",
-                "search",
-                "database migration #eng-infra #C1234567890 @alice",
-                "--source",
-                "slack",
-                "--limit",
-                "5",
-                "--json",
-            ],
-            {"check": False},
-        )
+        {
+            "query": "database migration #eng-infra #C1234567890 @alice",
+            "limit": 5,
+            "source": "slack",
+        }
     ]
 
 
