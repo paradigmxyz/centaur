@@ -234,7 +234,11 @@ export async function serializeMessage(
       attachments.push(await serializeAttachment(attachment, options))
     }
   }
-  const displayText = renderSlackDisplayText({ raw: message.raw, text: message.text })
+  const displayText = renderSlackDisplayText({
+    isBot: message.author.isBot === true,
+    raw: message.raw,
+    text: message.text
+  })
 
   return {
     attachments,

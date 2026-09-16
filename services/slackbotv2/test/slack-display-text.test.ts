@@ -1,5 +1,50 @@
 import { describe, expect, it } from 'bun:test'
-import { slackRichTextMentionsUser } from '../src/slack-display-text'
+import { renderSlackDisplayText, slackMessagePromptText, slackRichTextMentionsUser } from '../src/slack-display-text'
+
+describe('Slack bot message bodies', () => {
+  const summary = 'Firing: ReplicaMismatch'
+  const command = '<@UBOT> $alert-investigation'
+  const raw = {
+    blocks: [
+      { type: 'header', text: { type: 'plain_text', text: summary } },
+      { type: 'section', text: { type: 'mrkdwn', text: '*Cluster:* `test-cluster`' } },
+      { type: 'section', text: { type: 'mrkdwn', text: command } }
+    ]
+  }
+
+  it('includes the visible bot body and command despite a nonempty notification summary', () => {
+    const display = renderSlackDisplayText({ isBot: true, raw, text: summary })
+    expect(display.source).toBe('raw_blocks')
+    expect(display.text).toBe(`${summary}\n*Cluster:* \`test-cluster\`\n@UBOT $alert-investigation`)
+    expect(slackMessagePromptText({
+      displayText: display.text, displayTextSource: display.source, text: summary
+    })).toBe(display.text)
+  })
+
+  it('retains a distinct bot summary not repeated in its blocks', () => {
+    const display = renderSlackDisplayText({ isBot: true, raw, text: 'Additional alert context' })
+    expect(display.text).toStartWith(`Additional alert context\n${summary}\n`)
+  })
+
+  it('preserves human-authored text rather than replacing it with rich content', () => {
+    const text = 'Please review this message\n\nKeep these paragraphs.'
+    expect(renderSlackDisplayText({ isBot: false, raw, text })).toMatchObject({ source: 'text', text })
+    expect(renderSlackDisplayText({ raw, text })).toMatchObject({ source: 'text', text })
+  })
+
+  it('keeps bot notification text when blocks contain no readable content', () => {
+    expect(renderSlackDisplayText({ isBot: true, raw: { blocks: [{ type: 'divider' }] }, text: summary }))
+      .toMatchObject({ source: 'text', text: summary })
+  })
+
+  it('does not promote attachment unfurls into a nonempty bot message', () => {
+    const display = renderSlackDisplayText({
+      isBot: true, text: summary,
+      raw: { attachments: [{ is_msg_unfurl: true, blocks: raw.blocks }] }
+    })
+    expect(display).toMatchObject({ source: 'text', text: summary })
+  })
+})
 
 const BOT_USER_ID = 'U0ANX3AM5RR'
 const MENTION = `<@${BOT_USER_ID}> investigate`

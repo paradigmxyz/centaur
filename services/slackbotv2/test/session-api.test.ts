@@ -342,6 +342,39 @@ describe('session interruption', () => {
 })
 
 describe('Slack display text fallback', () => {
+  test('forwards bot block commands with a nonempty summary to durable messages and execution input', async () => {
+    const { fetchFn, requests } = fakeApi()
+    const message = await serializeMessage({
+      attachments: [],
+      author: { fullName: 'Alert Bot', isBot: true, isMe: false, userId: 'UALERT', userName: 'alert' },
+      id: '1700000000.000100',
+      isMention: true,
+      metadata: { dateSent: new Date('2026-06-10T00:00:00.000Z') },
+      raw: {
+        team_id: 'T1',
+        blocks: [
+          { type: 'section', text: { type: 'mrkdwn', text: '*Cluster:* `test-cluster`' } },
+          { type: 'section', text: { type: 'mrkdwn', text: '<@UBOT> $alert-investigation' } }
+        ]
+      },
+      text: 'Firing: ReplicaMismatch',
+      threadId: 'slack:C1:1700000000.000100'
+    } as unknown as Parameters<typeof serializeMessage>[0])
+
+    await forwardToSessionApi(options(fetchFn), forwardInput(message))
+
+    const expected = 'Firing: ReplicaMismatch\n*Cluster:* `test-cluster`\n@UBOT $alert-investigation'
+    expect(message.text).toBe('Firing: ReplicaMismatch')
+    expect(appendedTextParts(requests)).toContain(expected)
+    const line = executeLine(requests)
+    expect(lineContent(line).at(-1)).toEqual({ type: 'text', text: expected })
+    expect(line.trace_metadata).toEqual(expect.objectContaining({
+      slack_display_text_chars: expected.length,
+      slack_raw_block_count: 2,
+      slack_text_source: 'raw_blocks'
+    }))
+  })
+
   test('serializeMessage extracts raw Slack blocks when adapter text is empty', async () => {
     const raw = {
       blocks: [

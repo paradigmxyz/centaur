@@ -5647,6 +5647,47 @@ describe('slackbotv2', () => {
     expect(threadState).toEqual(expect.objectContaining({ activeExecution: false }))
   })
 
+  it('forwards an allowlisted bot block command once despite a summary and duplicate event kinds', async () => {
+    bot = createTestBot({ triggerBotAllowlist: ['UOTHERBOT'] })
+    const summary = 'Firing: ReplicaMismatch'
+    const posted = await postUserMessage(summary)
+    const command = `<@${BOT_USER_ID}> $alert-investigation`
+
+    for (const type of ['app_mention', 'message']) {
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
+        event_id: `Ev-bot-block-command-${type}`,
+        event: {
+          type,
+          app_id: 'AOTHERBOT',
+          bot_id: 'BOTHERBOT',
+          bot_profile: { app_id: 'AOTHERBOT', id: 'BOTHERBOT', user_id: 'UOTHERBOT' },
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: posted.ts,
+          user: 'UOTHERBOT',
+          text: summary,
+          blocks: [
+            { type: 'section', text: { type: 'mrkdwn', text: '*Cluster:* `test-cluster`' } },
+            { type: 'section', text: { type: 'mrkdwn', text: command } }
+          ]
+        }
+      }), {}, waitUntilContext(waits))
+      expect(response.status).toBe(200)
+      await Promise.all(waits)
+    }
+
+    expect(codexApi.appends).toHaveLength(1)
+    expect(codexApi.executes).toHaveLength(1)
+    const persisted = sessionMessageTexts(codexApi.appends[0]!.body.messages).join('\n')
+    expect(persisted).toContain(summary)
+    expect(persisted).toContain('test-cluster')
+    expect(persisted).toContain('$alert-investigation')
+    const executeInput = JSON.stringify(JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!))
+    expect(executeInput).toContain('$alert-investigation')
+    expect(slackStreamTranscripts(slackApi.calls)).toHaveLength(1)
+  })
+
   it('enforces external org and trigger-bot member allowlists', async () => {
     const externalMention = await postUserMessage(`<@${BOT_USER_ID}> from external org`)
     const externalWaits: Promise<unknown>[] = []

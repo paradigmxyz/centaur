@@ -1731,7 +1731,7 @@ function scheduleExecutionRender(
 }
 
 function setMessageText(message: SlackbotV2ApiMessage, text: string): void {
-  const displayText = renderSlackDisplayText({ raw: message.raw, text })
+  const displayText = renderSlackDisplayText({ isBot: message.author.isBot === true, raw: message.raw, text })
   message.text = text
   message.displayText = displayText.text
   message.displayTextSource = displayText.source
@@ -3423,7 +3423,7 @@ async function slackApiMessageFromSlack(
   const actorId = slackActorId(message)
   const isBot = Boolean(message.bot_id || message.bot_profile)
   const text = normalizeSlackText(stringField(message.text))
-  const displayText = renderSlackDisplayText({ raw: message, text })
+  const displayText = renderSlackDisplayText({ isBot, raw: message, text })
   return {
     attachments: await slackApiAttachmentsFromFiles(options, message, rawCurrent),
     author: {

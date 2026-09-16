@@ -25,10 +25,30 @@ const MAX_RAW_DISPLAY_TEXT_CHARS = 24_000
 
 type UnknownRecord = Record<string, unknown>
 
-export function renderSlackDisplayText(input: { raw: unknown; text: string }): SlackDisplayText {
+export function renderSlackDisplayText(input: {
+  isBot?: boolean
+  raw: unknown
+  text: string
+}): SlackDisplayText {
   const records = slackMessageRecords(input.raw)
   const rawBlockCount = countArrayFields(records, 'blocks')
   const rawAttachmentCount = countArrayFields(records, 'attachments')
+
+  // App-authored messages can put only a notification summary in `text` while
+  // their visible body (including the requested command) lives in blocks.
+  // Keep any distinct summary as well; do not promote attachment unfurls into
+  // the message body or change the text used for human-authored messages.
+  if (input.isBot && input.text.trim()) {
+    const blockLines = collectRawBlockLines(records)
+    if (finalizeDisplayLines(blockLines)) {
+      return {
+        rawAttachmentCount,
+        rawBlockCount,
+        source: 'raw_blocks',
+        text: finalizeDisplayLines([input.text, ...blockLines])
+      }
+    }
+  }
 
   if (input.text.trim()) {
     return {
