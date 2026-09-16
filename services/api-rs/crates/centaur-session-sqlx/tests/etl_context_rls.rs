@@ -43,6 +43,8 @@ struct CompanyContextSearchRows {
 #[derive(Debug, PartialEq, Eq)]
 struct CompanyContextReaderRows {
     slack_channels: Vec<String>,
+    slack_users: Vec<String>,
+    slack_messages: Vec<String>,
     company_context_docs: Vec<String>,
     google_docs_observations: Vec<String>,
     google_docs: Vec<String>,
@@ -755,8 +757,57 @@ async fn assert_company_context_reader_role_security(
             "slack_private_context_documents".to_owned(),
             "slack_private_conversation_context_documents".to_owned(),
             "slack_sync_channels".to_owned(),
+            "slack_sync_messages".to_owned(),
+            "slack_sync_users".to_owned(),
         ],
         "company context reader gained effective access to an unexpected application table or view"
+    );
+
+    let slack_table_privileges: Vec<(String, bool)> = sqlx::query_as(
+        r#"
+        select relation, has_table_privilege(
+            'centaur_company_context_reader',
+            'public.' || relation,
+            'SELECT'
+        )
+        from unnest(array['slack_sync_messages', 'slack_sync_users']) relation
+        order by relation
+        "#,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    assert_eq!(
+        slack_table_privileges,
+        vec![
+            ("slack_sync_messages".to_owned(), false),
+            ("slack_sync_users".to_owned(), false),
+        ],
+        "Slack source rows must be exposed through column grants, not table-wide SELECT"
+    );
+
+    let sensitive_slack_column_privileges: Vec<(String, String, bool)> = sqlx::query_as(
+        r#"
+        select relation, column_name, has_column_privilege(
+            'centaur_company_context_reader',
+            'public.' || relation,
+            column_name,
+            'SELECT'
+        )
+        from (values
+            ('slack_sync_messages', 'raw_payload'),
+            ('slack_sync_messages', 'source_run_id'),
+            ('slack_sync_users', 'raw_payload')
+        ) columns(relation, column_name)
+        order by relation, column_name
+        "#,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    assert!(
+        sensitive_slack_column_privileges
+            .iter()
+            .all(|(_, _, allowed)| !allowed),
+        "company context reader gained access to sensitive Slack source columns: {sensitive_slack_column_privileges:?}"
     );
 
     let tables_without_rls: Vec<String> = sqlx::query_scalar(
@@ -903,6 +954,8 @@ async fn assert_company_context_reader_denies_unauthorized_rows(
         missing_identity,
         CompanyContextReaderRows {
             slack_channels: Vec::new(),
+            slack_users: Vec::new(),
+            slack_messages: Vec::new(),
             company_context_docs: Vec::new(),
             google_docs_observations: Vec::new(),
             google_docs: Vec::new(),
@@ -929,6 +982,8 @@ async fn assert_company_context_reader_denies_unauthorized_rows(
         viewer,
         CompanyContextReaderRows {
             slack_channels: vec!["G_PRIVATE".to_owned()],
+            slack_users: vec!["U_PRIVATE".to_owned()],
+            slack_messages: vec!["G_PRIVATE:1000.000003".to_owned()],
             company_context_docs: vec!["doc_slack_private".to_owned()],
             google_docs_observations: vec!["gdocs_observed_file".to_owned()],
             google_docs: vec!["gdocs_doc".to_owned()],
@@ -962,6 +1017,8 @@ async fn assert_company_context_reader_denies_unauthorized_rows(
         other_user,
         CompanyContextReaderRows {
             slack_channels: vec!["G_PRIVATE_OTHER".to_owned()],
+            slack_users: Vec::new(),
+            slack_messages: Vec::new(),
             company_context_docs: vec!["doc_slack_private_other".to_owned()],
             google_docs_observations: vec!["gdocs_observed_other".to_owned()],
             google_docs: vec!["gdocs_doc_other".to_owned()],
@@ -990,6 +1047,8 @@ async fn assert_company_context_reader_denies_unauthorized_rows(
         wrong_team,
         CompanyContextReaderRows {
             slack_channels: vec!["G_PRIVATE_CROSS_TEAM".to_owned()],
+            slack_users: Vec::new(),
+            slack_messages: Vec::new(),
             company_context_docs: vec!["doc_slack_private_cross_team".to_owned()],
             google_docs_observations: Vec::new(),
             google_docs: Vec::new(),
@@ -1053,6 +1112,8 @@ async fn assert_company_context_reader_channel_grants(
         channel_grants_only,
         CompanyContextReaderRows {
             slack_channels: vec!["C_ALPHA".to_owned(), "G_PRIVATE_OTHER".to_owned()],
+            slack_users: vec!["U_ALPHA".to_owned()],
+            slack_messages: vec!["C_ALPHA:1000.000001".to_owned()],
             company_context_docs: vec![
                 "doc_slack_alpha".to_owned(),
                 "doc_slack_private_other".to_owned(),
@@ -1512,6 +1573,16 @@ async fn company_context_reader_rows(
         slack_channels: text_array(
             &mut tx,
             "select coalesce(array_agg(channel_id order by channel_id), '{}') from slack_sync_channels",
+        )
+        .await?,
+        slack_users: text_array(
+            &mut tx,
+            "select coalesce(array_agg(user_id order by user_id), '{}') from slack_sync_users",
+        )
+        .await?,
+        slack_messages: text_array(
+            &mut tx,
+            "select coalesce(array_agg(channel_id || ':' || message_ts order by channel_id, message_ts), '{}') from slack_sync_messages",
         )
         .await?,
         company_context_docs: text_array(

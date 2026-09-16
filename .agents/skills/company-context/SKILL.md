@@ -13,7 +13,7 @@ For aggregation, grouping, joins, or fields that the search surface does not exp
 company_context query "SELECT source, count(*) FROM company_context_documents GROUP BY source" --limit 100 --json
 ```
 
-Use one row-returning query. The command runs it inside a read-only transaction with a bounded timeout, so writes and multiple statements are rejected.
+Use one row-returning query. The command runs it inside a read-only transaction with a bounded timeout, so writes and multiple statements are rejected. For exact or not-yet-projected Slack results, query the normalized `slack_sync_messages` and `slack_sync_users` columns; channel RLS still applies, users are limited to authors visible through that scope, and raw payloads remain inaccessible.
 
 ## Default Workflow
 
