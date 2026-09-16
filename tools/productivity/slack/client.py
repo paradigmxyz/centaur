@@ -953,6 +953,29 @@ class SlackClient:
                 access_path=access_path,
             )
 
+    def search_messages_direct(
+        self,
+        query: str,
+        max_results: int = 20,
+        channels: list[str] | None = None,
+        from_user: str | None = None,
+    ) -> list[dict]:
+        """Search directly with Slack's native user-token search API.
+
+        Unlike ``search_messages``, this path never scans channel history.
+        Channel and user filters are translated into native Slack modifiers.
+        """
+        modifiers = []
+        for channel in channels or []:
+            normalized = self._clean_channel_ref(channel)
+            if normalized:
+                modifiers.append(f"in:{normalized}")
+        if from_user:
+            modifiers.append(f"from:@{from_user.lstrip('@')}")
+
+        search_query = " ".join(part for part in [query.strip(), *modifiers] if part)
+        return self._search_messages_native(search_query, max_results)
+
     def _search_messages_native(
         self,
         query: str,
@@ -2645,6 +2668,10 @@ def resolve_mentions(
 
 def search_messages(*args, **kwargs):
     return _client().search_messages(*args, **kwargs)
+
+
+def search_messages_direct(*args, **kwargs):
+    return _client().search_messages_direct(*args, **kwargs)
 
 
 def get_channel_history_page(*args, **kwargs):

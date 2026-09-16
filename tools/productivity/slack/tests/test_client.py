@@ -1274,6 +1274,32 @@ def test_search_messages_falls_back_to_direct_history_and_threads_when_proxy_fai
     assert results[0]["channel"] == "C123456789"
 
 
+def test_search_messages_direct_uses_native_filters_without_scanning_history() -> None:
+    client, fake_web_client = _make_client()
+    client._search_messages_local = pytest.fail  # type: ignore[method-assign]
+    client._get_user_cache = lambda: {}  # type: ignore[method-assign]
+
+    results = client.search_messages_direct(
+        "fire-drill after:2026-08-10",
+        max_results=7,
+        channels=["#eng-infra", "<#C042WDDP89Y|eng-ai>"],
+        from_user="@alice",
+    )
+
+    assert results == []
+    assert fake_web_client.api_calls == [
+        (
+            "search.messages",
+            {
+                "query": "fire-drill after:2026-08-10 in:eng-infra in:C042WDDP89Y from:@alice",
+                "count": 7,
+                "sort": "timestamp",
+            },
+        )
+    ]
+    assert fake_web_client.history_calls == []
+
+
 def test_unscoped_search_uses_restricted_history_fallback_for_bot_token() -> None:
     client, _ = _make_client()
     fallback_result = [{"text": "matched through authorized history"}]
