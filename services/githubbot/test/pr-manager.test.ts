@@ -217,15 +217,23 @@ describe("Actions fallback when check nodes are unreadable", () => {
   function statusCtx(context: string, state: string) {
     return { __typename: "StatusContext", context, createdAt: "2026-08-01T10:00:00Z", state };
   }
-  function job(name: string, conclusion: string | null, status = "completed") {
-    return { conclusion, name, status };
+  function job(
+    name: string,
+    conclusion: string | null,
+    status = "completed",
+    runAttempt = 1,
+  ) {
+    return { conclusion, name, run_attempt: runAttempt, status };
   }
   function ctxFor(input: {
     nodes: (Record<string, unknown> | null)[];
     checkRuns: number;
+    checkState?: string;
     statuses: number;
     actionsJobs: Record<number, ReturnType<typeof job>[]>;
-    actionRuns?: Record<number, { event?: string; workflowId: number }>;
+    actionRuns?: Record<number, { event?: string; runAttempt?: number; workflowId: number }>;
+    onActionsCall?: () => void;
+    rollupState?: string;
   }) {
     const runIds = Object.keys(input.actionsJobs).map(Number);
     return {
@@ -234,11 +242,13 @@ describe("Actions fallback when check nodes are unreadable", () => {
           repository: {
             object: {
               statusCheckRollup: {
-                state: "FAILURE",
+                state: input.rollupState ?? "FAILURE",
                 contexts: {
                   nodes: input.nodes,
                   pageInfo: { hasNextPage: false, endCursor: null },
-                  checkRunCountsByState: [{ count: input.checkRuns, state: "COMPLETED" }],
+                  checkRunCountsByState: [
+                    { count: input.checkRuns, state: input.checkState ?? "COMPLETED" },
+                  ],
                   statusContextCountsByState: [{ count: input.statuses, state: "SUCCESS" }],
                 },
               },
@@ -247,24 +257,89 @@ describe("Actions fallback when check nodes are unreadable", () => {
         }),
         rest: {
           actions: {
-            listWorkflowRunsForRepo: async () => ({
-              data: {
-                workflow_runs: runIds.map((id) => ({
-                  event: input.actionRuns?.[id]?.event ?? "pull_request",
-                  id,
-                  workflow_id: input.actionRuns?.[id]?.workflowId ?? 1,
-                })),
-              },
-            }),
-            listJobsForWorkflowRun: async ({ run_id }: { run_id: number }) => ({
-              data: { jobs: input.actionsJobs[run_id] ?? [] },
-            }),
+            listWorkflowRunsForRepo: async ({
+              page = 1,
+              per_page = 30,
+            }: {
+              page?: number;
+              per_page?: number;
+            }) => {
+              input.onActionsCall?.();
+              const pageRunIds = runIds.slice((page - 1) * per_page, page * per_page);
+              return {
+                data: {
+                  workflow_runs: pageRunIds.map((id) => ({
+                    event: input.actionRuns?.[id]?.event ?? "pull_request",
+                    id,
+                    run_attempt: input.actionRuns?.[id]?.runAttempt ?? 1,
+                    workflow_id: input.actionRuns?.[id]?.workflowId ?? 1,
+                  })),
+                },
+              };
+            },
+            listJobsForWorkflowRun: async ({
+              filter,
+              page = 1,
+              per_page = 30,
+              run_id,
+            }: {
+              filter?: string;
+              page?: number;
+              per_page?: number;
+              run_id: number;
+            }) => {
+              input.onActionsCall?.();
+              expect(filter).toBe("latest");
+              const jobs = input.actionsJobs[run_id] ?? [];
+              return { data: { jobs: jobs.slice((page - 1) * per_page, page * per_page) } };
+            },
           },
         },
       },
       options: { logger: quietLogger },
     } as unknown as PrManagerContext;
   }
+
+  test("does not call Actions while the aggregate is pending", async () => {
+    let actionsCalls = 0;
+    const ctx = ctxFor({
+      nodes: [null],
+      checkRuns: 1,
+      statuses: 0,
+      actionsJobs: {},
+      onActionsCall: () => {
+        actionsCalls += 1;
+      },
+      rollupState: "PENDING",
+    });
+    await expect(fetchCiEvaluation(ctx, "base", "repo", "abc123")).resolves.toEqual({
+      failed: false,
+      failingNames: [],
+      settled: false,
+    });
+    expect(actionsCalls).toBe(0);
+  });
+
+  test("does not call Actions while aggregate counts remain pending", async () => {
+    let actionsCalls = 0;
+    const ctx = ctxFor({
+      nodes: [null],
+      checkRuns: 1,
+      checkState: "IN_PROGRESS",
+      statuses: 0,
+      actionsJobs: {},
+      onActionsCall: () => {
+        actionsCalls += 1;
+      },
+      rollupState: "FAILURE",
+    });
+    await expect(fetchCiEvaluation(ctx, "base", "repo", "abc123")).resolves.toEqual({
+      failed: true,
+      failingNames: [],
+      settled: false,
+    });
+    expect(actionsCalls).toBe(0);
+  });
 
   test("reconstructs the checks and drops the marked one", async () => {
     // A typical fine-grained PAT response: check nodes null, commit status readable.
@@ -357,14 +432,76 @@ describe("Actions fallback when check nodes are unreadable", () => {
     });
   });
 
-  test("a superseded run never overwrites the newest job", async () => {
-    // Same job in two runs of one workflow; only the newest (higher id) counts,
-    // so the stale failure must not resurface.
+  test("deduplicates superseded runs before checking the rollup count", async () => {
+    // The rollup and the fallback both retain only the newest check context.
     const ctx = ctxFor({
       nodes: [null, statusCtx("Vercel", "SUCCESS")],
       checkRuns: 1,
       statuses: 1,
       actionsJobs: { 9: [job("typecheck", "success")], 4: [job("typecheck", "failure")] },
+    });
+    await expect(fetchCiEvaluation(ctx, "base", "repo", "abc123")).resolves.toEqual({
+      failed: false,
+      failingNames: [],
+      settled: true,
+    });
+  });
+
+  test("uses the latest job attempt after a partial rerun", async () => {
+    // GitHub's latest filter carries forward successful jobs while replacing
+    // rerun jobs, matching the rollup's one context per job.
+    const ctx = ctxFor({
+      nodes: [null, null, statusCtx("Vercel", "SUCCESS")],
+      checkRuns: 2,
+      statuses: 1,
+      actionsJobs: {
+        9: [
+          job("build", "success", "completed", 2),
+          job("test", "success", "completed", 2),
+        ],
+      },
+    });
+    await expect(fetchCiEvaluation(ctx, "base", "repo", "abc123")).resolves.toEqual({
+      failed: false,
+      failingNames: [],
+      settled: true,
+    });
+  });
+
+  test("paginates jobs within a workflow run", async () => {
+    const jobs = Array.from({ length: 101 }, (_, index) =>
+      index === 0
+        ? job("approval-centaur-skip", "failure")
+        : job(`job-${index}`, "success"),
+    );
+    const ctx = ctxFor({
+      nodes: Array.from({ length: 101 }, () => null),
+      checkRuns: 101,
+      statuses: 0,
+      actionsJobs: { 1: jobs },
+    });
+    await expect(fetchCiEvaluation(ctx, "base", "repo", "abc123")).resolves.toEqual({
+      failed: false,
+      failingNames: [],
+      settled: true,
+    });
+  });
+
+  test("paginates workflow runs for a SHA", async () => {
+    const actionsJobs: Record<number, ReturnType<typeof job>[]> = {};
+    const actionRuns: Record<number, { workflowId: number }> = {};
+    for (let id = 1; id <= 101; id += 1) {
+      actionsJobs[id] = [
+        id === 101 ? job("approval-centaur-skip", "failure") : job(`job-${id}`, "success"),
+      ];
+      actionRuns[id] = { workflowId: id };
+    }
+    const ctx = ctxFor({
+      nodes: Array.from({ length: 101 }, () => null),
+      checkRuns: 101,
+      statuses: 0,
+      actionsJobs,
+      actionRuns,
     });
     await expect(fetchCiEvaluation(ctx, "base", "repo", "abc123")).resolves.toEqual({
       failed: false,

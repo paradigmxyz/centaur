@@ -250,11 +250,13 @@ export async function fetchCiEvaluation(
   }
 
   if (!rollupState) return null;
-  const detail = detailReadable
-    ? evaluateCiRollupContexts(nodes)
-    : await evaluateCiViaActions(ctx, owner, repo, sha, nodes, checkRunCounts, statusContextCounts);
   const aggregatePending = rollupState === "PENDING" || rollupState === "EXPECTED";
   const countsPending = stateCountsPending(checkRunCounts, statusContextCounts);
+  const detail = detailReadable
+    ? evaluateCiRollupContexts(nodes)
+    : aggregatePending || countsPending === true
+      ? null
+      : await evaluateCiViaActions(ctx, owner, repo, sha, nodes, checkRunCounts, statusContextCounts);
   let settled = rollupState === "SUCCESS";
   if (detail) settled = detail.settled && !aggregatePending;
   else if (countsPending !== undefined) {
@@ -298,24 +300,25 @@ async function evaluateCiViaActions(
   const statuses = latestCiStatuses(nodes);
   if (statuses.length !== sumCounts(statusContextCounts)) return null;
 
-  let jobs: { name: string; status: string; conclusion: string | null }[];
+  let jobs: ActionsCiJob[];
   try {
     jobs = await fetchActionsJobs(ctx, owner, repo, sha);
   } catch (error) {
     logger.warn("githubbot_ci_actions_fallback_failed", { error: errorMessage(error) });
     return null;
   }
-  if (jobs.length !== sumCounts(checkRunCounts)) {
+  const latestJobs = latestActionsJobs(jobs);
+  if (latestJobs.length !== sumCounts(checkRunCounts)) {
     logger.warn("githubbot_ci_actions_fallback_incomplete", {
       checkRuns: sumCounts(checkRunCounts),
-      jobs: jobs.length,
+      jobs: latestJobs.length,
       ref: `${owner}/${repo}@${sha}`,
     });
     return null;
   }
 
   return evaluateCi(
-    jobs
+    latestJobs
       .filter((job) => !isCentaurSkipCheck(job.name))
       .map((job) => ({
         status: job.status.toLowerCase(),
@@ -326,41 +329,73 @@ async function evaluateCiViaActions(
   );
 }
 
-/** Every job for a SHA, newest run first, deduped like the rollup does. */
+type ActionsCiJob = {
+  conclusion: string | null;
+  event: string;
+  name: string;
+  runAttempt: number;
+  runId: number;
+  status: string;
+  workflowId: number;
+};
+
+/** Every latest Actions job/check run for a SHA, across all pages. */
 async function fetchActionsJobs(
   ctx: WorkflowEventProducerContext,
   owner: string,
   repo: string,
   sha: string,
-): Promise<{ name: string; status: string; conclusion: string | null }[]> {
-  const runs = await ctx.octokit.rest.actions.listWorkflowRunsForRepo({
-    head_sha: sha,
-    owner,
-    per_page: 100,
-    repo,
-  });
-  const latest = new Map<string, { name: string; status: string; conclusion: string | null }>();
-  // Descending id === newest first, so the first job seen for a workflow,
-  // trigger, and name wins and a superseded run never overwrites it. The
-  // workflow identity prevents same-named jobs in separate workflows from
-  // collapsing into one check.
-  for (const run of [...runs.data.workflow_runs].sort((a, b) => b.id - a.id)) {
-    const jobs = await ctx.octokit.rest.actions.listJobsForWorkflowRun({
+): Promise<ActionsCiJob[]> {
+  const runs = [];
+  for (let page = 1; ; page += 1) {
+    const response = await ctx.octokit.rest.actions.listWorkflowRunsForRepo({
+      head_sha: sha,
       owner,
+      page,
       per_page: 100,
       repo,
-      run_id: run.id,
     });
-    for (const job of jobs.data.jobs) {
-      const key = [run.workflow_id, run.event, job.name].join("\0");
-      if (!latest.has(key)) {
-        latest.set(key, {
+    runs.push(...response.data.workflow_runs);
+    if (response.data.workflow_runs.length < 100) break;
+  }
+
+  const result: ActionsCiJob[] = [];
+  for (const run of runs) {
+    for (let page = 1; ; page += 1) {
+      const response = await ctx.octokit.rest.actions.listJobsForWorkflowRun({
+        filter: "latest",
+        owner,
+        page,
+        per_page: 100,
+        repo,
+        run_id: run.id,
+      });
+      result.push(
+        ...response.data.jobs.map((job) => ({
           conclusion: job.conclusion ?? null,
+          event: run.event,
           name: job.name,
+          runAttempt: job.run_attempt ?? run.run_attempt ?? 0,
+          runId: run.id,
           status: job.status,
-        });
-      }
+          workflowId: run.workflow_id,
+        })),
+      );
+      if (response.data.jobs.length < 100) break;
     }
+  }
+  return result;
+}
+
+/** Match the rollup's latest check for each workflow, trigger, and job name. */
+function latestActionsJobs(jobs: ActionsCiJob[]): ActionsCiJob[] {
+  const latest = new Map<string, ActionsCiJob>();
+  const newestFirst = [...jobs].sort(
+    (a, b) => b.runId - a.runId || b.runAttempt - a.runAttempt,
+  );
+  for (const job of newestFirst) {
+    const key = [job.workflowId, job.event, job.name].join("\0");
+    if (!latest.has(key)) latest.set(key, job);
   }
   return [...latest.values()];
 }
