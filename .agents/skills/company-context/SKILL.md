@@ -13,10 +13,10 @@ For aggregation, grouping, joins, or fields that the search surface does not exp
 company_context query "SELECT source, count(*) FROM company_context_documents GROUP BY source" --limit 100 --json
 ```
 
-Use one row-returning query. The command runs it inside a read-only transaction with a bounded timeout, so writes and multiple statements are rejected. For exact or not-yet-projected Slack results, query the normalized `slack_sync_messages` and `slack_sync_users` columns; channel RLS still applies, users are limited to authors visible through that scope, and raw payloads remain inaccessible. These tables use column-level grants, so `SELECT *`, `alias.*`, and whole-row conversion are rejected; list the fields you need explicitly. Bound message queries by channel and/or time when possible:
+Use one row-returning query. The command runs it inside a read-only transaction with a bounded timeout, so writes and multiple statements are rejected. For exact or not-yet-projected Slack results, query `company_context_slack_messages` and `company_context_slack_users`. These security-invoker views expose normalized fields while preserving channel RLS; users are limited to authors visible through that scope, and raw payloads remain inaccessible. Bound message queries by channel and/or time when possible:
 
 ```bash
-company_context query "SELECT m.occurred_at, u.display_name, m.text, m.permalink FROM slack_sync_messages m LEFT JOIN slack_sync_users u ON u.user_id = m.user_id WHERE m.channel_id = 'CHANNEL_ID' AND m.occurred_at >= now() - interval '7 days' ORDER BY m.occurred_at DESC" --limit 100 --json
+company_context query "SELECT m.occurred_at, u.display_name, m.text, m.permalink FROM company_context_slack_messages m LEFT JOIN company_context_slack_users u ON u.user_id = m.user_id WHERE m.channel_id = 'CHANNEL_ID' AND m.occurred_at >= now() - interval '7 days' ORDER BY m.occurred_at DESC" --limit 100 --json
 ```
 
 ## Default Workflow

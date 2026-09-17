@@ -751,6 +751,8 @@ async fn assert_company_context_reader_role_security(
         vec![
             "company_context_document_embeddings".to_owned(),
             "company_context_documents".to_owned(),
+            "company_context_slack_messages".to_owned(),
+            "company_context_slack_users".to_owned(),
             "google_docs_context_documents".to_owned(),
             "google_docs_sync_file_observations".to_owned(),
             "granola_context_documents".to_owned(),
@@ -761,6 +763,31 @@ async fn assert_company_context_reader_role_security(
             "slack_sync_users".to_owned(),
         ],
         "company context reader gained effective access to an unexpected application table or view"
+    );
+
+    let slack_view_security: Vec<(String, bool)> = sqlx::query_as(
+        r#"
+        select relations.relname,
+               coalesce(relations.reloptions @> array['security_invoker=true'], false)
+        from pg_class relations
+        join pg_namespace schemas on schemas.oid = relations.relnamespace
+        where schemas.nspname = 'public'
+          and relations.relname in (
+              'company_context_slack_messages',
+              'company_context_slack_users'
+          )
+        order by relations.relname
+        "#,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    assert_eq!(
+        slack_view_security,
+        vec![
+            ("company_context_slack_messages".to_owned(), true),
+            ("company_context_slack_users".to_owned(), true),
+        ],
+        "company context Slack views must enforce the invoking reader's RLS policies"
     );
 
     let slack_table_privileges: Vec<(String, bool)> = sqlx::query_as(
@@ -817,6 +844,7 @@ async fn assert_company_context_reader_role_security(
         join pg_namespace schemas on schemas.oid = tables.relnamespace
         where schemas.nspname = 'public'
           and tables.relname = any($1::text[])
+          and tables.relkind in ('r', 'p')
           and not tables.relrowsecurity
         order by tables.relname
         "#,
@@ -1577,12 +1605,12 @@ async fn company_context_reader_rows(
         .await?,
         slack_users: text_array(
             &mut tx,
-            "select coalesce(array_agg(user_id order by user_id), '{}') from slack_sync_users",
+            "select coalesce(array_agg(user_id order by user_id), '{}') from (select * from company_context_slack_users) users",
         )
         .await?,
         slack_messages: text_array(
             &mut tx,
-            "select coalesce(array_agg(channel_id || ':' || message_ts order by channel_id, message_ts), '{}') from slack_sync_messages",
+            "select coalesce(array_agg(channel_id || ':' || message_ts order by channel_id, message_ts), '{}') from (select * from company_context_slack_messages) messages",
         )
         .await?,
         company_context_docs: text_array(
