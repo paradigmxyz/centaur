@@ -80,6 +80,7 @@
 
 [Sandbox API permissions]
 |Before using api-rs to read a session or its events, or to read, create, or cancel workflow runs, fetch the current sandbox permissions with `centaur-console permissions` and inspect its `capabilities` object.
+|For Slack search, public channels are always available through both proxied and direct search. The permissions endpoint returns only private channels that an admin has whitelisted; a public channel's absence from that response does not mean it is unavailable.
 |Require `sandbox_sessions_read_enabled` for session and session-event reads, `sandbox_workflows_read_enabled` for workflow schedule and run reads, and `sandbox_workflows_write_enabled` for creating or canceling workflow runs. Workflow write access does not imply workflow read access.
 |Treat a false or missing capability as denied. Do not attempt the protected operation; tell the user which capability is unavailable.
 |If the permissions lookup fails, do not assume access. Say that the live sandbox permissions could not be verified and include the tool error briefly.

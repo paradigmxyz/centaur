@@ -76,6 +76,18 @@ class SystemPromptTest(unittest.TestCase):
         self.assertIn("personal `provider_email`", prompt)
         self.assertIn("Centaur can use their personal connected account", prompt)
 
+    def test_slack_search_permission_guidance_is_present(self) -> None:
+        prompt = SYSTEM_PROMPT.read_text()
+
+        self.assertIn(
+            "public channels are always available through both proxied and direct search",
+            prompt,
+        )
+        self.assertIn(
+            "permissions endpoint returns only private channels that an admin has whitelisted",
+            prompt,
+        )
+
     def test_scheduled_task_guidance_is_present(self) -> None:
         prompt = SYSTEM_PROMPT.read_text()
 
