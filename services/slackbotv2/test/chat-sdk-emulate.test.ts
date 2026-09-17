@@ -5647,7 +5647,9 @@ describe('slackbotv2', () => {
     expect(threadState).toEqual(expect.objectContaining({ activeExecution: false }))
   })
 
-  it('silently ignores a session principal admission denial', async () => {
+  it('silently ignores a session principal admission denial after clearing deferred status', async () => {
+    bot = createTestBot({ assistantStatus: 'Admission pending...' })
+    const releaseStatus = slackApi.holdAssistantStatus()
     codexApi.queueCreateResponse(
       {
         ok: false,
@@ -5678,12 +5680,37 @@ describe('slackbotv2', () => {
       waitUntilContext(waits)
     )
 
-    expect(response.status).toBe(200)
-    await Promise.all(waits)
-    expect(codexApi.creates).toHaveLength(1)
-    expect(codexApi.appends).toHaveLength(0)
-    expect(codexApi.executes).toHaveLength(0)
-    expect(await threadText(parent.ts)).not.toContain('Execution failed')
+    try {
+      expect(response.status).toBe(200)
+      await waitFor(() => codexApi.creates.length === 1)
+      const initialStatusIndex = slackApi.calls.findIndex(
+        call =>
+          call.method === 'assistant.threads.setStatus'
+          && stringField(call.body.status) === 'Admission pending...'
+      )
+      expect(initialStatusIndex).toBeGreaterThanOrEqual(0)
+      expect(
+        slackApi.calls
+          .slice(initialStatusIndex)
+          .filter(call => call.method === 'assistant.threads.setStatus')
+          .map(call => stringField(call.body.status))
+      ).toEqual(['Admission pending...'])
+
+      releaseStatus()
+      await Promise.all(waits)
+      expect(codexApi.creates).toHaveLength(1)
+      expect(codexApi.appends).toHaveLength(0)
+      expect(codexApi.executes).toHaveLength(0)
+      expect(
+        slackApi.calls
+          .slice(initialStatusIndex)
+          .filter(call => call.method === 'assistant.threads.setStatus')
+          .map(call => stringField(call.body.status))
+      ).toEqual(['Admission pending...', ''])
+      expect(await threadText(parent.ts)).not.toContain('Execution failed')
+    } finally {
+      releaseStatus()
+    }
   })
 
   it('enforces external org and trigger-bot member allowlists', async () => {
@@ -6793,7 +6820,12 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
   const server = createServer((req, res) => {
     void handlePatchedSlackRequest(req, res, {
       appendFailure,
-      assistantStatusGate: () => assistantStatusGate,
+      assistantStatusGate: status => {
+        if (!status) return null
+        const gate = assistantStatusGate
+        assistantStatusGate = null
+        return gate
+      },
       calls,
       conversationsJoinResponses,
       fileInfo,
@@ -6838,7 +6870,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       return fileInfoRequests.get(fileId) ?? 0
     },
     holdAssistantStatus() {
-      if (assistantStatusGate) throw new Error('assistant status is already held')
+      if (releaseAssistantStatusGate) throw new Error('assistant status is already held')
       assistantStatusGate = new Promise(resolve => {
         releaseAssistantStatusGate = resolve
       })
@@ -6888,7 +6920,7 @@ async function handlePatchedSlackRequest(
   res: ServerResponse,
   input: {
     appendFailure: { error: string; remaining: number }
-    assistantStatusGate: () => Promise<void> | null
+    assistantStatusGate: (status: string) => Promise<void> | null
     calls: StreamCall[]
     conversationsJoinResponses: QueuedSlackApiResponse[]
     fileInfo: Map<string, Record<string, unknown>>
@@ -6941,7 +6973,7 @@ async function handlePatchedSlackRequest(
   if (path === '/api/assistant.threads.setStatus') {
     const body = await requestBody(request)
     input.calls.push({ method: 'assistant.threads.setStatus', body })
-    const gate = input.assistantStatusGate()
+    const gate = input.assistantStatusGate(stringField(body.status))
     if (gate) await gate
     await sendWebResponse(res, Response.json({ ok: true }))
     return
