@@ -185,9 +185,9 @@ def search(
     """
     channel_list = [channel.strip() for channel in channels.split(",")] if channels else None
 
-    from tools.productivity.company_context.client import CompanyContextClient
+    from .client import IndexedSlackClient
 
-    result = CompanyContextClient().search_slack_messages(
+    result = IndexedSlackClient().search_messages(
         query=query,
         limit=limit,
         channels=channel_list,

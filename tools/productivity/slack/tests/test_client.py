@@ -1,10 +1,11 @@
 import base64
+import datetime as dt
 import email.message
 import json
 
 import pytest
 import slack.client as slack_client
-from slack.client import SlackAuthError, SlackClient, SlackRateLimitError
+from slack.client import IndexedSlackClient, SlackAuthError, SlackClient, SlackRateLimitError
 from slack_sdk.errors import SlackApiError
 
 
@@ -1128,6 +1129,80 @@ def test_search_files_direct_uses_direct_files_list() -> None:
 
     assert fake_web_client.files_list_calls == [{"count": 200, "page": 1}]
     assert results[0]["user"] == "alice"
+
+
+def test_indexed_search_queries_scoped_slack_rows(monkeypatch) -> None:
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.fetch_calls = []
+            self.closed = False
+
+        async def fetch(self, query, *args):
+            self.fetch_calls.append((query, args))
+            return [
+                {
+                    "channel_id": "C123",
+                    "channel_name": "eng-infra",
+                    "message_ts": "1780000000.000001",
+                    "occurred_at": dt.datetime(2026, 9, 17, 12, 0, tzinfo=dt.UTC),
+                    "thread_ts": "1780000000.000000",
+                    "user_id": "U123",
+                    "bot_id": "",
+                    "text": "database migration completed",
+                    "permalink": "https://example.slack.com/archives/C123/p1780000000000001",
+                    "reply_count": 0,
+                    "author_name": "Alice",
+                    "score": 0.75,
+                }
+            ]
+
+        async def close(self):
+            self.closed = True
+
+    fake = FakeConnection()
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(slack_client.asyncpg, "connect", fake_connect)
+
+    result = IndexedSlackClient("postgresql://example/centaur").search_messages(
+        " database migration ",
+        limit=500,
+        channels=["#eng-infra", "<#C123|eng-infra>", "ENG-INFRA"],
+        from_user="@Alice",
+    )
+
+    assert result["status"] == "ok"
+    assert result["query"] == "database migration"
+    assert result["results"] == [
+        {
+            "channel": "eng-infra",
+            "channel_id": "C123",
+            "user": "Alice",
+            "user_id": "U123",
+            "bot_id": "",
+            "text": "database migration completed",
+            "timestamp": "1780000000.000001",
+            "occurred_at": "2026-09-17T12:00:00+00:00",
+            "permalink": "https://example.slack.com/archives/C123/p1780000000000001",
+            "thread_ts": "1780000000.000000",
+            "reply_count": 0,
+            "score": 0.75,
+        }
+    ]
+    query, args = fake.fetch_calls[0]
+    assert "FROM company_context_slack_messages messages" in query
+    assert "LEFT JOIN company_context_slack_users users" in query
+    assert "websearch_to_tsquery('english', $1)" in query
+    assert args == ("database migration", ["eng-infra", "c123"], "alice", 50)
+    assert fake.closed is True
+
+
+def test_indexed_search_rejects_empty_query() -> None:
+    result = IndexedSlackClient("postgresql://example/centaur").search_messages("   ")
+
+    assert result == {"status": "error", "error": "query cannot be empty"}
 
 
 def test_search_messages_direct_uses_native_filters_without_scanning_history() -> None:

@@ -557,11 +557,11 @@ def test_help_explains_channel_and_dm_access_paths() -> None:
     assert "search-direct" in result.output
 
 
-def test_search_uses_indexed_slack_company_context_client(monkeypatch) -> None:
+def test_search_uses_indexed_slack_client(monkeypatch) -> None:
     calls = []
 
-    class FakeCompanyContextClient:
-        def search_slack_messages(self, **kwargs):
+    class FakeIndexedSlackClient:
+        def search_messages(self, **kwargs):
             calls.append(kwargs)
             return {
                 "status": "ok",
@@ -577,8 +577,8 @@ def test_search_uses_indexed_slack_company_context_client(monkeypatch) -> None:
 
     monkeypatch.setitem(
         sys.modules,
-        "tools.productivity.company_context.client",
-        types.SimpleNamespace(CompanyContextClient=FakeCompanyContextClient),
+        "slack.client",
+        types.SimpleNamespace(IndexedSlackClient=FakeIndexedSlackClient),
     )
 
     result = CliRunner().invoke(
