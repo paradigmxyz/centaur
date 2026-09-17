@@ -1690,6 +1690,8 @@ impl SessionRuntime {
         self
     }
 
+    /// Create or load an internal session, automatically provisioning its
+    /// derived principal when no explicit principal is supplied.
     pub async fn create_or_get_session(
         &self,
         thread_key: &ThreadKey,
@@ -1698,20 +1700,44 @@ impl SessionRuntime {
         metadata: Option<Value>,
         on_harness_conflict: HarnessConflictPolicy,
     ) -> Result<CreateOrGetSessionOutcome, SessionRuntimeError> {
-        self.create_or_get_session_with_principal(
+        self.create_or_get_session_with_principal_admission(
             thread_key,
             harness_type,
             persona_id,
             metadata,
             on_harness_conflict,
             None,
+            SessionPrincipalAdmission::Automatic,
         )
         .await
     }
 
-    /// Create or load a session and bind it to an existing iron-control
-    /// principal selected by foreign ID. When no foreign ID is supplied, the
-    /// session keeps the normal principal derived from its thread key.
+    /// Create or load an ingress session using the deployment's principal
+    /// admission policy. HTTP chat ingresses use this path; internal workflows
+    /// use [`Self::create_or_get_session`] or explicitly select a principal.
+    pub async fn create_or_get_admitted_session(
+        &self,
+        thread_key: &ThreadKey,
+        harness_type: &HarnessType,
+        persona_id: Option<&str>,
+        metadata: Option<Value>,
+        on_harness_conflict: HarnessConflictPolicy,
+    ) -> Result<CreateOrGetSessionOutcome, SessionRuntimeError> {
+        self.create_or_get_session_with_principal_admission(
+            thread_key,
+            harness_type,
+            persona_id,
+            metadata,
+            on_harness_conflict,
+            None,
+            self.session_principal_admission,
+        )
+        .await
+    }
+
+    /// Create or load an internal session and bind it to an existing
+    /// iron-control principal selected by foreign ID. When no foreign ID is
+    /// supplied, its derived principal is provisioned automatically.
     pub async fn create_or_get_session_with_principal(
         &self,
         thread_key: &ThreadKey,
@@ -1720,6 +1746,29 @@ impl SessionRuntime {
         metadata: Option<Value>,
         on_harness_conflict: HarnessConflictPolicy,
         principal_foreign_id: Option<&str>,
+    ) -> Result<CreateOrGetSessionOutcome, SessionRuntimeError> {
+        self.create_or_get_session_with_principal_admission(
+            thread_key,
+            harness_type,
+            persona_id,
+            metadata,
+            on_harness_conflict,
+            principal_foreign_id,
+            SessionPrincipalAdmission::Automatic,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_or_get_session_with_principal_admission(
+        &self,
+        thread_key: &ThreadKey,
+        harness_type: &HarnessType,
+        persona_id: Option<&str>,
+        metadata: Option<Value>,
+        on_harness_conflict: HarnessConflictPolicy,
+        principal_foreign_id: Option<&str>,
+        admission: SessionPrincipalAdmission,
     ) -> Result<CreateOrGetSessionOutcome, SessionRuntimeError> {
         let principal_foreign_id = match principal_foreign_id {
             Some(foreign_id) if foreign_id.trim().is_empty() => {
@@ -1757,7 +1806,7 @@ impl SessionRuntime {
                         .register_session(
                             thread_key.as_str(),
                             Some(&session_metadata),
-                            self.session_principal_admission.create_if_missing(),
+                            admission.create_if_missing(),
                         )
                         .await?
                 }
@@ -9228,7 +9277,9 @@ mod adoption_tests {
             create_if_missing: bool,
         ) -> Result<Principal, IronControlError> {
             if create_if_missing {
-                Ok(test_principal("prn_test"))
+                Err(IronControlError::PrincipalDerivation(
+                    centaur_iron_control::PrincipalDerivationError::MissingSlackTeamId,
+                ))
             } else {
                 Err(IronControlError::SessionPrincipalNotPreapproved {
                     foreign_id: "slack-channel-t123-c123".to_owned(),
@@ -9301,7 +9352,7 @@ mod adoption_tests {
         .with_session_principal_admission(SessionPrincipalAdmission::Preapproved);
 
         let error = runtime
-            .create_or_get_session(
+            .create_or_get_admitted_session(
                 &ThreadKey::try_from("slack:T123:C123:1773364194.179929".to_owned()).unwrap(),
                 &HarnessType::Codex,
                 None,
@@ -9316,6 +9367,38 @@ mod adoption_tests {
             SessionRuntimeError::IronControl(
                 IronControlError::SessionPrincipalNotPreapproved { .. }
             )
+        ));
+    }
+
+    #[tokio::test]
+    async fn internal_sessions_keep_automatic_principal_creation() {
+        let pool =
+            sqlx::PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test")
+                .expect("create lazy pool");
+        let runtime = SessionRuntime::new(
+            PgSessionStore::new(pool),
+            SandboxRuntime::backend(
+                Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new())),
+                SandboxSpec::new("test"),
+            ),
+            AdmissionProbeRegistrar,
+        )
+        .with_session_principal_admission(SessionPrincipalAdmission::Preapproved);
+
+        let error = runtime
+            .create_or_get_session(
+                &ThreadKey::try_from("workflow:internal:test".to_owned()).unwrap(),
+                &HarnessType::Codex,
+                None,
+                None,
+                HarnessConflictPolicy::Reject,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SessionRuntimeError::IronControl(IronControlError::PrincipalDerivation(_))
         ));
     }
 

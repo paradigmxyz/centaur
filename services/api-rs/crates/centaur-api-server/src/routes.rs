@@ -639,7 +639,7 @@ async fn create_or_get_session(
         Some(OnHarnessConflict::Reject) | None => HarnessConflictPolicy::Reject,
     };
     let outcome = runtime
-        .create_or_get_session(
+        .create_or_get_admitted_session(
             &thread_key,
             &harness_type,
             request.persona_id.as_deref(),
