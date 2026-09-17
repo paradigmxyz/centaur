@@ -561,16 +561,16 @@ def test_search_uses_indexed_slack_company_context_client(monkeypatch) -> None:
     calls = []
 
     class FakeCompanyContextClient:
-        def search(self, **kwargs):
+        def search_slack_messages(self, **kwargs):
             calls.append(kwargs)
             return {
                 "status": "ok",
                 "results": [
                     {
-                        "source_type": "slack_thread",
-                        "occurred_at": "2026-09-10",
-                        "title": "#eng-infra migration",
-                        "preview": "database migration completed",
+                        "channel": "eng-infra",
+                        "user": "alice",
+                        "text": "database migration completed",
+                        "permalink": "https://example.slack.com/archives/C123/p123",
                     }
                 ],
             }
@@ -596,13 +596,13 @@ def test_search_uses_indexed_slack_company_context_client(monkeypatch) -> None:
     )
 
     assert result.exit_code == 0
-    assert "Indexed Slack" in result.output
     assert "completed" in result.output
     assert calls == [
         {
-            "query": "database migration #eng-infra #C1234567890 @alice",
+            "query": "database migration",
             "limit": 5,
-            "source": "slack",
+            "channels": ["eng-infra", "C1234567890"],
+            "from_user": "alice",
         }
     ]
 

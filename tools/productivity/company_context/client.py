@@ -1525,6 +1525,125 @@ class CompanyContextClient:
             )
             return {"status": "error", "error": str(exc)}
 
+    async def _search_slack_messages_async(
+        self,
+        *,
+        query: str,
+        limit: int,
+        channels: list[str] | None,
+        from_user: str | None,
+    ) -> dict[str, Any]:
+        conn = await self._connect()
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    messages.channel_id,
+                    channels.channel_name,
+                    messages.message_ts,
+                    messages.occurred_at,
+                    messages.thread_ts,
+                    messages.user_id,
+                    messages.bot_id,
+                    messages.text,
+                    messages.permalink,
+                    messages.reply_count,
+                    COALESCE(
+                        NULLIF(users.display_name, ''),
+                        NULLIF(users.real_name, ''),
+                        NULLIF(users.user_name, ''),
+                        NULLIF(messages.user_id, ''),
+                        messages.bot_id
+                    ) AS author_name,
+                    ts_rank_cd(
+                        to_tsvector('english', COALESCE(messages.text, '')),
+                        websearch_to_tsquery('english', $1)
+                    ) AS score
+                FROM company_context_slack_messages messages
+                JOIN slack_sync_channels channels
+                  ON channels.channel_id = messages.channel_id
+                LEFT JOIN company_context_slack_users users
+                  ON users.user_id = messages.user_id
+                WHERE to_tsvector('english', COALESCE(messages.text, ''))
+                      @@ websearch_to_tsquery('english', $1)
+                  AND (
+                      $2::text[] IS NULL
+                      OR LOWER(messages.channel_id) = ANY($2::text[])
+                      OR LOWER(channels.channel_name) = ANY($2::text[])
+                  )
+                  AND (
+                      $3::text IS NULL
+                      OR LOWER(messages.user_id) = $3
+                      OR LOWER(users.user_name) = $3
+                      OR LOWER(users.real_name) = $3
+                      OR LOWER(users.display_name) = $3
+                  )
+                ORDER BY score DESC, messages.occurred_at DESC NULLS LAST
+                LIMIT $4
+                """,
+                query,
+                channels,
+                from_user,
+                limit,
+            )
+            return {
+                "status": "ok",
+                "query": query,
+                "results": [
+                    {
+                        "channel": str(_row_value(row, "channel_name", "")),
+                        "channel_id": str(_row_value(row, "channel_id", "")),
+                        "user": str(_row_value(row, "author_name", "")),
+                        "user_id": str(_row_value(row, "user_id", "")),
+                        "bot_id": str(_row_value(row, "bot_id", "")),
+                        "text": str(_row_value(row, "text", "")),
+                        "timestamp": str(_row_value(row, "message_ts", "")),
+                        "occurred_at": _isoformat(_row_value(row, "occurred_at")),
+                        "permalink": str(_row_value(row, "permalink", "")),
+                        "thread_ts": str(_row_value(row, "thread_ts", "") or "") or None,
+                        "reply_count": int(_row_value(row, "reply_count", 0) or 0),
+                        "score": float(_row_value(row, "score", 0.0) or 0.0),
+                    }
+                    for row in rows
+                ],
+            }
+        finally:
+            await conn.close()
+
+    def search_slack_messages(
+        self,
+        query: str,
+        limit: int = DEFAULT_SEARCH_LIMIT,
+        channels: list[str] | None = None,
+        from_user: str | None = None,
+    ) -> dict[str, Any]:
+        """Search normalized, RLS-scoped Slack message rows."""
+        normalized_query = query.strip()
+        if not normalized_query:
+            return {"status": "error", "error": "query cannot be empty"}
+
+        normalized_channels = []
+        for channel in channels or []:
+            normalized = str(channel).strip()
+            if normalized.startswith("<#") and normalized.endswith(">"):
+                normalized = normalized[2:-1].split("|", 1)[0]
+            normalized = normalized.lstrip("#").strip().lower()
+            if normalized and normalized not in normalized_channels:
+                normalized_channels.append(normalized)
+
+        normalized_from_user = from_user.strip().lstrip("@").lower() if from_user else None
+        try:
+            return asyncio.run(
+                self._search_slack_messages_async(
+                    query=normalized_query,
+                    limit=_clamp(limit, minimum=1, maximum=MAX_SEARCH_LIMIT),
+                    channels=normalized_channels or None,
+                    from_user=normalized_from_user or None,
+                )
+            )
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
     async def _search_dm_conversations_async(
         self,
         *,

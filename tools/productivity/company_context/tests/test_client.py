@@ -120,6 +120,72 @@ def test_search_rejects_empty_query(query):
     assert result == {"status": "error", "error": "query cannot be empty"}
 
 
+def test_search_slack_messages_queries_scoped_normalized_rows(monkeypatch):
+    fake = _FakeConnection(
+        rows=[
+            {
+                "channel_id": "C123",
+                "channel_name": "eng-infra",
+                "message_ts": "1780000000.000001",
+                "occurred_at": dt.datetime(2026, 9, 17, 12, 0, tzinfo=dt.UTC),
+                "thread_ts": "1780000000.000000",
+                "user_id": "U123",
+                "bot_id": "",
+                "text": "database migration completed",
+                "permalink": "https://example.slack.com/archives/C123/p1780000000000001",
+                "reply_count": 0,
+                "author_name": "Alice",
+                "score": 0.75,
+            }
+        ]
+    )
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").search_slack_messages(
+        " database migration ",
+        limit=500,
+        channels=["#eng-infra", "<#C123|eng-infra>", "ENG-INFRA"],
+        from_user="@Alice",
+    )
+
+    assert result == {
+        "status": "ok",
+        "query": "database migration",
+        "results": [
+            {
+                "channel": "eng-infra",
+                "channel_id": "C123",
+                "user": "Alice",
+                "user_id": "U123",
+                "bot_id": "",
+                "text": "database migration completed",
+                "timestamp": "1780000000.000001",
+                "occurred_at": "2026-09-17T12:00:00+00:00",
+                "permalink": "https://example.slack.com/archives/C123/p1780000000000001",
+                "thread_ts": "1780000000.000000",
+                "reply_count": 0,
+                "score": 0.75,
+            }
+        ],
+    }
+    query, args = fake.fetch_calls[0]
+    assert "FROM company_context_slack_messages messages" in query
+    assert "LEFT JOIN company_context_slack_users users" in query
+    assert "websearch_to_tsquery('english', $1)" in query
+    assert args == ("database migration", ["eng-infra", "c123"], "alice", 50)
+    assert fake.closed is True
+
+
+def test_search_slack_messages_rejects_empty_query():
+    result = CompanyContextClient("postgresql://example").search_slack_messages("   ")
+
+    assert result == {"status": "error", "error": "query cannot be empty"}
+
+
 def test_default_database_url_uses_company_context_dsn_env(monkeypatch):
     monkeypatch.setenv("CENTAUR_POSTGRES_DSN", "postgresql://scoped")
     monkeypatch.setenv("DATABASE_URL", "postgresql://raw-app-db")

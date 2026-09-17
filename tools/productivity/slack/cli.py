@@ -173,9 +173,9 @@ def search(
 ):
     """Search indexed Slack history through company context.
 
-    This command uses the indexed company-context search rather than downloading
-    channel history. Channel and author options are added as search anchors. Use
-    search-direct for exact native Slack modifiers when a linked user credential
+    This command searches normalized, access-scoped Slack rows rather than
+    downloading channel history. Channel and author options are exact filters.
+    Use search-direct for native Slack modifiers when a linked user credential
     is available.
 
     Examples:
@@ -183,22 +183,15 @@ def search(
         slack search "kubernetes error" --channels eng-infra,eng-ai
         slack search "database migration" --from alice
     """
-    search_terms = [query.strip()]
-    if channels:
-        search_terms.extend(
-            f"#{channel.strip().lstrip('#')}"
-            for channel in channels.split(",")
-            if channel.strip().lstrip("#")
-        )
-    if from_user:
-        search_terms.append(f"@{from_user.strip().lstrip('@')}")
+    channel_list = [channel.strip() for channel in channels.split(",")] if channels else None
 
     from tools.productivity.company_context.client import CompanyContextClient
 
-    result = CompanyContextClient().search(
-        query=" ".join(search_terms),
+    result = CompanyContextClient().search_slack_messages(
+        query=query,
         limit=limit,
-        source="slack",
+        channels=channel_list,
+        from_user=from_user,
     )
     if result.get("status") == "error":
         stderr_console.print(f"[red]Error: {result.get('error', 'unknown error')}[/]")
@@ -208,24 +201,7 @@ def search(
         print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
         return
 
-    results = result.get("results") or []
-    if not results:
-        console.print(f"[yellow]No indexed Slack context found for: {query}[/yellow]")
-        return
-
-    table = Table(title=f"Indexed Slack: '{query}' ({len(results)} results)")
-    table.add_column("Type", style="cyan", max_width=18)
-    table.add_column("Date", style="green", max_width=20)
-    table.add_column("Title", style="bold", max_width=36)
-    table.add_column("Preview", max_width=72)
-    for item in results:
-        table.add_row(
-            str(item.get("source_type") or ""),
-            str(item.get("occurred_at") or ""),
-            str(item.get("title") or ""),
-            str(item.get("preview") or ""),
-        )
-    console.print(table)
+    _print_message_search_results(query, result.get("results") or [], full=False)
 
 
 @app.command("search-direct")
