@@ -121,6 +121,7 @@ mod tests {
             &self,
             _thread_key: &str,
             _metadata: Option<&Value>,
+            _create_if_missing: bool,
         ) -> Result<Option<centaur_iron_control::Principal>, centaur_iron_control::IronControlError>
         {
             Ok(None)

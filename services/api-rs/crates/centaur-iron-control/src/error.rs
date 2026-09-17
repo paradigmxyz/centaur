@@ -9,7 +9,7 @@ pub enum IronControlError {
     /// canonical principal.
     #[error(transparent)]
     PrincipalDerivation(#[from] PrincipalDerivationError),
-    /// Automatic session admission requires a principal that does not exist.
+    /// Preapproved session admission could not find the required principal.
     #[error("session principal {foreign_id} is not preapproved")]
     SessionPrincipalNotPreapproved { foreign_id: String },
     /// The HTTP request could not be sent or the response could not be read.

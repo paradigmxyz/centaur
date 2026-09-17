@@ -488,9 +488,12 @@ apiRs:
   # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
   mcpPublicUrl: ""
   runMigrations: true
-  # Controls whether a missing conversation principal may be created during
-  # session admission. "preapproved" admits only principals already present in
-  # the Console. Existing principals form the allowlist across chat platforms.
+  # Controls whether a missing automatically derived session principal may be
+  # created. "preapproved" admits only principals already present in the
+  # Console; missing requester principals are omitted rather than created.
+  # Session families with unpredictable per-thread principals, including new
+  # Console chats, are incompatible with preapproved mode unless they select an
+  # existing principal explicitly.
   sessionPrincipalAdmission: automatic
   # Expose the experimental centaur MCP dispatcher (currently action=list).
   mcpV2Enabled: false

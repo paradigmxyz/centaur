@@ -142,6 +142,18 @@ impl SessionRegistrar {
         thread_key: &str,
         metadata: Option<&Value>,
     ) -> Result<Option<Principal>> {
+        self.resolve_requester(thread_key, metadata, true).await
+    }
+
+    /// Resolve the human requesting a turn. When creation is disabled, a
+    /// missing derived requester is omitted so an approved conversation can
+    /// proceed without implicitly approving that user for a future DM.
+    pub async fn resolve_requester(
+        &self,
+        thread_key: &str,
+        metadata: Option<&Value>,
+        create_if_missing: bool,
+    ) -> Result<Option<Principal>> {
         let Some(metadata) = metadata else {
             return Ok(None);
         };
@@ -157,8 +169,14 @@ impl SessionRegistrar {
                     &mut input,
                     metadata.get("slack_user_email").and_then(Value::as_str),
                 );
-                self.merge_existing_labels(&mut input).await?;
-                Ok(Some(self.client.upsert_principal(&input).await?))
+                let existing = self.merge_existing_labels(&mut input).await?;
+                match (existing, create_if_missing) {
+                    (Some(principal), false) => Ok(Some(principal)),
+                    (None, false) => Ok(None),
+                    (Some(_), true) | (None, true) => {
+                        Ok(Some(self.client.upsert_principal(&input).await?))
+                    }
+                }
             }
         }
     }
@@ -661,6 +679,53 @@ mod tests {
                 .iter()
                 .any(|request| request == "POST /api/v1/principals/prn_user/roles"),
             "iron-control owns default role assignment"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn preapproved_requester_omits_a_missing_user_without_upserting() {
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(false).await;
+        let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+        let metadata = json!({
+            "slack_user_id": "U123",
+            "slack_team_id": "T123",
+            "slack_home_team_id": "T123"
+        });
+
+        let principal = registrar
+            .resolve_requester("slack:T123:C123:1773364194.179929", Some(&metadata), false)
+            .await
+            .unwrap();
+
+        assert_eq!(principal, None);
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            ["GET /api/v1/principals/lookup/slack-user-t123-u123"]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn preapproved_requester_uses_an_existing_user_without_upserting() {
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(true).await;
+        let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+        let metadata = json!({
+            "slack_user_id": "U123",
+            "slack_team_id": "T123",
+            "slack_home_team_id": "T123"
+        });
+
+        let principal = registrar
+            .resolve_requester("slack:T123:C123:1773364194.179929", Some(&metadata), false)
+            .await
+            .unwrap()
+            .expect("preapproved requester resolves");
+
+        assert_eq!(principal.id, "prn_user");
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            ["GET /api/v1/principals/lookup/slack-user-t123-u123"]
         );
         server.abort();
     }

@@ -115,6 +115,7 @@ pub trait SessionPrincipalRegistrar: Send + Sync {
         &self,
         thread_key: &str,
         metadata: Option<&Value>,
+        create_if_missing: bool,
     ) -> Result<Option<Principal>, IronControlError>;
 
     async fn get_principal(&self, principal: &str) -> Result<Principal, IronControlError>;
@@ -135,8 +136,9 @@ impl SessionPrincipalRegistrar for SessionRegistrar {
         &self,
         thread_key: &str,
         metadata: Option<&Value>,
+        create_if_missing: bool,
     ) -> Result<Option<Principal>, IronControlError> {
-        SessionRegistrar::register_requester(self, thread_key, metadata).await
+        SessionRegistrar::resolve_requester(self, thread_key, metadata, create_if_missing).await
     }
 
     async fn get_principal(&self, principal: &str) -> Result<Principal, IronControlError> {
@@ -3373,7 +3375,11 @@ impl SessionRuntime {
     ) -> Option<String> {
         match self
             .iron_control
-            .register_requester(thread_key.as_str(), metadata)
+            .register_requester(
+                thread_key.as_str(),
+                metadata,
+                self.session_principal_admission.create_if_missing(),
+            )
             .await
         {
             Ok(principal) => principal.map(|principal| principal.id),
@@ -9234,6 +9240,7 @@ mod adoption_tests {
             &self,
             _thread_key: &str,
             _metadata: Option<&Value>,
+            _create_if_missing: bool,
         ) -> Result<Option<Principal>, IronControlError> {
             Ok(None)
         }
@@ -9258,6 +9265,7 @@ mod adoption_tests {
             &self,
             _thread_key: &str,
             _metadata: Option<&Value>,
+            _create_if_missing: bool,
         ) -> Result<Option<Principal>, IronControlError> {
             Ok(None)
         }
