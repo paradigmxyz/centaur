@@ -80,11 +80,12 @@ class SystemPromptTest(unittest.TestCase):
         prompt = SYSTEM_PROMPT.read_text()
 
         self.assertIn(
-            "public channels are always available through both proxied and direct search",
+            "public channels are available through proxied Slack methods",
             prompt,
         )
+        self.assertIn("intentionally omits public channels", prompt)
         self.assertIn(
-            "permissions endpoint returns only private channels that an admin has whitelisted",
+            "lists only private channels that an admin has whitelisted",
             prompt,
         )
 
