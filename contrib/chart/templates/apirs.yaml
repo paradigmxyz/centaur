@@ -261,6 +261,10 @@ spec:
 {{- end }}
             - name: RUN_MIGRATIONS
               value: {{ .Values.apiRs.runMigrations | quote }}
+{{- if not (hasKey .Values.apiRs.extraEnv "CENTAUR_SESSION_PRINCIPAL_ADMISSION") }}
+            - name: CENTAUR_SESSION_PRINCIPAL_ADMISSION
+              value: {{ .Values.apiRs.sessionPrincipalAdmission | quote }}
+{{- end }}
 {{- if not (hasKey .Values.apiRs.extraEnv "CENTAUR_MCP_V2_ENABLED") }}
             - name: CENTAUR_MCP_V2_ENABLED
               value: {{ .Values.apiRs.mcpV2Enabled | quote }}

@@ -5647,6 +5647,45 @@ describe('slackbotv2', () => {
     expect(threadState).toEqual(expect.objectContaining({ activeExecution: false }))
   })
 
+  it('silently ignores a session principal admission denial', async () => {
+    codexApi.queueCreateResponse(
+      {
+        ok: false,
+        error: 'session principal slack-channel-t123-c123 is not preapproved',
+        code: 'session_principal_not_preapproved'
+      },
+      403
+    )
+
+    const parent = await postUserMessage('History before admission denial.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> denied`, parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-admission-denied',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> denied`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(codexApi.creates).toHaveLength(1)
+    expect(codexApi.appends).toHaveLength(0)
+    expect(codexApi.executes).toHaveLength(0)
+    expect(await threadText(parent.ts)).not.toContain('Execution failed')
+  })
+
   it('enforces external org and trigger-bot member allowlists', async () => {
     const externalMention = await postUserMessage(`<@${BOT_USER_ID}> from external org`)
     const externalWaits: Promise<unknown>[] = []

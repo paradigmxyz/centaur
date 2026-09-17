@@ -6,8 +6,10 @@ import {
   forwardToSessionApi,
   harnessRestartPreamble,
   interruptSessionExecution,
+  isSessionPrincipalAdmissionDenied,
   openSessionEventStream,
   resolveSlackHomeTeamId,
+  SessionApiError,
   serializeAttachment,
   serializeMessage
 } from '../src/session-api'
@@ -24,6 +26,21 @@ type RecordedRequest = {
   body: unknown
   url: string
 }
+
+describe('session admission errors', () => {
+  test('recognizes only the typed preapproval denial', () => {
+    const error = new SessionApiError({
+      action: 'create session',
+      body: JSON.stringify({ code: 'session_principal_not_preapproved' }),
+      retryable: false,
+      status: 403,
+      statusText: 'Forbidden'
+    })
+
+    expect(isSessionPrincipalAdmissionDenied(error)).toBe(true)
+    expect(isSessionPrincipalAdmissionDenied(new Error('forbidden'))).toBe(false)
+  })
+})
 
 function apiMessage(
   text: string,

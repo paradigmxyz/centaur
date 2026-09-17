@@ -33,7 +33,7 @@ use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
 use centaur_session_core::HarnessType;
 use centaur_session_runtime::{
     PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode, SessionEventRetentionConfig,
-    SessionSandboxCleanupConfig,
+    SessionPrincipalAdmission, SessionSandboxCleanupConfig,
 };
 use centaur_workflows::{WorkflowHostSandboxRuntime, WorkflowPrincipalRegistrar};
 use clap::{Args as ClapArgs, Parser, ValueEnum};
@@ -65,6 +65,14 @@ pub(crate) struct Args {
     sandbox: SandboxArgs,
     #[command(flatten)]
     session_event_retention: SessionEventRetentionArgs,
+    /// Whether session creation may automatically provision a missing conversation principal.
+    #[arg(
+        long = "session-principal-admission",
+        env = "CENTAUR_SESSION_PRINCIPAL_ADMISSION",
+        default_value = "automatic",
+        value_enum
+    )]
+    session_principal_admission: SessionPrincipalAdmissionArg,
     #[command(flatten)]
     activity_summary: ActivitySummaryArgs,
 }
@@ -106,6 +114,13 @@ impl Args {
         self.session_event_retention.config()
     }
 
+    pub(crate) fn session_principal_admission(&self) -> SessionPrincipalAdmission {
+        match self.session_principal_admission {
+            SessionPrincipalAdmissionArg::Automatic => SessionPrincipalAdmission::Automatic,
+            SessionPrincipalAdmissionArg::Preapproved => SessionPrincipalAdmission::Preapproved,
+        }
+    }
+
     pub(crate) async fn workflow_host_sandbox_runtime(
         &self,
         bootstrap_iron_control_principal: &str,
@@ -127,6 +142,12 @@ impl Args {
         (self.server.execution_adoption_interval_secs > 0)
             .then(|| Duration::from_secs(self.server.execution_adoption_interval_secs))
     }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SessionPrincipalAdmissionArg {
+    Automatic,
+    Preapproved,
 }
 
 pub(crate) struct IronControlRuntime {
@@ -1523,7 +1544,8 @@ async fn register_role_with_retry(
 fn should_retry_iron_control_register(error: &RegisterError) -> bool {
     match error {
         RegisterError::Translate(_) => false,
-        RegisterError::Control(IronControlError::PrincipalDerivation(_)) => false,
+        RegisterError::Control(IronControlError::PrincipalDerivation(_))
+        | RegisterError::Control(IronControlError::SessionPrincipalNotPreapproved { .. }) => false,
         RegisterError::Control(IronControlError::Transport { .. }) => true,
         RegisterError::Control(IronControlError::Decode { .. }) => false,
         RegisterError::Control(IronControlError::Status { status, .. }) => {
@@ -2308,6 +2330,47 @@ mod tests {
                 what: "unsupported transform".to_owned(),
             })
         ));
+    }
+
+    #[test]
+    fn session_principal_admission_defaults_to_automatic_and_accepts_preapproved() {
+        let default_args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+        ])
+        .unwrap();
+        assert_eq!(
+            default_args.session_principal_admission(),
+            SessionPrincipalAdmission::Automatic
+        );
+
+        let restricted_args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-principal-admission",
+            "preapproved",
+        ])
+        .unwrap();
+        assert_eq!(
+            restricted_args.session_principal_admission(),
+            SessionPrincipalAdmission::Preapproved
+        );
+    }
+
+    #[test]
+    fn session_principal_admission_rejects_unknown_values() {
+        assert!(
+            Args::try_parse_from([
+                "centaur-api-server",
+                "--database-url",
+                "postgres://postgres:postgres@localhost/centaur",
+                "--session-principal-admission",
+                "sometimes",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

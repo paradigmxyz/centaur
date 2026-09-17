@@ -46,6 +46,7 @@ import {
   harnessRestartPreamble,
   interruptSessionExecution,
   isRetryableSessionApiError,
+  isSessionPrincipalAdmissionDenied,
   openSessionEventStream,
   serializeAttachment,
   serializeMessageLinks,
@@ -1524,6 +1525,12 @@ async function syncThreadMessageToSession(
         })
       }
     } catch (error) {
+      if (isSessionPrincipalAdmissionDenied(error)) {
+        finishSteeringReaction(input, trace)
+        traceLog(input.options, 'slackbotv2_session_admission_denied', trace)
+        recordForward(input.mode, 'admission_denied', traceStartedAtMs)
+        return
+      }
       if (isRetryableSessionApiError(error)) {
         if (scheduleHandoffRetry(thread, message, input, error, trace)) {
           recordForward(input.mode, 'retry_scheduled', traceStartedAtMs)
@@ -1640,6 +1647,13 @@ async function syncThreadMessageToSession(
       activeExecution: false,
       lastEventId: Math.max(latest.lastEventId ?? 0, lastEventId)
     })
+    if (isSessionPrincipalAdmissionDenied(error)) {
+      finishSteeringReaction(input, trace)
+      await setAssistantStatus(thread, '', input.options, trace).catch(() => undefined)
+      traceLog(input.options, 'slackbotv2_session_admission_denied', trace)
+      recordForward(input.mode, 'admission_denied', traceStartedAtMs)
+      return
+    }
     if (isRetryableSessionApiError(error)) {
       // The assistant status stays visible through the retry window; a
       // successful retry replaces it with the live render, and exhaustion
