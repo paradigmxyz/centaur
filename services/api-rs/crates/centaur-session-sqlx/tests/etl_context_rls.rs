@@ -150,6 +150,18 @@ async fn company_context_reader_accepts_only_explicit_channel_grants() -> Result
 }
 
 #[tokio::test]
+async fn company_context_reader_scopes_public_messages_and_mixed_visibility_authors()
+-> Result<(), Box<dyn Error>> {
+    let Some(mut fixture) = RlsTestFixture::create().await? else {
+        return Ok(());
+    };
+    let result = assert_company_context_reader_public_message_visibility(&mut fixture.conn)
+        .await
+        .map_err(Into::into);
+    fixture.finish(result).await
+}
+
+#[tokio::test]
 async fn company_context_reader_public_membership_does_not_grant_channel_access()
 -> Result<(), Box<dyn Error>> {
     let Some(mut fixture) = RlsTestFixture::create().await? else {
@@ -517,6 +529,8 @@ fn expected_policies() -> Vec<(String, String)> {
             "centaur_cc_reader_documents_select",
         ),
         ("slack_sync_channels", "centaur_cc_reader_channels_select"),
+        ("slack_sync_messages", "centaur_cc_reader_messages_select"),
+        ("slack_sync_users", "centaur_cc_reader_users_select"),
         (
             "granola_context_documents",
             "centaur_cc_reader_granola_documents_select",
@@ -836,6 +850,10 @@ async fn assert_company_context_reader_role_security(
             .all(|(_, _, allowed)| !allowed),
         "company context reader gained access to sensitive Slack source columns: {sensitive_slack_column_privileges:?}"
     );
+    assert_company_context_reader_query_denied(conn, "select raw_payload from slack_sync_messages")
+        .await?;
+    assert_company_context_reader_query_denied(conn, "select raw_payload from slack_sync_users")
+        .await?;
 
     let tables_without_rls: Vec<String> = sqlx::query_scalar(
         r#"
@@ -903,6 +921,31 @@ async fn assert_company_context_reader_role_security(
     assert!(
         writable_relations.is_empty(),
         "company context reader gained an effective write privilege: {writable_relations:?}"
+    );
+    Ok(())
+}
+
+async fn assert_company_context_reader_query_denied(
+    conn: &mut PgConnection,
+    query: &str,
+) -> Result<(), sqlx::Error> {
+    let mut tx = conn.begin().await?;
+    tx.execute("set local search_path to public").await?;
+    tx.execute("set role centaur_company_context_reader")
+        .await?;
+    let error = sqlx::query(query)
+        .fetch_all(&mut *tx)
+        .await
+        .expect_err("sensitive Slack source column query must be denied");
+    tx.rollback().await?;
+
+    let sqlx::Error::Database(error) = error else {
+        panic!("expected a database permission error, got {error}");
+    };
+    assert_eq!(
+        error.code().as_deref(),
+        Some("42501"),
+        "sensitive Slack source column query failed for an unexpected reason"
     );
     Ok(())
 }
@@ -1153,6 +1196,57 @@ async fn assert_company_context_reader_channel_grants(
             slack_private_conversation_docs: Vec::new(),
         },
         "channel-only grants must expose exactly the granted channels without user-scoped data"
+    );
+    Ok(())
+}
+
+async fn assert_company_context_reader_public_message_visibility(
+    conn: &mut PgConnection,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        insert into slack_sync_messages (channel_id, message_ts, user_id, text)
+        values ('C_ALPHA', '1000.000004', 'U_PRIVATE', 'mixed visibility author message')
+        "#,
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    let public_rows = company_context_reader_rows(
+        conn,
+        CompanyContextReaderSettings {
+            slack_history_channel_ids: Some("[]"),
+            slack_include_public: Some(true),
+            ..Default::default()
+        },
+    )
+    .await?;
+    assert_eq!(
+        public_rows,
+        CompanyContextReaderRows {
+            slack_channels: vec![
+                "C_ADMIN".to_owned(),
+                "C_ALPHA".to_owned(),
+                "C_BETA".to_owned(),
+            ],
+            slack_users: vec![
+                "U_ALPHA".to_owned(),
+                "U_BETA".to_owned(),
+                "U_PRIVATE".to_owned(),
+            ],
+            slack_messages: vec![
+                "C_ALPHA:1000.000001".to_owned(),
+                "C_ALPHA:1000.000004".to_owned(),
+                "C_BETA:1000.000002".to_owned(),
+            ],
+            company_context_docs: vec!["doc_slack_alpha".to_owned(), "doc_slack_beta".to_owned(),],
+            google_docs_observations: Vec::new(),
+            google_docs: Vec::new(),
+            granola_docs: Vec::new(),
+            slack_private_docs: Vec::new(),
+            slack_private_conversation_docs: Vec::new(),
+        },
+        "public Slack access must expose public messages and their authors without leaking private messages"
     );
     Ok(())
 }
