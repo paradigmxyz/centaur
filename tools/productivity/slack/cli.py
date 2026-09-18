@@ -14,8 +14,8 @@ app = typer.Typer(
     name="slack",
     help=(
         "Slack CLI for AI agents. Use proxy-backed commands such as `thread` and `upload` "
-        "in Slack channels. Use commands ending in `-direct`, such as `thread-direct` and "
-        "`upload-direct`, in Slack DMs."
+        "in Slack channels. In Slack DMs or when using Slack through MCP, use commands "
+        "ending in `-direct`, such as `thread-direct` and `upload-direct`."
     ),
 )
 

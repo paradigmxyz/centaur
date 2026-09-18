@@ -373,10 +373,8 @@ fn mcp_initialize_result(params: &Value) -> Value {
                 "from the short MCP bootstrap tool list. In particular, search when a request ",
                 "involves an external service, private or current data, an external action, or ",
                 "a service URL. Load the selected tool with `centaur_catalog_load`, follow its ",
-                "help and skill instructions, then invoke it with `centaur_tool_call`. For Slack ",
-                "DM access, use commands ending in `-direct`, such as `thread-direct` and ",
-                "`upload-direct`. When the user needs a downloadable artifact, instruct the ",
-                "producing tool to write it ",
+                "help and skill instructions, then invoke it with `centaur_tool_call`. When the ",
+                "user needs a downloadable artifact, instruct the producing tool to write it ",
                 "beneath `/tmp/downloads`, then immediately call `centaur_artifact_get` with its ",
                 "relative path. Files in `/tmp/downloads` are transient and may not survive a ",
                 "sandbox pause, restart, or replacement."
@@ -2236,8 +2234,6 @@ def search(query, limit=20):
             let initialize = mcp_initialize_result(&json!({}));
             if enabled {
                 let instructions = initialize["instructions"].as_str().unwrap();
-                assert!(instructions.contains("Slack DM access"));
-                assert!(instructions.contains("commands ending in `-direct`"));
                 assert!(instructions.contains("write it beneath `/tmp/downloads`"));
                 assert!(instructions.contains("`centaur_artifact_get`"));
                 assert!(instructions.contains("transient"));
