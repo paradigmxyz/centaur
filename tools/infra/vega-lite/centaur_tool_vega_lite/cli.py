@@ -12,38 +12,12 @@ import typer
 
 app = typer.Typer(
     name="vega-lite",
-    help=(
-        "Create charts from declarative Vega-Lite JSON specifications. "
-        "Use this when you need layering, transforms, faceting, annotations, or "
-        "other chart types beyond a basic plotting helper."
+    help="Render declarative Vega-Lite JSON specifications to PNG or SVG.",
+    epilog=(
+        "Vega-Lite specification reference: https://vega.github.io/vega-lite/docs/\n\n"
+        "Keep data inline, then run: "
+        "vega-lite render spec.json --output chart.png"
     ),
-    epilog="""
-**Agent workflow**
-
-1. Write a Vega-Lite JSON spec to the workspace. Put records directly in
-   `data.values` (or `datasets`); network URLs are intentionally blocked.
-2. Render it with
-   `vega-lite render spec.json --output chart.png`.
-3. Inspect the JSON result, then attach the generated file with the appropriate
-   platform upload tool. Use `.svg` when a vector artifact is preferable.
-
-The `$schema` property is optional; Vega-Lite 6 is used automatically. Simple
-charts default to 800x450 before PNG scaling. A minimal spec looks like:
-
-```json
-{
-  "data": {"values": [{"category": "A", "value": 4}]},
-  "mark": "bar",
-  "encoding": {
-    "x": {"field": "category", "type": "nominal"},
-    "y": {"field": "value", "type": "quantitative"}
-  }
-}
-```
-
-Run `vega-lite render --help` for input and output options.
-""",
-    rich_markup_mode="markdown",
     no_args_is_help=True,
 )
 

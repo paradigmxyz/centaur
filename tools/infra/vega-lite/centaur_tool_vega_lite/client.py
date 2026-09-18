@@ -17,37 +17,44 @@ MAX_DIMENSION = 1_600
 MAX_SCALE = 3.0
 
 _DEFAULT_CONFIG: dict[str, Any] = {
-    "font": "sans-serif",
-    "background": "white",
+    "font": "Arial",
+    "background": "#FFFFFF",
     "view": {
         "continuousWidth": 800,
         "continuousHeight": 450,
         "stroke": None,
     },
+    "mark": {"color": "#00FF00"},
     "axis": {
-        "domainColor": "#9CA3AF",
-        "gridColor": "#E5E7EB",
-        "labelColor": "#374151",
-        "titleColor": "#111827",
+        "domainColor": "#000000",
+        "gridColor": "#E5E5E5",
+        "labelColor": "#000000",
+        "tickColor": "#000000",
+        "titleColor": "#000000",
     },
     "legend": {
-        "labelColor": "#374151",
-        "titleColor": "#111827",
+        "labelColor": "#000000",
+        "titleColor": "#000000",
     },
     "title": {
         "anchor": "start",
-        "color": "#111827",
-        "fontSize": 18,
+        "color": "#000000",
+        "font": "Times New Roman",
+        "fontSize": 20,
+        "fontWeight": "normal",
     },
     "range": {
         "category": [
-            "#0072B2",
-            "#D55E00",
-            "#009E73",
-            "#CC79A7",
-            "#F0E442",
-            "#56B4E9",
-            "#E69F00",
+            "#00FF00",
+            "#000000",
+            "#8D6ED6",
+            "#BDADE6",
+            "#0A82E2",
+            "#ACD5F5",
+            "#F3BF15",
+            "#F3F8B4",
+            "#D95959",
+            "#EEA4A4",
         ]
     },
 }
@@ -135,8 +142,8 @@ class VegaLiteClient:
 
         Data must be provided inline with ``data.values`` or ``datasets``.
         External data and image URLs are blocked. The spec is compiled with
-        Vega-Lite 6.4 and receives accessible, colorblind-safe style defaults;
-        values in the spec's ``config`` override those defaults.
+        Vega-Lite 6.4 and receives the default visual style; values in the
+        spec's ``config`` override those defaults.
         """
         prepared = _prepare_spec(spec)
         normalized_format = output_format.lower()
