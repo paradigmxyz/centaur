@@ -10,6 +10,7 @@ from rich.status import Status
 from rich.table import Table
 
 from .client import DuneClient
+from .client import _client as create_client
 
 load_dotenv()
 
@@ -19,7 +20,7 @@ _client: DuneClient | None = None
 def _get_client() -> DuneClient:
     global _client
     if _client is None:
-        _client = DuneClient()
+        _client = create_client()
     return _client
 
 
@@ -29,9 +30,7 @@ app = typer.Typer(name="dune", help="Dune Analytics CLI for executing queries an
 @app.command("health")
 def health():
     """Assert dune connectivity and auth with a safe read-only check."""
-    from .client import _client
-
-    client = _client()
+    client = create_client()
     try:
         details = client.raw_request("GET", "/query/2408388/results")
         payload = {"ok": True, "tool": "dune", "error": None, "details": details}
