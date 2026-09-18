@@ -441,6 +441,9 @@ TARGET_PROMPT="$WORKSPACE_DIR/AGENTS.md"
 compose-system-prompt \
     --home-dir "$HOME_DIR" \
     --target-prompt "$TARGET_PROMPT"
+cp "$TARGET_PROMPT" "$WORKSPACE_DIR/AGENTS_RUNTIME_BASE.md"
+export CENTAUR_RUNTIME_INSTRUCTIONS_BASELINE="$WORKSPACE_DIR/AGENTS_RUNTIME_BASE.md"
+export CENTAUR_RUNTIME_INSTRUCTIONS_TARGET="$TARGET_PROMPT"
 
 # Switch to workspace so the harness reads workspace/AGENTS.md (with persona overlay)
 cd "$WORKSPACE_DIR"
