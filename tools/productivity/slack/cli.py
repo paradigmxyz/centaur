@@ -16,9 +16,10 @@ app = typer.Typer(
         "Slack CLI for AI agents with two access paths. Proxied commands omit the "
         "`-direct` suffix (for example, `thread` and `upload`), route through the Centaur "
         "API, and are for Slack channel chat surfaces. Direct commands end in `-direct` "
-        "(for example, `thread-direct` and `upload-direct`), use the available scoped Slack "
-        "credential, and are for Slack DM chat surfaces and MCP, where channel proxy context "
-        "is unavailable. Choose the command flavor that matches the current surface."
+        "(for example, `thread-direct` and `upload-direct`) and call Slack with an actual user "
+        "token. Use direct commands when a user token is available, including in Slack DM chat "
+        "surfaces and MCP. Choose the command flavor that matches the current surface and "
+        "credential context."
     ),
 )
 

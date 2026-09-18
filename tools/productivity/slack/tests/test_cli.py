@@ -554,8 +554,9 @@ def test_help_explains_channel_and_dm_access_paths() -> None:
     assert "Proxied commands omit" in result.output
     assert "Slack channel chat surfaces" in result.output
     assert "Direct commands end" in result.output
-    assert "Slack DM chat surfaces and MCP" in result.output
-    assert "matches the current surface" in result.output
+    assert "actual user token" in result.output
+    assert "including in Slack DM chat surfaces and MCP" in result.output
+    assert "surface and credential context" in result.output
     assert "search-direct" in result.output
 
 
