@@ -48,7 +48,9 @@
             </td>
             <td class="console-td">
               <div class="flex justify-end gap-2">
-                <%= button_to "Run now", run_console_scheduled_task_path(task.oid), method: :post, class: "btn-secondary py-1.5" %>
+                <%= button_to "Run now", run_console_scheduled_task_path(task.oid), method: :post,
+                      disabled: !task.enabled?,
+                      class: "btn-secondary py-1.5 disabled:cursor-not-allowed disabled:opacity-50" %>
                 <%= link_to "Edit", edit_console_scheduled_task_path(task.oid), class: "btn-secondary py-1.5" %>
                 <%= button_to "Delete", console_scheduled_task_path(task.oid), method: :delete,
                       class: "btn-secondary py-1.5 text-red-300",

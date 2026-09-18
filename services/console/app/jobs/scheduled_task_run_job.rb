@@ -10,6 +10,8 @@ class ScheduledTaskRunJob < ApplicationJob
 
   def perform(task_id, scheduled_for = Time.current.iso8601)
     task = ScheduledTask.find(task_id)
+    return unless task.enabled?
+
     result = client_factory.call.create_workflow_run(
       workflow_name: ScheduledTask::WORKFLOW_NAME,
       input: task.api_input,

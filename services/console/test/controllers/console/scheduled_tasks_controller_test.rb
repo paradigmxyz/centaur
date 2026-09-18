@@ -18,7 +18,8 @@ class Console::ScheduledTasksControllerTest < ActionDispatch::IntegrationTest
     assert_select "textarea[name='scheduled_task[prompt]']"
     assert_select "select[name='scheduled_task[principal_oid]']", count: 0
     assert_select "select[name='scheduled_task[schedule_preset]']"
-    assert_select "select[name='scheduled_task[schedule_preset]'] option", 5
+    assert_select "select[name='scheduled_task[schedule_preset]'] option", 6
+    assert_select "option", text: "Manual only"
     assert_select "option", text: "Every day"
     assert_select "option", text: "Every weekday"
     assert_select "option", text: "Mondays"
@@ -29,7 +30,7 @@ class Console::ScheduledTasksControllerTest < ActionDispatch::IntegrationTest
     assert_select "input[type=checkbox][name='scheduled_task[custom_days][]']", 7
     assert_select "input[type=time][name='scheduled_task[custom_time]']"
     assert_select "input[name='scheduled_task[cron_expression]']", count: 0
-    assert_select "p", text: "Presets run at 9:00 AM Pacific Time."
+    assert_select "p", text: "Choose Manual only for an ad-hoc task, or run a preset at 9:00 AM Pacific Time."
     assert_select "form[data-controller='slack-channel-autocomplete']"
     assert_select "[data-slack-channel-autocomplete-url-value=?]",
                   slack_channel_options_console_scheduled_tasks_path
@@ -55,6 +56,18 @@ class Console::ScheduledTasksControllerTest < ActionDispatch::IntegrationTest
     assert_equal "0 9 * * 1-5", task.cron_expression
     assert_equal ScheduledTask::DEFAULT_TIMEZONE, task.timezone
     assert_not_nil task.next_run_at
+  end
+
+  test "creates an ad-hoc task without a schedule" do
+    post console_scheduled_tasks_url, params: {
+      scheduled_task: task_params.merge(schedule_preset: "manual")
+    }
+
+    task = ScheduledTask.order(:id).last
+    assert_redirected_to console_scheduled_tasks_path
+    assert_nil task.cron_expression
+    assert_nil task.next_run_at
+    assert_equal "Manual only", task.schedule_label
   end
 
   test "creates a task that delivers to the author's Slack DM" do
@@ -171,6 +184,20 @@ class Console::ScheduledTasksControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_redirected_to console_scheduled_tasks_path
+  end
+
+  test "does not allow a disabled task to run" do
+    task = create_task
+    task.update!(enabled: false)
+
+    get console_scheduled_tasks_url
+    assert_select "form[action=?] button[disabled]", run_console_scheduled_task_path(task.oid), text: "Run now"
+
+    assert_no_enqueued_jobs only: ScheduledTaskRunJob do
+      post run_console_scheduled_task_url(task.oid)
+    end
+    assert_redirected_to console_scheduled_tasks_path
+    assert_equal "Enable the task before running it.", flash[:alert]
   end
 
   test "users can only view and edit their own scheduled tasks" do

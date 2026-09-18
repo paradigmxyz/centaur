@@ -3,12 +3,11 @@
 import json
 import math
 
+import httpx
 import typer
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
-
-from artemis import APIError, APIStatusError
 
 from .client import METRICS, _client
 
@@ -22,9 +21,9 @@ HEALTH_SYMBOLS = ("btc", "eth")
 
 
 def _error_message(exc: Exception) -> str:
-    if isinstance(exc, APIStatusError):
-        return f"Artemis API error: HTTP {exc.status_code}"
-    if isinstance(exc, APIError):
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"Artemis API error: HTTP {exc.response.status_code}"
+    if isinstance(exc, httpx.HTTPError):
         return f"Artemis request failed ({type(exc).__name__})."
     if isinstance(exc, json.JSONDecodeError):
         return "Artemis returned invalid JSON."
@@ -52,7 +51,7 @@ def health() -> None:
         ):
             raise RuntimeError("Artemis returned missing or invalid market data.")
         payload = {"ok": True, "tool": "artemis", "error": None, "details": details}
-    except (APIError, RuntimeError, ValueError) as exc:
+    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
         print(
             json.dumps(
                 {"ok": False, "tool": "artemis", "error": _error_message(exc), "details": details}
@@ -73,7 +72,7 @@ def market_data(
     try:
         with _client() as client:
             data = client.get_market_data(symbols)
-    except (APIError, RuntimeError, ValueError) as exc:
+    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
         console.print(_error_message(exc), style="red", markup=False)
         raise typer.Exit(ERROR_EXIT_CODE) from None
 

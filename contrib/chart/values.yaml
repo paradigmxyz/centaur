@@ -338,6 +338,13 @@ sandbox:
   # placement to the default scheduler.
   nodeSelector: {}
   #   workload: centaur-sandbox
+  # Extra metadata annotations for sandbox **and** iron-proxy pods, as string
+  # key/value pairs. The motivating case is keeping a cluster autoscaler from
+  # reclaiming a node while a pod is serving a turn, e.g.
+  # `karpenter.sh/do-not-disrupt: "true"` (or the cluster-autoscaler
+  # `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`). Empty adds none.
+  podAnnotations: {}
+  #   karpenter.sh/do-not-disrupt: "true"
   tolerations: []
   # - key: centaur.ai/sandbox
   #   operator: Exists
@@ -481,6 +488,13 @@ apiRs:
   # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
   mcpPublicUrl: ""
   runMigrations: true
+  # Controls whether a missing automatically derived session principal may be
+  # created. "preapproved" admits only principals already present in the
+  # Console; missing requester principals are omitted rather than created.
+  # HTTP ingress families with unpredictable per-thread principals, including
+  # new Console chats, are incompatible with preapproved mode. Internal
+  # workflow/MCP sessions use separate principal-provisioning paths.
+  sessionPrincipalAdmission: automatic
   # Expose the experimental centaur MCP dispatcher (currently action=list).
   mcpV2Enabled: false
   sandboxBackend: agent-k8s

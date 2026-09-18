@@ -261,6 +261,10 @@ spec:
 {{- end }}
             - name: RUN_MIGRATIONS
               value: {{ .Values.apiRs.runMigrations | quote }}
+{{- if not (hasKey .Values.apiRs.extraEnv "CENTAUR_SESSION_PRINCIPAL_ADMISSION") }}
+            - name: CENTAUR_SESSION_PRINCIPAL_ADMISSION
+              value: {{ .Values.apiRs.sessionPrincipalAdmission | quote }}
+{{- end }}
 {{- if not (hasKey .Values.apiRs.extraEnv "CENTAUR_MCP_V2_ENABLED") }}
             - name: CENTAUR_MCP_V2_ENABLED
               value: {{ .Values.apiRs.mcpV2Enabled | quote }}
@@ -382,6 +386,10 @@ spec:
 {{- if and .Values.sandbox.nodeSelector (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_NODE_SELECTOR")) }}
             - name: SESSION_SANDBOX_NODE_SELECTOR
               value: {{ toJson .Values.sandbox.nodeSelector | quote }}
+{{- end }}
+{{- if and .Values.sandbox.podAnnotations (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_POD_ANNOTATIONS")) }}
+            - name: SESSION_SANDBOX_POD_ANNOTATIONS
+              value: {{ toJson .Values.sandbox.podAnnotations | quote }}
 {{- end }}
 {{- if and .Values.sandbox.tolerations (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_TOLERATIONS")) }}
             - name: SESSION_SANDBOX_TOLERATIONS

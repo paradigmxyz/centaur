@@ -386,6 +386,7 @@ impl AgentSandboxBackend {
                     resolved,
                     &sync,
                     ProxyPodScheduling {
+                        annotations: &self.config.pod_annotations,
                         node_selector: &self.config.node_selector,
                         tolerations: &self.config.tolerations,
                         runtime_class_name: self.config.runtime_class_name.as_deref(),
@@ -1414,6 +1415,10 @@ pub(crate) fn sandbox_ca_volume_json(iron_proxy: &IronProxyConfig) -> Value {
 /// Pod-scheduling knobs copied from [`AgentSandboxConfig`] onto each proxy
 /// pod so it lands under the same constraints as its sandbox.
 struct ProxyPodScheduling<'a> {
+    /// Operator annotations (e.g. `karpenter.sh/do-not-disrupt`) shared with
+    /// the sandbox pod, so the proxy survives a node drain alongside the
+    /// sandbox it serves instead of being evicted out from under it.
+    annotations: &'a BTreeMap<String, String>,
     node_selector: &'a BTreeMap<String, String>,
     tolerations: &'a [k8s_openapi::api::core::v1::Toleration],
     runtime_class_name: Option<&'a str>,
@@ -1427,16 +1432,17 @@ fn build_iron_proxy_pod(
     sync: &ProxySyncEnv,
     scheduling: ProxyPodScheduling<'_>,
 ) -> Pod {
-    let annotations = BTreeMap::from([
-        (
-            IRON_CONTROL_PROXY_ID_ANNOTATION.to_owned(),
-            sync.proxy_id.clone(),
-        ),
-        (
-            crate::IRON_CONTROL_PRINCIPAL_ANNOTATION.to_owned(),
-            resolved.principal_id.clone(),
-        ),
-    ]);
+    // Start from the operator annotations, then insert the proxy binding
+    // annotations last so they always win over any operator key collision.
+    let mut annotations = scheduling.annotations.clone();
+    annotations.insert(
+        IRON_CONTROL_PROXY_ID_ANNOTATION.to_owned(),
+        sync.proxy_id.clone(),
+    );
+    annotations.insert(
+        crate::IRON_CONTROL_PRINCIPAL_ANNOTATION.to_owned(),
+        resolved.principal_id.clone(),
+    );
     let runtime_class = scheduling
         .runtime_class_name
         .map(str::trim)
@@ -2343,6 +2349,7 @@ mod tests {
     fn no_scheduling() -> ProxyPodScheduling<'static> {
         static EMPTY_SELECTOR: BTreeMap<String, String> = BTreeMap::new();
         ProxyPodScheduling {
+            annotations: &EMPTY_SELECTOR,
             node_selector: &EMPTY_SELECTOR,
             tolerations: &[],
             runtime_class_name: None,
@@ -2755,6 +2762,13 @@ mod tests {
             config_hash: None,
         };
         let node_selector = BTreeMap::from([("workload".to_owned(), "centaur-sandbox".to_owned())]);
+        let annotations = BTreeMap::from([
+            ("karpenter.sh/do-not-disrupt".to_owned(), "true".to_owned()),
+            (
+                IRON_CONTROL_PROXY_ID_ANNOTATION.to_owned(),
+                "operator-value".to_owned(),
+            ),
+        ]);
         let tolerations = vec![Toleration {
             key: Some("example.com/sandbox".to_owned()),
             operator: Some("Exists".to_owned()),
@@ -2768,11 +2782,26 @@ mod tests {
             &resolved,
             &sync,
             ProxyPodScheduling {
+                annotations: &annotations,
                 node_selector: &node_selector,
                 tolerations: &tolerations,
                 runtime_class_name: Some("gvisor"),
                 priority_class_name: Some("centaur-sandbox"),
             },
+        );
+        let pod_annotations = pod.metadata.annotations.as_ref().unwrap();
+        assert_eq!(
+            pod_annotations
+                .get("karpenter.sh/do-not-disrupt")
+                .map(String::as_str),
+            Some("true")
+        );
+        // Operator annotations never shadow the proxy binding annotations.
+        assert_eq!(
+            pod_annotations
+                .get(IRON_CONTROL_PROXY_ID_ANNOTATION)
+                .map(String::as_str),
+            Some("iprx_test")
         );
         let pod_spec = pod.spec.unwrap();
         assert_eq!(

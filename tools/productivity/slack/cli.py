@@ -133,46 +133,10 @@ def dm(
         raise typer.Exit(1)
 
 
-@app.command()
-def search(
-    query: str = typer.Argument(..., help="Text to search for (supports multiple terms)"),
-    limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
-    full: bool = typer.Option(False, "--full", "-f", help="Show full message text"),
-    channels: str = typer.Option(
-        None, "--channels", "-c", help="Comma-separated channel names to search"
-    ),
-    from_user: str = typer.Option(None, "--from", help="Filter by username"),
-    depth: int = typer.Option(200, "--depth", "-d", help="Messages per channel to scan"),
-):
-    """Search messages in bot-accessible channels.
-
-    Workspace-wide queries use Slack's native search API. Queries with --channels
-    scan proxy-accessible public or explicitly granted channel history and rank
-    results by relevance (exact phrase matches score higher).
-
-    Native search uses the linked Slack user's token. If the principal has no
-    linked Slack account, search falls back to bot-accessible channel history.
-    Scoped history searches are limited to proxy-accessible channels.
-
-    Examples:
-        slack search "deploy"
-        slack search "kubernetes error" --channels eng-infra,eng-ai
-        slack search "database migration" --from alice --depth 500
-    """
-    from .client import search_messages
-
-    channel_list = [c.strip() for c in channels.split(",")] if channels else None
-    results = search_messages(
-        query,
-        max_results=limit,
-        channels=channel_list,
-        from_user=from_user,
-        messages_per_channel=depth,
-    )
-
+def _print_message_search_results(query: str, results: list[dict], *, full: bool) -> None:
     if not results:
         console.print("[yellow]No messages found.[/]")
-        raise typer.Exit()
+        return
 
     if full:
         for i, msg in enumerate(results, 1):
@@ -181,19 +145,101 @@ def search(
             console.print(f"[dim]{msg['permalink']}[/]")
             if i < len(results):
                 console.print("---")
-    else:
-        table = Table(title=f"Slack: '{query}' ({len(results)} results)")
-        table.add_column("Channel", style="cyan", max_width=15)
-        table.add_column("User", style="green", max_width=15)
-        table.add_column("Message", style="white", max_width=80)
+        return
 
-        for msg in results:
-            text = msg["text"][:80].replace("\n", " ")
-            if len(msg["text"]) > 80:
-                text += "..."
-            table.add_row(f"#{msg['channel']}", msg["user"], text)
+    table = Table(title=f"Slack: '{query}' ({len(results)} results)")
+    table.add_column("Channel", style="cyan", max_width=15)
+    table.add_column("User", style="green", max_width=15)
+    table.add_column("Message", style="white", max_width=80)
 
-        console.print(table)
+    for msg in results:
+        text = msg["text"][:80].replace("\n", " ")
+        if len(msg["text"]) > 80:
+            text += "..."
+        table.add_row(f"#{msg['channel']}", msg["user"], text)
+
+    console.print(table)
+
+
+@app.command()
+def search(
+    query: str = typer.Argument(..., help="Text to search for (supports multiple terms)"),
+    limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
+    full: bool = typer.Option(False, "--full", "-f", help="Output full indexed result metadata"),
+    channels: str = typer.Option(
+        None, "--channels", "-c", help="Comma-separated channel names or IDs to target"
+    ),
+    from_user: str = typer.Option(None, "--from", help="Target messages by this username"),
+):
+    """Search indexed Slack history through company context.
+
+    This command searches normalized, access-scoped Slack rows rather than
+    downloading channel history. Channel and author options are exact filters.
+    Use search-direct for native Slack modifiers when a linked user credential
+    is available.
+
+    Examples:
+        slack search "deploy"
+        slack search "kubernetes error" --channels eng-infra,eng-ai
+        slack search "database migration" --from alice
+    """
+    channel_list = [channel.strip() for channel in channels.split(",")] if channels else None
+
+    from .client import IndexedSlackClient
+
+    result = IndexedSlackClient().search_messages(
+        query=query,
+        limit=limit,
+        channels=channel_list,
+        from_user=from_user,
+    )
+    if result.get("status") == "error":
+        stderr_console.print(f"[red]Error: {result.get('error', 'unknown error')}[/]")
+        raise typer.Exit(1)
+
+    if full:
+        print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+        return
+
+    _print_message_search_results(query, result.get("results") or [], full=False)
+
+
+@app.command("search-direct")
+def search_direct(
+    query: str = typer.Argument(..., help="Slack search query, including native modifiers"),
+    limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
+    full: bool = typer.Option(False, "--full", "-f", help="Show full message text"),
+    channels: str = typer.Option(
+        None, "--channels", "-c", help="Comma-separated channel names or IDs to search"
+    ),
+    from_user: str = typer.Option(None, "--from", help="Filter by username"),
+):
+    """Search directly with Slack's native user-token search API.
+
+    Use this command when the current Slack context provides a linked user's
+    credential. Channel filters remain native Slack search modifiers; this
+    command never downloads and scans channel history.
+
+    Examples:
+        slack search-direct "deploy"
+        slack search-direct "kubernetes error" --channels eng-infra,eng-ai
+        slack search-direct "database migration" --from alice
+    """
+    from .client import search_messages_direct
+
+    channel_list = [c.strip() for c in channels.split(",")] if channels else None
+    try:
+        results = search_messages_direct(
+            query,
+            max_results=limit,
+            channels=channel_list,
+            from_user=from_user,
+        )
+    except (RuntimeError, ValueError) as e:
+        stderr_console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+    _print_message_search_results(query, results, full=full)
 
 
 @app.command("channel-direct")

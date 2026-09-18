@@ -95,10 +95,10 @@ def scheduled_task(
 def create_scheduled_task(
     name: str = typer.Argument(..., help="Unique task name"),
     prompt: str = typer.Option(..., "--prompt", "-p", help="Prompt to run"),
-    cron_expression: str = typer.Option(
-        ...,
+    cron_expression: str | None = typer.Option(
+        None,
         "--cron",
-        help="Five-field cron expression in Pacific Time",
+        help="Optional five-field cron expression in Pacific Time",
     ),
     delivery_channel: str = typer.Option(
         "dm",
@@ -114,7 +114,7 @@ def create_scheduled_task(
         envvar="CENTAUR_CONSOLE_BEARER_TOKEN",
     ),
 ) -> None:
-    """Create a scheduled task owned by the current Console user."""
+    """Create an ad-hoc or scheduled task owned by the current Console user."""
     with get_client(url=url, bearer_token=bearer_token) as client:
         result = client.create_scheduled_task(
             name=name,
@@ -134,7 +134,7 @@ def update_scheduled_task(
     cron_expression: str | None = typer.Option(
         None,
         "--cron",
-        help="New five-field cron expression in Pacific Time",
+        help='New five-field cron expression in Pacific Time; pass "" to clear',
     ),
     delivery_channel: str | None = typer.Option(
         None,

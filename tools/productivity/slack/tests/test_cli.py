@@ -554,6 +554,102 @@ def test_help_explains_channel_and_dm_access_paths() -> None:
     assert "Slack channels" in result.output
     assert "Use commands ending in" in result.output
     assert "Slack DMs" in result.output
+    assert "search-direct" in result.output
+
+
+def test_search_uses_indexed_slack_client(monkeypatch) -> None:
+    calls = []
+
+    class FakeIndexedSlackClient:
+        def search_messages(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "status": "ok",
+                "results": [
+                    {
+                        "channel": "eng-infra",
+                        "user": "alice",
+                        "text": "database migration completed",
+                        "permalink": "https://example.slack.com/archives/C123/p123",
+                    }
+                ],
+            }
+
+    monkeypatch.setitem(
+        sys.modules,
+        "slack.client",
+        types.SimpleNamespace(IndexedSlackClient=FakeIndexedSlackClient),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "search",
+            "database migration",
+            "--channels",
+            "eng-infra,C1234567890",
+            "--from",
+            "alice",
+            "--limit",
+            "5",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "completed" in result.output
+    assert calls == [
+        {
+            "query": "database migration",
+            "limit": 5,
+            "channels": ["eng-infra", "C1234567890"],
+            "from_user": "alice",
+        }
+    ]
+
+
+def test_search_direct_calls_native_search_client(monkeypatch) -> None:
+    calls = []
+
+    def fake_search_messages_direct(*args, **kwargs):
+        calls.append((args, kwargs))
+        return [
+            {
+                "channel": "eng-infra",
+                "user": "alice",
+                "text": "deploy completed",
+                "permalink": "https://example.slack.com/archives/C123/p123",
+            }
+        ]
+
+    fake_client = types.SimpleNamespace(search_messages_direct=fake_search_messages_direct)
+    monkeypatch.setitem(sys.modules, "slack.client", fake_client)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "search-direct",
+            "deploy",
+            "--channels",
+            "eng-infra,C1234567890",
+            "--from",
+            "alice",
+            "--limit",
+            "5",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "deploy completed" in result.output
+    assert calls == [
+        (
+            ("deploy",),
+            {
+                "max_results": 5,
+                "channels": ["eng-infra", "C1234567890"],
+                "from_user": "alice",
+            },
+        )
+    ]
 
 
 def test_thread_does_not_fall_back_when_api_server_fails(monkeypatch) -> None:

@@ -363,6 +363,10 @@
         "syncInfraSecrets": { "type": "boolean" },
         "mcpV2Enabled": { "type": "boolean" },
         "mcpPublicUrl": { "type": "string" },
+        "sessionPrincipalAdmission": {
+          "type": "string",
+          "enum": ["automatic", "preapproved"]
+        },
         "sandboxRunningLimit": { "type": "integer", "minimum": 0 },
         "sandboxHotIdleGraceSecs": { "type": "integer", "minimum": 0 },
         "sessionEventsRetentionDays": { "type": "integer", "minimum": 0, "maximum": 3650 },

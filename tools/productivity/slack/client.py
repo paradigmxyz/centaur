@@ -1,5 +1,6 @@
 """Slack API client for bot-token Slack tool operations."""
 
+import asyncio
 import base64
 import binascii
 import json
@@ -11,12 +12,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import urlparse
 
+import asyncpg
 import structlog
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -70,6 +71,160 @@ class SlackRateLimitError(RuntimeError):
         }
         self.payload = payload
         super().__init__(json.dumps(payload, sort_keys=True))
+
+
+class IndexedSlackClient:
+    """Search RLS-scoped Slack messages stored by the Slack sync."""
+
+    _DEFAULT_LIMIT = 20
+    _MAX_LIMIT = 50
+    _DSN_ENV = "CENTAUR_POSTGRES_DSN"
+    _DATABASE_ENV = "COMPANY_CONTEXT_POSTGRES_DATABASE"
+    _DEFAULT_DATABASE = "centaur"
+
+    def __init__(self, database_url: str | None = None):
+        value = database_url
+        if value is None:
+            value = os.getenv(self._DSN_ENV)  # noqa: TID251
+        if value is None:
+            value = secret(self._DSN_ENV, default="")
+        value = value.strip()
+        if not value or value == self._DSN_ENV:
+            raise RuntimeError(f"{self._DSN_ENV} is not configured")
+
+        database = os.getenv(self._DATABASE_ENV, self._DEFAULT_DATABASE).strip()  # noqa: TID251
+        parsed = urllib.parse.urlparse(value)
+        if parsed.scheme and parsed.netloc and parsed.path in ("", "/"):
+            value = urllib.parse.urlunparse(
+                parsed._replace(path=f"/{database or self._DEFAULT_DATABASE}")
+            )
+        self.database_url = value
+
+    async def _search_messages(
+        self,
+        *,
+        query: str,
+        limit: int,
+        channels: list[str] | None,
+        from_user: str | None,
+    ) -> dict[str, Any]:
+        conn = await asyncpg.connect(self.database_url)
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    messages.channel_id,
+                    channels.channel_name,
+                    messages.message_ts,
+                    messages.occurred_at,
+                    messages.thread_ts,
+                    messages.user_id,
+                    messages.bot_id,
+                    messages.text,
+                    messages.permalink,
+                    messages.reply_count,
+                    COALESCE(
+                        NULLIF(users.display_name, ''),
+                        NULLIF(users.real_name, ''),
+                        NULLIF(users.user_name, ''),
+                        NULLIF(messages.user_id, ''),
+                        messages.bot_id
+                    ) AS author_name,
+                    ts_rank_cd(
+                        to_tsvector('english', COALESCE(messages.text, '')),
+                        websearch_to_tsquery('english', $1)
+                    ) AS score
+                FROM company_context_slack_messages messages
+                JOIN slack_sync_channels channels
+                  ON channels.channel_id = messages.channel_id
+                LEFT JOIN company_context_slack_users users
+                  ON users.user_id = messages.user_id
+                WHERE to_tsvector('english', COALESCE(messages.text, ''))
+                      @@ websearch_to_tsquery('english', $1)
+                  AND (
+                      $2::text[] IS NULL
+                      OR LOWER(messages.channel_id) = ANY($2::text[])
+                      OR LOWER(channels.channel_name) = ANY($2::text[])
+                  )
+                  AND (
+                      $3::text IS NULL
+                      OR LOWER(messages.user_id) = $3
+                      OR LOWER(users.user_name) = $3
+                      OR LOWER(users.real_name) = $3
+                      OR LOWER(users.display_name) = $3
+                  )
+                ORDER BY score DESC, messages.occurred_at DESC NULLS LAST
+                LIMIT $4
+                """,
+                query,
+                channels,
+                from_user,
+                limit,
+            )
+            return {
+                "status": "ok",
+                "query": query,
+                "results": [
+                    {
+                        "channel": str(row.get("channel_name") or ""),
+                        "channel_id": str(row.get("channel_id") or ""),
+                        "user": str(row.get("author_name") or ""),
+                        "user_id": str(row.get("user_id") or ""),
+                        "bot_id": str(row.get("bot_id") or ""),
+                        "text": str(row.get("text") or ""),
+                        "timestamp": str(row.get("message_ts") or ""),
+                        "occurred_at": self._isoformat(row.get("occurred_at")),
+                        "permalink": str(row.get("permalink") or ""),
+                        "thread_ts": str(row.get("thread_ts") or "") or None,
+                        "reply_count": int(row.get("reply_count") or 0),
+                        "score": float(row.get("score") or 0.0),
+                    }
+                    for row in rows
+                ],
+            }
+        finally:
+            await conn.close()
+
+    @staticmethod
+    def _isoformat(value: Any) -> str | None:
+        if value is None:
+            return None
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+        return str(value)
+
+    def search_messages(
+        self,
+        query: str,
+        limit: int = _DEFAULT_LIMIT,
+        channels: list[str] | None = None,
+        from_user: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_query = query.strip()
+        if not normalized_query:
+            return {"status": "error", "error": "query cannot be empty"}
+
+        normalized_channels = []
+        for channel in channels or []:
+            normalized = str(channel).strip()
+            if normalized.startswith("<#") and normalized.endswith(">"):
+                normalized = normalized[2:-1].split("|", 1)[0]
+            normalized = normalized.lstrip("#").strip().lower()
+            if normalized and normalized not in normalized_channels:
+                normalized_channels.append(normalized)
+
+        normalized_from_user = from_user.strip().lstrip("@").lower() if from_user else None
+        try:
+            return asyncio.run(
+                self._search_messages(
+                    query=normalized_query,
+                    limit=max(1, min(int(limit), self._MAX_LIMIT)),
+                    channels=normalized_channels or None,
+                    from_user=normalized_from_user or None,
+                )
+            )
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
 
 
 class SlackClient:
@@ -695,9 +850,8 @@ class SlackClient:
         legal channels and search/history calls only work on channels the bot
         actually belongs to. Filtering to ``types="public_channel"`` silently
         drops every private channel from this list and from every caller
-        that depends on it (e.g. ``_search_messages_local`` scans this list
-        as the fallback when native search lacks ``search:read``, and
-        ``gather_context``'s Slack grab walks the bot's member channels).
+        that depends on it (including ``gather_context``'s Slack grab, which
+        walks the bot's member channels).
 
         Uses ``users.conversations``, which returns only the conversations the
         bot is a member of. ``conversations.list`` would instead page through
@@ -762,190 +916,30 @@ class SlackClient:
         self._save_channel_cache(result)
         return result
 
-    def _fetch_channel_history_for_search(
-        self,
-        channel_id: str,
-        channel_name: str,
-        limit: int,
-        user_cache: dict[str, str],
-    ) -> list[dict]:
-        """Fetch history for a single search fallback channel."""
-        try:
-            response = self.get_channel_history_proxy(channel_id, limit=limit)
-        except (RuntimeError, ValueError):
-            return self._fetch_direct_channel_history_for_search(
-                channel_id,
-                channel_name,
-                limit,
-                user_cache,
-            )
-
-        messages = []
-        for msg in response.get("messages", []):
-            messages.append(
-                self._serialize_message(
-                    msg,
-                    channel_id,
-                    user_cache,
-                    channel_name=channel_name,
-                )
-            )
-
-        return messages
-
-    _MAX_SEARCH_DIRECT_THREADS = 10
-
-    def _fetch_direct_channel_history_for_search(
-        self,
-        channel_id: str,
-        channel_name: str,
-        limit: int,
-        user_cache: dict[str, str],
-    ) -> list[dict]:
-        """Fetch direct Slack history and expand a bounded number of threads."""
-        try:
-            page = self.get_channel_history_page(channel_id, limit=limit)
-        except (RuntimeError, ValueError):
-            return []
-
-        messages = [{**msg, "channel": channel_name} for msg in page.get("messages", [])]
-        seen_timestamps = {message.get("timestamp") for message in messages}
-        expanded_threads = 0
-
-        for message in list(messages):
-            if expanded_threads >= self._MAX_SEARCH_DIRECT_THREADS:
-                break
-            if int(message.get("reply_count") or 0) <= 0:
-                continue
-
-            thread_ts = message.get("thread_ts") or message.get("timestamp")
-            if not thread_ts:
-                continue
-
-            try:
-                thread_page = self.get_thread_replies_page(
-                    channel=channel_id,
-                    thread_ts=thread_ts,
-                    limit=min(limit, self._DEFAULT_THREAD_REPLY_LIMIT),
-                )
-            except (RuntimeError, ValueError):
-                continue
-
-            expanded_threads += 1
-            for reply in thread_page.get("messages", []):
-                timestamp = reply.get("timestamp")
-                if not timestamp or timestamp in seen_timestamps:
-                    continue
-                seen_timestamps.add(timestamp)
-                messages.append({**reply, "channel": channel_name})
-
-        return messages
-
-    _MAX_SEARCH_CHANNELS = 50  # Max channels to search when no filter specified
-
-    def _rank_channels_for_query(self, channels: list[dict], query_terms: list[str]) -> list[dict]:
-        """Rank channels by relevance to query terms. Most relevant first."""
-        scored = []
-        for ch in channels:
-            score = 0.0
-            name_lower = ch["name"].lower()
-            searchable = f"{name_lower} {ch.get('purpose', '')} {ch.get('topic', '')}".lower()
-            for term in query_terms:
-                if term in name_lower:
-                    score += 5.0
-                elif term in searchable:
-                    score += 2.0
-            # Boost by member count (more members = more likely relevant)
-            score += min(ch.get("member_count", 0) / 50, 3.0)
-            scored.append((score, ch))
-        scored.sort(key=lambda x: -x[0])
-        return [ch for _, ch in scored]
-
-    def _score_match(self, query_terms: list[str], text: str) -> float:
-        """Score how well text matches query terms. Higher = better match."""
-        text_lower = text.lower()
-        score = 0.0
-
-        # Exact phrase match (highest score)
-        full_query = " ".join(query_terms)
-        if full_query in text_lower:
-            score += 10.0
-
-        # Individual term matches
-        for term in query_terms:
-            if term in text_lower:
-                score += 1.0
-                # Bonus for word boundary matches
-                if f" {term} " in f" {text_lower} ":
-                    score += 0.5
-
-        # Penalty for very long messages (likely less relevant)
-        if len(text) > 500:
-            score *= 0.8
-
-        return score
-
-    def search_messages(
+    def search_messages_direct(
         self,
         query: str,
         max_results: int = 20,
         channels: list[str] | None = None,
         from_user: str | None = None,
-        messages_per_channel: int = 200,
     ) -> list[dict]:
-        """Search messages using Slack's native search.messages API.
+        """Search directly with Slack's native user-token search API.
 
-        Uses Slack's native search.messages API with the current principal's
-        user token for fast, workspace-wide search. Explicitly channel-scoped
-        searches use authorized channel history instead. When no user token is
-        linked, Slack rejects native search and the bot-scoped history path is
-        used as a compatibility fallback.
-
-        Supports Slack search modifiers in the query string:
-            in:#channel, from:@user, before:YYYY-MM-DD, after:YYYY-MM-DD,
-            has:link, has:reaction, is:thread, etc.
-
-        Args:
-            query: Search query (plain text or with Slack search modifiers)
-            max_results: Maximum results to return
-            channels: Optional list of channel names to filter by
-            from_user: Optional username to filter by
-            messages_per_channel: Messages per channel (only used in fallback)
-
-        Returns:
-            List of matching message dicts, sorted by relevance
+        This path never scans channel history. Channel and user filters are
+        translated into native Slack modifiers.
         """
-        local_query, local_channels, local_from_user = self._extract_local_search_filters(
-            query, channels, from_user
-        )
-        if local_channels:
-            return self._search_messages_local(
-                local_query,
-                max_results,
-                local_channels,
-                local_from_user,
-                messages_per_channel,
-            )
-
-        # Build the search query with modifiers
-        search_query = query
+        modifiers = []
+        for channel in channels or []:
+            normalized = self._clean_channel_ref(channel)
+            if normalized:
+                modifiers.append(f"in:{normalized}")
         if from_user:
-            search_query += f" from:@{from_user.lstrip('@')}"
+            modifiers.append(f"from:@{from_user.lstrip('@')}")
 
+        search_query = " ".join(part for part in [query.strip(), *modifiers] if part)
         try:
             return self._search_messages_native(search_query, max_results)
         except SlackApiError as error:
-            # search.messages does not accept bot tokens. Preserve the restricted
-            # bot-history path for principals without a linked Slack credential,
-            # but never turn a mis-scoped user token into a workspace-wide scan.
-            if self._slack_error_code(error) == "not_allowed_token_type":
-                return self._search_messages_local(
-                    local_query,
-                    max_results,
-                    local_channels,
-                    local_from_user,
-                    messages_per_channel,
-                )
             access_path = "search_token" if self._search_client is not self._client else "bot_token"
             self._raise_slack_api_error(
                 error,
@@ -996,155 +990,6 @@ class SlackClient:
                 }
             )
 
-        return results
-
-    def _extract_local_search_filters(
-        self,
-        query: str,
-        channels: list[str] | None,
-        from_user: str | None,
-    ) -> tuple[str, list[str] | None, str | None]:
-        """Extract common Slack search modifiers for the local history scanner."""
-        local_channels = list(channels or [])
-        local_from_user = from_user
-
-        def channel_repl(match: re.Match) -> str:
-            local_channels.append(match.group("id") or match.group("name") or "")
-            return " "
-
-        query = re.sub(
-            r"(?<!\S)in:(?:<#(?P<id>[CGD][A-Z0-9]+)(?:\|[^>]+)?>|#?(?P<name>[A-Za-z0-9_-]+))",
-            channel_repl,
-            query,
-        )
-
-        def from_repl(match: re.Match) -> str:
-            nonlocal local_from_user
-            local_from_user = match.group("uid") or match.group("uname") or local_from_user
-            return " "
-
-        query = re.sub(
-            r"(?<!\S)from:(?:<@(?P<uid>[A-Z0-9]+)>|@?(?P<uname>[A-Za-z0-9._-]+))",
-            from_repl,
-            query,
-        )
-
-        deduped_channels = []
-        seen = set()
-        for channel in local_channels:
-            normalized = self._clean_channel_ref(channel)
-            if not normalized:
-                continue
-            key = normalized.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped_channels.append(normalized)
-
-        return " ".join(query.split()), deduped_channels or None, local_from_user
-
-    def _channel_refs_for_search(self, channels: list[str]) -> list[dict]:
-        """Resolve channel filters without listing channels when IDs are provided."""
-        resolved: dict[str, dict] = {}
-        unresolved_names: set[str] = set()
-
-        for channel in channels:
-            normalized = self._clean_channel_ref(channel)
-            if not normalized:
-                continue
-            if self._looks_like_channel_id(normalized):
-                channel_id = normalized.upper()
-                resolved[channel_id] = {
-                    "id": channel_id,
-                    "name": channel_id,
-                    "purpose": "",
-                    "topic": "",
-                    "member_count": 0,
-                    "is_private": channel_id.startswith("G"),
-                }
-            else:
-                unresolved_names.add(normalized.lower())
-
-        if unresolved_names:
-            for channel in self.list_channels_proxy(history_only=True):
-                if channel["name"].lower() in unresolved_names:
-                    resolved[channel["id"]] = channel
-
-        return list(resolved.values())
-
-    def _search_messages_local(
-        self,
-        query: str,
-        max_results: int = 20,
-        channels: list[str] | None = None,
-        from_user: str | None = None,
-        messages_per_channel: int = 200,
-    ) -> list[dict]:
-        """Search messages by scanning channel histories through the proxy."""
-        query_terms = [t.strip().lower() for t in query.split() if t.strip()]
-
-        if channels:
-            bot_channels = self._channel_refs_for_search(channels)
-        else:
-            bot_channels = self.list_channels_proxy(history_only=True)
-            bot_channels = self._rank_channels_for_query(bot_channels, query_terms)
-            bot_channels = bot_channels[: self._MAX_SEARCH_CHANNELS]
-
-        if not bot_channels:
-            return []
-
-        user_cache = self._get_user_cache()
-        effective_limit = max(1, min(int(messages_per_channel), self._MAX_PAGE_SIZE))
-        if len(bot_channels) > 30 and messages_per_channel > 100:
-            effective_limit = 100
-
-        all_messages = []
-        with ThreadPoolExecutor(max_workers=min(6, len(bot_channels))) as executor:
-            futures = {
-                executor.submit(
-                    self._fetch_channel_history_for_search,
-                    ch["id"],
-                    ch["name"],
-                    effective_limit,
-                    user_cache,
-                ): ch
-                for ch in bot_channels
-            }
-
-            for future in as_completed(futures):
-                try:
-                    messages = future.result()
-                    all_messages.extend(messages)
-                except Exception:
-                    pass
-
-        scored_results = []
-        for msg in all_messages:
-            text_lower = msg["text"].lower()
-            if query_terms and not any(term in text_lower for term in query_terms):
-                continue
-
-            if from_user:
-                username = user_cache.get(msg["user_id"], msg["user_id"])
-                normalized_user = from_user.lower().lstrip("@")
-                if normalized_user not in {username.lower(), msg["user_id"].lower()}:
-                    continue
-
-            score = self._score_match(query_terms, msg["text"])
-            msg["user"] = user_cache.get(msg["user_id"], msg["user_id"])
-            msg["text"] = self._resolve_mentions(msg["text"], user_cache)
-            msg["_score"] = score
-            scored_results.append(msg)
-
-        scored_results.sort(key=lambda x: (-x["_score"], -float(x["timestamp"])))
-        for msg in scored_results:
-            del msg["_score"]
-
-        results = scored_results[:max_results]
-        for msg in results:
-            msg["permalink"] = self._canonical_message_permalink(
-                msg["channel_id"], msg["timestamp"]
-            )
         return results
 
     def get_channel_history_page(
@@ -2643,8 +2488,8 @@ def resolve_mentions(
     return slack_client._resolve_mentions(text, resolved_user_cache)
 
 
-def search_messages(*args, **kwargs):
-    return _client().search_messages(*args, **kwargs)
+def search_messages_direct(*args, **kwargs):
+    return _client().search_messages_direct(*args, **kwargs)
 
 
 def get_channel_history_page(*args, **kwargs):

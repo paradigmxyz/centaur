@@ -84,6 +84,18 @@ class ScheduledTaskJobsTest < ActiveJob::TestCase
     assert_equal Time.utc(2026, 8, 19, 12, 5), task.last_run_at
   end
 
+  test "runner skips a task disabled after it was enqueued" do
+    task = create_task
+    task.update!(enabled: false)
+    client = FakeApiClient.new
+    ScheduledTaskRunJob.client_factory = -> { client }
+
+    ScheduledTaskRunJob.perform_now(task.id, "2026-08-19T12:00:00Z")
+
+    assert_empty client.requests
+    assert_nil task.reload.last_run_id
+  end
+
   test "runner refuses a private destination after the author or bot leaves the channel" do
     channel = SlackBotChannel.create!(
       team_id: "T0123456789",

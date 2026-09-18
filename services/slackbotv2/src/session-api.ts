@@ -67,6 +67,16 @@ export function isRetryableSessionApiError(error: unknown): boolean {
   return error.name === 'AbortError' || error.name === 'TypeError'
 }
 
+export function isSessionPrincipalAdmissionDenied(error: unknown): boolean {
+  if (!(error instanceof SessionApiError) || error.status !== 403) return false
+  try {
+    const body: unknown = JSON.parse(error.body)
+    return isJsonObject(body) && body.code === 'session_principal_not_preapproved'
+  } catch {
+    return false
+  }
+}
+
 export const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 3 * 60 * 60 * 1000
 const DEFAULT_SESSION_API_TIMEOUT_MS = 30_000
 const DEFAULT_SLACK_API_TIMEOUT_MS = 5_000

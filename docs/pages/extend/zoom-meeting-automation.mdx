@@ -1,0 +1,197 @@
+---
+title: Zoom Meeting Automation
+description: >-
+  Build a deployment-specific Zoom scheduler with Console-managed OAuth
+  credentials, an overlay tool, and a durable workflow.
+---
+
+# Zoom Meeting Automation
+
+Centaur ships Zoom credential management, but it does not prescribe a meeting
+scheduler. Scheduling policy is deployment-specific: organizer selection,
+calendar ownership, attendee approval, recording defaults, retention, and
+where transcripts may be published all belong in your overlay.
+
+This recipe shows how to combine a Console-managed Zoom token with a small tool
+and a durable workflow. Extend it with Google Calendar or another calendar
+provider if your deployment also needs availability and invitations.
+
+## 1. Connect a Zoom account
+
+Create a user-managed General App in the Zoom App Marketplace. Configure the
+callback URL as:
+
+```text
+<CENTAUR_CONSOLE_PUBLIC_URL>/oauth/<slug>/callback
+```
+
+Add only the scopes required by your implementation. A scheduler that creates
+meetings and later reads recordings commonly needs the user-level equivalents
+of:
+
+- `user:read:user` for Centaur's `/users/me` identity lookup (Centaur always
+  requests this required scope);
+- `meeting:write` for `POST /users/me/meetings`;
+- `recording:read` if the workflow retrieves cloud-recording metadata or
+  transcripts.
+
+Zoom also offers granular scopes. Use the scopes shown for the exact endpoints
+in the current Zoom API reference, and add the same values to the OAuth app's
+allowed scopes in Centaur.
+
+In the Centaur Console, open **OAuth Apps**, create an app with provider
+`zoom`, and enter the Zoom client ID, client secret, and allowed scopes. Open
+the app's consent link and authorize the Zoom user that should own meetings.
+The Console exchanges the code, stores the rotating refresh-token family, and
+creates a grantable wrapper secret. That wrapper injects the current access
+token into requests to `api.zoom.us`; the tool does not need to declare or
+handle the credential itself.
+
+## 2. Add an overlay tool
+
+Put the integration in your overlay rather than the base Centaur repo:
+
+```text
+centaur-overlay/
+├── tools/
+│   └── zoom-scheduler/
+│       ├── __init__.py
+│       ├── client.py
+│       ├── cli.py
+│       └── pyproject.toml
+└── workflows/
+    └── schedule_zoom_meeting.py
+```
+
+The tool has no credential declaration. The Console-created wrapper owns the
+broker relationship, Zoom host rule, and bearer-header injection; declaring a
+second secret here would create a separate credential instead of using that
+wrapper.
+
+```toml
+[project]
+name = "zoom-scheduler"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["httpx>=0.27.0", "typer>=0.12.0"]
+
+[project.scripts]
+zoom-scheduler = "zoom_scheduler.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "zoom_scheduler"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.centaur]
+module = "client.py"
+secrets = []
+```
+
+The client sends no authorization header. When the wrapper is granted to the
+workflow principal, `iron-proxy` injects the current bearer token on the
+allowed Zoom host:
+
+```python
+import httpx
+
+
+class ZoomScheduler:
+    def create_meeting(self, topic: str, start_time: str, duration: int) -> dict:
+        response = httpx.post(
+            "https://api.zoom.us/v2/users/me/meetings",
+            json={
+                "topic": topic,
+                "type": 2,
+                "start_time": start_time,
+                "duration": duration,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        meeting = response.json()
+        return {
+            "id": str(meeting["id"]),
+            "join_url": meeting["join_url"],
+        }
+
+
+def _client() -> ZoomScheduler:
+    return ZoomScheduler()
+```
+
+Keep the CLI wrapper thin and return only fields an agent or workflow needs.
+Do not return `start_url`, authorization headers, signed download URLs, or raw
+provider error bodies.
+
+## 3. Put writes behind a durable workflow
+
+Meeting creation is an external side effect. Give each requested occurrence a
+stable business key and checkpoint the create call with `ctx.step(...)`:
+
+```python
+from dataclasses import dataclass
+
+from api.workflow_engine import WorkflowContext
+
+
+WORKFLOW_NAME = "schedule_zoom_meeting"
+WORKFLOW_PRINCIPAL = True
+
+
+@dataclass
+class Input:
+    occurrence_key: str
+    topic: str
+    start_time: str
+    duration: int
+
+
+async def handler(inp: Input, ctx: WorkflowContext) -> dict:
+    return await ctx.step(
+        f"create-zoom-meeting:{inp.occurrence_key}",
+        lambda: ctx.call_tool(
+            "zoom-scheduler",
+            "create_meeting",
+            {
+                "topic": inp.topic,
+                "start_time": inp.start_time,
+                "duration": inp.duration,
+            },
+        ),
+    )
+```
+
+For stronger recovery, persist `occurrence_key`, the Zoom meeting ID, and the
+desired meeting fields in deployment-owned storage. Before retrying a create,
+reconcile that record with Zoom. Use separate stable step names for calendar
+creation, Zoom creation, invitation updates, and post-meeting processing so a
+restart does not repeat completed provider writes.
+
+## 4. Grant and verify access
+
+Grant the Zoom wrapper secret directly to the workflow principal. The tool has
+no generated credential role because its manifest intentionally declares no
+secret. Do not make a scheduling credential a default role for all agent
+sessions.
+
+After the overlay is deployed, verify:
+
+1. `centaur-tools list` includes `zoom-scheduler` in a fresh workflow sandbox.
+2. The workflow principal can create one disposable meeting.
+3. The same call from an ungranted principal reaches Zoom without an
+   authorization header and is rejected.
+4. Re-running the same occurrence key does not create a second meeting.
+5. Re-consent or token refresh updates the brokered credential without exposing
+   the refresh token to the sandbox.
+
+If you add recording or transcript retrieval, treat Zoom webhook delivery as a
+hint rather than the only source of truth: checkpoint the event, then reconcile
+the recording state through the API. Bound downloaded content and keep signed
+URLs, tokens, participant data, and provider response bodies out of logs and
+workflow results.

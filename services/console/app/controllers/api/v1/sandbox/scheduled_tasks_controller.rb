@@ -32,6 +32,10 @@ module Api
 
         def run
           task = owned_task
+          unless task.enabled?
+            return render_error(status: :unprocessable_entity, message: "scheduled task is disabled")
+          end
+
           queued_job = ScheduledTaskRunJob.perform_later(task.id, Time.current.iso8601)
           unless queued_job
             return render_error(status: :service_unavailable, message: "scheduled task run could not be queued")

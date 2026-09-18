@@ -108,12 +108,14 @@ pub trait SessionPrincipalRegistrar: Send + Sync {
         &self,
         thread_key: &str,
         metadata: Option<&Value>,
+        create_if_missing: bool,
     ) -> Result<Principal, IronControlError>;
 
     async fn register_requester(
         &self,
         thread_key: &str,
         metadata: Option<&Value>,
+        create_if_missing: bool,
     ) -> Result<Option<Principal>, IronControlError>;
 
     async fn get_principal(&self, principal: &str) -> Result<Principal, IronControlError>;
@@ -125,20 +127,35 @@ impl SessionPrincipalRegistrar for SessionRegistrar {
         &self,
         thread_key: &str,
         metadata: Option<&Value>,
+        create_if_missing: bool,
     ) -> Result<Principal, IronControlError> {
-        SessionRegistrar::register_session(self, thread_key, metadata).await
+        SessionRegistrar::resolve_session(self, thread_key, metadata, create_if_missing).await
     }
 
     async fn register_requester(
         &self,
         thread_key: &str,
         metadata: Option<&Value>,
+        create_if_missing: bool,
     ) -> Result<Option<Principal>, IronControlError> {
-        SessionRegistrar::register_requester(self, thread_key, metadata).await
+        SessionRegistrar::resolve_requester(self, thread_key, metadata, create_if_missing).await
     }
 
     async fn get_principal(&self, principal: &str) -> Result<Principal, IronControlError> {
         SessionRegistrar::get_principal(self, principal).await
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SessionPrincipalAdmission {
+    #[default]
+    Automatic,
+    Preapproved,
+}
+
+impl SessionPrincipalAdmission {
+    fn create_if_missing(self) -> bool {
+        matches!(self, Self::Automatic)
     }
 }
 
@@ -151,6 +168,7 @@ pub struct SessionRuntime {
     tool_host_call_locks: ToolHostCallLocks,
     execution_spans: ExecutionSpanRegistry,
     iron_control: Arc<dyn SessionPrincipalRegistrar>,
+    session_principal_admission: SessionPrincipalAdmission,
     warm_pool: Option<Arc<WarmPoolManager>>,
     personas: Option<Arc<PersonaRegistry>>,
     session_title_generator: Option<SessionTitleGenerator>,
@@ -969,6 +987,7 @@ impl SessionRuntime {
             tool_host_call_locks: Arc::new(DashMap::new()),
             execution_spans: Arc::new(Mutex::new(HashMap::new())),
             iron_control: Arc::new(iron_control),
+            session_principal_admission: SessionPrincipalAdmission::default(),
             warm_pool: None,
             personas: None,
             session_title_generator: None,
@@ -978,6 +997,14 @@ impl SessionRuntime {
             stdout_owner_id: format!("api-rs-{}", uuid::Uuid::new_v4().simple()),
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn with_session_principal_admission(
+        mut self,
+        admission: SessionPrincipalAdmission,
+    ) -> Self {
+        self.session_principal_admission = admission;
+        self
     }
 
     pub fn with_session_title_generator<F, Fut>(mut self, generator: F) -> Self
@@ -1569,7 +1596,7 @@ impl SessionRuntime {
         let metadata = tool_host_session_metadata(principal_id, None, None);
         let principal = self
             .iron_control
-            .register_session(thread_key.as_str(), Some(&metadata))
+            .register_session(thread_key.as_str(), Some(&metadata), true)
             .await?;
         Ok(principal.id)
     }
@@ -1663,6 +1690,8 @@ impl SessionRuntime {
         self
     }
 
+    /// Create or load an internal session, automatically provisioning its
+    /// derived principal when no explicit principal is supplied.
     pub async fn create_or_get_session(
         &self,
         thread_key: &ThreadKey,
@@ -1671,20 +1700,44 @@ impl SessionRuntime {
         metadata: Option<Value>,
         on_harness_conflict: HarnessConflictPolicy,
     ) -> Result<CreateOrGetSessionOutcome, SessionRuntimeError> {
-        self.create_or_get_session_with_principal(
+        self.create_or_get_session_with_principal_admission(
             thread_key,
             harness_type,
             persona_id,
             metadata,
             on_harness_conflict,
             None,
+            SessionPrincipalAdmission::Automatic,
         )
         .await
     }
 
-    /// Create or load a session and bind it to an existing iron-control
-    /// principal selected by foreign ID. When no foreign ID is supplied, the
-    /// session keeps the normal principal derived from its thread key.
+    /// Create or load an ingress session using the deployment's principal
+    /// admission policy. HTTP chat ingresses use this path; internal workflows
+    /// use [`Self::create_or_get_session`] or explicitly select a principal.
+    pub async fn create_or_get_admitted_session(
+        &self,
+        thread_key: &ThreadKey,
+        harness_type: &HarnessType,
+        persona_id: Option<&str>,
+        metadata: Option<Value>,
+        on_harness_conflict: HarnessConflictPolicy,
+    ) -> Result<CreateOrGetSessionOutcome, SessionRuntimeError> {
+        self.create_or_get_session_with_principal_admission(
+            thread_key,
+            harness_type,
+            persona_id,
+            metadata,
+            on_harness_conflict,
+            None,
+            self.session_principal_admission,
+        )
+        .await
+    }
+
+    /// Create or load an internal session and bind it to an existing
+    /// iron-control principal selected by foreign ID. When no foreign ID is
+    /// supplied, its derived principal is provisioned automatically.
     pub async fn create_or_get_session_with_principal(
         &self,
         thread_key: &ThreadKey,
@@ -1693,6 +1746,29 @@ impl SessionRuntime {
         metadata: Option<Value>,
         on_harness_conflict: HarnessConflictPolicy,
         principal_foreign_id: Option<&str>,
+    ) -> Result<CreateOrGetSessionOutcome, SessionRuntimeError> {
+        self.create_or_get_session_with_principal_admission(
+            thread_key,
+            harness_type,
+            persona_id,
+            metadata,
+            on_harness_conflict,
+            principal_foreign_id,
+            SessionPrincipalAdmission::Automatic,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_or_get_session_with_principal_admission(
+        &self,
+        thread_key: &ThreadKey,
+        harness_type: &HarnessType,
+        persona_id: Option<&str>,
+        metadata: Option<Value>,
+        on_harness_conflict: HarnessConflictPolicy,
+        principal_foreign_id: Option<&str>,
+        admission: SessionPrincipalAdmission,
     ) -> Result<CreateOrGetSessionOutcome, SessionRuntimeError> {
         let principal_foreign_id = match principal_foreign_id {
             Some(foreign_id) if foreign_id.trim().is_empty() => {
@@ -1727,7 +1803,11 @@ impl SessionRuntime {
                 Some(foreign_id) => self.iron_control.get_principal(foreign_id).await?,
                 None => {
                     self.iron_control
-                        .register_session(thread_key.as_str(), Some(&session_metadata))
+                        .register_session(
+                            thread_key.as_str(),
+                            Some(&session_metadata),
+                            admission.create_if_missing(),
+                        )
                         .await?
                 }
             };
@@ -3344,7 +3424,11 @@ impl SessionRuntime {
     ) -> Option<String> {
         match self
             .iron_control
-            .register_requester(thread_key.as_str(), metadata)
+            .register_requester(
+                thread_key.as_str(),
+                metadata,
+                self.session_principal_admission.create_if_missing(),
+            )
             .await
         {
             Ok(principal) => principal.map(|principal| principal.id),
@@ -9181,12 +9265,49 @@ mod adoption_tests {
     #[derive(Clone, Copy)]
     struct TestSessionPrincipalRegistrar;
 
+    #[derive(Clone, Copy)]
+    struct AdmissionProbeRegistrar;
+
+    #[async_trait::async_trait]
+    impl SessionPrincipalRegistrar for AdmissionProbeRegistrar {
+        async fn register_session(
+            &self,
+            _thread_key: &str,
+            _metadata: Option<&Value>,
+            create_if_missing: bool,
+        ) -> Result<Principal, IronControlError> {
+            if create_if_missing {
+                Err(IronControlError::PrincipalDerivation(
+                    centaur_iron_control::PrincipalDerivationError::MissingSlackTeamId,
+                ))
+            } else {
+                Err(IronControlError::SessionPrincipalNotPreapproved {
+                    foreign_id: "slack-channel-t123-c123".to_owned(),
+                })
+            }
+        }
+
+        async fn register_requester(
+            &self,
+            _thread_key: &str,
+            _metadata: Option<&Value>,
+            _create_if_missing: bool,
+        ) -> Result<Option<Principal>, IronControlError> {
+            Ok(None)
+        }
+
+        async fn get_principal(&self, principal: &str) -> Result<Principal, IronControlError> {
+            Ok(test_principal(principal))
+        }
+    }
+
     #[async_trait::async_trait]
     impl SessionPrincipalRegistrar for TestSessionPrincipalRegistrar {
         async fn register_session(
             &self,
             _thread_key: &str,
             _metadata: Option<&Value>,
+            _create_if_missing: bool,
         ) -> Result<Principal, IronControlError> {
             Ok(test_principal("prn_test"))
         }
@@ -9195,6 +9316,7 @@ mod adoption_tests {
             &self,
             _thread_key: &str,
             _metadata: Option<&Value>,
+            _create_if_missing: bool,
         ) -> Result<Option<Principal>, IronControlError> {
             Ok(None)
         }
@@ -9212,6 +9334,72 @@ mod adoption_tests {
             labels: BTreeMap::new(),
             sandbox_observability_enabled: true,
         }
+    }
+
+    #[tokio::test]
+    async fn preapproved_admission_disables_principal_creation_before_store_access() {
+        let pool =
+            sqlx::PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test")
+                .expect("create lazy pool");
+        let runtime = SessionRuntime::new(
+            PgSessionStore::new(pool),
+            SandboxRuntime::backend(
+                Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new())),
+                SandboxSpec::new("test"),
+            ),
+            AdmissionProbeRegistrar,
+        )
+        .with_session_principal_admission(SessionPrincipalAdmission::Preapproved);
+
+        let error = runtime
+            .create_or_get_admitted_session(
+                &ThreadKey::try_from("slack:T123:C123:1773364194.179929".to_owned()).unwrap(),
+                &HarnessType::Codex,
+                None,
+                None,
+                HarnessConflictPolicy::Reject,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SessionRuntimeError::IronControl(
+                IronControlError::SessionPrincipalNotPreapproved { .. }
+            )
+        ));
+    }
+
+    #[tokio::test]
+    async fn internal_sessions_keep_automatic_principal_creation() {
+        let pool =
+            sqlx::PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test")
+                .expect("create lazy pool");
+        let runtime = SessionRuntime::new(
+            PgSessionStore::new(pool),
+            SandboxRuntime::backend(
+                Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new())),
+                SandboxSpec::new("test"),
+            ),
+            AdmissionProbeRegistrar,
+        )
+        .with_session_principal_admission(SessionPrincipalAdmission::Preapproved);
+
+        let error = runtime
+            .create_or_get_session(
+                &ThreadKey::try_from("workflow:internal:test".to_owned()).unwrap(),
+                &HarnessType::Codex,
+                None,
+                None,
+                HarnessConflictPolicy::Reject,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SessionRuntimeError::IronControl(IronControlError::PrincipalDerivation(_))
+        ));
     }
 
     type ProxyEnsure = (String, String, Option<String>, BTreeMap<String, String>);

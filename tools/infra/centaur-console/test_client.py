@@ -139,6 +139,19 @@ def test_create_scheduled_task_posts_schedule_and_delivery():
     assert result == {"id": "tsk_123", "delivery_channel": "U0123456789"}
 
 
+def test_create_scheduled_task_allows_an_omitted_schedule():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["data"]["cron_expression"] is None
+        return json_response({"data": {"id": "tsk_123", "cron_expression": None}}, 201)
+
+    result = make_client(handler).create_scheduled_task(
+        name="One-off briefing",
+        prompt="Summarize updates.",
+    )
+
+    assert result["cron_expression"] is None
+
+
 def test_update_scheduled_task_patches_only_provided_fields():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "PATCH"
@@ -157,6 +170,19 @@ def test_update_scheduled_task_patches_only_provided_fields():
     )
 
     assert result["enabled"] is False
+
+
+def test_update_scheduled_task_clears_the_schedule_with_an_empty_cron():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {"data": {"cron_expression": ""}}
+        return json_response({"data": {"id": "tsk_123", "cron_expression": None}})
+
+    result = make_client(handler).update_scheduled_task(
+        "tsk_123",
+        cron_expression="",
+    )
+
+    assert result["cron_expression"] is None
 
 
 def test_update_scheduled_task_requires_a_field():

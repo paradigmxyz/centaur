@@ -70,6 +70,9 @@ impl IntoResponse for ApiError {
             Self::Runtime(SessionRuntimeError::IronControl(
                 centaur_iron_control::IronControlError::PrincipalDerivation(_),
             )) => StatusCode::BAD_REQUEST,
+            Self::Runtime(SessionRuntimeError::IronControl(
+                centaur_iron_control::IronControlError::SessionPrincipalNotPreapproved { .. },
+            )) => StatusCode::FORBIDDEN,
             Self::Workflow(WorkflowRuntimeError::BadRequest(_)) => StatusCode::BAD_REQUEST,
             Self::Workflow(WorkflowRuntimeError::Disabled(_)) => StatusCode::FORBIDDEN,
             Self::Workflow(WorkflowRuntimeError::NotFound(_)) => StatusCode::NOT_FOUND,
@@ -119,6 +122,12 @@ impl IntoResponse for ApiError {
             body["existing_principal"] = json!(existing);
             body["requested_principal"] = json!(requested);
         }
+        if let Self::Runtime(SessionRuntimeError::IronControl(
+            centaur_iron_control::IronControlError::SessionPrincipalNotPreapproved { .. },
+        )) = &self
+        {
+            body["code"] = json!("session_principal_not_preapproved");
+        }
         let mut response = (status, Json(body)).into_response();
         if status == StatusCode::UNAUTHORIZED {
             response
@@ -159,6 +168,23 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn unapproved_session_principals_are_forbidden_with_a_stable_code() {
+        let response = ApiError::Runtime(SessionRuntimeError::IronControl(
+            IronControlError::SessionPrincipalNotPreapproved {
+                foreign_id: "slack-channel-t123-c123".to_owned(),
+            },
+        ))
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("decode response body");
+        assert_eq!(body["code"], "session_principal_not_preapproved");
     }
 
     #[tokio::test]

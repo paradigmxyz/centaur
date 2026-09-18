@@ -119,11 +119,11 @@ class ConsoleClient:
         self,
         name: str,
         prompt: str,
-        cron_expression: str,
+        cron_expression: str | None = None,
         delivery_channel: str = "dm",
         enabled: bool = True,
     ) -> dict[str, Any]:
-        """Create a Pacific Time cron task; deliver to dm or a permitted Slack channel ID."""
+        """Create an ad-hoc or Pacific Time cron task."""
         result = self._scheduled_task_request(
             SANDBOX_SCHEDULED_TASKS_PATH,
             method="POST",
@@ -153,7 +153,7 @@ class ConsoleClient:
         enabled: bool | None = None,
     ) -> dict[str, Any]:
         """Update selected fields on a scheduled task owned by the current Console user."""
-        attributes: dict[str, str | bool] = {}
+        attributes: dict[str, str | bool | None] = {}
         for key, value in {
             "name": name,
             "prompt": prompt,
