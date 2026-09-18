@@ -47,6 +47,11 @@ def health():
 console = Console()
 stderr_console = Console(stderr=True)
 
+
+def _print_json(payload: object) -> None:
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 _SLACK_CHANNEL_ID_RE = re.compile(r"^[CGD][A-Z0-9]{8,}$")
 
 
@@ -137,7 +142,17 @@ def dm(
         raise typer.Exit(1)
 
 
-def _print_message_search_results(query: str, results: list[dict], *, full: bool) -> None:
+def _print_message_search_results(
+    query: str,
+    results: list[dict],
+    *,
+    full: bool,
+    json_output: bool,
+) -> None:
+    if json_output:
+        _print_json({"query": query, "results": results, "count": len(results)})
+        return
+
     if not results:
         console.print("[yellow]No messages found.[/]")
         return
@@ -174,6 +189,7 @@ def search(
         None, "--channels", "-c", help="Comma-separated channel names or IDs to target"
     ),
     from_user: str = typer.Option(None, "--from", help="Target messages by this username"),
+    json_output: bool = typer.Option(True, "--json/--no-json", help="Output as JSON (default)"),
 ):
     """Search indexed Slack history through company context.
 
@@ -201,11 +217,16 @@ def search(
         stderr_console.print(f"[red]Error: {result.get('error', 'unknown error')}[/]")
         raise typer.Exit(1)
 
-    if full:
-        print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+    if json_output:
+        _print_json(result)
         return
 
-    _print_message_search_results(query, result.get("results") or [], full=False)
+    _print_message_search_results(
+        query,
+        result.get("results") or [],
+        full=full,
+        json_output=False,
+    )
 
 
 @app.command("search-direct")
@@ -217,6 +238,7 @@ def search_direct(
         None, "--channels", "-c", help="Comma-separated channel names or IDs to search"
     ),
     from_user: str = typer.Option(None, "--from", help="Filter by username"),
+    json_output: bool = typer.Option(True, "--json/--no-json", help="Output as JSON (default)"),
 ):
     """Search directly with Slack's native user-token search API.
 
@@ -243,7 +265,7 @@ def search_direct(
         stderr_console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1) from e
 
-    _print_message_search_results(query, results, full=full)
+    _print_message_search_results(query, results, full=full, json_output=json_output)
 
 
 @app.command("channel-direct")
@@ -637,8 +659,17 @@ def sync_history(
     console.print(f"[dim]sync_state={json.dumps(result['sync_state'], ensure_ascii=False)}[/]")
 
 
-def _render_channels(results: list[dict], title: str, include_access: bool = False) -> None:
+def _render_channels(
+    results: list[dict],
+    title: str,
+    include_access: bool = False,
+    json_output: bool = True,
+) -> None:
     """Render a Slack channel list."""
+    if json_output:
+        _print_json(results)
+        return
+
     if not results:
         console.print("[yellow]No channels found.[/]")
         raise typer.Exit()
@@ -675,13 +706,19 @@ def _render_channels(results: list[dict], title: str, include_access: bool = Fal
 def channels(
     limit: int = typer.Option(100, "--limit", "-n", help="Max channels"),
     query: str = typer.Option(None, "--query", "-q", help="Filter by name"),
+    json_output: bool = typer.Option(True, "--json/--no-json", help="Output as JSON (default)"),
 ):
     """List bot-readable public and explicitly granted channels from the proxy."""
     from .client import list_channels_proxy
 
     results = list_channels_proxy(limit=limit, query=query)
 
-    _render_channels(results, f"Channels ({len(results)})", include_access=True)
+    _render_channels(
+        results,
+        f"Channels ({len(results)})",
+        include_access=True,
+        json_output=json_output,
+    )
 
 
 @app.command("channels-direct")
@@ -693,6 +730,7 @@ def channels_direct(
         "--bot-member-only",
         help="Only list channels the bot can actually read history from",
     ),
+    json_output: bool = typer.Option(True, "--json/--no-json", help="Output as JSON (default)"),
 ):
     """List Slack channels directly with the Slack SDK."""
     from .client import list_bot_channels, list_channels
@@ -705,10 +743,19 @@ def channels_direct(
     if query:
         results = [c for c in results if query.lower() in c["name"].lower()]
 
-    _render_channels(results, f"Channels ({len(results)})")
+    _render_channels(results, f"Channels ({len(results)})", json_output=json_output)
 
 
-def _render_channel_members(channel: str, members: list[dict], emails_only: bool) -> None:
+def _render_channel_members(
+    channel: str,
+    members: list[dict],
+    emails_only: bool,
+    json_output: bool,
+) -> None:
+    if json_output and not emails_only:
+        _print_json(members)
+        return
+
     if not members:
         console.print("[yellow]No members found.[/]")
         raise typer.Exit()
@@ -738,6 +785,7 @@ def channel_members_cmd(
     emails_only: bool = typer.Option(
         False, "--emails", "-e", help="Output only email addresses (one per line)"
     ),
+    json_output: bool = typer.Option(True, "--json/--no-json", help="Output as JSON (default)"),
 ):
     """List members of a Slack channel through the Centaur API server proxy.
 
@@ -753,7 +801,7 @@ def channel_members_cmd(
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
 
-    _render_channel_members(channel_id, members, emails_only)
+    _render_channel_members(channel_id, members, emails_only, json_output)
 
 
 @app.command("channel-members-direct")
@@ -762,6 +810,7 @@ def channel_members_direct_cmd(
     emails_only: bool = typer.Option(
         False, "--emails", "-e", help="Output only email addresses (one per line)"
     ),
+    json_output: bool = typer.Option(True, "--json/--no-json", help="Output as JSON (default)"),
 ):
     """List all members of a Slack channel directly with the Slack SDK.
 
@@ -777,7 +826,7 @@ def channel_members_direct_cmd(
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
 
-    _render_channel_members(channel, members, emails_only)
+    _render_channel_members(channel, members, emails_only, json_output)
 
 
 @app.command()
@@ -785,6 +834,7 @@ def users(
     limit: int = typer.Option(100, "--limit", "-n", help="Max users"),
     query: str = typer.Option(None, "--query", "-q", help="Filter by name/email"),
     bots: bool = typer.Option(False, "--bots", "-b", help="Include bots"),
+    json_output: bool = typer.Option(True, "--json/--no-json", help="Output as JSON (default)"),
 ):
     """List all Slack workspace members."""
     from .client import list_users
@@ -803,6 +853,10 @@ def users(
             or query_lower in u["real_name"].lower()
             or query_lower in u["email"].lower()
         ]
+
+    if json_output:
+        _print_json(results)
+        return
 
     if not results:
         console.print("[yellow]No users found.[/]")
@@ -935,6 +989,7 @@ def upload(
 def questions(
     channel: str = typer.Argument(..., help="Channel name (without #)"),
     limit: int = typer.Option(100, "--limit", "-n", help="Messages to scan"),
+    json_output: bool = typer.Option(True, "--json/--no-json", help="Output as JSON (default)"),
 ):
     """Find questions in a channel (messages ending with ? or containing question words)."""
     from .client import get_channel_history
@@ -964,6 +1019,10 @@ def questions(
         if is_question and len(msg["text"]) > 10:
             questions.append(msg)
 
+    if json_output:
+        _print_json({"channel": channel, "questions": questions, "count": len(questions)})
+        return
+
     if not questions:
         console.print("[yellow]No questions found.[/]")
         raise typer.Exit()
@@ -981,6 +1040,7 @@ def questions(
 @app.command()
 def usergroups(
     query: str = typer.Option(None, "--query", "-q", help="Filter by handle/name"),
+    json_output: bool = typer.Option(True, "--json/--no-json", help="Output as JSON (default)"),
 ):
     """List all Slack user groups."""
     from .client import list_usergroups
@@ -994,6 +1054,10 @@ def usergroups(
             for g in results
             if query_lower in g["handle"].lower() or query_lower in g["name"].lower()
         ]
+
+    if json_output:
+        _print_json(results)
+        return
 
     if not results:
         console.print("[yellow]No user groups found.[/]")
@@ -1063,6 +1127,7 @@ def search_files_cmd(
     channel_id: str = typer.Argument(..., help="Slack channel ID to search"),
     query: str = typer.Argument(..., help="Search query for files"),
     limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
+    json_output: bool = typer.Option(True, "--json/--no-json", help="Output as JSON (default)"),
 ):
     """Search files shared in a Slack channel.
 
@@ -1078,13 +1143,14 @@ def search_files_cmd(
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
 
-    _print_file_search_results(query, results)
+    _print_file_search_results(query, results, json_output=json_output)
 
 
 @app.command("search-files-direct")
 def search_files_direct_cmd(
     query: str = typer.Argument(..., help="Search query for files"),
     limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
+    json_output: bool = typer.Option(True, "--json/--no-json", help="Output as JSON (default)"),
 ):
     """Search files by calling Slack files.list directly.
 
@@ -1100,7 +1166,7 @@ def search_files_direct_cmd(
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
 
-    _print_file_search_results(query, results)
+    _print_file_search_results(query, results, json_output=json_output)
 
 
 def _format_file_size(size: object) -> str:
@@ -1121,7 +1187,11 @@ def _format_file_info_value(key: str, value: object) -> str:
     return str(value)
 
 
-def _print_file_search_results(query: str, results: list[dict]) -> None:
+def _print_file_search_results(query: str, results: list[dict], *, json_output: bool) -> None:
+    if json_output:
+        _print_json({"query": query, "results": results, "count": len(results)})
+        return
+
     if not results:
         console.print("[yellow]No files found.[/]")
         raise typer.Exit()
@@ -1190,6 +1260,7 @@ def file_info(
 def search_users_cmd(
     query: str = typer.Argument(..., help="Search by name, email, or title"),
     limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
+    json_output: bool = typer.Option(True, "--json/--no-json", help="Output as JSON (default)"),
 ):
     """Search workspace users by name, email, or title.
 
@@ -1205,6 +1276,10 @@ def search_users_cmd(
     except RuntimeError as e:
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
+
+    if json_output:
+        _print_json({"query": query, "results": results, "count": len(results)})
+        return
 
     if not results:
         console.print("[yellow]No users found.[/]")
@@ -1277,6 +1352,7 @@ def files(
         False, "--download", "-d", help="Download files to current directory"
     ),
     output: str = typer.Option(".", "--output", "-o", help="Output directory for downloads"),
+    json_output: bool = typer.Option(True, "--json/--no-json", help="Output as JSON (default)"),
 ):
     """List or download files attached to a message.
 
@@ -1326,12 +1402,12 @@ def files(
                 continue
 
             _download_direct_url(f["url_private"], output, display_name=f["name"])
+    elif json_output:
+        _print_json(files_list)
     else:
         console.print(f"[bold]Files ({len(files_list)})[/]\n")
         for f in files_list:
-            console.print(
-                f"[cyan]{f['name']}[/] ({f['filetype']}, {_format_file_size(f['size'])})"
-            )
+            console.print(f"[cyan]{f['name']}[/] ({f['filetype']}, {_format_file_size(f['size'])})")
             console.print(f"  [dim]{f['url_private']}[/]")
 
 
@@ -1444,7 +1520,7 @@ def download(
 @app.command("channel-emails")
 def channel_emails(
     channel: str = typer.Argument(..., help="Channel name (with or without #)"),
-    output: str = typer.Option("text", "-o", "--output", help="Output format: text or json"),
+    output: str = typer.Option("json", "-o", "--output", help="Output format: json or text"),
 ):
     """Get email addresses of all members in a channel.
 
@@ -1474,7 +1550,7 @@ def channel_emails(
 @app.command("user-info")
 def user_info(
     user_id: str = typer.Argument(..., help="Slack user ID (e.g., U123ABC)"),
-    output: str = typer.Option("text", "-o", "--output", help="Output format: text or json"),
+    output: str = typer.Option("json", "-o", "--output", help="Output format: json or text"),
 ):
     """Get full user profile including email, phone, title, status, and custom fields.
 

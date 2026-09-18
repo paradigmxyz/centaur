@@ -177,7 +177,7 @@ def test_channels_calls_proxy_client(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert calls == [((), {"limit": 10, "query": "general"})]
-    assert "general" in result.output
+    assert json.loads(result.output)[0]["name"] == "general"
 
 
 def test_channels_direct_calls_direct_client(monkeypatch) -> None:
@@ -210,7 +210,7 @@ def test_channels_direct_calls_direct_client(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert calls == [("list_channels", (), {"limit": 10})]
-    assert "general" in result.output
+    assert json.loads(result.output)[0]["name"] == "general"
 
 
 def test_channel_members_calls_proxy_client(monkeypatch) -> None:
@@ -220,9 +220,7 @@ def test_channel_members_calls_proxy_client(monkeypatch) -> None:
         calls.append((args, kwargs))
         return [{"id": "U123456789", "name": "alice"}]
 
-    fake_client = types.SimpleNamespace(
-        get_channel_members_proxy=fake_get_channel_members_proxy
-    )
+    fake_client = types.SimpleNamespace(get_channel_members_proxy=fake_get_channel_members_proxy)
     monkeypatch.setitem(sys.modules, "slack.client", fake_client)
 
     result = CliRunner().invoke(
@@ -232,7 +230,7 @@ def test_channel_members_calls_proxy_client(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert calls == [(("C1234567890",), {"limit": 25})]
-    assert "alice" in result.output
+    assert json.loads(result.output) == [{"id": "U123456789", "name": "alice"}]
 
 
 def test_channel_members_direct_calls_direct_client(monkeypatch) -> None:
@@ -249,7 +247,7 @@ def test_channel_members_direct_calls_direct_client(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert calls == [(("eng-ai",), {})]
-    assert "alice" in result.output
+    assert json.loads(result.output) == [{"id": "U123456789", "name": "alice"}]
 
 
 def test_search_files_calls_proxy_client(monkeypatch) -> None:
@@ -282,7 +280,9 @@ def test_search_files_calls_proxy_client(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert calls == [(("C1234567890", "report"), {"max_results": 10})]
-    assert "report.pdf" in result.output
+    payload = json.loads(result.output)
+    assert payload["count"] == 1
+    assert payload["results"][0]["name"] == "report.pdf"
 
 
 def test_search_files_direct_calls_direct_client(monkeypatch) -> None:
@@ -315,12 +315,12 @@ def test_search_files_direct_calls_direct_client(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert calls == [(("report",), {"max_results": 10})]
-    assert "report.pdf" in result.output
+    payload = json.loads(result.output)
+    assert payload["count"] == 1
+    assert payload["results"][0]["name"] == "report.pdf"
 
 
-def test_upload_direct_requires_explicit_channel_and_thread(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_upload_direct_requires_explicit_channel_and_thread(monkeypatch, tmp_path: Path) -> None:
     upload = tmp_path / "chart.png"
     upload.write_bytes(b"png")
 
@@ -599,7 +599,7 @@ def test_search_uses_indexed_slack_client(monkeypatch) -> None:
     )
 
     assert result.exit_code == 0
-    assert "completed" in result.output
+    assert json.loads(result.output)["results"][0]["text"] == "database migration completed"
     assert calls == [
         {
             "query": "database migration",
@@ -642,7 +642,9 @@ def test_search_direct_calls_native_search_client(monkeypatch) -> None:
     )
 
     assert result.exit_code == 0
-    assert "deploy completed" in result.output
+    payload = json.loads(result.output)
+    assert payload["count"] == 1
+    assert payload["results"][0]["text"] == "deploy completed"
     assert calls == [
         (
             ("deploy",),
