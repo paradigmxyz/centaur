@@ -1,6 +1,6 @@
 [project]
 name = "slack"
-description = "Search Slack messages, channels, threads, users"
+description = "Search Slack messages, channels, threads, and users. Use *-direct command variants for Slack DMs."
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
