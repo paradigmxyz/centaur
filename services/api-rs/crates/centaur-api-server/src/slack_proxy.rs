@@ -490,11 +490,6 @@ async fn authorized_slack_file_info(
         &SLACK_FILE_SHARE_RETRY_DELAYS,
     )
     .await?;
-    if !slack_file_in_channel(&file, channel_id) {
-        return Err(ApiError::Forbidden(
-            "file is not shared in an allowed Slack channel".to_owned(),
-        ));
-    }
     Ok((config, file))
 }
 
@@ -885,18 +880,26 @@ async fn slack_file_info_with_share_retry(
     retry_delays: &[Duration],
 ) -> Result<Value, ApiError> {
     let mut file = slack_file_info(client, config, file_id).await?;
-    if slack_file_in_channel(&file, channel_id) || !slack_file_share_may_be_propagating(&file) {
+    if slack_file_in_channel(&file, channel_id) {
         return Ok(file);
     }
 
-    for delay in retry_delays {
-        tokio::time::sleep(*delay).await;
-        file = slack_file_info(client, config, file_id).await?;
-        if slack_file_in_channel(&file, channel_id) || !slack_file_channel_ids(&file).is_empty() {
-            break;
+    if slack_file_share_may_be_propagating(&file) {
+        for delay in retry_delays {
+            tokio::time::sleep(*delay).await;
+            file = slack_file_info(client, config, file_id).await?;
+            if slack_file_in_channel(&file, channel_id) {
+                return Ok(file);
+            }
+            if !slack_file_channel_ids(&file).is_empty() {
+                break;
+            }
         }
     }
-    Ok(file)
+
+    Err(ApiError::Forbidden(
+        "file is not shared in an allowed Slack channel".to_owned(),
+    ))
 }
 
 fn slack_file_share_may_be_propagating(file: &Value) -> bool {
