@@ -912,11 +912,7 @@ fn slack_file_share_may_be_propagating(file: &Value) -> bool {
     let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
         return false;
     };
-    created
-        <= now
-            .as_secs()
-            .saturating_add(SLACK_FILE_SHARE_PROPAGATION_WINDOW.as_secs())
-        && now.as_secs().saturating_sub(created) <= SLACK_FILE_SHARE_PROPAGATION_WINDOW.as_secs()
+    now.as_secs().abs_diff(created) <= SLACK_FILE_SHARE_PROPAGATION_WINDOW.as_secs()
 }
 
 async fn slack_channel_info(
