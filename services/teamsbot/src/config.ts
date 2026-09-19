@@ -22,7 +22,6 @@ const envSchema = z.object({
   TEAMS_ALLOWED_TEAM_IDS: z.string().default(''),
   TEAMS_ALLOWED_TENANT_IDS: z.string().default(''),
   TEAMS_REQUIRE_MENTION: envBoolean(true),
-  TEAMS_DEFAULT_HARNESS_TYPE: z.string().default('codex'),
   TEAMS_ACTIVE_EXECUTION_TTL_MS: z.coerce.number().int().positive().default(30 * 60 * 1000),
   TEAMS_RENDER_DELIVERY_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
   SESSION_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
@@ -60,7 +59,6 @@ export type TeamsbotConfig = {
     attachmentDownloadEnabled: boolean;
     attachmentMaxBytes: number;
     activeExecutionTtlMs: number;
-    defaultHarnessType: string;
     graphBearerToken?: string;
     graphTokenScope: string;
     idleTimeoutMs?: number;
@@ -96,7 +94,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): TeamsbotConfig
       attachmentDownloadEnabled: parsed.TEAMS_DOWNLOAD_ATTACHMENTS,
       attachmentMaxBytes: parsed.TEAMS_ATTACHMENT_MAX_BYTES,
       activeExecutionTtlMs: parsed.TEAMS_ACTIVE_EXECUTION_TTL_MS,
-      defaultHarnessType: parsed.TEAMS_DEFAULT_HARNESS_TYPE,
       graphBearerToken: parsed.TEAMS_GRAPH_BEARER_TOKEN,
       graphTokenScope: parsed.TEAMS_GRAPH_TOKEN_SCOPE,
       idleTimeoutMs: parsed.TEAMS_IDLE_TIMEOUT_MS ?? parsed.SESSION_IDLE_TIMEOUT_MS,

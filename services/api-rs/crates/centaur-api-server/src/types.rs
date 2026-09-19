@@ -7,7 +7,10 @@ use thiserror::Error;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CreateSessionRequest {
-    pub harness_type: HarnessType,
+    /// Harness explicitly requested for this session. When omitted, new
+    /// sessions use the deployment default and existing sessions keep their
+    /// pinned harness.
+    pub harness_type: Option<HarnessType>,
     /// Used only when creating the session. The first persisted persona stays
     /// pinned for the lifetime of the thread. An ID absent from the deployment
     /// falls back to the eligible deployment default or no persona.

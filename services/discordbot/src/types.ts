@@ -58,7 +58,7 @@ export type DiscordbotAppendMessagesRequest = {
 };
 
 export type DiscordbotCreateSessionRequest = {
-  harness_type: string;
+  harness_type?: string;
   metadata: JsonObject;
 };
 

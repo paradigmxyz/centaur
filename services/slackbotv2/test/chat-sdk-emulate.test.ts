@@ -1077,7 +1077,7 @@ describe('slackbotv2', () => {
     await sharedState.connect()
     let strategyRequestCount = 0
     bot = createTestBot({
-      defaultHarnessType: 'claudecode',
+      deploymentDefaultHarnessType: 'claudecode',
       messageOverridesStrategy: createOpenAiMessageOverridesStrategy({
         apiKey: 'test-key',
         fetch: (async () => {
@@ -1151,7 +1151,7 @@ describe('slackbotv2', () => {
     expect(codexApi.creates.map(create => create.body.harness_type)).toEqual([
       'nanocodex',
       'nanocodex',
-      'claudecode'
+      undefined
     ])
     expect(codexApi.creates[0]!.body.on_harness_conflict).toBe('restart')
     expect(codexApi.creates[2]!.body.on_harness_conflict).toBeUndefined()

@@ -354,6 +354,9 @@ pub enum SandboxWorkloadMode {
 pub enum HarnessConflictPolicy {
     /// Fail with [`SessionStoreError::HarnessConflict`] (the default).
     Reject,
+    /// Use the supplied harness only when creating a session. Existing
+    /// sessions retain their pinned harness.
+    UseExisting,
     /// Restart the thread on the requested harness: stop the old sandbox,
     /// clear the harness thread state, and switch the session row over. The
     /// new harness starts with no conversational memory.
@@ -1844,17 +1847,31 @@ impl SessionRuntime {
             if let Some(context) = persona_resolution.context.as_ref() {
                 add_persona_metadata(&mut session_metadata, context);
             }
-            match self
-                .store
-                .create_or_get_session(
-                    thread_key,
-                    harness_type,
-                    persona_resolution.persona_id.as_deref(),
-                    session_metadata.clone(),
-                    proxy_labels.clone(),
-                )
-                .await
-            {
+            let stored_session = match on_harness_conflict {
+                HarnessConflictPolicy::UseExisting => {
+                    self.store
+                        .create_or_get_session_with_default_harness(
+                            thread_key,
+                            harness_type,
+                            persona_resolution.persona_id.as_deref(),
+                            session_metadata.clone(),
+                            proxy_labels.clone(),
+                        )
+                        .await
+                }
+                HarnessConflictPolicy::Reject | HarnessConflictPolicy::Restart => {
+                    self.store
+                        .create_or_get_session(
+                            thread_key,
+                            harness_type,
+                            persona_resolution.persona_id.as_deref(),
+                            session_metadata.clone(),
+                            proxy_labels.clone(),
+                        )
+                        .await
+                }
+            };
+            match stored_session {
                 Ok(session) => session,
                 Err(SessionStoreError::HarnessConflict { existing, .. })
                     if on_harness_conflict == HarnessConflictPolicy::Restart =>

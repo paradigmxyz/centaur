@@ -395,7 +395,6 @@ async function createSession(
   const fetchFn = options.fetch ?? fetch;
   const name = conversationName?.trim();
   const body: DiscordbotCreateSessionRequest = {
-    harness_type: "codex",
     metadata: {
       source: "discordbot",
       platform: "discord",

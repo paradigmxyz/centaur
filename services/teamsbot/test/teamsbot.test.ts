@@ -25,7 +25,6 @@ const config: TeamsbotConfig = {
     attachmentDownloadEnabled: false,
     attachmentMaxBytes: 1024 * 1024,
     activeExecutionTtlMs: 30 * 60 * 1000,
-    defaultHarnessType: 'codex',
     graphTokenScope: 'https://graph.microsoft.com/.default',
     renderDeliveryTimeoutMs: 15_000,
     requireMention: true,

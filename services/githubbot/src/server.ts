@@ -121,7 +121,6 @@ const options: GithubbotOptions = {
   escalationHandle: optionalEnv("GITHUBBOT_ESCALATION_HANDLE"),
   holdLabel: optionalEnv("GITHUBBOT_HOLD_LABEL"),
   mergeMethod: mergeMethodEnv(),
-  defaultHarnessType: optionalEnv("GITHUBBOT_DEFAULT_HARNESS"),
   githubApiUrl: optionalEnv("GITHUB_API_URL"),
   idleTimeoutMs: optionalNumberEnv("SESSION_IDLE_TIMEOUT_MS"),
   maxDurationMs: optionalNumberEnv("SESSION_MAX_DURATION_MS"),

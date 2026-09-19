@@ -168,16 +168,20 @@ describe("forwardToSessionApi principal naming", () => {
     };
   }
 
-  it("carries the channel name as create-session metadata", async () => {
+  it("uses the API default harness and carries the channel name", async () => {
     const { fetchFn, creates } = recorderApi();
     await forwardToSessionApi(
       options(fetchFn),
       forwardInput({ conversationName: "general" }),
     );
-    expect(
-      (creates[0] as { metadata: { discord_conversation_name?: string } })
-        .metadata.discord_conversation_name,
-    ).toBe("general");
+    expect(creates[0]).toEqual({
+      metadata: {
+        source: "discordbot",
+        platform: "discord",
+        thread_id: "discord:G1:C1:T1",
+        discord_conversation_name: "general",
+      },
+    });
   });
 
   it("omits the channel name when unset or blank", async () => {

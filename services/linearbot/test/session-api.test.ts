@@ -100,13 +100,11 @@ function isCreateRequest(request: RecordedRequest): boolean {
 }
 
 describe("forwardToSessionApi overrides", () => {
-  test("creates session with default codex harness", async () => {
+  test("defers implicit harness selection to api-rs", async () => {
     const { fetchFn, requests } = fakeApi();
     await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage("hi")));
     const create = requests.find(isCreateRequest);
-    expect((create?.body as { harness_type?: string }).harness_type).toBe(
-      "codex",
-    );
+    expect("harness_type" in (create?.body as object)).toBe(false);
     expect(
       (create?.body as { metadata: { platform: string } }).metadata.platform,
     ).toBe("linear");
@@ -220,7 +218,7 @@ describe("forwardToSessionApi overrides", () => {
     );
   });
 
-  test("recovers existing harness from the error message when fields are absent", async () => {
+  test("does not guess a harness when an implicit create unexpectedly conflicts", async () => {
     const { fetchFn, requests } = fakeApi({
       createSession: [
         {
@@ -230,16 +228,12 @@ describe("forwardToSessionApi overrides", () => {
           },
           status: 409,
         },
-        { status: 200 },
       ],
     });
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage("hi")));
-    const creates = requests.filter(isCreateRequest);
-    expect(
-      creates.map(
-        (request) => (request.body as { harness_type: string }).harness_type,
-      ),
-    ).toEqual(["codex", "amp"]);
+    await expect(
+      forwardToSessionApi(options(fetchFn), forwardInput(apiMessage("hi"))),
+    ).rejects.toThrow("create session failed: 409");
+    expect(requests.filter(isCreateRequest)).toHaveLength(1);
   });
 
   test("surfaces non-conflict create failures with a sanitized message", async () => {
@@ -280,20 +274,6 @@ describe("forwardToSessionApi harness restart", () => {
     const { fetchFn, requests } = fakeApi();
     await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage("hi")));
     const create = requests.find(isCreateRequest);
-    expect("on_harness_conflict" in (create?.body as object)).toBe(false);
-  });
-
-  test("uses the configured default harness when no override is set", async () => {
-    const { fetchFn, requests } = fakeApi();
-    await forwardToSessionApi(
-      { ...options(fetchFn), defaultHarnessType: "claudecode" },
-      forwardInput(apiMessage("hi")),
-    );
-    const create = requests.find(isCreateRequest);
-    expect((create?.body as { harness_type?: string }).harness_type).toBe(
-      "claudecode",
-    );
-    // The default never forces a switch on a thread pinned to another harness.
     expect("on_harness_conflict" in (create?.body as object)).toBe(false);
   });
 

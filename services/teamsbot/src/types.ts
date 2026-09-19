@@ -88,7 +88,7 @@ export type SessionMessage = {
 };
 
 export type CreateSessionRequest = {
-  harness_type: string;
+  harness_type?: string;
   metadata: JsonObject;
 };
 

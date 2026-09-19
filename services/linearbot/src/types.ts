@@ -62,7 +62,7 @@ export type LinearbotAppendMessagesRequest = {
 };
 
 export type LinearbotCreateSessionRequest = {
-  harness_type: string;
+  harness_type?: string;
   metadata: JsonObject;
   /** 'restart': switch the thread to harness_type if it's pinned to another harness. */
   on_harness_conflict?: "reject" | "restart";
@@ -104,11 +104,6 @@ export type LinearbotOptions = {
    * backends.
    */
   connectStateOnStart?: boolean;
-  /**
-   * Harness for new threads when no --claude/--amp/--codex flag is given
-   * (HarnessType wire value: codex | amp | claudecode). Defaults to codex.
-   */
-  defaultHarnessType?: string;
   fetch?: LinearbotFetch;
   idleTimeoutMs?: number;
   /** OAuth access token from an actor=app install (the bot runs as an app). */

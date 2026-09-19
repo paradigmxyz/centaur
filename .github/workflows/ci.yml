@@ -210,6 +210,8 @@ jobs:
 
           PGPASSWORD=postgres createdb --host localhost --username postgres session_runtime
           SESSION_RUNTIME_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/session_runtime \
+            cargo test -p centaur-session-sqlx --lib -- --test-threads=1
+          SESSION_RUNTIME_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/session_runtime \
             cargo test -p centaur-session-runtime -- --test-threads=1
 
       - name: Run API integration test
@@ -224,6 +226,7 @@ jobs:
           CENTAUR_CONSOLE_INITIAL_API_KEY: iak_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
           CENTAUR_CONSOLE_INITIAL_USER_EMAIL: api-integration@example.com
           CENTAUR_CONSOLE_INITIAL_USER_PASSWORD: api-integration-password
+          CENTAUR_DEFAULT_HARNESS: claudecode
           CENTAUR_API_URL: http://127.0.0.1:18080
           CENTAUR_JWT_SIGNING_SECRET: api-integration-jwt-signing-secret
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/centaur?sslmode=disable

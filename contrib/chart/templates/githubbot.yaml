@@ -63,10 +63,6 @@ spec:
               value: "3001"
             - name: CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
-            # New threads without an explicit --claude/--amp/--codex flag run
-            # the deployment's default harness.
-            - name: GITHUBBOT_DEFAULT_HARNESS
-              value: {{ .Values.sandbox.harnessEngine | quote }}
             # Personal access token for the bot's GitHub teammate account — kept
             # distinct from the sandbox tool token so the bot acts as its own
             # GitHub user (requestable as a reviewer, @-mentionable).

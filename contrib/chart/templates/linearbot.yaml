@@ -32,10 +32,6 @@ spec:
               value: "3001"
             - name: CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
-            # New threads without an explicit --claude/--amp/--codex flag run
-            # the deployment's default harness.
-            - name: LINEARBOT_DEFAULT_HARNESS
-              value: {{ .Values.sandbox.harnessEngine | quote }}
             # actor=app OAuth token from the Linear agent install; agent
             # sessions are unavailable on a plain personal API key.
             - name: LINEAR_ACCESS_TOKEN

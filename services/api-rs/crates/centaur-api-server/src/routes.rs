@@ -27,7 +27,7 @@ use axum::{
     routing::{any, get, post},
 };
 use base64::{Engine as _, engine::general_purpose};
-use centaur_session_core::{ChatDestination, ThreadKey};
+use centaur_session_core::{ChatDestination, HarnessType, ThreadKey};
 use centaur_session_runtime::{
     ExecuteSessionInput, HarnessConflictPolicy, SandboxRuntime, SessionPrincipalRegistrar,
     SessionRuntime,
@@ -73,6 +73,7 @@ pub struct AppState {
     initialized: Arc<RwLock<Option<AppRuntimeState>>>,
     metrics: PrometheusHandle,
     auth: ApiAuthConfig,
+    default_harness: HarnessType,
 }
 
 #[derive(Clone)]
@@ -85,10 +86,15 @@ struct AppRuntimeState {
 
 impl AppState {
     pub fn unready(auth: ApiAuthConfig) -> Self {
+        Self::unready_with_default_harness(auth, HarnessType::Codex)
+    }
+
+    pub fn unready_with_default_harness(auth: ApiAuthConfig, default_harness: HarnessType) -> Self {
         Self {
             initialized: Arc::new(RwLock::new(None)),
             metrics: prometheus_handle().expect("failed to initialize Prometheus metrics recorder"),
             auth,
+            default_harness,
         }
     }
 
@@ -632,12 +638,20 @@ async fn create_or_get_session(
     Json(request): Json<CreateSessionRequest>,
 ) -> Result<Json<CreateSessionResponse>, ApiError> {
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
-    let harness_type = request.harness_type;
-    let runtime = state.runtime()?;
-    let on_harness_conflict = match request.on_harness_conflict {
-        Some(OnHarnessConflict::Restart) => HarnessConflictPolicy::Restart,
-        Some(OnHarnessConflict::Reject) | None => HarnessConflictPolicy::Reject,
+    let (harness_type, on_harness_conflict) = match request.harness_type {
+        Some(harness_type) => {
+            let policy = match request.on_harness_conflict {
+                Some(OnHarnessConflict::Restart) => HarnessConflictPolicy::Restart,
+                Some(OnHarnessConflict::Reject) | None => HarnessConflictPolicy::Reject,
+            };
+            (harness_type, policy)
+        }
+        None => (
+            state.default_harness.clone(),
+            HarnessConflictPolicy::UseExisting,
+        ),
     };
+    let runtime = state.runtime()?;
     let outcome = runtime
         .create_or_get_admitted_session(
             &thread_key,

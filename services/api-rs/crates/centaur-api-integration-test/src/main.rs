@@ -71,6 +71,14 @@ async fn main() -> Result<()> {
     let line = line!() + 1;
     record_result(
         &mut results,
+        "Default harness applies only to new sessions",
+        line,
+        test_default_harness(&http, &base_url).await,
+    );
+
+    let line = line!() + 1;
+    record_result(
+        &mut results,
         "Session execute forwards model context and completes",
         line,
         test_session_turn(&http, &base_url).await,
@@ -311,6 +319,55 @@ async fn test_harness_wire_values(http: &HttpClient, base_url: &str) -> Result<(
         let status = invalid_response.status();
         let body = invalid_response.text().await.unwrap_or_default();
         bail!("stale claude-code harness value returned {status}: {body}");
+    }
+
+    Ok(())
+}
+
+async fn test_default_harness(http: &HttpClient, base_url: &str) -> Result<()> {
+    let default_thread_key = test_thread_key("default-harness")?;
+    let default_session = post_json_ok(
+        http,
+        session_url(base_url, &default_thread_key),
+        json!({
+            "metadata": {"source": "centaur-api-integration-test"},
+        }),
+    )
+    .await
+    .context("create session on deployment default")?;
+    if default_session.get("harness_type").and_then(Value::as_str) != Some("claudecode") {
+        bail!("session did not use configured default harness: {default_session}");
+    }
+
+    let pinned_thread_key = test_thread_key("pinned-harness")?;
+    post_json_ok(
+        http,
+        session_url(base_url, &pinned_thread_key),
+        json!({
+            "harness_type": "amp",
+            "metadata": {"source": "centaur-api-integration-test"},
+        }),
+    )
+    .await
+    .context("create explicitly pinned session")?;
+    let pinned_session = post_json_ok(
+        http,
+        session_url(base_url, &pinned_thread_key),
+        json!({
+            "metadata": {"source": "centaur-api-integration-test"},
+        }),
+    )
+    .await
+    .context("load pinned session without a harness override")?;
+    if pinned_session.get("harness_type").and_then(Value::as_str) != Some("amp") {
+        bail!("implicit default replaced pinned harness: {pinned_session}");
+    }
+    if pinned_session
+        .get("harness_switched")
+        .and_then(Value::as_bool)
+        != Some(false)
+    {
+        bail!("implicit default reported a harness switch: {pinned_session}");
     }
 
     Ok(())

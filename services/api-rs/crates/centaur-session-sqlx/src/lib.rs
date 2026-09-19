@@ -88,6 +88,13 @@ pub struct PgSessionStore {
     pool: PgPool,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CreateOrGetMode {
+    ExactHarness,
+    DefaultHarness,
+    MergeMetadata,
+}
+
 impl PgSessionStore {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -130,7 +137,28 @@ impl PgSessionStore {
             persona_id,
             metadata,
             proxy_labels,
-            false,
+            CreateOrGetMode::ExactHarness,
+        )
+        .await
+    }
+
+    /// Create a session on the supplied deployment default, or return an
+    /// existing session without requiring it to use that default.
+    pub async fn create_or_get_session_with_default_harness(
+        &self,
+        thread_key: &ThreadKey,
+        default_harness: &HarnessType,
+        persona_id: Option<&str>,
+        metadata: Value,
+        proxy_labels: BTreeMap<String, String>,
+    ) -> Result<Session, SessionStoreError> {
+        self.create_or_get_session_inner(
+            thread_key,
+            default_harness,
+            persona_id,
+            metadata,
+            proxy_labels,
+            CreateOrGetMode::DefaultHarness,
         )
         .await
     }
@@ -152,7 +180,7 @@ impl PgSessionStore {
             persona_id,
             metadata,
             proxy_labels,
-            true,
+            CreateOrGetMode::MergeMetadata,
         )
         .await
     }
@@ -164,9 +192,9 @@ impl PgSessionStore {
         persona_id: Option<&str>,
         metadata: Value,
         proxy_labels: BTreeMap<String, String>,
-        merge_metadata: bool,
+        mode: CreateOrGetMode,
     ) -> Result<Session, SessionStoreError> {
-        let query = if merge_metadata {
+        let query = if mode == CreateOrGetMode::MergeMetadata {
             sqlx::query(
                 r#"
                 insert into sessions (thread_key, harness_type, persona_id, status, metadata, proxy_labels)
@@ -212,7 +240,7 @@ impl PgSessionStore {
         }
 
         let session = self.get_session(thread_key).await?;
-        if session.harness_type != *harness_type {
+        if mode != CreateOrGetMode::DefaultHarness && session.harness_type != *harness_type {
             return Err(SessionStoreError::HarnessConflict {
                 thread_key: thread_key.as_str().to_owned(),
                 existing: session.harness_type.to_string(),
@@ -2324,6 +2352,51 @@ mod tests {
                 .proxy_labels,
             labels
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn default_harness_only_applies_when_creating_a_session() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let new_thread =
+            ThreadKey::parse(format!("test:default-harness-new-{}", Uuid::new_v4())).unwrap();
+        let existing_thread =
+            ThreadKey::parse(format!("test:default-harness-existing-{}", Uuid::new_v4())).unwrap();
+
+        let created = store
+            .create_or_get_session_with_default_harness(
+                &new_thread,
+                &HarnessType::ClaudeCode,
+                None,
+                json!({}),
+                BTreeMap::new(),
+            )
+            .await
+            .expect("create session on deployment default");
+        assert_eq!(created.harness_type, HarnessType::ClaudeCode);
+
+        store
+            .create_or_get_session(
+                &existing_thread,
+                &HarnessType::Amp,
+                None,
+                json!({}),
+                BTreeMap::new(),
+            )
+            .await
+            .expect("create explicitly selected session");
+        let existing = store
+            .create_or_get_session_with_default_harness(
+                &existing_thread,
+                &HarnessType::ClaudeCode,
+                None,
+                json!({}),
+                BTreeMap::new(),
+            )
+            .await
+            .expect("load session pinned to a different harness");
+        assert_eq!(existing.harness_type, HarnessType::Amp);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
