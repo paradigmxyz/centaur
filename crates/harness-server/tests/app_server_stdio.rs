@@ -666,6 +666,147 @@ fn fake_codex_blocks_mode_queues_active_turns_in_order() {
 }
 
 #[test]
+fn fake_codex_blocks_mode_switches_model_after_cyber_policy_rejection() {
+    let fake_codex = temp_path("fake-cyber-fallback-codex.sh");
+    let fake_codex_log = temp_path("fake-cyber-fallback-codex-requests.jsonl");
+    let script = fake_codex_cyber_fallback_script(&fake_codex_log);
+    std::fs::write(&fake_codex, script).expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex)
+        .expect("fake codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
+        Harness::Codex,
+        None,
+        Some((
+            "CODEX_BIN",
+            fake_codex.to_str().expect("utf-8 fake codex path"),
+        )),
+        &[("FAKE_CODEX_HAS_DAYBREAK", "1")],
+    );
+    let turn = bridge.run_blocks_user_turn_with_model(
+        "retry with fallback",
+        Some("primary-model"),
+        Duration::from_secs(10),
+    );
+    bridge.finish_successfully();
+
+    assert_completed_turn(&turn);
+    assert_eq!(turn.text_from_deltas, "fallback answer");
+    assert!(!turn.methods.contains(&"error".to_string()));
+
+    let requests = std::fs::read_to_string(&fake_codex_log).expect("read fake codex request log");
+    let turn_models: Vec<_> = requests
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("fake codex request JSON"))
+        .filter(|value| value.get("method").and_then(Value::as_str) == Some("turn/start"))
+        .map(|value| {
+            value
+                .pointer("/params/model")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    assert_eq!(
+        turn_models,
+        vec![
+            Some("primary-model".to_string()),
+            Some("gpt-daybreak-blue-latest".to_string())
+        ]
+    );
+    let model_list = requests
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("fake codex request JSON"))
+        .find(|value| value.get("method").and_then(Value::as_str) == Some("model/list"))
+        .expect("fallback must be checked against the live model catalog");
+    assert_eq!(
+        model_list
+            .pointer("/params/includeHidden")
+            .and_then(Value::as_bool),
+        Some(true),
+        "hidden configured models must be considered"
+    );
+
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(fake_codex_log);
+}
+
+#[test]
+fn fake_codex_blocks_mode_preserves_refusal_when_daybreak_is_not_configured() {
+    let fake_codex = temp_path("fake-cyber-no-fallback-codex.sh");
+    let fake_codex_log = temp_path("fake-cyber-no-fallback-codex-requests.jsonl");
+    let script = fake_codex_cyber_fallback_script(&fake_codex_log);
+    std::fs::write(&fake_codex, script).expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex)
+        .expect("fake codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
+        Harness::Codex,
+        None,
+        Some((
+            "CODEX_BIN",
+            fake_codex.to_str().expect("utf-8 fake codex path"),
+        )),
+        &[],
+    );
+    bridge.send(json!({
+        "type": "user",
+        "thread_key": "slack:C123:123.456",
+        "model": "primary-model",
+        "trace_metadata": {
+            "source": "slackbotv2",
+            "action": "execute"
+        },
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": "preserve refusal"}],
+        },
+    }));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let value = bridge.read_json(deadline);
+        if value.get("method").and_then(Value::as_str) == Some("error") {
+            assert_eq!(
+                value
+                    .pointer("/params/error/codexErrorInfo")
+                    .and_then(Value::as_str),
+                Some("cyberPolicy")
+            );
+            break;
+        }
+    }
+    bridge.finish_successfully();
+
+    let requests = std::fs::read_to_string(&fake_codex_log).expect("read fake codex request log");
+    let requests: Vec<Value> = requests
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("fake codex request JSON"))
+        .collect();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|value| value.get("method").and_then(Value::as_str) == Some("turn/start"))
+            .count(),
+        1,
+        "must not retry an unavailable fallback model"
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|value| value.get("method").and_then(Value::as_str) == Some("model/list")),
+        "must check the live Codex model catalog"
+    );
+
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(fake_codex_log);
+}
+
+#[test]
 fn fake_codex_blocks_mode_interrupts_active_turn() {
     let fake_codex = temp_path("fake-interruptible-codex.sh");
     let fake_codex_log = temp_path("fake-interruptible-codex-requests.jsonl");
@@ -1414,6 +1555,7 @@ impl BridgeProcess {
             "CODEX_MODEL_PROVIDER",
             "FAKE_CODEX_TURN_DELAY",
             "FAKE_CODEX_WAIT_FOR_STEER",
+            "FAKE_CODEX_HAS_DAYBREAK",
             "OPENROUTER_MODEL",
         ] {
             command.env_remove(env_key);
@@ -2490,6 +2632,70 @@ while IFS= read -r line; do
       ;;
     *)
       printf '%s\n' "unexpected request: $line" >&2
+      exit 65
+      ;;
+  esac
+done
+"#,
+    );
+    script
+}
+
+fn fake_codex_cyber_fallback_script(log_path: &Path) -> String {
+    let mut script = String::new();
+    script.push_str("#!/bin/sh\n");
+    script.push_str("log=");
+    script.push_str(&shell_quote(log_path));
+    script.push_str(
+        r#"
+touch "$log"
+if [ "${1:-}" = "app-server" ] && [ "${2:-}" = "--help" ]; then
+  printf '%s\n' '--listen stdio://'
+  exit 0
+fi
+if [ "${1:-}" != "app-server" ]; then
+  exit 64
+fi
+
+request_id() {
+  printf '%s' "$1" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'
+}
+
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$log"
+  case "$line" in
+    *'"method":"initialize"'*)
+      id=$(request_id "$line")
+      printf '{"id":%s,"result":{"userAgent":"fake-codex"}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      id=$(request_id "$line")
+      printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id"
+      ;;
+    *'"method":"model/list"'*)
+      id=$(request_id "$line")
+      if [ "${FAKE_CODEX_HAS_DAYBREAK:-}" = "1" ]; then
+        printf '{"id":%s,"result":{"data":[{"id":"gpt-daybreak-blue-latest","model":"gpt-daybreak-blue-latest","upgrade":null,"upgradeInfo":null,"availabilityNux":null,"displayName":"Daybreak","description":"","hidden":true,"supportedReasoningEfforts":[],"defaultReasoningEffort":"medium","inputModalities":["text"],"supportsPersonality":false,"additionalSpeedTiers":[],"serviceTiers":[],"defaultServiceTier":null,"isDefault":false}],"nextCursor":null}}\n' "$id"
+      else
+        printf '{"id":%s,"result":{"data":[],"nextCursor":null}}\n' "$id"
+      fi
+      ;;
+    *'"method":"turn/start"'*'"model":"gpt-daybreak-blue-latest"'*)
+      id=$(request_id "$line")
+      printf '{"id":%s,"result":{"turn":{"id":"turn-2"}}}\n' "$id"
+      printf '%s\n' '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-2","items":[],"itemsView":"full","status":"inProgress","error":null,"startedAt":2,"completedAt":null,"durationMs":null}}}'
+      printf '%s\n' '{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-2","itemId":"answer-2","delta":"fallback answer"}}'
+      printf '%s\n' '{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-2","item":{"type":"agentMessage","id":"answer-2","text":"fallback answer","phase":null,"memoryCitation":null},"completedAtMs":3}}'
+      printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-2","items":[{"type":"agentMessage","id":"answer-2","text":"fallback answer","phase":null,"memoryCitation":null}],"itemsView":"full","status":"completed","error":null,"startedAt":2,"completedAt":3,"durationMs":1}}}'
+      ;;
+    *'"method":"turn/start"'*)
+      id=$(request_id "$line")
+      printf '{"id":%s,"result":{"turn":{"id":"turn-1"}}}\n' "$id"
+      printf '%s\n' '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[],"itemsView":"full","status":"inProgress","error":null,"startedAt":1,"completedAt":null,"durationMs":null}}}'
+      printf '%s\n' '{"method":"thread/status/changed","params":{"threadId":"thread-1","status":{"type":"systemError"}}}'
+      printf '%s\n' '{"method":"error","params":{"error":{"message":"This request has been flagged for potentially high-risk cyber activity.","codexErrorInfo":"cyberPolicy","additionalDetails":null},"willRetry":false,"threadId":"thread-1","turnId":"turn-1"}}'
+      ;;
+    *)
       exit 65
       ;;
   esac

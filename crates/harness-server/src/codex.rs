@@ -10,7 +10,7 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
-use codex_app_server_protocol::UserInput;
+use codex_app_server_protocol::{ModelListResponse, UserInput};
 use serde_json::{Value, json};
 
 use crate::otel::{TurnStatus as TelemetryTurnStatus, TurnTelemetry};
@@ -20,6 +20,8 @@ use crate::server::{
 };
 use crate::util::write_value;
 use crate::{AppServerRuntime, HarnessServerError, Result};
+
+const CYBER_POLICY_FALLBACK_MODEL: &str = "gpt-daybreak-blue-latest";
 
 #[derive(Debug, Clone, Copy)]
 pub struct CodexHarnessServer {
@@ -412,6 +414,7 @@ fn run_codex_user_turn<W: Write>(
     // re-running them would duplicate output and repeat side effects.
     let max_retries = engine_retry_max();
     let mut retries = 0u32;
+    let mut cyber_fallback_used = false;
     loop {
         let turn_request_id = next_request_id(request_id);
         codex.send_request(turn_request_id, "turn/start", params.clone(), traceparent)?;
@@ -450,6 +453,42 @@ fn run_codex_user_turn<W: Write>(
                      retrying ({retries}/{max_retries})"
                 );
                 thread::sleep(retry_backoff(retries));
+            }
+            TurnTermination::CyberPolicyError { withheld } => {
+                let current_model = params.get("model").and_then(Value::as_str);
+                let fallback_available = !cyber_fallback_used
+                    && current_model != Some(CYBER_POLICY_FALLBACK_MODEL)
+                    && match codex.model_is_available(
+                        stdout,
+                        request_id,
+                        CYBER_POLICY_FALLBACK_MODEL,
+                        traceparent,
+                    ) {
+                        Ok(available) => available,
+                        Err(error) => {
+                            eprintln!(
+                                "could not verify Codex fallback model \
+                                 `{CYBER_POLICY_FALLBACK_MODEL}`: {error:#}"
+                            );
+                            false
+                        }
+                    };
+                if !fallback_available {
+                    for value in &withheld {
+                        telemetry.observe_wire_value(value);
+                        write_value(stdout, value)?;
+                    }
+                    return Ok(());
+                }
+
+                cyber_fallback_used = true;
+                params["model"] = Value::String(CYBER_POLICY_FALLBACK_MODEL.to_owned());
+                *thread_model = Some(CYBER_POLICY_FALLBACK_MODEL.to_owned());
+                telemetry.set_model(CYBER_POLICY_FALLBACK_MODEL);
+                eprintln!(
+                    "codex turn was rejected by the cybersecurity policy; \
+                     retrying once with fallback model `{CYBER_POLICY_FALLBACK_MODEL}`"
+                );
             }
         }
     }
@@ -640,6 +679,48 @@ impl CodexJsonRpcChild {
         }
     }
 
+    fn model_is_available<W: Write>(
+        &mut self,
+        stdout: &mut W,
+        request_id: &mut i64,
+        model: &str,
+        traceparent: Option<&str>,
+    ) -> Result<bool> {
+        let mut cursor = None;
+        let mut seen_cursors = HashSet::new();
+        loop {
+            let id = next_request_id(request_id);
+            self.send_request(
+                id,
+                "model/list",
+                json!({
+                    "cursor": cursor,
+                    "limit": 100,
+                    "includeHidden": true,
+                }),
+                traceparent,
+            )?;
+            let result = self.read_response_or_forward(id, stdout)?;
+            let response: ModelListResponse = serde_json::from_value(result)?;
+            if response
+                .data
+                .iter()
+                .any(|candidate| candidate.model == model)
+            {
+                return Ok(true);
+            }
+            let Some(next_cursor) = response.next_cursor else {
+                return Ok(false);
+            };
+            if !seen_cursors.insert(next_cursor.clone()) {
+                return Err(HarnessServerError::Protocol(
+                    "Codex model/list returned a repeated cursor".to_string(),
+                ));
+            }
+            cursor = Some(next_cursor);
+        }
+    }
+
     /// Drives a codex turn to its terminal notification, forwarding events to
     /// `stdout`. If the turn fails with a transient engine-registration error
     /// before streaming any output, the error (and the `systemError` status that
@@ -704,6 +785,9 @@ impl CodexJsonRpcChild {
             match guard.observe(value, terminal) {
                 GuardStep::Retry(withheld) => {
                     return Ok(TurnTermination::RetriableEngineError { withheld });
+                }
+                GuardStep::CyberPolicy(withheld) => {
+                    return Ok(TurnTermination::CyberPolicyError { withheld });
                 }
                 GuardStep::Forward(values) => {
                     for value in &values {
@@ -832,6 +916,10 @@ enum TurnTermination {
     /// were withheld so the caller can drop them and re-submit the turn, or
     /// forward them once its retry budget is spent.
     RetriableEngineError { withheld: Vec<Value> },
+    /// The requested model rejected the turn under its cybersecurity policy
+    /// before streaming any work. The caller may retry once with the Daybreak
+    /// fallback model without duplicating output or tool side effects.
+    CyberPolicyError { withheld: Vec<Value> },
 }
 
 /// Per-turn notification filter. Sits between codex's stdout and the client so
@@ -857,6 +945,9 @@ enum GuardStep {
     /// Withhold these (retriable) notifications; the caller drops them and
     /// re-submits the turn, or forwards them if it is out of retry budget.
     Retry(Vec<Value>),
+    /// Withhold a cybersecurity-policy rejection so the caller can switch to
+    /// the Daybreak fallback model.
+    CyberPolicy(Vec<Value>),
 }
 
 impl TurnGuard {
@@ -874,6 +965,15 @@ impl TurnGuard {
             }
             withheld.push(value);
             return GuardStep::Retry(withheld);
+        }
+
+        if terminal && method == "error" && !self.streamed && is_cyber_policy_error(&value) {
+            let mut withheld = Vec::new();
+            if let Some(status) = self.pending_system_error.take() {
+                withheld.push(status);
+            }
+            withheld.push(value);
+            return GuardStep::CyberPolicy(withheld);
         }
 
         // We are forwarding `value`; release any held status first to preserve
@@ -936,6 +1036,26 @@ fn is_retriable_engine_error(value: &Value) -> bool {
     };
     message.contains("Engine not found")
         || (message.contains("Job registration failed") && message.contains("404"))
+}
+
+/// True for Codex's typed cybersecurity-policy rejection. The message fallback
+/// keeps this compatible with older Codex builds that did not yet expose
+/// `codexErrorInfo: "cyberPolicy"` through app-server.
+fn is_cyber_policy_error(value: &Value) -> bool {
+    let error = value.pointer("/params/error").unwrap_or(&Value::Null);
+    let info = error.get("codexErrorInfo").and_then(Value::as_str);
+    if matches!(info, Some("cyberPolicy" | "cyber_policy")) {
+        return true;
+    }
+
+    error
+        .get("message")
+        .and_then(Value::as_str)
+        .is_some_and(|message| {
+            let message = message.to_ascii_lowercase();
+            message.contains("high-risk cyber activity")
+                || message.contains("high risk cyber activity")
+        })
 }
 
 /// True for a `thread/status/changed` notification reporting a `systemError`.
@@ -1126,7 +1246,7 @@ mod tests {
         let mut forwarded = Vec::new();
         for (value, terminal) in events {
             match guard.observe(value, terminal) {
-                GuardStep::Retry(withheld) => {
+                GuardStep::Retry(withheld) | GuardStep::CyberPolicy(withheld) => {
                     return (methods(&forwarded), Some(methods(&withheld)));
                 }
                 GuardStep::Forward(values) => forwarded.extend(values),
@@ -1182,6 +1302,31 @@ mod tests {
     }
 
     #[test]
+    fn classifies_typed_and_legacy_cyber_policy_errors() {
+        assert!(is_cyber_policy_error(&json!({
+            "method": "error",
+            "params": {
+                "error": {
+                    "codexErrorInfo": "cyberPolicy",
+                    "message": "request rejected"
+                }
+            }
+        })));
+        assert!(is_cyber_policy_error(&json!({
+            "method": "error",
+            "params": {
+                "error": {
+                    "message": "This request has been flagged for potentially high-risk cyber activity."
+                }
+            }
+        })));
+        assert!(!is_cyber_policy_error(&json!({
+            "method": "error",
+            "params": { "error": { "message": "usage limit exceeded" } }
+        })));
+    }
+
+    #[test]
     fn detects_system_error_status() {
         assert!(is_system_error_status(&system_error_status()));
         assert!(!is_system_error_status(&json!({
@@ -1209,6 +1354,29 @@ mod tests {
                 "error".to_string(),
             ])
         );
+    }
+
+    #[test]
+    fn withholds_output_free_cyber_policy_error_for_model_switch() {
+        let cyber_error = json!({
+            "method": "error",
+            "params": {
+                "error": {
+                    "codexErrorInfo": "cyberPolicy",
+                    "message": "This request has been flagged for potentially high-risk cyber activity."
+                },
+                "willRetry": false
+            }
+        });
+        let mut guard = TurnGuard::default();
+        assert!(matches!(
+            guard.observe(system_error_status(), false),
+            GuardStep::Forward(values) if values.is_empty()
+        ));
+        assert!(matches!(
+            guard.observe(cyber_error, true),
+            GuardStep::CyberPolicy(values) if methods(&values) == ["thread/status/changed", "error"]
+        ));
     }
 
     #[test]
