@@ -61,6 +61,9 @@ use title_generator::{
 
 pub const SESSION_OUTPUT_LINE_EVENT: &str = "session.output.line";
 pub const SESSION_FIRST_TOKEN_EVENT: &str = "session.first_token";
+/// Requester-facing failure message used when a sandbox is replaced mid-turn.
+const SANDBOX_EVICTED_REQUESTER_MESSAGE: &str =
+    "The sandbox running this response was replaced before it finished; please re-ask.";
 
 const EVENT_STREAM_SAFETY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const STEERING_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
@@ -4758,6 +4761,9 @@ enum ReattachOutcome {
     Retryable(String),
     /// The sandbox cannot serve IO anymore.
     Dead(String),
+    /// The sandbox disappeared for an infrastructure reason rather than an
+    /// agent error.
+    Evicted(String),
 }
 
 fn session_pipe_from_parts(stdin: SandboxWrite, instance_id: Option<String>) -> SessionPipe {
@@ -4942,6 +4948,26 @@ fn spawn_stdout_pump_loop(state: StdoutPumpLoop) {
                         .await;
                         break 'pump;
                     }
+                    ReattachOutcome::Evicted(detail) => {
+                        warn!(
+                            component = COMPONENT_SESSION_RUNTIME,
+                            event = "session_execution_sandbox_evicted",
+                            thread_key = %thread_key,
+                            execution_id = %execution.execution_id,
+                            sandbox_id = %sandbox_id,
+                            detail,
+                            "sandbox replaced before the turn finished"
+                        );
+                        fail_detached_execution_with(
+                            &ctx,
+                            &thread_key,
+                            &sandbox_id,
+                            &execution.execution_id,
+                            SANDBOX_EVICTED_REQUESTER_MESSAGE.to_owned(),
+                        )
+                        .await;
+                        break 'pump;
+                    }
                 }
             }
         }
@@ -4974,7 +5000,9 @@ async fn reattach_session_pipe(
             Ok(observed)
                 if pipe.instance_id.is_some() && observed.instance_id != pipe.instance_id =>
             {
-                return ReattachOutcome::Dead(format!(
+                // The pod we streamed from was replaced, rather than stopped by
+                // an agent error. Surface the infrastructure-specific message.
+                return ReattachOutcome::Evicted(format!(
                     "sandbox instance changed while reattaching stdout (status {:?})",
                     observed.status
                 ));
@@ -4984,7 +5012,9 @@ async fn reattach_session_pipe(
                     Ok(io) => {
                         let parts = io.into_parts();
                         if pipe.instance_id.is_some() && parts.instance_id != pipe.instance_id {
-                            return ReattachOutcome::Dead(
+                            // Replaced between observe and open: same eviction
+                            // shape and requester-facing failure.
+                            return ReattachOutcome::Evicted(
                                 "sandbox instance changed while opening stdout".to_owned(),
                             );
                         }
@@ -5045,13 +5075,18 @@ async fn reattach_session_pipe(
                 .await;
             }
             Ok(observed) => {
-                return ReattachOutcome::Dead(sandbox_dead_detail(
-                    &observed.status,
-                    observed.reason.as_deref(),
-                ));
+                let detail = sandbox_dead_detail(&observed.status, observed.reason.as_deref());
+                // Kubernetes reports an evicted pod as Stopped with reason
+                // Evicted before deletion, then Gone or NotFound afterward.
+                if observed.status == SandboxStatus::Gone
+                    || observed.reason.as_deref() == Some("Evicted")
+                {
+                    return ReattachOutcome::Evicted(detail);
+                }
+                return ReattachOutcome::Dead(detail);
             }
             Err(SandboxError::NotFound(_)) => {
-                return ReattachOutcome::Dead("sandbox no longer exists".to_owned());
+                return ReattachOutcome::Evicted("sandbox no longer exists".to_owned());
             }
             Err(error) => {
                 return ReattachOutcome::Retryable(format!("sandbox status check failed: {error}"));
@@ -5130,6 +5165,18 @@ async fn fail_detached_execution(
     detail: &str,
 ) {
     let error = format!("sandbox stdout closed before terminal output; {detail}");
+    fail_detached_execution_with(ctx, thread_key, sandbox_id, execution_id, error).await;
+}
+
+/// Fail a detached execution with an explicit human-facing error, used when the
+/// raw pump detail would otherwise be surfaced to the requester verbatim.
+async fn fail_detached_execution_with(
+    ctx: &RuntimeContext,
+    thread_key: &ThreadKey,
+    sandbox_id: &str,
+    execution_id: &str,
+    error: String,
+) {
     if let Err(record_error) = record_terminal_output(
         ctx,
         thread_key,
@@ -6364,7 +6411,7 @@ fn terminal_failure_class(error: &str) -> &'static str {
     if error.contains("oomkilled") {
         return "oom";
     }
-    if error.contains("evicted") {
+    if error.contains("evicted") || error.contains("sandbox running this response was replaced") {
         return "evicted";
     }
     if error.contains("max_duration") || error.contains("timeout") || error.contains("timed out") {
@@ -8377,6 +8424,10 @@ mod tests {
                 "sandbox stdout closed before terminal output; {}",
                 sandbox_dead_detail(&SandboxStatus::Stopped, Some("Evicted"))
             )),
+            "evicted"
+        );
+        assert_eq!(
+            terminal_failure_class(SANDBOX_EVICTED_REQUESTER_MESSAGE),
             "evicted"
         );
         // Without a reason the classification is unchanged.
@@ -11542,6 +11593,59 @@ mod adoption_tests {
         reset_test_store(&store).await;
     }
 
+    /// Kubernetes reports an evicted pod as Stopped before deleting it. Fail
+    /// with a requester-facing message even when no output was persisted;
+    /// replaying could repeat an unrecorded external side effect.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn evicted_sandbox_before_deletion_fails_with_requester_message() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:evicted-early-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-evicted"), true).await;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let (io, stdout, _stdin) = mock_io();
+        backend.push_io(io).await;
+
+        let runtime = runtime_with(&store, backend.clone());
+        claim_test_stdout_owner(&runtime, &execution_id).await;
+        runtime
+            .ensure_session_pipe(&thread_key, "sbx-evicted")
+            .await
+            .expect("open initial pipe");
+        backend.set_reason(Some("Evicted"));
+        backend.set_status(SandboxStatus::Stopped);
+        drop(stdout);
+
+        wait_for_event(&store, &thread_key, "session.execution_failed").await;
+        let all = events(&store, &thread_key).await;
+        let failed = all
+            .iter()
+            .find(|event| event.event_type == "session.execution_failed")
+            .expect("failed event");
+        assert_eq!(
+            failed.payload["error"].as_str(),
+            Some(SANDBOX_EVICTED_REQUESTER_MESSAGE)
+        );
+        let execution = store
+            .latest_execution_for_thread(&thread_key)
+            .await
+            .unwrap()
+            .expect("execution row");
+        assert_eq!(execution.execution_id, execution_id);
+        assert_eq!(execution.status, ExecutionStatus::Failed);
+        assert_eq!(
+            execution.error.as_deref(),
+            Some(SANDBOX_EVICTED_REQUESTER_MESSAGE)
+        );
+        assert_eq!(backend.opens(), 1);
+        assert!(backend.created_specs().is_empty());
+        reset_test_store(&store).await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stdout_eof_reattaches_and_delivers_late_terminal_output() {
         let Some(store) = test_store().await else {
@@ -11796,11 +11900,18 @@ mod adoption_tests {
             .iter()
             .find(|event| event.event_type == "session.execution_failed")
             .expect("failed event");
+        // A replaced pod is an infrastructure failure, so do not inherit the
+        // active execution onto it or expose the raw pump detail.
         assert!(
             failed.payload["error"]
                 .as_str()
-                .is_some_and(|error| error.contains("sandbox instance changed")),
-            "replacement should fail rather than inherit the active execution"
+                .is_some_and(|error| error.contains("was replaced")),
+            "replacement should fail (not inherit) with the eviction message"
+        );
+        assert!(
+            !all.iter()
+                .any(|event| event.event_type == "session.stdout_pump_reattached"),
+            "must not reattach the pump to the replacement pod"
         );
         reset_test_store(&store).await;
     }
@@ -11883,8 +11994,8 @@ mod adoption_tests {
         };
         let _serial = TEST_LOCK.lock().await;
         let thread_key =
-            ThreadKey::parse(format!("test:eof-gone-{}", uuid::Uuid::new_v4())).unwrap();
-        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-gone"), true).await;
+            ThreadKey::parse(format!("test:eof-stopped-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-stopped"), true).await;
 
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
         let (io, stdout, _stdin) = mock_io();
@@ -11893,10 +12004,12 @@ mod adoption_tests {
         let runtime = runtime_with(&store, backend.clone());
         claim_test_stdout_owner(&runtime, &execution_id).await;
         runtime
-            .ensure_session_pipe(&thread_key, "sbx-gone")
+            .ensure_session_pipe(&thread_key, "sbx-stopped")
             .await
             .expect("open initial pipe");
-        backend.set_status(SandboxStatus::Gone);
+        // A non-eviction terminal status (a crashed/stopped pod, same pod UID)
+        // still fails with the raw pump error.
+        backend.set_status(SandboxStatus::Stopped);
         drop(stdout);
 
         wait_for_event(&store, &thread_key, "session.execution_failed").await;
@@ -11917,7 +12030,7 @@ mod adoption_tests {
         assert!(
             !all.iter()
                 .any(|event| event.event_type == "session.stdout_pump_reattached"),
-            "gone sandbox should not reattach"
+            "stopped sandbox should not reattach"
         );
         assert_eq!(backend.opens(), 1);
         reset_test_store(&store).await;
