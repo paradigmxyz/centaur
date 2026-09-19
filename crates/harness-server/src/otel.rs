@@ -1200,6 +1200,15 @@ fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
 }
 
 fn openai_pricing(model: &str) -> Option<TokenPricing> {
+    if model.contains("gpt-6-astra") {
+        return Some(TokenPricing {
+            input_per_mtok: 10.0,
+            cache_creation_per_mtok: 12.5,
+            cache_read_per_mtok: 1.0,
+            output_per_mtok: 60.0,
+            source: "centaur_estimate:openai:gpt-6-astra:standard-short-context",
+        });
+    }
     if model.contains("gpt-5-6-sol") {
         return Some(TokenPricing {
             input_per_mtok: 5.0,
@@ -1826,6 +1835,28 @@ mod tests {
             estimate_usage_cost(HarnessKind::Codex, "openai", "gpt-5.5", &usage).expect("cost");
         assert!((cost.input_cost - 3.875).abs() < 1e-9);
         assert!((cost.output_cost - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn astra_cost_uses_standard_short_context_pricing() {
+        let usage = NormalizedTokenUsage {
+            input_tokens: Some(1_000_000),
+            cache_creation_input_tokens: Some(100_000),
+            cache_read_input_tokens: Some(200_000),
+            output_tokens: Some(100_000),
+            ..Default::default()
+        };
+
+        let cost =
+            estimate_usage_cost(HarnessKind::Codex, "openai", "gpt-6-astra", &usage).expect("cost");
+
+        assert!((cost.input_cost - 8.45).abs() < 1e-9);
+        assert!((cost.output_cost - 6.0).abs() < 1e-9);
+        assert!((cost.total_cost() - 14.45).abs() < 1e-9);
+        assert_eq!(
+            cost.source,
+            "centaur_estimate:openai:gpt-6-astra:standard-short-context"
+        );
     }
 
     #[test]
