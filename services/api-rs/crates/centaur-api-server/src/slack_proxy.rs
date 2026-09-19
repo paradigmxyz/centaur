@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::OnceLock,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -33,6 +33,13 @@ const SLACK_CHANNEL_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const SLACK_CHANNEL_REFRESH_RETRY_DELAY: Duration = Duration::from_secs(60);
 const SLACK_RATE_LIMIT_MAX_RETRIES: u32 = 2;
 const SLACK_RATE_LIMIT_MAX_DELAY: Duration = Duration::from_secs(60);
+const SLACK_FILE_SHARE_PROPAGATION_WINDOW: Duration = Duration::from_secs(10);
+const SLACK_FILE_SHARE_RETRY_DELAYS: [Duration; 4] = [
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+];
 
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -475,7 +482,14 @@ async fn authorized_slack_file_info(
         SlackChannelPermission::Download,
     )
     .await?;
-    let file = slack_file_info(client, config, file_id).await?;
+    let file = slack_file_info_with_share_retry(
+        client,
+        config,
+        file_id,
+        channel_id,
+        &SLACK_FILE_SHARE_RETRY_DELAYS,
+    )
+    .await?;
     if !slack_file_in_channel(&file, channel_id) {
         return Err(ApiError::Forbidden(
             "file is not shared in an allowed Slack channel".to_owned(),
@@ -861,6 +875,45 @@ async fn slack_file_info(
     value.get("file").cloned().ok_or_else(|| {
         ApiError::BadRequest("Slack file info response did not include file".to_owned())
     })
+}
+
+async fn slack_file_info_with_share_retry(
+    client: &reqwest::Client,
+    config: &SlackFileProxyConfig,
+    file_id: &str,
+    channel_id: &str,
+    retry_delays: &[Duration],
+) -> Result<Value, ApiError> {
+    let mut file = slack_file_info(client, config, file_id).await?;
+    if slack_file_in_channel(&file, channel_id) || !slack_file_share_may_be_propagating(&file) {
+        return Ok(file);
+    }
+
+    for delay in retry_delays {
+        tokio::time::sleep(*delay).await;
+        file = slack_file_info(client, config, file_id).await?;
+        if slack_file_in_channel(&file, channel_id) || !slack_file_channel_ids(&file).is_empty() {
+            break;
+        }
+    }
+    Ok(file)
+}
+
+fn slack_file_share_may_be_propagating(file: &Value) -> bool {
+    if !slack_file_channel_ids(file).is_empty() {
+        return false;
+    }
+    let Some(created) = file.get("created").and_then(Value::as_u64) else {
+        return false;
+    };
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return false;
+    };
+    created
+        <= now
+            .as_secs()
+            .saturating_add(SLACK_FILE_SHARE_PROPAGATION_WINDOW.as_secs())
+        && now.as_secs().saturating_sub(created) <= SLACK_FILE_SHARE_PROPAGATION_WINDOW.as_secs()
 }
 
 async fn slack_channel_info(
@@ -1902,6 +1955,79 @@ mod tests {
         assert_eq!(value.get("ok"), Some(&Value::Bool(true)));
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn file_info_retries_recent_files_until_channel_membership_appears() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let handler_attempts = attempts.clone();
+        let created = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let app = axum::Router::new().route(
+            "/files.info",
+            axum::routing::post(move || {
+                let attempt = handler_attempts.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    let channels = if attempt < 2 {
+                        Vec::<String>::new()
+                    } else {
+                        vec!["C123456789".to_owned()]
+                    };
+                    axum::Json(json!({
+                        "ok": true,
+                        "file": {
+                            "id": "F123456789",
+                            "created": created,
+                            "channels": channels
+                        }
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = SlackFileProxyConfig {
+            api_url: format!("http://{address}"),
+            bot_token: "test-token".to_owned(),
+            max_upload_bytes: 1,
+        };
+
+        let file = slack_file_info_with_share_retry(
+            http_client(),
+            &config,
+            "F123456789",
+            "C123456789",
+            &[Duration::ZERO; 4],
+        )
+        .await
+        .unwrap();
+
+        assert!(slack_file_in_channel(&file, "C123456789"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[test]
+    fn file_share_retry_only_applies_to_recent_files_without_memberships() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(slack_file_share_may_be_propagating(&json!({
+            "created": now,
+            "channels": []
+        })));
+        assert!(!slack_file_share_may_be_propagating(&json!({
+            "created": now,
+            "channels": ["C987654321"]
+        })));
+        assert!(!slack_file_share_may_be_propagating(&json!({
+            "created": now.saturating_sub(SLACK_FILE_SHARE_PROPAGATION_WINDOW.as_secs() + 1),
+            "channels": []
+        })));
     }
 
     #[test]
