@@ -378,6 +378,32 @@ describe('validateStrategyOverrides', () => {
     })
   })
 
+  test('accepts a configured model only through its configured provider', () => {
+    const configuredModels = {
+      'gpt-daybreak-blue-latest': {
+        harnessType: 'codex',
+        provider: 'daybreak'
+      }
+    }
+    expect(
+      validateStrategyOverrides(
+        {
+          model: 'gpt-daybreak-blue-latest',
+          provider: 'daybreak'
+        },
+        configuredModels
+      )
+    ).toEqual({
+      harnessType: 'codex',
+      model: 'gpt-daybreak-blue-latest',
+      provider: 'daybreak',
+      reasoning: undefined
+    })
+    expect(
+      validateStrategyOverrides({ model: 'gpt-daybreak-blue-latest' }, configuredModels)
+    ).toEqual({})
+  })
+
   test('accepts canonical OpenAI model ids from the model catalog', () => {
     expect(validateStrategyOverrides({ model: 'gpt-6-astra' })).toEqual({
       harnessType: 'codex',
@@ -630,6 +656,102 @@ describe('messageOverridesForText strategy invocation', () => {
         reasoning: 'max'
       }
     })
+  })
+
+  test('defaults software engineering work to a configured Daybreak model', async () => {
+    const previous = process.env.CODEX_CUSTOM_PROVIDERS
+    process.env.CODEX_CUSTOM_PROVIDERS = JSON.stringify({
+      daybreak: {
+        baseUrl: 'https://inference.example.com/v1',
+        defaultModel: 'gpt-daybreak-blue-latest',
+        name: 'Daybreak'
+      }
+    })
+    let requestBody: Record<string, any> | undefined
+    try {
+      const strategy = createOpenAiMessageOverridesStrategy({
+        apiKey: 'test-key',
+        fetch: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+          requestBody = JSON.parse(String(init?.body))
+          return Response.json({
+            output: [
+              {
+                content: [
+                  {
+                    text: JSON.stringify({
+                      harness: 'codex',
+                      model: 'gpt-daybreak-blue-latest',
+                      provider: 'daybreak',
+                      reasoning: null
+                    })
+                  }
+                ]
+              }
+            ]
+          })
+        }) as unknown as typeof fetch,
+        model: 'gpt-5.4-nano'
+      })
+
+      await expect(strategy({ text: 'fix this vulnerability' })).resolves.toEqual({
+        overrides: {
+          harnessType: 'codex',
+          model: 'gpt-daybreak-blue-latest',
+          provider: 'daybreak',
+          reasoning: undefined
+        }
+      })
+      expect(requestBody?.instructions).toContain(
+        'Exception to the explicit-selection rule'
+      )
+      expect(requestBody?.text.format.schema.properties.model.enum).toContain(
+        'gpt-daybreak-blue-latest'
+      )
+      expect(requestBody?.text.format.schema.properties.provider.enum).toContain('daybreak')
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_CUSTOM_PROVIDERS
+      else process.env.CODEX_CUSTOM_PROVIDERS = previous
+    }
+  })
+
+  test('does not advertise Daybreak when that model is not configured', async () => {
+    const previous = process.env.CODEX_CUSTOM_PROVIDERS
+    delete process.env.CODEX_CUSTOM_PROVIDERS
+    let requestBody: Record<string, any> | undefined
+    try {
+      const strategy = createOpenAiMessageOverridesStrategy({
+        apiKey: 'test-key',
+        fetch: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+          requestBody = JSON.parse(String(init?.body))
+          return Response.json({
+            output: [
+              {
+                content: [
+                  {
+                    text: JSON.stringify({
+                      harness: null,
+                      model: null,
+                      provider: null,
+                      reasoning: null
+                    })
+                  }
+                ]
+              }
+            ]
+          })
+        }) as unknown as typeof fetch,
+        model: 'gpt-5.4-nano'
+      })
+
+      await strategy({ text: 'fix this vulnerability' })
+      expect(requestBody?.instructions).not.toContain('gpt-daybreak-blue-latest')
+      expect(requestBody?.text.format.schema.properties.model.enum).not.toContain(
+        'gpt-daybreak-blue-latest'
+      )
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_CUSTOM_PROVIDERS
+      else process.env.CODEX_CUSTOM_PROVIDERS = previous
+    }
   })
 
   test('falls back when the OpenAI strategy request fails', async () => {

@@ -1,15 +1,17 @@
 import type { Logger } from 'chat'
 import {
   extractMessageOverrides,
-  validateStrategyOverrides
+  validateStrategyOverrides,
+  type StrategyModelRoute
 } from './overrides'
 import type { JsonObject, MessageOverridesStrategy } from './types'
 import { errorMessage, isJsonObject } from './utils'
 
 const DEFAULT_TIMEOUT_MS = 2_000
 const DEFAULT_MAX_OUTPUT_TOKENS = 300
+const DAYBREAK_MODEL = 'gpt-daybreak-blue-latest'
 
-const SYSTEM_PROMPT = [
+const BASE_SYSTEM_PROMPT = [
   'Decide whether the Slack message asks to use a specific AI harness, model, provider, or reasoning effort.',
   'Return only canonical override values from the schema.',
   'Use null for every field when the message does not ask to change model selection.',
@@ -27,7 +29,7 @@ const SYSTEM_PROMPT = [
   'Words containing or merely evoking model aliases are not model requests. For example, "think deeply", "do a deep analysis", "use your strongest thinking", and "give me a fast answer" do not select Amp. Unless another explicit selector is present, return null for every field.',
   'For example, "use max effort and the sol model" should return model "gpt-5.6-sol" and reasoning "max".',
   'Do not treat ordinary discussion of model names as a selection request.'
-].join('\n')
+]
 
 const MODEL_VALUES = [
   'claude-fable-5',
@@ -109,6 +111,15 @@ export function createOpenAiMessageOverridesStrategy(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const maxOutputTokens = options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
   const fetchFn = options.fetch ?? fetch
+  const configuredDaybreak = configuredCustomProviderModel(
+    process.env.CODEX_CUSTOM_PROVIDERS,
+    DAYBREAK_MODEL
+  )
+  const configuredModels: Record<string, StrategyModelRoute> = configuredDaybreak
+    ? { [DAYBREAK_MODEL]: configuredDaybreak }
+    : {}
+  const systemPrompt = messageOverridesSystemPrompt(configuredDaybreak)
+  const schema = messageOverridesSchema(configuredDaybreak)
 
   return async ({ text }) => {
     // Explicit model flags are deterministic user commands and bypass the
@@ -129,7 +140,7 @@ export function createOpenAiMessageOverridesStrategy(
       const response = await fetchFn(responsesUrl, {
         body: JSON.stringify({
           input: strategyText,
-          instructions: SYSTEM_PROMPT,
+          instructions: systemPrompt,
           max_output_tokens: maxOutputTokens,
           model: options.model,
           reasoning: { effort: 'none' },
@@ -137,7 +148,7 @@ export function createOpenAiMessageOverridesStrategy(
           text: {
             format: {
               name: 'slack_message_overrides',
-              schema: MESSAGE_OVERRIDES_SCHEMA,
+              schema,
               strict: true,
               type: 'json_schema'
             }
@@ -166,7 +177,8 @@ export function createOpenAiMessageOverridesStrategy(
       }
       const parsed = JSON.parse(outputText)
       const strategyOverrides = validateStrategyOverrides(
-        isJsonObject(parsed) ? (parsed as OpenAiMessageOverridesStrategyOutput) : null
+        isJsonObject(parsed) ? (parsed as OpenAiMessageOverridesStrategyOutput) : null,
+        configuredModels
       )
       return { overrides: strategyOverrides }
     } catch (error) {
@@ -180,6 +192,67 @@ export function createOpenAiMessageOverridesStrategy(
       clearTimeout(timeout)
     }
   }
+}
+
+function messageOverridesSystemPrompt(configuredDaybreak?: StrategyModelRoute): string {
+  return [
+    ...BASE_SYSTEM_PROMPT,
+    ...(configuredDaybreak
+      ? [
+          `Exception to the explicit-selection rule: the model ${DAYBREAK_MODEL} is configured through provider ${configuredDaybreak.provider}. Default bug fixes, security work, vulnerability analysis or remediation, and other software-engineering work to this model and provider unless the user explicitly selects something else.`
+        ]
+      : [])
+  ].join('\n')
+}
+
+function messageOverridesSchema(configuredDaybreak?: StrategyModelRoute) {
+  if (!configuredDaybreak?.provider) return MESSAGE_OVERRIDES_SCHEMA
+  return {
+    ...MESSAGE_OVERRIDES_SCHEMA,
+    properties: {
+      ...MESSAGE_OVERRIDES_SCHEMA.properties,
+      model: {
+        ...MESSAGE_OVERRIDES_SCHEMA.properties.model,
+        enum: [...MODEL_VALUES.filter(value => value !== null), DAYBREAK_MODEL, null]
+      },
+      provider: {
+        ...MESSAGE_OVERRIDES_SCHEMA.properties.provider,
+        enum: [
+          ...new Set([
+            'responses',
+            'amazon-bedrock',
+            'openrouter',
+            configuredDaybreak.provider
+          ]),
+          null
+        ]
+      }
+    }
+  }
+}
+
+function configuredCustomProviderModel(
+  raw: string | undefined,
+  model: string
+): StrategyModelRoute | undefined {
+  if (!raw) return undefined
+  try {
+    const providers = JSON.parse(raw)
+    if (!isJsonObject(providers)) return undefined
+    for (const [provider, config] of Object.entries(providers)) {
+      if (
+        !isJsonObject(config) ||
+        typeof config.defaultModel !== 'string' ||
+        config.defaultModel.trim().toLowerCase() !== model
+      ) {
+        continue
+      }
+      return { harnessType: 'codex', provider }
+    }
+  } catch {
+    return undefined
+  }
+  return undefined
 }
 
 function responseOutputText(value: unknown): string | undefined {

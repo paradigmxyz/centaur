@@ -123,6 +123,11 @@ const STRATEGY_MODEL_HARNESSES: Record<string, string> = {
   'gpt-6-astra': 'codex'
 }
 
+export type StrategyModelRoute = {
+  harnessType: string
+  provider?: string
+}
+
 // Values are one horizontal-whitespace-delimited token; a newline after the
 // value starts the user's prompt, not part of the model/reasoning value.
 const FLAG_VALUE_SEPARATOR = String.raw`(?:[^\S\r\n]*=[^\S\r\n]*|[^\S\r\n]+)`
@@ -238,7 +243,8 @@ export function validateStrategyOverrides(
     model?: unknown
     provider?: unknown
     reasoning?: unknown
-  } | null | undefined
+  } | null | undefined,
+  configuredModels: Record<string, StrategyModelRoute> = {}
 ): HarnessOverrides {
   if (!raw || typeof raw !== 'object') return {}
   let harnessType: string | undefined
@@ -256,7 +262,12 @@ export function validateStrategyOverrides(
   const providerRaw = cleanString(raw.provider)
   if (providerRaw) {
     const normalized = providerRaw.toLowerCase()
-    if (!STRATEGY_PROVIDERS.has(normalized)) return {}
+    const configuredProviders = new Set(
+      Object.values(configuredModels).flatMap(route =>
+        route.provider ? [route.provider.toLowerCase()] : []
+      )
+    )
+    if (!STRATEGY_PROVIDERS.has(normalized) && !configuredProviders.has(normalized)) return {}
     provider = normalized
     if (harnessType && harnessType !== 'codex') return {}
     harnessType = 'codex'
@@ -264,10 +275,13 @@ export function validateStrategyOverrides(
 
   const modelRaw = cleanString(raw.model)
   if (modelRaw) {
-    const modelHarness = STRATEGY_MODEL_HARNESSES[modelRaw.toLowerCase()]
+    const normalized = modelRaw.toLowerCase()
+    const configuredRoute = configuredModels[normalized]
+    const modelHarness = STRATEGY_MODEL_HARNESSES[normalized] ?? configuredRoute?.harnessType
     if (!modelHarness) return {}
     if (harnessType && harnessType !== modelHarness) return {}
-    model = modelRaw.toLowerCase()
+    if (configuredRoute?.provider && provider !== configuredRoute.provider.toLowerCase()) return {}
+    model = normalized
     harnessType = modelHarness
   }
 
