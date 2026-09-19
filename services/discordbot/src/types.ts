@@ -95,6 +95,8 @@ export type DiscordbotOptions = {
   apiUrl: string;
   applicationId: string;
   botToken: string;
+  /** Harness for new threads; existing sessions keep their harness. Defaults to codex. */
+  defaultHarnessType?: string;
   discordApiUrl?: string;
   fetch?: DiscordbotFetch;
   guildAllowlist?: readonly string[];
