@@ -20,13 +20,16 @@ class VegaLiteClientTests(unittest.TestCase):
 
         self.assertTrue(rendered.startswith(b"\x89PNG"))
         width, height = struct.unpack(">II", rendered[16:24])
-        self.assertGreaterEqual(width, 800)
-        self.assertGreaterEqual(height, 450)
+        self.assertEqual((width, height), (800, 450))
 
-    def test_renders_inline_spec_to_svg(self):
+    def test_renders_inline_spec_to_svg_with_default_style(self):
         encoded = VegaLiteClient().render(BAR_SPEC, output_format="svg")
 
-        self.assertIn(b"<svg", base64.b64decode(encoded)[:500])
+        rendered = base64.b64decode(encoded).decode("utf-8")
+        self.assertIn("<svg", rendered[:500])
+        self.assertIn("#F8F9FA", rendered)
+        self.assertIn("#0072B2", rendered)
+        self.assertIn("Inter", rendered)
 
     def test_rejects_external_data_url(self):
         spec = {

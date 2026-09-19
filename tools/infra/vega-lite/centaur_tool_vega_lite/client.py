@@ -17,44 +17,61 @@ MAX_DIMENSION = 1_600
 MAX_SCALE = 3.0
 
 _DEFAULT_CONFIG: dict[str, Any] = {
-    "font": "Arial",
-    "background": "#FFFFFF",
+    "font": "Inter, IBM Plex Sans, Source Sans 3, DejaVu Sans, Arial, sans-serif",
+    "background": "#F8F9FA",
     "view": {
         "continuousWidth": 800,
         "continuousHeight": 450,
         "stroke": None,
     },
-    "mark": {"color": "#00FF00"},
+    "mark": {"color": "#0072B2"},
+    "line": {"strokeWidth": 2},
+    "point": {"filled": True, "size": 50},
     "axis": {
-        "domainColor": "#000000",
-        "gridColor": "#E5E5E5",
-        "labelColor": "#000000",
-        "tickColor": "#000000",
-        "titleColor": "#000000",
+        "domainColor": "#9CA3AF",
+        "domainWidth": 0.8,
+        "gridColor": "#E5E7EB",
+        "gridWidth": 0.6,
+        "labelColor": "#4B5563",
+        "labelFontSize": 9.5,
+        "labelPadding": 6,
+        "tickColor": "#9CA3AF",
+        "tickWidth": 0.8,
+        "titleColor": "#374151",
+        "titleFontSize": 10.5,
+        "titleFontWeight": "normal",
+        "titlePadding": 10,
     },
+    "axisX": {"grid": False, "tickSize": 4, "ticks": True},
+    "axisY": {"domain": True, "grid": True, "ticks": False},
     "legend": {
-        "labelColor": "#000000",
-        "titleColor": "#000000",
+        "labelColor": "#4B5563",
+        "labelFontSize": 9.5,
+        "titleColor": "#374151",
+        "titleFontSize": 10.5,
+        "titleFontWeight": "normal",
     },
     "title": {
         "anchor": "start",
-        "color": "#000000",
-        "font": "Times New Roman",
-        "fontSize": 20,
-        "fontWeight": "normal",
+        "color": "#111827",
+        "fontSize": 13,
+        "fontWeight": 600,
+        "offset": 12,
+        "subtitleColor": "#4B5563",
+        "subtitleFontSize": 10,
+        "subtitleFontWeight": "normal",
+        "subtitlePadding": 6,
     },
     "range": {
         "category": [
-            "#00FF00",
+            "#0072B2",
+            "#D55E00",
+            "#009E73",
+            "#CC79A7",
+            "#F0E442",
+            "#56B4E9",
+            "#E69F00",
             "#000000",
-            "#8D6ED6",
-            "#BDADE6",
-            "#0A82E2",
-            "#ACD5F5",
-            "#F3BF15",
-            "#F3F8B4",
-            "#D95959",
-            "#EEA4A4",
         ]
     },
 }
@@ -122,6 +139,7 @@ def _prepare_spec(spec: dict[str, Any]) -> dict[str, Any]:
     if "mark" in prepared or "layer" in prepared:
         prepared.setdefault("width", 800)
         prepared.setdefault("height", 450)
+        prepared.setdefault("autosize", {"type": "fit", "contains": "padding"})
     config = prepared.get("config", {})
     if not isinstance(config, Mapping):
         raise ValueError("spec.config must be an object")
