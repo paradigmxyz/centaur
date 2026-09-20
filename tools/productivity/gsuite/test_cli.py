@@ -160,6 +160,23 @@ def test_docs_create_allows_omitting_channel(monkeypatch):
     assert "Ownership transferred to alice@example.com" in result.output
 
 
+def test_drive_drives_lists_shared_drive_ids(monkeypatch):
+    calls: list[dict] = []
+
+    def fake_drive_list_drives(**kwargs):
+        calls.append(kwargs)
+        return [{"id": "0ALWnusNQi9yLUk9PVA", "name": "Engineering"}]
+
+    monkeypatch.setattr(client, "drive_list_drives", fake_drive_list_drives)
+
+    result = runner.invoke(app, ["drive", "drives", "--limit", "5"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [{"max_results": 5}]
+    assert "Engineering" in result.output
+    assert "0ALWnusNQi9yLUk9PVA" in result.output
+
+
 def test_drive_list_full_text_flag_is_passed_to_client(monkeypatch):
     calls: list[dict] = []
 

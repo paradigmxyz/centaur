@@ -554,6 +554,35 @@ def drive_list(
     console.print(table)
 
 
+@drive_app.command("drives")
+def drive_drives(
+    limit: int = typer.Option(100, "--limit", "-n", help="Max results"),
+):
+    """List the shared drives the account is a member of.
+
+    Use a drive ID with `gsuite drive list --folder <id>` to browse its top level.
+
+    Examples:
+        gsuite drive drives
+    """
+    from .client import drive_list_drives
+
+    results = drive_list_drives(max_results=limit)
+
+    if not results:
+        console.print("[yellow]No shared drives found.[/]")
+        raise typer.Exit()
+
+    table = Table(title=f"Shared Drives ({len(results)})")
+    table.add_column("Name", style="cyan", max_width=40)
+    table.add_column("ID", style="dim")
+
+    for d in results:
+        table.add_row(d["name"][:40], d["id"])
+
+    console.print(table)
+
+
 @drive_app.command("download")
 def drive_download(
     file_id: str = typer.Argument(..., help="File ID"),

@@ -35,6 +35,9 @@ class GoogleDriveReadonlyClient:
                 "lastModifyingUser, trashed, createdTime, modifiedTime"
                 ")"
             ),
+            # The default "user" corpus omits shared drive content reached only
+            # through membership, even with includeItemsFromAllDrives.
+            "corpora": "allDrives",
             "includeItemsFromAllDrives": True,
             "supportsAllDrives": True,
             "orderBy": "modifiedTime",

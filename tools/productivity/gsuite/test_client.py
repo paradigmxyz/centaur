@@ -92,6 +92,18 @@ class _FakeRevisionsApi:
         return _CreateRequest(self.get_result)
 
 
+class _FakeDrivesApi:
+    def __init__(self, list_results: list[dict] | None = None):
+        self.list_results = list(list_results or [])
+        self.list_calls: list[dict] = []
+
+    def list(self, **kwargs):
+        self.list_calls.append(kwargs)
+        if not self.list_results:
+            raise AssertionError("Unexpected extra drives.list call")
+        return _CreateRequest(self.list_results.pop(0))
+
+
 class _FakeCommentsApi:
     def __init__(self, list_results: list[dict] | None = None):
         self.list_results = list(list_results or [])
@@ -110,6 +122,7 @@ class _FakeDriveService:
         revision_list_results: list[dict] | None = None,
         revision_get_result: dict | None = None,
         comment_list_results: list[dict] | None = None,
+        drive_list_results: list[dict] | None = None,
     ):
         self.files_api = _FakeFilesApi()
         self.revisions_api = _FakeRevisionsApi(
@@ -117,6 +130,7 @@ class _FakeDriveService:
             revision_get_result,
         )
         self.comments_api = _FakeCommentsApi(comment_list_results)
+        self.drives_api = _FakeDrivesApi(drive_list_results)
 
     def files(self):
         return self.files_api
@@ -126,6 +140,9 @@ class _FakeDriveService:
 
     def comments(self):
         return self.comments_api
+
+    def drives(self):
+        return self.drives_api
 
 
 class _FakeGmailMessagesApi:
@@ -325,6 +342,7 @@ def test_drive_list_searches_name_by_default(monkeypatch):
 
     list_call = fake_service.files_api.list_calls[0]
     assert list_call["q"] == "name contains 'report' and trashed = false"
+    assert list_call["corpora"] == "allDrives"
     assert list_call["includeItemsFromAllDrives"] is True
     assert list_call["supportsAllDrives"] is True
     assert result[0]["id"] == "file-123"
@@ -349,6 +367,39 @@ def test_drive_list_supports_full_text_contains_and_escapes_literals(monkeypatch
         "mimeType = 'application/pdf' and "
         "trashed = false"
     )
+
+
+def test_drive_list_drives_paginates_and_stops_at_limit(monkeypatch):
+    fake_service = _FakeDriveService(
+        drive_list_results=[
+            {
+                "drives": [
+                    {"id": "drive-1", "name": "Engineering"},
+                    {"id": "drive-2", "name": "Bizz&Plans"},
+                ],
+                "nextPageToken": "page-2",
+            },
+            {
+                "drives": [{"id": "drive-3", "name": "meeting-artifacts"}],
+                "nextPageToken": "page-3",
+            },
+        ]
+    )
+    monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
+
+    result = client.drive_list_drives(max_results=3)
+
+    assert result == [
+        {"id": "drive-1", "name": "Engineering"},
+        {"id": "drive-2", "name": "Bizz&Plans"},
+        {"id": "drive-3", "name": "meeting-artifacts"},
+    ]
+    assert [c.get("pageToken") for c in fake_service.drives_api.list_calls] == [None, "page-2"]
+
+
+def test_drive_list_drives_rejects_non_positive_limit():
+    with pytest.raises(ValueError):
+        client.drive_list_drives(max_results=0)
 
 
 def test_gsuite_client_drive_search_supports_full_text(monkeypatch):

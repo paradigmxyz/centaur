@@ -693,10 +693,13 @@ def drive_list(
 
     q_parts.append("trashed = false")
 
+    # The default "user" corpus omits shared drive content reached only through
+    # membership, even with includeItemsFromAllDrives.
     kwargs = {
         "pageSize": max_results,
         "fields": "files(id, name, mimeType, size, modifiedTime, webViewLink, parents)",
         "q": " and ".join(q_parts) if q_parts else None,
+        "corpora": "allDrives",
         "includeItemsFromAllDrives": True,
         "supportsAllDrives": True,
     }
@@ -715,6 +718,43 @@ def drive_list(
         }
         for f in results.get("files", [])
     ]
+
+
+def drive_list_drives(max_results: int = 100) -> list[dict]:
+    """List the shared drives the account is a member of.
+
+    Args:
+        max_results: Maximum number of results
+
+    Returns:
+        List of drive dicts with id and name. Use the id as ``folder_id`` in
+        ``drive_list`` to browse a drive's top level.
+    """
+    if max_results < 1:
+        raise ValueError("max_results must be at least 1")
+
+    service = get_drive_service()
+    drives: list[dict] = []
+    page_token: str | None = None
+
+    while len(drives) < max_results:
+        request_args = {
+            "pageSize": min(100, max_results - len(drives)),
+            "fields": "nextPageToken,drives(id,name)",
+        }
+        if page_token:
+            request_args["pageToken"] = page_token
+
+        result = service.drives().list(**request_args).execute()
+        drives.extend(
+            {"id": drive["id"], "name": drive.get("name", "")}
+            for drive in result.get("drives", [])
+        )
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+
+    return drives[:max_results]
 
 
 def _drive_download_bytes(file_id: str) -> tuple[dict, bytes]:
@@ -3155,6 +3195,18 @@ class GSuiteClient:
             List of file dicts with id, name, mimeType, size, modifiedTime, webViewLink
         """
         return drive_list(query=query, max_results=max_results, full_text=full_text)
+
+    def drive_list_drives(self, max_results: int = 100) -> list[dict]:
+        """List the shared drives the account is a member of.
+
+        Args:
+            max_results: Maximum number of results
+
+        Returns:
+            List of drive dicts with id and name. Pass an id as ``folder_id`` to
+            ``drive_list`` to browse that drive's top level.
+        """
+        return drive_list_drives(max_results=max_results)
 
     def drive_get(self, file_id: str) -> dict:
         """Get file metadata from Google Drive.
