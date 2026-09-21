@@ -71,7 +71,6 @@ pub const WORKFLOW_QUEUE_TASKS_BY_WORKFLOW: &str = "workflow_queue_tasks_by_work
 pub const WORKFLOW_QUEUE_OLDEST_TASK_AGE_SECONDS: &str = "workflow_queue_oldest_task_age_seconds";
 pub const WORKFLOW_QUEUE_OLDEST_TASK_AGE_BY_WORKFLOW_SECONDS: &str =
     "workflow_queue_oldest_task_age_by_workflow_seconds";
-pub const WORKFLOW_LAST_FAILURE_TIMESTAMP_SECONDS: &str = "workflow_last_failure_timestamp_seconds";
 pub const SLACK_ARCHIVE_IMPORT_RUNS_TOTAL: &str = "slack_archive_import_runs_total";
 pub const SLACK_ARCHIVE_IMPORT_DURATION_SECONDS: &str = "slack_archive_import_duration_seconds";
 pub const SLACK_ARCHIVE_IMPORT_BYTES_TOTAL: &str = "slack_archive_import_bytes_total";
@@ -466,18 +465,6 @@ pub fn set_workflow_queue_oldest_task_age_by_workflow_seconds(
     .set(value);
 }
 
-pub fn set_workflow_last_failure_timestamp_seconds(queue: &str, workflow_name: &str, value: f64) {
-    if !value.is_finite() {
-        return;
-    }
-    metrics::gauge!(
-        WORKFLOW_LAST_FAILURE_TIMESTAMP_SECONDS,
-        "queue" => queue.to_owned(),
-        "workflow_name" => workflow_name.to_owned(),
-    )
-    .set(value);
-}
-
 pub fn http_status_class(status: u16) -> &'static str {
     match status / 100 {
         1 => "1xx",
@@ -711,11 +698,6 @@ fn describe_metrics() {
         WORKFLOW_QUEUE_OLDEST_TASK_AGE_BY_WORKFLOW_SECONDS,
         metrics::Unit::Seconds,
         "Oldest non-terminal workflow task age in seconds by queue, state, and workflow name."
-    );
-    metrics::describe_gauge!(
-        WORKFLOW_LAST_FAILURE_TIMESTAMP_SECONDS,
-        metrics::Unit::Seconds,
-        "Unix timestamp of the most recent terminal workflow failure by queue and workflow name."
     );
     metrics::describe_counter!(
         SLACK_ARCHIVE_IMPORT_RUNS_TOTAL,
@@ -1041,11 +1023,6 @@ mod tests {
         record_sandbox_startup_duration("local", "success", Duration::from_secs(4));
         record_sandbox_warm_pool_claim("hit");
         record_workflow_run("centaur_workflows", "example", "failed");
-        set_workflow_last_failure_timestamp_seconds(
-            "centaur_workflows",
-            "example",
-            1_700_000_000.0,
-        );
 
         let metrics = render_metrics().unwrap();
 
@@ -1077,9 +1054,6 @@ mod tests {
         assert!(metrics.contains(r#"centaur_sandbox_warm_pool_claims_total{result="hit"}"#));
         assert!(metrics.contains(
             r#"workflow_runs_total{queue="centaur_workflows",workflow_name="example",status="failed"} 1"#
-        ));
-        assert!(metrics.contains(
-            r#"workflow_last_failure_timestamp_seconds{queue="centaur_workflows",workflow_name="example"} 1700000000"#
         ));
     }
 

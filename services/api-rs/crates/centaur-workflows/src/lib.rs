@@ -10,7 +10,8 @@ use std::{
 
 use absurd::{
     AwaitEventOptions, Client, ClientOptions, CreateQueueOptions, RetryKind, RetryStrategy,
-    SpawnOptions, StepHandle, TaskContext, TaskRegistrationOptions, Worker, WorkerOptions,
+    SpawnOptions, StepHandle, TaskContext, TaskRegistrationOptions, TaskResultState,
+    TaskTerminalOutcome, Worker, WorkerOptions,
 };
 use centaur_iron_control::{IronControlClient, IronControlError, PrincipalInput, slugify};
 use centaur_sandbox_core::SandboxSpec;
@@ -728,8 +729,10 @@ impl WorkflowRuntime {
             .clone();
         reconcile_schedules(&schedule_client, &startup_schedules).await?;
 
+        let terminal_outcome_hook = Arc::new(record_terminal_workflow_outcome);
         let worker = client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-worker".to_owned()),
+            on_task_terminal: Some(terminal_outcome_hook.clone()),
             concurrency: worker_concurrency(
                 WORKFLOW_WORKER_CONCURRENCY_ENV,
                 DEFAULT_WORKFLOW_WORKER_CONCURRENCY,
@@ -741,6 +744,7 @@ impl WorkflowRuntime {
         });
         let slack_live_worker = slack_live_client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-slack-live-worker".to_owned()),
+            on_task_terminal: Some(terminal_outcome_hook.clone()),
             concurrency: 1,
             on_error: Some(Arc::new(|error| {
                 warn!(%error, "absurd workflow slack live worker error");
@@ -749,6 +753,7 @@ impl WorkflowRuntime {
         });
         let etl_worker = etl_client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-etl-worker".to_owned()),
+            on_task_terminal: Some(terminal_outcome_hook.clone()),
             concurrency: worker_concurrency(
                 WORKFLOW_ETL_WORKER_CONCURRENCY_ENV,
                 DEFAULT_WORKFLOW_ETL_WORKER_CONCURRENCY,
@@ -760,6 +765,7 @@ impl WorkflowRuntime {
         });
         let etl_backfill_worker = etl_backfill_client.start_worker(WorkerOptions {
             worker_id: Some("centaur-api-rs-workflow-etl-backfill-worker".to_owned()),
+            on_task_terminal: Some(terminal_outcome_hook),
             concurrency: worker_concurrency(
                 WORKFLOW_ETL_BACKFILL_WORKER_CONCURRENCY_ENV,
                 DEFAULT_WORKFLOW_ETL_BACKFILL_WORKER_CONCURRENCY,
@@ -2052,12 +2058,6 @@ struct WorkflowQueueMetricRow {
     oldest_age_seconds: f64,
 }
 
-struct WorkflowFailureMetricRow {
-    queue_name: String,
-    workflow_name: String,
-    timestamp_seconds: f64,
-}
-
 const WORKFLOW_QUEUE_METRIC_STATES: &[&str] = &["pending", "running", "sleeping"];
 
 async fn record_workflow_queue_metrics(
@@ -2066,7 +2066,6 @@ async fn record_workflow_queue_metrics(
     workflow_names: &BTreeSet<String>,
 ) -> Result<(), WorkflowRuntimeError> {
     let mut rows = Vec::new();
-    let mut failure_rows = Vec::new();
     for (queue_name, client) in queues {
         for state in WORKFLOW_QUEUE_METRIC_STATES {
             recorder
@@ -2074,7 +2073,6 @@ async fn record_workflow_queue_metrics(
                 .insert((queue_name.to_owned(), (*state).to_owned()));
         }
         rows.extend(fetch_workflow_queue_metric_rows(client, queue_name).await?);
-        failure_rows.extend(fetch_workflow_failure_metric_rows(client, queue_name).await?);
     }
 
     for workflow_name in workflow_names {
@@ -2149,14 +2147,6 @@ async fn record_workflow_queue_metrics(
         );
     }
 
-    for row in failure_rows {
-        centaur_telemetry::set_workflow_last_failure_timestamp_seconds(
-            &row.queue_name,
-            &row.workflow_name,
-            row.timestamp_seconds,
-        );
-    }
-
     Ok(())
 }
 
@@ -2201,42 +2191,6 @@ async fn fetch_workflow_queue_metric_rows(
                 state: row.try_get("state")?,
                 task_count: row.try_get("task_count")?,
                 oldest_age_seconds: row.try_get("oldest_age_seconds")?,
-            })
-        })
-        .collect()
-}
-
-async fn fetch_workflow_failure_metric_rows(
-    client: &Client,
-    queue_name: &str,
-) -> Result<Vec<WorkflowFailureMetricRow>, WorkflowRuntimeError> {
-    let (task_table, run_table) = absurd_queue_tables(queue_name)?;
-    let rows = sqlx::query(&format!(
-        r#"
-        select
-            coalesce(nullif(t.params->>'workflow_name', ''), 'unknown') as workflow_name,
-            extract(epoch from max(r.failed_at))::float8 as timestamp_seconds
-        from {run_table} r
-        join {task_table} t
-          on t.task_id = r.task_id
-         and t.last_attempt_run = r.run_id
-        where r.state = 'failed'
-          and t.task_name = $1
-          and t.state = 'failed'
-          and r.failed_at is not null
-        group by 1
-        "#,
-    ))
-    .bind(WORKFLOW_TASK)
-    .fetch_all(client.pool())
-    .await?;
-
-    rows.into_iter()
-        .map(|row| {
-            Ok(WorkflowFailureMetricRow {
-                queue_name: queue_name.to_owned(),
-                workflow_name: row.try_get("workflow_name")?,
-                timestamp_seconds: row.try_get("timestamp_seconds")?,
             })
         })
         .collect()
@@ -2663,6 +2617,33 @@ fn normalize_cron_expression(expr: &str) -> String {
     }
 }
 
+fn terminal_workflow_metric(outcome: &TaskTerminalOutcome) -> Option<(&str, &str, &'static str)> {
+    if outcome.task_name != WORKFLOW_TASK {
+        return None;
+    }
+    let workflow_name = outcome
+        .params
+        .get("workflow_name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("unknown");
+    let status = match outcome.state {
+        TaskResultState::Completed => "completed",
+        TaskResultState::Failed => "failed",
+        TaskResultState::Cancelled => "cancelled",
+        TaskResultState::Pending | TaskResultState::Running | TaskResultState::Sleeping => {
+            return None;
+        }
+    };
+    Some((&outcome.queue_name, workflow_name, status))
+}
+
+fn record_terminal_workflow_outcome(outcome: TaskTerminalOutcome) {
+    if let Some((queue_name, workflow_name, status)) = terminal_workflow_metric(&outcome) {
+        centaur_telemetry::record_workflow_run(queue_name, workflow_name, status);
+    }
+}
+
 async fn run_centaur_workflow(
     mut input: WorkflowTaskInput,
     ctx: TaskContext,
@@ -2670,10 +2651,6 @@ async fn run_centaur_workflow(
     workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
     workflow_clients: WorkflowQueueClients,
 ) -> absurd::Result<WorkflowResult> {
-    let workflow_name = input.workflow_name.clone();
-    let queue_name = ctx.queue_name().to_owned();
-    let attempt = ctx.attempt();
-    let max_attempts = ctx.max_attempts();
     let mut cleanup_guard =
         WorkflowSandboxCleanupGuard::new(session_runtime.clone(), ctx.run_id().to_owned());
     let feedback = input.slack_button_feedback.take();
@@ -2693,31 +2670,12 @@ async fn run_centaur_workflow(
         },
     )
     .await;
-    if let Some(status) = workflow_run_status(&result, attempt, max_attempts) {
-        centaur_telemetry::record_workflow_run(&queue_name, &workflow_name, status);
-    }
     if let Some(reason) = workflow_cleanup_reason(&result) {
         cleanup_guard.cleanup(reason).await;
     } else {
         cleanup_guard.disarm();
     }
     result
-}
-
-fn workflow_run_status(
-    result: &absurd::Result<WorkflowResult>,
-    attempt: i32,
-    max_attempts: Option<i32>,
-) -> Option<&'static str> {
-    match result {
-        Ok(_) => Some("completed"),
-        Err(absurd::Error::Suspend) => None,
-        Err(absurd::Error::Cancelled) => Some("cancelled"),
-        Err(_) if max_attempts.is_some_and(|max_attempts| attempt >= max_attempts) => {
-            Some("failed")
-        }
-        Err(_) => None,
-    }
 }
 
 fn workflow_cleanup_reason(result: &absurd::Result<WorkflowResult>) -> Option<&'static str> {
@@ -5662,6 +5620,36 @@ mod tests {
     }
 
     #[test]
+    fn terminal_workflow_metrics_use_durable_outcomes() {
+        for (state, expected_status) in [
+            (TaskResultState::Completed, "completed"),
+            (TaskResultState::Failed, "failed"),
+            (TaskResultState::Cancelled, "cancelled"),
+        ] {
+            let outcome = TaskTerminalOutcome {
+                queue_name: WORKFLOW_QUEUE.to_owned(),
+                task_id: "task-1".to_owned(),
+                task_name: WORKFLOW_TASK.to_owned(),
+                params: json!({"workflow_name": "example"}),
+                state,
+            };
+            assert_eq!(
+                terminal_workflow_metric(&outcome),
+                Some((WORKFLOW_QUEUE, "example", expected_status))
+            );
+        }
+
+        let non_terminal = TaskTerminalOutcome {
+            queue_name: WORKFLOW_QUEUE.to_owned(),
+            task_id: "task-1".to_owned(),
+            task_name: WORKFLOW_TASK.to_owned(),
+            params: json!({"workflow_name": "example"}),
+            state: TaskResultState::Sleeping,
+        };
+        assert_eq!(terminal_workflow_metric(&non_terminal), None);
+    }
+
+    #[test]
     fn workflow_cleanup_reason_skips_suspended_runs() {
         let completed: absurd::Result<WorkflowResult> = Ok(WorkflowResult {
             workflow_name: "test".to_owned(),
@@ -5671,32 +5659,20 @@ mod tests {
             output: json!({}),
         });
         assert_eq!(
-            workflow_run_status(&completed, 1, Some(5)),
-            Some("completed")
-        );
-        assert_eq!(
             workflow_cleanup_reason(&completed),
             Some("workflow_completed")
         );
 
         let suspended: absurd::Result<WorkflowResult> = Err(absurd::Error::Suspend);
-        assert_eq!(workflow_run_status(&suspended, 1, Some(5)), None);
         assert_eq!(workflow_cleanup_reason(&suspended), None);
 
         let cancelled: absurd::Result<WorkflowResult> = Err(absurd::Error::Cancelled);
-        assert_eq!(
-            workflow_run_status(&cancelled, 1, Some(5)),
-            Some("cancelled")
-        );
         assert_eq!(
             workflow_cleanup_reason(&cancelled),
             Some("workflow_cancelled")
         );
 
         let failed: absurd::Result<WorkflowResult> = Err(absurd::Error::Timeout("boom".to_owned()));
-        assert_eq!(workflow_run_status(&failed, 4, Some(5)), None);
-        assert_eq!(workflow_run_status(&failed, 5, Some(5)), Some("failed"));
-        assert_eq!(workflow_run_status(&failed, 5, None), None);
         assert_eq!(workflow_cleanup_reason(&failed), Some("workflow_failed"));
     }
 
