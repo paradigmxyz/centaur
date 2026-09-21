@@ -12,6 +12,7 @@ on:
       - centaur_sdk/**
       - packages/**
       - tools/**
+      - workflows/**
       - scripts/bootstrap-k8s-secrets.sh
       - package.json
       - pnpm-lock.yaml
