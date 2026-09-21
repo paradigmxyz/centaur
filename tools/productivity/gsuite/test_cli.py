@@ -194,6 +194,48 @@ def test_drive_list_full_text_flag_is_passed_to_client(monkeypatch):
             "full_text": True,
         }
     ]
+    assert "file-123" in result.output
+
+
+@pytest.mark.parametrize(
+    "command,client_method",
+    [
+        (["gmail", "search", "anything"], "gmail_search"),
+        (["gmail", "labels"], "gmail_labels"),
+        (["calendar", "list"], "calendar_list"),
+        (["calendar", "events"], "calendar_events"),
+        (["drive", "list"], "drive_list"),
+        (["drive", "permissions", "file-123"], "drive_list_permissions"),
+    ],
+)
+def test_table_commands_output_json(monkeypatch, command, client_method):
+    expected = [{"id": "item-1", "name": "[draft] café"}]
+    monkeypatch.setattr(client, client_method, lambda *args, **kwargs: expected)
+    if client_method == "calendar_events":
+        monkeypatch.setattr(client, "calendar_get_timezone", lambda calendar_id: "UTC")
+
+    result = runner.invoke(app, [*command, "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == expected
+
+
+def test_analytics_sites_outputs_json(monkeypatch):
+    from gsuite import analytics_properties
+
+    monkeypatch.setattr(
+        analytics_properties,
+        "PROPERTY_MAPPINGS",
+        {"example.com": "123", "example": "123", "other.com": "456"},
+    )
+
+    result = runner.invoke(app, ["analytics", "sites", "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == [
+        {"property_id": "123", "sites": ["example", "example.com"]},
+        {"property_id": "456", "sites": ["other.com"]},
+    ]
 
 
 def test_docs_bullets_command_prints_verification_summary(monkeypatch):

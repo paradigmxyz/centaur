@@ -72,6 +72,7 @@ def gmail_search(
     query: str = typer.Argument(..., help="Gmail search query"),
     limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
     full: bool = typer.Option(False, "--full", "-f", help="Show full snippets"),
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
     """Search Gmail messages.
 
@@ -83,6 +84,10 @@ def gmail_search(
     from .client import gmail_search as search
 
     results = search(query, max_results=limit)
+
+    if output_json:
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return
 
     if not results:
         console.print("[yellow]No messages found.[/]")
@@ -158,11 +163,17 @@ def gmail_send(
 
 
 @gmail_app.command("labels")
-def gmail_labels():
+def gmail_labels(
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
     """List Gmail labels."""
     from .client import gmail_labels as labels
 
     results = labels()
+
+    if output_json:
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return
 
     table = Table(title=f"Gmail Labels ({len(results)})")
     table.add_column("Name", style="cyan")
@@ -243,11 +254,17 @@ def gmail_reply_cmd(
 
 
 @calendar_app.command("list")
-def calendar_list():
+def calendar_list(
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
     """List all calendars."""
     from .client import calendar_list as list_cals
 
     results = list_cals()
+
+    if output_json:
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return
 
     table = Table(title=f"Calendars ({len(results)})")
     table.add_column("Name", style="cyan")
@@ -269,6 +286,7 @@ def calendar_events(
     days: int = typer.Option(None, "--days", "-d", help="Look ahead N days"),
     start: str = typer.Option(None, "--start", "-s", help="Start date (YYYY-MM-DD or ISO8601)"),
     end: str = typer.Option(None, "--end", "-e", help="End date (YYYY-MM-DD or ISO8601)"),
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
     """List calendar events.
 
@@ -344,6 +362,10 @@ def calendar_events(
         time_min=time_min,
         time_max=time_max,
     )
+
+    if output_json:
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return
 
     if not results:
         console.print("[yellow]No events found.[/]")
@@ -514,6 +536,7 @@ def drive_list(
         help="Search file contents and metadata with Drive fullText contains",
     ),
     file_type: str = typer.Option(None, "--type", "-t", help="Filter by MIME type"),
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
     """List files in Google Drive.
 
@@ -534,11 +557,16 @@ def drive_list(
         full_text=full_text,
     )
 
+    if output_json:
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return
+
     if not results:
         console.print("[yellow]No files found.[/]")
         raise typer.Exit()
 
     table = Table(title=f"Drive Files ({len(results)})")
+    table.add_column("ID", style="dim", max_width=30)
     table.add_column("Name", style="cyan", max_width=40)
     table.add_column("Type", style="dim", max_width=20)
     table.add_column("Size", style="green", justify="right", max_width=10)
@@ -549,7 +577,7 @@ def drive_list(
         mime = f["mime_type"].split("/")[-1][:20]
         size = f"{f['size'] / 1024:.1f} KB" if f["size"] else "-"
         modified = f["modified_time"][:10] if f["modified_time"] else ""
-        table.add_row(name, mime, size, modified)
+        table.add_row(f["id"], name, mime, size, modified)
 
     console.print(table)
 
@@ -963,6 +991,7 @@ def drive_download_revision_cmd(
 @drive_app.command("permissions")
 def drive_permissions_cmd(
     file_id: str = typer.Argument(..., help="File ID"),
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
     """List permissions on a Google Drive file.
 
@@ -973,6 +1002,10 @@ def drive_permissions_cmd(
 
     try:
         permissions = drive_list_permissions(file_id)
+
+        if output_json:
+            print(json.dumps(permissions, indent=2, ensure_ascii=False))
+            return
 
         if not permissions:
             console.print("[yellow]No permissions found.[/]")
@@ -1590,7 +1623,7 @@ def sheets_read_cmd(
         result = sheets_read(spreadsheet_id, range_notation)
 
         if output_json:
-            console.print(json.dumps(result["rows"], indent=2))
+            print(json.dumps(result["rows"], indent=2, ensure_ascii=False))
             return
 
         if not result["rows"]:
@@ -1632,7 +1665,7 @@ def sheets_batch_read_cmd(
         result = sheets_batch_read(spreadsheet_id, range_notations)
 
         if output_json:
-            console.print(json.dumps(result, indent=2), markup=False, soft_wrap=True)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
             return
 
         for value_range in result:
@@ -1806,7 +1839,6 @@ def _setup_analytics_property():
             console.print("[dim]Tip: Use 'gsuite analytics sites' to list known sites[/]")
             raise typer.Exit(1)
 
-        console.print(f"[dim]Using property {resolved_id} for {_analytics_site}[/]")
         set_analytics_property(resolved_id)
     elif _analytics_property:
         set_analytics_property(_analytics_property)
@@ -1831,18 +1863,28 @@ def analytics_main(
 
 
 @analytics_app.command("sites")
-def analytics_sites():
+def analytics_sites(
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
     """List available site mappings."""
     from .analytics_properties import PROPERTY_MAPPINGS
-
-    table = Table(title="Available Sites")
-    table.add_column("Site / Alias", style="cyan")
-    table.add_column("Property ID", style="green")
 
     # Group by property ID to show aliases together
     by_property: dict[str, list[str]] = {}
     for name, prop_id in PROPERTY_MAPPINGS.items():
         by_property.setdefault(prop_id, []).append(name)
+
+    if output_json:
+        sites = [
+            {"property_id": prop_id, "sites": sorted(names)}
+            for prop_id, names in sorted(by_property.items())
+        ]
+        print(json.dumps(sites, indent=2, ensure_ascii=False))
+        return
+
+    table = Table(title="Available Sites")
+    table.add_column("Site / Alias", style="cyan")
+    table.add_column("Property ID", style="green")
 
     for prop_id, names in sorted(by_property.items()):
         canonical = max(names, key=len)
@@ -1879,7 +1921,7 @@ def analytics_summary(
         result = analytics_get_summary(start_date=start, end_date=end)
 
         if output_json:
-            console.print(json.dumps(result, indent=2))
+            print(json.dumps(result, indent=2, ensure_ascii=False))
             return
 
         table = Table(title=f"GA4 Summary ({start} to {end})")
