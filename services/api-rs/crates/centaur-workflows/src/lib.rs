@@ -2216,9 +2216,12 @@ async fn fetch_workflow_failure_metric_rows(
         select
             coalesce(nullif(t.params->>'workflow_name', ''), 'unknown') as workflow_name,
             extract(epoch from max(r.failed_at))::float8 as timestamp_seconds
-        from {task_table} t
-        join {run_table} r on r.run_id = t.last_attempt_run
-        where t.task_name = $1
+        from {run_table} r
+        join {task_table} t
+          on t.task_id = r.task_id
+         and t.last_attempt_run = r.run_id
+        where r.state = 'failed'
+          and t.task_name = $1
           and t.state = 'failed'
           and r.failed_at is not null
         group by 1
@@ -2669,6 +2672,8 @@ async fn run_centaur_workflow(
 ) -> absurd::Result<WorkflowResult> {
     let workflow_name = input.workflow_name.clone();
     let queue_name = ctx.queue_name().to_owned();
+    let attempt = ctx.attempt();
+    let max_attempts = ctx.max_attempts();
     let mut cleanup_guard =
         WorkflowSandboxCleanupGuard::new(session_runtime.clone(), ctx.run_id().to_owned());
     let feedback = input.slack_button_feedback.take();
@@ -2688,7 +2693,7 @@ async fn run_centaur_workflow(
         },
     )
     .await;
-    if let Some(status) = workflow_run_status(&result) {
+    if let Some(status) = workflow_run_status(&result, attempt, max_attempts) {
         centaur_telemetry::record_workflow_run(&queue_name, &workflow_name, status);
     }
     if let Some(reason) = workflow_cleanup_reason(&result) {
@@ -2699,12 +2704,19 @@ async fn run_centaur_workflow(
     result
 }
 
-fn workflow_run_status(result: &absurd::Result<WorkflowResult>) -> Option<&'static str> {
+fn workflow_run_status(
+    result: &absurd::Result<WorkflowResult>,
+    attempt: i32,
+    max_attempts: Option<i32>,
+) -> Option<&'static str> {
     match result {
         Ok(_) => Some("completed"),
         Err(absurd::Error::Suspend) => None,
         Err(absurd::Error::Cancelled) => Some("cancelled"),
-        Err(_) => Some("failed"),
+        Err(_) if max_attempts.is_some_and(|max_attempts| attempt >= max_attempts) => {
+            Some("failed")
+        }
+        Err(_) => None,
     }
 }
 
@@ -5658,25 +5670,33 @@ mod tests {
             steps: Vec::new(),
             output: json!({}),
         });
-        assert_eq!(workflow_run_status(&completed), Some("completed"));
+        assert_eq!(
+            workflow_run_status(&completed, 1, Some(5)),
+            Some("completed")
+        );
         assert_eq!(
             workflow_cleanup_reason(&completed),
             Some("workflow_completed")
         );
 
         let suspended: absurd::Result<WorkflowResult> = Err(absurd::Error::Suspend);
-        assert_eq!(workflow_run_status(&suspended), None);
+        assert_eq!(workflow_run_status(&suspended, 1, Some(5)), None);
         assert_eq!(workflow_cleanup_reason(&suspended), None);
 
         let cancelled: absurd::Result<WorkflowResult> = Err(absurd::Error::Cancelled);
-        assert_eq!(workflow_run_status(&cancelled), Some("cancelled"));
+        assert_eq!(
+            workflow_run_status(&cancelled, 1, Some(5)),
+            Some("cancelled")
+        );
         assert_eq!(
             workflow_cleanup_reason(&cancelled),
             Some("workflow_cancelled")
         );
 
         let failed: absurd::Result<WorkflowResult> = Err(absurd::Error::Timeout("boom".to_owned()));
-        assert_eq!(workflow_run_status(&failed), Some("failed"));
+        assert_eq!(workflow_run_status(&failed, 4, Some(5)), None);
+        assert_eq!(workflow_run_status(&failed, 5, Some(5)), Some("failed"));
+        assert_eq!(workflow_run_status(&failed, 5, None), None);
         assert_eq!(workflow_cleanup_reason(&failed), Some("workflow_failed"));
     }
 

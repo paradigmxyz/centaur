@@ -1129,6 +1129,7 @@ struct TaskContextInner {
     run_id: String,
     task_name: String,
     attempt: i32,
+    max_attempts: Option<i32>,
     claim_timeout: Duration,
     headers: JsonObject,
     wake_event: Mutex<Option<String>>,
@@ -1177,6 +1178,7 @@ impl TaskContext {
                 run_id: task.run_id,
                 task_name: task.task_name,
                 attempt: task.attempt,
+                max_attempts: task.max_attempts,
                 claim_timeout,
                 headers,
                 wake_event: Mutex::new(task.wake_event),
@@ -1206,6 +1208,10 @@ impl TaskContext {
 
     pub fn attempt(&self) -> i32 {
         self.inner.attempt
+    }
+
+    pub fn max_attempts(&self) -> Option<i32> {
+        self.inner.max_attempts
     }
 
     pub fn headers(&self) -> JsonObject {

@@ -692,7 +692,7 @@ fn describe_metrics() {
     );
     metrics::describe_counter!(
         WORKFLOW_RUNS_TOTAL,
-        "Workflow run attempts by queue, workflow name, and terminal status."
+        "Workflow runs by queue, workflow name, and terminal status."
     );
     metrics::describe_gauge!(
         WORKFLOW_QUEUE_TASKS,
