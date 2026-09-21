@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-import os
 import re
 from typing import Any
-from urllib.parse import quote
-
-import httpx
 
 WORKFLOW_NAME = "console_workflow"
 SLACK_MESSAGE_MAX_LENGTH = 50_000
@@ -43,7 +39,6 @@ async def _deliver_to_slack(
     channel: str,
     text: str,
     slack_user_id: str,
-    eligibility_check: Any,
 ) -> Any:
     footer = _scheduled_task_footer(slack_user_id)
     footer_suffix = f"\n\n{footer}"
@@ -67,17 +62,10 @@ async def _deliver_to_slack(
             args["blocks"] = _scheduled_task_blocks(final_body, footer)
         return args
 
-    async def post_root() -> Any:
-        if not await eligibility_check():
-            return {
-                "status": "skipped",
-                "reason": "scheduled_task_not_executable",
-            }
-        return await ctx.post_to_slack(channel, chunks[0], **message_args(0))
-
-    root = await ctx.step("post_result", post_root)
-    if isinstance(root, dict) and root.get("status") == "skipped":
-        return root
+    root = await ctx.step(
+        "post_result",
+        lambda: ctx.post_to_slack(channel, chunks[0], **message_args(0)),
+    )
     if len(chunks) == 1:
         return root
     if not isinstance(root, dict):
@@ -154,39 +142,6 @@ def _prompt_for_slack(prompt: str) -> str:
     )
 
 
-async def _get_scheduled_task(task_id: str) -> dict[str, Any] | None:
-    base_url = os.environ["IRON_CONTROL_URL"].rstrip("/")
-    api_key = os.environ["IRON_CONTROL_API_KEY"]
-    url = f"{base_url}/api/v1/scheduled_tasks/{quote(task_id, safe='')}"
-    async with httpx.AsyncClient(timeout=10) as client:
-        response = await client.get(
-            url,
-            headers={"Authorization": f"Bearer {api_key}"},
-        )
-    if response.status_code == httpx.codes.NOT_FOUND:
-        return None
-    response.raise_for_status()
-    body = response.json()
-    task = body.get("data") if isinstance(body, dict) else None
-    if not isinstance(task, dict):
-        raise ValueError("scheduled task response must contain a data object")
-    return task
-
-
-def _task_is_executable(task: Any, *, task_id: str, channel: str) -> bool:
-    return (
-        isinstance(task, dict)
-        and task.get("id") == task_id
-        and task.get("enabled") is True
-        and task.get("delivery_channel") == channel
-    )
-
-
-async def _task_is_executable_now(*, task_id: str, channel: str) -> bool:
-    task = await _get_scheduled_task(task_id)
-    return _task_is_executable(task, task_id=task_id, channel=channel)
-
-
 async def handler(params: Any, ctx: Any) -> dict[str, Any]:
     prompt = _required_string(params, "prompt")
     principal = _required_string(params, "principal")
@@ -195,16 +150,6 @@ async def handler(params: Any, ctx: Any) -> dict[str, Any]:
     slack_user_id = str(params.get("slack_user_id") or "").strip()
 
     async def run_agent() -> dict[str, Any]:
-        if not await _task_is_executable_now(
-            task_id=scheduled_task_id,
-            channel=channel,
-        ):
-            return {
-                "status": "skipped",
-                "reason": "scheduled_task_not_executable",
-                "scheduled_task_id": scheduled_task_id,
-            }
-
         message_id = f"absurd-workflow:{ctx.task_id}:1:user"
         return await ctx.agent_turn(
             _prompt_for_slack(prompt),
@@ -218,8 +163,6 @@ async def handler(params: Any, ctx: Any) -> dict[str, Any]:
         )
 
     result = await ctx.step("agent_result", run_agent)
-    if result.get("status") == "skipped":
-        return result
     response_text = str(result.get("result_text") or "").strip()
     if not response_text:
         response_text = "The task completed without a text response."
@@ -229,17 +172,7 @@ async def handler(params: Any, ctx: Any) -> dict[str, Any]:
         channel,
         response_text,
         slack_user_id,
-        lambda: _task_is_executable_now(
-            task_id=scheduled_task_id,
-            channel=channel,
-        ),
     )
-    if isinstance(delivery, dict) and delivery.get("status") == "skipped":
-        return {
-            **delivery,
-            "scheduled_task_id": scheduled_task_id,
-            "agent_result": result,
-        }
 
     return {
         "agent_result": result,
