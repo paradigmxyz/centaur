@@ -65,11 +65,13 @@ pub const ETL_BACKFILL_JOBS: &str = "etl_backfill_jobs";
 pub const ETL_BACKFILL_JOB_AGE_SECONDS: &str = "etl_backfill_job_age_seconds";
 pub const COMPANY_CONTEXT_DOCUMENTS_CHANGED_TOTAL: &str = "company_context_documents_changed_total";
 pub const COMPANY_CONTEXT_PROJECTION_LAG_SECONDS: &str = "company_context_projection_lag_seconds";
+pub const WORKFLOW_RUNS_TOTAL: &str = "workflow_runs_total";
 pub const WORKFLOW_QUEUE_TASKS: &str = "workflow_queue_tasks";
 pub const WORKFLOW_QUEUE_TASKS_BY_WORKFLOW: &str = "workflow_queue_tasks_by_workflow";
 pub const WORKFLOW_QUEUE_OLDEST_TASK_AGE_SECONDS: &str = "workflow_queue_oldest_task_age_seconds";
 pub const WORKFLOW_QUEUE_OLDEST_TASK_AGE_BY_WORKFLOW_SECONDS: &str =
     "workflow_queue_oldest_task_age_by_workflow_seconds";
+pub const WORKFLOW_LAST_FAILURE_TIMESTAMP_SECONDS: &str = "workflow_last_failure_timestamp_seconds";
 pub const SLACK_ARCHIVE_IMPORT_RUNS_TOTAL: &str = "slack_archive_import_runs_total";
 pub const SLACK_ARCHIVE_IMPORT_DURATION_SECONDS: &str = "slack_archive_import_duration_seconds";
 pub const SLACK_ARCHIVE_IMPORT_BYTES_TOTAL: &str = "slack_archive_import_bytes_total";
@@ -400,6 +402,16 @@ pub fn record_workflow_histogram(name: &str, labels: &[(String, String)], value:
     metrics::histogram!(name.to_owned(), workflow_metric_labels(labels)).record(value);
 }
 
+pub fn record_workflow_run(queue: &str, workflow_name: &str, status: &'static str) {
+    metrics::counter!(
+        WORKFLOW_RUNS_TOTAL,
+        "queue" => queue.to_owned(),
+        "workflow_name" => workflow_name.to_owned(),
+        "status" => status,
+    )
+    .increment(1);
+}
+
 pub fn set_workflow_queue_tasks(queue: &str, state: &str, value: f64) {
     metrics::gauge!(
         WORKFLOW_QUEUE_TASKS,
@@ -449,6 +461,18 @@ pub fn set_workflow_queue_oldest_task_age_by_workflow_seconds(
         WORKFLOW_QUEUE_OLDEST_TASK_AGE_BY_WORKFLOW_SECONDS,
         "queue" => queue.to_owned(),
         "state" => state.to_owned(),
+        "workflow_name" => workflow_name.to_owned(),
+    )
+    .set(value);
+}
+
+pub fn set_workflow_last_failure_timestamp_seconds(queue: &str, workflow_name: &str, value: f64) {
+    if !value.is_finite() {
+        return;
+    }
+    metrics::gauge!(
+        WORKFLOW_LAST_FAILURE_TIMESTAMP_SECONDS,
+        "queue" => queue.to_owned(),
         "workflow_name" => workflow_name.to_owned(),
     )
     .set(value);
@@ -666,6 +690,10 @@ fn describe_metrics() {
         metrics::Unit::Seconds,
         "Company context projection lag in seconds."
     );
+    metrics::describe_counter!(
+        WORKFLOW_RUNS_TOTAL,
+        "Workflow run attempts by queue, workflow name, and terminal status."
+    );
     metrics::describe_gauge!(
         WORKFLOW_QUEUE_TASKS,
         "Current non-terminal workflow task count by queue and state."
@@ -683,6 +711,11 @@ fn describe_metrics() {
         WORKFLOW_QUEUE_OLDEST_TASK_AGE_BY_WORKFLOW_SECONDS,
         metrics::Unit::Seconds,
         "Oldest non-terminal workflow task age in seconds by queue, state, and workflow name."
+    );
+    metrics::describe_gauge!(
+        WORKFLOW_LAST_FAILURE_TIMESTAMP_SECONDS,
+        metrics::Unit::Seconds,
+        "Unix timestamp of the most recent terminal workflow failure by queue and workflow name."
     );
     metrics::describe_counter!(
         SLACK_ARCHIVE_IMPORT_RUNS_TOTAL,
@@ -1007,6 +1040,12 @@ mod tests {
         record_sandbox_operation("local", "create", "success");
         record_sandbox_startup_duration("local", "success", Duration::from_secs(4));
         record_sandbox_warm_pool_claim("hit");
+        record_workflow_run("centaur_workflows", "example", "failed");
+        set_workflow_last_failure_timestamp_seconds(
+            "centaur_workflows",
+            "example",
+            1_700_000_000.0,
+        );
 
         let metrics = render_metrics().unwrap();
 
@@ -1036,6 +1075,12 @@ mod tests {
             r#"centaur_sandbox_startup_duration_seconds_count{backend="local",status="success"}"#
         ));
         assert!(metrics.contains(r#"centaur_sandbox_warm_pool_claims_total{result="hit"}"#));
+        assert!(metrics.contains(
+            r#"workflow_runs_total{queue="centaur_workflows",workflow_name="example",status="failed"} 1"#
+        ));
+        assert!(metrics.contains(
+            r#"workflow_last_failure_timestamp_seconds{queue="centaur_workflows",workflow_name="example"} 1700000000"#
+        ));
     }
 
     #[test]
