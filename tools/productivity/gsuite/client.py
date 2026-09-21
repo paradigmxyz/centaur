@@ -1441,13 +1441,13 @@ def drive_label_folder(
 def drive_setup_channel_permissions(
     file_id: str,
     channel_member_emails: list[str],
-    requester_email: str,
+    requester_email: str | None,
 ) -> dict:
-    """Set up file permissions for Slack channel members and transfer ownership.
+    """Set up file permissions for Slack channel members and optionally transfer ownership.
 
     This function:
     1. Shares the file with all channel members (writer role)
-    2. Transfers ownership to the requester
+    2. Transfers ownership when a requester is provided
 
     Note: The original owner (service account) is automatically downgraded to
     editor by Google Drive when ownership is transferred, and retains access.
@@ -1458,7 +1458,7 @@ def drive_setup_channel_permissions(
         file_id: The Google Drive file ID
         channel_member_emails: List of email addresses for channel members
             (obtained from Slack via get_channel_members_with_emails)
-        requester_email: Email of the person who requested the file (new owner)
+        requester_email: Optional email of the person who requested the file (new owner)
 
     Returns:
         Dict with results: shared_with, new_owner, errors
@@ -3440,14 +3440,14 @@ class GSuiteClient:
         self,
         file_id: str,
         channel_member_emails: list[str],
-        requester_email: str,
+        requester_email: str | None,
     ) -> dict:
-        """Set up file permissions for Slack channel members and transfer ownership.
+        """Set up file permissions and optionally transfer ownership.
 
         Args:
             file_id: The Google Drive file ID
             channel_member_emails: List of email addresses for channel members
-            requester_email: Email of the person who requested the file (new owner)
+            requester_email: Optional email of the person who requested the file (new owner)
 
         Returns:
             Dict with results: shared_with, new_owner, errors

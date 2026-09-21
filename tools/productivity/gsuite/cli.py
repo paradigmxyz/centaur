@@ -1537,7 +1537,8 @@ def _create_and_share(
         console.print(f"[cyan]URL: {result['url']}[/]", soft_wrap=True)
         console.print(f"[dim]ID: {result[id_key]}[/]")
 
-        if not channel and not owner:
+        owner_to_transfer = owner if not folder else None
+        if not channel and not owner_to_transfer:
             return
 
         member_emails = _get_channel_member_emails_via_cli(channel) if channel else []
@@ -1549,15 +1550,15 @@ def _create_and_share(
         perm_result = drive_setup_channel_permissions(
             file_id=result[id_key],
             channel_member_emails=member_emails,
-            requester_email=owner,
+            requester_email=owner_to_transfer,
         )
 
         if channel:
             console.print(
                 f"[green]✓ Shared with {len(perm_result['shared_with'])} channel members[/]"
             )
-        if owner:
-            console.print(f"[green]✓ Ownership transferred to {owner}[/]")
+        if owner_to_transfer:
+            console.print(f"[green]✓ Ownership transferred to {owner_to_transfer}[/]")
 
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")
