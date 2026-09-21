@@ -959,6 +959,8 @@ impl Client {
                         "message": err.to_string(),
                     });
                     fail_task_run(&self.pool, &self.queue_name, &task.run_id, failure).await?;
+                    self.emit_terminal_outcome(&task, on_task_terminal.as_ref())
+                        .await;
                     return Ok(());
                 }
             }
@@ -970,6 +972,8 @@ impl Client {
                 "message": format!("misconfigured task {:?} (queue mismatch)", task.task_name),
             });
             fail_task_run(&self.pool, &self.queue_name, &task.run_id, failure).await?;
+            self.emit_terminal_outcome(&task, on_task_terminal.as_ref())
+                .await;
             return Ok(());
         }
 
@@ -998,6 +1002,8 @@ impl Client {
                 let failure = serialize_error(&err);
                 fail_task_run(&self.pool, &self.queue_name, &task.run_id, failure).await?;
                 watchdog.stop();
+                self.emit_terminal_outcome(&task, on_task_terminal.as_ref())
+                    .await;
                 return Ok(());
             }
             Err(err) => {
@@ -1042,6 +1048,7 @@ impl Client {
 
         watchdog.stop();
 
+        let suspended = matches!(&run_result, Ok(Err(Error::Suspend)));
         let transition = match run_result {
             Ok(Ok(result)) => {
                 complete_task_run(&self.pool, &self.queue_name, &task.run_id, result).await
@@ -1069,28 +1076,31 @@ impl Client {
             }
         };
 
-        if let Some(on_task_terminal) = on_task_terminal {
-            match terminal_outcome_for_run(
-                &self.pool,
-                &self.queue_name,
-                &task.task_id,
-                &task.run_id,
-            )
-            .await
-            {
-                Ok(Some(state)) => on_task_terminal(TaskTerminalOutcome {
-                    queue_name: self.queue_name.clone(),
-                    task_id: task.task_id,
-                    task_name: task.task_name,
-                    params: task.params,
-                    state,
-                }),
-                Ok(None) => {}
-                Err(error) => eprintln!("[absurd] failed to read terminal task outcome: {error}"),
-            }
+        if !suspended {
+            self.emit_terminal_outcome(&task, on_task_terminal.as_ref())
+                .await;
         }
 
         transition
+    }
+
+    async fn emit_terminal_outcome(&self, task: &ClaimedTask, hook: Option<&TaskTerminalHook>) {
+        let Some(hook) = hook else {
+            return;
+        };
+        match terminal_outcome_for_run(&self.pool, &self.queue_name, &task.task_id, &task.run_id)
+            .await
+        {
+            Ok(Some(state)) => hook(TaskTerminalOutcome {
+                queue_name: self.queue_name.clone(),
+                task_id: task.task_id.clone(),
+                task_name: task.task_name.clone(),
+                params: task.params.clone(),
+                state,
+            }),
+            Ok(None) => {}
+            Err(error) => eprintln!("[absurd] failed to read terminal task outcome: {error}"),
+        }
     }
 
     fn registration(&self, task_name: &str) -> Result<Option<RegisteredTask>> {
@@ -2492,6 +2502,10 @@ mod tests {
         app.register_task("fail", |_params: Value, _ctx| async move {
             Err::<Value, _>(Error::InvalidOptions("boom".to_string()))
         })?;
+        app.register_task("sleep", |_params: Value, ctx| async move {
+            ctx.sleep_for("pause", Duration::from_millis(50)).await?;
+            Ok(json!({"ok": true}))
+        })?;
 
         let hanging = app.spawn("hang", json!({}), Default::default()).await?;
         let outcomes = Arc::new(Mutex::new(Vec::new()));
@@ -2540,12 +2554,19 @@ mod tests {
             .await?;
         assert_eq!(failed_snapshot.state(), TaskResultState::Failed);
 
+        let sleeping = app.spawn("sleep", json!({}), Default::default()).await?;
+        let sleeping_snapshot = app
+            .await_task_result(&sleeping.task_id, None, Some(Duration::from_secs(2)))
+            .await?;
+        assert_eq!(sleeping_snapshot.state(), TaskResultState::Completed);
+
         assert_eq!(
             *outcomes.lock().expect("terminal outcomes lock poisoned"),
             vec![
                 ("hang".to_string(), TaskResultState::Cancelled),
                 ("quick".to_string(), TaskResultState::Completed),
                 ("fail".to_string(), TaskResultState::Failed),
+                ("sleep".to_string(), TaskResultState::Completed),
             ]
         );
 
