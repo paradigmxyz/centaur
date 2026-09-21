@@ -2509,6 +2509,7 @@ mod tests {
 
         let hanging = app.spawn("hang", json!({}), Default::default()).await?;
         let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let outcome_recorded = Arc::new(Notify::new());
         let worker = app.start_worker(WorkerOptions {
             worker_id: Some("rust-cancel-release-worker".to_string()),
             concurrency: 1,
@@ -2516,11 +2517,13 @@ mod tests {
             fatal_on_lease_timeout: false,
             on_task_terminal: Some({
                 let outcomes = outcomes.clone();
+                let outcome_recorded = outcome_recorded.clone();
                 Arc::new(move |outcome| {
                     outcomes
                         .lock()
                         .expect("terminal outcomes lock poisoned")
                         .push((outcome.task_name, outcome.state));
+                    outcome_recorded.notify_one();
                 })
             }),
             ..WorkerOptions::default()
@@ -2559,6 +2562,22 @@ mod tests {
             .await_task_result(&sleeping.task_id, None, Some(Duration::from_secs(2)))
             .await?;
         assert_eq!(sleeping_snapshot.state(), TaskResultState::Completed);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if outcomes
+                    .lock()
+                    .expect("terminal outcomes lock poisoned")
+                    .len()
+                    >= 4
+                {
+                    break;
+                }
+                outcome_recorded.notified().await;
+            }
+        })
+        .await
+        .map_err(|_| Error::Timeout("timed out waiting for terminal outcomes".to_string()))?;
 
         assert_eq!(
             *outcomes.lock().expect("terminal outcomes lock poisoned"),
