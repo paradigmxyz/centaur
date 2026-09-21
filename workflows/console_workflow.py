@@ -149,9 +149,9 @@ async def handler(params: Any, ctx: Any) -> dict[str, Any]:
     scheduled_task_id = _required_string(params, "scheduled_task_id")
     slack_user_id = str(params.get("slack_user_id") or "").strip()
 
-    async def run_agent() -> dict[str, Any]:
+    async def run_agent() -> dict[str, str]:
         message_id = f"absurd-workflow:{ctx.task_id}:1:user"
-        return await ctx.agent_turn(
+        result = await ctx.agent_turn(
             _prompt_for_slack(prompt),
             principal=principal,
             message_id=message_id,
@@ -161,6 +161,12 @@ async def handler(params: Any, ctx: Any) -> dict[str, Any]:
                 "scheduled_task_name": str(params.get("scheduled_task_name") or ""),
             },
         )
+        return {
+            "execution_id": str(result.get("execution_id") or ""),
+            "result_text": str(result.get("result_text") or "").strip()[
+                :SLACK_MESSAGE_MAX_LENGTH
+            ],
+        }
 
     result = await ctx.step("agent_result", run_agent)
     response_text = str(result.get("result_text") or "").strip()
