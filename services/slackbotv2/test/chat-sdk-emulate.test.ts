@@ -4715,6 +4715,88 @@ describe('slackbotv2', () => {
     ).toEqual(expect.arrayContaining(['Thinking...', '']))
   })
 
+  it('posts and clears a placeholder status message in DMs without a thread ts', async () => {
+    const logs: CapturedLog[] = []
+    bot = createTestBot({ logger: captureLogger(logs) })
+    codexApi.autoRespond = false
+    const releaseExecute = codexApi.holdNextExecute()
+
+    const members = await slackBot.users.list({})
+    const userId = members.members?.find(member => member.name === 'tester')?.id
+    expect(userId).toBeDefined()
+    const dm = await slackBot.conversations.open({ users: userId! })
+    const channel = dm.channel!.id!
+    const posted = await slackBot.chat.postMessage({ channel, text: 'DM status request' })
+    const waits: Promise<unknown>[] = []
+    const responsePromise = bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-dm-status',
+        event: {
+          type: 'message',
+          channel_type: 'im',
+          channel,
+          user: USER_ID,
+          ts: posted.ts,
+          text: 'DM status request'
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    await waitFor(() => codexApi.executes.length === 1)
+    let placeholderTs: string | undefined
+    await waitFor(async () => {
+      const history = await slackBot.conversations.history({ channel })
+      placeholderTs = (history.messages ?? []).find(
+        message => message.text === 'Thinking...'
+      )?.ts
+      return Boolean(placeholderTs)
+    }, 3000)
+    expect(placeholderTs).toBeDefined()
+    expect(codexApi.executes[0]?.threadKey).toBe(`slack:${channel}:`)
+    expect(logData(logs, 'slackbotv2_assistant_status_started')).toEqual(
+      expect.objectContaining({
+        mode: 'dm_placeholder',
+        operation: 'set',
+        thread_id: `slack:${channel}:`
+      })
+    )
+    expect(logData(logs, 'slackbotv2_assistant_status_complete')).toEqual(
+      expect.objectContaining({
+        mode: 'dm_placeholder',
+        operation: 'set',
+        visible: true
+      })
+    )
+
+    releaseExecute()
+    const response = await responsePromise
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.streamCount === 1)
+    codexApi.emitOutputLines(`slack:${channel}:`, sampleCodexOutputLines('Executed request 1.'))
+    await Promise.all(waits)
+    await waitFor(
+      () =>
+        slackApi.calls.some(
+          call =>
+            call.method === 'chat.delete'
+            && stringField(call.body.channel) === channel
+            && stringField(call.body.ts) === placeholderTs
+        ),
+      3000
+    )
+    const history = await slackBot.conversations.history({ channel })
+    expect(
+      (history.messages ?? []).some(message => message.text === 'Thinking...')
+    ).toBe(false)
+    const answerText = (history.messages ?? [])
+      .map(message => [message.text ?? '', blocksText(message.blocks)].join('\n'))
+      .join('\n')
+    expect(answerText).toContain('Executed request 1.')
+  })
+
   it('does not wait for hung assistant status before creating Slack sessions', async () => {
     const logs: CapturedLog[] = []
     bot = createTestBot({ logger: captureLogger(logs), slackApiTimeoutMs: 25 })
@@ -6761,6 +6843,7 @@ type StreamCall = {
     | 'agents.sessions.rename'
     | 'assistant.threads.setStatus'
     | 'assistant.threads.setTitle'
+    | 'chat.delete'
     | 'chat.postMessage'
     | 'chat.update'
     | 'chat.startStream'
@@ -7088,6 +7171,18 @@ async function handlePatchedSlackRequest(
       )
       return
     }
+  }
+  if (path === '/api/chat.delete') {
+    const body = await requestBody(request.clone())
+    input.calls.push({ method: 'chat.delete', body })
+    const rawBody = await request.arrayBuffer()
+    const proxied = await fetch(new URL(`${path}${url.search}`, input.upstreamUrl), {
+      method: request.method,
+      headers: request.headers,
+      body: rawBody.byteLength > 0 ? rawBody : undefined
+    })
+    await sendWebResponse(res, proxied)
+    return
   }
   if (path === '/api/chat.startStream') {
     await sendWebResponse(

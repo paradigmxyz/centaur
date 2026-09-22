@@ -18,7 +18,8 @@ import { createSlackAdapter } from '@chat-adapter/slack'
 import {
   assertSlackOk,
   callSlackApi,
-  fetchSlackThreadReplies
+  fetchSlackThreadReplies,
+  SlackApiError
 } from '@chat-adapter/slack/api'
 import { createPostgresState } from '@chat-adapter/state-pg'
 import pg from 'pg'
@@ -181,6 +182,15 @@ const LATE_SLACK_FILE_IDLE_POLL_MS = 500
 const LATE_SLACK_FILE_MESSAGE_TEXT = 'Late Slack file attachment for the previous message.'
 const SLACK_BLOCK_ACTION_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000
 const SLACK_BLOCK_ACTION_LEASE_TTL_MS = 60 * 1000
+// Assistant status in DMs uses a placeholder message (post/update/delete)
+// because Slack's assistant-thread status API needs a thread_ts and DM session
+// ids carry an empty one. This caps the in-process placeholder registry.
+const DM_ASSISTANT_PLACEHOLDER_MAX_ENTRIES = 200
+
+// Placeholder message ts per DM channel, so status updates edit one message and
+// completion deletes it. In-memory only: losing an entry (isolate restart)
+// leaves a stale placeholder up but never breaks a turn.
+const dmAssistantPlaceholderTs = new Map<string, string>()
 
 type PendingLateSlackFileMention = {
   channel: string
@@ -3728,13 +3738,28 @@ async function setAssistantStatus(
   const normalizedStatus = normalizeAssistantStatus(status)
   const target = slackAssistantTarget(thread)
   const adapter = thread.adapter as SlackAssistantAdapter
-  const fields = {
+  // DM session ids carry an empty thread_ts, so the assistant-thread status
+  // surface is unavailable there; fall back to a placeholder DM message.
+  const dmChannel = target ? null : slackDmAssistantChannel(thread)
+  const dmPlaceholder = Boolean(dmChannel && adapter.setAssistantStatus && options?.botToken)
+  const fields: JsonObject = {
     has_adapter: Boolean(adapter.setAssistantStatus),
     has_target: Boolean(target),
+    mode: target ? 'assistant_thread' : dmPlaceholder ? 'dm_placeholder' : 'unsupported',
     operation: normalizedStatus ? 'set' : 'clear',
     status_empty: !normalizedStatus
   }
   if (options) traceLog(options, 'slackbotv2_assistant_status_started', trace, fields)
+  if (dmPlaceholder) {
+    return setDmAssistantPlaceholderStatus(
+      dmChannel!,
+      normalizedStatus,
+      options!,
+      trace,
+      fields,
+      startedAtMs
+    )
+  }
   if (!target || !adapter.setAssistantStatus) {
     if (options) {
       traceLog(options, 'slackbotv2_assistant_status_complete', trace, {
@@ -3787,6 +3812,103 @@ async function setAssistantStatus(
   }
 }
 
+/**
+ * Assistant status for DM sessions (empty thread_ts): post a placeholder
+ * message, edit it on updates, and delete it on clear — mirroring the
+ * assistant-thread status lifecycle (set while working, removed at the end)
+ * with plain chat API calls. Errors are swallowed; status is UI polish.
+ */
+async function setDmAssistantPlaceholderStatus(
+  channel: string,
+  status: string,
+  options: SlackbotV2Options,
+  trace: SlackbotV2Trace | undefined,
+  fields: JsonObject,
+  startedAtMs: number
+): Promise<boolean> {
+  const stopPendingLog = startPendingOperationLog(
+    options,
+    'slackbotv2_assistant_status_pending',
+    trace,
+    fields,
+    startedAtMs
+  )
+  let visible = false
+  try {
+    visible = await withSlackApiTimeout(
+      options,
+      'set assistant status',
+      () => upsertDmAssistantPlaceholder(channel, status, options)
+    )
+  } catch {
+    // Assistant status is Slack UI polish. Rendering should continue if unsupported.
+    visible = false
+  } finally {
+    stopPendingLog()
+  }
+  traceLog(options, 'slackbotv2_assistant_status_complete', trace, {
+    ...fields,
+    phase_ms: elapsedMs(startedAtMs),
+    visible
+  })
+  return visible
+}
+
+async function upsertDmAssistantPlaceholder(
+  channel: string,
+  status: string,
+  options: SlackbotV2Options
+): Promise<boolean> {
+  const callSlack = (method: string, body: Record<string, unknown>) =>
+    withSlackApiTimeout(options, `assistant status placeholder ${method}`, () =>
+      callSlackApi(method, body, {
+        apiUrl: options.slackApiUrl,
+        fetch: options.fetch as typeof globalThis.fetch | undefined,
+        token: options.botToken
+      })
+    )
+  if (!status) {
+    const existingTs = dmAssistantPlaceholderTs.get(channel)
+    if (!existingTs) return false
+    dmAssistantPlaceholderTs.delete(channel)
+    assertSlackOk('chat.delete', await callSlack('chat.delete', { channel, ts: existingTs }))
+    return true
+  }
+  const updateTs = dmAssistantPlaceholderTs.get(channel)
+  if (updateTs) {
+    try {
+      assertSlackOk(
+        'chat.update',
+        await callSlack('chat.update', { channel, text: status, ts: updateTs })
+      )
+      return true
+    } catch (error) {
+      // Repost only when the placeholder is confirmed gone (deleted out-of-band).
+      // Transient failures keep the ts so later updates retry the same message.
+      if (!(error instanceof SlackApiError && error.response?.error === 'message_not_found')) {
+        throw error
+      }
+      dmAssistantPlaceholderTs.delete(channel)
+    }
+  }
+  const posted = await callSlack('chat.postMessage', { channel, text: status })
+  assertSlackOk('chat.postMessage', posted)
+  const ts = stringValue(posted.ts)
+  if (ts) rememberDmAssistantPlaceholder(channel, ts)
+  return Boolean(ts)
+}
+
+function rememberDmAssistantPlaceholder(channel: string, ts: string): void {
+  if (!dmAssistantPlaceholderTs.has(channel)) {
+    while (dmAssistantPlaceholderTs.size >= DM_ASSISTANT_PLACEHOLDER_MAX_ENTRIES) {
+      const oldest = dmAssistantPlaceholderTs.keys().next()
+      if (oldest.done === true) break
+      dmAssistantPlaceholderTs.delete(oldest.value)
+    }
+  }
+  dmAssistantPlaceholderTs.set(channel, ts)
+}
+
 function normalizeAssistantStatus(status: string): string {
   const oneLine = status.replace(/\s+/g, ' ').trim()
   const chars = Array.from(oneLine)
@@ -3836,6 +3958,16 @@ function slackAssistantTarget(thread: Thread): { channel: string; threadTs: stri
   const parts = thread.id.split(':')
   if (parts[0] !== 'slack' || !parts[1] || !parts[2]) return null
   return { channel: parts[1], threadTs: parts[2] }
+}
+
+/**
+ * Channel for DM sessions whose thread id carries an empty thread_ts
+ * (`slack:D…:`); these have no assistant-thread status surface.
+ */
+function slackDmAssistantChannel(thread: Thread): string | null {
+  const parts = thread.id.split(':')
+  if (parts[0] !== 'slack' || !parts[1] || parts[2]) return null
+  return parts[1]
 }
 
 function titleFromMessage(text: string, userName = 'centaur'): string {
