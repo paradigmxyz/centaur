@@ -875,6 +875,9 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
       assert_select "input[type=hidden][name=model]", count: 1
       assert_select "[data-console-model-option][data-value=?]", "amp"
       assert_select "[data-console-model-option][data-value=?]", "gpt-6-astra"
+      %w[sol luna].each do |variant|
+        assert_select "[data-console-model-option][data-value=?]", "gpt-6-#{variant}", count: 1
+      end
       %w[sol terra luna].each do |variant|
         assert_select "[data-console-model-option][data-value=?]", "gpt-5.6-#{variant}", count: 1
       end
@@ -901,6 +904,15 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
           %w[high High], [ "xhigh", "Extra High" ], %w[max Max]
         ] },
         agents["gpt-5.6-#{variant}"]
+      )
+    end
+    %w[sol luna].each do |variant|
+      assert_equal(
+        { "label" => "GPT-6 #{variant.capitalize}", "efforts" => [
+          %w[none None], %w[low Low], %w[medium Medium],
+          %w[high High], [ "xhigh", "Extra High" ], %w[max Max]
+        ] },
+        agents["gpt-6-#{variant}"]
       )
     end
     # Submitting replaces the centered empty state with a full-height,
@@ -1237,7 +1249,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "private_responses", line["provider"]
   end
 
-  %w[gpt-6-astra gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna].each do |model|
+  %w[gpt-6-astra gpt-6-sol gpt-6-luna gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna].each do |model|
     test "a #{model} chat carries the picked model and reasoning effort" do
       client = RecordingApiClient.new
       with_composer(client: client) do

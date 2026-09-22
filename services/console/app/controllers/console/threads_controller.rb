@@ -117,6 +117,14 @@ class Console::ThreadsController < ApplicationController
     %w[max Max],
     %w[ultra Ultra]
   ].freeze
+  GPT_6_SOL_LUNA_EFFORTS = [
+    %w[none None],
+    %w[low Low],
+    %w[medium Medium],
+    %w[high High],
+    [ "xhigh", "Extra High" ],
+    %w[max Max]
+  ].freeze
   MODEL_EFFORT_OVERRIDES = {
     [ "claude-opus-5", "fast" ] => "claude-opus-5-fast"
   }.freeze
@@ -130,6 +138,12 @@ class Console::ThreadsController < ApplicationController
     ComposerAgent.new(value: "gpt-6-astra", label: "GPT-6-Astra",
                       harness: "codex", model: "gpt-6-astra",
                       efforts: ASTRA_EFFORTS),
+    ComposerAgent.new(value: "gpt-6-sol", label: "GPT-6 Sol",
+                      harness: "codex", model: "gpt-6-sol",
+                      efforts: GPT_6_SOL_LUNA_EFFORTS),
+    ComposerAgent.new(value: "gpt-6-luna", label: "GPT-6 Luna",
+                      harness: "codex", model: "gpt-6-luna",
+                      efforts: GPT_6_SOL_LUNA_EFFORTS),
     ComposerAgent.new(value: "gpt-5.6-terra", label: "GPT-5.6 Terra",
                       harness: "codex", model: "gpt-5.6-terra",
                       efforts: CODEX_EFFORTS + [ %w[max Max] ]),

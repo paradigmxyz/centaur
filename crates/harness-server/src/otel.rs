@@ -1200,6 +1200,27 @@ fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
 }
 
 fn openai_pricing(model: &str) -> Option<TokenPricing> {
+    // Standard rates for <=272K input tokens, verified against the model pages:
+    // https://developers.openai.com/api/docs/models/gpt-6-sol
+    // https://developers.openai.com/api/docs/models/gpt-6-luna
+    if model.contains("gpt-6-sol") {
+        return Some(TokenPricing {
+            input_per_mtok: 2.0,
+            cache_creation_per_mtok: 2.5,
+            cache_read_per_mtok: 0.2,
+            output_per_mtok: 10.0,
+            source: "centaur_estimate:openai:gpt-6-sol:standard-short-context",
+        });
+    }
+    if model.contains("gpt-6-luna") {
+        return Some(TokenPricing {
+            input_per_mtok: 0.1,
+            cache_creation_per_mtok: 0.125,
+            cache_read_per_mtok: 0.01,
+            output_per_mtok: 0.5,
+            source: "centaur_estimate:openai:gpt-6-luna:standard-short-context",
+        });
+    }
     if model.contains("gpt-6-astra") {
         return Some(TokenPricing {
             input_per_mtok: 10.0,
@@ -1892,6 +1913,42 @@ mod tests {
             let cost =
                 estimate_usage_cost(HarnessKind::Codex, "openai", model, &usage).expect("cost");
 
+            assert!((cost.input_cost - input_cost).abs() < 1e-9, "{model}");
+            assert!((cost.output_cost - output_cost).abs() < 1e-9, "{model}");
+            assert!(
+                (cost.total_cost() - input_cost - output_cost).abs() < 1e-9,
+                "{model}"
+            );
+            assert_eq!(cost.source, source);
+        }
+    }
+
+    #[test]
+    fn gpt_6_sol_and_luna_cost_use_standard_short_context_pricing() {
+        let usage = NormalizedTokenUsage {
+            input_tokens: Some(100_000),
+            cache_creation_input_tokens: Some(10_000),
+            cache_read_input_tokens: Some(20_000),
+            output_tokens: Some(10_000),
+            ..Default::default()
+        };
+
+        for (model, input_cost, output_cost, source) in [
+            (
+                "gpt-6-sol",
+                0.169,
+                0.1,
+                "centaur_estimate:openai:gpt-6-sol:standard-short-context",
+            ),
+            (
+                "gpt-6-luna",
+                0.00845,
+                0.005,
+                "centaur_estimate:openai:gpt-6-luna:standard-short-context",
+            ),
+        ] {
+            let cost =
+                estimate_usage_cost(HarnessKind::Codex, "openai", model, &usage).expect("cost");
             assert!((cost.input_cost - input_cost).abs() < 1e-9, "{model}");
             assert!((cost.output_cost - output_cost).abs() < 1e-9, "{model}");
             assert!(
