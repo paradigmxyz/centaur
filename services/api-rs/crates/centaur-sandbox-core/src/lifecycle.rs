@@ -63,6 +63,14 @@ impl SandboxHandle {
 pub enum SandboxStatus {
     /// Runtime resources exist but are not yet ready for byte I/O.
     Created,
+    /// The runtime record asks for a process and the backend has none for it.
+    ///
+    /// Distinct from [`SandboxStatus::Created`], where a process exists and is
+    /// still coming up, and from [`SandboxStatus::Suspended`], where nothing is
+    /// asking for one. A vacant runtime holds its record and state volume but
+    /// no compute, so it must not be counted against a running-capacity limit:
+    /// there is nothing running to account for.
+    Vacant,
     /// Runtime is live and should accept `open_io`.
     Running,
     /// Runtime state may exist, but no live process is serving I/O.
