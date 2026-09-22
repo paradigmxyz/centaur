@@ -14,6 +14,8 @@ pub enum HarnessServerError {
     Io(#[from] io::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("runtime instructions request failed: {0}")]
+    RuntimeInstructionsRequest(#[from] reqwest::Error),
     #[error("Codex App Server protocol conversion failed: {0}")]
     Protocol(String),
     #[error("notification is not a Codex App Server V2 server notification: {message}")]

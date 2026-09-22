@@ -31,6 +31,7 @@ use crate::amp::AmpHarness;
 use crate::claude::ClaudeCodeHarness;
 use crate::codex::CodexHarnessServer;
 use crate::otel::{TraceContext, TurnStatus as TelemetryTurnStatus, TurnTelemetry};
+use crate::runtime_instructions::RuntimeInstructions;
 use crate::traits::{
     AppServerNormalizer, AppServerRuntime, HarnessChild, HarnessKind, HarnessServer,
     NormalizedEvent, ThreadState,
@@ -87,6 +88,7 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
     let (command_tx, command_rx) = mpsc::channel();
     let (request_tx, request_rx) = mpsc::channel();
     let turn_active = Arc::new(AtomicBool::new(false));
+    let mut runtime_instructions = RuntimeInstructions::from_env();
 
     {
         let turn_active = Arc::clone(&turn_active);
@@ -151,6 +153,9 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                 reasoning: _,
                 trace_context,
             }) => {
+                if refresh_runtime_instructions(&mut runtime_instructions) {
+                    state.process = None;
+                }
                 if let Some(model) = model {
                     state.model = model;
                 }
@@ -217,13 +222,19 @@ pub(crate) fn run_app_server<H: HarnessServer>(harness: &H) -> Result<()> {
 
     let mut stdout = io::stdout().lock();
     let mut threads: HashMap<String, ThreadState> = HashMap::new();
+    let mut runtime_instructions = RuntimeInstructions::from_env();
 
     while let Ok(request) = request_rx.recv() {
         match request {
             ActiveTurnRequest::JsonRpc(request) => {
-                if let Err(error) =
-                    handle_request(harness, request, &request_rx, &mut threads, &mut stdout)
-                {
+                if let Err(error) = handle_request(
+                    harness,
+                    request,
+                    &request_rx,
+                    &mut threads,
+                    &mut runtime_instructions,
+                    &mut stdout,
+                ) {
                     eprintln!("request failed: {error:#}");
                 }
             }
@@ -862,6 +873,7 @@ fn handle_request<H: HarnessServer, W: Write>(
     request: JSONRPCRequest,
     request_rx: &Receiver<ActiveTurnRequest>,
     threads: &mut HashMap<String, ThreadState>,
+    runtime_instructions: &mut Option<RuntimeInstructions>,
     stdout: &mut W,
 ) -> Result<()> {
     match request.method.as_str() {
@@ -962,6 +974,13 @@ fn handle_request<H: HarnessServer, W: Write>(
         }
         "turn/start" => {
             let params: TurnStartParams = request_params(request.params)?;
+            if refresh_runtime_instructions(runtime_instructions) {
+                // A JSON-RPC bridge may own several emulated threads. Every
+                // live process was started with the previous prompt revision.
+                for state in threads.values_mut() {
+                    state.process = None;
+                }
+            }
             let state = threads.get_mut(&params.thread_id).ok_or_else(|| {
                 HarnessServerError::UnknownThread {
                     thread_id: params.thread_id.clone(),
@@ -1012,6 +1031,32 @@ fn handle_request<H: HarnessServer, W: Write>(
             -32601,
             format!("method not found: {}", request.method),
         ),
+    }
+}
+
+fn refresh_runtime_instructions(runtime: &mut Option<RuntimeInstructions>) -> bool {
+    let Some(runtime) = runtime else {
+        return false;
+    };
+    match runtime.refresh() {
+        Ok(update) if update.changed => {
+            eprintln!(
+                "organization instructions updated: revision={} sha256={}",
+                update.revision.as_deref().unwrap_or("none"),
+                update.sha256.as_deref().unwrap_or("unknown")
+            );
+            // Claude Code receives AGENTS.md as an appended system prompt and
+            // Amp reads AGENT.md at process startup. Restarting between turns
+            // lets both resume their session with the newly composed prompt.
+            true
+        }
+        Ok(_) => false,
+        Err(error) => {
+            // Fetch failures are deliberately non-fatal: the target file and
+            // running process remain on the last known-good revision.
+            eprintln!("organization instructions refresh failed: {error}");
+            false
+        }
     }
 }
 

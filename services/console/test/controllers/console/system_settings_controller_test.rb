@@ -30,6 +30,65 @@ module Console
       assert_select "input[name='system_setting[default_sandbox_workflows_read_enabled]']"
       assert_select "input[name='system_setting[default_sandbox_workflows_write_enabled]']"
       assert_select "input[name='system_setting[default_role_ids][]'][value=?]", roles(:acme_infra).id.to_s
+      assert_select "textarea[name='system_setting[organization_instructions_draft]']"
+      assert_select "button[name='publish_organization_instructions'][value='1']", text: "Publish to agents"
+    end
+
+    test "admin saves organization instructions as a draft without publishing" do
+      sign_in users(:acme_admin)
+
+      assert_no_difference -> { OrganizationInstructionVersion.count } do
+        patch console_system_settings_url,
+              params: {
+                system_setting: { organization_instructions_draft: "Search the canonical workspace first." }
+              }
+      end
+
+      assert_redirected_to edit_console_system_settings_path
+      assert_equal "Draft saved.", flash[:notice]
+      settings = system_settings(:default).reload
+      assert_equal "Search the canonical workspace first.", settings.organization_instructions_draft
+      assert_nil settings.published_organization_instruction_version
+    end
+
+    test "admin publishes a versioned organization instruction" do
+      sign_in users(:acme_admin)
+
+      assert_difference -> { OrganizationInstructionVersion.count }, 1 do
+        patch console_system_settings_url,
+              params: {
+                publish_organization_instructions: "1",
+                system_setting: { organization_instructions_draft: "Search Notion for current workstreams." }
+              }
+      end
+
+      assert_redirected_to edit_console_system_settings_path
+      assert_equal "Organization instructions published.", flash[:notice]
+      settings = system_settings(:default).reload
+      version = settings.published_organization_instruction_version
+      assert_equal "Search Notion for current workstreams.", version.content
+      assert_equal users(:acme_admin), version.published_by
+    end
+
+    test "admin restores a historical version by publishing a new version" do
+      sign_in users(:acme_admin)
+      old_version = OrganizationInstructionVersion.create!(
+        content: "Use the canonical source.",
+        published_by: users(:acme_admin)
+      )
+      settings = system_settings(:default)
+      settings.update!(organization_instructions_draft: "Newer draft")
+
+      assert_difference -> { OrganizationInstructionVersion.count }, 1 do
+        post console_restore_organization_instruction_version_url(old_version)
+      end
+
+      assert_redirected_to edit_console_system_settings_path
+      assert_equal "Organization instructions restored and published.", flash[:notice]
+      settings.reload
+      refute_equal old_version, settings.published_organization_instruction_version
+      assert_equal old_version.content, settings.published_organization_instruction_version.content
+      assert_equal old_version.content, settings.organization_instructions_draft
     end
 
     test "admin updates principal defaults" do

@@ -47,6 +47,21 @@ To use an existing ParadeDB installation instead, set
 `CENTAUR_CONSOLE_MANAGE_PARADEDB=false` so `just dev` does not start Docker. The
 server must have `pg_search` installed and available to the Console database.
 
+## Organization instructions
+
+Console admins can manage a deployment-wide prompt overlay from **Settings >
+Organization instructions**. Saving keeps a draft; publishing creates an
+immutable revision and makes it available to agent sandboxes. Restoring a
+historical revision publishes its contents as a new revision, preserving an
+append-only audit history.
+
+Published changes apply to new and existing sessions on their next turn; no
+image build or deployment is required. The overlay is behavior guidance only:
+it cannot add tools, credentials, network access, roles, or bypass Centaur's
+authorization policy. Sandboxes retain their last successfully fetched revision
+when the Console is temporarily unavailable. Runtime logs record only the
+revision and SHA-256 digest, never the instruction text.
+
 ## Environment Variables
 
 All of the console's environment variables use the `CENTAUR_CONSOLE_` prefix. For backwards compatibility, every variable also resolves from the legacy `IRON_CONTROL_` name when the `CENTAUR_CONSOLE_` one is unset, so existing deployments keep working until they migrate. The `CENTAUR_CONSOLE_` name wins when both are set.

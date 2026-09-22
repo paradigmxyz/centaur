@@ -164,6 +164,9 @@ Rails.application.routes.draw do
       end
     end
     resource :system_settings, only: %i[edit update], path: "settings"
+    post "settings/organization_instructions/:id/restore",
+         to: "system_settings#restore_organization_instructions",
+         as: :restore_organization_instruction_version
     # Admin self-descope ("view as operator"): pause (admin-only) and restore
     # admin permissions. A singular resource because it's a per-session flag.
     resource :descope, only: %i[create destroy]
@@ -273,6 +276,7 @@ Rails.application.routes.draw do
       # proxy injects a short-lived sandbox entitlement JWT scoped to these paths.
       namespace :sandbox do
         resource :permissions, only: :show
+        resource :runtime_instructions, only: :show
         resources :oauth_apps, only: :index
         resources :scheduled_tasks, only: %i[index show create update destroy] do
           post :run, on: :member

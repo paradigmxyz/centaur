@@ -14,6 +14,7 @@ use codex_app_server_protocol::UserInput;
 use serde_json::{Value, json};
 
 use crate::otel::{TurnStatus as TelemetryTurnStatus, TurnTelemetry};
+use crate::runtime_instructions::RuntimeInstructions;
 use crate::server::{
     BlocksCommand, BlocksState, parse_blocks_line_with_state, usage_span_input_value,
     write_blocks_error,
@@ -131,6 +132,8 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
     // thread start (the app-server protocol has no per-turn provider), so this
     // lets a later conflicting override be surfaced rather than silently dropped.
     let mut thread_provider: Option<String> = None;
+    let mut runtime_instructions = RuntimeInstructions::from_env();
+    let mut developer_instructions: Option<String> = None;
     let (command_tx, command_rx) = mpsc::channel();
     let (active_turn_tx, active_turn_rx) = mpsc::channel();
     let turn_active = Arc::new(AtomicBool::new(false));
@@ -232,6 +235,36 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                 );
                 turn_active.store(true, Ordering::SeqCst);
                 let result = (|| -> Result<()> {
+                    if let Some(runtime) = runtime_instructions.as_mut() {
+                        match runtime.refresh() {
+                            Ok(update) if update.changed => {
+                                eprintln!(
+                                    "organization instructions updated: revision={} sha256={}",
+                                    update.revision.as_deref().unwrap_or("none"),
+                                    update.sha256.as_deref().unwrap_or("unknown")
+                                );
+                                developer_instructions = update.content;
+                                if let (Some(child), Some(existing_thread_id)) =
+                                    (codex.as_mut(), thread_id.as_deref())
+                                {
+                                    let resumed = resume_thread_with_instructions(
+                                        child,
+                                        &mut stdout,
+                                        &mut request_id,
+                                        existing_thread_id,
+                                        &model_provider,
+                                        developer_instructions.as_deref(),
+                                        traceparent.as_deref(),
+                                    )?;
+                                    thread_model = resumed.model.or(thread_model.take());
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                eprintln!("organization instructions refresh failed: {error}");
+                            }
+                        }
+                    }
                     if codex.is_none() {
                         let mut child = CodexJsonRpcChild::spawn()?;
                         initialize_codex(
@@ -257,6 +290,7 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                         &active_turn_rx,
                         traceparent.as_deref(),
                         &mut telemetry,
+                        developer_instructions.as_deref(),
                     )
                 })();
                 telemetry.finish(if result.is_ok() {
@@ -350,11 +384,18 @@ fn run_codex_user_turn<W: Write>(
     active_turn_rx: &Receiver<CodexActiveTurnRequest>,
     traceparent: Option<&str>,
     telemetry: &mut TurnTelemetry,
+    developer_instructions: Option<&str>,
 ) -> Result<()> {
     let (model, model_provider) = model_and_provider;
     if thread_id.is_none() {
-        let thread =
-            start_or_resume_thread(codex, stdout, request_id, &model_provider, traceparent)?;
+        let thread = start_or_resume_thread(
+            codex,
+            stdout,
+            request_id,
+            &model_provider,
+            developer_instructions,
+            traceparent,
+        )?;
         *thread_id = Some(thread.id);
         *thread_model = thread.model;
         *thread_provider = Some(model_provider.clone());
@@ -465,13 +506,14 @@ fn start_or_resume_thread<W: Write>(
     stdout: &mut W,
     request_id: &mut i64,
     model_provider: &str,
+    developer_instructions: Option<&str>,
     traceparent: Option<&str>,
 ) -> Result<StartedCodexThread> {
     let cwd = env::current_dir()?.display().to_string();
     let resume = env::var("CODEX_CONTINUE_THREAD_ID")
         .or_else(|_| env::var("AMP_CONTINUE_THREAD_ID"))
         .unwrap_or_default();
-    let (method, params) = if resume.trim().is_empty() {
+    let (method, mut params) = if resume.trim().is_empty() {
         (
             "thread/start",
             json!({
@@ -496,11 +538,41 @@ fn start_or_resume_thread<W: Write>(
             }),
         )
     };
+    if let Some(instructions) = developer_instructions {
+        params["developerInstructions"] = Value::String(instructions.to_owned());
+    }
 
     let id = next_request_id(request_id);
     codex.send_request(id, method, params, traceparent)?;
     let result = codex.read_response_or_forward(id, stdout)?;
     started_codex_thread_from_response(&result, method)
+}
+
+fn resume_thread_with_instructions<W: Write>(
+    codex: &mut CodexJsonRpcChild,
+    stdout: &mut W,
+    request_id: &mut i64,
+    thread_id: &str,
+    model_provider: &str,
+    developer_instructions: Option<&str>,
+    traceparent: Option<&str>,
+) -> Result<StartedCodexThread> {
+    let mut params = json!({
+        "threadId": thread_id,
+        "cwd": env::current_dir()?.display().to_string(),
+        "approvalPolicy": "never",
+        "approvalsReviewer": "user",
+        "sandbox": "danger-full-access",
+        "modelProvider": model_provider,
+        "excludeTurns": false,
+    });
+    if let Some(instructions) = developer_instructions {
+        params["developerInstructions"] = Value::String(instructions.to_owned());
+    }
+    let id = next_request_id(request_id);
+    codex.send_request(id, "thread/resume", params, traceparent)?;
+    let result = codex.read_response_or_forward(id, stdout)?;
+    started_codex_thread_from_response(&result, "thread/resume")
 }
 
 fn started_codex_thread_from_response(result: &Value, method: &str) -> Result<StartedCodexThread> {

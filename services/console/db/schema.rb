@@ -260,6 +260,14 @@ ActiveRecord::Schema[8.1].define(version: 2026_09_16_152611) do
     t.index ["labels"], name: "index_oauth_token_secrets_on_labels", using: :gin
   end
 
+  create_table "organization_instruction_versions", force: :cascade do |t|
+    t.text "content", null: false
+    t.datetime "created_at", null: false
+    t.bigint "published_by_id", null: false
+    t.datetime "updated_at", null: false
+    t.index ["published_by_id"], name: "index_organization_instruction_versions_on_published_by_id"
+  end
+
   create_table "pg_dsn_secrets", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.bigint "created_by_id", null: false
@@ -525,8 +533,11 @@ ActiveRecord::Schema[8.1].define(version: 2026_09_16_152611) do
     t.boolean "default_sandbox_sessions_read_enabled", default: false, null: false
     t.boolean "default_sandbox_workflows_read_enabled", default: false, null: false
     t.boolean "default_sandbox_workflows_write_enabled", default: false, null: false
+    t.text "organization_instructions_draft", default: "", null: false
+    t.bigint "published_organization_instruction_version_id"
     t.boolean "singleton", default: true, null: false
     t.datetime "updated_at", null: false
+    t.index ["published_organization_instruction_version_id"], name: "idx_on_published_organization_instruction_version_i_d8df838f94"
     t.index ["singleton"], name: "index_system_settings_on_singleton", unique: true
   end
 
@@ -591,6 +602,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_09_16_152611) do
   add_foreign_key "mcp_oauth_refresh_tokens", "users"
   add_foreign_key "oauth_apps", "users", column: "created_by_id"
   add_foreign_key "oauth_token_secrets", "users", column: "created_by_id"
+  add_foreign_key "organization_instruction_versions", "users", column: "published_by_id"
   add_foreign_key "pg_dsn_secrets", "users", column: "created_by_id"
   add_foreign_key "principal_roles", "principals"
   add_foreign_key "principal_roles", "roles"
@@ -621,6 +633,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_09_16_152611) do
   add_foreign_key "slack_channel_permissions", "roles"
   add_foreign_key "static_secrets", "broker_credentials"
   add_foreign_key "static_secrets", "users", column: "created_by_id"
+  add_foreign_key "system_settings", "organization_instruction_versions", column: "published_organization_instruction_version_id"
   add_foreign_key "thread_shares", "users", column: "created_by_id"
   add_foreign_key "user_identities", "users"
   add_foreign_key "users", "users", column: "approved_by_id"

@@ -24,6 +24,39 @@
   <% end %>
 
   <section class="form-section">
+    <h2 class="form-section-heading">Organization instructions</h2>
+    <p class="mb-4 text-sm text-zinc-500">
+      Deployment-wide behavior guidance appended to the code-managed system prompt. It cannot grant tools or change security policy.
+      Published changes apply on an agent's next turn without a deployment.
+    </p>
+    <%= form.text_area :organization_instructions_draft,
+                       rows: 14,
+                       maxlength: 32_000,
+                       class: "form-input font-mono text-sm",
+                       placeholder: "Describe when agents should consult canonical internal sources…" %>
+    <div class="mt-3 flex flex-wrap items-center gap-3">
+      <%= form.submit "Save draft", class: "btn-secondary" %>
+      <%= form.button "Publish to agents",
+                      name: "publish_organization_instructions",
+                      value: "1",
+                      class: "btn-primary" %>
+      <% if (published = @system_setting.published_organization_instruction_version) %>
+        <span class="text-xs text-zinc-500">
+          Published revision <%= published.id %> by <%= published.published_by.email %>
+          <%= time_ago_in_words(published.created_at) %> ago
+        </span>
+      <% else %>
+        <span class="text-xs text-zinc-500">No organization instructions are published.</span>
+      <% end %>
+    </div>
+    <details class="mt-4 rounded border border-ink-700 bg-ink-900/60 p-4">
+      <summary class="cursor-pointer text-sm font-medium text-zinc-200">Preview appended instructions</summary>
+      <pre class="mt-3 whitespace-pre-wrap text-xs text-zinc-400">[Organization instructions]
+<%= @system_setting.organization_instructions_draft %></pre>
+    </details>
+  </section>
+
+  <section class="form-section">
     <h2 class="form-section-heading">Default Sandbox Capabilities</h2>
     <div class="grid gap-5 md:grid-cols-3">
       <label class="block">
@@ -110,4 +143,26 @@
     <%= form.submit "Save settings", class: "btn-primary" %>
     <a href="<%= console_principals_path %>" class="btn-secondary">Cancel</a>
   </div>
+<% end %>
+
+<% if @organization_instruction_versions.any? %>
+  <section class="form-section mt-6">
+    <h2 class="form-section-heading">Published history</h2>
+    <div class="space-y-3">
+      <% @organization_instruction_versions.each do |version| %>
+        <div class="rounded border border-ink-700 bg-ink-850/60 p-4">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div class="text-sm text-zinc-300">
+              Revision <%= version.id %> · <%= version.published_by.email %> · <%= version.created_at.to_fs(:long) %>
+            </div>
+            <%= button_to "Restore and publish",
+                          console_restore_organization_instruction_version_path(version),
+                          method: :post,
+                          class: "btn-secondary" %>
+          </div>
+          <pre class="mt-3 max-h-40 overflow-auto whitespace-pre-wrap text-xs text-zinc-500"><%= version.content %></pre>
+        </div>
+      <% end %>
+    </div>
+  </section>
 <% end %>

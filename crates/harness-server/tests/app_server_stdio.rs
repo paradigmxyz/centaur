@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -663,6 +664,101 @@ fn fake_codex_blocks_mode_queues_active_turns_in_order() {
 
     let _ = std::fs::remove_file(fake_codex);
     let _ = std::fs::remove_file(fake_codex_log);
+}
+
+#[test]
+fn fake_codex_applies_changed_organization_instructions_on_the_next_turn() {
+    let fake_codex = temp_path("fake-runtime-instructions-codex.sh");
+    let fake_codex_log = temp_path("fake-runtime-instructions-codex-requests.jsonl");
+    let baseline = temp_path("runtime-instructions-baseline.md");
+    let target = temp_path("runtime-instructions-agents.md");
+    std::fs::write(&baseline, "Base instructions\n").expect("write baseline");
+    std::fs::write(&target, "Base instructions\n").expect("write target");
+    let console_url = serve_runtime_instruction_revisions(&[
+        r#"{"data":{"revision":"1","content":"First organization revision.","sha256":"sha-1","published_at":"2026-09-15T12:00:00Z"}}"#,
+        r#"{"data":{"revision":"2","content":"Second organization revision.","sha256":"sha-2","published_at":"2026-09-15T12:01:00Z"}}"#,
+    ]);
+
+    let script = fake_codex_app_server_script(&fake_codex_log);
+    std::fs::write(&fake_codex, script).expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex)
+        .expect("fake codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
+        Harness::Codex,
+        None,
+        Some((
+            "CODEX_BIN",
+            fake_codex.to_str().expect("utf-8 fake codex path"),
+        )),
+        &[
+            ("CENTAUR_CONSOLE_URL", &console_url),
+            (
+                "CENTAUR_RUNTIME_INSTRUCTIONS_BASELINE",
+                baseline.to_str().expect("utf-8 baseline path"),
+            ),
+            (
+                "CENTAUR_RUNTIME_INSTRUCTIONS_TARGET",
+                target.to_str().expect("utf-8 target path"),
+            ),
+        ],
+    );
+    assert_completed_turn(&bridge.run_blocks_user_turn("first", Duration::from_secs(10)));
+    assert_completed_turn(&bridge.run_blocks_user_turn("second", Duration::from_secs(10)));
+    bridge.finish_successfully();
+
+    let requests = std::fs::read_to_string(&fake_codex_log).expect("read request log");
+    let requests: Vec<Value> = requests
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("fake codex request JSON"))
+        .collect();
+    let thread_start = requests
+        .iter()
+        .find(|value| value.get("method").and_then(Value::as_str) == Some("thread/start"))
+        .expect("thread/start request");
+    let thread_resume = requests
+        .iter()
+        .find(|value| value.get("method").and_then(Value::as_str) == Some("thread/resume"))
+        .expect("thread/resume request after revision change");
+    assert_eq!(
+        thread_start
+            .pointer("/params/developerInstructions")
+            .and_then(Value::as_str),
+        Some("First organization revision.")
+    );
+    assert_eq!(
+        thread_resume
+            .pointer("/params/developerInstructions")
+            .and_then(Value::as_str),
+        Some("Second organization revision.")
+    );
+
+    for path in [fake_codex, fake_codex_log, baseline, target] {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn serve_runtime_instruction_revisions(bodies: &'static [&'static str]) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind instruction server");
+    let address = listener.local_addr().expect("instruction server address");
+    thread::spawn(move || {
+        for body in bodies {
+            let (mut stream, _) = listener.accept().expect("accept instruction request");
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).expect("read instruction request");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write instruction response");
+        }
+    });
+    format!("http://{address}")
 }
 
 #[test]
