@@ -736,12 +736,9 @@ def channels_direct(
     from .client import list_bot_channels, list_channels
 
     if bot_member_only:
-        results = list_bot_channels(limit=limit)
+        results = list_bot_channels(limit=limit, query=query)
     else:
-        results = list_channels(limit=limit)
-
-    if query:
-        results = [c for c in results if query.lower() in c["name"].lower()]
+        results = list_channels(limit=limit, query=query)
 
     _render_channels(results, f"Channels ({len(results)})", json_output=json_output)
 
@@ -1436,7 +1433,7 @@ def download_direct(
     ),
     output: str = typer.Option(".", "--output", "-o", help="Output directory for downloads"),
 ):
-    """Download Slack files directly with the Slack bot token."""
+    """Download Slack files directly with the linked Slack user token."""
     _download_direct(permalink, output)
 
 
@@ -1444,12 +1441,27 @@ def _download_direct(permalink: str, output: str) -> None:
     import re
     from urllib.parse import urlparse
 
-    from .client import get_message_files
+    from .client import get_file_info_direct, get_message_files
 
     parsed = urlparse(permalink)
-    if parsed.scheme == "https" and (parsed.hostname or "").lower() == "files.slack.com":
+    hostname = (parsed.hostname or "").lower()
+    if parsed.scheme == "https" and hostname == "files.slack.com":
         _download_direct_url(permalink, output)
         return
+
+    if parsed.scheme == "https" and hostname.endswith(".slack.com"):
+        file_match = re.fullmatch(r"/files/[A-Z0-9]+/(F[A-Z0-9]+)(?:/[^/]*)?/?", parsed.path)
+        if file_match:
+            try:
+                file = get_file_info_direct(file_match.group(1))
+                url_private = file.get("url_private_download") or file.get("url_private")
+                if not url_private:
+                    raise RuntimeError("Slack file metadata did not include a download URL")
+                _download_direct_url(url_private, output, display_name=file.get("name"))
+                return
+            except (RuntimeError, ValueError) as e:
+                console.print(f"[red]Error resolving Slack file permalink: {e}[/]")
+                raise typer.Exit(1) from e
 
     if permalink.startswith("https://"):
         match = re.search(r"/archives/([A-Z0-9]+)/p(\d+)", permalink)
@@ -1465,7 +1477,7 @@ def _download_direct(permalink: str, output: str) -> None:
         console.print("[red]Provide a Slack permalink, 'channel_id:timestamp', or url_private[/]")
         raise typer.Exit(1)
 
-    files_list = get_message_files(channel_id, message_ts)
+    files_list = get_message_files(channel_id, message_ts, direct=True)
     if not files_list:
         console.print("[yellow]No files attached to this message.[/]")
         raise typer.Exit()

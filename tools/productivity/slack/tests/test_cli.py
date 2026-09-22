@@ -209,8 +209,30 @@ def test_channels_direct_calls_direct_client(monkeypatch) -> None:
     result = CliRunner().invoke(app, ["channels-direct", "--limit", "10"])
 
     assert result.exit_code == 0
-    assert calls == [("list_channels", (), {"limit": 10})]
+    assert calls == [("list_channels", (), {"limit": 10, "query": None})]
     assert json.loads(result.output)[0]["name"] == "general"
+
+
+def test_channels_direct_passes_query_before_limit(monkeypatch) -> None:
+    calls = []
+
+    def fake_list_channels(*args, **kwargs):
+        calls.append((args, kwargs))
+        return []
+
+    fake_client = types.SimpleNamespace(
+        list_channels=fake_list_channels,
+        list_bot_channels=lambda **_: [],
+    )
+    monkeypatch.setitem(sys.modules, "slack.client", fake_client)
+
+    result = CliRunner().invoke(
+        app,
+        ["channels-direct", "--query", "centaur", "--limit", "5"],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [((), {"limit": 5, "query": "centaur"})]
 
 
 def test_channel_members_calls_proxy_client(monkeypatch) -> None:
@@ -440,6 +462,45 @@ def test_upload_calls_proxy_client(monkeypatch, tmp_path: Path) -> None:
             "snippet_type": None,
         }
     ]
+
+
+def test_download_direct_resolves_workspace_file_permalink(monkeypatch, tmp_path: Path) -> None:
+    calls = []
+
+    def fake_get_file_info_direct(file_id):
+        calls.append(file_id)
+        return {
+            "name": "report.pdf",
+            "url_private_download": "https://files.slack.com/files-pri/T1-F1/report.pdf",
+        }
+
+    def fake_fetch_slack_file(url):
+        calls.append(url)
+        return "report.pdf", "application/pdf", b"report"
+
+    fake_client = types.SimpleNamespace(
+        get_file_info_direct=fake_get_file_info_direct,
+        get_message_files=lambda *_args, **_kwargs: [],
+        _fetch_slack_file=fake_fetch_slack_file,
+    )
+    monkeypatch.setitem(sys.modules, "slack.client", fake_client)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "download-direct",
+            "https://paradigm-ops.slack.com/files/U123/F123/report.pdf",
+            "--output",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        "F123",
+        "https://files.slack.com/files-pri/T1-F1/report.pdf",
+    ]
+    assert (tmp_path / "report.pdf").read_bytes() == b"report"
 
 
 def test_download_writes_file_with_proxy(monkeypatch, tmp_path: Path) -> None:
