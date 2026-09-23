@@ -114,6 +114,7 @@ class ScheduledTask < ApplicationRecord
   end
 
   def api_input
+    execution_principal = self.execution_principal
     delivery_policy = SlackDeliveryPolicy.new(author)
     unless delivery_policy.allowed?(delivery_channel)
       raise DeliveryDestinationUnavailable, "Slack delivery destination is no longer available to the author"
@@ -122,6 +123,7 @@ class ScheduledTask < ApplicationRecord
     {
       prompt: prompt,
       principal: execution_principal.foreign_id,
+      principal_id: execution_principal.oid,
       channel: delivery_channel,
       slack_user_id: delivery_policy.slack_user_id,
       scheduled_task_id: oid,

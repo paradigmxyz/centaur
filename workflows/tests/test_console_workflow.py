@@ -2,9 +2,46 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
+import pytest
+
 from workflows import console_workflow
 
 ACTION_STEPS = ["agent_result", "post_result"]
+
+
+class FakeConsoleApi:
+    def __init__(self, async_client) -> None:
+        self.async_client = async_client
+        self.responses = []
+        self.requests = []
+
+    def client(self, **kwargs):
+        assert kwargs == {"timeout": 10}
+        return self.async_client(transport=httpx.MockTransport(self.handle))
+
+    def handle(self, request):
+        self.requests.append(request)
+        assert "authorization" not in request.headers
+        assert request.url.host == "console.test"
+        assert request.url.path.startswith("/api/v1/sandbox/scheduled_tasks/")
+        task_id = request.url.path.rsplit("/", 1)[-1]
+        task = self.responses.pop(0) if self.responses else {
+            "id": task_id,
+            "enabled": True,
+            "delivery_channel": "C0123456789",
+        }
+        if task is None:
+            return httpx.Response(404, json={"error": {"message": "not found"}})
+        return httpx.Response(200, json={"data": task})
+
+
+@pytest.fixture(autouse=True)
+def console_api(monkeypatch):
+    api = FakeConsoleApi(httpx.AsyncClient)
+    monkeypatch.setenv("CENTAUR_CONSOLE_URL", "http://console.test/")
+    monkeypatch.setattr(console_workflow.httpx, "AsyncClient", api.client)
+    return api
 
 
 class FakeContext:
@@ -122,6 +159,60 @@ def test_handler_runs_one_scoped_agent_turn_and_delivers_its_text():
     assert result["delivery"]["ts"] == "123.1"
 
 
+def test_handler_skips_an_ineligible_task_before_starting_an_agent(console_api):
+    console_api.responses = [None]
+    context = FakeContext()
+
+    result = asyncio.run(
+        console_workflow.handler(
+            {
+                "prompt": "Summarize open incidents",
+                "principal": "console-user-author",
+                "channel": "C0123456789",
+                "scheduled_task_id": "tsk_123",
+            },
+            context,
+        )
+    )
+
+    assert result == {
+        "status": "skipped",
+        "reason": "scheduled_task_not_executable",
+        "scheduled_task_id": "tsk_123",
+    }
+    assert context.agent_calls == []
+    assert context.step_calls == ["agent_result"]
+    assert context.slack_calls == []
+
+
+def test_handler_rechecks_eligibility_before_slack_delivery(console_api):
+    executable = {
+        "id": "tsk_123",
+        "enabled": True,
+        "delivery_channel": "C0123456789",
+    }
+    console_api.responses = [executable, {**executable, "enabled": False}]
+    context = FakeContext()
+
+    result = asyncio.run(
+        console_workflow.handler(
+            {
+                "prompt": "Summarize open incidents",
+                "principal": "console-user-author",
+                "channel": "C0123456789",
+                "scheduled_task_id": "tsk_123",
+            },
+            context,
+        )
+    )
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "scheduled_task_not_executable"
+    assert len(context.agent_calls) == 1
+    assert context.step_calls == ACTION_STEPS
+    assert context.slack_calls == []
+
+
 def test_handler_treats_recurring_language_as_an_instruction_to_execute_now():
     context = FakeContext()
     task = (
@@ -199,8 +290,20 @@ def test_handler_threads_and_truncates_long_channel_results():
     assert result["delivery"]["ts"] == "123.1"
 
 
-def test_handler_posts_long_dm_results_as_replies_to_the_first_message():
+def test_handler_posts_long_dm_results_as_replies_to_the_first_message(console_api):
     response_text = "a" * (console_workflow.SLACK_MESSAGE_CHUNK_MAX_LENGTH * 2 + 25)
+    console_api.responses = [
+        {
+            "id": "tsk_123",
+            "enabled": True,
+            "delivery_channel": "U0123456789",
+        },
+        {
+            "id": "tsk_123",
+            "enabled": True,
+            "delivery_channel": "U0123456789",
+        },
+    ]
     context = FakeContext(
         result_text=response_text,
         slack_response_channel="D0123456789",

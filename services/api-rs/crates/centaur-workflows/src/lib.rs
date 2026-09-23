@@ -281,15 +281,24 @@ impl WorkflowHostSandboxRuntime {
         };
     }
 
-    fn spec_for_workflow(&self, workflow_name: &str) -> Result<SandboxSpec, WorkflowRuntimeError> {
+    fn spec_for_workflow(
+        &self,
+        workflow_name: &str,
+        principal_id: Option<&str>,
+    ) -> Result<SandboxSpec, WorkflowRuntimeError> {
         let mut spec = self.spec.clone();
-        let principal = {
+        let declared_principal = {
             let assignments = self
                 .workflow_principals
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             assignments.principal_for_workflow(workflow_name)?
         };
+        let principal = principal_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .or(declared_principal);
         if let Some(principal) = principal {
             spec.iron_control_principal = Some(principal);
         }
@@ -2928,6 +2937,12 @@ impl Drop for WorkflowSandboxCleanupGuard {
     }
 }
 
+fn workflow_input_principal_id(input: &WorkflowTaskInput) -> Option<&str> {
+    (input.workflow_name == "console_workflow")
+        .then(|| input.input.get("principal_id")?.as_str())
+        .flatten()
+}
+
 async fn run_python_workflow_host(
     input: WorkflowTaskInput,
     ctx: TaskContext,
@@ -3100,7 +3115,8 @@ async fn run_python_workflow_host_in_sandbox(
     sandbox: WorkflowHostSandboxRuntime,
     workflow_clients: WorkflowQueueClients,
 ) -> Result<Value, WorkflowRuntimeError> {
-    let mut spec = sandbox.spec_for_workflow(&input.workflow_name)?;
+    let mut spec =
+        sandbox.spec_for_workflow(&input.workflow_name, workflow_input_principal_id(&input))?;
     spec.env
         .retain(|entry| entry.name != "CENTAUR_JWT_SIGNING_SECRET");
     spec = spec
