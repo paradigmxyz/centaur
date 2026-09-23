@@ -49,6 +49,13 @@ def _repository_visibilities(value: str, repositories: list[str]) -> dict[str, s
     return visibilities
 
 
+def _normalize_git_filter(value: str | None) -> str | None:
+    git_filter = (value or "").strip()
+    if not git_filter or git_filter.lower() in {"0", "false", "none", "off"}:
+        return None
+    return git_filter
+
+
 def _atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp")
@@ -77,6 +84,7 @@ class RepoCacheSync:
         repository_visibilities: dict[str, str],
         sync_interval_seconds: float,
         github_token_file: Path,
+        git_filter: str | None = "blob:none",
     ) -> None:
         self.cache_dir = cache_dir
         self.repositories = repositories
@@ -84,6 +92,7 @@ class RepoCacheSync:
         self.repository_visibilities = repository_visibilities
         self.sync_interval_seconds = sync_interval_seconds
         self.github_token_file = github_token_file
+        self.git_filter = _normalize_git_filter(git_filter)
         self.git_env: dict[str, str] | None = None
         self.ready_file = self.cache_dir / ".repo-cache-ready"
 
@@ -159,7 +168,11 @@ class RepoCacheSync:
             github_token_file=Path(
                 os.environ.get("GITHUB_TOKEN_FILE", "/github-token/token")
             ),
+            git_filter=os.environ.get("REPO_CACHE_GIT_FILTER", "blob:none"),
         )
+
+    def git_filter_args(self) -> list[str]:
+        return ["--filter", self.git_filter] if self.git_filter else []
 
     def _git_env(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -261,6 +274,7 @@ class RepoCacheSync:
                         "-c",
                         "gc.auto=0",
                         "fetch",
+                        *self.git_filter_args(),
                         "--prune",
                         "--tags",
                         "origin",
@@ -319,6 +333,7 @@ class RepoCacheSync:
                     "-c",
                     "gc.auto=0",
                     "fetch",
+                    *self.git_filter_args(),
                     "--prune",
                     "--tags",
                     "origin",
@@ -336,10 +351,23 @@ class RepoCacheSync:
         for stale_tmp in glob.glob(f"{target}.tmp*"):
             _remove_path(Path(stale_tmp))
         _remove_path(target)
-        self._run_git(["clone", "--quiet", repo_url, str(tmp)], f"clone {repo}")
+        self._run_git(
+            ["clone", "--quiet", *self.git_filter_args(), repo_url, str(tmp)],
+            f"clone {repo}",
+        )
         self._git_ok(tmp, "config", "gc.auto", "0")
         self._run_git(
-            ["-C", str(tmp), "-c", "gc.auto=0", "fetch", "--prune", "--tags", "origin"],
+            [
+                "-C",
+                str(tmp),
+                "-c",
+                "gc.auto=0",
+                "fetch",
+                *self.git_filter_args(),
+                "--prune",
+                "--tags",
+                "origin",
+            ],
             f"fetch {repo}",
         )
         self._git_ok(tmp, "remote", "set-head", "origin", "-a")

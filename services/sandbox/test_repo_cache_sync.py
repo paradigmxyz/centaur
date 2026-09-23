@@ -50,6 +50,54 @@ class RepoCacheSyncTest(unittest.TestCase):
             os.environ.clear()
             os.environ.update(old_env)
 
+    def test_git_filter_args_default_to_blobless_partial_clone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sync = repo_cache_sync.RepoCacheSync(
+                cache_dir=root / "cache",
+                repositories=["acme/centaur"],
+                repository_refs={},
+                repository_visibilities={},
+                sync_interval_seconds=30,
+                github_token_file=root / "missing-token",
+            )
+
+            self.assertEqual(sync.git_filter_args(), ["--filter", "blob:none"])
+
+    def test_from_env_allows_custom_repo_cache_git_filter(self) -> None:
+        old_env = os.environ.copy()
+        try:
+            os.environ.update(
+                {
+                    "REPOSITORIES": "acme/centaur",
+                    "REPO_CACHE_GIT_FILTER": "tree:0",
+                }
+            )
+
+            sync = repo_cache_sync.RepoCacheSync.from_env()
+
+            self.assertEqual(sync.git_filter_args(), ["--filter", "tree:0"])
+        finally:
+            os.environ.clear()
+            os.environ.update(old_env)
+
+    def test_from_env_can_disable_repo_cache_git_filter(self) -> None:
+        old_env = os.environ.copy()
+        try:
+            os.environ.update(
+                {
+                    "REPOSITORIES": "acme/centaur",
+                    "REPO_CACHE_GIT_FILTER": "off",
+                }
+            )
+
+            sync = repo_cache_sync.RepoCacheSync.from_env()
+
+            self.assertEqual(sync.git_filter_args(), [])
+        finally:
+            os.environ.clear()
+            os.environ.update(old_env)
+
     def test_write_ready_preserves_readiness_format(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
