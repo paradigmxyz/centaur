@@ -617,6 +617,10 @@ def test_help_explains_channel_and_dm_access_paths() -> None:
     assert "Direct commands end" in result.output
     assert "actual user token" in result.output
     assert "including in Slack DM chat surfaces and MCP" in result.output
+    assert (
+        "inside a Slack DM, upload files with regular `upload`, not `upload-direct`"
+        in " ".join(result.output.split())
+    )
     assert "surface and credential context" in result.output
     assert "search-direct" in result.output
 

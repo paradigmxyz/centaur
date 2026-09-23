@@ -18,8 +18,9 @@ app = typer.Typer(
         "API, and are for Slack channel chat surfaces. Direct commands end in `-direct` "
         "(for example, `thread-direct` and `upload-direct`) and call Slack with an actual user "
         "token. Use direct commands when a user token is available, including in Slack DM chat "
-        "surfaces and MCP. Choose the command flavor that matches the current surface and "
-        "credential context."
+        "surfaces and MCP. Exception: inside a Slack DM, upload files with regular `upload`, not "
+        "`upload-direct`. Choose the command flavor that matches the current surface and credential "
+        "context."
     ),
 )
 
