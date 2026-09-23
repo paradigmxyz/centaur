@@ -1137,6 +1137,15 @@ fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
             source: "centaur_estimate:anthropic:fable-mythos-5:5m-cache-write",
         });
     }
+    if model.contains("opus-5-5") {
+        return Some(TokenPricing {
+            input_per_mtok: 4.0,
+            cache_creation_per_mtok: 5.0,
+            cache_read_per_mtok: 0.2,
+            output_per_mtok: 20.0,
+            source: "centaur_estimate:anthropic:opus-5-5:5m-cache-write",
+        });
+    }
     if model.contains("opus-5-fast") {
         return Some(TokenPricing {
             input_per_mtok: 10.0,
@@ -1955,6 +1964,38 @@ mod tests {
                 (cost.total_cost() - input_cost - output_cost).abs() < 1e-9,
                 "{model}"
             );
+            assert_eq!(cost.source, source);
+        }
+    }
+
+    #[test]
+    fn opus_5_5_cost_is_not_billed_as_opus_5() {
+        let usage = NormalizedTokenUsage {
+            input_tokens: Some(1_000_000),
+            cache_creation_input_tokens: Some(100_000),
+            cache_read_input_tokens: Some(200_000),
+            output_tokens: Some(100_000),
+            ..Default::default()
+        };
+
+        for (model, input_cost, output_cost, source) in [
+            (
+                "claude-opus-5-5",
+                3.34,
+                2.0,
+                "centaur_estimate:anthropic:opus-5-5:5m-cache-write",
+            ),
+            (
+                "claude-opus-5",
+                4.225,
+                2.5,
+                "centaur_estimate:anthropic:opus-4.5-plus:5m-cache-write",
+            ),
+        ] {
+            let cost = estimate_usage_cost(HarnessKind::ClaudeCode, "anthropic", model, &usage)
+                .expect("cost");
+            assert!((cost.input_cost - input_cost).abs() < 1e-9, "{model}");
+            assert!((cost.output_cost - output_cost).abs() < 1e-9, "{model}");
             assert_eq!(cost.source, source);
         }
     }

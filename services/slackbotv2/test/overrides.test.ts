@@ -66,7 +66,7 @@ describe('extractMessageOverrides', () => {
     expect(extractMessageOverrides('--opus fix it')).toEqual({
       cleanedText: 'fix it',
       harnessType: 'claudecode',
-      model: 'claude-opus-5',
+      model: 'claude-opus-5-5',
       reasoning: undefined
     })
     expect(extractMessageOverrides('--sonnet fix it').model).toBe('claude-sonnet-5')
@@ -117,7 +117,7 @@ describe('extractMessageOverrides', () => {
     expect(extractMessageOverrides('--claude --model opus go')).toEqual({
       cleanedText: 'go',
       harnessType: 'claudecode',
-      model: 'claude-opus-5'
+      model: 'claude-opus-5-5'
     })
     expect(extractMessageOverrides('--model Sonnet go').model).toBe('claude-sonnet-5')
     expect(extractMessageOverrides('--model fable go').model).toBe('claude-fable-5')
@@ -158,7 +158,7 @@ describe('extractMessageOverrides', () => {
     expect(extractMessageOverrides('--codex --opus fix it')).toEqual({
       cleanedText: 'fix it',
       harnessType: 'codex',
-      model: 'claude-opus-5',
+      model: 'claude-opus-5-5',
       reasoning: undefined
     })
     expect(extractMessageOverrides('--sonnet --model claude-opus-4-8 fix it').model).toBe(
@@ -310,7 +310,7 @@ describe('normalizeHarnessOverrides', () => {
       normalizeHarnessOverrides({ harness: 'claude', model: 'opus', reasoning: 'hi' })
     ).toEqual({
       harnessType: 'claudecode',
-      model: 'claude-opus-5',
+      model: 'claude-opus-5-5',
       provider: undefined,
       reasoning: 'high'
     })
@@ -339,7 +339,7 @@ describe('normalizeHarnessOverrides', () => {
     // the explicit `harness` field / thread / deployment default.
     expect(normalizeHarnessOverrides({ model: 'opus' })).toEqual({
       harnessType: undefined,
-      model: 'claude-opus-5',
+      model: 'claude-opus-5-5',
       provider: undefined,
       reasoning: undefined
     })
@@ -528,7 +528,7 @@ describe('messageOverridesForText strategy invocation', () => {
       cleanedText: 'fix it',
       overrides: {
         harnessType: 'claudecode',
-        model: 'claude-opus-5',
+        model: 'claude-opus-5-5',
         provider: undefined,
         reasoning: undefined
       }

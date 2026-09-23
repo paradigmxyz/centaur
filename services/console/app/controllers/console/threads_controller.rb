@@ -155,6 +155,8 @@ class Console::ThreadsController < ApplicationController
     ComposerAgent.new(value: "gpt-5.5", label: "GPT-5.5",
                       harness: "codex", model: "gpt-5.5",
                       efforts: CODEX_EFFORTS),
+    ComposerAgent.new(value: "claude-opus-5-5", label: "Claude Opus 5.5",
+                      harness: "claudecode", model: "claude-opus-5-5", efforts: []),
     ComposerAgent.new(value: "claude-opus-5", label: "Claude Opus 5",
                       harness: "claudecode", model: "claude-opus-5",
                       efforts: [ %w[fast Fast] ]),
