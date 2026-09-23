@@ -113,8 +113,12 @@ def _filter_excluded_channels(
 
 
 def _channel_is_non_member(channel: dict[str, Any]) -> bool:
-    """Return whether Slack discovery says the ETL actor cannot read history."""
-    return channel.get("is_member") is False
+    """Return whether Slack discovery says the ETL actor cannot read history.
+
+    The ETL token is a user token, which reads public channel history without
+    joining, so only private channels depend on membership.
+    """
+    return bool(channel.get("is_private")) and channel.get("is_member") is False
 
 
 def _filter_non_member_channels(
