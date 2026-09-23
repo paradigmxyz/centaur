@@ -38,6 +38,7 @@ const options: DiscordbotOptions = {
   applicationId,
   botToken,
   publicKey,
+  defaultHarnessType: optionalEnv("DISCORDBOT_DEFAULT_HARNESS"),
   discordApiUrl: optionalEnv("DISCORD_API_URL"),
   guildAllowlist: optionalList("DISCORDBOT_GUILD_ALLOWLIST"),
   idleTimeoutMs: optionalNumberEnv("SESSION_IDLE_TIMEOUT_MS"),

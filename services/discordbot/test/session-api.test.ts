@@ -120,14 +120,17 @@ describe("isDiscordPermissionError", () => {
   });
 });
 
-describe("forwardToSessionApi principal naming", () => {
-  function recorderApi(): {
+describe("forwardToSessionApi sessions", () => {
+  function recorderApi(onCreate?: (body: JsonRecord) => Response): {
     fetchFn: DiscordbotFetch;
     creates: Array<Record<string, unknown>>;
+    calls: string[];
   } {
     const creates: Array<Record<string, unknown>> = [];
+    const calls: string[] = [];
     const fetchFn: DiscordbotFetch = async (input, init) => {
       const url = String(input);
+      calls.push(url);
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
       if (url.endsWith("/execute")) {
         return Response.json({
@@ -139,9 +142,9 @@ describe("forwardToSessionApi principal naming", () => {
       }
       if (url.endsWith("/messages")) return Response.json({ ok: true });
       creates.push(body);
-      return Response.json({ ok: true });
+      return onCreate?.(body) ?? Response.json({ ok: true });
     };
-    return { fetchFn, creates };
+    return { fetchFn, creates, calls };
   }
 
   function options(fetchFn: DiscordbotFetch): DiscordbotOptions {
@@ -190,6 +193,88 @@ describe("forwardToSessionApi principal naming", () => {
       "discord_conversation_name" in
         (creates[0] as { metadata: object }).metadata,
     ).toBe(false);
+  });
+
+  it("creates and executes a thread using the configured runtime", async () => {
+    const { fetchFn, creates, calls } = recorderApi();
+    await forwardToSessionApi(
+      { ...options(fetchFn), defaultHarnessType: "claudecode" },
+      forwardInput({ conversationName: "general" }),
+    );
+    expect(creates).toEqual([
+      {
+        harness_type: "claudecode",
+        metadata: {
+          source: "discordbot",
+          platform: "discord",
+          thread_id: "discord:G1:C1:T1",
+          discord_conversation_name: "general",
+        },
+      },
+    ]);
+    expect(calls.map((url) => url.split("/").at(-1))).toEqual([
+      "discord%3AG1%3AC1%3AT1",
+      "messages",
+      "execute",
+    ]);
+  });
+
+  it.each([
+    JSON.stringify({ existing_harness: "codex" }),
+    "session already exists with harness_type codex",
+  ])("preserves an existing thread after the default changes (%s)", async (conflict) => {
+    let pinnedHarness: unknown;
+    const { fetchFn, creates, calls } = recorderApi((body) => {
+      if (pinnedHarness && body.harness_type !== pinnedHarness) {
+        return new Response(conflict, { status: 409 });
+      }
+      pinnedHarness ??= body.harness_type;
+      return Response.json({ ok: true });
+    });
+    await forwardToSessionApi(options(fetchFn), forwardInput());
+    const followup = apiMessage({ id: "m2", text: "continue" });
+    await forwardToSessionApi(
+      { ...options(fetchFn), defaultHarnessType: "claudecode" },
+      forwardInput({ messages: [followup], executeMessage: followup }),
+    );
+    expect(pinnedHarness).toBe("codex");
+    expect(creates.map((body) => body.harness_type)).toEqual([
+      "codex",
+      "claudecode",
+      "codex",
+    ]);
+    expect(creates.every((body) => !body.on_harness_conflict)).toBe(true);
+    expect(calls.filter((url) => url.endsWith("/messages"))).toHaveLength(2);
+    expect(calls.filter((url) => url.endsWith("/execute"))).toHaveLength(2);
+  });
+
+  it.each([
+    [409, JSON.stringify({ error: "another conflict" })],
+    [403, JSON.stringify({ existing_harness: "codex" })],
+  ])("does not bypass unrelated API errors (%s)", async (status, body) => {
+    const { fetchFn, calls } = recorderApi(
+      () => new Response(body, { status }),
+    );
+    await expect(
+      forwardToSessionApi(
+        { ...options(fetchFn), defaultHarnessType: "claudecode" },
+        forwardInput(),
+      ),
+    ).rejects.toMatchObject({ name: "SessionApiError", status, body });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("stops after one harness conflict retry without appending or executing", async () => {
+    const { fetchFn, calls } = recorderApi((body) =>
+      Response.json(
+        { existing_harness: body.harness_type === "codex" ? "amp" : "codex" },
+        { status: 409 },
+      ),
+    );
+    await expect(
+      forwardToSessionApi(options(fetchFn), forwardInput()),
+    ).rejects.toMatchObject({ name: "SessionApiError", status: 409 });
+    expect(calls).toHaveLength(2);
   });
 });
 
