@@ -47,11 +47,9 @@ ironProxy:
 # each sandbox's /app/tools, so adding a tool is a push to the repo, not an image
 # rebuild. Prefer overlays.sources for new deployments; toolServer.* remains as
 # a compatibility input and maps to the first ordered overlay source when
-# overlays.sources is empty. `port` is legacy (the deprecated tool-server
-# sidecar) and unused here.
+# overlays.sources is empty.
 toolServer:
   enabled: true
-  port: 8001
   # owner/name of the GitHub repo carrying the tools tree. REQUIRED when enabled;
   # override for forks. Private repos additionally need githubToken below.
   repo: paradigmxyz/centaur
@@ -322,7 +320,6 @@ codex:
   customProviders: {}
 
 sandbox:
-  controller: pod
   image:
     repository: centaur-agent
     tag: latest

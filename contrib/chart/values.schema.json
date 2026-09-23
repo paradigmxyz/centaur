@@ -174,7 +174,6 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
-        "port": { "type": "integer" },
         "repo": { "type": "string" },
         "ref": { "type": "string" },
         "visibility": { "type": "string" },

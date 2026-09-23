@@ -1,5 +1,4 @@
 secretManager:
-  backend: onepassword
   envPrefix: ""
   existingSecretName: centaur-infra-env
 
@@ -39,14 +38,7 @@ console:
 ironProxy:
   image:
     pullPolicy: IfNotPresent
-  manager:
-    secretSource: onepassword
 
 sandbox:
   image:
     pullPolicy: IfNotPresent
-
-# Run the tool-server sidecar by default in dev so local clusters mirror
-# production sandbox topology.
-toolServer:
-  enabled: true
