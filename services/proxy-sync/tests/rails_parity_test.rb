@@ -26,11 +26,11 @@ class RailsParityTest < ActionDispatch::IntegrationTest
       token = "iprx_#{'a' * 64}"
       body = compare(token)
       @inline.source.update!(secret: "rotated-parity-value")
-      changed = compare(token)
+      changed = compare(token, { config_hash: body.fetch("config_hash") })
       refute_equal body.fetch("config_hash"), changed.fetch("config_hash")
 
       bind_requester
-      union = compare(token)
+      union = compare(token, { config_hash: changed.fetch("config_hash") })
       assert_equal changed.fetch("secrets").length + 1, union.fetch("secrets").length
       compare(token, { config_hash: union.fetch("config_hash") })
     end

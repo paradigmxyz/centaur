@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 
-use crate::active_record_encryption::ActiveRecordEncryption;
+use crate::{active_record_encryption::ActiveRecordEncryption, cache::SyncCache};
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -14,6 +14,7 @@ pub(crate) struct AppState {
     pub(crate) jwt_secret: Option<String>,
     pub(crate) api_hosts: Vec<String>,
     pub(crate) console_host: Option<String>,
+    pub(crate) sync_cache: Arc<SyncCache>,
 }
 
 #[derive(Debug)]
@@ -25,6 +26,7 @@ pub(crate) struct ProxyRecord {
     pub(crate) requester_principal_id: Option<i64>,
     pub(crate) principal_assigned_at: Option<DateTime<Utc>>,
     pub(crate) requester_principal_assigned_at: Option<DateTime<Utc>>,
+    pub(crate) principal_cache_version: Option<i64>,
     pub(crate) principal: Option<Value>,
     pub(crate) console_user_email: Option<String>,
     pub(crate) console_user_id: Option<i64>,

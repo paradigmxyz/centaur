@@ -1,4 +1,5 @@
 mod active_record_encryption;
+mod cache;
 mod config;
 mod conflicts;
 mod database;
@@ -18,6 +19,8 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use cache::SyncCache;
+use chrono::Utc;
 use config::{build_config, config_hash};
 use database::load_proxy;
 use identifiers::oid;
@@ -25,6 +28,7 @@ use models::{AppState, Config};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use tokens::token_windows;
 use tracing::{error, info};
 use url::Url;
 
@@ -124,6 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .filter(|value| !value.trim().is_empty()),
         api_hosts,
         console_host,
+        sync_cache: Arc::new(SyncCache::default()),
     };
     let app = Router::new()
         .route("/healthz", get(|| async { StatusCode::OK }))
@@ -170,8 +175,22 @@ async fn sync(
     let proxy = load_proxy(&state.pool, token)
         .await?
         .ok_or_else(ApiError::unauthorized)?;
+    let now = Utc::now().timestamp();
+    let token_windows = token_windows(&state, &proxy, now);
+    if let Some(client_hash) = request
+        .config_hash
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        && let Some(config_hash) =
+            state
+                .sync_cache
+                .matching_hash(&proxy, token_windows, client_hash)
+    {
+        return Ok(Json(json!({ "config_hash": config_hash })));
+    }
+
     let config = if let Some(principal_id) = proxy.principal_id {
-        build_config(&state, &proxy, principal_id).await?
+        build_config(&state, &proxy, principal_id, now).await?
     } else {
         Config::default()
     };
@@ -181,6 +200,9 @@ async fn sync(
         "postgres": config.postgres,
     });
     let config_hash = config_hash(&proxy, &config_value)?;
+    state
+        .sync_cache
+        .store(&proxy, token_windows, config_hash.clone());
     if request
         .config_hash
         .as_deref()

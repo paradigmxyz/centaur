@@ -1,6 +1,5 @@
 use std::env;
 
-use chrono::Utc;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::Serialize;
 use serde_json::json;
@@ -49,10 +48,29 @@ struct SandboxJwtClaims {
     principal_id: String,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct TokenWindows {
+    pub(crate) api: Option<i64>,
+    pub(crate) sandbox: Option<i64>,
+}
+
+pub(crate) fn token_windows(state: &AppState, proxy: &ProxyRecord, now: i64) -> TokenWindows {
+    let api = proxy
+        .principal_id
+        .filter(|_| state.jwt_secret.is_some() && !state.api_hosts.is_empty())
+        .map(|principal_id| window_start(&oid("prn", principal_id), now, 900));
+    let sandbox = proxy
+        .principal_id
+        .filter(|_| state.jwt_secret.is_some() && state.console_host.is_some())
+        .map(|_| window_start(&oid("prx", proxy.id), now, 86_400));
+    TokenWindows { api, sandbox }
+}
+
 pub(crate) async fn append_api_jwt(
     state: &AppState,
     proxy: &ProxyRecord,
     config: &mut Config,
+    now: i64,
 ) -> Result<(), ApiError> {
     let (Some(secret), Some(principal_id)) = (&state.jwt_secret, proxy.principal_id) else {
         return Ok(());
@@ -63,7 +81,6 @@ pub(crate) async fn append_api_jwt(
     let (upload_channels, download_channels, history_channels) =
         permission_channels(&state.pool, principal_id).await?;
     let principal_oid = oid("prn", principal_id);
-    let now = Utc::now().timestamp();
     let iat = window_start(&principal_oid, now, 900);
     let claims = ApiJwtClaims {
         iss: env_default("CENTAUR_API_JWT_ISSUER", "centaur-console"),
@@ -104,6 +121,7 @@ pub(crate) fn append_sandbox_jwt(
     state: &AppState,
     proxy: &ProxyRecord,
     config: &mut Config,
+    now: i64,
 ) -> Result<(), ApiError> {
     let (Some(secret), Some(host), Some(principal_id)) =
         (&state.jwt_secret, &state.console_host, proxy.principal_id)
@@ -111,7 +129,7 @@ pub(crate) fn append_sandbox_jwt(
         return Ok(());
     };
     let proxy_oid = oid("prx", proxy.id);
-    let iat = window_start(&proxy_oid, Utc::now().timestamp(), 86_400);
+    let iat = window_start(&proxy_oid, now, 86_400);
     let claims = SandboxJwtClaims {
         iss: env_default("CENTAUR_SANDBOX_ENTITLEMENTS_JWT_ISSUER", "centaur-console"),
         aud: env_default(

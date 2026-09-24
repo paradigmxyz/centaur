@@ -21,6 +21,7 @@ pub(crate) async fn build_config(
     state: &AppState,
     proxy: &ProxyRecord,
     principal_id: i64,
+    now: i64,
 ) -> Result<Config, ApiError> {
     let loaded = load_credentials(&state.pool, principal_id, proxy.requester_principal_id).await?;
     let mut credentials = Vec::with_capacity(loaded.len());
@@ -56,8 +57,8 @@ pub(crate) async fn build_config(
             config.secrets.push(Value::Object(entry));
         }
     }
-    append_api_jwt(state, proxy, &mut config).await?;
-    append_sandbox_jwt(state, proxy, &mut config)?;
+    append_api_jwt(state, proxy, &mut config, now).await?;
+    append_sandbox_jwt(state, proxy, &mut config, now)?;
 
     for kind in [
         CredentialKind::GcpAuth,
@@ -463,6 +464,7 @@ mod tests {
             requester_principal_id: None,
             principal_assigned_at: None,
             requester_principal_assigned_at: None,
+            principal_cache_version: Some(0),
             principal: Some(json!({"labels": {"tenant": 123, "enabled": false, "empty": null}})),
             console_user_email: None,
             console_user_id: None,
