@@ -531,6 +531,7 @@ impl IronControlArgs {
         let control_url = non_empty(self.proxy_sync_url.as_deref()).unwrap_or(admin_url);
         Ok(IronControlSettings {
             client,
+            console_url: admin_url.to_owned(),
             control_url: control_url.to_owned(),
         })
     }
@@ -2736,6 +2737,7 @@ mod tests {
         .unwrap();
 
         let settings = args.sandbox.iron_control.settings().unwrap();
+        assert_eq!(settings.console_url, "http://console.local:3000");
         assert_eq!(settings.control_url, "http://proxy-sync.local:8080");
         let proxy = args.sandbox.iron_proxy.to_config().unwrap();
         assert_eq!(

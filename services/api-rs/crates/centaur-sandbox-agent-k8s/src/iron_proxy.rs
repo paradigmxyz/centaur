@@ -331,7 +331,7 @@ impl AgentSandboxBackend {
             proxy_host: iron_proxy_service_name(id),
             proxy_pod_name: new_iron_proxy_pod_name(id),
             proxy_port: PROXY_TUNNEL_PORT,
-            console_url: self.config.iron_control.control_url.clone(),
+            console_url: self.config.iron_control.console_url.clone(),
             principal_id,
             requester_principal_id,
             labels,

@@ -89,6 +89,11 @@ spec:
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
+{{- if .Values.proxySync.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "proxy-sync") | nindent 14 }}
+{{- end }}
         # console Solid Queue worker (bin/jobs) reaches the app + queue DBs.
         - podSelector:
             matchLabels:
@@ -230,6 +235,28 @@ spec:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
 ---
+{{- if .Values.proxySync.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.fullname" . }}-proxy-console
+  labels:
+{{ include "centaur.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      centaur.ai/iron-proxy: "true"
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ $console.service.httpPort }}
+---
+{{- end }}
 {{- if .Values.networkPolicy.observabilityEgress.enabled }}
 {{- if not .Values.networkPolicy.observabilityEgress.destinations }}
 {{- fail "networkPolicy.observabilityEgress.destinations must contain at least one destination when networkPolicy.observabilityEgress.enabled is true" }}

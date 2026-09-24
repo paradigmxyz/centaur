@@ -386,6 +386,7 @@ async fn agent_k8s_implementation() -> SandboxImplementation {
         namespace,
         IronControlSettings {
             client: IronControlClient::new("http://127.0.0.1:1", "test-key"),
+            console_url: "http://iron-control".to_owned(),
             control_url: "http://iron-control".to_owned(),
         },
     );
