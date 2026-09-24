@@ -4,43 +4,34 @@ use std::{
     time::{Duration, Instant},
 };
 
+use sha2::{Digest, Sha256};
+
 use crate::{models::ProxyRecord, tokens::TokenWindows};
 
 const ENTRY_TTL: Duration = Duration::from_secs(10 * 60);
 
-#[derive(Clone, PartialEq)]
-struct Generation {
-    proxy_name: String,
-    proxy_labels: serde_json::Value,
-    principal_id: Option<i64>,
-    principal_assigned_at: Option<chrono::DateTime<chrono::Utc>>,
-    principal_cache_version: Option<i64>,
-    principal: Option<serde_json::Value>,
-    console_user_email: Option<String>,
-    console_user_id: Option<i64>,
-    slack_history_channel_ids: serde_json::Value,
-    token_windows: TokenWindows,
-}
-
-impl Generation {
-    fn new(proxy: &ProxyRecord, token_windows: TokenWindows) -> Self {
-        Self {
-            proxy_name: proxy.name.clone(),
-            proxy_labels: proxy.labels.clone(),
-            principal_id: proxy.principal_id,
-            principal_assigned_at: proxy.principal_assigned_at,
-            principal_cache_version: proxy.principal_cache_version,
-            principal: proxy.principal.clone(),
-            console_user_email: proxy.console_user_email.clone(),
-            console_user_id: proxy.console_user_id,
-            slack_history_channel_ids: proxy.slack_history_channel_ids.clone(),
-            token_windows,
-        }
-    }
+fn generation_fingerprint(proxy: &ProxyRecord, token_windows: TokenWindows) -> Option<[u8; 32]> {
+    // Structured serialization preserves field boundaries. serde_json's default
+    // map representation sorts object keys independently of insertion order.
+    let bytes = serde_json::to_vec(&(
+        &proxy.name,
+        &proxy.labels,
+        proxy.principal_id,
+        proxy.principal_assigned_at,
+        proxy.principal_cache_version,
+        &proxy.principal,
+        &proxy.console_user_email,
+        proxy.console_user_id,
+        &proxy.slack_history_channel_ids,
+        token_windows.api,
+        token_windows.sandbox,
+    ))
+    .ok()?;
+    Some(Sha256::digest(bytes).into())
 }
 
 struct Entry {
-    generation: Generation,
+    generation: [u8; 32],
     config_hash: String,
     created_at: Instant,
 }
@@ -62,7 +53,7 @@ impl SyncCache {
         if proxy.requester_principal_id.is_some() {
             return None;
         }
-        let generation = Generation::new(proxy, token_windows);
+        let generation = generation_fingerprint(proxy, token_windows)?;
         let entries = self.entries.read().unwrap_or_else(|lock| lock.into_inner());
         let entry = entries.get(&proxy.id)?;
         (entry.created_at.elapsed() < ENTRY_TTL
@@ -80,6 +71,9 @@ impl SyncCache {
         if proxy.requester_principal_id.is_some() {
             return;
         }
+        let Some(generation) = generation_fingerprint(proxy, token_windows) else {
+            return;
+        };
         let mut entries = self
             .entries
             .write()
@@ -88,7 +82,7 @@ impl SyncCache {
         entries.insert(
             proxy.id,
             Entry {
-                generation: Generation::new(proxy, token_windows),
+                generation,
                 config_hash,
                 created_at: Instant::now(),
             },
@@ -148,6 +142,38 @@ mod tests {
     }
 
     #[test]
+    fn proxy_specific_changes_invalidate_the_hash() {
+        let cache = SyncCache::default();
+        cache.store(&proxy(), windows(), "sha256:current".to_owned());
+
+        let changes: &[fn(&mut ProxyRecord)] = &[
+            |p| p.name.push_str("-renamed"),
+            |p| p.labels["team"] = json!("other"),
+            |p| p.principal_id = Some(22),
+            |p| p.principal_assigned_at = None,
+            |p| p.principal.as_mut().unwrap()["labels"] = json!({"tenant": "other"}),
+            |p| p.console_user_email = Some("other@example.com".to_owned()),
+            |p| p.console_user_id = Some(23),
+            |p| p.slack_history_channel_ids = json!([]),
+        ];
+        for change in changes {
+            let mut changed = proxy();
+            change(&mut changed);
+            assert_eq!(
+                cache.matching_hash(&changed, windows(), "sha256:current"),
+                None
+            );
+        }
+
+        let mut reordered = proxy();
+        reordered.principal = Some(json!({"labels": {}, "id": 11}));
+        assert_eq!(
+            cache.matching_hash(&reordered, windows(), "sha256:current"),
+            Some("sha256:current".to_owned())
+        );
+    }
+
+    #[test]
     fn requester_unions_bypass_the_cache() {
         let cache = SyncCache::default();
         let mut proxy = proxy();
@@ -169,6 +195,14 @@ mod tests {
 
         let next_window = TokenWindows {
             api: windows.api.map(|window| window + 900),
+            ..windows
+        };
+        assert_eq!(
+            cache.matching_hash(&proxy, next_window, "sha256:current"),
+            None
+        );
+        let next_window = TokenWindows {
+            sandbox: windows.sandbox.map(|window| window + 86_400),
             ..windows
         };
         assert_eq!(
