@@ -31,6 +31,7 @@ class SecretSource < ApplicationRecord
   belongs_to :oauth_token_secret, optional: true
   belongs_to :pg_dsn_secret, optional: true
   belongs_to :hmac_secret, optional: true
+  belongs_to :broker_credential, optional: true
 
   # Only set for oauth_token_secret- and hmac_secret-owned sources: whether
   # `role` names a credential field (client_id, secret, ...) or a token-endpoint
@@ -40,6 +41,7 @@ class SecretSource < ApplicationRecord
   encrypts :secret
 
   attr_readonly :source_type
+  before_validation :resolve_broker_credential_reference
 
   # Maps this source to the iron-proxy `secrets` transform `source` block,
   # discriminated by `type`. For control_plane sources the decrypted value is
@@ -103,20 +105,21 @@ class SecretSource < ApplicationRecord
   private
 
   # The BrokerCredential a token_broker source references. credential_id is either
-  # an opaque id (bcr_...) or a globally unique foreign_id. Returns nil when the source is not a token_broker, the
-  # reference is incomplete, or nothing matches. Memoized so deliverable?,
-  # to_proxy_source, and validation share one lookup.
+  # an opaque id (bcr_...) or a globally unique foreign_id. Returns nil when the
+  # source is not a token_broker, the reference is incomplete, or nothing matches.
   def brokered_credential
-    return @brokered_credential if defined?(@brokered_credential)
-    @brokered_credential = resolve_brokered_credential
+    resolve_broker_credential_reference if broker_credential_id.nil? || will_save_change_to_config?
+    broker_credential
   end
 
-  def resolve_brokered_credential
-    return nil unless source_type == "token_broker" && config.is_a?(Hash)
-    ref = config["credential_id"]
-    return nil if ref.blank?
+  def resolve_broker_credential_reference
+    unless source_type == "token_broker" && config.is_a?(Hash)
+      self.broker_credential = nil
+      return
+    end
 
-    if BrokerCredential.decode_oid(ref)
+    ref = config["credential_id"]
+    self.broker_credential = if BrokerCredential.decode_oid(ref)
       BrokerCredential.find_by_oid(ref)
     else
       BrokerCredential.find_by(foreign_id: ref)

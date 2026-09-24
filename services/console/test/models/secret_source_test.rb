@@ -120,17 +120,19 @@ class SecretSourceTest < ActiveSupport::TestCase
     assert_equal s, SecretSource.find_by_oid(s.oid)
   end
 
-  test "token_broker source is valid referencing a credential by oid" do
+  test "token_broker source links a credential referenced by oid" do
     cred = make_broker_credential(access_token: nil)
     s = new_source(source_type: "token_broker", config: { "credential_id" => cred.oid })
     assert s.valid?, s.errors.full_messages.inspect
+    assert_equal cred, s.broker_credential
   end
 
-  test "token_broker source is valid referencing a credential by foreign_id" do
+  test "token_broker source links a credential referenced by foreign_id" do
     cred = make_broker_credential(access_token: nil)
     s = new_source(source_type: "token_broker",
                    config: { "credential_id" => cred.foreign_id })
     assert s.valid?, s.errors.full_messages.inspect
+    assert_equal cred, s.broker_credential
   end
 
   test "token_broker source rejects a reference that does not resolve" do
