@@ -61,7 +61,7 @@ export type GithubbotAppendMessagesRequest = {
 };
 
 export type GithubbotCreateSessionRequest = {
-  harness_type: string;
+  harness_type?: string;
   metadata: JsonObject;
   /** 'restart': switch the thread to harness_type if it's pinned to another harness. */
   on_harness_conflict?: "reject" | "restart";
@@ -101,11 +101,6 @@ export type GithubbotOptions = {
    * backends.
    */
   connectStateOnStart?: boolean;
-  /**
-   * Harness for new threads when no --claude/--amp/--codex flag is given
-   * (HarnessType wire value: codex | amp | claudecode). Defaults to codex.
-   */
-  defaultHarnessType?: string;
   fetch?: GithubbotFetch;
   /** Override the GitHub REST API base URL (GitHub Enterprise / emulation). */
   githubApiUrl?: string;

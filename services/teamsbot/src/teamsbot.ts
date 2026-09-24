@@ -64,7 +64,6 @@ export class TeamsbotService {
     this.sessionClient = sessionClient ?? new CentaurSessionClient({
       apiKey: config.centaur.apiKey,
       apiUrl: config.centaur.apiUrl,
-      defaultHarnessType: config.teams.defaultHarnessType,
       idleTimeoutMs: config.teams.idleTimeoutMs,
       logger: this.logger.child('session-api'),
       maxDurationMs: config.teams.maxDurationMs,

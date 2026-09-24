@@ -74,50 +74,19 @@ describe('session API serialization', () => {
     expect(createBody.metadata).not.toHaveProperty('tenant_id');
   });
 
-  it('retries session creation with the existing harness after an implicit default conflict', async () => {
-    const createBodies: any[] = [];
+  it('defers implicit harness selection to api-rs', async () => {
+    let createBody: any;
     const client = new CentaurSessionClient({
       apiUrl: 'http://mock-centaur.local',
-      defaultHarnessType: 'claudecode',
       fetch: async (_input, init) => {
-        createBodies.push(JSON.parse(String(init?.body)));
-        if (createBodies.length === 1) {
-          return Response.json({
-            code: 'harness_conflict',
-            existing_harness: 'codex',
-            ok: false,
-            requested_harness: 'claudecode',
-          }, { status: 409 });
-        }
+        createBody = JSON.parse(String(init?.body));
         return Response.json({ ok: true });
       },
     });
 
     await client.createSession('thread-1', messageFixture());
 
-    expect(createBodies.map((body) => body.harness_type)).toEqual(['claudecode', 'codex']);
-  });
-
-  it('recovers the existing harness from a conflict error message', async () => {
-    const createBodies: any[] = [];
-    const client = new CentaurSessionClient({
-      apiUrl: 'http://mock-centaur.local',
-      defaultHarnessType: 'codex',
-      fetch: async (_input, init) => {
-        createBodies.push(JSON.parse(String(init?.body)));
-        if (createBodies.length === 1) {
-          return Response.json({
-            error: 'session thread-1 already exists with harness_type amp, requested codex',
-            ok: false,
-          }, { status: 409 });
-        }
-        return Response.json({ ok: true });
-      },
-    });
-
-    await client.createSession('thread-1', messageFixture());
-
-    expect(createBodies.map((body) => body.harness_type)).toEqual(['codex', 'amp']);
+    expect(createBody).not.toHaveProperty('harness_type');
   });
 
   it('sends downloaded Teams attachments with the harness mimeType field', () => {

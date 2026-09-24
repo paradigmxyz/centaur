@@ -617,11 +617,11 @@ describe('Slack attachment serialization', () => {
 })
 
 describe('forwardToSessionApi overrides', () => {
-  test('creates session with default codex harness', async () => {
+  test('defers implicit harness selection to api-rs', async () => {
     const { fetchFn, requests } = fakeApi()
     await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
     const create = requests.find(request => request.url.endsWith('.000100'))
-    expect((create?.body as { harness_type?: string }).harness_type).toBe('codex')
+    expect('harness_type' in (create?.body as object)).toBe(false)
   })
 
   test('creates session with parsed harness override', async () => {
@@ -774,7 +774,7 @@ describe('forwardToSessionApi overrides', () => {
     expect(requests.some(request => request.url.endsWith('/execute'))).toBe(true)
   })
 
-  test('recovers existing harness from the error message when fields are absent', async () => {
+  test('does not guess a harness when an implicit create unexpectedly conflicts', async () => {
     const { fetchFn, requests } = fakeApi({
       createSession: [
         {
@@ -784,15 +784,14 @@ describe('forwardToSessionApi overrides', () => {
             ok: false
           },
           status: 409
-        },
-        { status: 200 }
+        }
       ]
     })
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
+    await expect(
+      forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
+    ).rejects.toThrow('create session failed: 409')
     const creates = requests.filter(request => request.url.endsWith('.000100'))
-    expect(creates.map(request => (request.body as { harness_type: string }).harness_type)).toEqual(
-      ['codex', 'amp']
-    )
+    expect(creates).toHaveLength(1)
   })
 
   test('surfaces non-conflict create failures', async () => {

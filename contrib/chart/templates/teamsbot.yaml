@@ -34,8 +34,6 @@ spec:
               value: "3100"
             - name: CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
-            - name: TEAMS_DEFAULT_HARNESS_TYPE
-              value: {{ .Values.sandbox.harnessEngine | quote }}
             - name: TEAMS_BOT_APP_ID
               valueFrom:
                 secretKeyRef:

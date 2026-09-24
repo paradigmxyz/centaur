@@ -72,7 +72,7 @@ export type SlackbotV2AppendMessagesRequest = {
 }
 
 export type SlackbotV2CreateSessionRequest = {
-  harness_type: string
+  harness_type?: string
   metadata: JsonObject
   /** 'restart': switch the thread to harness_type if it's pinned to another harness. */
   on_harness_conflict?: 'reject' | 'restart'
@@ -162,12 +162,8 @@ export type SlackbotV2Options = {
   channelDefaults?: ChannelDefaults
   /** Percentage of otherwise-default Codex threads assigned to Nanocodex. */
   codexNanocodexRolloutPercent?: number
-  /**
-   * Harness for new threads when no --claude/--amp/--codex/--nanocodex/--hermes
-   * flag is given (HarnessType wire value: codex | amp | claudecode |
-   * nanocodex | hermes). Defaults to codex.
-   */
-  defaultHarnessType?: string
+  /** Deployment-wide harness used to render defaults before api-rs resolves the session. */
+  deploymentDefaultHarnessType?: string
   fetch?: SlackbotV2Fetch
   /**
    * Deployment-configured default model per harness wire value (claudecode |

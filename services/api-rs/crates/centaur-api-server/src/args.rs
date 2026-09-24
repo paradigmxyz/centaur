@@ -63,6 +63,13 @@ pub(crate) struct Args {
     pub(crate) server: ServerArgs,
     #[command(flatten)]
     sandbox: SandboxArgs,
+    /// Harness assigned to new sessions that do not explicitly request one.
+    #[arg(
+        long = "centaur-default-harness",
+        env = "CENTAUR_DEFAULT_HARNESS",
+        default_value = "codex"
+    )]
+    session_default_harness: HarnessType,
     #[command(flatten)]
     session_event_retention: SessionEventRetentionArgs,
     /// Whether session creation may automatically provision a missing conversation principal.
@@ -78,6 +85,10 @@ pub(crate) struct Args {
 }
 
 impl Args {
+    pub(crate) fn default_harness(&self) -> HarnessType {
+        self.session_default_harness.clone()
+    }
+
     pub(crate) async fn sandbox_runtime(&self) -> Result<SandboxRuntime, ServerError> {
         self.sandbox.runtime().await
     }
@@ -2330,6 +2341,23 @@ mod tests {
                 what: "unsupported transform".to_owned(),
             })
         ));
+    }
+
+    #[test]
+    fn default_harness_is_configurable_independently_of_the_warm_pool() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--centaur-default-harness",
+            "claudecode",
+            "--session-sandbox-harness",
+            "amp",
+        ])
+        .unwrap();
+
+        assert_eq!(args.default_harness(), HarnessType::ClaudeCode);
+        assert_eq!(args.sandbox.default_harness, HarnessType::Amp);
     }
 
     #[test]

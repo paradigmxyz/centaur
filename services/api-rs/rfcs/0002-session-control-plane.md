@@ -147,7 +147,8 @@ POST /api/session/{thread_key}
 
 Creates a session for `thread_key` or returns the existing session. The
 `thread_key` path segment must be URL-encoded by clients when it contains
-reserved characters.
+reserved characters. `harness_type` is optional: when omitted, a new session
+uses the deployment default and an existing session keeps its pinned harness.
 
 Example request:
 
@@ -178,8 +179,10 @@ Idempotency rules:
 
 - `thread_key` is unique.
 - Repeating the same request returns the existing session.
-- If the existing session has a different `harness_type`, the API should reject
-  the request with `409 Conflict` rather than silently changing the session.
+- If `harness_type` is omitted, the deployment default applies only when the
+  session is first created; later calls return the session's pinned harness.
+- If an explicit `harness_type` differs from the existing session, the API
+  rejects the request with `409 Conflict` rather than silently changing it.
 
 ### Append Messages
 
@@ -383,7 +386,9 @@ A migration can be incremental:
 - Unit test idempotent session creation by `thread_key`.
 - Unit test `thread_key` as the canonical public address for messages,
   execution, and events.
-- Unit test `409 Conflict` on incompatible `harness_type`.
+- Unit test deployment-default selection when `harness_type` is omitted and
+  preservation of an existing session's pinned harness.
+- Unit test `409 Conflict` on an incompatible explicit `harness_type`.
 - Unit test message append ordering.
 - Unit test per-session execution serialization.
 - Unit test sandbox replacement updates only the current `sandbox_id`.

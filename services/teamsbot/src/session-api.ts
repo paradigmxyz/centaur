@@ -29,7 +29,6 @@ const STAGED_ATTACHMENT_CHUNK_CHARS = 700 * 1024;
 export type CentaurSessionClientOptions = {
   apiKey?: string;
   apiUrl: string;
-  defaultHarnessType?: string;
   fetch?: FetchFn;
   idleTimeoutMs?: number;
   maxDurationMs?: number;
@@ -42,30 +41,12 @@ export class CentaurSessionClient {
   constructor(private readonly options: CentaurSessionClientOptions) {}
 
   async createSession(threadId: string, message?: TeamsApiMessage): Promise<void> {
-    const harnessType = this.options.defaultHarnessType ?? 'codex';
-    const response = await this.postCreateSession(threadId, harnessType, message);
-    if (response.ok) {
-      return;
-    }
-    const body = await safeResponseText(response);
-    const existingHarness = response.status === 409 ? existingHarnessFromConflict(body) : undefined;
-    if (existingHarness && existingHarness !== harnessType) {
-      const retry = await this.postCreateSession(threadId, existingHarness, message);
-      await ensureSessionResponseOk(retry, 'create session');
-      return;
-    }
-    throw new SessionApiError({
-      action: 'create session',
-      body,
-      retryable: isRetryableSessionStatus(response.status),
-      status: response.status,
-      statusText: response.statusText,
-    });
+    const response = await this.postCreateSession(threadId, message);
+    await ensureSessionResponseOk(response, 'create session');
   }
 
-  private async postCreateSession(threadId: string, harnessType: string, message?: TeamsApiMessage): Promise<Response> {
+  private async postCreateSession(threadId: string, message?: TeamsApiMessage): Promise<Response> {
     const body: CreateSessionRequest = {
-      harness_type: harnessType,
       metadata: {
         source: 'teamsbot',
         platform: 'msteams',
@@ -434,24 +415,4 @@ async function safeResponseText(response: Response): Promise<string> {
 
 function isRetryableSessionStatus(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
-}
-
-function existingHarnessFromConflict(body: string): string | undefined {
-  try {
-    const parsed = JSON.parse(body) as unknown;
-    if (isJsonObject(parsed)) {
-      const existing = parsed.existing_harness;
-      if (typeof existing === 'string' && existing.trim()) {
-        return existing;
-      }
-    }
-  } catch {
-    // Fall through to the plain-text error parser.
-  }
-  const match = body.match(/already exists with harness_type\s+([A-Za-z0-9_-]+)/);
-  return match?.[1];
-}
-
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

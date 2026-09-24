@@ -375,8 +375,6 @@ async function bytesToBase64(data: Buffer | Blob): Promise<string> {
   return Buffer.from(bytes).toString("base64");
 }
 
-const DEFAULT_HARNESS_TYPE = "codex";
-
 type CreateSessionOutcome = {
   /** The API restarted the thread onto the requested harness. */
   harnessSwitched: boolean;
@@ -388,10 +386,9 @@ async function createSession(
   harnessType?: string,
   conversationName?: string,
 ): Promise<CreateSessionOutcome> {
-  const requested =
-    harnessType ?? options.defaultHarnessType ?? DEFAULT_HARNESS_TYPE;
+  const requested = harnessType;
   // An explicit --claude/--amp/--codex restarts a thread pinned to another
-  // harness; the implicit default never forces a switch.
+  // harness. Without one, api-rs resolves the deployment default.
   const response = await postCreateSession(
     options,
     threadId,
@@ -415,7 +412,7 @@ async function createSession(
   // harness instead of failing the message.
   const existing =
     response.status === 409 ? existingHarnessFromConflict(body) : undefined;
-  if (existing && existing !== requested) {
+  if (requested && existing && existing !== requested) {
     const retry = await postCreateSession(
       options,
       threadId,
@@ -439,14 +436,14 @@ async function createSession(
 async function postCreateSession(
   options: LinearbotOptions,
   threadId: string,
-  harnessType: string,
+  harnessType: string | undefined,
   onHarnessConflict?: "reject" | "restart",
   conversationName?: string,
 ): Promise<Response> {
   const fetchFn = options.fetch ?? fetch;
   const name = conversationName?.trim();
   const body: LinearbotCreateSessionRequest = {
-    harness_type: harnessType,
+    ...(harnessType ? { harness_type: harnessType } : {}),
     metadata: {
       source: "linearbot",
       platform: "linear",

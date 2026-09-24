@@ -771,8 +771,6 @@ async function bytesToBase64(data: Buffer | Blob | ArrayBuffer): Promise<string>
   return Buffer.from(bytes).toString('base64')
 }
 
-const DEFAULT_HARNESS_TYPE = 'codex'
-
 type RequesterIdentity = {
   githubHandle?: string
   githubHandleSource?: string
@@ -833,9 +831,9 @@ async function createSession(
   restartOnHarnessConflict?: boolean,
   harnessAssignment?: SlackbotV2HarnessAssignment
 ): Promise<CreateSessionOutcome> {
-  const requested = harnessType ?? options.defaultHarnessType ?? DEFAULT_HARNESS_TYPE
+  const requested = harnessType
   // A sticky --claude/--amp/--codex/--nanocodex selection restarts a thread
-  // pinned to another harness; the implicit default never forces a switch.
+  // pinned to another harness. Without one, api-rs resolves the deployment default.
   const response = await postCreateSession(
     options,
     threadId,
@@ -860,7 +858,7 @@ async function createSession(
   // a non-default harness lands here: keep the thread alive on its existing
   // harness instead of failing the message.
   const existing = response.status === 409 ? existingHarnessFromConflict(body) : undefined
-  if (existing && existing !== requested) {
+  if (requested && existing && existing !== requested) {
     const retry = await postCreateSession(
       options,
       threadId,
@@ -885,7 +883,7 @@ async function createSession(
 async function postCreateSession(
   options: SlackbotV2Options,
   threadId: string,
-  harnessType: string,
+  harnessType: string | undefined,
   personaId?: string,
   message?: SlackbotV2ApiMessage,
   onHarnessConflict?: 'reject' | 'restart',
@@ -901,7 +899,7 @@ async function postCreateSession(
       ? await resolveRequesterIdentity(options, message)
       : undefined
   const body: SlackbotV2CreateSessionRequest = {
-    harness_type: harnessType,
+    ...(harnessType ? { harness_type: harnessType } : {}),
     metadata: {
       source: 'slackbotv2',
       platform: 'slack',
