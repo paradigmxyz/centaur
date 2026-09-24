@@ -73,6 +73,17 @@ class SlackRateLimitError(RuntimeError):
         super().__init__(json.dumps(payload, sort_keys=True))
 
 
+def _conversation_flag(value: Any) -> bool | None:
+    """Return explicit boolean Slack metadata, or None when absent or non-boolean.
+
+    Slack conversation type flags (``is_private``/``is_im``/``is_mpim``) are
+    tri-state: only an explicit boolean classifies the conversation. Missing or
+    malformed metadata stays ``None`` (unknown) so public-only callers can fail
+    closed instead of mistaking unknown classification for public.
+    """
+    return value if isinstance(value, bool) else None
+
+
 class IndexedSlackClient:
     """Search RLS-scoped Slack messages stored by the Slack sync."""
 
@@ -917,7 +928,7 @@ class SlackClient:
                         "purpose": channel.get("purpose", {}).get("value", ""),
                         "topic": channel.get("topic", {}).get("value", ""),
                         "member_count": channel.get("num_members", 0),
-                        "is_private": channel.get("is_private", False),
+                        "is_private": _conversation_flag(channel.get("is_private")),
                     }
                 )
 
@@ -1385,7 +1396,7 @@ class SlackClient:
                         "purpose": channel.get("purpose", {}).get("value", ""),
                         "topic": channel.get("topic", {}).get("value", ""),
                         "member_count": channel.get("num_members", 0),
-                        "is_private": channel.get("is_private", False),
+                        "is_private": _conversation_flag(channel.get("is_private")),
                         "is_member": channel.get("is_member", False),
                     }
                 )
@@ -1402,7 +1413,12 @@ class SlackClient:
         history_only: bool = False,
         query: str | None = None,
     ) -> list[dict]:
-        """List Slack channels exposed by the Centaur API server proxy."""
+        """List Slack channels exposed by the Centaur API server proxy.
+
+        Conversation type flags (``is_private``/``is_im``/``is_mpim``) are
+        tri-state: explicit booleans pass through verbatim and unknown
+        classification stays ``None``.
+        """
         requested_limit = max(int(limit), 0)
 
         def fetch_page(cursor: str | None, page_limit: int) -> dict[str, Any]:
@@ -1428,7 +1444,9 @@ class SlackClient:
                 "purpose": channel.get("purpose", ""),
                 "topic": channel.get("topic", ""),
                 "member_count": channel.get("member_count", 0),
-                "is_private": channel.get("is_private", False),
+                "is_private": _conversation_flag(channel.get("is_private")),
+                "is_im": _conversation_flag(channel.get("is_im")),
+                "is_mpim": _conversation_flag(channel.get("is_mpim")),
                 "is_member": channel.get("is_member", False),
                 "can_upload": channel.get("can_upload", False),
                 "can_download": channel.get("can_download", False),

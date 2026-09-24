@@ -1206,8 +1206,11 @@ class SlackEtlClient:
                 )
 
             for channel in response.get("channels", []):
-                is_private = bool(channel.get("is_private", False))
-                if is_private and not include_private:
+                # Conversation type is tri-state: only an explicit False counts
+                # as public, so a public-only listing fails closed instead of
+                # treating unknown classification as public.
+                is_private = channel.get("is_private")
+                if is_private is not False and not include_private:
                     continue
                 channels.append(
                     {
