@@ -227,6 +227,7 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/proxy_sync_parity_test
           PROXY_SYNC_BINARY: ../proxy-sync/target/debug/centaur-proxy-sync
         run: |
+          export CENTAUR_CONSOLE_DATABASE_URL="$DATABASE_URL"
           bin/rails db:prepare
           bin/rails test ../proxy-sync/tests/rails_parity_test.rb
 
