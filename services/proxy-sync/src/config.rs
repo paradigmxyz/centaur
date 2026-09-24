@@ -308,9 +308,8 @@ fn postgres_settings(proxy: &ProxyRecord, settings: &[PostgresSetting]) -> Vec<V
                     proxy
                         .principal_field("labels")
                         .get(label)
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_owned()
+                        .map(value_to_string)
+                        .unwrap_or_default()
                 } else if let Some(label) = nonempty(reference.proxy_label.as_deref()) {
                     proxy
                         .labels
@@ -451,8 +450,41 @@ fn timestamp(value: Option<DateTime<Utc>>) -> Value {
 mod tests {
     use serde_json::json;
 
-    use super::proxy_rules;
-    use crate::models::RequestRule;
+    use super::{postgres_settings, proxy_rules};
+    use crate::models::{PostgresSetting, ProxyRecord, RequestRule};
+
+    #[test]
+    fn postgres_principal_labels_stringify_scalars_and_missing_values() {
+        let proxy = ProxyRecord {
+            id: 1,
+            name: "test".into(),
+            labels: json!({}),
+            principal_id: Some(1),
+            requester_principal_id: None,
+            principal_assigned_at: None,
+            requester_principal_assigned_at: None,
+            principal: Some(json!({"labels": {"tenant": 123, "enabled": false, "empty": null}})),
+            console_user_email: None,
+            console_user_id: None,
+            slack_history_channel_ids: json!([]),
+        };
+        let settings: Vec<PostgresSetting> = serde_json::from_value(json!([
+            {"name": "app.tenant", "value_from": {"principal_label": "tenant"}},
+            {"name": "app.enabled", "value_from": {"principal_label": "enabled"}},
+            {"name": "app.empty", "value_from": {"principal_label": "empty"}},
+            {"name": "app.missing", "value_from": {"principal_label": "missing"}}
+        ]))
+        .unwrap();
+        assert_eq!(
+            postgres_settings(&proxy, &settings),
+            vec![
+                json!({"name": "app.tenant", "value": "123"}),
+                json!({"name": "app.enabled", "value": "false"}),
+                json!({"name": "app.empty", "value": ""}),
+                json!({"name": "app.missing", "value": ""}),
+            ]
+        );
+    }
 
     #[test]
     fn rules_match_the_proxy_shape() {
