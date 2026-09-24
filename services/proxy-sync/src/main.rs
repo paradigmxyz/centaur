@@ -6,13 +6,14 @@ mod identifiers;
 mod models;
 mod tokens;
 
-use std::{env, net::SocketAddr, str::FromStr, sync::Arc};
+use std::{env, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
 
 use active_record_encryption::{ActiveRecordEncryption, Error as EncryptionError};
 use axum::{
     Json, Router,
+    body::Body,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Request, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -24,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tower_http::trace::TraceLayer;
-use tracing::{error, info};
+use tracing::{Span, error, info};
 use url::Url;
 
 #[derive(Deserialize, Default)]
@@ -127,7 +128,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/healthz", get(|| async { StatusCode::OK }))
         .route("/api/v1/proxy/sync", post(sync))
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &Request<Body>| {
+                    tracing::info_span!(
+                        "proxy_sync.http_request",
+                        method = %request.method(),
+                        path = request.uri().path(),
+                    )
+                })
+                .on_request(())
+                .on_response(|response: &Response, latency: Duration, _span: &Span| {
+                    info!(
+                        component = "proxy_sync",
+                        event = "http_request",
+                        status = response.status().as_u16(),
+                        duration_ms = latency.as_secs_f64() * 1000.0,
+                        "http request completed"
+                    );
+                }),
+        )
         .with_state(state);
     let bind: SocketAddr = env::var("BIND_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:8080".to_owned())
