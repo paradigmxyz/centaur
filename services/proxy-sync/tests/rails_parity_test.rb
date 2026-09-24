@@ -8,7 +8,45 @@ class RailsParityTest < ActionDispatch::IntegrationTest
   self.use_transactional_tests = false
   parallelize(workers: 1)
 
-  test "Rust sync matches Rails for populated, changed, hash-only and unassigned configurations" do
+  test "Rust sync matches Rails for populated and hash-only configurations" do
+    with_sync_services do
+      populate_credentials
+      token = "iprx_#{'a' * 64}"
+      body = compare(token)
+      assert_operator body.fetch("secrets").length, :>=, 102
+      assert_equal %w[aws_auth gcp_auth gcp_id_token hmac_sign oauth_token], body.fetch("transforms").map { |t| t.fetch("name") }.sort
+      assert_not_empty body.fetch("postgres")
+      compare(token, { config_hash: body.fetch("config_hash") })
+    end
+  end
+
+  test "Rust sync matches Rails after secret rotation and requester assignment" do
+    with_sync_services do
+      populate_credentials
+      token = "iprx_#{'a' * 64}"
+      body = compare(token)
+      @inline.source.update!(secret: "rotated-parity-value")
+      changed = compare(token)
+      refute_equal body.fetch("config_hash"), changed.fetch("config_hash")
+
+      bind_requester
+      union = compare(token)
+      assert_equal changed.fetch("secrets").length + 1, union.fetch("secrets").length
+      compare(token, { config_hash: union.fetch("config_hash") })
+    end
+  end
+
+  test "Rust sync matches Rails for unassigned proxies and authentication failures" do
+    with_sync_services do
+      compare("iprx_#{'c' * 64}")
+      compare(nil, {}, status: 401)
+      compare("iprx_#{'9' * 64}", {}, status: 401)
+    end
+  end
+
+  private
+
+  def with_sync_services
     binary = File.expand_path(ENV.fetch("PROXY_SYNC_BINARY"))
     assert File.executable?(binary), "Build proxy-sync before running parity tests"
     assert Rails.env.test?
@@ -18,32 +56,9 @@ class RailsParityTest < ActionDispatch::IntegrationTest
       "CENTAUR_CONSOLE_URL" => "http://console.example:3000",
       "CENTAUR_API_URL" => "http://api.example:8080"
     ) do
-      populate_credentials
-      with_rust(binary) do
-        token = "iprx_#{'a' * 64}"
-        body = compare(token)
-        assert_operator body.fetch("secrets").length, :>=, 102
-        assert_equal %w[aws_auth gcp_auth gcp_id_token hmac_sign oauth_token], body.fetch("transforms").map { |t| t.fetch("name") }.sort
-        assert_not_empty body.fetch("postgres")
-        compare(token, { config_hash: body.fetch("config_hash") })
-
-        @inline.source.update!(secret: "rotated-parity-value")
-        changed = compare(token)
-        refute_equal body.fetch("config_hash"), changed.fetch("config_hash")
-
-        bind_requester
-        union = compare(token)
-        assert_equal changed.fetch("secrets").length + 1, union.fetch("secrets").length
-        compare(token, { config_hash: union.fetch("config_hash") })
-
-        compare("iprx_#{'c' * 64}")
-        compare(nil, {}, status: 401)
-        compare("iprx_#{'9' * 64}", {}, status: 401)
-      end
+      with_rust(binary) { yield }
     end
   end
-
-  private
 
   def populate_credentials
     principal = principals(:acme_channel)
