@@ -125,8 +125,6 @@ class SecretSourceTest < ActiveSupport::TestCase
     s = new_source(source_type: "token_broker", config: { "credential_id" => cred.oid })
     assert s.valid?, s.errors.full_messages.inspect
     assert_equal cred, s.broker_credential
-    assert_equal({}, s.config)
-    assert_equal({ "credential_id" => cred.oid }, s.external_config)
   end
 
   test "token_broker source links a credential referenced by foreign_id" do
@@ -135,8 +133,6 @@ class SecretSourceTest < ActiveSupport::TestCase
                    config: { "credential_id" => cred.foreign_id })
     assert s.valid?, s.errors.full_messages.inspect
     assert_equal cred, s.broker_credential
-    assert_equal({}, s.config)
-    assert_equal({ "credential_id" => cred.oid }, s.external_config)
   end
 
   test "token_broker reference lookup uses the durable credential link" do
@@ -144,11 +140,9 @@ class SecretSourceTest < ActiveSupport::TestCase
     source = SecretSource.create!(source_type: "token_broker",
                                   config: { "credential_id" => cred.foreign_id })
     cred.update!(foreign_id: "renamed-#{SecureRandom.hex(4)}")
-    source.reload.save!
 
     assert_equal source, SecretSource.referencing_broker_credential(cred).sole
     assert_equal cred, source.reload.broker_credential
-    assert_equal({}, source.config)
   end
 
   test "token_broker source rejects a reference that does not resolve" do

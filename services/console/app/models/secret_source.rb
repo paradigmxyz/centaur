@@ -4,7 +4,7 @@ class SecretSource < ApplicationRecord
   include SyncConfigOwnerInvalidation
 
   SOURCE_TYPES = %w[env aws_sm aws_ssm 1password 1password_connect control_plane token_broker].freeze
-  SYNC_CONFIG_REPLACEMENT_ATTRIBUTES = %w[source_type config secret role role_kind broker_credential_id].freeze
+  SYNC_CONFIG_REPLACEMENT_ATTRIBUTES = %w[source_type config secret role role_kind].freeze
 
   UNIVERSAL_OPTIONAL = %w[json_key ttl].freeze
 
@@ -15,7 +15,7 @@ class SecretSource < ApplicationRecord
     "1password" => { required: %w[secret_ref], optional: %w[token_env] },
     "1password_connect" => { required: %w[secret_ref], optional: %w[host_env token_env] },
     "control_plane" => { required: [], optional: [] },
-    "token_broker" => { required: [], optional: [] }
+    "token_broker" => { required: %w[credential_id], optional: [] }
   }.freeze
 
   # A source belongs to exactly one owner. static_secret feeds the `secrets`
@@ -43,18 +43,6 @@ class SecretSource < ApplicationRecord
   attr_readonly :source_type
   before_validation :resolve_broker_credential_reference
 
-  # Normalize either assignment order used by Active Record callers before
-  # replacement comparisons inspect the persisted fields.
-  def source_type=(value)
-    super
-    resolve_broker_credential_reference
-  end
-
-  def config=(value)
-    super
-    resolve_broker_credential_reference
-  end
-
   # Maps this source to the iron-proxy `secrets` transform `source` block,
   # discriminated by `type`. For control_plane sources the decrypted value is
   # delivered inline; all other types pass their config through (the proxy's
@@ -71,15 +59,6 @@ class SecretSource < ApplicationRecord
     source["type"] = source_type
     source["value"] = secret if source_type == "control_plane"
     source
-  end
-
-  # The public source config preserves the credential_id API while the database
-  # stores the normalized broker_credential_id foreign key as its source of truth.
-  def external_config
-    return config unless source_type == "token_broker" && config.is_a?(Hash)
-
-    credential = brokered_credential
-    credential ? config.merge("credential_id" => credential.oid) : config
   end
 
   # Whether this source can currently deliver a value to a proxy. Always true
@@ -122,42 +101,41 @@ class SecretSource < ApplicationRecord
 
   private
 
+  # The BrokerCredential a token_broker source references. credential_id is either
+  # an opaque id (bcr_...) or a globally unique foreign_id. Returns nil when the
+  # source is not a token_broker, the reference is incomplete, or nothing matches.
   def brokered_credential
-    resolve_broker_credential_reference if source_type == "token_broker" && config.is_a?(Hash) && config.key?("credential_id")
+    resolve_broker_credential_reference if broker_credential_id.nil? || will_save_change_to_config?
     broker_credential
   end
 
-  # Accept the public credential_id input, resolve it once, and remove it from
-  # the persisted config. Subsequent validations use the durable foreign key.
   def resolve_broker_credential_reference
-    unless source_type == "token_broker"
+    unless source_type == "token_broker" && config.is_a?(Hash)
       self.broker_credential = nil
       return
     end
-    return unless config.is_a?(Hash) && config.key?("credential_id")
 
-    reference = config["credential_id"]
-    self.config = config.except("credential_id")
-    @broker_credential_reference = reference
-    self.broker_credential = if reference.blank?
-      nil
-    elsif BrokerCredential.decode_oid(reference)
-      BrokerCredential.find_by_oid(reference)
+    ref = config["credential_id"]
+    if ref.blank?
+      self.broker_credential = nil
+      return
+    end
+
+    self.broker_credential = if BrokerCredential.decode_oid(ref)
+      BrokerCredential.find_by_oid(ref)
     else
-      BrokerCredential.find_by(foreign_id: reference)
+      BrokerCredential.find_by(foreign_id: ref)
     end
   end
 
-  # A token_broker source must point at a real credential. API callers supply
-  # credential_id in config; internal callers may assign the association directly.
+  # A token_broker source must point at a real credential.
   def token_broker_reference_resolves
-    return unless source_type == "token_broker"
-    return if brokered_credential.present?
+    return unless source_type == "token_broker" && config.is_a?(Hash)
+    ref = config["credential_id"]
+    return if ref.blank? # missing-key reported by config_matches_source_type
 
-    if @broker_credential_reference.present?
-      errors.add(:config, "credential_id #{@broker_credential_reference.inspect} does not reference an existing broker credential")
-    else
-      errors.add(:config, "is missing required key \"credential_id\" for source_type \"token_broker\"")
+    if brokered_credential.nil?
+      errors.add(:config, "credential_id #{ref.inspect} does not reference an existing broker credential")
     end
   end
 

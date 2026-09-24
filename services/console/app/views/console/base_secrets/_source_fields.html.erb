@@ -11,7 +11,7 @@
   heading = local_assigns.fetch(:heading, "Source")
   bare = local_assigns.fetch(:bare, false)
   type = src&.source_type.presence || "env"
-  cfg = src&.external_config.is_a?(Hash) ? src.external_config : {}
+  cfg = src&.config.is_a?(Hash) ? src.config : {}
   reference = cfg[SecretKinds::SOURCE_REF_KEYS[type]]
   region = cfg["region"]
   json_key = cfg["json_key"]

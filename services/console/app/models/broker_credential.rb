@@ -5,7 +5,7 @@
 #
 # The minted access token reaches iron-proxy through the normal /sync path: a
 # `token_broker` SecretSource on some grantable secret references this credential
-# through a foreign key, and SecretSource#to_proxy_source resolves it to
+# by `credential_id` (its oid), and SecretSource#to_proxy_source resolves it to
 # the current access token, delivered inline like a control_plane value. A
 # BrokerCredential is itself NOT synced and NOT grantable.
 #
@@ -49,8 +49,9 @@ class BrokerCredential < ApplicationRecord
 
   attr_writer :refresh_client
 
-  # Refuse to delete a credential that token_broker sources still reference so
-  # the operator receives a useful validation error instead of a foreign-key error.
+  # Refuse to delete a credential that token_broker sources still reference: there
+  # is no FK to cascade or nullify, so deletion would silently leave those secrets
+  # undeliverable. The operator must remove the references first.
   before_destroy :ensure_not_referenced
   after_commit :auto_grant_matching_principals, on: %i[create update], if: :oauth_app_id?
   before_validation :default_preqin_token_endpoint

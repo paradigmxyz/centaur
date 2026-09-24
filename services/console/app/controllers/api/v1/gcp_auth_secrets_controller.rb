@@ -83,7 +83,7 @@ module Api
           scopes: ref.scopes,
           keyfile: ref.keyfile_source && {
             source_type: ref.keyfile_source.source_type,
-            config: ref.keyfile_source.external_config
+            config: ref.keyfile_source.config
           },
           rules: ref.rules.map do |r|
             { host: r.host, cidr: r.cidr, position: r.position, http_methods: r.http_methods, paths: r.paths }

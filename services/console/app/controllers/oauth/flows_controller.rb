@@ -284,7 +284,7 @@ module Oauth
       secret.name = "#{credential.name} token"
       secret.kind = wrapping_secret_kind
       secret.assign_attributes(wrapping_secret_config) if secret.kind == CredentialProfiles::Registry::CUSTOM_KIND
-      secret.source = SecretSource.new(source_type: "token_broker", config: {}, broker_credential: credential)
+      secret.source = SecretSource.new(source_type: "token_broker", config: { "credential_id" => credential.oid })
       rules = if secret.kind == CredentialProfiles::Registry::CUSTOM_KIND
         Array(@provider.api_hosts).each_with_index.map do |host, position|
           RequestRule.new(host: host, http_methods: [], paths: [], position: position)

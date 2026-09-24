@@ -115,7 +115,7 @@ module Api
       end
 
       def source_payload(source)
-        { source_type: source.source_type, config: source.external_config }
+        { source_type: source.source_type, config: source.config }
       end
     end
   end
