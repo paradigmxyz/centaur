@@ -10,11 +10,12 @@ use crate::{
     conflicts::suppress,
     database::load_credentials,
     identifiers::oid,
-    models::{AppState, Config, Credential, ProxyRecord},
+    models::{
+        AppState, Config, Credential, CredentialData, CredentialKind, PostgresSetting, ProxyRecord,
+        RequestRule, SecretSource,
+    },
     tokens::{append_api_jwt, append_sandbox_jwt},
 };
-
-const EMPTY_ARRAY: Value = Value::Array(Vec::new());
 
 pub(crate) async fn build_config(
     state: &AppState,
@@ -24,7 +25,7 @@ pub(crate) async fn build_config(
     let loaded = load_credentials(&state.pool, principal_id, proxy.requester_principal_id).await?;
     let mut credentials = Vec::with_capacity(loaded.len());
     for credential in loaded {
-        let deliverable = if credential.kind == "static" {
+        let deliverable = if credential.kind == CredentialKind::Static {
             match credential.sources.first() {
                 Some(source) => source_value(source, &state.encryption)?.is_some(),
                 None => false,
@@ -39,31 +40,35 @@ pub(crate) async fn build_config(
     suppress(&mut credentials);
 
     let mut config = Config::default();
-    for credential in credentials.iter().filter(|c| c.kind == "static") {
+    for credential in credentials
+        .iter()
+        .filter(|credential| credential.kind == CredentialKind::Static)
+    {
+        let CredentialData::Static(data) = &credential.data else {
+            return Err(mismatched_data(credential));
+        };
         if let Some(source) = source_value(&credential.sources[0], &state.encryption)? {
             let mut entry = Map::new();
             entry.insert("source".to_owned(), source);
             entry.insert("rules".to_owned(), proxy_rules(&credential.rules));
-            if present(credential.data.get("inject_config")) {
-                entry.insert(
-                    "inject".to_owned(),
-                    credential.data["inject_config"].clone(),
-                );
-            }
-            if present(credential.data.get("replace_config")) {
-                entry.insert(
-                    "replace".to_owned(),
-                    credential.data["replace_config"].clone(),
-                );
-            }
+            insert_present(&mut entry, "inject", data.inject_config.as_ref());
+            insert_present(&mut entry, "replace", data.replace_config.as_ref());
             config.secrets.push(Value::Object(entry));
         }
     }
     append_api_jwt(state, proxy, &mut config).await?;
     append_sandbox_jwt(state, proxy, &mut config)?;
 
-    for kind in ["gcp_auth", "gcp_id_token", "aws_auth", "hmac"] {
-        for credential in credentials.iter().filter(|c| c.kind == kind) {
+    for kind in [
+        CredentialKind::GcpAuth,
+        CredentialKind::GcpIdToken,
+        CredentialKind::AwsAuth,
+        CredentialKind::Hmac,
+    ] {
+        for credential in credentials
+            .iter()
+            .filter(|credential| credential.kind == kind)
+        {
             config
                 .transforms
                 .push(transform(credential, &state.encryption)?);
@@ -71,8 +76,8 @@ pub(crate) async fn build_config(
     }
     let oauth: Vec<Value> = credentials
         .iter()
-        .filter(|c| c.kind == "oauth_token")
-        .map(|c| oauth_entry(c, &state.encryption))
+        .filter(|credential| credential.kind == CredentialKind::OauthToken)
+        .map(|credential| oauth_entry(credential, &state.encryption))
         .collect::<Result<_, _>>()?;
     if !oauth.is_empty() {
         config
@@ -84,12 +89,11 @@ pub(crate) async fn build_config(
 }
 
 fn source_value(
-    source: &Value,
+    source: &SecretSource,
     encryption: &ActiveRecordEncryption,
 ) -> Result<Option<Value>, ApiError> {
-    let source_type = string(source, "source_type");
-    if source_type == "token_broker" {
-        let Some(raw) = source.get("broker_access_token").and_then(Value::as_str) else {
+    if source.source_type == "token_broker" {
+        let Some(raw) = source.broker_access_token.as_deref() else {
             return Ok(None);
         };
         let value = encryption.decrypt(raw)?;
@@ -98,74 +102,60 @@ fn source_value(
         }
         return Ok(Some(json!({ "type": "control_plane", "value": value })));
     }
-    let mut result = source
-        .get("config")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    result.insert("type".to_owned(), Value::String(source_type.to_owned()));
-    if source_type == "control_plane" {
+
+    let mut result = source.config.clone();
+    result.insert("type".to_owned(), Value::String(source.source_type.clone()));
+    if source.source_type == "control_plane" {
         let raw = source
-            .get("secret")
-            .and_then(Value::as_str)
+            .secret
+            .as_deref()
             .ok_or_else(|| ApiError::internal("control_plane source has no secret"))?;
         result.insert("value".to_owned(), Value::String(encryption.decrypt(raw)?));
     }
     Ok(Some(Value::Object(result)))
 }
 
-fn proxy_rules(rules: &[Value]) -> Value {
+fn proxy_rules(rules: &[RequestRule]) -> Value {
     Value::Array(
         rules
             .iter()
             .map(|rule| {
                 let mut output = Map::new();
-                for key in ["host", "cidr"] {
-                    if let Some(value) = rule.get(key).filter(|v| present(Some(v))) {
-                        output.insert(key.to_owned(), value.clone());
-                    }
-                }
-                if let Some(value) = rule.get("http_methods").filter(|v| present(Some(v))) {
-                    output.insert("methods".to_owned(), value.clone());
-                }
-                if let Some(value) = rule.get("paths").filter(|v| present(Some(v))) {
-                    output.insert("paths".to_owned(), value.clone());
-                }
+                insert_nonempty_string(&mut output, "host", rule.host.as_deref());
+                insert_nonempty_string(&mut output, "cidr", rule.cidr.as_deref());
+                insert_nonempty_vec(&mut output, "methods", &rule.http_methods);
+                insert_nonempty_vec(&mut output, "paths", &rule.paths);
                 Value::Object(output)
             })
             .collect(),
     )
 }
 
-fn transform(c: &Credential, encryption: &ActiveRecordEncryption) -> Result<Value, ApiError> {
-    let rules = proxy_rules(&c.rules);
-    match c.kind.as_str() {
-        "gcp_auth" => {
+fn transform(
+    credential: &Credential,
+    encryption: &ActiveRecordEncryption,
+) -> Result<Value, ApiError> {
+    let rules = proxy_rules(&credential.rules);
+    match &credential.data {
+        CredentialData::GcpAuth(data) => {
             let mut config = Map::new();
-            if let Some(source) = c.sources.first()
+            if let Some(source) = credential.sources.first()
                 && let Some(value) = source_value(source, encryption)?
             {
                 config.insert("keyfile".to_owned(), value);
             }
-            copy_present(
-                &c.data,
+            insert_present(
                 &mut config,
                 "credentials_provider",
-                "credentials_provider",
+                data.credentials_provider.as_ref(),
             );
-            copy_present(&c.data, &mut config, "subject", "subject");
-            config.insert(
-                "scopes".to_owned(),
-                c.data
-                    .get("scopes")
-                    .cloned()
-                    .unwrap_or_else(|| EMPTY_ARRAY.clone()),
-            );
+            insert_nonempty_string(&mut config, "subject", data.subject.as_deref());
+            config.insert("scopes".to_owned(), json!(data.scopes));
             config.insert("rules".to_owned(), rules);
             Ok(json!({ "name": "gcp_auth", "config": config }))
         }
-        "gcp_id_token" => {
-            let source = c
+        CredentialData::GcpIdToken(data) => {
+            let source = credential
                 .sources
                 .first()
                 .ok_or_else(|| ApiError::internal("gcp_id_token source missing"))?;
@@ -175,29 +165,29 @@ fn transform(c: &Credential, encryption: &ActiveRecordEncryption) -> Result<Valu
                 source_value(source, encryption)?
                     .ok_or_else(|| ApiError::internal("gcp_id_token source unavailable"))?,
             );
-            config.insert("audience".to_owned(), c.data["audience"].clone());
+            config.insert("audience".to_owned(), Value::String(data.audience.clone()));
             config.insert("rules".to_owned(), rules);
-            copy_present(&c.data, &mut config, "header", "header");
+            insert_nonempty_string(&mut config, "header", data.header.as_deref());
             Ok(json!({ "name": "gcp_id_token", "config": config }))
         }
-        "aws_auth" => {
+        CredentialData::AwsAuth(data) => {
             let mut config = Map::new();
-            for source in &c.sources {
-                if let Some(role) = source.get("role").and_then(Value::as_str)
+            for source in &credential.sources {
+                if let Some(role) = source.role.as_deref()
                     && let Some(value) = source_value(source, encryption)?
                 {
                     config.insert(role.to_owned(), value);
                 }
             }
-            copy_present(&c.data, &mut config, "allowed_regions", "allowed_regions");
-            copy_present(&c.data, &mut config, "allowed_services", "allowed_services");
+            insert_nonempty_vec(&mut config, "allowed_regions", &data.allowed_regions);
+            insert_nonempty_vec(&mut config, "allowed_services", &data.allowed_services);
             config.insert("rules".to_owned(), rules);
             Ok(json!({ "name": "aws_auth", "config": config }))
         }
-        "hmac" => {
+        CredentialData::Hmac(data) => {
             let mut credentials = Map::new();
-            for source in &c.sources {
-                if let Some(role) = source.get("role").and_then(Value::as_str)
+            for source in &credential.sources {
+                if let Some(role) = source.role.as_deref()
                     && let Some(value) = source_value(source, encryption)?
                 {
                     credentials.insert(role.to_owned(), value);
@@ -205,53 +195,60 @@ fn transform(c: &Credential, encryption: &ActiveRecordEncryption) -> Result<Valu
             }
             let mut config = json!({
                 "credentials": credentials,
-                "timestamp": { "format": c.data["timestamp_format"] },
+                "timestamp": { "format": data.timestamp_format },
                 "signature": {
-                    "algorithm": c.data["signature_algorithm"],
-                    "key_encoding": c.data["signature_key_encoding"],
-                    "output_encoding": c.data["signature_output_encoding"],
-                    "message": c.data["signature_message"]
+                    "algorithm": data.signature_algorithm,
+                    "key_encoding": data.signature_key_encoding,
+                    "output_encoding": data.signature_output_encoding,
+                    "message": data.signature_message
                 },
-                "headers": c.data["headers"],
+                "headers": data.headers,
                 "rules": rules
             });
-            if c.data.get("allow_chunked_body").and_then(Value::as_bool) == Some(true) {
+            if data.allow_chunked_body {
                 config["allow_chunked_body"] = Value::Bool(true);
             }
             Ok(json!({ "name": "hmac_sign", "config": config }))
         }
-        _ => Err(ApiError::internal("unknown transform kind")),
+        _ => Err(mismatched_data(credential)),
     }
 }
 
-fn oauth_entry(c: &Credential, encryption: &ActiveRecordEncryption) -> Result<Value, ApiError> {
+fn oauth_entry(
+    credential: &Credential,
+    encryption: &ActiveRecordEncryption,
+) -> Result<Value, ApiError> {
+    let CredentialData::OauthToken(data) = &credential.data else {
+        return Err(mismatched_data(credential));
+    };
     let mut entry = Map::new();
-    entry.insert("grant".to_owned(), c.data["grant"].clone());
+    entry.insert("grant".to_owned(), Value::String(data.grant.clone()));
     entry.insert(
         "token_endpoint".to_owned(),
-        c.data["token_endpoint"].clone(),
+        Value::String(data.token_endpoint.clone()),
     );
     let mut headers = Map::new();
-    for source in &c.sources {
-        let Some(role) = source.get("role").and_then(Value::as_str) else {
+    for source in &credential.sources {
+        let Some(role) = source.role.as_deref() else {
             continue;
         };
         let Some(value) = source_value(source, encryption)? else {
             continue;
         };
-        if string(source, "role_kind") == "endpoint_header" {
+        if source.role_kind.as_deref() == Some("endpoint_header") {
             headers.insert(role.to_owned(), value);
         } else {
             entry.insert(role.to_owned(), value);
         }
     }
-    for key in ["audience", "scopes", "header", "value_prefix"] {
-        copy_present(&c.data, &mut entry, key, key);
-    }
+    insert_nonempty_string(&mut entry, "audience", data.audience.as_deref());
+    insert_nonempty_vec(&mut entry, "scopes", &data.scopes);
+    insert_nonempty_string(&mut entry, "header", data.header.as_deref());
+    insert_nonempty_string(&mut entry, "value_prefix", data.value_prefix.as_deref());
     if !headers.is_empty() {
         entry.insert("token_endpoint_headers".to_owned(), Value::Object(headers));
     }
-    entry.insert("rules".to_owned(), proxy_rules(&c.rules));
+    entry.insert("rules".to_owned(), proxy_rules(&credential.rules));
     Ok(Value::Object(entry))
 }
 
@@ -262,55 +259,59 @@ fn append_postgres(
     config: &mut Config,
 ) -> Result<(), ApiError> {
     let mut positions: HashMap<String, usize> = HashMap::new();
-    for c in credentials.iter().filter(|c| c.kind == "pg_dsn") {
-        let Some(source) = c.sources.first() else {
+    for credential in credentials
+        .iter()
+        .filter(|credential| credential.kind == CredentialKind::PgDsn)
+    {
+        let CredentialData::PgDsn(data) = &credential.data else {
+            return Err(mismatched_data(credential));
+        };
+        let Some(source) = credential.sources.first() else {
             continue;
         };
         let Some(dsn) = source_value(source, encryption)? else {
             continue;
         };
-        let database = string(&c.data, "database").to_owned();
         let mut entry = Map::new();
-        entry.insert("id".to_owned(), Value::String(oid("pgs", c.id)));
-        entry.insert("foreign_id".to_owned(), c.data["foreign_id"].clone());
-        entry.insert("database".to_owned(), Value::String(database.clone()));
+        entry.insert("id".to_owned(), Value::String(oid("pgs", credential.id)));
+        entry.insert(
+            "foreign_id".to_owned(),
+            Value::String(data.foreign_id.clone()),
+        );
+        entry.insert("database".to_owned(), Value::String(data.database.clone()));
         entry.insert("dsn".to_owned(), dsn);
-        copy_present(&c.data, &mut entry, "role", "role");
-        let settings = postgres_settings(proxy, c.data.get("settings"));
+        insert_nonempty_string(&mut entry, "role", data.role.as_deref());
+        let settings = postgres_settings(proxy, &data.settings);
         if !settings.is_empty() {
             entry.insert("settings".to_owned(), Value::Array(settings));
         }
-        if let Some(index) = positions.get(&database).copied() {
+        if let Some(index) = positions.get(&data.database).copied() {
             config.postgres[index] = Value::Object(entry);
         } else {
-            positions.insert(database, config.postgres.len());
+            positions.insert(data.database.clone(), config.postgres.len());
             config.postgres.push(Value::Object(entry));
         }
     }
     Ok(())
 }
 
-fn postgres_settings(proxy: &ProxyRecord, value: Option<&Value>) -> Vec<Value> {
-    value
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
+fn postgres_settings(proxy: &ProxyRecord, settings: &[PostgresSetting]) -> Vec<Value> {
+    settings
+        .iter()
         .filter_map(|setting| {
-            let name = setting.get("name")?.as_str()?.trim();
+            let name = setting.name.trim();
             if name.is_empty() {
                 return None;
             }
-            let value = if let Some(reference) =
-                setting.get("value_from").and_then(Value::as_object)
-            {
-                if let Some(label) = reference.get("principal_label").and_then(Value::as_str) {
+            let value = if let Some(reference) = &setting.value_from {
+                if let Some(label) = nonempty(reference.principal_label.as_deref()) {
                     proxy
                         .principal_field("labels")
                         .get(label)
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_owned()
-                } else if let Some(label) = reference.get("proxy_label").and_then(Value::as_str) {
+                } else if let Some(label) = nonempty(reference.proxy_label.as_deref()) {
                     proxy
                         .labels
                         .get(label)
@@ -319,14 +320,15 @@ fn postgres_settings(proxy: &ProxyRecord, value: Option<&Value>) -> Vec<Value> {
                         .to_owned()
                 } else {
                     reference
-                        .get("principal_field")
-                        .and_then(Value::as_str)
+                        .principal_field
+                        .as_deref()
                         .map(|field| principal_setting(proxy, field))
                         .unwrap_or_default()
                 }
             } else {
                 setting
-                    .get("value")
+                    .value
+                    .as_ref()
                     .map(value_to_string)
                     .unwrap_or_default()
             };
@@ -386,8 +388,42 @@ pub(crate) fn config_hash(proxy: &ProxyRecord, config: &Value) -> Result<String,
     Ok(format!("sha256:{}", hex::encode(Sha256::digest(canonical))))
 }
 
-fn string<'a>(value: &'a Value, key: &str) -> &'a str {
-    value.get(key).and_then(Value::as_str).unwrap_or("")
+fn insert_present(target: &mut Map<String, Value>, key: &str, value: Option<&Value>) {
+    if let Some(value) = value
+        && present(value)
+    {
+        target.insert(key.to_owned(), value.clone());
+    }
+}
+
+fn insert_nonempty_string(target: &mut Map<String, Value>, key: &str, value: Option<&str>) {
+    if let Some(value) = nonempty(value) {
+        target.insert(key.to_owned(), Value::String(value.to_owned()));
+    }
+}
+
+fn insert_nonempty_vec<T: serde::Serialize>(
+    target: &mut Map<String, Value>,
+    key: &str,
+    value: &[T],
+) {
+    if !value.is_empty() {
+        target.insert(key.to_owned(), json!(value));
+    }
+}
+
+fn nonempty(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.is_empty())
+}
+
+fn present(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
+        _ => true,
+    }
 }
 
 fn value_to_string(value: &Value) -> String {
@@ -398,20 +434,11 @@ fn value_to_string(value: &Value) -> String {
     }
 }
 
-fn present(value: Option<&Value>) -> bool {
-    match value {
-        None | Some(Value::Null) => false,
-        Some(Value::String(value)) => !value.is_empty(),
-        Some(Value::Array(value)) => !value.is_empty(),
-        Some(Value::Object(value)) => !value.is_empty(),
-        Some(_) => true,
-    }
-}
-
-fn copy_present(source: &Value, target: &mut Map<String, Value>, from: &str, to: &str) {
-    if let Some(value) = source.get(from).filter(|value| present(Some(value))) {
-        target.insert(to.to_owned(), value.clone());
-    }
+fn mismatched_data(credential: &Credential) -> ApiError {
+    ApiError::internal(format!(
+        "credential {} data does not match {:?}",
+        credential.id, credential.kind
+    ))
 }
 
 fn timestamp(value: Option<DateTime<Utc>>) -> Value {
@@ -425,12 +452,16 @@ mod tests {
     use serde_json::json;
 
     use super::proxy_rules;
+    use crate::models::RequestRule;
 
     #[test]
     fn rules_match_the_proxy_shape() {
-        let rules = vec![
-            json!({"host":"api.example.com","cidr":null,"http_methods":["POST"],"paths":["/v1/*"],"position":0}),
-        ];
+        let rules = vec![RequestRule {
+            host: Some("api.example.com".to_owned()),
+            cidr: None,
+            http_methods: vec!["POST".to_owned()],
+            paths: vec!["/v1/*".to_owned()],
+        }];
         assert_eq!(
             proxy_rules(&rules),
             json!([{"host":"api.example.com","methods":["POST"],"paths":["/v1/*"]}])

@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use sqlx::PgPool;
 
 use crate::active_record_encryption::ActiveRecordEncryption;
@@ -39,14 +40,143 @@ impl ProxyRecord {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CredentialKind {
+    Static,
+    GcpAuth,
+    GcpIdToken,
+    AwsAuth,
+    OauthToken,
+    PgDsn,
+    Hmac,
+}
+
+impl CredentialKind {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "static" => Some(Self::Static),
+            "gcp_auth" => Some(Self::GcpAuth),
+            "gcp_id_token" => Some(Self::GcpIdToken),
+            "aws_auth" => Some(Self::AwsAuth),
+            "oauth_token" => Some(Self::OauthToken),
+            "pg_dsn" => Some(Self::PgDsn),
+            "hmac" => Some(Self::Hmac),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Credential {
-    pub(crate) kind: String,
+    pub(crate) kind: CredentialKind,
     pub(crate) id: i64,
     pub(crate) priority: i32,
-    pub(crate) data: Value,
-    pub(crate) sources: Vec<Value>,
-    pub(crate) rules: Vec<Value>,
+    pub(crate) data: CredentialData,
+    pub(crate) sources: Vec<SecretSource>,
+    pub(crate) rules: Vec<RequestRule>,
+}
+
+#[derive(Debug)]
+pub(crate) enum CredentialData {
+    Static(StaticData),
+    GcpAuth(GcpAuthData),
+    GcpIdToken(GcpIdTokenData),
+    AwsAuth(AwsAuthData),
+    OauthToken(OauthTokenData),
+    PgDsn(PgDsnData),
+    Hmac(HmacData),
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct StaticData {
+    pub(crate) inject_config: Option<Value>,
+    pub(crate) replace_config: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct GcpAuthData {
+    pub(crate) credentials_provider: Option<Value>,
+    pub(crate) subject: Option<String>,
+    pub(crate) scopes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct GcpIdTokenData {
+    pub(crate) audience: String,
+    pub(crate) header: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AwsAuthData {
+    pub(crate) allowed_regions: Vec<String>,
+    pub(crate) allowed_services: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OauthTokenData {
+    pub(crate) grant: String,
+    pub(crate) token_endpoint: String,
+    pub(crate) audience: Option<String>,
+    pub(crate) scopes: Vec<String>,
+    pub(crate) header: Option<String>,
+    pub(crate) value_prefix: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PgDsnData {
+    pub(crate) foreign_id: String,
+    pub(crate) database: String,
+    pub(crate) role: Option<String>,
+    pub(crate) settings: Vec<PostgresSetting>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PostgresSetting {
+    pub(crate) name: String,
+    pub(crate) value: Option<Value>,
+    pub(crate) value_from: Option<PostgresValueFrom>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PostgresValueFrom {
+    pub(crate) principal_label: Option<String>,
+    pub(crate) proxy_label: Option<String>,
+    pub(crate) principal_field: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct HmacData {
+    pub(crate) timestamp_format: String,
+    pub(crate) signature_algorithm: String,
+    pub(crate) signature_key_encoding: String,
+    pub(crate) signature_output_encoding: String,
+    pub(crate) signature_message: String,
+    pub(crate) headers: Vec<HmacHeader>,
+    pub(crate) allow_chunked_body: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct HmacHeader {
+    pub(crate) name: String,
+    pub(crate) value: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SecretSource {
+    pub(crate) source_type: String,
+    pub(crate) config: Map<String, Value>,
+    pub(crate) secret: Option<String>,
+    pub(crate) broker_access_token: Option<String>,
+    pub(crate) role: Option<String>,
+    pub(crate) role_kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RequestRule {
+    pub(crate) host: Option<String>,
+    pub(crate) cidr: Option<String>,
+    pub(crate) http_methods: Vec<String>,
+    pub(crate) paths: Vec<String>,
 }
 
 #[derive(Default)]

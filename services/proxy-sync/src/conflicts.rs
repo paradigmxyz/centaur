@@ -1,31 +1,29 @@
 use std::collections::HashMap;
 
-use serde_json::Value;
-
-use crate::models::Credential;
+use crate::models::{Credential, CredentialData, CredentialKind};
 
 pub(crate) fn suppress(credentials: &mut Vec<Credential>) {
     let mut indexes: Vec<usize> = (0..credentials.len()).collect();
-    indexes.sort_by_key(|&i| (-credentials[i].priority, -credentials[i].id));
+    indexes.sort_by_key(|&index| (-credentials[index].priority, -credentials[index].id));
     let mut claimed: HashMap<String, Vec<(String, i32)>> = HashMap::new();
     let mut suppressed = vec![false; credentials.len()];
-    for i in indexes {
-        let claims = claims(&credentials[i]);
+    for index in indexes {
+        let claims = claims(&credentials[index]);
         let stronger = claims.iter().any(|(scope, target)| {
             claimed.get(target).is_some_and(|prior| {
                 prior.iter().any(|(other, priority)| {
-                    *priority > credentials[i].priority && scopes_overlap(scope, other)
+                    *priority > credentials[index].priority && scopes_overlap(scope, other)
                 })
             })
         });
         if stronger {
-            suppressed[i] = true;
+            suppressed[index] = true;
         } else {
             for (scope, target) in claims {
                 claimed
                     .entry(target)
                     .or_default()
-                    .push((scope, credentials[i].priority));
+                    .push((scope, credentials[index].priority));
             }
         }
     }
@@ -38,66 +36,55 @@ pub(crate) fn suppress(credentials: &mut Vec<Credential>) {
 }
 
 fn claims(credential: &Credential) -> Vec<(String, String)> {
-    if credential.kind == "pg_dsn" {
+    if credential.kind == CredentialKind::PgDsn {
         return Vec::new();
     }
-    let targets: Vec<String> = match credential.kind.as_str() {
-        "static" => {
-            if let Some(inject) = credential
-                .data
-                .get("inject_config")
-                .filter(|value| present(Some(value)))
-            {
-                if let Some(header) = inject.get("header").and_then(Value::as_str) {
+    let targets: Vec<String> = match &credential.data {
+        CredentialData::Static(data) => {
+            if let Some(inject) = data.inject_config.as_ref().filter(|value| present(value)) {
+                if let Some(header) = inject.get("header").and_then(|value| value.as_str()) {
                     vec![format!("header:{}", header.to_lowercase())]
-                } else if let Some(param) = inject.get("query_param").and_then(Value::as_str) {
+                } else if let Some(param) =
+                    inject.get("query_param").and_then(|value| value.as_str())
+                {
                     vec![format!("query:{param}")]
                 } else {
                     vec![]
                 }
             } else {
-                credential
-                    .data
-                    .get("replace_config")
+                data.replace_config
+                    .as_ref()
                     .and_then(|value| value.get("match_headers"))
-                    .and_then(Value::as_array)
+                    .and_then(|value| value.as_array())
                     .into_iter()
                     .flatten()
-                    .filter_map(Value::as_str)
+                    .filter_map(|value| value.as_str())
                     .map(|value| format!("header:{}", value.to_lowercase()))
                     .collect()
             }
         }
-        "gcp_auth" | "aws_auth" | "oauth_token" => vec!["header:authorization".to_owned()],
-        "gcp_id_token" => vec![format!(
+        CredentialData::GcpAuth(_) | CredentialData::AwsAuth(_) | CredentialData::OauthToken(_) => {
+            vec!["header:authorization".to_owned()]
+        }
+        CredentialData::GcpIdToken(data) => vec![format!(
             "header:{}",
-            credential
-                .data
-                .get("header")
-                .and_then(Value::as_str)
-                .unwrap_or("authorization")
+            data.header.as_deref().unwrap_or("authorization")
         )],
-        "hmac" => credential
-            .data
-            .get("headers")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|header| header.get("name").and_then(Value::as_str))
-            .map(|header| format!("header:{}", header.to_lowercase()))
+        CredentialData::Hmac(data) => data
+            .headers
+            .iter()
+            .map(|header| format!("header:{}", header.name.to_lowercase()))
             .collect(),
-        _ => vec![],
+        CredentialData::PgDsn(_) => vec![],
     };
     let scopes = credential.rules.iter().filter_map(|rule| {
-        if let Some(host) = rule.get("host").and_then(Value::as_str) {
+        if let Some(host) = &rule.host {
             Some(format!(
                 "host:{}",
                 host.trim().trim_end_matches('.').to_lowercase()
             ))
         } else {
-            rule.get("cidr")
-                .and_then(Value::as_str)
-                .map(|value| format!("cidr:{value}"))
+            rule.cidr.as_ref().map(|value| format!("cidr:{value}"))
         }
     });
     scopes
@@ -134,13 +121,13 @@ fn scopes_overlap(a: &str, b: &str) -> bool {
             .all(|(x, y)| *x == "*" || y == "*" || *x == y)
 }
 
-fn present(value: Option<&Value>) -> bool {
+fn present(value: &serde_json::Value) -> bool {
     match value {
-        None | Some(Value::Null) => false,
-        Some(Value::String(value)) => !value.is_empty(),
-        Some(Value::Array(value)) => !value.is_empty(),
-        Some(Value::Object(value)) => !value.is_empty(),
-        Some(_) => true,
+        serde_json::Value::Null => false,
+        serde_json::Value::String(value) => !value.is_empty(),
+        serde_json::Value::Array(value) => !value.is_empty(),
+        serde_json::Value::Object(value) => !value.is_empty(),
+        _ => true,
     }
 }
 
@@ -149,25 +136,47 @@ mod tests {
     use serde_json::json;
 
     use super::suppress;
-    use crate::models::Credential;
+    use crate::models::{
+        Credential, CredentialData, CredentialKind, GcpAuthData, RequestRule, StaticData,
+    };
 
     #[test]
     fn higher_priority_conflict_suppresses_lower_priority() {
-        let make = |kind: &str, id, priority| Credential {
-            kind: kind.to_owned(),
-            id,
-            priority,
-            data: if kind == "static" {
-                json!({"inject_config":{"header":"Authorization"}})
-            } else {
-                json!({})
-            },
-            sources: vec![],
-            rules: vec![json!({"host":"api.example.com"})],
+        let rules = || {
+            vec![RequestRule {
+                host: Some("api.example.com".to_owned()),
+                cidr: None,
+                http_methods: vec![],
+                paths: vec![],
+            }]
         };
-        let mut credentials = vec![make("gcp_auth", 1, 0), make("static", 2, 100)];
+        let mut credentials = vec![
+            Credential {
+                kind: CredentialKind::GcpAuth,
+                id: 1,
+                priority: 0,
+                data: CredentialData::GcpAuth(GcpAuthData {
+                    credentials_provider: None,
+                    subject: None,
+                    scopes: vec![],
+                }),
+                sources: vec![],
+                rules: rules(),
+            },
+            Credential {
+                kind: CredentialKind::Static,
+                id: 2,
+                priority: 100,
+                data: CredentialData::Static(StaticData {
+                    inject_config: Some(json!({"header":"Authorization"})),
+                    replace_config: None,
+                }),
+                sources: vec![],
+                rules: rules(),
+            },
+        ];
         suppress(&mut credentials);
         assert_eq!(credentials.len(), 1);
-        assert_eq!(credentials[0].kind, "static");
+        assert_eq!(credentials[0].kind, CredentialKind::Static);
     }
 }
