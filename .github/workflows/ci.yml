@@ -229,7 +229,7 @@ jobs:
         run: |
           export CENTAUR_CONSOLE_DATABASE_URL="$DATABASE_URL"
           bin/rails db:prepare
-          bin/rails test ../proxy-sync/tests/rails_parity_test.rb
+          bin/rails test ../proxy-sync/tests/rails_parity_test.rb --verbose
 
   rust-api:
     name: Rust API fmt, clippy, and tests
