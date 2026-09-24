@@ -216,27 +216,17 @@ struct SlackChannelItem {
     purpose: String,
     topic: String,
     member_count: u64,
-    is_private: Option<bool>,
-    is_im: Option<bool>,
-    is_mpim: Option<bool>,
+    is_private: bool,
+    is_im: bool,
+    is_mpim: bool,
     is_member: bool,
     can_upload: bool,
     can_download: bool,
     can_read_history: bool,
 }
 
-/// Deserialize a Slack conversation flag as tri-state metadata: `Some` only for
-/// an explicit boolean, `None` (unknown) when Slack omits the field, sends
-/// null, or sends a non-boolean value. Never defaults to public or private.
-fn slack_bool_metadata<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = Option::<Value>::deserialize(deserializer)?;
-    Ok(match value {
-        Some(Value::Bool(flag)) => Some(flag),
-        _ => None,
-    })
+fn default_private() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -250,12 +240,12 @@ struct SlackChannel {
     topic: SlackChannelText,
     #[serde(default)]
     num_members: u64,
-    #[serde(default, deserialize_with = "slack_bool_metadata")]
-    is_private: Option<bool>,
-    #[serde(default, deserialize_with = "slack_bool_metadata")]
-    is_im: Option<bool>,
-    #[serde(default, deserialize_with = "slack_bool_metadata")]
-    is_mpim: Option<bool>,
+    #[serde(default = "default_private")]
+    is_private: bool,
+    #[serde(default)]
+    is_im: bool,
+    #[serde(default)]
+    is_mpim: bool,
     #[serde(default)]
     is_member: bool,
 }
@@ -1413,7 +1403,7 @@ async fn ensure_slack_channel_allowed(
 }
 
 fn slack_channel_has_default_access(channel: &SlackChannel) -> bool {
-    channel.is_private == Some(false) && channel.is_member
+    !channel.is_private && channel.is_member
 }
 
 fn slack_channel_ids_from_claims(claims: &SlackFileProxyClaims) -> Result<Vec<String>, ApiError> {
@@ -1453,9 +1443,6 @@ fn slack_channel_item(
         purpose: channel.purpose.value.clone(),
         topic: channel.topic.value.clone(),
         member_count: channel.num_members,
-        // Conversation type stays tri-state: explicit Slack metadata passes
-        // through verbatim, and missing or non-boolean values serialize as
-        // null (unknown) instead of being inferred from the channel ID prefix.
         is_private: channel.is_private,
         is_im: channel.is_im,
         is_mpim: channel.is_mpim,
@@ -1751,9 +1738,9 @@ mod tests {
             purpose: String::new(),
             topic: String::new(),
             member_count: 0,
-            is_private: Some(false),
-            is_im: None,
-            is_mpim: None,
+            is_private: false,
+            is_im: false,
+            is_mpim: false,
             is_member: true,
             can_upload: false,
             can_download: false,
@@ -1836,9 +1823,9 @@ mod tests {
         assert_eq!(item.purpose, "Company updates");
         assert_eq!(item.topic, "Announcements");
         assert_eq!(item.member_count, 42);
-        assert_eq!(item.is_private, Some(false));
-        assert_eq!(item.is_im, None);
-        assert_eq!(item.is_mpim, None);
+        assert!(!item.is_private);
+        assert!(!item.is_im);
+        assert!(!item.is_mpim);
         assert!(item.is_member);
         assert!(item.can_upload);
         assert!(item.can_download);
@@ -1846,104 +1833,45 @@ mod tests {
     }
 
     #[test]
-    fn channel_item_keeps_missing_or_invalid_privacy_metadata_unknown() {
+    fn channel_item_defaults_missing_privacy_metadata_to_private() {
         let claims = test_claims();
 
-        // Absent metadata stays unknown for every conversation ID prefix; a
-        // `G` prefix alone never implies private (or public).
         for channel_id in ["C123456789", "D123456789", "G123456789"] {
             let channel = test_channel(json!({ "id": channel_id }));
             let item = slack_channel_item(&claims, channel_id, &channel);
-            assert_eq!(item.is_private, None, "absent is_private for {channel_id}");
-            assert_eq!(item.is_im, None);
-            assert_eq!(item.is_mpim, None);
+            assert!(item.is_private, "missing is_private for {channel_id}");
+            assert!(!item.is_im);
+            assert!(!item.is_mpim);
         }
-
-        let null_metadata = test_channel(json!({
-            "id": "C123456789",
-            "is_private": null,
-            "is_im": null,
-            "is_mpim": null
-        }));
-        let item = slack_channel_item(&claims, "C123456789", &null_metadata);
-        assert_eq!(item.is_private, None);
-        assert_eq!(item.is_im, None);
-        assert_eq!(item.is_mpim, None);
-
-        // Wrong-typed values are unknown, not false, and do not fail parsing.
-        let wrong_type = test_channel(json!({
-            "id": "C123456789",
-            "is_private": "yes",
-            "is_im": 1,
-            "is_mpim": "false"
-        }));
-        let item = slack_channel_item(&claims, "C123456789", &wrong_type);
-        assert_eq!(item.is_private, None);
-        assert_eq!(item.is_im, None);
-        assert_eq!(item.is_mpim, None);
     }
 
     #[test]
-    fn channel_item_passes_explicit_conversation_type_through() {
+    fn channel_item_passes_conversation_type_through() {
         let claims = test_claims();
-
-        let private_item = slack_channel_item(
-            &claims,
-            "G123456789",
-            &test_channel(json!({ "id": "G123456789", "is_private": true })),
-        );
-        assert_eq!(private_item.is_private, Some(true));
 
         let public_item = slack_channel_item(
             &claims,
             "C123456789",
             &test_channel(json!({ "id": "C123456789", "is_private": false })),
         );
-        assert_eq!(public_item.is_private, Some(false));
-        assert_eq!(public_item.is_im, None);
-        assert_eq!(public_item.is_mpim, None);
+        assert!(!public_item.is_private);
 
         let dm_item = slack_channel_item(
             &claims,
             "D123456789",
             &test_channel(json!({ "id": "D123456789", "is_im": true })),
         );
-        assert_eq!(dm_item.is_im, Some(true));
-        assert_eq!(dm_item.is_private, None);
-        assert_eq!(dm_item.is_mpim, None);
+        assert!(dm_item.is_private);
+        assert!(dm_item.is_im);
+        assert!(!dm_item.is_mpim);
 
         let mpim_item = slack_channel_item(
             &claims,
             "G987654321",
-            &test_channel(json!({ "id": "G987654321", "is_mpim": true, "is_private": true })),
+            &test_channel(json!({ "id": "G987654321", "is_mpim": true })),
         );
-        assert_eq!(mpim_item.is_mpim, Some(true));
-        assert_eq!(mpim_item.is_private, Some(true));
-    }
-
-    #[test]
-    fn channel_item_serializes_unknown_conversation_type_as_null_fields() {
-        let claims = test_claims();
-        let item = slack_channel_item(
-            &claims,
-            "C123456789",
-            &test_channel(json!({ "id": "C123456789" })),
-        );
-
-        let value = serde_json::to_value(&item).unwrap();
-        assert_eq!(value["is_private"], Value::Null);
-        assert_eq!(value["is_im"], Value::Null);
-        assert_eq!(value["is_mpim"], Value::Null);
-        assert_eq!(value["is_member"], Value::Bool(false));
-
-        let item = slack_channel_item(
-            &claims,
-            "D123456789",
-            &test_channel(json!({ "id": "D123456789", "is_im": true })),
-        );
-        let value = serde_json::to_value(&item).unwrap();
-        assert_eq!(value["is_im"], Value::Bool(true));
-        assert_eq!(value["is_private"], Value::Null);
+        assert!(mpim_item.is_private);
+        assert!(mpim_item.is_mpim);
     }
 
     #[test]
@@ -1969,7 +1897,7 @@ mod tests {
         for inaccessible in [
             test_channel(json!({"id": "G123456789", "is_private": true, "is_member": true})),
             test_channel(json!({"id": "C123456789", "is_private": false, "is_member": false})),
-            // Unknown privacy classification is not proof of publicness.
+            // Missing privacy metadata defaults to private.
             test_channel(json!({"id": "D123456789", "is_member": true})),
         ] {
             assert!(!slack_channel_has_default_access(&inaccessible));
