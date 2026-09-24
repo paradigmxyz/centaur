@@ -78,6 +78,8 @@ jobs:
             '^\.github/workflows/ci\.yml$'
           set_output proxy_sync_checks \
             '^services/proxy-sync/' \
+            '^services/console/' \
+            '^\.github/scripts/start-paradedb-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
           set_output rust_api \
             '^services/api-rs/' \
@@ -202,6 +204,31 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+      - name: Build parity test server
+        run: cargo build --locked
+
+      - name: Start parity database
+        working-directory: .
+        run: .github/scripts/start-paradedb-postgres.sh proxy-sync-parity-postgres 5432 proxy_sync_parity_test
+
+      - name: Install Console packages
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
+
+      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
+        with:
+          working-directory: services/console
+          bundler-cache: true
+
+      - name: Compare Rails and Rust sync responses
+        working-directory: services/console
+        env:
+          RAILS_ENV: test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/proxy_sync_parity_test
+          PROXY_SYNC_BINARY: ../proxy-sync/target/debug/centaur-proxy-sync
+        run: |
+          bin/rails db:prepare
+          bin/rails test ../proxy-sync/tests/rails_parity_test.rb
 
   rust-api:
     name: Rust API fmt, clippy, and tests
