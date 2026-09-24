@@ -139,7 +139,8 @@ class SecretSourceTest < ActiveSupport::TestCase
     cred = make_broker_credential(access_token: nil)
     source = SecretSource.create!(source_type: "token_broker",
                                   config: { "credential_id" => cred.foreign_id })
-    cred.update!(foreign_id: "renamed-#{SecureRandom.hex(4)}")
+    assert_not cred.update(foreign_id: "renamed-#{SecureRandom.hex(4)}")
+    source.reload.save!
 
     assert_equal source, SecretSource.referencing_broker_credential(cred).sole
     assert_equal cred, source.reload.broker_credential
@@ -169,8 +170,9 @@ class SecretSourceTest < ActiveSupport::TestCase
   end
 
   test "token_broker source requires credential_id without linking an unrelated credential" do
-    unrelated = make_broker_credential(access_token: nil)
-    unrelated.update!(foreign_id: nil)
+    unrelated = BrokerCredential.create!(foreign_id: nil,
+                                           token_endpoint: "https://idp.example/token", client_id: "cid",
+                                           created_by: users(:acme_admin), refresh_token: "seed")
     s = new_source(source_type: "token_broker", config: {})
 
     assert_not s.valid?
