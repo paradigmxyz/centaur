@@ -116,6 +116,11 @@ class SecretSource < ApplicationRecord
     end
 
     ref = config["credential_id"]
+    if ref.blank?
+      self.broker_credential = nil
+      return
+    end
+
     self.broker_credential = if BrokerCredential.decode_oid(ref)
       BrokerCredential.find_by_oid(ref)
     else

@@ -168,10 +168,14 @@ class SecretSourceTest < ActiveSupport::TestCase
     assert s.errors[:config].any? { |m| m.include?("failure_ttl") }
   end
 
-  test "token_broker source requires credential_id" do
+  test "token_broker source requires credential_id without linking an unrelated credential" do
+    unrelated = make_broker_credential(access_token: nil)
+    unrelated.update!(foreign_id: nil)
     s = new_source(source_type: "token_broker", config: {})
+
     assert_not s.valid?
     assert s.errors[:config].any? { |m| m.include?("credential_id") }
+    assert_nil s.broker_credential
   end
 
   test "token_broker source resolves to a control_plane inline value at sync" do

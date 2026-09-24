@@ -43,6 +43,8 @@ class AddBrokerCredentialToSecretSources < ActiveRecord::Migration[8.1]
   private
 
   def resolve_credential(reference)
+    return nil if reference.blank?
+
     id = decode_oid(reference)
     return MigrationBrokerCredential.find_by(id: id) if id
 
