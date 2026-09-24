@@ -135,15 +135,29 @@ class SecretSourceTest < ActiveSupport::TestCase
     assert_equal cred, s.broker_credential
   end
 
-  test "token_broker reference lookup uses the durable credential link" do
-    cred = make_broker_credential(access_token: nil)
+  test "token_broker delivery and reference lookup use the durable credential link" do
+    cred = make_broker_credential(access_token: "live-token")
     source = SecretSource.create!(source_type: "token_broker",
                                   config: { "credential_id" => cred.foreign_id })
-    assert_not cred.update(foreign_id: "renamed-#{SecureRandom.hex(4)}")
-    source.reload.save!
+    source.update_columns(config: { "credential_id" => "stale-reference" })
+    source.reload
 
     assert_equal source, SecretSource.referencing_broker_credential(cred).sole
-    assert_equal cred, source.reload.broker_credential
+    assert_equal({ "type" => "control_plane", "value" => "live-token" }, source.to_proxy_source)
+    assert source.deliverable?
+  end
+
+  test "database permits an unresolved legacy token_broker source during migration" do
+    now = Time.current
+    reference = "legacy-missing-#{SecureRandom.hex(4)}"
+
+    assert_nothing_raised do
+      SecretSource.insert_all!([
+        { source_type: "token_broker", config: { "credential_id" => reference },
+          broker_credential_id: nil, created_at: now, updated_at: now }
+      ])
+    end
+    assert_nil SecretSource.find_by!(config: { "credential_id" => reference }).broker_credential_id
   end
 
   test "token_broker source rejects a reference that does not resolve" do

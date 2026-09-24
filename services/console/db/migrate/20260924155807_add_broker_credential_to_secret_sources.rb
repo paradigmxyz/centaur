@@ -10,7 +10,7 @@ class AddBrokerCredentialToSecretSources < ActiveRecord::Migration[8.1]
     self.table_name = "broker_credentials"
   end
 
-  CHECK_NAME = "secret_sources_token_broker_credential_present".freeze
+  CHECK_NAME = "secret_sources_broker_credential_requires_token_broker".freeze
   OID_PREFIX = "bcr".freeze
   OID_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".freeze
   OID_MIN_LENGTH = 8
@@ -19,19 +19,23 @@ class AddBrokerCredentialToSecretSources < ActiveRecord::Migration[8.1]
     add_reference :secret_sources, :broker_credential, null: true, foreign_key: true
     MigrationSecretSource.reset_column_information
 
+    unresolved_source_ids = []
     MigrationSecretSource.where(source_type: "token_broker").find_each do |source|
       reference = source.config.to_h["credential_id"]
       credential = resolve_credential(reference)
       unless credential
-        raise ActiveRecord::MigrationError,
-              "token_broker secret source #{source.id} references missing broker credential #{reference.inspect}"
+        unresolved_source_ids << source.id
+        next
       end
 
       source.update_columns(broker_credential_id: credential.id)
     end
+    if unresolved_source_ids.any?
+      say "Left unresolved token_broker secret sources unchanged: #{unresolved_source_ids.join(", ")}"
+    end
 
     add_check_constraint :secret_sources,
-                         "(source_type = 'token_broker') = (broker_credential_id IS NOT NULL)",
+                         "broker_credential_id IS NULL OR source_type = 'token_broker'",
                          name: CHECK_NAME
   end
 

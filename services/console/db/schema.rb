@@ -428,7 +428,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_09_24_155807) do
     t.index ["pg_dsn_secret_id"], name: "index_secret_sources_on_pg_dsn_secret_id", unique: true
     t.index ["source_type"], name: "index_secret_sources_on_source_type"
     t.index ["static_secret_id"], name: "index_secret_sources_on_static_secret_id", unique: true
-    t.check_constraint "(source_type::text = 'token_broker'::text) = (broker_credential_id IS NOT NULL)", name: "secret_sources_token_broker_credential_present"
+    t.check_constraint "broker_credential_id IS NULL OR source_type::text = 'token_broker'::text", name: "secret_sources_broker_credential_requires_token_broker"
   end
 
   create_table "skill_editors", force: :cascade do |t|
