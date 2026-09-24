@@ -76,13 +76,10 @@ class SecretSource < ApplicationRecord
     credential.present? && brokered_credential&.id == credential.id
   end
 
-  # token_broker sources that reference the given broker credential by oid or
-  # foreign_id. Used to block deleting a credential still in use.
+  # Used to invalidate principals when a broker token rotates and to block
+  # deleting a credential that a token_broker source still references.
   def self.referencing_broker_credential(credential)
-    scope = where(source_type: "token_broker")
-    return scope.where("config->>'credential_id' = ?", credential.oid) if credential.foreign_id.blank?
-
-    scope.where("config->>'credential_id' IN (:oid, :fid)", oid: credential.oid, fid: credential.foreign_id)
+    where(source_type: "token_broker", broker_credential_id: credential.id)
   end
 
   OWNER_ASSOCIATIONS = %i[

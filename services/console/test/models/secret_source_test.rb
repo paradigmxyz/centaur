@@ -135,6 +135,16 @@ class SecretSourceTest < ActiveSupport::TestCase
     assert_equal cred, s.broker_credential
   end
 
+  test "token_broker reference lookup uses the durable credential link" do
+    cred = make_broker_credential(access_token: nil)
+    source = SecretSource.create!(source_type: "token_broker",
+                                  config: { "credential_id" => cred.foreign_id })
+    cred.update!(foreign_id: "renamed-#{SecureRandom.hex(4)}")
+
+    assert_equal source, SecretSource.referencing_broker_credential(cred).sole
+    assert_equal cred, source.reload.broker_credential
+  end
+
   test "token_broker source rejects a reference that does not resolve" do
     # A foreign_id with no such credential.
     s = new_source(source_type: "token_broker",
