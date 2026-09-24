@@ -31,6 +31,10 @@ apiRs:
   image:
     pullPolicy: IfNotPresent
 
+proxySync:
+  image:
+    pullPolicy: IfNotPresent
+
 console:
   image:
     pullPolicy: IfNotPresent

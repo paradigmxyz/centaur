@@ -460,6 +460,23 @@ agentSandbox:
   controller:
     extensions: false
 
+# Rust proxy sync endpoint. When enabled, api-rs directs managed iron-proxy
+# instances here for POST /api/v1/proxy/sync while all operator/admin traffic
+# continues to use Console. The service reads Console's database directly.
+proxySync:
+  enabled: false
+  replicaCount: 1
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  image:
+    repository: centaur-proxy-sync
+    tag: latest
+    pullPolicy: Always
+  port: 8080
+  databaseMaxConnections: 20
+  resources: {}
+
 # Rust session control plane (services/api-rs). Owns sessions, agent-k8s
 # sandboxes (via the agents.x-k8s.io Sandbox CRD), and the per-sandbox
 # iron-proxy/firewall.

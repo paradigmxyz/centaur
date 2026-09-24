@@ -442,6 +442,10 @@ spec:
             # plane's pods (callback + postgres-listener access).
             - name: KUBERNETES_API_POD_LABEL_SELECTOR
               value: {{ printf "app.kubernetes.io/name=%s,app.kubernetes.io/instance=%s,app.kubernetes.io/component=api-rs" (include "centaur.name" .) .Release.Name | quote }}
+{{- if .Values.proxySync.enabled }}
+            - name: KUBERNETES_CONTROL_PLANE_POD_LABEL_SELECTOR
+              value: {{ printf "app.kubernetes.io/name=%s,app.kubernetes.io/instance=%s,app.kubernetes.io/component=proxy-sync" (include "centaur.name" .) .Release.Name | quote }}
+{{- end }}
             - name: FIREWALL_MANAGER_SECRET_SOURCE
               value: {{ .Values.ironProxy.secretSource | quote }}
             - name: FIREWALL_MANAGER_SECRET_TTL
@@ -512,6 +516,10 @@ spec:
             # proxy sync.
             - name: IRON_CONTROL_URL
               value: {{ include "centaur.consoleUrl" . | quote }}
+{{- if .Values.proxySync.enabled }}
+            - name: IRON_CONTROL_PROXY_SYNC_URL
+              value: {{ include "centaur.proxySyncUrl" . | quote }}
+{{- end }}
             - name: IRON_CONTROL_API_KEY
               valueFrom:
                 secretKeyRef:

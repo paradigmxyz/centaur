@@ -231,3 +231,11 @@ IRON_CONTROL_API_KEY (their names are hardcoded in the Rust binaries); the URL
 {{- $console := include "centaur.consoleValues" . | fromYaml -}}
 {{- printf "http://%s:%v" (include "centaur.consoleHost" .) $console.service.httpPort -}}
 {{- end -}}
+
+{{- define "centaur.proxySyncName" -}}
+{{- include "centaur.componentName" (dict "root" . "component" "proxy-sync") -}}
+{{- end -}}
+
+{{- define "centaur.proxySyncUrl" -}}
+{{- printf "http://%s:%v" (include "centaur.proxySyncName" .) .Values.proxySync.port -}}
+{{- end -}}

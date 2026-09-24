@@ -355,6 +355,25 @@
         }
       }
     },
+    "proxySync": {
+      "allOf": [{ "$ref": "#/definitions/podScheduling" }],
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicaCount": { "type": "integer", "minimum": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "databaseMaxConnections": { "type": "integer", "minimum": 1 },
+        "resources": { "type": "object" },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string" }
+          }
+        }
+      }
+    },
     "apiRs": {
       "allOf": [{ "$ref": "#/definitions/podScheduling" }],
       "type": "object",
