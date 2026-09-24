@@ -6,7 +6,7 @@ mod identifiers;
 mod models;
 mod tokens;
 
-use std::{env, net::SocketAddr, sync::Arc};
+use std::{env, net::SocketAddr, str::FromStr, sync::Arc};
 
 use active_record_encryption::{ActiveRecordEncryption, Error as EncryptionError};
 use axum::{
@@ -22,7 +22,7 @@ use identifiers::oid;
 use models::{AppState, Config};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 use url::Url;
@@ -96,8 +96,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let database_url = required_env("IRON_CONTROL_DATABASE_URL")?;
+    let database_name = env::var("IRON_CONTROL_DATABASE_NAME")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
     let primary_key = required_env("IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY")?;
     let salt = required_env("IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT")?;
+    let connect_options = database_connect_options(&database_url, database_name.as_deref())?;
     let pool = PgPoolOptions::new()
         .max_connections(
             env::var("DATABASE_MAX_CONNECTIONS")
@@ -105,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(5),
         )
-        .connect(&database_url)
+        .connect_with(connect_options)
         .await?;
     let api_hosts = configured_hosts("CENTAUR_API_SERVER_PROXY_HOSTS", "CENTAUR_API_URL");
     let console_host = env::var("CENTAUR_CONSOLE_URL")
@@ -214,6 +218,44 @@ fn host_from_url(value: &str) -> Option<String> {
     Url::parse(value).ok()?.host_str().map(str::to_owned)
 }
 
+fn database_connect_options(
+    database_url: &str,
+    database_name: Option<&str>,
+) -> Result<PgConnectOptions, sqlx::Error> {
+    let options = PgConnectOptions::from_str(database_url)?;
+    Ok(match database_name {
+        Some(database_name) => options.database(database_name),
+        None => options,
+    })
+}
+
 fn required_env(name: &str) -> Result<String, Box<dyn std::error::Error>> {
     env::var(name).map_err(|_| format!("{name} is required").into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::database_connect_options;
+
+    #[test]
+    fn database_name_overrides_url_default() {
+        let options = database_connect_options(
+            "postgresql://tempo:secret@postgres.example:5432",
+            Some("iron_control_production"),
+        )
+        .expect("database URL should parse");
+
+        assert_eq!(options.get_database(), Some("iron_control_production"));
+    }
+
+    #[test]
+    fn explicit_url_database_is_preserved_without_override() {
+        let options = database_connect_options(
+            "postgresql://tempo:secret@postgres.example:5432/custom_console",
+            None,
+        )
+        .expect("database URL should parse");
+
+        assert_eq!(options.get_database(), Some("custom_console"));
+    }
 }

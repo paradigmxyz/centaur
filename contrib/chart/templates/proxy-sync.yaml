@@ -2,6 +2,7 @@
 {{- $name := include "centaur.proxySyncName" . }}
 {{- $secretEnv := include "centaur.secretEnvName" . }}
 {{- $prefix := .Values.secretManager.envPrefix }}
+{{- $console := include "centaur.consoleValues" . | fromYaml }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") }}
 apiVersion: v1
 kind: Service
@@ -55,6 +56,8 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sIRON_CONTROL_DATABASE_URL" $prefix }}
+            - name: IRON_CONTROL_DATABASE_NAME
+              value: {{ $console.database.name | quote }}
             - name: IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY
               valueFrom:
                 secretKeyRef:

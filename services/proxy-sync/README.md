@@ -17,7 +17,8 @@ configures newly created managed proxies to poll this service.
 
 ## Environment
 
-- `IRON_CONTROL_DATABASE_URL` — Console database URL.
+- `IRON_CONTROL_DATABASE_URL` — Console database server URL. It may include the database name.
+- `IRON_CONTROL_DATABASE_NAME` — optional database name override; the Helm chart sets this to Console's configured primary database.
 - `IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY` — Active Record encryption primary key.
 - `IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT` — Active Record key derivation salt.
 - `CENTAUR_JWT_SIGNING_SECRET` — optional shared key for generated API and sandbox-entitlement credentials.
