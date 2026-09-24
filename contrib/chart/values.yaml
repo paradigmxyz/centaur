@@ -463,6 +463,7 @@ agentSandbox:
 # Rust proxy sync endpoint. When enabled, api-rs directs managed iron-proxy
 # instances here for POST /api/v1/proxy/sync while all operator/admin traffic
 # continues to use Console. The service reads Console's database directly.
+# This component is under active development and must not be used yet.
 proxySync:
   enabled: false
   replicaCount: 1
