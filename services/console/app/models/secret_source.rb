@@ -4,7 +4,7 @@ class SecretSource < ApplicationRecord
   include SyncConfigOwnerInvalidation
 
   SOURCE_TYPES = %w[env aws_sm aws_ssm 1password 1password_connect control_plane token_broker].freeze
-  SYNC_CONFIG_REPLACEMENT_ATTRIBUTES = %w[source_type config secret role role_kind].freeze
+  SYNC_CONFIG_REPLACEMENT_ATTRIBUTES = %w[source_type config secret role role_kind broker_credential_id].freeze
 
   UNIVERSAL_OPTIONAL = %w[json_key ttl].freeze
 
@@ -42,6 +42,18 @@ class SecretSource < ApplicationRecord
 
   attr_readonly :source_type
   before_validation :resolve_broker_credential_reference
+
+  # Resolve either assignment order before sync replacement comparisons inspect
+  # broker_credential_id on an unsaved candidate source.
+  def source_type=(value)
+    super
+    resolve_broker_credential_reference
+  end
+
+  def config=(value)
+    super
+    resolve_broker_credential_reference
+  end
 
   # Maps this source to the iron-proxy `secrets` transform `source` block,
   # discriminated by `type`. For control_plane sources the decrypted value is
