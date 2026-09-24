@@ -634,7 +634,7 @@ impl CodexJsonRpcChild {
                 }
                 return Ok(value.get("result").cloned().unwrap_or(Value::Null));
             }
-            if notification_method(&value).is_some() {
+            if notification_method(&value).is_some() && !is_dropped_notification(&value) {
                 write_value(stdout, &value)?;
             }
         }
@@ -951,6 +951,17 @@ fn streams_turn_output(method: &str) -> bool {
     method.starts_with("item/") || method == "thread/tokenUsage/updated"
 }
 
+/// True for codex notifications dropped at the forward boundary instead of
+/// being forwarded. Deliberately a deny list: the wire contract is the codex
+/// notification shape verbatim, so unrecognized methods must keep flowing;
+/// only methods positively known to be dead weight belong here.
+/// `account/rateLimits/updated` arrives with every field null and nothing in
+/// `crates/harness-server` or `packages/harness-events` reads it, so forwarding
+/// it only adds log volume to the container log stream.
+fn is_dropped_notification(value: &Value) -> bool {
+    notification_method(value) == Some("account/rateLimits/updated")
+}
+
 fn is_server_request(value: &Value) -> bool {
     value.get("id").is_some() && value.get("method").is_some()
 }
@@ -1118,6 +1129,13 @@ mod tests {
         json!({ "method": "item/agentMessage/delta", "params": { "delta": "hi" } })
     }
 
+    fn rate_limits_updated() -> Value {
+        json!({
+            "method": "account/rateLimits/updated",
+            "params": { "rateLimits": { "primary": null, "secondary": null } }
+        })
+    }
+
     /// Runs a `(notification, is_terminal)` sequence through a `TurnGuard` and
     /// returns the methods forwarded plus, when a retry is signalled, the methods
     /// withheld for the caller to drop (on retry) or forward (out of budget).
@@ -1189,6 +1207,19 @@ mod tests {
             "params": { "status": { "type": "running" } }
         })));
         assert!(!is_system_error_status(&turn_started()));
+    }
+
+    #[test]
+    fn drops_only_the_rate_limits_notification() {
+        // Deny list, not an allow list: the known-dead rateLimits notification
+        // is dropped, while unrelated and unrecognized methods both keep
+        // flowing so the verbatim wire contract is preserved.
+        assert!(is_dropped_notification(&rate_limits_updated()));
+        assert!(!is_dropped_notification(&turn_started()));
+        assert!(!is_dropped_notification(&json!({
+            "method": "some/future/codexMethod",
+            "params": {}
+        })));
     }
 
     #[test]
