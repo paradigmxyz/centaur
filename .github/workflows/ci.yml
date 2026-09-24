@@ -20,6 +20,7 @@ jobs:
       migration_order: ${{ steps.filter.outputs.migration_order }}
       harness_server_checks: ${{ steps.filter.outputs.harness_server_checks }}
       rust_api: ${{ steps.filter.outputs.rust_api }}
+      proxy_sync_checks: ${{ steps.filter.outputs.proxy_sync_checks }}
       sandbox_e2e: ${{ steps.filter.outputs.sandbox_e2e }}
       sandbox_tests: ${{ steps.filter.outputs.sandbox_tests }}
       workflow_python_tests: ${{ steps.filter.outputs.workflow_python_tests }}
@@ -74,6 +75,9 @@ jobs:
             '^\.github/workflows/ci\.yml$'
           set_output harness_server_checks \
             '^crates/harness-server/' \
+            '^\.github/workflows/ci\.yml$'
+          set_output proxy_sync_checks \
+            '^services/proxy-sync/' \
             '^\.github/workflows/ci\.yml$'
           set_output rust_api \
             '^services/api-rs/' \
@@ -166,6 +170,37 @@ jobs:
 
       - name: Test
         working-directory: crates/harness-server
+        run: cargo test --locked
+
+  proxy-sync-checks:
+    name: Proxy sync fmt, clippy, and tests
+    runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.proxy_sync_checks == 'true'
+    defaults:
+      run:
+        working-directory: services/proxy-sync
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/proxy-sync
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
         run: cargo test --locked
 
   rust-api:
@@ -581,6 +616,7 @@ jobs:
       - ci_changes
       - migration-order
       - harness-server-checks
+      - proxy-sync-checks
       - rust-api
       - sandbox-e2e
       - sandbox-tests
@@ -595,5 +631,5 @@ jobs:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
-          allowed-skips: migration-order, harness-server-checks, rust-api, sandbox-e2e, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
+          allowed-skips: migration-order, harness-server-checks, proxy-sync-checks, rust-api, sandbox-e2e, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
           jobs: ${{ toJSON(needs) }}
