@@ -103,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             env::var("DATABASE_MAX_CONNECTIONS")
                 .ok()
                 .and_then(|value| value.parse().ok())
-                .unwrap_or(20),
+                .unwrap_or(5),
         )
         .connect(&database_url)
         .await?;

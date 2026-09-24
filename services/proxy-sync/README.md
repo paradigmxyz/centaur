@@ -24,4 +24,4 @@ configures newly created managed proxies to poll this service.
 - `CENTAUR_CONSOLE_URL` — Console URL used for sandbox-entitlement rules.
 - `CENTAUR_API_URL` / `CENTAUR_API_SERVER_PROXY_HOSTS` — API hosts used for generated API credentials.
 - `BIND_ADDR` — listen address; defaults to `0.0.0.0:8080`.
-- `DATABASE_MAX_CONNECTIONS` — SQLx pool limit; defaults to `20`.
+- `DATABASE_MAX_CONNECTIONS` — SQLx pool limit; defaults to `5`.

@@ -466,7 +466,8 @@ agentSandbox:
 # This component is under active development and must not be used yet.
 proxySync:
   enabled: false
-  replicaCount: 1
+  # Two replicas keep sync available during pod restarts and rolling updates.
+  replicaCount: 2
   nodeSelector: {}
   affinity: {}
   tolerations: []
@@ -475,7 +476,7 @@ proxySync:
     tag: latest
     pullPolicy: Always
   port: 8080
-  databaseMaxConnections: 20
+  databaseMaxConnections: 5
   resources: {}
 
 # Rust session control plane (services/api-rs). Owns sessions, agent-k8s
