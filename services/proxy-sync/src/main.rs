@@ -1,9 +1,8 @@
-use std::{collections::HashMap, env, io::Read, net::SocketAddr, sync::Arc};
+mod active_record_encryption;
 
-use aes_gcm::{
-    Aes256Gcm, KeyInit, Nonce,
-    aead::{Aead, Payload},
-};
+use std::{collections::HashMap, env, net::SocketAddr, sync::Arc};
+
+use active_record_encryption::{ActiveRecordEncryption, Error as EncryptionError};
 use axum::{
     Json, Router,
     extract::State,
@@ -11,14 +10,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
-use flate2::read::ZlibDecoder;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use pbkdf2::pbkdf2_hmac;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 use tower_http::trace::TraceLayer;
@@ -31,96 +26,10 @@ const EMPTY_ARRAY: Value = Value::Array(Vec::new());
 #[derive(Clone)]
 struct AppState {
     pool: PgPool,
-    encryption: Arc<RailsEncryption>,
+    encryption: Arc<ActiveRecordEncryption>,
     jwt_secret: Option<String>,
     api_hosts: Vec<String>,
     console_host: Option<String>,
-}
-
-#[derive(Debug)]
-struct RailsEncryption {
-    keys: [[u8; 32]; 2],
-}
-
-#[derive(Deserialize)]
-struct EncryptedMessage {
-    p: String,
-    #[serde(default)]
-    h: EncryptedHeaders,
-}
-
-#[derive(Default, Deserialize)]
-struct EncryptedHeaders {
-    iv: String,
-    at: String,
-    #[serde(default)]
-    c: bool,
-}
-
-impl RailsEncryption {
-    fn new(primary_key: &str, salt: &str) -> Self {
-        let mut sha256_key = [0; 32];
-        pbkdf2_hmac::<Sha256>(
-            primary_key.as_bytes(),
-            salt.as_bytes(),
-            1 << 16,
-            &mut sha256_key,
-        );
-        let mut sha1_key = [0; 32];
-        pbkdf2_hmac::<Sha1>(
-            primary_key.as_bytes(),
-            salt.as_bytes(),
-            1 << 16,
-            &mut sha1_key,
-        );
-        Self {
-            keys: [sha256_key, sha1_key],
-        }
-    }
-
-    fn decrypt(&self, encoded: &str) -> Result<String, ApiError> {
-        let message: EncryptedMessage = serde_json::from_str(encoded)
-            .map_err(|_| ApiError::internal("invalid encrypted attribute envelope"))?;
-        let ciphertext = STANDARD
-            .decode(message.p)
-            .map_err(|_| ApiError::internal("invalid encrypted attribute payload"))?;
-        let iv = STANDARD
-            .decode(message.h.iv)
-            .map_err(|_| ApiError::internal("invalid encrypted attribute IV"))?;
-        let tag = STANDARD
-            .decode(message.h.at)
-            .map_err(|_| ApiError::internal("invalid encrypted attribute tag"))?;
-        if iv.len() != 12 || tag.len() != 16 {
-            return Err(ApiError::internal("invalid encrypted attribute dimensions"));
-        }
-        let mut ciphertext_and_tag = ciphertext;
-        ciphertext_and_tag.extend_from_slice(&tag);
-        let mut plaintext = self
-            .keys
-            .iter()
-            .find_map(|key| {
-                let cipher = Aes256Gcm::new_from_slice(key).ok()?;
-                cipher
-                    .decrypt(
-                        Nonce::from_slice(&iv),
-                        Payload {
-                            msg: &ciphertext_and_tag,
-                            aad: b"",
-                        },
-                    )
-                    .ok()
-            })
-            .ok_or_else(|| ApiError::internal("encrypted attribute authentication failed"))?;
-        if message.h.c {
-            let mut decoded = Vec::new();
-            ZlibDecoder::new(plaintext.as_slice())
-                .read_to_end(&mut decoded)
-                .map_err(|_| ApiError::internal("encrypted attribute decompression failed"))?;
-            plaintext = decoded;
-        }
-        String::from_utf8(plaintext)
-            .map_err(|_| ApiError::internal("encrypted attribute was not UTF-8"))
-    }
 }
 
 #[derive(Debug)]
@@ -229,6 +138,12 @@ impl ApiError {
     }
 }
 
+impl From<EncryptionError> for ApiError {
+    fn from(error: EncryptionError) -> Self {
+        Self::internal(error.to_string())
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         if self.status.is_server_error() {
@@ -272,7 +187,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|url| host_from_url(&url));
     let state = AppState {
         pool,
-        encryption: Arc::new(RailsEncryption::new(&primary_key, &salt)),
+        encryption: Arc::new(ActiveRecordEncryption::new(&primary_key, &salt)),
         jwt_secret: env::var("CENTAUR_JWT_SIGNING_SECRET")
             .ok()
             .filter(|v| !v.trim().is_empty()),
@@ -475,7 +390,10 @@ async fn build_config(
     Ok(config)
 }
 
-fn source_value(source: &Value, encryption: &RailsEncryption) -> Result<Option<Value>, ApiError> {
+fn source_value(
+    source: &Value,
+    encryption: &ActiveRecordEncryption,
+) -> Result<Option<Value>, ApiError> {
     let source_type = string(source, "source_type");
     if source_type == "token_broker" {
         let Some(raw) = source.get("broker_access_token").and_then(Value::as_str) else {
@@ -526,7 +444,7 @@ fn proxy_rules(rules: &[Value]) -> Value {
     )
 }
 
-fn transform(c: &Credential, encryption: &RailsEncryption) -> Result<Value, ApiError> {
+fn transform(c: &Credential, encryption: &ActiveRecordEncryption) -> Result<Value, ApiError> {
     let rules = proxy_rules(&c.rules);
     match c.kind.as_str() {
         "gcp_auth" => {
@@ -613,7 +531,7 @@ fn transform(c: &Credential, encryption: &RailsEncryption) -> Result<Value, ApiE
     }
 }
 
-fn oauth_entry(c: &Credential, encryption: &RailsEncryption) -> Result<Value, ApiError> {
+fn oauth_entry(c: &Credential, encryption: &ActiveRecordEncryption) -> Result<Value, ApiError> {
     let mut entry = Map::new();
     entry.insert("grant".to_owned(), c.data["grant"].clone());
     entry.insert(
@@ -647,7 +565,7 @@ fn oauth_entry(c: &Credential, encryption: &RailsEncryption) -> Result<Value, Ap
 fn append_postgres(
     proxy: &ProxyRecord,
     credentials: &[Credential],
-    encryption: &RailsEncryption,
+    encryption: &ActiveRecordEncryption,
     config: &mut Config,
 ) -> Result<(), ApiError> {
     let mut positions: HashMap<String, usize> = HashMap::new();
@@ -1161,18 +1079,5 @@ mod tests {
         assert_eq!(oid("prn", 1), "prn_5CO4fITZ");
         assert_eq!(oid("prn", 3), "prn_xUC2fVYG");
         assert_eq!(oid("prn", 123), "prn_yRoWctYw");
-    }
-
-    #[test]
-    fn decrypts_active_record_encryption_envelopes() {
-        let encryption = RailsEncryption::new(
-            "dev_ar_encryption_primary_key_0000000000000000",
-            "dev_ar_encryption_key_derivation_salt_000000000",
-        );
-        let ciphertext = r#"{"p":"xOiyro9XYBkfABUF","h":{"iv":"pCjJC5SxH78ZN0Nm","at":"s9DIUyHAkF8ZAthKO6ROtw=="}}"#;
-        assert_eq!(encryption.decrypt(ciphertext).unwrap(), "known secret");
-
-        let legacy = r#"{"p":"dSeLBWwnaY1TWU1x","h":{"iv":"SB1xJfmKBwS48kLd","at":"DW6Ug2HRtVMhkRn7VEBbFg=="}}"#;
-        assert_eq!(encryption.decrypt(legacy).unwrap(), "known secret");
     }
 }
