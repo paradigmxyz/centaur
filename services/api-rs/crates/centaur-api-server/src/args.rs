@@ -1878,8 +1878,6 @@ struct IronProxyArgs {
     bootstrap_secret_name: Option<String>,
     #[arg(long = "kubernetes-api-pod-label-selector", env = "KUBERNETES_API_POD_LABEL_SELECTOR", value_parser = parse_label_selector_arg)]
     api_pod_label_selector: Option<BTreeMap<String, String>>,
-    #[arg(long = "kubernetes-control-plane-pod-label-selector", env = "KUBERNETES_CONTROL_PLANE_POD_LABEL_SELECTOR", value_parser = parse_label_selector_arg)]
-    control_plane_pod_label_selector: Option<BTreeMap<String, String>>,
 }
 
 impl IronProxyArgs {
@@ -1909,13 +1907,6 @@ impl IronProxyArgs {
             .filter(|labels| !labels.is_empty())
         {
             config.api_pod_labels = labels.clone();
-        }
-        if let Some(labels) = self
-            .control_plane_pod_label_selector
-            .as_ref()
-            .filter(|labels| !labels.is_empty())
-        {
-            config.control_plane_pod_labels = labels.clone();
         }
         Ok(config)
     }
@@ -2720,7 +2711,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_sync_url_and_pod_selector_can_be_overridden_independently() {
+    fn proxy_sync_url_override_preserves_console_url_and_egress_selector() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -2731,8 +2722,6 @@ mod tests {
             "http://proxy-sync.local:8080",
             "--iron-control-api-key",
             "iak_test",
-            "--kubernetes-control-plane-pod-label-selector",
-            "app.kubernetes.io/component=proxy-sync",
         ])
         .unwrap();
 
@@ -2744,7 +2733,7 @@ mod tests {
             proxy
                 .control_plane_pod_labels
                 .get("app.kubernetes.io/component"),
-            Some(&"proxy-sync".to_owned())
+            Some(&"console".to_owned())
         );
     }
 

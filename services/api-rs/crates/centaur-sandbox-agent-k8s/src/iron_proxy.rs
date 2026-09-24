@@ -360,7 +360,7 @@ impl AgentSandboxBackend {
             .await
             .map_err(|err| map_kube_error("create iron-proxy service", err))?;
         let control_target = control_plane_egress_target(
-            &sync.control_url,
+            &resolved.console_url,
             &self.config.namespace,
             iron_proxy.control_plane_pod_labels.clone(),
         );
