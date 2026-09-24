@@ -272,6 +272,8 @@ spec:
 {{- end }}
             - name: CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED
               value: {{ $console.googleDocsSync.enabled | quote }}
+            - name: CENTAUR_CONSOLE_GOOGLE_DRIVE_PDF_INDEXING_ENABLED
+              value: {{ $console.googleDocsSync.pdfIndexingEnabled | quote }}
             - name: PORT
               value: {{ $console.service.httpPort | quote }}
             - name: RAILS_LOG_TO_STDOUT

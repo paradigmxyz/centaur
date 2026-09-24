@@ -22,9 +22,10 @@ module GoogleDocs
       credential = eligible_credential(credential_id)
       return unless credential
 
-      sync_page(credential, sync_client(credential), load_checkpoint(credential))
+      checkpoint = load_checkpoint(credential)
+      sync_page(credential, sync_client(credential), checkpoint)
     rescue GoogleDocs::SyncCredential::InvalidPageTokenError
-      restart_initial_sync(credential)
+      restart_initial_sync(credential, checkpoint)
     end
 
     private
@@ -48,8 +49,12 @@ module GoogleDocs
       user_changes_page_token:,
       run_id: nil,
       full_sync_finished: false,
-      incremental_sync_finished: false
+      incremental_sync_finished: false,
+      pdf_backfill_version: nil,
+      metadata: {}
     )
+      metadata = metadata.to_h.deep_dup
+      metadata["pdf_backfill_version"] = pdf_backfill_version unless pdf_backfill_version.nil?
       payload = {
         broker_credential_id: credential.oid,
         provider_subject: credential.provider_subject.to_s,
@@ -57,7 +62,7 @@ module GoogleDocs
         changes_page_token: user_changes_page_token,
         last_run_id: run_id,
         last_error: "",
-        metadata: {}
+        metadata: metadata
       }
       now = Time.current.iso8601
       payload[:last_full_sync_at] = now if full_sync_finished
@@ -128,8 +133,13 @@ module GoogleDocs
       }
     end
 
-    def restart_initial_sync(credential)
-      persist_user_checkpoint(credential, user_changes_page_token: "", run_id: nil)
+    def restart_initial_sync(credential, checkpoint)
+      persist_user_checkpoint(
+        credential,
+        user_changes_page_token: "",
+        run_id: nil,
+        metadata: checkpoint.to_h.fetch("metadata", {})
+      )
       GoogleDocs::InitialSyncJob.perform_later(credential.id)
     end
   end

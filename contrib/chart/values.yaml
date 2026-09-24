@@ -190,6 +190,9 @@ console:
   # This does not disable Google OAuth or remove previously indexed content.
   googleDocsSync:
     enabled: false
+    # Download and index PDFs visible through Google Drive. PDFs larger than
+    # 50 MiB and PDFs requiring OCR are skipped.
+    pdfIndexingEnabled: false
   service:
     httpPort: 3000
   # Optional Ingress for the console. Bring your own controller — Tailscale

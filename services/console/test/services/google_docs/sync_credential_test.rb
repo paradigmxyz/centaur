@@ -2,6 +2,21 @@ require "test_helper"
 
 module GoogleDocs
   class SyncCredentialTest < ActiveSupport::TestCase
+    PDF_INDEXING_ENABLED_ENV = "CENTAUR_CONSOLE_GOOGLE_DRIVE_PDF_INDEXING_ENABLED"
+
+    setup do
+      @previous_pdf_indexing_enabled = ENV[PDF_INDEXING_ENABLED_ENV]
+      ENV[PDF_INDEXING_ENABLED_ENV] = "true"
+    end
+
+    teardown do
+      if @previous_pdf_indexing_enabled.nil?
+        ENV.delete(PDF_INDEXING_ENABLED_ENV)
+      else
+        ENV[PDF_INDEXING_ENABLED_ENV] = @previous_pdf_indexing_enabled
+      end
+    end
+
     def google_app
       OauthApp.create!(
         provider: "google",
@@ -119,6 +134,8 @@ module GoogleDocs
       assert_equal "true", files_params["supportsAllDrives"]
       refute_includes files_params, "driveId"
       assert_includes files_params["q"], "trashed = false"
+      assert_includes files_params["q"], GoogleDocs::SyncCredential::GOOGLE_DOC_MIME_TYPE
+      refute_includes files_params["q"], GoogleDocs::SyncCredential::PDF_MIME_TYPE
       changes_params = calls.find { |endpoint, _| endpoint == GoogleDocs::SyncCredential::CHANGES_LIST_ENDPOINT }.last
       assert_equal "change-100", changes_params["pageToken"]
       assert_equal "true", changes_params["includeRemoved"]
@@ -142,6 +159,24 @@ module GoogleDocs
         assert_raises(GoogleDocs::SyncCredential::InvalidPageTokenError) do
           sync.list_user_changes_page(page_token: "rejected-token")
         end
+      end
+    end
+
+    test "does not classify a rejected files page token as a Changes cursor failure" do
+      response = HttpClient::Response.new(
+        status: 400,
+        body: { error: { message: "Page token expired" } }.to_json,
+        headers: {}
+      )
+      api = Object.new
+      api.define_singleton_method(:get) { |*, **| response }
+      sync = GoogleDocs::SyncCredential.new(credential)
+
+      HttpClient.stub(:new, api) do
+        error = assert_raises(GoogleDocs::SyncCredential::GoogleApiError) do
+          sync.list_user_pdfs_page(page_token: "rejected-token")
+        end
+        refute_kind_of GoogleDocs::SyncCredential::InvalidPageTokenError, error
       end
     end
 
@@ -214,6 +249,151 @@ module GoogleDocs
       assert_equal "google_docs:doc-123:chunk-0000", batch[:context_documents].first[:document_id]
       assert_equal({ source: "google_docs" }, batch[:context_documents].first[:metadata])
       refute_includes batch[:context_documents].first[:metadata], :broker_credential_id
+    end
+
+    test "downloads, extracts, and chunks Drive PDFs" do
+      credential.update!(scopes: [ GoogleDocs::SyncCredential::DRIVE_READONLY_SCOPE ])
+      downloaded_pdf = "%PDF fixture bytes".b
+      google_http = lambda do |endpoint:, params:, access_token:|
+        assert_equal "#{GoogleDocs::SyncCredential::FILES_LIST_ENDPOINT}/pdf-123", endpoint
+        assert_equal({ "alt" => "media", "supportsAllDrives" => "true" }, params)
+        assert_equal "ya29.live", access_token
+        downloaded_pdf
+      end
+      extracted_text = "x" * (GoogleDocs::SyncCredential.chunk_chars + 1)
+      temporary_path = nil
+      extractor = lambda do |path|
+        temporary_path = path
+        assert_equal downloaded_pdf, File.binread(path)
+        extracted_text
+      end
+      sync = GoogleDocs::SyncCredential.new(
+        credential,
+        google_api_http: google_http,
+        pdf_text_extractor: extractor
+      )
+      file = google_doc.merge(
+        "id" => "pdf-123",
+        "name" => "Board Pack.pdf",
+        "mimeType" => GoogleDocs::SyncCredential::PDF_MIME_TYPE
+      )
+
+      assert sync.eligible_file?(file)
+      batch = sync.document_batch(file)
+
+      refute File.exist?(temporary_path)
+      assert_equal extracted_text, batch[:contents].first[:text_content]
+      assert_equal GoogleDocs::SyncCredential::PDF_MIME_TYPE, batch[:contents].first[:export_mime_type]
+      assert_equal 2, batch[:context_documents].length
+      assert_equal "google_docs:pdf-123:chunk-0000", batch[:context_documents].first[:document_id]
+      assert_equal "google_docs:pdf-123:chunk-0001", batch[:context_documents].second[:document_id]
+      assert_equal GoogleDocs::SyncCredential::PDF_MIME_TYPE, batch[:context_documents].first[:mime_type]
+      assert_equal({ source: "google_docs" }, batch[:context_documents].first[:metadata])
+    end
+
+    test "does not create chunks for PDFs without embedded text" do
+      credential.update!(scopes: [ GoogleDocs::SyncCredential::DRIVE_READONLY_SCOPE ])
+      sync = GoogleDocs::SyncCredential.new(
+        credential,
+        google_api_http: ->(**) { "%PDF fixture bytes".b },
+        pdf_text_extractor: ->(*) { "" }
+      )
+      file = google_doc.merge(
+        "id" => "pdf-123",
+        "name" => "Scanned.pdf",
+        "mimeType" => GoogleDocs::SyncCredential::PDF_MIME_TYPE
+      )
+
+      batch = sync.document_batch(file)
+
+      assert_empty batch[:context_documents]
+      assert_equal "", batch.dig(:contents, 0, :text_content)
+    end
+
+    test "rejects PDFs over the configured size limit before extraction" do
+      credential.update!(scopes: [ GoogleDocs::SyncCredential::DRIVE_READONLY_SCOPE ])
+      extractor = ->(*) { flunk "oversized PDF should not be extracted" }
+      sync = GoogleDocs::SyncCredential.new(
+        credential,
+        google_api_http: ->(**) { "123456" },
+        pdf_text_extractor: extractor,
+        max_pdf_bytes: 5
+      )
+      file = google_doc.merge(
+        "id" => "pdf-123",
+        "name" => "Board Pack.pdf",
+        "mimeType" => GoogleDocs::SyncCredential::PDF_MIME_TYPE
+      )
+
+      error = assert_raises(GoogleDocs::SyncCredential::PdfTooLargeError) do
+        sync.document_batch(file)
+      end
+
+      assert_equal "PDF exceeds the 50 MB indexing limit", error.message
+
+      failure = sync.content_failure_batch(file, error)
+      assert_equal "7", failure.dig(:contents, 0, :source_version)
+      assert_includes failure.dig(:contents, 0, :last_error), "PdfTooLargeError"
+      assert_empty failure[:context_documents]
+      assert failure[:replace_context_documents]
+    end
+
+    test "stops a streaming PDF download when chunks cross the size limit" do
+      credential.update!(scopes: [ GoogleDocs::SyncCredential::DRIVE_READONLY_SCOPE ])
+      response = Object.new
+      response.define_singleton_method(:code) { "200" }
+      response.define_singleton_method(:[]) { |_name| nil }
+      response.define_singleton_method(:read_body) do |&block|
+        block.call("123")
+        block.call("456")
+      end
+      http = Object.new
+      http.define_singleton_method(:use_ssl=) { |_| }
+      http.define_singleton_method(:open_timeout=) { |_| }
+      http.define_singleton_method(:read_timeout=) { |_| }
+      http.define_singleton_method(:request) { |_request, &block| block.call(response) }
+      sync = GoogleDocs::SyncCredential.new(credential, max_pdf_bytes: 5)
+      file = google_doc.merge(
+        "id" => "pdf-123",
+        "name" => "Board Pack.pdf",
+        "mimeType" => GoogleDocs::SyncCredential::PDF_MIME_TYPE
+      )
+
+      Net::HTTP.stub(:new, http) do
+        assert_raises(GoogleDocs::SyncCredential::PdfTooLargeError) do
+          sync.document_batch(file)
+        end
+      end
+    end
+
+    test "does not list PDFs when PDF indexing is disabled" do
+      credential.update!(scopes: [ GoogleDocs::SyncCredential::DRIVE_READONLY_SCOPE ])
+      ENV[PDF_INDEXING_ENABLED_ENV] = "false"
+      requested_params = nil
+      google_http = lambda do |params:, **|
+        requested_params = params
+        { "files" => [] }
+      end
+
+      GoogleDocs::SyncCredential.new(credential, google_api_http: google_http).list_user_files_page
+
+      assert_includes requested_params["q"], GoogleDocs::SyncCredential::GOOGLE_DOC_MIME_TYPE
+      refute_includes requested_params["q"], GoogleDocs::SyncCredential::PDF_MIME_TYPE
+    end
+
+    test "lists PDFs when the credential grants Drive content access" do
+      credential.update!(scopes: [ GoogleDocs::SyncCredential::DRIVE_READONLY_SCOPE ])
+      requested_params = nil
+      google_http = lambda do |endpoint:, params:, **|
+        assert_equal GoogleDocs::SyncCredential::FILES_LIST_ENDPOINT, endpoint
+        requested_params = params
+        { "files" => [] }
+      end
+
+      GoogleDocs::SyncCredential.new(credential, google_api_http: google_http).list_user_files_page
+
+      assert_includes requested_params["q"], GoogleDocs::SyncCredential::GOOGLE_DOC_MIME_TYPE
+      assert_includes requested_params["q"], GoogleDocs::SyncCredential::PDF_MIME_TYPE
     end
 
     test "truncates names sent to the sync API while preserving the raw payload" do

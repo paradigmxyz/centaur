@@ -28,5 +28,18 @@ module GoogleDocs
         end
       end
     end
+
+    test "PDF indexing defaults to disabled and honors its feature switch" do
+      env_key = "CENTAUR_CONSOLE_GOOGLE_DRIVE_PDF_INDEXING_ENABLED"
+      previous = ENV[env_key]
+      ENV.delete(env_key)
+
+      refute GoogleDocs::Config.pdf_indexing_enabled?
+
+      ENV[env_key] = "true"
+      assert GoogleDocs::Config.pdf_indexing_enabled?
+    ensure
+      previous.nil? ? ENV.delete(env_key) : ENV[env_key] = previous
+    end
   end
 end

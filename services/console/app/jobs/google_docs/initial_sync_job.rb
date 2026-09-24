@@ -45,7 +45,9 @@ module GoogleDocs
           credential,
           user_changes_page_token: user_start_page_token,
           run_id: run_id,
-          full_sync_finished: true
+          full_sync_finished: true,
+          pdf_backfill_version: Config.pdf_indexing_enabled? && SyncCredential.pdf_access?(credential) ? SyncCredential::PDF_BACKFILL_VERSION : 0,
+          metadata: checkpoint.to_h.fetch("metadata", {})
         ),
         replace_context_documents: false
       )

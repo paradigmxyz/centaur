@@ -63,7 +63,8 @@
         "googleDocsSync": {
           "type": "object",
           "properties": {
-            "enabled": { "type": "boolean" }
+            "enabled": { "type": "boolean" },
+            "pdfIndexingEnabled": { "type": "boolean" }
           }
         },
         "service": {

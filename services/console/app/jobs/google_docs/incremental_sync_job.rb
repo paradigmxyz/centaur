@@ -34,7 +34,8 @@ module GoogleDocs
           credential,
           user_changes_page_token: next_user_changes_page_token,
           run_id: run_id,
-          incremental_sync_finished: true
+          incremental_sync_finished: true,
+          metadata: checkpoint.to_h.fetch("metadata", {})
         )
         break
       end
@@ -51,6 +52,9 @@ module GoogleDocs
         next unless file_id
 
         file = change["file"]
+        if file&.fetch("mimeType", nil) == SyncCredential::PDF_MIME_TYPE && !Config.pdf_indexing_enabled?
+          next
+        end
         if change["removed"] == true || !sync.eligible_file?(file)
           deactivations << sync.observation_deactivation(file_id)
         else

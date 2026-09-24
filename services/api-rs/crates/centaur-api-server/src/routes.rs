@@ -2466,7 +2466,7 @@ async fn get_google_docs_content_status(
     let available = sqlx::query_as::<_, (String, String)>(
         "SELECT file_id, source_version \
          FROM google_docs_sync_document_contents \
-         WHERE file_id = ANY($1) AND last_error = ''",
+         WHERE file_id = ANY($1)",
     )
     .bind(&file_ids)
     .fetch_all(&pool)

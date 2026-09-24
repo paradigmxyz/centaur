@@ -1,6 +1,9 @@
 require "cgi"
 require "digest"
 require "json"
+require "net/http"
+require "tempfile"
+require "uri"
 
 module GoogleDocs
   class SyncCredential
@@ -8,10 +11,13 @@ module GoogleDocs
     DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
     DOCS_READONLY_SCOPE = "https://www.googleapis.com/auth/documents.readonly"
     GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document"
+    PDF_MIME_TYPE = "application/pdf"
     EXPORT_MIME_TYPE = "text/plain"
     NAME_MAX_BYTES = 1_024
     USER_CORPUS = "user"
     FETCH_READ_TIMEOUT_SECONDS = 60
+    PDF_BACKFILL_VERSION = 1
+    MAX_PDF_BYTES = 50 * 1024 * 1024
 
     FILES_LIST_ENDPOINT = "https://www.googleapis.com/drive/v3/files"
     CHANGES_LIST_ENDPOINT = "https://www.googleapis.com/drive/v3/changes"
@@ -26,6 +32,9 @@ module GoogleDocs
 
     class GoogleApiError < StandardError; end
     class InvalidPageTokenError < GoogleApiError; end
+    class PdfContentError < StandardError; end
+    class PdfTooLargeError < PdfContentError; end
+    class PdfExtractionError < PdfContentError; end
 
     NETWORK_ERRORS = [
       EOFError,
@@ -66,6 +75,24 @@ module GoogleDocs
         positive_int(ConsoleEnv["GOOGLE_DOCS_SYNC_CHUNK_CHARS"], 12_000)
       end
 
+      def pdf_access?(credential)
+        Array(credential.scopes).include?(DRIVE_READONLY_SCOPE)
+      end
+
+      def pdf_backfill_version(checkpoint)
+        metadata = checkpoint.to_h.fetch("metadata", {})
+        metadata.is_a?(Hash) ? metadata.fetch("pdf_backfill_version", 0).to_i : 0
+      end
+
+      def pdf_backfill_required?(credential, checkpoint)
+        GoogleDocs::Config.pdf_indexing_enabled? && pdf_access?(credential) &&
+          pdf_backfill_version(checkpoint) < PDF_BACKFILL_VERSION
+      end
+
+      def pdf_backfill_reset_required?(checkpoint)
+        !GoogleDocs::Config.pdf_indexing_enabled? && pdf_backfill_version(checkpoint).positive?
+      end
+
       def positive_int(value, default)
         parsed = value.to_i
         parsed.positive? ? parsed : default
@@ -74,9 +101,11 @@ module GoogleDocs
 
     attr_reader :credential
 
-    def initialize(credential, google_api_http: nil)
+    def initialize(credential, google_api_http: nil, pdf_text_extractor: nil, max_pdf_bytes: MAX_PDF_BYTES)
       @credential = credential
       @google_api_http = google_api_http || self.class.google_api_http
+      @pdf_text_extractor = pdf_text_extractor || GoogleDocs::PdfTextExtractor.method(:extract)
+      @max_pdf_bytes = max_pdf_bytes
     end
 
     def user_start_page_token
@@ -89,10 +118,19 @@ module GoogleDocs
     end
 
     def list_user_files_page(page_token: nil)
+      list_files_page(mime_types: eligible_mime_types, page_token: page_token)
+    end
+
+    def list_user_pdfs_page(page_token: nil)
+      list_files_page(mime_types: [ PDF_MIME_TYPE ], page_token: page_token)
+    end
+
+    def list_files_page(mime_types:, page_token: nil)
       google_api(
         FILES_LIST_ENDPOINT,
         {
-          "q" => "mimeType = '#{GOOGLE_DOC_MIME_TYPE}' and trashed = false",
+          "q" => "(#{mime_types.map { |mime_type| "mimeType = '#{mime_type}'" }.join(' or ')}) " \
+            "and trashed = false",
           "pageSize" => self.class.page_size,
           "fields" => "nextPageToken,files(#{FILE_FIELDS})",
           "corpora" => USER_CORPUS,
@@ -122,7 +160,7 @@ module GoogleDocs
 
     def eligible_file?(file)
       file.is_a?(Hash) && file["id"].present? &&
-        file["mimeType"] == GOOGLE_DOC_MIME_TYPE && file["trashed"] != true
+        eligible_mime_types.include?(file["mimeType"]) && file["trashed"] != true
     end
 
     def file_payload(file, run_id: nil)
@@ -179,21 +217,23 @@ module GoogleDocs
     end
 
     def document_batch(file)
-      doc = google_api(
-        "#{DOCS_GET_ENDPOINT}/#{CGI.escape(file.fetch('id'))}",
-        "includeTabsContent" => "true"
-      )
-      text = docs_text_from_document(doc)
-      title = doc["title"].presence || file["name"].to_s
-      exported_at = Time.current.iso8601
+      title, text, export_mime_type = if file["mimeType"] == PDF_MIME_TYPE
+        [ file["name"].to_s, pdf_text(file), PDF_MIME_TYPE ]
+      else
+        doc = google_api(
+          "#{DOCS_GET_ENDPOINT}/#{CGI.escape(file.fetch('id'))}",
+          "includeTabsContent" => "true"
+        )
+        [ doc["title"].presence || file["name"].to_s, docs_text_from_document(doc), EXPORT_MIME_TYPE ]
+      end
       contents = [
         {
           file_id: file.fetch("id"),
           title: title,
           text_content: text,
           text_hash: content_hash(text),
-          export_mime_type: EXPORT_MIME_TYPE,
-          exported_at: exported_at,
+          export_mime_type: export_mime_type,
+          exported_at: Time.current.iso8601,
           source_modified_at: file["modifiedTime"],
           source_version: source_version(file)
         }
@@ -208,7 +248,50 @@ module GoogleDocs
       }
     end
 
+    def content_failure_batch(file, error)
+      {
+        contents: [
+          {
+            file_id: file.fetch("id"),
+            title: file["name"].to_s,
+            text_content: "",
+            text_hash: content_hash(""),
+            export_mime_type: file["mimeType"].to_s,
+            exported_at: Time.current.iso8601,
+            source_modified_at: file["modifiedTime"],
+            source_version: source_version(file),
+            last_error: "#{error.class}: #{error.message}".byteslice(0, 1_000)
+          }
+        ],
+        context_documents: [],
+        replace_context_documents: true
+      }
+    end
+
     private
+
+    def eligible_mime_types
+      mime_types = [ GOOGLE_DOC_MIME_TYPE ]
+      if GoogleDocs::Config.pdf_indexing_enabled? && self.class.pdf_access?(credential)
+        mime_types << PDF_MIME_TYPE
+      end
+      mime_types
+    end
+
+    def pdf_text(file)
+      Tempfile.create([ "google-drive-pdf-", ".pdf" ], binmode: true) do |tempfile|
+        google_download(
+          "#{FILES_LIST_ENDPOINT}/#{CGI.escape(file.fetch('id'))}",
+          tempfile,
+          "alt" => "media",
+          "supportsAllDrives" => "true"
+        )
+        tempfile.flush
+        @pdf_text_extractor.call(tempfile.path).to_s
+      end
+    rescue GoogleDocs::PdfTextExtractor::Error => error
+      raise PdfExtractionError, error.message
+    end
 
     def truncated_name(file)
       name = file["name"].to_s
@@ -267,7 +350,7 @@ module GoogleDocs
     end
 
     def chunks_for(text)
-      return [ "" ] if text.blank?
+      return [] if text.blank?
 
       text.scan(/.{1,#{self.class.chunk_chars}}/m)
     end
@@ -298,6 +381,23 @@ module GoogleDocs
       raise GoogleApiError, "Google API network request failed: #{error.class}"
     end
 
+    def google_download(endpoint, destination, params)
+      if @google_api_http
+        response = @google_api_http.call(
+          endpoint: endpoint,
+          params: params,
+          access_token: credential.access_token
+        )
+        raise GoogleApiError, "Google API returned invalid file content" unless response.is_a?(String)
+
+        write_pdf_chunk(destination, response, 0)
+      else
+        net_http_download(endpoint, destination, params)
+      end
+    rescue *NETWORK_ERRORS => error
+      raise GoogleApiError, "Google API network request failed: #{error.class}"
+    end
+
     def net_http_get(endpoint, params)
       response = HttpClient.new(read_timeout: FETCH_READ_TIMEOUT_SECONDS).get(
         endpoint,
@@ -308,22 +408,58 @@ module GoogleDocs
       return parsed if response.success?
 
       message = parsed.dig("error", "message") if parsed.is_a?(Hash)
-      error_class = if invalid_page_token_response?(response.status, params)
+      error_class = if invalid_page_token_response?(endpoint, response.status, params)
         InvalidPageTokenError
       else
         GoogleApiError
       end
       raise error_class, message.presence || "Google API returned HTTP #{response.status}"
     rescue JSON::ParserError
-      if invalid_page_token_response?(response&.status, params)
+      if invalid_page_token_response?(endpoint, response&.status, params)
         raise InvalidPageTokenError, "Google API rejected the page token"
       end
 
       raise GoogleApiError, "Google API returned invalid JSON"
     end
 
-    def invalid_page_token_response?(status, params)
-      params["pageToken"].present? && [ 400, 404, 410 ].include?(status)
+    def net_http_download(endpoint, destination, params)
+      uri = URI.parse(endpoint)
+      uri.query = URI.encode_www_form(params)
+      request = Net::HTTP::Get.new(uri)
+      request["Authorization"] = "Bearer #{credential.access_token}"
+      http = Net::HTTP.new(uri.host, uri.port)
+      http.use_ssl = uri.scheme == "https"
+      http.open_timeout = HttpClient::DEFAULT_OPEN_TIMEOUT
+      http.read_timeout = FETCH_READ_TIMEOUT_SECONDS
+
+      http.request(request) do |response|
+        status = response.code.to_i
+        raise GoogleApiError, "Google API returned HTTP #{status}" unless status.between?(200, 299)
+
+        content_length = response["Content-Length"].to_i
+        raise_pdf_too_large if content_length > @max_pdf_bytes
+
+        bytes_written = 0
+        response.read_body do |chunk|
+          bytes_written = write_pdf_chunk(destination, chunk, bytes_written)
+        end
+      end
+    end
+
+    def write_pdf_chunk(destination, chunk, bytes_written)
+      new_size = bytes_written + chunk.bytesize
+      raise_pdf_too_large if new_size > @max_pdf_bytes
+
+      destination.write(chunk)
+      new_size
+    end
+
+    def raise_pdf_too_large
+      raise PdfTooLargeError, "PDF exceeds the 50 MB indexing limit"
+    end
+
+    def invalid_page_token_response?(endpoint, status, params)
+      endpoint == CHANGES_LIST_ENDPOINT && params["pageToken"].present? && [ 400, 404, 410 ].include?(status)
     end
   end
 end
