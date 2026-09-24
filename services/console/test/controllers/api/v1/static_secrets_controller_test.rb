@@ -153,6 +153,29 @@ module Api
         assert_equal [ 0, 1 ], data["rules"].map { |r| r["position"] }
       end
 
+      test "POST stores a token broker foreign key while preserving the credential_id response" do
+        credential = broker_credentials(:acme_managed_gmail)
+        body = {
+          data: {
+            foreign_id: "token-broker-source",
+            inject_config: { "header" => "Authorization" },
+            source: {
+              source_type: "token_broker",
+              config: { credential_id: credential.foreign_id }
+            },
+            rules: [ { host: "api.example.com" } ]
+          }
+        }
+
+        post api_v1_static_secrets_url, params: body.to_json, headers: auth_headers
+
+        assert_response :created
+        source = StaticSecret.find_by!(foreign_id: "token-broker-source").source
+        assert_equal({}, source.config)
+        assert_equal credential, source.broker_credential
+        assert_equal credential.oid, json_body.dig("data", "source", "config", "credential_id")
+      end
+
       test "POST rejects credential_namespace in a token broker source config" do
         credential = broker_credentials(:acme_managed_gmail)
         body = {

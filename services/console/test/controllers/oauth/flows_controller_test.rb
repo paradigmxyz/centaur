@@ -707,7 +707,9 @@ module Oauth
       assert_nil secret.created_by # the wrapping secret is not owned by an operator
       assert_equal({ "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" }, secret.inject_config)
       assert_equal "token_broker", secret.source.source_type
-      assert_equal cred.oid, secret.source.config["credential_id"]
+      assert_equal({}, secret.source.config)
+      assert_equal cred, secret.source.broker_credential
+      assert_equal cred.oid, secret.source.external_config["credential_id"]
       assert_equal [ "*.googleapis.com" ], secret.rules.map(&:host)
       # The source resolves the credential's live token at sync time.
       assert_equal({ "type" => "control_plane", "value" => "AT" }, secret.source.to_proxy_source)

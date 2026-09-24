@@ -125,7 +125,7 @@ module Api
           replace_config: ref.replace_config,
           source: ref.source && {
             source_type: ref.source.source_type,
-            config: ref.source.config
+            config: ref.source.external_config
           },
           rules: ref.rules.map do |r|
             {

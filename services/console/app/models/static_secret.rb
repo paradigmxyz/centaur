@@ -44,8 +44,8 @@ class StaticSecret < ApplicationRecord
   # it wraps.
   belongs_to :created_by, class_name: "User", optional: true
   # Set when this secret wraps a managed broker credential (auto-created by the
-  # OAuth consent flow). The token_broker source carries the credential_id the
-  # proxy resolves at sync; this association is the console-level link.
+  # OAuth consent flow). Its token_broker source independently links the same
+  # credential for sync delivery.
   belongs_to :broker_credential, optional: true
 
   def apply_kind_defaults(rules: self.rules)

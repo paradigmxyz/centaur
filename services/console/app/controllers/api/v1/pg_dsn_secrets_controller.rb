@@ -86,7 +86,7 @@ module Api
           settings: ref.settings,
           dsn: ref.dsn_source && {
             source_type: ref.dsn_source.source_type,
-            config: ref.dsn_source.config
+            config: ref.dsn_source.external_config
           },
           created_at: ref.created_at,
           updated_at: ref.updated_at

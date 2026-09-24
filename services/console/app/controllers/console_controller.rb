@@ -258,9 +258,10 @@ class ConsoleController < ApplicationController
     return nil unless source
 
     key = SOURCE_REF_KEYS[source.source_type]
+    config = source.external_config
     ref =
-      if key && source.config.is_a?(Hash)
-        source.config[key]
+      if key && config.is_a?(Hash)
+        config[key]
       elsif source.source_type == "control_plane"
         "inline"
       end
