@@ -56,9 +56,9 @@ spec:
             failureThreshold: 3
             periodSeconds: 10
             successThreshold: 1
-            tcpSocket:
-              port: 5432
-            timeoutSeconds: 1
+            exec:
+              command: ["pg_isready", "-q"]
+            timeoutSeconds: 3
           livenessProbe:
             failureThreshold: 3
             periodSeconds: 10
