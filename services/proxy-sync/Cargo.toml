@@ -13,6 +13,8 @@ crc32fast = "1"
 flate2 = "1"
 hex = "0.4"
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
 pbkdf2 = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -4,10 +4,19 @@
 {{- $prefix := .Values.secretManager.envPrefix }}
 {{- $console := include "centaur.consoleValues" . | fromYaml }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") }}
+{{- $metricsAnnotations := dict -}}
+{{- if .Values.proxySync.metrics.scrapeAnnotations -}}
+{{- $metricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" .Values.proxySync.metrics.path "prometheus.io/port" (printf "%v" .Values.proxySync.port) -}}
+{{- $metricsAnnotations = mergeOverwrite $metricsAnnotations (.Values.proxySync.metrics.annotations | default dict) -}}
+{{- end -}}
 apiVersion: v1
 kind: Service
 metadata:
   name: {{ $name }}
+{{- with $metricsAnnotations }}
+  annotations:
+{{ toYaml . | nindent 4 }}
+{{- end }}
   labels:
 {{ include "centaur.componentLabels" (dict "root" . "component" "proxy-sync") | nindent 4 }}
 spec:
@@ -33,6 +42,9 @@ spec:
     metadata:
       annotations:
         checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+{{- with $metricsAnnotations }}
+{{ toYaml . | nindent 8 }}
+{{- end }}
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "proxy-sync") | nindent 8 }}
     spec:
@@ -114,6 +126,11 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/iron-proxy: "true"
+{{- range .Values.networkPolicy.apiIngressSourceNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+{{- end }}
       ports:
         - protocol: TCP
           port: {{ .Values.proxySync.port }}

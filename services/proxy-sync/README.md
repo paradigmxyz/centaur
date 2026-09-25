@@ -15,6 +15,12 @@ proxySync:
 When enabled, `api-rs` continues sending administrative requests to Console but
 configures newly created managed proxies to poll this service.
 
+## Metrics
+
+`GET /metrics` exposes Prometheus metrics for HTTP request rate, errors, latency,
+in-flight requests, and sync cache hit/miss results. Requests to `/metrics` are
+excluded from the HTTP request metrics.
+
 ## Environment
 
 - `IRON_CONTROL_DATABASE_URL` — Console database server URL. It may include the database name.

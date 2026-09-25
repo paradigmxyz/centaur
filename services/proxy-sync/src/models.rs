@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use metrics_exporter_prometheus::PrometheusHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
@@ -15,6 +16,7 @@ pub(crate) struct AppState {
     pub(crate) api_hosts: Vec<String>,
     pub(crate) console_host: Option<String>,
     pub(crate) sync_cache: Arc<SyncCache>,
+    pub(crate) metrics: PrometheusHandle,
 }
 
 #[derive(Debug)]

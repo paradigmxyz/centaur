@@ -477,6 +477,12 @@ proxySync:
     pullPolicy: Always
   port: 8080
   databaseMaxConnections: 5
+  metrics:
+    # proxy-sync serves Prometheus text metrics at /metrics. This flag only
+    # controls scrape annotations for Prometheus/VictoriaMetrics-style discovery.
+    scrapeAnnotations: true
+    path: /metrics
+    annotations: {}
   resources: {}
 
 # Rust session control plane (services/api-rs). Owns sessions, agent-k8s

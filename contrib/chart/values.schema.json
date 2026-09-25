@@ -363,6 +363,17 @@
         "replicaCount": { "type": "integer", "minimum": 1 },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "databaseMaxConnections": { "type": "integer", "minimum": 1 },
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "scrapeAnnotations": { "type": "boolean" },
+            "path": { "type": "string" },
+            "annotations": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        },
         "resources": { "type": "object" },
         "image": {
           "type": "object",

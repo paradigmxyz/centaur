@@ -5,6 +5,7 @@ mod conflicts;
 mod database;
 mod identifiers;
 mod models;
+mod telemetry;
 mod tokens;
 
 use std::{env, net::SocketAddr, str::FromStr, sync::Arc, time::Instant};
@@ -13,7 +14,7 @@ use active_record_encryption::{ActiveRecordEncryption, Error as EncryptionError}
 use axum::{
     Json, Router,
     body::Body,
-    extract::State,
+    extract::{MatchedPath, State},
     http::{HeaderMap, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -28,6 +29,9 @@ use models::{AppState, Config};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use telemetry::{
+    init_metrics, record_cache_lookup, record_http_request_finished, record_http_request_started,
+};
 use tokens::token_windows;
 use tracing::{error, info};
 use url::Url;
@@ -100,6 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
+    let metrics_handle = init_metrics()?;
     let database_url = required_env("IRON_CONTROL_DATABASE_URL")?;
     let database_name = env::var("IRON_CONTROL_DATABASE_NAME")
         .ok()
@@ -129,9 +134,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         api_hosts,
         console_host,
         sync_cache: Arc::new(SyncCache::default()),
+        metrics: metrics_handle,
     };
     let app = Router::new()
         .route("/healthz", get(|| async { StatusCode::OK }))
+        .route("/metrics", get(metrics))
         .route("/api/v1/proxy/sync", post(sync))
         .layer(middleware::from_fn(log_request))
         .with_state(state);
@@ -150,18 +157,44 @@ async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
+async fn metrics(State(state): State<AppState>) -> Response {
+    (
+        [("Content-Type", "text/plain; version=0.0.4; charset=utf-8")],
+        state.metrics.render(),
+    )
+        .into_response()
+}
+
 async fn log_request(request: Request<Body>, next: Next) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|path| path.as_str().to_owned())
+        .unwrap_or_else(|| "__unmatched__".to_owned());
+    let record_metrics = route != "/metrics";
     let started_at = Instant::now();
+    if record_metrics {
+        record_http_request_started();
+    }
     let response = next.run(request).await;
+    let duration = started_at.elapsed();
+    if record_metrics {
+        record_http_request_finished(
+            method.as_str(),
+            route.as_str(),
+            response.status().as_u16(),
+            duration,
+        );
+    }
     info!(
         component = "proxy_sync",
         event = "http_request",
         method = %method,
         path,
         status = response.status().as_u16(),
-        duration_ms = started_at.elapsed().as_secs_f64() * 1000.0,
+        duration_ms = duration.as_secs_f64() * 1000.0,
     );
     response
 }
@@ -181,12 +214,16 @@ async fn sync(
         .config_hash
         .as_deref()
         .filter(|value| !value.is_empty())
-        && let Some(config_hash) =
+    {
+        if let Some(config_hash) =
             state
                 .sync_cache
                 .matching_hash(&proxy, token_windows, client_hash)
-    {
-        return Ok(Json(json!({ "config_hash": config_hash })));
+        {
+            record_cache_lookup("hit");
+            return Ok(Json(json!({ "config_hash": config_hash })));
+        }
+        record_cache_lookup("miss");
     }
 
     let config = if let Some(principal_id) = proxy.principal_id {
