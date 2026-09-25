@@ -20,7 +20,7 @@
   "devDependencies": {
     "@resvg/resvg-wasm": "^2.6.2",
     "typescript": "7.0.2",
-    "wrangler": "^4.136.1"
+    "wrangler": "^4.136.3"
   },
   "overrides": {
     "esbuild": "^0.28.1"
