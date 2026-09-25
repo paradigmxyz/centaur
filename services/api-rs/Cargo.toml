@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "crates/absurd-sdk",
     "crates/centaur-api-server",
     "crates/centaur-api-integration-test",
     "crates/centaur-iron-control",
@@ -36,7 +35,7 @@ unimplemented = "warn"
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"
-absurd-sdk = { path = "crates/absurd-sdk" }
+absurd-sdk = { path = "../../crates/absurd-sdk" }
 axum = "0.8.9"
 aws-config = "1"
 aws-sdk-s3 = "1"

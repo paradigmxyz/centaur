@@ -83,6 +83,7 @@ jobs:
             '^\.github/scripts/start-paradedb-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
           set_output rust_api \
+            '^crates/absurd-sdk/' \
             '^services/api-rs/' \
             '^services/workflow-python/' \
             '^workflows/' \
@@ -275,7 +276,21 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: services/api-rs
+          workspaces: |
+            crates/absurd-sdk
+            services/api-rs
+
+      - name: Format Absurd SDK
+        working-directory: crates/absurd-sdk
+        run: cargo fmt --all --check
+
+      - name: Clippy Absurd SDK
+        working-directory: crates/absurd-sdk
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test Absurd SDK
+        working-directory: crates/absurd-sdk
+        run: cargo test --locked
 
       - name: Format
         working-directory: services/api-rs

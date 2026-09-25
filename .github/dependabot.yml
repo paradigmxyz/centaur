@@ -54,6 +54,22 @@ updates:
           - "*"
 
   - package-ecosystem: cargo
+    directory: /crates/absurd-sdk
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Denver
+    commit-message:
+      prefix: chore
+      include: scope
+    open-pull-requests-limit: 5
+    groups:
+      absurd-sdk-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: cargo
     directory: /crates/active-record-encryption
     schedule:
       interval: weekly

@@ -2122,15 +2122,10 @@ mod tests {
     use super::*;
     use std::{
         sync::atomic::{AtomicUsize, Ordering},
-        sync::{Mutex, OnceLock},
+        sync::Mutex,
         time::{SystemTime, UNIX_EPOCH},
     };
     use tokio::sync::Notify;
-
-    fn schema_setup_lock() -> &'static tokio::sync::Mutex<()> {
-        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-    }
 
     async fn optional_test_pool() -> Result<Option<PgPool>> {
         let Ok(database_url) = env::var("ABSURD_TEST_DATABASE_URL") else {
@@ -2141,19 +2136,6 @@ mod tests {
             .max_connections(4)
             .connect(&database_url)
             .await?;
-
-        let _guard = schema_setup_lock().lock().await;
-        let has_schema: Option<i32> =
-            sqlx::query_scalar("SELECT 1 FROM pg_namespace WHERE nspname = 'absurd'")
-                .fetch_optional(&pool)
-                .await?;
-        if has_schema.is_none() {
-            sqlx::raw_sql(include_str!(
-                "../../centaur-session-sqlx/migrations/0007_absurd_workflows.sql"
-            ))
-            .execute(&pool)
-            .await?;
-        }
 
         Ok(Some(pool))
     }

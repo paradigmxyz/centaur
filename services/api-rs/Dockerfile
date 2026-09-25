@@ -31,7 +31,9 @@ ENV CARGO_INCREMENTAL=0 \
     RUSTC_WRAPPER=/usr/local/bin/sccache \
     SCCACHE_DIR=/var/cache/sccache
 WORKDIR /build
-COPY services/api-rs/ ./
+COPY crates/absurd-sdk/ crates/absurd-sdk/
+COPY services/api-rs/ services/api-rs/
+WORKDIR /build/services/api-rs
 ARG RUST_BUILD_PROFILE=release
 RUN --mount=type=cache,id=api-rs-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=api-rs-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
