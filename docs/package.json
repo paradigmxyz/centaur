@@ -14,7 +14,7 @@
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "vocs": "https://pkg.pr.new/vocs@3f54829",
-    "waku": "1.0.0-rc.1",
+    "waku": "1.0.0-alpha.6",
     "yaml": "^2.9.1"
   },
   "devDependencies": {
