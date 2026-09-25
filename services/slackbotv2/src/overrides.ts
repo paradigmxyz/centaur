@@ -75,7 +75,7 @@ const PROVIDER_FLAGS: Record<string, ProviderMapping> = {
 const CLAUDE_MODEL_ALIASES: Record<string, string> = {
   fable: 'claude-fable-5',
   haiku: 'claude-haiku-4-5',
-  opus: 'claude-opus-5',
+  opus: 'claude-opus-5-5',
   sonnet: 'claude-sonnet-5'
 }
 
@@ -107,6 +107,7 @@ const STRATEGY_MODEL_HARNESSES: Record<string, string> = {
   'claude-opus-4-8': 'claudecode',
   'claude-opus-5': 'claudecode',
   'claude-opus-5-fast': 'claudecode',
+  'claude-opus-5-5': 'claudecode',
   'claude-sonnet-4-6': 'claudecode',
   'claude-sonnet-5': 'claudecode',
   deep: 'amp',
@@ -120,7 +121,9 @@ const STRATEGY_MODEL_HARNESSES: Record<string, string> = {
   'gpt-5.6-luna': 'codex',
   'gpt-5.6-sol': 'codex',
   'gpt-5.6-terra': 'codex',
-  'gpt-6-astra': 'codex'
+  'gpt-6-astra': 'codex',
+  'gpt-6-sol': 'codex',
+  'gpt-6-luna': 'codex'
 }
 
 // Values are one horizontal-whitespace-delimited token; a newline after the

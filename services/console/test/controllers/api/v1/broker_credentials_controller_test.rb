@@ -236,6 +236,19 @@ module Api
         assert json_body.dig("error", "details", "api_key").present?
       end
 
+      test "PUT rejects changing an existing foreign_id" do
+        credential = broker_credentials(:acme_managed_gmail)
+        original_foreign_id = credential.foreign_id
+
+        put api_v1_broker_credential_url(id: credential.oid),
+            params: { data: { foreign_id: "renamed-credential" } }.to_json,
+            headers: auth_headers
+
+        assert_response :unprocessable_content
+        assert_equal original_foreign_id, credential.reload.foreign_id
+        assert_includes json_body.dig("error", "details", "foreign_id"), "cannot be changed once set"
+      end
+
       test "re-auth via PUT clears dead state and reschedules" do
         bc = broker_credentials(:acme_managed_gmail)
         bc.update!(dead: true, dead_reason: "invalid_grant", failure_count: 3)

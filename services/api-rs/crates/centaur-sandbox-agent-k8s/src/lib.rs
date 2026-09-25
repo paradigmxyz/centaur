@@ -121,7 +121,9 @@ pub struct OtlpEgressTarget {
 pub struct IronControlSettings {
     /// Admin client used to register/deregister the per-sandbox proxy.
     pub client: IronControlClient,
-    /// Base URL injected into the proxy pod as `IRON_CONTROL_URL`.
+    /// Console base URL used by sandbox entitlement clients.
+    pub console_url: String,
+    /// Sync base URL injected into the proxy pod as `IRON_CONTROL_PLANE_URL`.
     pub control_url: String,
 }
 
@@ -129,6 +131,7 @@ pub struct IronControlSettings {
 fn test_iron_control_settings() -> IronControlSettings {
     IronControlSettings {
         client: IronControlClient::new("http://127.0.0.1:1", "test-key"),
+        console_url: "http://iron-control".to_owned(),
         control_url: "http://iron-control".to_owned(),
     }
 }

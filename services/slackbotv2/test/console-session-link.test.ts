@@ -56,7 +56,9 @@ describe('reasoningForModel', () => {
     'gpt-5.6-luna': [...standardEfforts, 'max'],
     'gpt-5.6-sol': [...standardEfforts, 'max'],
     'gpt-5.6-terra': [...standardEfforts, 'max'],
-    'gpt-6-astra': ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
+    'gpt-6-astra': ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+    'gpt-6-sol': [...standardEfforts, 'max'],
+    'gpt-6-luna': [...standardEfforts, 'max']
   }
 
   test('matches the reasoning efforts advertised by supported Codex models', () => {

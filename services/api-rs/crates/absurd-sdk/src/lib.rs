@@ -308,6 +308,17 @@ pub type TaskExecute = Box<dyn FnOnce() -> BoxFuture<'static, Result<Value>> + S
 pub type WrapTaskExecutionHook =
     Arc<dyn Fn(TaskContext, TaskExecute) -> BoxFuture<'static, Result<Value>> + Send + Sync>;
 
+#[derive(Debug, Clone)]
+pub struct TaskTerminalOutcome {
+    pub queue_name: String,
+    pub task_id: String,
+    pub task_name: String,
+    pub params: Value,
+    pub state: TaskResultState,
+}
+
+pub type TaskTerminalHook = Arc<dyn Fn(TaskTerminalOutcome) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct ClientOptions {
     pub database_url: Option<String>,
@@ -375,6 +386,7 @@ pub struct WorkerOptions {
     pub concurrency: usize,
     pub poll_interval: Duration,
     pub on_error: Option<Arc<dyn Fn(Error) + Send + Sync>>,
+    pub on_task_terminal: Option<TaskTerminalHook>,
     pub fatal_on_lease_timeout: bool,
 }
 
@@ -387,6 +399,7 @@ impl Default for WorkerOptions {
             concurrency: 1,
             poll_interval: DEFAULT_POLL_INTERVAL,
             on_error: None,
+            on_task_terminal: None,
             fatal_on_lease_timeout: true,
         }
     }
@@ -773,7 +786,7 @@ impl Client {
         let claim_timeout = options.claim_timeout;
         let tasks = self.claim_tasks(options).await?;
         for task in tasks {
-            self.execute_task(task, claim_timeout, false).await?;
+            self.execute_task(task, claim_timeout, false, None).await?;
         }
         Ok(())
     }
@@ -892,10 +905,16 @@ impl Client {
                 let on_error = on_error.clone();
                 let claim_timeout = options.claim_timeout;
                 let fatal_on_lease_timeout = options.fatal_on_lease_timeout;
+                let on_task_terminal = options.on_task_terminal.clone();
                 executing.spawn(async move {
                     let _permit = permit;
                     if let Err(err) = client
-                        .execute_task(task, claim_timeout, fatal_on_lease_timeout)
+                        .execute_task(
+                            task,
+                            claim_timeout,
+                            fatal_on_lease_timeout,
+                            on_task_terminal,
+                        )
                         .await
                     {
                         on_error(err);
@@ -917,6 +936,7 @@ impl Client {
         task: ClaimedTask,
         claim_timeout: Duration,
         fatal_on_lease_timeout: bool,
+        on_task_terminal: Option<TaskTerminalHook>,
     ) -> Result<()> {
         let registration = self.registration(&task.task_name)?;
         let Some(registration) = registration else {
@@ -939,6 +959,8 @@ impl Client {
                         "message": err.to_string(),
                     });
                     fail_task_run(&self.pool, &self.queue_name, &task.run_id, failure).await?;
+                    self.emit_terminal_outcome(&task, on_task_terminal.as_ref())
+                        .await;
                     return Ok(());
                 }
             }
@@ -950,6 +972,8 @@ impl Client {
                 "message": format!("misconfigured task {:?} (queue mismatch)", task.task_name),
             });
             fail_task_run(&self.pool, &self.queue_name, &task.run_id, failure).await?;
+            self.emit_terminal_outcome(&task, on_task_terminal.as_ref())
+                .await;
             return Ok(());
         }
 
@@ -978,6 +1002,8 @@ impl Client {
                 let failure = serialize_error(&err);
                 fail_task_run(&self.pool, &self.queue_name, &task.run_id, failure).await?;
                 watchdog.stop();
+                self.emit_terminal_outcome(&task, on_task_terminal.as_ref())
+                    .await;
                 return Ok(());
             }
             Err(err) => {
@@ -1022,7 +1048,8 @@ impl Client {
 
         watchdog.stop();
 
-        match run_result {
+        let suspended = matches!(&run_result, Ok(Err(Error::Suspend)));
+        let transition = match run_result {
             Ok(Ok(result)) => {
                 complete_task_run(&self.pool, &self.queue_name, &task.run_id, result).await
             }
@@ -1047,6 +1074,32 @@ impl Client {
                     other => other,
                 }
             }
+        };
+
+        if !suspended {
+            self.emit_terminal_outcome(&task, on_task_terminal.as_ref())
+                .await;
+        }
+
+        transition
+    }
+
+    async fn emit_terminal_outcome(&self, task: &ClaimedTask, hook: Option<&TaskTerminalHook>) {
+        let Some(hook) = hook else {
+            return;
+        };
+        match terminal_outcome_for_run(&self.pool, &self.queue_name, &task.task_id, &task.run_id)
+            .await
+        {
+            Ok(Some(state)) => hook(TaskTerminalOutcome {
+                queue_name: self.queue_name.clone(),
+                task_id: task.task_id.clone(),
+                task_name: task.task_name.clone(),
+                params: task.params.clone(),
+                state,
+            }),
+            Ok(None) => {}
+            Err(error) => eprintln!("[absurd] failed to read terminal task outcome: {error}"),
         }
     }
 
@@ -1773,6 +1826,38 @@ async fn wait_for_run_cancellation(pool: PgPool, queue_name: String, run_id: Str
     }
 }
 
+async fn terminal_outcome_for_run(
+    pool: &PgPool,
+    queue_name: &str,
+    task_id: &str,
+    run_id: &str,
+) -> Result<Option<TaskResultState>> {
+    let task_table = format!("t_{}", validate_queue_name(queue_name)?);
+    let row = sqlx::query(&format!(
+        r#"
+        SELECT state
+        FROM absurd.{task_table}
+        WHERE task_id = $1::uuid
+          AND last_attempt_run = $2::uuid
+          AND state IN ('completed', 'failed', 'cancelled')
+        "#,
+    ))
+    .bind(task_id)
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(|row| match row.try_get::<String, _>("state")?.as_str() {
+        "completed" => Ok(TaskResultState::Completed),
+        "failed" => Ok(TaskResultState::Failed),
+        "cancelled" => Ok(TaskResultState::Cancelled),
+        state => Err(Error::InvalidOptions(format!(
+            "unexpected terminal task state {state:?}"
+        ))),
+    })
+    .transpose()
+}
+
 async fn fail_task_run(
     pool: &PgPool,
     queue_name: &str,
@@ -2037,7 +2122,7 @@ mod tests {
     use super::*;
     use std::{
         sync::atomic::{AtomicUsize, Ordering},
-        sync::OnceLock,
+        sync::{Mutex, OnceLock},
         time::{SystemTime, UNIX_EPOCH},
     };
     use tokio::sync::Notify;
@@ -2414,13 +2499,33 @@ mod tests {
         app.register_task("quick", |_params: Value, _ctx| async move {
             Ok(json!({"ok": true}))
         })?;
+        app.register_task("fail", |_params: Value, _ctx| async move {
+            Err::<Value, _>(Error::InvalidOptions("boom".to_string()))
+        })?;
+        app.register_task("sleep", |_params: Value, ctx| async move {
+            ctx.sleep_for("pause", Duration::from_millis(50)).await?;
+            Ok(json!({"ok": true}))
+        })?;
 
         let hanging = app.spawn("hang", json!({}), Default::default()).await?;
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let outcome_recorded = Arc::new(Notify::new());
         let worker = app.start_worker(WorkerOptions {
             worker_id: Some("rust-cancel-release-worker".to_string()),
             concurrency: 1,
             poll_interval: Duration::from_millis(25),
             fatal_on_lease_timeout: false,
+            on_task_terminal: Some({
+                let outcomes = outcomes.clone();
+                let outcome_recorded = outcome_recorded.clone();
+                Arc::new(move |outcome| {
+                    outcomes
+                        .lock()
+                        .expect("terminal outcomes lock poisoned")
+                        .push((outcome.task_name, outcome.state));
+                    outcome_recorded.notify_one();
+                })
+            }),
             ..WorkerOptions::default()
         });
         tokio::time::timeout(Duration::from_secs(2), hanging_started.notified())
@@ -2436,6 +2541,53 @@ mod tests {
             .await_task_result(&quick.task_id, None, Some(Duration::from_secs(2)))
             .await?;
         assert_eq!(snapshot.result::<Value>()?, Some(json!({"ok": true})));
+
+        let failed = app
+            .spawn(
+                "fail",
+                json!({}),
+                SpawnOptions {
+                    max_attempts: Some(1),
+                    ..SpawnOptions::default()
+                },
+            )
+            .await?;
+        let failed_snapshot = app
+            .await_task_result(&failed.task_id, None, Some(Duration::from_secs(2)))
+            .await?;
+        assert_eq!(failed_snapshot.state(), TaskResultState::Failed);
+
+        let sleeping = app.spawn("sleep", json!({}), Default::default()).await?;
+        let sleeping_snapshot = app
+            .await_task_result(&sleeping.task_id, None, Some(Duration::from_secs(2)))
+            .await?;
+        assert_eq!(sleeping_snapshot.state(), TaskResultState::Completed);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if outcomes
+                    .lock()
+                    .expect("terminal outcomes lock poisoned")
+                    .len()
+                    >= 4
+                {
+                    break;
+                }
+                outcome_recorded.notified().await;
+            }
+        })
+        .await
+        .map_err(|_| Error::Timeout("timed out waiting for terminal outcomes".to_string()))?;
+
+        assert_eq!(
+            *outcomes.lock().expect("terminal outcomes lock poisoned"),
+            vec![
+                ("hang".to_string(), TaskResultState::Cancelled),
+                ("quick".to_string(), TaskResultState::Completed),
+                ("fail".to_string(), TaskResultState::Failed),
+                ("sleep".to_string(), TaskResultState::Completed),
+            ]
+        );
 
         drop(worker);
         Ok(())

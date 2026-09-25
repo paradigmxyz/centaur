@@ -37,7 +37,7 @@ gem "sentry-rails", "~> 7.0"
 gem "bcrypt", "~> 3.1.7"
 
 # JSON Web Tokens (HS256) for proxy sync, sandbox entitlement, and MCP tokens [https://github.com/jwt/ruby-jwt]
-gem "jwt", "~> 3.1"
+gem "jwt", "~> 3.3"
 
 # Windows does not include zoneinfo files, so bundle the tzinfo-data gem
 gem "tzinfo-data", platforms: %i[ windows jruby ]
@@ -48,7 +48,7 @@ gem "solid_queue"
 gem "solid_cable"
 # Parse and calculate scheduled task cron schedules. Solid Queue also uses
 # Fugit internally, but Console's task schedules are a direct dependency.
-gem "fugit", "~> 1.13"
+gem "fugit", "~> 1.14"
 
 # Reduces boot times through caching; required in config/boot.rb
 gem "bootsnap", require: false

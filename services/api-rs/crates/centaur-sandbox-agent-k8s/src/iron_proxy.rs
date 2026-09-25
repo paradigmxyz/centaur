@@ -331,7 +331,7 @@ impl AgentSandboxBackend {
             proxy_host: iron_proxy_service_name(id),
             proxy_pod_name: new_iron_proxy_pod_name(id),
             proxy_port: PROXY_TUNNEL_PORT,
-            console_url: self.config.iron_control.control_url.clone(),
+            console_url: self.config.iron_control.console_url.clone(),
             principal_id,
             requester_principal_id,
             labels,
@@ -360,7 +360,7 @@ impl AgentSandboxBackend {
             .await
             .map_err(|err| map_kube_error("create iron-proxy service", err))?;
         let control_target = control_plane_egress_target(
-            &sync.control_url,
+            &resolved.console_url,
             &self.config.namespace,
             iron_proxy.control_plane_pod_labels.clone(),
         );

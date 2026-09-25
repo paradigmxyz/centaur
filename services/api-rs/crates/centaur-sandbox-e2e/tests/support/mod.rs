@@ -363,6 +363,7 @@ fn local_implementation() -> SandboxImplementation {
 }
 
 async fn agent_k8s_implementation() -> SandboxImplementation {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let args = E2eArgs::from_env();
     let context = args
         .sandbox_e2e_k8s_context
@@ -385,6 +386,7 @@ async fn agent_k8s_implementation() -> SandboxImplementation {
         namespace,
         IronControlSettings {
             client: IronControlClient::new("http://127.0.0.1:1", "test-key"),
+            console_url: "http://iron-control".to_owned(),
             control_url: "http://iron-control".to_owned(),
         },
     );

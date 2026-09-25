@@ -12,6 +12,7 @@ on:
       - centaur_sdk/**
       - packages/**
       - tools/**
+      - workflows/**
       - scripts/bootstrap-k8s-secrets.sh
       - package.json
       - pnpm-lock.yaml
@@ -50,13 +51,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [api-rs, slackbotv2, linearbot, discordbot, githubbot, teamsbot, agent, iron-proxy, console]
+        service: [api-rs, proxy-sync, slackbotv2, linearbot, discordbot, githubbot, teamsbot, agent, iron-proxy, console]
         platform: ${{ github.event_name == 'push' && fromJSON('["linux/amd64", "linux/arm64"]') || fromJSON('["linux/amd64"]') }}
         include:
           - service: api-rs
             image: centaur-api-rs
             context: .
             dockerfile: services/api-rs/Dockerfile
+            target: ""
+          - service: proxy-sync
+            image: centaur-proxy-sync
+            context: .
+            dockerfile: services/proxy-sync/Dockerfile
             target: ""
           - service: slackbotv2
             image: centaur-slackbotv2
@@ -173,6 +179,7 @@ jobs:
       matrix:
         include:
           - image: centaur-api-rs
+          - image: centaur-proxy-sync
           - image: centaur-slackbotv2
           - image: centaur-linearbot
           - image: centaur-agent
@@ -191,7 +198,7 @@ jobs:
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0

@@ -47,11 +47,9 @@ ironProxy:
 # each sandbox's /app/tools, so adding a tool is a push to the repo, not an image
 # rebuild. Prefer overlays.sources for new deployments; toolServer.* remains as
 # a compatibility input and maps to the first ordered overlay source when
-# overlays.sources is empty. `port` is legacy (the deprecated tool-server
-# sidecar) and unused here.
+# overlays.sources is empty.
 toolServer:
   enabled: true
-  port: 8001
   # owner/name of the GitHub repo carrying the tools tree. REQUIRED when enabled;
   # override for forks. Private repos additionally need githubToken below.
   repo: paradigmxyz/centaur
@@ -322,7 +320,6 @@ codex:
   customProviders: {}
 
 sandbox:
-  controller: pod
   image:
     repository: centaur-agent
     tag: latest
@@ -462,6 +459,31 @@ agentSandbox:
     pullPolicy: IfNotPresent
   controller:
     extensions: false
+
+# Rust proxy sync endpoint. When enabled, api-rs directs managed iron-proxy
+# instances here for POST /api/v1/proxy/sync while all operator/admin traffic
+# continues to use Console. The service reads Console's database directly.
+# This component is under active development and must not be used yet.
+proxySync:
+  enabled: false
+  # Two replicas keep sync available during pod restarts and rolling updates.
+  replicaCount: 2
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  image:
+    repository: centaur-proxy-sync
+    tag: latest
+    pullPolicy: Always
+  port: 8080
+  databaseMaxConnections: 5
+  metrics:
+    # proxy-sync serves Prometheus text metrics at /metrics. This flag only
+    # controls scrape annotations for Prometheus/VictoriaMetrics-style discovery.
+    scrapeAnnotations: true
+    path: /metrics
+    annotations: {}
+  resources: {}
 
 # Rust session control plane (services/api-rs). Owns sessions, agent-k8s
 # sandboxes (via the agents.x-k8s.io Sandbox CRD), and the per-sandbox

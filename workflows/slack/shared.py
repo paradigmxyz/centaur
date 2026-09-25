@@ -1206,7 +1206,7 @@ class SlackEtlClient:
                 )
 
             for channel in response.get("channels", []):
-                is_private = bool(channel.get("is_private", False))
+                is_private = channel.get("is_private", True)
                 if is_private and not include_private:
                     continue
                 channels.append(

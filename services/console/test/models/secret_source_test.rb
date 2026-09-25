@@ -120,17 +120,44 @@ class SecretSourceTest < ActiveSupport::TestCase
     assert_equal s, SecretSource.find_by_oid(s.oid)
   end
 
-  test "token_broker source is valid referencing a credential by oid" do
+  test "token_broker source links a credential referenced by oid" do
     cred = make_broker_credential(access_token: nil)
     s = new_source(source_type: "token_broker", config: { "credential_id" => cred.oid })
     assert s.valid?, s.errors.full_messages.inspect
+    assert_equal cred, s.broker_credential
   end
 
-  test "token_broker source is valid referencing a credential by foreign_id" do
+  test "token_broker source links a credential referenced by foreign_id" do
     cred = make_broker_credential(access_token: nil)
     s = new_source(source_type: "token_broker",
                    config: { "credential_id" => cred.foreign_id })
     assert s.valid?, s.errors.full_messages.inspect
+    assert_equal cred, s.broker_credential
+  end
+
+  test "token_broker delivery and reference lookup use the durable credential link" do
+    cred = make_broker_credential(access_token: "live-token")
+    source = SecretSource.create!(source_type: "token_broker",
+                                  config: { "credential_id" => cred.foreign_id })
+    source.update_columns(config: { "credential_id" => "stale-reference" })
+    source.reload
+
+    assert_equal source, SecretSource.referencing_broker_credential(cred).sole
+    assert_equal({ "type" => "control_plane", "value" => "live-token" }, source.to_proxy_source)
+    assert source.deliverable?
+  end
+
+  test "database permits an unresolved legacy token_broker source during migration" do
+    now = Time.current
+    reference = "legacy-missing-#{SecureRandom.hex(4)}"
+
+    assert_nothing_raised do
+      SecretSource.insert_all!([
+        { source_type: "token_broker", config: { "credential_id" => reference },
+          broker_credential_id: nil, created_at: now, updated_at: now }
+      ])
+    end
+    assert_nil SecretSource.find_by!(config: { "credential_id" => reference }).broker_credential_id
   end
 
   test "token_broker source rejects a reference that does not resolve" do
@@ -156,10 +183,15 @@ class SecretSourceTest < ActiveSupport::TestCase
     assert s.errors[:config].any? { |m| m.include?("failure_ttl") }
   end
 
-  test "token_broker source requires credential_id" do
+  test "token_broker source requires credential_id without linking an unrelated credential" do
+    unrelated = BrokerCredential.create!(foreign_id: nil,
+                                           token_endpoint: "https://idp.example/token", client_id: "cid",
+                                           created_by: users(:acme_admin), refresh_token: "seed")
     s = new_source(source_type: "token_broker", config: {})
+
     assert_not s.valid?
     assert s.errors[:config].any? { |m| m.include?("credential_id") }
+    assert_nil s.broker_credential
   end
 
   test "token_broker source resolves to a control_plane inline value at sync" do

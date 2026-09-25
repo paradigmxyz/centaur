@@ -47,6 +47,15 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert build_credential.valid?
   end
 
+  test "foreign_id cannot be changed once set" do
+    credential = create_credential
+    original_foreign_id = credential.foreign_id
+
+    assert_not credential.update(foreign_id: "renamed-#{SecureRandom.hex(4)}")
+    assert_includes credential.errors[:foreign_id], "cannot be changed once set"
+    assert_equal original_foreign_id, credential.reload.foreign_id
+  end
+
   test "at most one wrapping static secret per credential" do
     cred = create_credential
     StaticSecret.create!(name: "wrapper", broker_credential: cred,

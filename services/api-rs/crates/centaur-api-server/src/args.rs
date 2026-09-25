@@ -498,6 +498,11 @@ fn slug_path_component(value: &str) -> String {
 struct IronControlArgs {
     #[arg(long = "iron-control-url", env = "IRON_CONTROL_URL")]
     url: Option<String>,
+    #[arg(
+        long = "iron-control-proxy-sync-url",
+        env = "IRON_CONTROL_PROXY_SYNC_URL"
+    )]
+    proxy_sync_url: Option<String>,
     #[arg(long = "iron-control-api-key", env = "IRON_CONTROL_API_KEY")]
     api_key: Option<String>,
 }
@@ -522,10 +527,12 @@ impl IronControlArgs {
     /// Required backend sync settings (admin client + control-plane URL).
     fn settings(&self) -> Result<IronControlSettings, ServerError> {
         let client = self.required_client()?;
-        let url = non_empty(self.url.as_deref()).expect("required client validates URL");
+        let admin_url = non_empty(self.url.as_deref()).expect("required client validates URL");
+        let control_url = non_empty(self.proxy_sync_url.as_deref()).unwrap_or(admin_url);
         Ok(IronControlSettings {
             client,
-            control_url: url.to_owned(),
+            console_url: admin_url.to_owned(),
+            control_url: control_url.to_owned(),
         })
     }
 }
@@ -2701,6 +2708,33 @@ mod tests {
         );
         assert_eq!(config.ready_timeout, Duration::from_secs(42));
         assert!(config.iron_proxy.is_some());
+    }
+
+    #[test]
+    fn proxy_sync_url_override_preserves_console_url_and_egress_selector() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--iron-control-url",
+            "http://console.local:3000",
+            "--iron-control-proxy-sync-url",
+            "http://proxy-sync.local:8080",
+            "--iron-control-api-key",
+            "iak_test",
+        ])
+        .unwrap();
+
+        let settings = args.sandbox.iron_control.settings().unwrap();
+        assert_eq!(settings.console_url, "http://console.local:3000");
+        assert_eq!(settings.control_url, "http://proxy-sync.local:8080");
+        let proxy = args.sandbox.iron_proxy.to_config().unwrap();
+        assert_eq!(
+            proxy
+                .control_plane_pod_labels
+                .get("app.kubernetes.io/component"),
+            Some(&"console".to_owned())
+        );
     }
 
     #[test]
