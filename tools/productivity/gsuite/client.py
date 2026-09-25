@@ -697,7 +697,7 @@ def drive_list(
     # membership, even with includeItemsFromAllDrives.
     kwargs = {
         "pageSize": max_results,
-        "fields": "files(id, name, mimeType, size, modifiedTime, webViewLink, parents)",
+        "fields": "incompleteSearch,files(id, name, mimeType, size, modifiedTime, webViewLink, parents)",
         "q": " and ".join(q_parts) if q_parts else None,
         "corpora": "allDrives",
         "includeItemsFromAllDrives": True,
@@ -705,6 +705,10 @@ def drive_list(
     }
 
     results = service.files().list(**kwargs).execute()
+    if results.get("incompleteSearch"):
+        raise RuntimeError(
+            "Google Drive could not search all drives; narrow the search to a specific drive"
+        )
 
     return [
         {

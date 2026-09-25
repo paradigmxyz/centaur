@@ -349,6 +349,19 @@ def test_drive_list_searches_name_by_default(monkeypatch):
     assert result[0]["size"] == 1024
 
 
+def test_drive_list_rejects_incomplete_all_drives_search(monkeypatch):
+    fake_service = _FakeDriveService()
+    fake_service.files_api.list = Mock(
+        return_value=_CreateRequest({"files": [], "incompleteSearch": True})
+    )
+    monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
+
+    with pytest.raises(RuntimeError, match="could not search all drives"):
+        client.drive_list()
+
+    assert "incompleteSearch" in fake_service.files_api.list.call_args.kwargs["fields"]
+
+
 def test_drive_list_supports_full_text_contains_and_escapes_literals(monkeypatch):
     fake_service = _FakeDriveService()
     monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
