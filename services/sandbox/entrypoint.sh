@@ -418,6 +418,21 @@ mkdir -p "$HOME_DIR/uploads"
 WORKSPACE_DIR="$WORKSPACE_DIR" install-tool-shims --refresh-skills \
     || echo "warning: failed to reload Centaur skills" >&2
 
+# ── Hermes harness config ───────────────────────────────────────────────────
+# Hermes reads $HERMES_HOME/config.yaml instead of harness flags, so startup
+# writes the two things the sandbox owns: the Centaur skills just refreshed into
+# the workspace (Hermes scans $HERMES_HOME/skills + skills.external_dirs, so
+# without this it is the only harness that cannot see them) and the operator's
+# HERMES_CONFIG_OVERLAY fragment, symmetric to CODEX_CONFIG_OVERLAY and
+# CLAUDE_SETTINGS_OVERLAY. The merge preserves whatever Hermes already wrote, so
+# this is safe to rerun against a persistent HERMES_HOME.
+if [ "${1:-}" = "harness-server" ] && [ "${2:-}" = "hermes" ]; then
+    compose-hermes-config \
+        --hermes-home "${HERMES_HOME:-$HOME_DIR/.hermes}" \
+        --skills-dir "$WORKSPACE_DIR/.agents/skills" \
+        || echo "warning: failed to compose Hermes config" >&2
+fi
+
 # ── Background: refresh repo-cache-backed tools/skills in running sandboxes ───
 case "${CENTAUR_TOOLS_AUTO_RELOAD:-true}" in
     0|false|False|FALSE|no|No|NO|off|Off|OFF) _centaur_tools_auto_reload=0 ;;
