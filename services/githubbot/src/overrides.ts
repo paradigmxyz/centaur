@@ -40,7 +40,7 @@ const HARNESS_FLAGS: Record<string, string> = {
 const CLAUDE_MODEL_ALIASES: Record<string, string> = {
   fable: "claude-fable-5",
   haiku: "claude-haiku-4-5",
-  opus: "claude-opus-5",
+  opus: "claude-opus-5-5",
   sonnet: "claude-sonnet-5",
 };
 

@@ -1372,6 +1372,71 @@ def test_docs_bullets_requires_revision_for_writes(monkeypatch):
     assert fake_service.documents_api.batch_update_calls == []
 
 
+def test_docs_create_with_folder_creates_through_drive(monkeypatch):
+    fake_drive = _FakeDriveService()
+    fake_docs = _FakeDocsService([])
+    monkeypatch.setattr(client, "get_drive_service", lambda: fake_drive)
+    monkeypatch.setattr(client, "get_docs_service", lambda: fake_docs)
+
+    result = client.docs_create("Design Notes", content="Hello", folder_id="drive-123")
+
+    create_call = fake_drive.files_api.create_calls[0]
+    assert create_call["body"] == {
+        "name": "Design Notes",
+        "mimeType": "application/vnd.google-apps.document",
+        "parents": ["drive-123"],
+    }
+    assert create_call["supportsAllDrives"] is True
+    assert fake_docs.documents_api.batch_update_calls == [
+        {
+            "documentId": "file-123",
+            "body": {"requests": [{"insertText": {"location": {"index": 1}, "text": "Hello"}}]},
+        }
+    ]
+    assert result == {
+        "document_id": "file-123",
+        "title": "Design Notes",
+        "url": "https://docs.google.com/document/d/file-123/edit",
+    }
+
+
+def test_sheets_create_with_folder_creates_through_drive_then_writes(monkeypatch):
+    fake_drive = _FakeDriveService()
+    fake_sheets = _FakeSheetsService()
+    monkeypatch.setattr(client, "get_drive_service", lambda: fake_drive)
+    monkeypatch.setattr(client, "get_sheets_service", lambda: fake_sheets)
+
+    result = client.sheets_create("Budget", content=[["a", "b"]], folder_id="drive-123")
+
+    create_call = fake_drive.files_api.create_calls[0]
+    assert create_call["body"]["mimeType"] == "application/vnd.google-apps.spreadsheet"
+    assert create_call["body"]["parents"] == ["drive-123"]
+    assert fake_sheets.spreadsheets_api.values_api.update_calls[0]["spreadsheetId"] == "file-123"
+    assert result["spreadsheet_id"] == "file-123"
+    assert result["url"] == "https://docs.google.com/spreadsheets/d/file-123/edit"
+
+
+def test_slides_create_with_folder_creates_through_drive(monkeypatch):
+    fake_drive = _FakeDriveService()
+    monkeypatch.setattr(client, "get_drive_service", lambda: fake_drive)
+    monkeypatch.setattr(
+        client,
+        "get_slides_service",
+        lambda: (_ for _ in ()).throw(AssertionError("Slides API should not be used")),
+    )
+
+    result = client.slides_create("Roadmap", folder_id="drive-123")
+
+    create_call = fake_drive.files_api.create_calls[0]
+    assert create_call["body"]["mimeType"] == "application/vnd.google-apps.presentation"
+    assert create_call["body"]["parents"] == ["drive-123"]
+    assert result == {
+        "presentation_id": "file-123",
+        "title": "Roadmap",
+        "url": "https://docs.google.com/presentation/d/file-123/edit",
+    }
+
+
 def test_docs_append_passes_expected_revision_id_through(monkeypatch):
     fake_service = _FakeDocsService([])
     monkeypatch.setattr(client, "get_docs_service", lambda: fake_service)

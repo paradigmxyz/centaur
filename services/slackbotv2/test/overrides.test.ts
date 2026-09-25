@@ -66,7 +66,7 @@ describe('extractMessageOverrides', () => {
     expect(extractMessageOverrides('--opus fix it')).toEqual({
       cleanedText: 'fix it',
       harnessType: 'claudecode',
-      model: 'claude-opus-5',
+      model: 'claude-opus-5-5',
       reasoning: undefined
     })
     expect(extractMessageOverrides('--sonnet fix it').model).toBe('claude-sonnet-5')
@@ -117,7 +117,7 @@ describe('extractMessageOverrides', () => {
     expect(extractMessageOverrides('--claude --model opus go')).toEqual({
       cleanedText: 'go',
       harnessType: 'claudecode',
-      model: 'claude-opus-5'
+      model: 'claude-opus-5-5'
     })
     expect(extractMessageOverrides('--model Sonnet go').model).toBe('claude-sonnet-5')
     expect(extractMessageOverrides('--model fable go').model).toBe('claude-fable-5')
@@ -158,7 +158,7 @@ describe('extractMessageOverrides', () => {
     expect(extractMessageOverrides('--codex --opus fix it')).toEqual({
       cleanedText: 'fix it',
       harnessType: 'codex',
-      model: 'claude-opus-5',
+      model: 'claude-opus-5-5',
       reasoning: undefined
     })
     expect(extractMessageOverrides('--sonnet --model claude-opus-4-8 fix it').model).toBe(
@@ -310,7 +310,7 @@ describe('normalizeHarnessOverrides', () => {
       normalizeHarnessOverrides({ harness: 'claude', model: 'opus', reasoning: 'hi' })
     ).toEqual({
       harnessType: 'claudecode',
-      model: 'claude-opus-5',
+      model: 'claude-opus-5-5',
       provider: undefined,
       reasoning: 'high'
     })
@@ -339,7 +339,7 @@ describe('normalizeHarnessOverrides', () => {
     // the explicit `harness` field / thread / deployment default.
     expect(normalizeHarnessOverrides({ model: 'opus' })).toEqual({
       harnessType: undefined,
-      model: 'claude-opus-5',
+      model: 'claude-opus-5-5',
       provider: undefined,
       reasoning: undefined
     })
@@ -364,6 +364,23 @@ describe('normalizeHarnessOverrides', () => {
 })
 
 describe('validateStrategyOverrides', () => {
+  for (const model of ['gpt-6-sol', 'gpt-6-luna']) {
+    test(`accepts ${model} and routes it to Codex`, () => {
+      expect(validateStrategyOverrides({ model, reasoning: 'max' })).toEqual({
+        harnessType: 'codex',
+        model,
+        provider: undefined,
+        reasoning: 'max'
+      })
+      expect(extractMessageOverrides(`--codex --model=${model} -rsn none fix it`)).toEqual({
+        cleanedText: 'fix it',
+        harnessType: 'codex',
+        model,
+        reasoning: 'none'
+      })
+    })
+  }
+
   test('accepts canonical strategy model ids', () => {
     expect(
       validateStrategyOverrides({
@@ -511,7 +528,7 @@ describe('messageOverridesForText strategy invocation', () => {
       cleanedText: 'fix it',
       overrides: {
         harnessType: 'claudecode',
-        model: 'claude-opus-5',
+        model: 'claude-opus-5-5',
         provider: undefined,
         reasoning: undefined
       }
@@ -709,7 +726,7 @@ describe('messageOverridesForText strategy invocation', () => {
                 {
                   text: JSON.stringify({
                     harness: 'codex',
-                    model: 'gpt-5.6-sol',
+                    model: 'gpt-6-sol',
                     provider: null,
                     reasoning: null
                   })
@@ -732,13 +749,22 @@ describe('messageOverridesForText strategy invocation', () => {
       cleanedText: 'use sol for this',
       overrides: {
         harnessType: 'codex',
-        model: 'gpt-5.6-sol',
+        model: 'gpt-6-sol',
         personaId: 'invest',
         provider: undefined,
         reasoning: undefined
       }
     })
     expect(requestBody?.input).toBe('use sol for this')
+    expect(requestBody?.instructions).toContain('sol -> gpt-6-sol')
+    expect(requestBody?.instructions).toContain('luna -> gpt-6-luna')
+    const format = (requestBody?.text as {
+      format: { schema: { properties: { model: { enum: (string | null)[] } } } }
+    }).format
+    expect(format.schema.properties.model.enum).toContain('gpt-6-sol')
+    expect(format.schema.properties.model.enum).toContain('gpt-6-luna')
+    expect(format.schema.properties.model.enum).toContain('gpt-5.6-sol')
+    expect(format.schema.properties.model.enum).toContain('gpt-5.6-luna')
   })
 
   test('allows the OpenAI strategy to select nanocodex from natural language', async () => {

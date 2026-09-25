@@ -69,7 +69,7 @@ describe("extractMessageOverrides", () => {
     expect(extractMessageOverrides("--opus fix it")).toEqual({
       cleanedText: "fix it",
       harnessType: "claudecode",
-      model: "claude-opus-5",
+      model: "claude-opus-5-5",
     });
     expect(extractMessageOverrides("--sonnet fix it").model).toBe(
       "claude-sonnet-5",
@@ -126,7 +126,7 @@ describe("extractMessageOverrides", () => {
     expect(extractMessageOverrides("--claude --model opus go")).toEqual({
       cleanedText: "go",
       harnessType: "claudecode",
-      model: "claude-opus-5",
+      model: "claude-opus-5-5",
     });
     expect(extractMessageOverrides("--model Sonnet go").model).toBe(
       "claude-sonnet-5",
@@ -174,7 +174,7 @@ describe("extractMessageOverrides", () => {
     expect(extractMessageOverrides("--codex --opus fix it")).toEqual({
       cleanedText: "fix it",
       harnessType: "codex",
-      model: "claude-opus-5",
+      model: "claude-opus-5-5",
     });
     expect(
       extractMessageOverrides("--sonnet --model claude-opus-4-8 fix it").model,

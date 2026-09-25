@@ -512,6 +512,10 @@ spec:
             # proxy sync.
             - name: IRON_CONTROL_URL
               value: {{ include "centaur.consoleUrl" . | quote }}
+{{- if .Values.proxySync.enabled }}
+            - name: IRON_CONTROL_PROXY_SYNC_URL
+              value: {{ include "centaur.proxySyncUrl" . | quote }}
+{{- end }}
             - name: IRON_CONTROL_API_KEY
               valueFrom:
                 secretKeyRef:

@@ -4,7 +4,7 @@ class SecretSource < ApplicationRecord
   include SyncConfigOwnerInvalidation
 
   SOURCE_TYPES = %w[env aws_sm aws_ssm 1password 1password_connect control_plane token_broker].freeze
-  SYNC_CONFIG_REPLACEMENT_ATTRIBUTES = %w[source_type config secret role role_kind].freeze
+  SYNC_CONFIG_REPLACEMENT_ATTRIBUTES = %w[source_type config secret role role_kind broker_credential_id].freeze
 
   UNIVERSAL_OPTIONAL = %w[json_key ttl].freeze
 
@@ -31,6 +31,7 @@ class SecretSource < ApplicationRecord
   belongs_to :oauth_token_secret, optional: true
   belongs_to :pg_dsn_secret, optional: true
   belongs_to :hmac_secret, optional: true
+  belongs_to :broker_credential, optional: true
 
   # Only set for oauth_token_secret- and hmac_secret-owned sources: whether
   # `role` names a credential field (client_id, secret, ...) or a token-endpoint
@@ -40,6 +41,19 @@ class SecretSource < ApplicationRecord
   encrypts :secret
 
   attr_readonly :source_type
+  before_validation :resolve_broker_credential_reference
+
+  # Resolve either assignment order before sync replacement comparisons inspect
+  # broker_credential_id on an unsaved candidate source.
+  def source_type=(value)
+    super
+    resolve_broker_credential_reference
+  end
+
+  def config=(value)
+    super
+    resolve_broker_credential_reference
+  end
 
   # Maps this source to the iron-proxy `secrets` transform `source` block,
   # discriminated by `type`. For control_plane sources the decrypted value is
@@ -74,13 +88,10 @@ class SecretSource < ApplicationRecord
     credential.present? && brokered_credential&.id == credential.id
   end
 
-  # token_broker sources that reference the given broker credential by oid or
-  # foreign_id. Used to block deleting a credential still in use.
+  # Used to invalidate principals when a broker token rotates and to block
+  # deleting a credential that a token_broker source still references.
   def self.referencing_broker_credential(credential)
-    scope = where(source_type: "token_broker")
-    return scope.where("config->>'credential_id' = ?", credential.oid) if credential.foreign_id.blank?
-
-    scope.where("config->>'credential_id' IN (:oid, :fid)", oid: credential.oid, fid: credential.foreign_id)
+    where(source_type: "token_broker", broker_credential_id: credential.id)
   end
 
   OWNER_ASSOCIATIONS = %i[
@@ -103,20 +114,26 @@ class SecretSource < ApplicationRecord
   private
 
   # The BrokerCredential a token_broker source references. credential_id is either
-  # an opaque id (bcr_...) or a globally unique foreign_id. Returns nil when the source is not a token_broker, the
-  # reference is incomplete, or nothing matches. Memoized so deliverable?,
-  # to_proxy_source, and validation share one lookup.
+  # an opaque id (bcr_...) or a globally unique foreign_id. Returns nil when the
+  # source is not a token_broker, the reference is incomplete, or nothing matches.
   def brokered_credential
-    return @brokered_credential if defined?(@brokered_credential)
-    @brokered_credential = resolve_brokered_credential
+    resolve_broker_credential_reference if broker_credential_id.nil? || will_save_change_to_config?
+    broker_credential
   end
 
-  def resolve_brokered_credential
-    return nil unless source_type == "token_broker" && config.is_a?(Hash)
-    ref = config["credential_id"]
-    return nil if ref.blank?
+  def resolve_broker_credential_reference
+    unless source_type == "token_broker" && config.is_a?(Hash)
+      self.broker_credential = nil
+      return
+    end
 
-    if BrokerCredential.decode_oid(ref)
+    ref = config["credential_id"]
+    if ref.blank?
+      self.broker_credential = nil
+      return
+    end
+
+    self.broker_credential = if BrokerCredential.decode_oid(ref)
       BrokerCredential.find_by_oid(ref)
     else
       BrokerCredential.find_by(foreign_id: ref)

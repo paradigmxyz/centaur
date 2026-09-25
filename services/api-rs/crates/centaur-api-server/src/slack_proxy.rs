@@ -217,10 +217,16 @@ struct SlackChannelItem {
     topic: String,
     member_count: u64,
     is_private: bool,
+    is_im: bool,
+    is_mpim: bool,
     is_member: bool,
     can_upload: bool,
     can_download: bool,
     can_read_history: bool,
+}
+
+fn default_private() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -234,8 +240,12 @@ struct SlackChannel {
     topic: SlackChannelText,
     #[serde(default)]
     num_members: u64,
+    #[serde(default = "default_private")]
+    is_private: bool,
     #[serde(default)]
-    is_private: Option<bool>,
+    is_im: bool,
+    #[serde(default)]
+    is_mpim: bool,
     #[serde(default)]
     is_member: bool,
 }
@@ -1393,7 +1403,7 @@ async fn ensure_slack_channel_allowed(
 }
 
 fn slack_channel_has_default_access(channel: &SlackChannel) -> bool {
-    channel.is_private == Some(false) && channel.is_member
+    !channel.is_private && channel.is_member
 }
 
 fn slack_channel_ids_from_claims(claims: &SlackFileProxyClaims) -> Result<Vec<String>, ApiError> {
@@ -1433,9 +1443,9 @@ fn slack_channel_item(
         purpose: channel.purpose.value.clone(),
         topic: channel.topic.value.clone(),
         member_count: channel.num_members,
-        is_private: channel
-            .is_private
-            .unwrap_or_else(|| channel_id.starts_with('G')),
+        is_private: channel.is_private,
+        is_im: channel.is_im,
+        is_mpim: channel.is_mpim,
         is_member: channel.is_member,
         can_upload: claims
             .slack
@@ -1711,6 +1721,16 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
+    fn test_claims() -> SlackFileProxyClaims {
+        SlackFileProxyClaims {
+            slack: SlackProxyClaims {
+                upload_channels: vec![],
+                download_channels: vec![],
+                history_channels: vec![],
+            },
+        }
+    }
+
     fn test_channel_item(id: &str, name: &str, can_read_history: bool) -> SlackChannelItem {
         SlackChannelItem {
             id: id.to_owned(),
@@ -1719,6 +1739,8 @@ mod tests {
             topic: String::new(),
             member_count: 0,
             is_private: false,
+            is_im: false,
+            is_mpim: false,
             is_member: true,
             can_upload: false,
             can_download: false,
@@ -1802,10 +1824,54 @@ mod tests {
         assert_eq!(item.topic, "Announcements");
         assert_eq!(item.member_count, 42);
         assert!(!item.is_private);
+        assert!(!item.is_im);
+        assert!(!item.is_mpim);
         assert!(item.is_member);
         assert!(item.can_upload);
         assert!(item.can_download);
         assert!(item.can_read_history);
+    }
+
+    #[test]
+    fn channel_item_defaults_missing_privacy_metadata_to_private() {
+        let claims = test_claims();
+
+        for channel_id in ["C123456789", "D123456789", "G123456789"] {
+            let channel = test_channel(json!({ "id": channel_id }));
+            let item = slack_channel_item(&claims, channel_id, &channel);
+            assert!(item.is_private, "missing is_private for {channel_id}");
+            assert!(!item.is_im);
+            assert!(!item.is_mpim);
+        }
+    }
+
+    #[test]
+    fn channel_item_passes_conversation_type_through() {
+        let claims = test_claims();
+
+        let public_item = slack_channel_item(
+            &claims,
+            "C123456789",
+            &test_channel(json!({ "id": "C123456789", "is_private": false })),
+        );
+        assert!(!public_item.is_private);
+
+        let dm_item = slack_channel_item(
+            &claims,
+            "D123456789",
+            &test_channel(json!({ "id": "D123456789", "is_im": true })),
+        );
+        assert!(dm_item.is_private);
+        assert!(dm_item.is_im);
+        assert!(!dm_item.is_mpim);
+
+        let mpim_item = slack_channel_item(
+            &claims,
+            "G987654321",
+            &test_channel(json!({ "id": "G987654321", "is_mpim": true })),
+        );
+        assert!(mpim_item.is_private);
+        assert!(mpim_item.is_mpim);
     }
 
     #[test]
@@ -1831,6 +1897,8 @@ mod tests {
         for inaccessible in [
             test_channel(json!({"id": "G123456789", "is_private": true, "is_member": true})),
             test_channel(json!({"id": "C123456789", "is_private": false, "is_member": false})),
+            // Missing privacy metadata defaults to private.
+            test_channel(json!({"id": "D123456789", "is_member": true})),
         ] {
             assert!(!slack_channel_has_default_access(&inaccessible));
         }

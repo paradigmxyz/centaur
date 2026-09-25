@@ -875,6 +875,12 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
       assert_select "input[type=hidden][name=model]", count: 1
       assert_select "[data-console-model-option][data-value=?]", "amp"
       assert_select "[data-console-model-option][data-value=?]", "gpt-6-astra"
+      %w[sol luna].each do |variant|
+        assert_select "[data-console-model-option][data-value=?]", "gpt-6-#{variant}", count: 1
+      end
+      %w[sol terra luna].each do |variant|
+        assert_select "[data-console-model-option][data-value=?]", "gpt-5.6-#{variant}", count: 1
+      end
       assert_select "[data-console-model-option][data-value=?]", "claude-opus-5"
       assert_select "select", count: 0
     end
@@ -891,6 +897,24 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
       ] },
       agents["gpt-6-astra"]
     )
+    %w[sol terra luna].each do |variant|
+      assert_equal(
+        { "label" => "GPT-5.6 #{variant.capitalize}", "efforts" => [
+          %w[minimal Minimal], %w[low Low], %w[medium Medium],
+          %w[high High], [ "xhigh", "Extra High" ], %w[max Max]
+        ] },
+        agents["gpt-5.6-#{variant}"]
+      )
+    end
+    %w[sol luna].each do |variant|
+      assert_equal(
+        { "label" => "GPT-6 #{variant.capitalize}", "efforts" => [
+          %w[none None], %w[low Low], %w[medium Medium],
+          %w[high High], [ "xhigh", "Extra High" ], %w[max Max]
+        ] },
+        agents["gpt-6-#{variant}"]
+      )
+    end
     # Submitting replaces the centered empty state with a full-height,
     # bottom-aligned optimistic transcript while the request is in flight.
     assert_includes response.body, 'container.classList.add("console-new-chat--optimistic")'
@@ -1225,17 +1249,25 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "private_responses", line["provider"]
   end
 
-  test "a codex chat carries the picked reasoning effort" do
-    client = RecordingApiClient.new
-    with_composer(client: client) do
-      post console_threads_url,
-           params: { prompt: "Reply with PONG.", model: "gpt-5.6-sol", effort: "max" }
-    end
+  %w[gpt-6-astra gpt-6-sol gpt-6-luna gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna].each do |model|
+    test "a #{model} chat carries the picked model and reasoning effort" do
+      client = RecordingApiClient.new
+      with_composer(client: client) do
+        post console_threads_url,
+             params: { prompt: "Reply with PONG.", model: model, effort: "max" }
+      end
 
-    execute = client.calls[2].last
-    assert_equal "max", execute[:metadata][:reasoning]
-    line = JSON.parse(execute[:input_lines].first)
-    assert_equal "max", line["reasoning"]
+      create = client.calls[0].last
+      assert_equal "codex", create[:harness_type]
+      assert_equal model, create[:metadata][:model]
+
+      execute = client.calls[2].last
+      assert_equal model, execute[:metadata][:model]
+      assert_equal "max", execute[:metadata][:reasoning]
+      line = JSON.parse(execute[:input_lines].first)
+      assert_equal model, line["model"]
+      assert_equal "max", line["reasoning"]
+    end
   end
 
   test "Claude Opus 5 Fast selects the native fast model variant" do

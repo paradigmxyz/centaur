@@ -1441,13 +1441,13 @@ def drive_label_folder(
 def drive_setup_channel_permissions(
     file_id: str,
     channel_member_emails: list[str],
-    requester_email: str,
+    requester_email: str | None,
 ) -> dict:
-    """Set up file permissions for Slack channel members and transfer ownership.
+    """Set up file permissions for Slack channel members and optionally transfer ownership.
 
     This function:
     1. Shares the file with all channel members (writer role)
-    2. Transfers ownership to the requester
+    2. Transfers ownership when a requester is provided
 
     Note: The original owner (service account) is automatically downgraded to
     editor by Google Drive when ownership is transferred, and retains access.
@@ -1458,7 +1458,7 @@ def drive_setup_channel_permissions(
         file_id: The Google Drive file ID
         channel_member_emails: List of email addresses for channel members
             (obtained from Slack via get_channel_members_with_emails)
-        requester_email: Email of the person who requested the file (new owner)
+        requester_email: Optional email of the person who requested the file (new owner)
 
     Returns:
         Dict with results: shared_with, new_owner, errors
@@ -2118,20 +2118,51 @@ def docs_insert(
     return {"document_id": result.get("document_id", "")}
 
 
-def docs_create(title: str, content: str | None = None) -> dict:
+def _drive_create_native(title: str, mime_type: str, folder_id: str) -> tuple[str, str]:
+    """Create an empty native Google file inside a folder or shared drive.
+
+    The Docs, Sheets, and Slides ``create`` calls cannot set a parent, so a
+    file that must live in a specific folder is created through Drive.
+
+    Returns:
+        Tuple of file id and name
+    """
+    created = (
+        get_drive_service()
+        .files()
+        .create(
+            body={"name": title, "mimeType": mime_type, "parents": [folder_id]},
+            fields="id, name",
+            supportsAllDrives=True,
+        )
+        .execute()
+    )
+    return created.get("id", ""), created.get("name", "")
+
+
+def docs_create(
+    title: str, content: str | None = None, folder_id: str | None = None
+) -> dict:
     """Create a new Google Doc.
 
     Args:
         title: Document title
         content: Optional initial content to add
+        folder_id: Optional parent folder or shared drive ID
 
     Returns:
         Dict with document_id, title, and url
     """
     service = get_docs_service()
 
-    doc = service.documents().create(body={"title": title}).execute()
-    document_id = doc.get("documentId", "")
+    if folder_id:
+        document_id, doc_title = _drive_create_native(
+            title, "application/vnd.google-apps.document", folder_id
+        )
+    else:
+        doc = service.documents().create(body={"title": title}).execute()
+        document_id = doc.get("documentId", "")
+        doc_title = doc.get("title", "")
 
     if content:
         requests = [{"insertText": {"location": {"index": 1}, "text": content}}]
@@ -2141,7 +2172,7 @@ def docs_create(title: str, content: str | None = None) -> dict:
 
     return {
         "document_id": document_id,
-        "title": doc.get("title", ""),
+        "title": doc_title,
         "url": f"https://docs.google.com/document/d/{document_id}/edit",
     }
 
@@ -2160,20 +2191,31 @@ def _quote_sheet_title(title: str) -> str:
     return f"'{escaped_title}'"
 
 
-def sheets_create(title: str, content: list[list[str]] | None = None) -> dict:
+def sheets_create(
+    title: str, content: list[list[str]] | None = None, folder_id: str | None = None
+) -> dict:
     """Create a new Google Sheet.
 
     Args:
         title: Spreadsheet title
         content: Optional 2D array of initial data (rows x cols)
+        folder_id: Optional parent folder or shared drive ID
 
     Returns:
         Dict with spreadsheet_id, title, and url
     """
     service = get_sheets_service()
 
-    spreadsheet = service.spreadsheets().create(body={"properties": {"title": title}}).execute()
-    spreadsheet_id = spreadsheet.get("spreadsheetId", "")
+    if folder_id:
+        spreadsheet_id, sheet_title = _drive_create_native(
+            title, "application/vnd.google-apps.spreadsheet", folder_id
+        )
+    else:
+        spreadsheet = (
+            service.spreadsheets().create(body={"properties": {"title": title}}).execute()
+        )
+        spreadsheet_id = spreadsheet.get("spreadsheetId", "")
+        sheet_title = spreadsheet.get("properties", {}).get("title", "")
 
     if content:
         service.spreadsheets().values().update(
@@ -2185,7 +2227,7 @@ def sheets_create(title: str, content: list[list[str]] | None = None) -> dict:
 
     return {
         "spreadsheet_id": spreadsheet_id,
-        "title": spreadsheet.get("properties", {}).get("title", ""),
+        "title": sheet_title,
         "url": f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit",
     }
 
@@ -2460,23 +2502,29 @@ def get_slides_service():
     return build("slides", "v1", http=_build_http())
 
 
-def slides_create(title: str) -> dict:
+def slides_create(title: str, folder_id: str | None = None) -> dict:
     """Create a new Google Slides presentation.
 
     Args:
         title: Presentation title
+        folder_id: Optional parent folder or shared drive ID
 
     Returns:
         Dict with presentation_id, title, and url
     """
-    service = get_slides_service()
-
-    presentation = service.presentations().create(body={"title": title}).execute()
-    presentation_id = presentation.get("presentationId", "")
+    if folder_id:
+        presentation_id, presentation_title = _drive_create_native(
+            title, "application/vnd.google-apps.presentation", folder_id
+        )
+    else:
+        service = get_slides_service()
+        presentation = service.presentations().create(body={"title": title}).execute()
+        presentation_id = presentation.get("presentationId", "")
+        presentation_title = presentation.get("title", "")
 
     return {
         "presentation_id": presentation_id,
-        "title": presentation.get("title", ""),
+        "title": presentation_title,
         "url": f"https://docs.google.com/presentation/d/{presentation_id}/edit",
     }
 
@@ -3392,14 +3440,14 @@ class GSuiteClient:
         self,
         file_id: str,
         channel_member_emails: list[str],
-        requester_email: str,
+        requester_email: str | None,
     ) -> dict:
-        """Set up file permissions for Slack channel members and transfer ownership.
+        """Set up file permissions and optionally transfer ownership.
 
         Args:
             file_id: The Google Drive file ID
             channel_member_emails: List of email addresses for channel members
-            requester_email: Email of the person who requested the file (new owner)
+            requester_email: Optional email of the person who requested the file (new owner)
 
         Returns:
             Dict with results: shared_with, new_owner, errors
@@ -3607,31 +3655,40 @@ class GSuiteClient:
             expected_revision_id=expected_revision_id,
         )
 
-    def docs_create(self, title: str, content: str | None = None) -> dict:
+    def docs_create(
+        self, title: str, content: str | None = None, folder_id: str | None = None
+    ) -> dict:
         """Create a new Google Doc.
 
         Args:
             title: Document title
             content: Optional initial content to add
+            folder_id: Optional parent folder or shared drive ID
 
         Returns:
             Dict with document_id, title, and url
         """
-        return docs_create(title, content=content)
+        return docs_create(title, content=content, folder_id=folder_id)
 
     # --- Sheets ---
 
-    def sheets_create(self, title: str, content: list[list[str]] | None = None) -> dict:
+    def sheets_create(
+        self,
+        title: str,
+        content: list[list[str]] | None = None,
+        folder_id: str | None = None,
+    ) -> dict:
         """Create a new Google Sheet.
 
         Args:
             title: Spreadsheet title
             content: Optional 2D array of initial data (rows x cols)
+            folder_id: Optional parent folder or shared drive ID
 
         Returns:
             Dict with spreadsheet_id, title, and url
         """
-        return sheets_create(title, content=content)
+        return sheets_create(title, content=content, folder_id=folder_id)
 
     def sheets_add_tab(
         self,
@@ -3751,16 +3808,17 @@ class GSuiteClient:
 
     # --- Slides ---
 
-    def slides_create(self, title: str) -> dict:
+    def slides_create(self, title: str, folder_id: str | None = None) -> dict:
         """Create a new Google Slides presentation.
 
         Args:
             title: Presentation title
+            folder_id: Optional parent folder or shared drive ID
 
         Returns:
             Dict with presentation_id, title, and url
         """
-        return slides_create(title)
+        return slides_create(title, folder_id=folder_id)
 
     # --- Analytics ---
 

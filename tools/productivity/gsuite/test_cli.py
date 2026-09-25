@@ -127,7 +127,7 @@ def test_docs_create_allows_omitting_channel(monkeypatch):
     monkeypatch.setattr(
         client,
         "docs_create",
-        lambda title, content: {
+        lambda title, content, folder_id=None: {
             "document_id": "doc-123",
             "title": title,
             "url": "https://docs.google.com/document/d/doc-123/edit",
@@ -158,6 +158,142 @@ def test_docs_create_allows_omitting_channel(monkeypatch):
     assert "Created document: Personal Notes" in result.output
     assert "Shared with" not in result.output
     assert "Ownership transferred to alice@example.com" in result.output
+
+
+_CREATE_COMMANDS = [
+    ("docs", "docs_create", "document_id", "document"),
+    ("sheets", "sheets_create", "spreadsheet_id", "spreadsheet"),
+    ("slides", "slides_create", "presentation_id", "presentation"),
+]
+
+
+@pytest.mark.parametrize(("command", "client_fn", "id_key", "kind"), _CREATE_COMMANDS)
+def test_create_in_folder_skips_ownership_transfer(
+    monkeypatch, command, client_fn, id_key, kind
+):
+    create_calls: list[dict] = []
+    monkeypatch.setattr(
+        client,
+        client_fn,
+        lambda title, *args, **kwargs: (
+            create_calls.append({"title": title, "folder_id": kwargs.get("folder_id")})
+            or {id_key: "file-123", "title": title, "url": "https://example.test/file-123"}
+        ),
+    )
+    monkeypatch.setattr(
+        client,
+        "drive_setup_channel_permissions",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected permission setup")),
+    )
+
+    result = runner.invoke(app, [command, "create", "Team Notes", "--folder", "drive-123"])
+
+    assert result.exit_code == 0, result.output
+    assert create_calls == [{"title": "Team Notes", "folder_id": "drive-123"}]
+    assert f"Created {kind}: Team Notes" in result.output
+    assert "Ownership transferred" not in result.output
+
+
+@pytest.mark.parametrize(("command", "client_fn", "id_key", "kind"), _CREATE_COMMANDS)
+def test_create_in_folder_ignores_owner(
+    monkeypatch, command, client_fn, id_key, kind
+):
+    monkeypatch.setattr(
+        client,
+        client_fn,
+        lambda title, *args, **kwargs: {
+            id_key: "file-123",
+            "title": title,
+            "url": "https://example.test/file-123",
+        },
+    )
+    monkeypatch.setattr(
+        client,
+        "drive_setup_channel_permissions",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected permission setup")),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            command,
+            "create",
+            "Team Notes",
+            "--folder",
+            "drive-123",
+            "--owner",
+            "alice@example.com",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Ownership transferred" not in result.output
+
+
+@pytest.mark.parametrize(("command", "client_fn", "id_key", "kind"), _CREATE_COMMANDS)
+def test_create_in_folder_still_shares_with_channel(
+    monkeypatch, command, client_fn, id_key, kind
+):
+    permission_calls: list[dict] = []
+    monkeypatch.setattr(
+        client,
+        client_fn,
+        lambda title, *args, **kwargs: {
+            id_key: "file-123",
+            "title": title,
+            "url": "https://example.test/file-123",
+        },
+    )
+    monkeypatch.setattr(
+        "gsuite.cli._get_channel_member_emails_via_cli", lambda channel: ["bob@example.com"]
+    )
+    monkeypatch.setattr(
+        client,
+        "drive_setup_channel_permissions",
+        lambda **kwargs: (
+            permission_calls.append(kwargs) or {"shared_with": ["bob@example.com"]}
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            command,
+            "create",
+            "Team Notes",
+            "--folder",
+            "drive-123",
+            "--channel",
+            "eng",
+            "--owner",
+            "alice@example.com",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert permission_calls == [
+        {
+            "file_id": "file-123",
+            "channel_member_emails": ["bob@example.com"],
+            "requester_email": None,
+        }
+    ]
+    assert "Shared with 1 channel members" in result.output
+    assert "Ownership transferred" not in result.output
+
+
+@pytest.mark.parametrize(("command", "client_fn", "id_key", "kind"), _CREATE_COMMANDS)
+def test_create_requires_owner_without_folder(monkeypatch, command, client_fn, id_key, kind):
+    monkeypatch.setattr(
+        client,
+        client_fn,
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected create")),
+    )
+
+    result = runner.invoke(app, [command, "create", "Team Notes"])
+
+    assert result.exit_code == 1
+    assert "--owner is required unless --folder is set" in result.output
 
 
 def test_drive_list_full_text_flag_is_passed_to_client(monkeypatch):

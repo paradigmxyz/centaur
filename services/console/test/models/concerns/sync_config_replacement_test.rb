@@ -54,6 +54,18 @@ class SyncConfigReplacementTest < ActiveSupport::TestCase
     )
   end
 
+  test "token broker replacement resolves its foreign key before comparison" do
+    existing = secret_sources(:broker_token)
+    replacement = SecretSource.new(
+      source_type: "token_broker",
+      config: { "credential_id" => existing.broker_credential.foreign_id }
+    )
+
+    assert_equal existing.broker_credential_id, replacement.broker_credential_id
+    assert_equal SyncConfigReplacement.documents(existing),
+                 SyncConfigReplacement.documents(replacement)
+  end
+
   test "request rule replacement fields cover the schema" do
     owner_foreign_keys = RequestRule::OWNER_ASSOCIATIONS.map do |association|
       RequestRule.reflect_on_association(association).foreign_key.to_s
