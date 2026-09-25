@@ -2,7 +2,7 @@ use std::{fmt, io::Read};
 
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
-    aead::{Aead, Payload},
+    aead::{Aead, Payload, consts::U12},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use flate2::read::ZlibDecoder;
@@ -79,6 +79,8 @@ impl ActiveRecordEncryption {
             return Err(Error("invalid encrypted attribute dimensions"));
         }
 
+        let nonce = <&Nonce<U12>>::try_from(iv.as_slice())
+            .map_err(|_| Error("invalid encrypted attribute dimensions"))?;
         let mut ciphertext_and_tag = ciphertext;
         ciphertext_and_tag.extend_from_slice(&tag);
         let mut plaintext = self
@@ -88,7 +90,7 @@ impl ActiveRecordEncryption {
                 let cipher = Aes256Gcm::new_from_slice(key).ok()?;
                 cipher
                     .decrypt(
-                        Nonce::from_slice(&iv),
+                        nonce,
                         Payload {
                             msg: &ciphertext_and_tag,
                             aad: b"",
