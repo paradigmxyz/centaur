@@ -22,8 +22,8 @@ ENV CARGO_INCREMENTAL=0 \
 WORKDIR /build
 COPY services/proxy-sync/ ./
 ARG RUST_BUILD_PROFILE=release
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+RUN --mount=type=cache,id=proxy-sync-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=proxy-sync-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=proxy-sync-sccache-${TARGETARCH},target=/var/cache/sccache,sharing=locked \
     case "$RUST_BUILD_PROFILE" in \
       release) cargo build --release && cp target/release/centaur-proxy-sync /usr/local/bin/centaur-proxy-sync ;; \
