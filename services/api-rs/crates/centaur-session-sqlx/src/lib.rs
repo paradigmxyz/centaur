@@ -1059,21 +1059,9 @@ impl PgSessionStore {
         event_type: &str,
         payload: Value,
     ) -> Result<SessionEvent, SessionStoreError> {
-        let row = sqlx::query_as::<_, SessionEventRow>(
-            r#"
-            insert into session_events (thread_key, execution_id, event_type, payload)
-            values ($1, $2, $3, $4)
-            returning event_id, thread_key, execution_id, event_type, payload, created_at
-            "#,
-        )
-        .bind(thread_key.as_str())
-        .bind(execution_id)
-        .bind(event_type)
-        .bind(payload)
-        .fetch_one(&self.pool)
-        .await?;
-
-        row.try_into()
+        insert_session_event(&self.pool, thread_key, execution_id, event_type, payload)
+            .await?
+            .try_into()
     }
 
     pub async fn append_event_if_stdout_owner(
@@ -1112,18 +1100,13 @@ impl PgSessionStore {
             return Ok(None);
         }
 
-        let row = sqlx::query_as::<_, SessionEventRow>(
-            r#"
-            insert into session_events (thread_key, execution_id, event_type, payload)
-            values ($1, $2, $3, $4)
-            returning event_id, thread_key, execution_id, event_type, payload, created_at
-            "#,
+        let row = insert_session_event(
+            &mut *tx,
+            thread_key,
+            Some(execution_id),
+            event_type,
+            payload,
         )
-        .bind(thread_key.as_str())
-        .bind(execution_id)
-        .bind(event_type)
-        .bind(payload)
-        .fetch_one(&mut *tx)
         .await?;
 
         tx.commit().await?;
@@ -2189,6 +2172,38 @@ fn stdout_lease_expires_at(lease: Duration) -> OffsetDateTime {
     OffsetDateTime::now_utc() + TimeDuration::new(seconds, lease.subsec_nanos() as i32)
 }
 
+/// Serialized per thread so event ids commit in order for `after_event_id` readers.
+async fn insert_session_event<'e, E>(
+    executor: E,
+    thread_key: &ThreadKey,
+    execution_id: Option<&str>,
+    event_type: &str,
+    payload: Value,
+) -> Result<SessionEventRow, sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    sqlx::query_as::<_, SessionEventRow>(
+        r#"
+        with thread_event_lock as (
+            select pg_advisory_xact_lock(
+                hashtextextended('centaur:session-events:' || $1::text, 0)
+            )
+        )
+        insert into session_events (thread_key, execution_id, event_type, payload)
+        select $1::text, $2::text, $3::text, $4::jsonb
+        from thread_event_lock
+        returning event_id, thread_key, execution_id, event_type, payload, created_at
+        "#,
+    )
+    .bind(thread_key.as_str())
+    .bind(execution_id)
+    .bind(event_type)
+    .bind(payload)
+    .fetch_one(executor)
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -2851,6 +2866,66 @@ mod tests {
             completed.status,
             centaur_session_core::ExecutionStatus::Completed
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn event_cursor_never_skips_an_event_that_commits_late() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key = ThreadKey::parse(format!("test:event-order-{}", Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+
+        // Inserted but not yet committed.
+        let mut slow_writer = store.pool().begin().await.expect("begin slow writer");
+        super::insert_session_event(&mut *slow_writer, &thread_key, None, "test.slow", json!({}))
+            .await
+            .expect("insert slow event");
+
+        let mut fast_writer = tokio::spawn({
+            let store = store.clone();
+            let thread_key = thread_key.clone();
+            async move {
+                store
+                    .append_event(&thread_key, None, "test.fast", json!({}))
+                    .await
+            }
+        });
+        let early = tokio::time::timeout(Duration::from_millis(500), &mut fast_writer).await;
+
+        let first_read = store
+            .list_events_after(&thread_key, 0, None, 100)
+            .await
+            .expect("first read");
+        let cursor = first_read.last().map_or(0, |event| event.event_id);
+
+        slow_writer.commit().await.expect("commit slow writer");
+        match early {
+            Ok(joined) => joined,
+            Err(_) => fast_writer.await,
+        }
+        .expect("join fast writer")
+        .expect("append fast event");
+
+        let second_read = store
+            .list_events_after(&thread_key, cursor, None, 100)
+            .await
+            .expect("second read");
+        let delivered = first_read
+            .iter()
+            .chain(&second_read)
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(delivered, ["test.slow", "test.fast"]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
