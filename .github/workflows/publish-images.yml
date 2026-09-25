@@ -7,7 +7,7 @@ on:
     paths:
       - .github/workflows/publish-images.yml
       - services/**
-      - crates/harness-server/**
+      - crates/**
       - harness/**
       - centaur_sdk/**
       - packages/**

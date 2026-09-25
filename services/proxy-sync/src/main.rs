@@ -1,4 +1,3 @@
-mod active_record_encryption;
 mod cache;
 mod config;
 mod conflicts;

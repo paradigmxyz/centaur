@@ -54,6 +54,22 @@ updates:
           - "*"
 
   - package-ecosystem: cargo
+    directory: /crates/active-record-encryption
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Denver
+    commit-message:
+      prefix: chore
+      include: scope
+    open-pull-requests-limit: 5
+    groups:
+      active-record-encryption-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: cargo
     directory: /crates/harness-server
     schedule:
       interval: weekly

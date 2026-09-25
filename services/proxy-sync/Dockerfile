@@ -20,7 +20,9 @@ ENV CARGO_INCREMENTAL=0 \
     RUSTC_WRAPPER=/usr/local/bin/sccache \
     SCCACHE_DIR=/var/cache/sccache
 WORKDIR /build
-COPY services/proxy-sync/ ./
+COPY crates/active-record-encryption/ crates/active-record-encryption/
+COPY services/proxy-sync/ services/proxy-sync/
+WORKDIR /build/services/proxy-sync
 ARG RUST_BUILD_PROFILE=release
 RUN --mount=type=cache,id=proxy-sync-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=proxy-sync-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \

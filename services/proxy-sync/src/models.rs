@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
+use active_record_encryption::ActiveRecordEncryption;
 use chrono::{DateTime, Utc};
 use metrics_exporter_prometheus::PrometheusHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 
-use crate::{active_record_encryption::ActiveRecordEncryption, cache::SyncCache};
+use crate::cache::SyncCache;
 
 #[derive(Clone)]
 pub(crate) struct AppState {

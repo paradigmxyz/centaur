@@ -3,6 +3,20 @@
 version = 4
 
 [[package]]
+name = "active-record-encryption"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "base64",
+ "flate2",
+ "pbkdf2",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -208,20 +222,16 @@ dependencies = [
 name = "centaur-proxy-sync"
 version = "0.1.0"
 dependencies = [
- "aes-gcm",
+ "active-record-encryption",
  "axum",
- "base64",
  "chrono",
  "crc32fast",
- "flate2",
  "hex",
  "jsonwebtoken",
  "metrics",
  "metrics-exporter-prometheus",
- "pbkdf2",
  "serde",
  "serde_json",
- "sha1",
  "sha2",
  "sqids",
  "sqlx",

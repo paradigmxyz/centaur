@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
+use active_record_encryption::ActiveRecordEncryption;
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
     ApiError,
-    active_record_encryption::ActiveRecordEncryption,
     conflicts::suppress,
     database::load_credentials,
     identifiers::oid,

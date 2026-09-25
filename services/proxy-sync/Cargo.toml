@@ -5,20 +5,16 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-aes-gcm = "0.10"
+active-record-encryption = { path = "../../crates/active-record-encryption" }
 axum = "0.8"
-base64 = "0.22"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 crc32fast = "1"
-flate2 = "1"
 hex = "0.4"
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
-pbkdf2 = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha1 = "0.10"
 sha2 = "0.10"
 sqids = "0.4"
 sqlx = { version = "0.8", default-features = false, features = ["json", "postgres", "runtime-tokio-rustls", "chrono"] }
