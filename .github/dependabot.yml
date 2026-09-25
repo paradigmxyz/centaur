@@ -108,6 +108,9 @@ updates:
       prefix: chore
       include: scope
     open-pull-requests-limit: 5
+    ignore:
+      # The pinned Vocs snapshot depends on Waku's alpha plugin API.
+      - dependency-name: waku
     groups:
       docs-dependencies:
         patterns:
