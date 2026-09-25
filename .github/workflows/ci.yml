@@ -290,7 +290,14 @@ jobs:
 
       - name: Test Absurd SDK
         working-directory: crates/absurd-sdk
-        run: cargo test --locked
+        env:
+          ABSURD_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/absurd_sdk
+        run: |
+          docker exec centaur-api-test-postgres createdb -U postgres absurd_sdk
+          docker exec -i centaur-api-test-postgres \
+            psql -v ON_ERROR_STOP=1 -U postgres -d absurd_sdk \
+            < ../../services/api-rs/crates/centaur-session-sqlx/migrations/0007_absurd_workflows.sql
+          cargo test --locked -- --test-threads=1
 
       - name: Format
         working-directory: services/api-rs
