@@ -871,3 +871,108 @@ describe('CodexAppServerRendererEventMapper retryable errors', () => {
     })
   })
 })
+
+describe('CodexAppServerRendererEventMapper collab subagents', () => {
+  it('ignores child turn completions and only finishes on the root turn', () => {
+    const mapper = new CodexAppServerRendererEventMapper()
+    mapper.process({
+      method: 'turn/started',
+      params: { threadId: 'thread-parent', turn: { id: 'turn-parent' } }
+    })
+    mapper.process({
+      method: 'turn/started',
+      params: { threadId: 'thread-child', turn: { id: 'turn-child' } }
+    })
+    const childEvents = mapper.process({
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-child',
+        turn: { id: 'turn-child', status: 'completed' }
+      }
+    })
+    expect(childEvents.some(event => event.type === 'renderer.done')).toBe(false)
+    expect(mapper.isDone()).toBe(false)
+
+    const parentEvents = mapper.process({
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-parent',
+        turn: { id: 'turn-parent', status: 'completed' }
+      }
+    })
+    expect(parentEvents.some(event => event.type === 'renderer.done')).toBe(true)
+    expect(mapper.isDone()).toBe(true)
+  })
+
+  it('does not fail on child turn failures', () => {
+    const mapper = new CodexAppServerRendererEventMapper()
+    mapper.process({
+      method: 'turn/started',
+      params: { threadId: 'thread-parent', turn: { id: 'turn-parent' } }
+    })
+    mapper.process({
+      method: 'turn/started',
+      params: { threadId: 'thread-child', turn: { id: 'turn-child' } }
+    })
+    const events = mapper.process({
+      method: 'turn/failed',
+      params: {
+        threadId: 'thread-child',
+        turn: { id: 'turn-child', status: 'failed' }
+      }
+    })
+    expect(events.some(event => event.type === 'renderer.done')).toBe(false)
+    expect(mapper.isDone()).toBe(false)
+  })
+
+  it('keeps child subagent text out of the final answer', () => {
+    const mapper = new CodexAppServerRendererEventMapper()
+    mapper.process({
+      method: 'turn/started',
+      params: { threadId: 'thread-parent', turn: { id: 'turn-parent' } }
+    })
+    mapper.process({
+      method: 'turn/started',
+      params: { threadId: 'thread-child', turn: { id: 'turn-child' } }
+    })
+    mapper.process({
+      type: 'item.started',
+      threadId: 'thread-child',
+      turnId: 'turn-child',
+      item: { id: 'msg-child', type: 'agentMessage', phase: 'final_answer' }
+    })
+    mapper.process({
+      type: 'item.agentMessage.delta',
+      threadId: 'thread-child',
+      turnId: 'turn-child',
+      itemId: 'msg-child',
+      delta: 'child draft. '
+    })
+    mapper.process({
+      type: 'item.started',
+      threadId: 'thread-parent',
+      turnId: 'turn-parent',
+      item: { id: 'msg-parent', type: 'agentMessage', phase: 'final_answer' }
+    })
+    mapper.process({
+      type: 'item.agentMessage.delta',
+      threadId: 'thread-parent',
+      turnId: 'turn-parent',
+      itemId: 'msg-parent',
+      delta: 'parent answer.'
+    })
+    const events = mapper.process({
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-parent',
+        turn: { id: 'turn-parent', status: 'completed' }
+      }
+    })
+    const done = events.find(event => event.type === 'renderer.done')
+    expect(mapper.isDone()).toBe(true)
+    expect(done).toMatchObject({
+      type: 'renderer.done',
+      answerMarkdown: 'parent answer.'
+    })
+  })
+})
