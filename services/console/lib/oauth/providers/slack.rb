@@ -15,7 +15,7 @@ module Oauth
       # Slack consent must request it even when an older operator-managed OAuth
       # app allowlist does not include it yet.
       REQUIRED_SCOPES = %w[search:read].freeze
-      API_HOSTS = %w[slack.com].freeze
+      API_HOSTS = %w[slack.com files.slack.com].freeze
       VALID_ISSUERS = %w[https://slack.com].freeze
 
       def key = KEY

@@ -118,6 +118,7 @@ module Oauth
         assert_equal "slack", strategy.key
         assert_equal "https://slack.com/oauth/v2/authorize", strategy.authorization_endpoint
         assert_equal "https://slack.com/api/oauth.v2.access", strategy.token_endpoint
+        assert_equal %w[slack.com files.slack.com], strategy.api_hosts
         assert_equal [], strategy.identity_scopes
         assert_equal "user_scope", strategy.authorization_scope_param
         assert_equal ",", strategy.scope_separator

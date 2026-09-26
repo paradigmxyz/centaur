@@ -368,7 +368,7 @@ module Oauth
       assert_equal "xoxe-1-refresh", cred.refresh_token
       assert cred.next_attempt_at.present?
       assert_equal "TACME", cred.labels["slack_team_id"]
-      assert_equal [ "slack.com" ], cred.static_secret.rules.map(&:host)
+      assert_equal [ "slack.com", "files.slack.com" ], cred.static_secret.rules.map(&:host)
       assert_equal "Slack – grace token", cred.static_secret.name
     end
 
@@ -413,7 +413,7 @@ module Oauth
       assert_nil cred.expires_at
       assert_nil cred.next_attempt_at
       assert_equal "TACME", cred.labels["slack_team_id"]
-      assert_equal [ "slack.com" ], cred.static_secret.rules.map(&:host)
+      assert_equal [ "slack.com", "files.slack.com" ], cred.static_secret.rules.map(&:host)
       refute_includes BrokerCredential.refreshable, cred
     end
 
