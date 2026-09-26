@@ -100,6 +100,28 @@ spec:
               value: {{ .Values.githubbot.mergeMethod | quote }}
             - name: GITHUBBOT_WORKFLOW_EVENTS
               value: {{ .Values.githubbot.workflowEvents | quote }}
+{{- with .Values.githubbot.reasoningEffort }}
+{{- if .assignment }}
+            - name: GITHUBBOT_EFFORT_ASSIGNMENT
+              value: {{ .assignment | quote }}
+{{- end }}
+{{- if .ciFix }}
+            - name: GITHUBBOT_EFFORT_CI_FIX
+              value: {{ .ciFix | quote }}
+{{- end }}
+{{- if .comment }}
+            - name: GITHUBBOT_EFFORT_COMMENT
+              value: {{ .comment | quote }}
+{{- end }}
+{{- if .management }}
+            - name: GITHUBBOT_EFFORT_MANAGEMENT
+              value: {{ .management | quote }}
+{{- end }}
+{{- if .review }}
+            - name: GITHUBBOT_EFFORT_REVIEW
+              value: {{ .review | quote }}
+{{- end }}
+{{- end }}
 {{- if .Values.githubbot.escalationHandle }}
             - name: GITHUBBOT_ESCALATION_HANDLE
               value: {{ .Values.githubbot.escalationHandle | quote }}

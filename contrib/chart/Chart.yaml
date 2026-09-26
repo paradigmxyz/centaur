@@ -2,7 +2,11 @@ apiVersion: v2
 name: centaur
 description: Helm chart for the trusted Centaur control plane
 type: application
+<<<<<<< HEAD
 version: 0.1.149
+=======
+version: 0.1.150
+>>>>>>> 4e3ffc88 (feat(githubbot,linearbot): per-turn reasoning effort for autonomous turns)
 appVersion: "0.1.0"
 dependencies:
   - name: connect

@@ -3,6 +3,7 @@ import { backgroundWaitUntil } from "./context";
 import { buildCommentReplyBody } from "./comment-bot";
 import type { PrManagerContext } from "./pr-manager";
 import { reactWorkingOnSubject, settleSubjectReaction } from "./reactions";
+import { reasoningEffortFor } from "./reasoning-effort";
 import { githubContextPreamble, runTurnStream } from "./turn";
 import type {
   ForwardSessionInput,
@@ -106,6 +107,9 @@ export function handleBodyMention(
       executeMessage: bodyMentionMessage(threadKey, number, body),
       messages: [],
       model: undefined,
+      // Conversational turn like a comment mention; no flag parsing on a
+      // subject body, so the configured per-turn-type default applies.
+      reasoning: reasoningEffortFor(options.reasoningEffort, "comment"),
       onEventId: () => undefined,
       openStream: false,
       threadId: threadKey,

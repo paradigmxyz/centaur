@@ -749,11 +749,12 @@ linearbot:
     tag: latest
     pullPolicy: Always
   userName: centaur
-  # Reasoning effort per turn type (codex turn/start.effort). Both unset run at
-  # the harness default. These turns are autonomous, so there is no message for
-  # a -rsn flag to ride on, and one global setting suits neither an assignment
-  # turn implementing a whole ticket nor a one-line comment reply.
-  # Accepts none | minimal | low | medium | high | xhigh | max.
+  # Reasoning effort per turn type (codex turn/start.effort). Unset types run
+  # at the harness default. Most turns are autonomous, so there is no message
+  # for a -rsn flag to ride on; on comment mentions an explicit -rsn flag in
+  # the text wins over this default. One global setting suits neither an
+  # assignment turn implementing a whole ticket nor a one-line comment reply.
+  # Accepts none | minimal | low | medium | high | xhigh | max | ultra.
   reasoningEffort:
     assignment: ""
     comment: ""
@@ -780,6 +781,19 @@ githubbot:
   # / draft status.
   autoMerge: true
   mergeMethod: squash
+  # Reasoning effort per turn type (codex turn/start.effort). Unset types run
+  # at the harness default. Most turns are autonomous (issue work, requested
+  # reviews, CI fixes, owned-PR management), so there is no message for a -rsn
+  # flag to ride on; on comment mentions an explicit -rsn flag in the text
+  # wins over this default. One global setting suits neither an issue-work
+  # turn implementing a whole ticket nor a mechanical CI fix.
+  # Accepts none | minimal | low | medium | high | xhigh | max | ultra.
+  reasoningEffort:
+    assignment: ""
+    ciFix: ""
+    comment: ""
+    management: ""
+    review: ""
   # Emit CI and review workflow events to api-rs.
   workflowEvents: false
   # Fallback @handle (no leading @) the bot tags when it gives up; empty = none.
