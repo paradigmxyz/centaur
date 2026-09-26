@@ -98,7 +98,7 @@ toml = "1.1"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7.0", features = ["trace"] }
 tracing = "0.1"
-tracing-opentelemetry = "0.33.0"
+tracing-opentelemetry = "0.34.0"
 tracing-subscriber = "0.3"
 urlencoding = "2"
 uuid = { version = "1", features = ["serde", "v4", "v5"] }
