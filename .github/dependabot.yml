@@ -124,6 +124,10 @@ updates:
       prefix: chore
       include: scope
     open-pull-requests-limit: 5
+    ignore:
+      # Chat SDK packages must stay aligned with the locally patched adapters.
+      - dependency-name: "@chat-adapter/*"
+      - dependency-name: chat
     groups:
       typescript-dependencies:
         patterns:
