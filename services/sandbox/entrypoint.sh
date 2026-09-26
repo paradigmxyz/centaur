@@ -437,17 +437,40 @@ unset _centaur_tools_auto_reload
 # Base prompt: mounted as AGENTS_BASE.md when present, fallback to baked-in AGENTS.md.
 # Prompt overlays from mounted repos are appended when present.
 # The selected persona is appended when AGENTS_PERSONA.md exists in the sandbox home.
-TARGET_PROMPT="$WORKSPACE_DIR/AGENTS.md"
+# When the checked-out repository tracks its own AGENTS.md, the composed prompt
+# must not clobber it: the repository file stays in place for harnesses that
+# read project instructions from workspace/AGENTS.md (codex), and the composed
+# prompt is written to $PROMPT_DIR/AGENTS.md instead. Claude Code receives it
+# from there via --append-system-prompt-file (crates/harness-server/src/
+# claude.rs probes that path first), codex picks it up as global guidance from
+# ~/.codex/AGENTS.md, and amp follows the AGENT.md symlink created below.
+PROMPT_DIR="$HOME_DIR/.centaur"
+if git -C "$WORKSPACE_DIR" ls-files --error-unmatch -- AGENTS.md >/dev/null 2>&1; then
+    TARGET_PROMPT="$PROMPT_DIR/AGENTS.md"
+    mkdir -p "$PROMPT_DIR"
+else
+    TARGET_PROMPT="$WORKSPACE_DIR/AGENTS.md"
+    # Clear artifacts from an earlier start that composed to $PROMPT_DIR.
+    rm -rf "$PROMPT_DIR"
+    rm -f "$HOME_DIR/.codex/AGENTS.md"
+fi
 compose-system-prompt \
     --home-dir "$HOME_DIR" \
     --target-prompt "$TARGET_PROMPT"
+if [ "$TARGET_PROMPT" != "$WORKSPACE_DIR/AGENTS.md" ]; then
+    # workspace/AGENTS.md is now the repository's own file, so codex would
+    # otherwise never see the composed prompt: deliver it as codex's global
+    # guidance, which codex merges ahead of the project-scope files.
+    cp "$TARGET_PROMPT" "$HOME_DIR/.codex/AGENTS.md" \
+        || echo "warning: could not install composed prompt as codex global guidance" >&2
+fi
 
-# Switch to workspace so the harness reads workspace/AGENTS.md (with persona overlay)
+# Switch to workspace so the harness reads the composed prompt (with persona overlay)
 cd "$WORKSPACE_DIR"
 
 if [ "${1:-}" = "harness-server" ] && [ "${2:-}" = "amp" ] && [ -f "$TARGET_PROMPT" ]; then
     rm -f "$WORKSPACE_DIR/AGENT.md"
-    ln -s "$(basename "$TARGET_PROMPT")" "$WORKSPACE_DIR/AGENT.md"
+    ln -s "$TARGET_PROMPT" "$WORKSPACE_DIR/AGENT.md"
 fi
 
 # Codex reads its auth file when the app server starts. Complete this before

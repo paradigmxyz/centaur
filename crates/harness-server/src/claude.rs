@@ -1,5 +1,5 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
@@ -196,6 +196,28 @@ fn flush_messages(
 #[derive(Debug, Default)]
 pub struct ClaudeCodeHarness;
 
+impl ClaudeCodeHarness {
+    /// Locates the composed Centaur system prompt to append via
+    /// `--append-system-prompt-file`. The sandbox entrypoint normally composes
+    /// it to `<workspace>/AGENTS.md`; when the checked-out repository ships
+    /// its own `AGENTS.md`, it composes to `$HOME/.centaur/AGENTS.md` instead
+    /// so the repository file is never clobbered. In that case the workspace
+    /// `AGENTS.md` belongs to the repository and must not be appended either,
+    /// so the composed path wins when both exist.
+    fn composed_system_prompt_for(home_dir: Option<&str>, workspace: &Path) -> Option<String> {
+        if let Some(home) = home_dir {
+            let composed = Path::new(home).join(".centaur").join("AGENTS.md");
+            if composed.is_file() {
+                return Some(composed.display().to_string());
+            }
+        }
+        let workspace_prompt = workspace.join("AGENTS.md");
+        workspace_prompt
+            .is_file()
+            .then(|| workspace_prompt.display().to_string())
+    }
+}
+
 impl HarnessServer for ClaudeCodeHarness {
     type Event = AnthropicStreamEvent;
     type EventNormalizer = ClaudeEventNormalizer;
@@ -243,8 +265,10 @@ impl HarnessServer for ClaudeCodeHarness {
         if !state.model.is_empty() {
             command.args(["--model", &state.model]);
         }
-        if PathBuf::from("AGENTS.md").is_file() {
-            command.args(["--append-system-prompt-file", "AGENTS.md"]);
+        if let Some(prompt_file) =
+            Self::composed_system_prompt_for(env::var("HOME").ok().as_deref(), Path::new("."))
+        {
+            command.args(["--append-system-prompt-file", &prompt_file]);
         }
         if let Some(session_id) = &state.harness_session_id {
             command.args(["--resume", session_id]);
@@ -302,6 +326,8 @@ impl HarnessServer for ClaudeCodeHarness {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use codex_app_server_protocol::UserInput;
     use serde_json::{Value, json};
 
@@ -558,5 +584,75 @@ mod tests {
         assert!(value.get("steer").is_none());
         assert_eq!(value["message"]["role"], "user");
         assert_eq!(value["message"]["content"][0]["text"], "new guidance");
+    }
+
+    /// Creates an empty scratch dir tree for prompt-probe tests and returns a
+    /// cleanup guard that removes it on drop.
+    fn prompt_probe_root(name: &str) -> (PathBuf, impl Drop) {
+        let root =
+            std::env::temp_dir().join(format!("centaur-claude-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        (
+            root.clone(),
+            defer(move || {
+                let _ = std::fs::remove_dir_all(&root);
+            }),
+        )
+    }
+
+    fn defer<F: FnOnce() + Send + 'static>(f: F) -> impl Drop {
+        struct Guard<F: FnOnce() + Send + 'static>(Option<F>);
+        impl<F: FnOnce() + Send + 'static> Drop for Guard<F> {
+            fn drop(&mut self) {
+                if let Some(f) = self.0.take() {
+                    f();
+                }
+            }
+        }
+        Guard(Some(f))
+    }
+
+    #[test]
+    fn composed_prompt_prefers_centaur_dir_over_workspace_agents_md() {
+        let (root, _guard) = prompt_probe_root("prefer");
+        let home = root.join("home");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(home.join(".centaur")).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(home.join(".centaur").join("AGENTS.md"), "composed").unwrap();
+        std::fs::write(workspace.join("AGENTS.md"), "repository file").unwrap();
+
+        let prompt =
+            ClaudeCodeHarness::composed_system_prompt_for(Some(home.to_str().unwrap()), &workspace)
+                .expect("composed prompt");
+
+        assert!(prompt.contains(".centaur"), "unexpected path: {prompt}");
+    }
+
+    #[test]
+    fn composed_prompt_falls_back_to_workspace_agents_md() {
+        let (root, _guard) = prompt_probe_root("fallback");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("AGENTS.md"), "composed").unwrap();
+
+        let prompt = ClaudeCodeHarness::composed_system_prompt_for(None, &workspace)
+            .expect("composed prompt");
+
+        assert!(prompt.ends_with("AGENTS.md"), "unexpected path: {prompt}");
+        assert!(!prompt.contains(".centaur"), "unexpected path: {prompt}");
+    }
+
+    #[test]
+    fn composed_prompt_absent_when_no_candidates_exist() {
+        let (root, _guard) = prompt_probe_root("absent");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        assert_eq!(
+            ClaudeCodeHarness::composed_system_prompt_for(Some(root.to_str().unwrap()), &workspace),
+            None
+        );
     }
 }
