@@ -12,7 +12,7 @@ patchedDependencies:
     hash: fce7a692b030cfe3d325b020a4472b9424b8976aa2f7faded6ad4c83421e9132
     path: patches/@chat-adapter__linear@4.31.0.patch
   '@chat-adapter/slack@4.40.0':
-    hash: 0e3cd8d89b08aafaa2fbc463e7e121e4eaef6729795f87791cdd611b00b06d9e
+    hash: a0b64f9130d2e0ea2413118bfd2ae0f4af3415f6f7489a4ecc2b27feb2c119d8
     path: patches/@chat-adapter__slack@4.40.0.patch
   '@chat-adapter/state-pg@4.31.0':
     hash: 69262b03c278ca9d4af0bed7b4e05f9d7a5a36d3d79fad31df2a85da4d349274

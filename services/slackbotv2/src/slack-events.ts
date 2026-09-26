@@ -153,6 +153,59 @@ export async function isAllowedSlackMessage(
   return true
 }
 
+type SlackStreamRecipientMessage = {
+  author: {
+    isBot: boolean | 'unknown'
+    userId: string
+  }
+  raw: unknown
+}
+
+/**
+ * Resolves the structured streaming `recipient_user_id` for a trigger
+ * message. Slack only accepts `U...`/`W...` member ids there, but
+ * bot-authored messages carry the bot's `B...` id in `author.userId`, which
+ * makes every `chat.startStream` fail. For bots, resolve a member id the same
+ * way the trigger-bot allowlist does (raw event fields, the cached
+ * `bots.info` identity, then the app's own bot user id). Returns undefined
+ * when no member id exists so the render path skips structured streaming up
+ * front instead of sending a start request Slack rejects.
+ */
+export async function slackStreamRecipientUserId(
+  message: SlackStreamRecipientMessage,
+  options: SlackbotV2Options,
+  logger: Logger
+): Promise<string | undefined> {
+  if (message.author.isBot !== true) return message.author.userId || undefined
+  try {
+    const raw = isRawSlackEvent(message.raw) ? message.raw : undefined
+    const directUserIds = normalizedIdentifierSet(
+      stringValue(raw?.user),
+      stringValue(raw?.bot_profile?.user_id),
+      message.author.userId
+    )
+    for (const userId of directUserIds) {
+      if (isSlackMemberId(userId)) return userId
+    }
+    const botIds = normalizedIdentifierSet(
+      stringValue(raw?.bot_id),
+      stringValue(raw?.bot_profile?.id)
+    )
+    for (const botId of botIds) {
+      const identity = await resolveTriggerBotIdentity(botId, options, logger)
+      if (identity?.userId && isSlackMemberId(identity.userId)) return identity.userId
+    }
+    const appBotUserId = options.botUserId
+    return appBotUserId && isSlackMemberId(appBotUserId) ? appBotUserId : undefined
+  } catch (error) {
+    logger.warn('slackbotv2_stream_recipient_resolution_failed', {
+      author_user_id: message.author.userId,
+      error: error instanceof Error ? error.message : String(error)
+    })
+    return undefined
+  }
+}
+
 function externalSlackTeamId(event: RawSlackEvent): string | undefined {
   return externalSlackTeamIdForHome(stringValue(event.team_id), event)
 }

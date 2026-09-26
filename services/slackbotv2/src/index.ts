@@ -75,7 +75,8 @@ import { createFlagMessageOverridesStrategy } from './message-overrides-strategy
 import {
   isAllowedSlackMessage,
   isAllowedSlackWebhookBody,
-  parseSlackWebhookPayload
+  parseSlackWebhookPayload,
+  slackStreamRecipientUserId
 } from './slack-events'
 import { isSlackStopCommand } from './stop-command'
 import {
@@ -2704,10 +2705,17 @@ async function renderExecutionStream(
     // posted message id is available for divergence reconciliation. For Slack
     // this matches thread.post(StreamingPlan): updateIntervalMs is a no-op
     // (Slack streams server-side) and the recipient context is the message
-    // author.
+    // author. Bot-authored triggers need a re-resolved `U...` recipient;
+    // undefined skips structured streaming instead of failing chat.startStream
+    // (the thread.post fallback would re-inject the author's `B...` id).
+    const recipientUserId = await slackStreamRecipientUserId(message, options, options.logger ?? noopLogger)
+    if (recipientUserId === undefined && message.author.isBot === true) {
+      await postChatSdkStreamText(thread, visibleStream)
+      return { diverged: capture.diverged }
+    }
     const sent = await thread.adapter.stream!(thread.id, visibleStream, {
       recipientTeamId: message.teamId,
-      recipientUserId: message.author.userId,
+      recipientUserId,
       ...(taskDisplayMode === 'none' ? {} : { taskDisplayMode }),
       // stopBlocks are appended to the end of the finalized Slack message via
       // chat.stopStream. The Console link is only included on the first assistant
@@ -2755,12 +2763,19 @@ async function renderRecoveredExecutionStream(
       )
     )
     if (!visibleStream) return { diverged: false }
+    // Same bot-recipient skip as renderExecutionStream: with no resolvable
+    // member id, structured streaming cannot succeed for a bot author.
+    const recipientUserId = await slackStreamRecipientUserId(message, options, options.logger ?? noopLogger)
+    if (recipientUserId === undefined && message.author.isBot === true) {
+      await postChatSdkStreamText(thread, visibleStream)
+      return { diverged: capture.diverged }
+    }
     const sent = await thread.adapter.stream!(
       thread.id,
       visibleStream,
       {
         recipientTeamId: message.teamId,
-        recipientUserId: message.author.userId,
+        recipientUserId,
         ...(taskDisplayMode === 'none' ? {} : { taskDisplayMode })
       }
     ) ?? await thread.post(visibleStream)
@@ -2817,6 +2832,27 @@ async function renderPlainTextExecutionStream(
   } finally {
     await setAssistantStatus(thread, '', options, trace)
   }
+}
+
+/**
+ * Posts the final-answer text of an already-shaped Chat SDK stream as one
+ * message. Used when structured streaming must be skipped up front (bot
+ * authors with no resolvable `U...` recipient): draining the stream here
+ * avoids thread.post(stream), whose SDK fallback would re-inject the
+ * bot-authored `B...` id that Slack rejects.
+ */
+async function postChatSdkStreamText(
+  thread: Thread,
+  stream: AsyncIterable<ChatSDKStreamChunk>
+): Promise<void> {
+  let markdownText = ''
+  for await (const chunk of stream) {
+    if (chunk.type === 'markdown_text') markdownText += chunk.text
+  }
+  if (!markdownText.trim()) return
+  await thread.post(
+    truncateSlackText(markdownText, SLACK_FALLBACK_TEXT_MAX_CHARS, 'Slack final answer')
+  )
 }
 
 class SlackRenderFallback {

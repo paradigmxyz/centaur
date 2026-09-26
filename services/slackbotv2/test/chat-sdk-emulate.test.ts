@@ -5943,6 +5943,125 @@ describe('slackbotv2', () => {
     expect(codexApi.appends).toHaveLength(0)
     expect(codexApi.executes).toHaveLength(0)
   })
+
+  it('streams bot-authored trigger replies to a resolvable member-id recipient', async () => {
+    // Regression for bot triggers whose raw event carries only the bot's
+    // `B...` id: that id fails Slack's `^[UW][A-Z0-9]{2,}$` recipient pattern,
+    // so the render path must re-resolve the bot's `U...` id (the cached
+    // allowlist identity) before starting the structured stream.
+    slackApi.setBotInfo('BOTHERBOT', { app_id: 'AOTHERBOT', id: 'BOTHERBOT', user_id: 'UOTHERBOT' })
+    const logs: CapturedLog[] = []
+    bot = createTestBot({ logger: captureLogger(logs), triggerBotAllowlist: ['UOTHERBOT'] })
+    const botTrigger = await postUserMessage('bot-authored trigger placeholder')
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-bot-trigger-streaming',
+        event: {
+          type: 'message',
+          bot_id: 'BOTHERBOT',
+          channel: CHANNEL_ID,
+          subtype: 'bot_message',
+          team: TEAM_ID,
+          text: `<@${BOT_USER_ID}> run the bot-triggered turn`,
+          ts: botTrigger.ts,
+          username: 'otherbot'
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(codexApi.executes).toHaveLength(1)
+    const transcripts = slackStreamTranscripts(slackApi.calls)
+    expect(transcripts).toHaveLength(1)
+    expect(transcripts[0]!.start.body).toEqual(
+      expect.objectContaining({
+        recipient_team_id: TEAM_ID,
+        recipient_user_id: 'UOTHERBOT',
+        thread_ts: botTrigger.ts
+      })
+    )
+    // The allowlist gate and the render path share one cached bots.info lookup.
+    expect(slackApi.botInfoRequestCount('BOTHERBOT')).toBe(1)
+    expect(await threadText(botTrigger.ts)).toContain('Executed request 1.')
+    expect(hasLog(logs, 'slackbotv2_render_failed')).toBe(false)
+
+    // Without a resolvable bot identity the recipient falls back to the app's
+    // own bot user id instead of the rejected B... id.
+    bot = createTestBot({ triggerBotAllowlist: ['bot:BOTHERBOT'] })
+    codexApi.reset()
+    slackApi.reset()
+    const fallbackTrigger = await postUserMessage('bot-authored fallback trigger placeholder')
+    const fallbackWaits: Promise<unknown>[] = []
+    const fallbackResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-bot-trigger-streaming-fallback',
+        event: {
+          type: 'message',
+          bot_id: 'BOTHERBOT',
+          channel: CHANNEL_ID,
+          subtype: 'bot_message',
+          team: TEAM_ID,
+          text: `<@${BOT_USER_ID}> run the fallback turn`,
+          ts: fallbackTrigger.ts,
+          username: 'otherbot'
+        }
+      }),
+      {},
+      waitUntilContext(fallbackWaits)
+    )
+    expect(fallbackResponse.status).toBe(200)
+    await Promise.all(fallbackWaits)
+    expect(codexApi.executes).toHaveLength(1)
+    const fallbackTranscripts = slackStreamTranscripts(slackApi.calls)
+    expect(fallbackTranscripts).toHaveLength(1)
+    expect(fallbackTranscripts[0]!.start.body).toEqual(
+      expect.objectContaining({
+        recipient_team_id: TEAM_ID,
+        recipient_user_id: BOT_USER_ID
+      })
+    )
+
+    // With no member id at all, structured streaming is skipped up front: no
+    // rejected chat.startStream and no false slack_answer_lost render failure.
+    const skipLogs: CapturedLog[] = []
+    bot = createTestBot({
+      botUserId: undefined,
+      logger: captureLogger(skipLogs),
+      triggerBotAllowlist: ['bot:BOTHERBOT']
+    })
+    codexApi.reset()
+    slackApi.reset()
+    const skipTrigger = await postUserMessage('bot-authored skip trigger placeholder')
+    const skipWaits: Promise<unknown>[] = []
+    const skipResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-bot-trigger-streaming-skipped',
+        event: {
+          type: 'app_mention',
+          bot_id: 'BOTHERBOT',
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          text: `<@${BOT_USER_ID}> run the skipped turn`,
+          ts: skipTrigger.ts,
+          username: 'otherbot'
+        }
+      }),
+      {},
+      waitUntilContext(skipWaits)
+    )
+    expect(skipResponse.status).toBe(200)
+    await Promise.all(skipWaits)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(false)
+    expect(await threadText(skipTrigger.ts)).toContain('Executed request 1.')
+    expect(hasLog(skipLogs, 'slackbotv2_render_failed')).toBe(false)
+  })
 })
 
 function createTestBot(
@@ -6736,6 +6855,7 @@ function writeMockSseEvent(stream: ServerResponse, event: MockSessionEvent): voi
 
 type PatchedSlackApi = {
   addFileToMessage(channel: string, ts: string, file: Record<string, unknown>): void
+  botInfoRequestCount(botId: string): number
   calls: StreamCall[]
   close(): Promise<void>
   failRepliesWithThreadNotFound(channel: string, ts: string): void
@@ -6747,6 +6867,7 @@ type PatchedSlackApi = {
   reset(): void
   respondToNextConversationsJoin(status: number, body: Record<string, unknown>): void
   respondToNextReaction(status: number, body: Record<string, unknown>): void
+  setBotInfo(botId: string, bot: Record<string, unknown>): void
   setFileInfo(fileId: string, file: Record<string, unknown>): void
   setUserProfile(userId: string, profile: Record<string, unknown>): void
   userProfileMethodRequestCount(userId: string, method: string): number
@@ -6796,6 +6917,8 @@ type SlackStreamTranscript = {
 async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackApi> {
   const upstreamUrl = loopbackUrl(emulatorUrl)
   const calls: StreamCall[] = []
+  const botInfo = new Map<string, Record<string, unknown>>()
+  const botInfoRequests = new Map<string, number>()
   const fileInfo = new Map<string, Record<string, unknown>>()
   const fileInfoRequests = new Map<string, number>()
   const conversationsJoinResponses: QueuedSlackApiResponse[] = []
@@ -6826,6 +6949,8 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
         assistantStatusGate = null
         return gate
       },
+      botInfo,
+      botInfoRequests,
       calls,
       conversationsJoinResponses,
       fileInfo,
@@ -6850,6 +6975,9 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
     addFileToMessage(channel: string, ts: string, file: Record<string, unknown>) {
       const key = slackReplyKey(channel, ts)
       threadMessageFiles.set(key, [...(threadMessageFiles.get(key) ?? []), file])
+    },
+    botInfoRequestCount(botId: string) {
+      return botInfoRequests.get(botId) ?? 0
     },
     calls,
     url: `http://127.0.0.1:${port}`,
@@ -6879,6 +7007,8 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
     reset() {
       releaseCurrentAssistantStatusGate()
       calls.length = 0
+      botInfo.clear()
+      botInfoRequests.clear()
       maxStreamStopChars = null
       stopFailure.remaining = 0
       appendFailure.remaining = -1
@@ -6898,6 +7028,9 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
     },
     respondToNextReaction(status: number, body: Record<string, unknown>) {
       reactionResponses.push({ body, status })
+    },
+    setBotInfo(botId: string, bot: Record<string, unknown>) {
+      botInfo.set(botId, bot)
     },
     setFileInfo(fileId: string, file: Record<string, unknown>) {
       fileInfo.set(fileId, file)
@@ -6921,6 +7054,8 @@ async function handlePatchedSlackRequest(
   input: {
     appendFailure: { error: string; remaining: number }
     assistantStatusGate: (status: string) => Promise<void> | null
+    botInfo: Map<string, Record<string, unknown>>
+    botInfoRequests: Map<string, number>
     calls: StreamCall[]
     conversationsJoinResponses: QueuedSlackApiResponse[]
     fileInfo: Map<string, Record<string, unknown>>
@@ -7012,6 +7147,18 @@ async function handlePatchedSlackRequest(
       return
     }
     await sendWebResponse(res, Response.json({ ok: true, profile }))
+    return
+  }
+  if (path === '/api/bots.info') {
+    const botId = url.searchParams.get('bot') ?? stringField((await requestBody(request)).bot)
+    input.botInfoRequests.set(botId, (input.botInfoRequests.get(botId) ?? 0) + 1)
+    const bot = input.botInfo.get(botId)
+    await sendWebResponse(
+      res,
+      bot
+        ? Response.json({ ok: true, bot })
+        : Response.json({ ok: false, error: 'bot_not_found' })
+    )
     return
   }
   if (path === '/api/files.info') {
