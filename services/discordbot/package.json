@@ -12,15 +12,15 @@
   "dependencies": {
     "@centaur/harness-events": "workspace:*",
     "@centaur/rendering": "workspace:*",
-    "@chat-adapter/discord": "^4.41.0",
-    "@chat-adapter/state-pg": "^4.41.0",
-    "chat": "^4.41.0",
+    "@chat-adapter/discord": "4.31.0",
+    "@chat-adapter/state-pg": "4.31.0",
+    "chat": "4.31.0",
     "discord.js": "^14.27.0",
     "hono": "^4.13.8",
     "pg": "^8.23.0"
   },
   "devDependencies": {
-    "@chat-adapter/state-memory": "^4.41.0",
+    "@chat-adapter/state-memory": "4.31.0",
     "@types/pg": "^8.23.1",
     "@types/bun": "^1.4.2",
     "@types/node": "^26.6.2",

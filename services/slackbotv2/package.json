@@ -12,14 +12,14 @@
   "dependencies": {
     "@centaur/harness-events": "workspace:*",
     "@centaur/rendering": "workspace:*",
-    "@chat-adapter/slack": "4.41.0",
-    "@chat-adapter/state-pg": "4.41.0",
-    "chat": "4.41.0",
+    "@chat-adapter/slack": "4.40.0",
+    "@chat-adapter/state-pg": "4.40.0",
+    "chat": "4.40.0",
     "hono": "^4.13.8",
     "pg": "^8.23.0"
   },
   "devDependencies": {
-    "@chat-adapter/state-memory": "4.41.0",
+    "@chat-adapter/state-memory": "4.40.0",
     "@slack/web-api": "^8.1.1",
     "@types/pg": "^8.23.1",
     "@types/bun": "^1.4.2",
