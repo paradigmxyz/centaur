@@ -316,6 +316,13 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     botUserId: options.botUserId,
     signingSecret: options.signingSecret,
     streamSegmentMaxAgeMs: Number(process.env.SLACK_STREAM_SEGMENT_MAX_AGE_MS) || undefined,
+    // The WebClient's default retry policy for 429s is tenRetriesInAboutThirtyMinutes,
+    // which can hold a live render (thread.post / adapter.stream) for ~30 minutes.
+    // Two quick retries absorb transient rate limits; sustained limiting then fails
+    // fast into the durable render/recovery paths instead of stalling a session.
+    webClientOptions: {
+      retryConfig: { retries: 2, factor: 2, minTimeout: 500, maxTimeout: 2_000, randomize: true }
+    },
     userName,
     logger
   })
