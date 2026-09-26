@@ -867,7 +867,11 @@ impl TurnGuard {
         // A retriable engine error before any output: withhold it (and the
         // `systemError` status we were holding) and hand both back so the caller
         // can drop them on retry or forward them once out of budget.
-        if terminal && method == "error" && !self.streamed && is_retriable_engine_error(&value) {
+        if terminal
+            && method == "error"
+            && !self.streamed
+            && is_retriable_engine_error(&value, &extra_retriable_error_patterns())
+        {
             let mut withheld = Vec::new();
             if let Some(status) = self.pending_system_error.take() {
                 withheld.push(status);
@@ -926,8 +930,12 @@ fn retry_backoff(retry: u32) -> Duration {
 /// True for codex's transient "engine warming up" failure, which surfaces as a
 /// -32602 error notification (`willRetry:false`) whose message ends in
 /// "...status 404 Not Found: Engine not found". These resolve on resubmission;
-/// other -32602s (genuine invalid params) are left untouched.
-fn is_retriable_engine_error(value: &Value) -> bool {
+/// other -32602s (genuine invalid params) are left untouched. Deployments
+/// pointing `OPENAI_BASE_URL` at other OpenAI-compatible endpoints can widen
+/// the set via `CODEX_RETRIABLE_ERROR_PATTERNS` (see
+/// `extra_retriable_error_patterns`); `extras` are matched as substrings of the
+/// same error message.
+fn is_retriable_engine_error(value: &Value, extras: &[String]) -> bool {
     let Some(message) = value
         .pointer("/params/error/message")
         .and_then(Value::as_str)
@@ -936,6 +944,26 @@ fn is_retriable_engine_error(value: &Value) -> bool {
     };
     message.contains("Engine not found")
         || (message.contains("Job registration failed") && message.contains("404"))
+        || extras
+            .iter()
+            .any(|pattern| message.contains(pattern.as_str()))
+}
+
+/// Extra retriable error-message substrings configured via
+/// `CODEX_RETRIABLE_ERROR_PATTERNS` (comma-separated; empty by default so the
+/// built-in engine-registration patterns are the only ones that match unless a
+/// deployment opts in).
+fn extra_retriable_error_patterns() -> Vec<String> {
+    parse_extra_retriable_error_patterns(env::var("CODEX_RETRIABLE_ERROR_PATTERNS").ok().as_deref())
+}
+
+fn parse_extra_retriable_error_patterns(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(|pattern| pattern.trim())
+        .filter(|pattern| !pattern.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// True for a `thread/status/changed` notification reporting a `systemError`.
@@ -1177,19 +1205,69 @@ mod tests {
     }
 
     #[test]
+    fn parse_extra_retriable_error_patterns_defaults_and_splits() {
+        // Empty by default: nothing configured, nothing extra matches.
+        assert!(parse_extra_retriable_error_patterns(None).is_empty());
+        assert!(parse_extra_retriable_error_patterns(Some("")).is_empty());
+        assert_eq!(
+            parse_extra_retriable_error_patterns(Some("upstream warming, rate limited")),
+            vec!["upstream warming".to_string(), "rate limited".to_string()]
+        );
+        // Whitespace is trimmed and empty entries are dropped.
+        assert_eq!(
+            parse_extra_retriable_error_patterns(Some("  a , , b  ")),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
     fn classifies_only_the_transient_engine_error() {
-        assert!(is_retriable_engine_error(&engine_error()));
-        assert!(is_retriable_engine_error(&json!({
-            "method": "error",
-            "params": { "error": { "message": "Job registration failed: ... 404 Not Found" } }
-        })));
+        assert!(is_retriable_engine_error(&engine_error(), &[]));
+        assert!(is_retriable_engine_error(
+            &json!({
+                "method": "error",
+                "params": { "error": { "message": "Job registration failed: ... 404 Not Found" } }
+            }),
+            &[]
+        ));
         // A genuine invalid-params -32602 is not the warmup case.
-        assert!(!is_retriable_engine_error(&json!({
-            "method": "error",
-            "params": { "error": { "message": "JSON-RPC error -32602: bad arguments" } }
-        })));
         assert!(!is_retriable_engine_error(
-            &json!({ "method": "error", "params": {} })
+            &json!({
+                "method": "error",
+                "params": { "error": { "message": "JSON-RPC error -32602: bad arguments" } }
+            }),
+            &[]
+        ));
+        assert!(!is_retriable_engine_error(
+            &json!({ "method": "error", "params": {} }),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn extras_widen_the_retriable_set_without_breaking_builtins() {
+        // A configured extra matches an arbitrary endpoint error message.
+        let endpoint_error = json!({
+            "method": "error",
+            "params": { "error": { "message": "JSON-RPC error -32602: upstream warming up, please retry" } }
+        });
+        assert!(!is_retriable_engine_error(&endpoint_error, &[]));
+        assert!(is_retriable_engine_error(
+            &endpoint_error,
+            &["upstream warming up".to_string()]
+        ));
+        // Built-in engine-registration patterns still match with extras set.
+        assert!(is_retriable_engine_error(
+            &engine_error(),
+            &["upstream warming up".to_string()]
+        ));
+        // An unrelated error is not matched even with extras configured.
+        assert!(!is_retriable_engine_error(
+            &json!({
+                "method": "error",
+                "params": { "error": { "message": "JSON-RPC error -32602: bad arguments" } }
+            }),
+            &["upstream warming up".to_string()]
         ));
     }
 
