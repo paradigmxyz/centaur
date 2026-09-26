@@ -535,6 +535,96 @@ async fn test_workflows_api(http: &HttpClient, base_url: &str) -> Result<()> {
     wait_for_workflow_schedule(http, base_url, &workflow_name, true)
         .await
         .context("wait for added workflow schedule to be discovered")?;
+    let idempotency_key = format!("{workflow_name}-concurrent-idempotency");
+    let start_url = format!("{base_url}/api/workflows/runs");
+    let start_request = json!({
+        "workflow_name": workflow_name,
+        "input": {
+            "case": "concurrent-idempotent-start",
+            "sleep_ms": 0,
+        },
+        "idempotency_key": idempotency_key,
+        "max_attempts": 2,
+    });
+    let (first_start, second_start) = tokio::join!(
+        post_json_ok(http, start_url.clone(), start_request.clone()),
+        post_json_ok(http, start_url, start_request),
+    );
+    let first_start = first_start.context("first concurrent workflow start")?;
+    let second_start = second_start.context("second concurrent workflow start")?;
+    if first_start.get("run_id") != second_start.get("run_id")
+        || first_start.get("initial_run_id") != second_start.get("initial_run_id")
+        || first_start.get("task_id") != second_start.get("task_id")
+    {
+        bail!("concurrent idempotent workflow starts diverged: {first_start} vs {second_start}");
+    }
+    let mut created = [
+        first_start.get("created").and_then(Value::as_bool),
+        second_start.get("created").and_then(Value::as_bool),
+    ];
+    created.sort_unstable();
+    if created != [Some(false), Some(true)] {
+        bail!(
+            "concurrent idempotent workflow starts returned unexpected created values: {created:?}"
+        );
+    }
+    if first_start.get("initial_run_id") != first_start.get("run_id") {
+        bail!("first workflow start did not expose its initial run identity: {first_start}");
+    }
+
+    let retry_idempotency_key = format!("{workflow_name}-retrying-idempotency");
+    let retry_request = json!({
+        "workflow_name": workflow_name,
+        "input": {
+            "case": "stable-initial-run-id",
+            "always_fail": true,
+        },
+        "idempotency_key": retry_idempotency_key,
+        "max_attempts": 2,
+    });
+    let retrying = post_json_ok(
+        http,
+        format!("{base_url}/api/workflows/runs"),
+        retry_request.clone(),
+    )
+    .await
+    .context("start retrying workflow")?;
+    let retrying_initial_run_id = required_string(&retrying, "initial_run_id")?;
+    if retrying.get("run_id") != retrying.get("initial_run_id") {
+        bail!("new retrying workflow did not start at its initial run: {retrying}");
+    }
+    wait_for_workflow_run_status(http, base_url, &retrying_initial_run_id, &["failed"])
+        .await
+        .context("wait for retrying workflow to exhaust attempts")?;
+    let replayed = post_json_ok(
+        http,
+        format!("{base_url}/api/workflows/runs"),
+        retry_request,
+    )
+    .await
+    .context("replay retrying workflow start")?;
+    if replayed.get("created").and_then(Value::as_bool) != Some(false)
+        || replayed.get("task_id") != retrying.get("task_id")
+        || replayed.get("initial_run_id") != retrying.get("initial_run_id")
+        || replayed.get("run_id") == retrying.get("run_id")
+    {
+        bail!(
+            "workflow replay did not preserve additive initial identity and legacy current run: {retrying} vs {replayed}"
+        );
+    }
+    let replayed_run = get_json_ok(
+        http,
+        format!("{base_url}/api/workflows/runs/{retrying_initial_run_id}"),
+    )
+    .await
+    .context("get retrying workflow by initial run")?;
+    if replayed_run
+        .pointer("/run/initial_run_id")
+        .and_then(Value::as_str)
+        != Some(retrying_initial_run_id.as_str())
+    {
+        bail!("workflow get did not expose the stable initial identity: {replayed_run}");
+    }
 
     let completed_run_id = create_workflow_run(
         http,
@@ -738,6 +828,8 @@ async def handler(params, ctx):
     sleep_ms = int(params.get("sleep_ms") or 0)
     if sleep_ms:
         await asyncio.sleep(sleep_ms / 1000)
+    if params.get("always_fail"):
+        raise RuntimeError("simulated retrying workflow failure")
     return {{
         "workflow_name": ctx.workflow_name,
         "run_id": ctx.run_id,
@@ -843,6 +935,14 @@ async fn create_workflow_run(
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
         .context("workflow create response missing run_id")
+}
+
+fn required_string(value: &Value, field: &str) -> Result<String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .with_context(|| format!("response missing {field}: {value}"))
 }
 
 async fn wait_for_workflow_run_status(
