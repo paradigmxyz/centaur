@@ -2235,9 +2235,9 @@ class SlackClient:
         """Download a Slack file's bytes: returns ``(filename, mime_type, body)``.
 
         ``url`` must be an ``https://files.slack.com/`` URL. iron-proxy replaces
-        the placeholder with the principal's linked Slack credential when present,
-        and the host check prevents that credential from being aimed at an API
-        endpoint (e.g. api.test) that would echo it back.
+        the placeholder with the configured Slack bot credential, and the host
+        check prevents that credential from being aimed at an API endpoint
+        (e.g. api.test) that would echo it back.
         """
         token = self.token
         if not token:
