@@ -3665,6 +3665,141 @@ describe('slackbotv2', () => {
     }
   })
 
+  it('keeps rendering after a quiet period crosses the Slack hard stream expiry', async () => {
+    process.env.SLACK_STREAM_SEGMENT_MAX_AGE_MS = '120'
+    const logs: CapturedLog[] = []
+    bot = createTestBot({ logger: captureLogger(logs) })
+    try {
+      codexApi.autoRespond = false
+      // Slack hard-expires a stream segment 200ms after chat.startStream:
+      // chat.appendStream / chat.stopStream for the expired segment are
+      // rejected with message_not_in_streaming_state.
+      slackApi.expireStreamSegmentsAfter(200)
+
+      const parent = await postUserMessage('Context before a hard stream expiry.')
+      const mention = await postUserMessage(`<@${BOT_USER_ID}> go quiet`, parent.ts)
+      const key = threadKey(parent.ts)
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: 'Ev-slackbotv2-hard-ttl-rotation',
+          event: {
+            type: 'app_mention',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: mention.ts,
+            thread_ts: parent.ts,
+            text: `<@${BOT_USER_ID}> go quiet`
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+
+      expect(response.status).toBe(200)
+      await waitFor(() => codexApi.executes.length === 1)
+      await waitFor(() => codexApi.eventRequests.length === 1)
+      await waitFor(() => codexApi.streamCount === 1)
+
+      codexApi.emitOutputLine(
+        key,
+        JSON.stringify({
+          type: 'item.started',
+          item: {
+            id: 'cmd-hard-ttl',
+            type: 'commandExecution',
+            // Large enough to flush the Slack SDK's client-side stream buffer
+            // so the first segment demonstrably carries content.
+            command: `sleep 1 # ${'x'.repeat(300)}`,
+            status: 'inProgress'
+          }
+        })
+      )
+      await waitFor(() => slackApi.calls.some(call => call.method === 'chat.startStream'))
+      // Stay silent past both the adapter's 120ms rotation threshold and the
+      // fake Slack 200ms hard expiry before the next renderer chunk arrives.
+      await new Promise(resolve => setTimeout(resolve, 250))
+      codexApi.emitOutputLine(
+        key,
+        JSON.stringify({
+          type: 'item.completed',
+          item: {
+            id: 'cmd-hard-ttl',
+            type: 'commandExecution',
+            command: 'sleep 1',
+            status: 'completed',
+            aggregatedOutput: ''
+          }
+        })
+      )
+      codexApi.emitSessionEvent(key, 'session.execution_completed', {
+        execution_id: 'exe-hard-ttl-rotation',
+        status: 'completed',
+        result_text: 'HARD_TTL_ROTATION_ANSWER_VISIBLE'
+      })
+
+      await Promise.all(waits)
+
+      // The primary renderer survived the quiet period: no render failure,
+      // and the answer was not reposted by the durable fallback.
+      expect(hasLog(logs, 'slackbotv2_render_failed')).toBe(false)
+      const fallbackPosts = slackApi.calls.filter(
+        call =>
+          call.method === 'chat.postMessage'
+          && stringField(call.body.markdown_text).includes('HARD_TTL_ROTATION_ANSWER_VISIBLE')
+      )
+      expect(fallbackPosts).toEqual([])
+      const starts = slackApi.calls.filter(call => call.method === 'chat.startStream')
+      expect(starts.length).toBeGreaterThanOrEqual(2)
+      const startTs = new Set(
+        starts.map(call => call.streamTs).filter((ts): ts is string => Boolean(ts))
+      )
+      const stopTs = new Set(
+        slackApi.calls
+          .filter(call => call.method === 'chat.stopStream')
+          .map(call => stringField(call.body.ts))
+      )
+      // At most the segment Slack had already hard-expired may lack a
+      // stopStream: it is already closed server-side, so the adapter treats
+      // its stop failure as cleanup and continues in a fresh segment.
+      const unstopped = [...startTs].filter(ts => !stopTs.has(ts))
+      expect(unstopped.length).toBeLessThanOrEqual(1)
+      // Progress continued in a fresh segment: the replayed task completes
+      // there and the final answer streams through it.
+      const freshTs = starts[starts.length - 1]!.streamTs
+      expect(typeof freshTs).toBe('string')
+      expect(
+        slackApi.calls.filter(
+          call => call.method === 'chat.stopStream' && stringField(call.body.ts) === freshTs
+        )
+      ).toHaveLength(1)
+      const freshChunks = slackApi.calls
+        .filter(
+          call =>
+            call.method === 'chat.startStream'
+              ? call.streamTs === freshTs
+              : stringField(call.body.ts) === freshTs
+        )
+        .flatMap(call => streamChunks(call.body.chunks))
+      const freshStatuses = freshChunks
+        .filter(chunk => chunk.type === 'task_update' && chunk.id === 'cmd-hard-ttl')
+        .map(chunk => stringField(chunk.status))
+      expect(freshStatuses[freshStatuses.length - 1]).toBe('complete')
+      const freshMarkdown = freshChunks
+        .filter(chunk => chunk.type === 'markdown_text')
+        .map(chunk => stringField(chunk.text))
+        .join('')
+      expect(freshMarkdown).toContain('HARD_TTL_ROTATION_ANSWER_VISIBLE')
+      const texts = await threadTexts(parent.ts)
+      expect(texts.some(text => text.includes(BROKEN_STREAM_TEXT))).toBe(false)
+      expect(texts.filter(text => text.includes('HARD_TTL_ROTATION_ANSWER_VISIBLE'))).toHaveLength(1)
+    } finally {
+      delete process.env.SLACK_STREAM_SEGMENT_MAX_AGE_MS
+    }
+  })
+
   it('rotates structured plan segments before they exceed the task char budget', async () => {
     process.env.SLACK_STREAM_SEGMENT_TASK_CHAR_BUDGET = '400'
     try {
@@ -6738,6 +6873,7 @@ type PatchedSlackApi = {
   addFileToMessage(channel: string, ts: string, file: Record<string, unknown>): void
   calls: StreamCall[]
   close(): Promise<void>
+  expireStreamSegmentsAfter(maxAgeMs: number): void
   failRepliesWithThreadNotFound(channel: string, ts: string): void
   failStreamAppendsAfter(count: number, error: string): void
   failStreamStopsLongerThan(maxChars: number): void
@@ -6775,6 +6911,7 @@ type StreamCall = {
 type StreamRecord = {
   channel: string
   payloadChars: number
+  startedAtMs?: number
   text: string
   ts: string
 }
@@ -6809,6 +6946,10 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
   let maxStreamStopChars: number | null = null
   const stopFailure = { remaining: 0 }
   const appendFailure: { error: string; remaining: number } = { error: '', remaining: -1 }
+  // Server-side stand-in for Slack's hard streaming expiry: once a stream
+  // segment is older than maxAgeMs, chat.appendStream / chat.stopStream for
+  // it are rejected with message_not_in_streaming_state.
+  const streamTtl = { maxAgeMs: 0 }
   const streams = new Map<string, StreamRecord>()
   const releaseCurrentAssistantStatusGate = () => {
     const release = releaseAssistantStatusGate
@@ -6834,6 +6975,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       stopFailure,
       port,
       reactionResponses,
+      streamTtl,
       streams,
       threadNotFoundReplies,
       threadMessageFiles,
@@ -6853,6 +6995,9 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
     },
     calls,
     url: `http://127.0.0.1:${port}`,
+    expireStreamSegmentsAfter(maxAgeMs: number) {
+      streamTtl.maxAgeMs = maxAgeMs
+    },
     failRepliesWithThreadNotFound(channel: string, ts: string) {
       threadNotFoundReplies.add(slackReplyKey(channel, ts))
     },
@@ -6883,6 +7028,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       stopFailure.remaining = 0
       appendFailure.remaining = -1
       appendFailure.error = ''
+      streamTtl.maxAgeMs = 0
       conversationsJoinResponses.length = 0
       reactionResponses.length = 0
       threadNotFoundReplies.clear()
@@ -6929,6 +7075,7 @@ async function handlePatchedSlackRequest(
     stopFailure: { remaining: number }
     port: number
     reactionResponses: QueuedSlackApiResponse[]
+    streamTtl: { maxAgeMs: number }
     streams: Map<string, StreamRecord>
     threadNotFoundReplies: Set<string>
     threadMessageFiles: Map<string, Record<string, unknown>[]>
@@ -7099,7 +7246,7 @@ async function handlePatchedSlackRequest(
   if (path === '/api/chat.appendStream') {
     await sendWebResponse(
       res,
-      await appendStream(input.upstreamUrl, request, input.streams, input.calls, input.appendFailure)
+      await appendStream(input.upstreamUrl, request, input.streams, input.calls, input.appendFailure, input.streamTtl)
     )
     return
   }
@@ -7112,7 +7259,8 @@ async function handlePatchedSlackRequest(
         input.streams,
         input.calls,
         input.maxStreamStopChars,
-        input.stopFailure
+        input.stopFailure,
+        input.streamTtl
       )
     )
     return
@@ -7243,8 +7391,25 @@ async function startStream(
   if (!posted.ok) return Response.json(posted)
   const ts = stringField(posted.ts)
   calls.push({ method: 'chat.startStream', body, streamTs: ts })
-  streams.set(streamKey(channel, ts), { channel, payloadChars, ts, text })
+  streams.set(streamKey(channel, ts), { channel, payloadChars, startedAtMs: Date.now(), ts, text })
   return Response.json({ ok: true, channel, ts })
+}
+
+/**
+ * Server-side stream TTL: mirrors Slack's hard streaming expiry. A segment
+ * older than maxAgeMs rejects chat.appendStream / chat.stopStream with
+ * message_not_in_streaming_state; the message keeps the content confirmed
+ * before expiry.
+ */
+function streamSegmentExpired(
+  streams: Map<string, StreamRecord>,
+  channel: string,
+  ts: string,
+  streamTtl: { maxAgeMs: number }
+): boolean {
+  if (streamTtl.maxAgeMs <= 0) return false
+  const startedAtMs = streams.get(streamKey(channel, ts))?.startedAtMs
+  return startedAtMs !== undefined && Date.now() - startedAtMs > streamTtl.maxAgeMs
 }
 
 async function appendStream(
@@ -7252,12 +7417,16 @@ async function appendStream(
   request: Request,
   streams: Map<string, StreamRecord>,
   calls: StreamCall[],
-  appendFailure: { error: string; remaining: number }
+  appendFailure: { error: string; remaining: number },
+  streamTtl: { maxAgeMs: number }
 ): Promise<Response> {
   const body = await requestBody(request)
   const channel = stringField(body.channel)
   const ts = stringField(body.ts)
   calls.push({ method: 'chat.appendStream', body, streamTs: ts })
+  if (streamSegmentExpired(streams, channel, ts, streamTtl)) {
+    return Response.json({ ok: false, error: 'message_not_in_streaming_state' })
+  }
   if (appendFailure.remaining === 0) {
     // The stream broke server-side: real Slack renders the message as
     // "Something went wrong" and drops the streamed content.
@@ -7287,12 +7456,16 @@ async function stopStream(
   streams: Map<string, StreamRecord>,
   calls: StreamCall[],
   maxStreamStopChars: number | null,
-  stopFailure: { remaining: number }
+  stopFailure: { remaining: number },
+  streamTtl: { maxAgeMs: number }
 ): Promise<Response> {
   const body = await requestBody(request)
   const channel = stringField(body.channel)
   const ts = stringField(body.ts)
   calls.push({ method: 'chat.stopStream', body, streamTs: ts })
+  if (streamSegmentExpired(streams, channel, ts, streamTtl)) {
+    return Response.json({ ok: false, error: 'message_not_in_streaming_state' })
+  }
   if (stopFailure.remaining > 0) {
     stopFailure.remaining -= 1
     return Response.json({ ok: false, error: 'internal_error' })
