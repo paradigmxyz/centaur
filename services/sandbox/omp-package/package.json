@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "dependencies": {
+    "@oh-my-pi/pi-coding-agent": "18.3.1"
+  }
+}

@@ -1,0 +1,83 @@
+# Using the OMP Harness
+
+Centaur can run [oh-my-pi](https://github.com/can1357/oh-my-pi) (OMP) as a
+session harness alongside Codex, Claude Code, Amp, Nanocodex, and Hermes.
+Start a Slack, GitHub, or Linear thread with `--omp` (or set `omp` as a channel
+or deployment default). On its first user turn, the sandbox starts a long-lived
+`omp --mode rpc --no-ui` process rather than spawning a CLI for each turn.
+
+## How the integration works
+
+- **One OMP process per thread** — `harness-server omp` keeps the process alive
+  across turns. Steering sends the native `steer` command into the active turn;
+  interruption sends `abort`, with a kill fallback if OMP does not finish within
+  the grace period. Startup failures fail the turn, not the harness server, and
+  a subsequent turn retries startup.
+- **Native session resume** — the first input line's `thread_key` takes precedence
+  over `CENTAUR_THREAD_KEY`; without either, a local run gets a random UUID.
+  After the RPC handshake, `open_session` binds OMP to
+  `$CENTAUR_OMP_SESSION_ROOT/<sha256(thread key)>`, using lowercase hexadecimal.
+  OMP resumes the newest non-empty session there or creates a new one. The
+  harness refreshes the restored model before applying a requested model override.
+  A later line with a different thread key is rejected: one sandbox serves one
+  thread. If OMP exits, the next turn repeats the handshake and opens the same
+  directory. History survives sandbox replacement only on persistent storage.
+- **Turn completion** — OMP 18.3.1 reports the prompt's outcome in a correlated
+  `prompt_result`: `completed`, `error`, or `aborted`. When `sessionSettled` is
+  false, the Centaur turn stays open and includes any background follow-up runs
+  until `session_settled`. When it is true, completion is immediate, without a
+  `get_state` quiescence query or waiting for another settle frame. Local commands
+  can instead finish through a prompt response with `data.agentInvoked: false`.
+- **Errors** — `prompt_result.error.message` is propagated verbatim, bounded to
+  4096 bytes plus a truncation marker. OMP handles its own provider retries; the
+  harness does not infer failure from assistant messages or retry events.
+- **Headless host** — `--no-ui` lets extension dialogs use their headless defaults.
+  The harness registers no host tools or URI schemes. Any host tool, host URI,
+  or extension UI request or cancellation is therefore a protocol error, not a
+  callback to decline.
+- **RPC v2** — OMP must advertise protocol v2 support (OMP 18.3.1 or newer). The
+  harness negotiates v2 and filters session events to the message, tool, agent-start,
+  and notice events it consumes. Assistant item IDs use `omp-<messageId>`, so an
+  injected message cannot change a streaming reply's identity. Physical stdout
+  lines remain bounded to 1 MiB plus framing slack; chunked logical frames are
+  reassembled up to the advertised limit (64 MiB), validating sequence metadata,
+  base64, strict UTF-8, and a single JSON object. Interleaved, interrupted,
+  malformed, and unknown frames fail closed.
+
+## Configuration
+
+| Variable | Purpose |
+|---|---|
+| `CENTAUR_OMP_BIN` | `omp` executable (default: `omp` on `PATH`). |
+| `CENTAUR_OMP_SESSION_ROOT` | Root for per-thread session directories (default: `~/.omp/centaur-sessions`). |
+| `CENTAUR_THREAD_KEY` | Fallback thread key when the input line does not supply `thread_key`. Without either, a local run starts a new thread. |
+
+The sandbox image installs `@oh-my-pi/pi-coding-agent` 18.3.1 from a frozen
+lockfile (which needs Bun 1.3.14 or newer) and checks the installed version at
+build time. OMP uses its stock tools and settings. When a sandbox state volume
+is mounted, the entrypoint keeps `~/.omp` on it next to the other harnesses'
+state.
+
+OMP supports warm pools: `SESSION_SANDBOX_HARNESS=omp` can be combined with a
+nonzero `SESSION_SANDBOX_WARM_POOL_SIZE`. A warm harness server waits for the
+first input line before starting OMP and binding the thread through `open_session`.
+No OMP session files are written before that binding.
+
+## Models and credentials
+
+Select a model with `--model provider/model`, for example
+`--omp --model anthropic/claude-sonnet-4-5`; without one, OMP uses its default
+or the model restored from the session.
+OMP reads provider keys from its environment the stock way. In a managed
+sandbox those variables hold placeholders, and iron-proxy swaps in the real
+credential on egress for every provider with a registered fragment: Anthropic
+through the Claude Code fragment (`CLAUDE_CODE_AUTH_MODE`), OpenAI through the
+Codex fragment, and the other fragments api-rs registers for every harness.
+Any other provider needs its own fragment or overlay, as with the other
+harnesses.
+
+## Rollback
+
+Migration `0056` adds `omp` to the sessions harness constraint and is
+forward-only. To stop using OMP, stop selecting it; keep the migration applied
+and keep rows with `harness_type = 'omp'` while older readers could see them.

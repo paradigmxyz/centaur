@@ -2229,6 +2229,26 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn omp_harness_type_survives_the_database_constraint() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key = ThreadKey::parse(format!("test:omp-{}", Uuid::new_v4())).unwrap();
+        let session = store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Omp,
+                None,
+                json!({}),
+                BTreeMap::new(),
+            )
+            .await
+            .expect("create OMP session");
+
+        assert_eq!(session.harness_type, HarnessType::Omp);
+    }
+
     fn idle_row(
         metadata: serde_json::Value,
         last_active_at: OffsetDateTime,

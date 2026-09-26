@@ -19,6 +19,7 @@ describe('harnessDisplayName', () => {
     expect(harnessDisplayName('nanocodex')).toBe('Nanocodex')
     expect(harnessDisplayName('claudecode')).toBe('Claude Code')
     expect(harnessDisplayName('amp')).toBe('Amp')
+    expect(harnessDisplayName('omp')).toBe('OMP')
   })
 
   test('is case-insensitive and trims', () => {

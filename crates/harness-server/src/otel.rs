@@ -1047,6 +1047,7 @@ fn harness_name(kind: HarnessKind) -> &'static str {
         HarnessKind::Codex => "codex",
         HarnessKind::ClaudeCode => "claude",
         HarnessKind::Amp => "amp",
+        HarnessKind::Omp => "omp",
     }
 }
 

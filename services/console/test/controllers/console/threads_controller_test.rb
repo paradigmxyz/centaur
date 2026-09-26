@@ -628,6 +628,8 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "Codex", controller.send(:thread_harness_label, session)
     session.harness_type = "nanocodex"
     assert_equal "Nanocodex", controller.send(:thread_harness_label, session)
+    omp_session = TranscriptSession.new(metadata_hash: {}, harness_type: "omp")
+    assert_equal "OMP", controller.send(:thread_harness_label, omp_session)
   end
 
   test "thread model label prefers the latest execution's recorded model override" do

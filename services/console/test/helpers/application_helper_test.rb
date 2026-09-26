@@ -7,6 +7,10 @@ class ApplicationHelperTest < ActionView::TestCase
     assert_equal "", truncate_middle(nil)
   end
 
+  test "workflow engine label displays OMP as an initialism" do
+    assert_equal "OMP", workflow_engine_label("omp")
+  end
+
   test "truncate_middle keeps the head and tail around a center ellipsis" do
     out = truncate_middle("salesforce-marketing-cloud-rest-api", max: 24)
     assert_equal 24, out.length

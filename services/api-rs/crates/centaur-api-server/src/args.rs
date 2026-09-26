@@ -2187,6 +2187,7 @@ fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
         HarnessType::ClaudeCode => "claude-code",
         HarnessType::Nanocodex => "codex",
         HarnessType::Hermes => "hermes",
+        HarnessType::Omp => "claude-code",
     }
 }
 
@@ -2202,7 +2203,7 @@ fn merge_fragment(target: &mut ProxyFragment, source: ProxyFragment) {
 fn harness_auth_mode_env(engine: &HarnessType) -> Option<String> {
     match engine {
         HarnessType::Codex | HarnessType::Nanocodex => env::var("CODEX_AUTH_MODE").ok(),
-        HarnessType::ClaudeCode => env::var("CLAUDE_CODE_AUTH_MODE").ok(),
+        HarnessType::ClaudeCode | HarnessType::Omp => env::var("CLAUDE_CODE_AUTH_MODE").ok(),
         HarnessType::Amp => None,
         // Hermes resolves providers through its own credential store /
         // iron-proxy placeholder injection; no dedicated auth-mode env.
@@ -3610,6 +3611,115 @@ mod tests {
             args.sandbox.iron_proxy.harness.engine,
             HarnessType::ClaudeCode
         );
+    }
+
+    #[tokio::test]
+    async fn omp_and_codex_admit_warm_pools() {
+        for (harness, size) in [("codex", "1"), ("omp", "0"), ("omp", "1")] {
+            let args = Args::try_parse_from([
+                "centaur-api-server",
+                "--database-url",
+                "postgres://postgres:postgres@localhost/centaur",
+                "--session-sandbox-backend",
+                "local",
+                "--session-sandbox-workload",
+                "mock",
+                "--session-sandbox-harness",
+                harness,
+                "--session-sandbox-warm-pool-size",
+                size,
+            ])
+            .unwrap();
+
+            let result = args.sandbox_runtime().await;
+            assert!(
+                result.is_ok(),
+                "{harness} with pool size {size} must be admitted"
+            );
+            assert_eq!(
+                args.warm_pool_config("bootstrap")
+                    .map(|pool| pool.target_size),
+                if size == "0" { None } else { Some(1) }
+            );
+        }
+    }
+
+    #[test]
+    fn omp_uses_claude_code_auth_mode_for_proxy_credentials() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        for mode in ["access_token", "api_key"] {
+            let _env = EnvGuard::set(&[("CLAUDE_CODE_AUTH_MODE", mode)]);
+            let fragment = IronProxyHarnessArgs {
+                engine: HarnessType::Omp,
+                auth_mode: None,
+            }
+            .fragment()
+            .unwrap();
+            let secrets: Vec<_> = fragment
+                .transforms
+                .iter()
+                .flat_map(|transform| &transform.config.secrets)
+                .collect();
+            assert_eq!(secrets.len(), 1);
+            if mode == "access_token" {
+                assert_eq!(
+                    secrets[0].source.as_ref().unwrap()["credential_id"].as_str(),
+                    Some("anthropic-claude")
+                );
+                assert_eq!(
+                    secrets[0].inject.as_ref().unwrap()["header"].as_str(),
+                    Some("Authorization")
+                );
+                assert!(secrets[0].replace.is_none());
+            } else {
+                assert_eq!(
+                    secrets[0].replace.as_ref().unwrap().proxy_value.as_deref(),
+                    Some("ANTHROPIC_API_KEY")
+                );
+                assert!(secrets[0].source.is_none());
+            }
+        }
+    }
+
+    /// OMP picks providers the stock way, so its sandbox must reach both
+    /// providers upstream ships fragments for: Anthropic through the Claude
+    /// Code fragment and OpenAI through the Codex fragment, each registered
+    /// exactly once whichever harness is primary.
+    #[test]
+    fn omp_proxy_registers_anthropic_and_openai_credentials_once() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("CLAUDE_CODE_AUTH_MODE", "api_key"),
+            ("CODEX_AUTH_MODE", "api_key"),
+            ("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        ]);
+        for engine in [
+            HarnessType::Codex,
+            HarnessType::ClaudeCode,
+            HarnessType::Omp,
+        ] {
+            let fragments = IronProxyHarnessArgs {
+                engine: engine.clone(),
+                auth_mode: Some("api_key".to_owned()),
+            }
+            .fragments()
+            .unwrap();
+            let credentials_for = |host: &str| {
+                fragments
+                    .iter()
+                    .flat_map(|fragment| &fragment.transforms)
+                    .flat_map(|transform| &transform.config.secrets)
+                    .filter(|secret| {
+                        secret
+                            .rules
+                            .iter()
+                            .any(|rule| rule["host"].as_str() == Some(host))
+                    })
+                    .count()
+            };
+            assert_eq!(credentials_for("api.anthropic.com"), 1, "{engine:?}");
+            assert_eq!(credentials_for("api.openai.com"), 1, "{engine:?}");
+        }
     }
 
     #[test]

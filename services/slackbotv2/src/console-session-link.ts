@@ -16,7 +16,8 @@ const HARNESS_DISPLAY_NAMES: Record<string, string> = {
   amp: 'Amp',
   claudecode: 'Claude Code',
   codex: 'Codex',
-  nanocodex: 'Nanocodex'
+  nanocodex: 'Nanocodex',
+  omp: 'OMP'
 }
 
 const REASONING_DISPLAY_NAMES: Record<string, string> = {
@@ -121,7 +122,7 @@ function titleCase(value: string): string {
 }
 
 /**
- * Maps a harness wire value (codex | claudecode | amp) to a human display name.
+ * Maps a harness wire value (codex | claudecode | amp | omp) to a human display name.
  * Unknown harnesses fall back to a title-cased form of the raw value. Returns
  * undefined when no harness is provided.
  */

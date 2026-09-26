@@ -40,16 +40,21 @@ use crate::util::{absolute_path, default_codex_home, write_value};
 use crate::wire::{is_known_untyped_server_notification, notification_to_wire_value};
 use crate::{HarnessServerError, Result};
 
-pub fn server_for(kind: HarnessKind) -> Box<dyn AppServerRuntime> {
-    match kind {
+pub fn server_for(kind: HarnessKind) -> Result<Box<dyn AppServerRuntime>> {
+    Ok(match kind {
         HarnessKind::Codex => Box::new(CodexHarnessServer::codex()),
         HarnessKind::ClaudeCode => Box::new(AppServerNormalizer::new(ClaudeCodeHarness)),
         HarnessKind::Amp => Box::new(AppServerNormalizer::new(AmpHarness)),
-    }
+        HarnessKind::Omp => {
+            return Err(HarnessServerError::Protocol(
+                "OMP only supports blocks input".to_string(),
+            ));
+        }
+    })
 }
 
 pub fn run_harness_server(kind: HarnessKind) -> Result<()> {
-    server_for(kind).run_stdio()
+    server_for(kind)?.run_stdio()
 }
 
 pub fn run_blocks_server(kind: HarnessKind) -> Result<()> {
@@ -57,6 +62,7 @@ pub fn run_blocks_server(kind: HarnessKind) -> Result<()> {
         HarnessKind::Codex => crate::codex::run_codex_blocks_server(CodexHarnessServer::codex()),
         HarnessKind::ClaudeCode => run_blocks_app_server(&ClaudeCodeHarness),
         HarnessKind::Amp => run_blocks_app_server(&AmpHarness),
+        HarnessKind::Omp => crate::omp::run_omp_blocks_server(),
     }
 }
 

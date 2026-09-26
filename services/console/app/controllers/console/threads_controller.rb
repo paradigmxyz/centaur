@@ -1569,6 +1569,7 @@ class Console::ThreadsController < ApplicationController
     when "claudecode" then "Claude Code"
     when "amp" then "Amp"
     when "nanocodex" then "Nanocodex"
+    when "omp" then "OMP"
     else source_label(session.harness_type)
     end
   end

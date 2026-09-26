@@ -32,6 +32,7 @@ describe('extractMessageOverrides', () => {
     expect(extractMessageOverrides('--codex review this').harnessType).toBe('codex')
     expect(extractMessageOverrides('--nanocodex review this').harnessType).toBe('nanocodex')
     expect(extractMessageOverrides('--hermes review this').harnessType).toBe('hermes')
+    expect(extractMessageOverrides('--omp review this').harnessType).toBe('omp')
   })
 
   test('parses harness flag anywhere in the message', () => {
@@ -645,6 +646,59 @@ describe('messageOverridesForText strategy invocation', () => {
         model: 'gpt-5.6-sol',
         provider: undefined,
         reasoning: 'max'
+      }
+    })
+  })
+
+  test('advertises and accepts the OMP strategy harness value', async () => {
+    let requestBody: unknown = null
+    const strategy = createOpenAiMessageOverridesStrategy({
+      apiKey: 'test-key',
+      fetch: (async (
+        _input: Parameters<typeof fetch>[0],
+        init?: Parameters<typeof fetch>[1]
+      ) => {
+        requestBody = JSON.parse(String(init?.body))
+        return new Response(
+          JSON.stringify({
+            output: [
+              {
+                content: [
+                  {
+                    text: JSON.stringify({
+                      harness: 'omp',
+                      model: null,
+                      provider: null,
+                      reasoning: null
+                    })
+                  }
+                ]
+              }
+            ]
+          }),
+          { headers: { 'content-type': 'application/json' }, status: 200 }
+        )
+      }) as unknown as typeof fetch,
+      model: 'gpt-5.4-nano'
+    })
+
+    await expect(strategy({ text: 'use OMP' })).resolves.toEqual({
+      overrides: {
+        harnessType: 'omp',
+        model: undefined,
+        provider: undefined,
+        reasoning: undefined
+      }
+    })
+    expect(requestBody).toMatchObject({
+      text: {
+        format: {
+          schema: {
+            properties: {
+              harness: { enum: expect.arrayContaining(['omp']) }
+            }
+          }
+        }
       }
     })
   })

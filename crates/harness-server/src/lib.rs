@@ -6,6 +6,7 @@ mod error;
 pub mod hermes;
 mod nanocodex;
 mod nanocodex_subagents;
+pub mod omp;
 mod otel;
 mod server;
 mod traits;
@@ -17,6 +18,7 @@ pub mod wire;
 pub use error::{HarnessServerError, Result};
 pub use hermes::run_hermes_blocks_server;
 pub use nanocodex::run_nanocodex_blocks_server;
+pub use omp::run_omp_blocks_server;
 pub use server::{run_blocks_server, run_harness_server, run_validate_jsonrpc, server_for};
 pub use traits::{
     AppServerNormalizer, AppServerRuntime, HarnessKind, HarnessServer, NormalizedContent,
