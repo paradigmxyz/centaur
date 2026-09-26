@@ -931,7 +931,7 @@ impl PgSessionStore {
         let row = sqlx::query_as::<_, SessionExecutionRow>(
             r#"
             update session_executions
-            set status = $2, error = $3, completed_at = coalesce(completed_at, now()), updated_at = now()
+            set status = $2, error = $3, completed_at = coalesce(completed_at, now()), updated_at = now(), idempotency_key = null
             where execution_id = $1
             returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
             "#,
@@ -955,7 +955,7 @@ impl PgSessionStore {
         let row = sqlx::query_as::<_, SessionExecutionRow>(
             r#"
             update session_executions
-            set status = $2, error = $3, completed_at = coalesce(completed_at, now()), updated_at = now()
+            set status = $2, error = $3, completed_at = coalesce(completed_at, now()), updated_at = now(), idempotency_key = null
             where execution_id = $1 and status in ($4, $5)
             returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
             "#,
@@ -988,6 +988,7 @@ impl PgSessionStore {
             set status = $2,
                 error = $3,
                 completed_at = coalesce(completed_at, now()),
+                idempotency_key = null,
                 stdout_owner_id = null,
                 stdout_owner_lease_expires_at = null,
                 updated_at = now()
@@ -1026,6 +1027,7 @@ impl PgSessionStore {
             set status = $2,
                 error = $3,
                 completed_at = coalesce(completed_at, now()),
+                idempotency_key = null,
                 stdout_owner_id = null,
                 stdout_owner_lease_expires_at = null,
                 updated_at = now()
@@ -2211,7 +2213,7 @@ mod tests {
         time::{Duration, UNIX_EPOCH},
     };
 
-    use centaur_session_core::{HarnessType, ThreadKey};
+    use centaur_session_core::{ExecutionStatus, HarnessType, ThreadKey};
     use serde_json::json;
     use time::{Duration as TimeDuration, OffsetDateTime};
     use uuid::Uuid;
@@ -2486,6 +2488,218 @@ mod tests {
                 .expect("load persisted execution request"),
             first_request
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_execution_releases_idempotency_key() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key = ThreadKey::parse(format!("test:idem-failed-{}", Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+
+        let first = store
+            .create_execution_with_request(
+                &thread_key,
+                Some("trigger-1"),
+                json!({"source": "test"}),
+                json!({"input_lines": ["first"]}),
+            )
+            .await
+            .expect("create execution");
+        assert!(first.created);
+
+        let failed = store
+            .fail_execution(&first.execution.execution_id, "sandbox died")
+            .await
+            .expect("fail execution");
+        assert_eq!(failed.idempotency_key, None, "failure must release the key");
+
+        let retry = store
+            .create_execution_with_request(
+                &thread_key,
+                Some("trigger-1"),
+                json!({"source": "test"}),
+                json!({"input_lines": ["retry"]}),
+            )
+            .await
+            .expect("re-create execution after failure");
+        assert!(retry.created, "failed key must be reusable");
+        assert_ne!(retry.execution.execution_id, first.execution.execution_id);
+        assert_eq!(retry.execution.status, ExecutionStatus::Queued);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn completed_execution_keeps_idempotency_key() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key =
+            ThreadKey::parse(format!("test:idem-completed-{}", Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+
+        let first = store
+            .create_execution_with_request(
+                &thread_key,
+                Some("trigger-1"),
+                json!({"source": "test"}),
+                json!({"input_lines": ["first"]}),
+            )
+            .await
+            .expect("create execution");
+        store
+            .complete_execution(&first.execution.execution_id)
+            .await
+            .expect("complete execution");
+
+        let replay = store
+            .create_execution_with_request(
+                &thread_key,
+                Some("trigger-1"),
+                json!({"source": "test"}),
+                json!({"input_lines": ["replay"]}),
+            )
+            .await
+            .expect("replay completed execution");
+        assert!(!replay.created, "completed key must still dedupe");
+        assert_eq!(replay.execution.execution_id, first.execution.execution_id);
+        assert_eq!(replay.execution.status, ExecutionStatus::Completed);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn in_flight_execution_keeps_idempotency_key() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key = ThreadKey::parse(format!("test:idem-running-{}", Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+
+        let first = store
+            .create_execution_with_request(
+                &thread_key,
+                Some("trigger-1"),
+                json!({"source": "test"}),
+                json!({"input_lines": ["first"]}),
+            )
+            .await
+            .expect("create execution");
+        store
+            .mark_execution_running(&first.execution.execution_id)
+            .await
+            .expect("mark running");
+
+        let duplicate = store
+            .create_execution_with_request(
+                &thread_key,
+                Some("trigger-1"),
+                json!({"source": "test"}),
+                json!({"input_lines": ["duplicate"]}),
+            )
+            .await
+            .expect("duplicate in-flight request");
+        assert!(!duplicate.created, "in-flight key must still dedupe");
+        assert_eq!(
+            duplicate.execution.execution_id,
+            first.execution.execution_id
+        );
+        assert_eq!(duplicate.execution.status, ExecutionStatus::Running);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_execution_releases_idempotency_key() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key =
+            ThreadKey::parse(format!("test:idem-cancelled-{}", Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+
+        let first = store
+            .create_execution_with_request(
+                &thread_key,
+                Some("trigger-1"),
+                json!({"source": "test"}),
+                json!({"input_lines": ["first"]}),
+            )
+            .await
+            .expect("create execution");
+        store
+            .mark_execution_running(&first.execution.execution_id)
+            .await
+            .expect("mark running");
+        assert!(
+            store
+                .claim_stdout_owner(
+                    &first.execution.execution_id,
+                    "owner-1",
+                    Duration::from_secs(60),
+                )
+                .await
+                .expect("claim stdout owner"),
+            "expected to claim stdout owner"
+        );
+
+        let cancelled = store
+            .cancel_execution_if_active_and_stdout_owner(
+                &first.execution.execution_id,
+                "owner-1",
+                "user cancelled",
+            )
+            .await
+            .expect("cancel execution")
+            .expect("execution was active and owned");
+        assert_eq!(
+            cancelled.idempotency_key, None,
+            "cancellation must release the key"
+        );
+
+        let retry = store
+            .create_execution_with_request(
+                &thread_key,
+                Some("trigger-1"),
+                json!({"source": "test"}),
+                json!({"input_lines": ["retry"]}),
+            )
+            .await
+            .expect("re-create execution after cancellation");
+        assert!(retry.created, "cancelled key must be reusable");
+        assert_ne!(retry.execution.execution_id, first.execution.execution_id);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
