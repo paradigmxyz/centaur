@@ -9,6 +9,10 @@ use centaur_sandbox_core::{SandboxBackend, SandboxId, SandboxSpec, SandboxStatus
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::{DriftReason, ReconcileOutcome, SandboxManager};
 use clap::Parser;
+use k8s_openapi::api::core::v1::{Container, Pod, PodSpec, Service, ServicePort, ServiceSpec};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+use kube::api::{Api, DeleteParams, PostParams};
 use kube::config::KubeConfigOptions;
 use kube::{Client, Config};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,6 +28,13 @@ pub(crate) struct SandboxImplementation {
     short_lived_spec: SandboxSpec,
     byte_io_spec: SandboxSpec,
     invalid_spec: SandboxSpec,
+    kubernetes: Option<KubernetesImplementation>,
+}
+
+pub(crate) struct KubernetesImplementation {
+    client: Client,
+    namespace: String,
+    image: String,
 }
 
 pub(crate) async fn implementation_if_requested(
@@ -56,6 +67,104 @@ pub(crate) async fn create_stop_cleans_up(implementation: &SandboxImplementation
         .await
         .unwrap_or_else(|err| panic!("{} stop failed: {err}", implementation.name));
     eventually_status(&manager, &handle.id, SandboxStatus::Gone).await;
+}
+
+pub(crate) async fn stop_preserves_egress_during_pod_termination(
+    implementation: &SandboxImplementation,
+) {
+    let kubernetes = implementation
+        .kubernetes
+        .as_ref()
+        .expect("shutdown egress test requires the agent-k8s implementation");
+    let manager = SandboxManager::new(implementation.backend.clone());
+    let spec = k8s_shell_spec(
+        &kubernetes.image,
+        r#"
+trap '
+  attempt=0
+  while [ "$attempt" -lt 20 ]; do
+    wget -qO- "http://${HOSTNAME}-proxy:8080/" >/dev/null && exit 0
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+  exit 1
+' TERM
+while :; do sleep 1; done
+"#,
+    );
+    let handle = manager
+        .create_running(spec)
+        .await
+        .expect("create shutdown egress sandbox");
+    let server_name = format!("{}-shutdown-egress", handle.id.as_str());
+    let proxy_service_name = format!("{}-proxy", handle.id.as_str());
+    let labels = std::collections::BTreeMap::from([(
+        "centaur.ai/shutdown-egress-test".to_owned(),
+        handle.id.as_str().to_owned(),
+    )]);
+    let pods: Api<Pod> = Api::namespaced(kubernetes.client.clone(), &kubernetes.namespace);
+    let services: Api<Service> = Api::namespaced(kubernetes.client.clone(), &kubernetes.namespace);
+
+    pods.create(
+        &PostParams::default(),
+        &Pod {
+            metadata: ObjectMeta {
+                name: Some(server_name.clone()),
+                labels: Some(labels.clone()),
+                ..ObjectMeta::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "listener".to_owned(),
+                    image: Some("busybox:1.36".to_owned()),
+                    command: Some(vec!["/bin/sh".to_owned(), "-lc".to_owned()]),
+                    args: Some(vec![
+                        "printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n' | nc -l -p 8080"
+                            .to_owned(),
+                    ]),
+                    ..Container::default()
+                }],
+                restart_policy: Some("Never".to_owned()),
+                ..PodSpec::default()
+            }),
+            ..Pod::default()
+        },
+    )
+    .await
+    .expect("create shutdown egress listener pod");
+    services
+        .create(
+            &PostParams::default(),
+            &Service {
+                metadata: ObjectMeta {
+                    name: Some(proxy_service_name),
+                    ..ObjectMeta::default()
+                },
+                spec: Some(ServiceSpec {
+                    selector: Some(labels),
+                    ports: Some(vec![ServicePort {
+                        port: 8080,
+                        target_port: Some(IntOrString::Int(8080)),
+                        ..ServicePort::default()
+                    }]),
+                    ..ServiceSpec::default()
+                }),
+                ..Service::default()
+            },
+        )
+        .await
+        .expect("create shutdown egress proxy service");
+    eventually_pod_phase(&pods, &server_name, "Running").await;
+
+    manager
+        .stop(&handle.id)
+        .await
+        .expect("stop shutdown egress sandbox");
+    eventually_pod_phase(&pods, &server_name, "Succeeded").await;
+
+    pods.delete(&server_name, &DeleteParams::default())
+        .await
+        .expect("delete shutdown egress listener pod");
 }
 
 pub(crate) async fn pause_resume_restores_running(implementation: &SandboxImplementation) {
@@ -314,6 +423,30 @@ where
     );
 }
 
+async fn eventually_pod_phase(pods: &Api<Pod>, name: &str, expected: &str) {
+    let mut latest = None;
+    let result = timeout(Duration::from_secs(45), async {
+        let mut ticks = interval(Duration::from_millis(250));
+        loop {
+            let pod = pods
+                .get(name)
+                .await
+                .expect("read shutdown egress listener pod");
+            latest = pod.status.and_then(|status| status.phase);
+            if latest.as_deref() == Some(expected) {
+                return;
+            }
+            ticks.tick().await;
+        }
+    })
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "pod {name} did not reach {expected}; latest phase: {latest:?}"
+    );
+}
+
 async fn eventually_observed_count_at_most(backend: Arc<dyn SandboxBackend>, expected_max: usize) {
     let mut latest = usize::MAX;
     let result = timeout(Duration::from_secs(45), async {
@@ -359,6 +492,7 @@ fn local_implementation() -> SandboxImplementation {
         short_lived_spec: shell_spec("sleep 0.02"),
         byte_io_spec: SandboxSpec::new("/bin/cat"),
         invalid_spec: SandboxSpec::new("/definitely-not-a-centaur-command"),
+        kubernetes: None,
     }
 }
 
@@ -383,7 +517,7 @@ async fn agent_k8s_implementation() -> SandboxImplementation {
     .expect("load e2e kube config");
     let client = Client::try_from(kube_config).expect("create e2e kube client");
     let mut config = AgentSandboxConfig::new(
-        namespace,
+        namespace.clone(),
         IronControlSettings {
             client: IronControlClient::new("http://127.0.0.1:1", "test-key"),
             console_url: "http://iron-control".to_owned(),
@@ -392,17 +526,28 @@ async fn agent_k8s_implementation() -> SandboxImplementation {
     );
     config.ready_timeout = Duration::from_secs(90);
     let backend = Arc::new(AgentSandboxBackend::new(client.clone(), config.clone()));
+    let reconnect_client = client.clone();
+    let reconnect_config = config.clone();
 
     SandboxImplementation {
         name: "agent-k8s",
         backend,
         reconnect_backend: Arc::new(move || {
-            Arc::new(AgentSandboxBackend::new(client.clone(), config.clone()))
+            Arc::new(AgentSandboxBackend::new(
+                reconnect_client.clone(),
+                reconnect_config.clone(),
+            ))
         }),
         long_running_spec: k8s_shell_spec(&image, "sleep 3600"),
         short_lived_spec: k8s_shell_spec(&image, "sleep 1"),
         byte_io_spec: k8s_shell_spec(&image, "cat"),
-        invalid_spec: SandboxSpec::new(image).command(["/definitely-not-a-centaur-command"]),
+        invalid_spec: SandboxSpec::new(image.clone())
+            .command(["/definitely-not-a-centaur-command"]),
+        kubernetes: Some(KubernetesImplementation {
+            client,
+            namespace,
+            image,
+        }),
     }
 }
 
