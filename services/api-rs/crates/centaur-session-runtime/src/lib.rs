@@ -8443,6 +8443,129 @@ mod tests {
     }
 
     #[test]
+    fn max_duration_is_read_from_execution_metadata() {
+        let execution = session_execution(
+            "exe-max",
+            ExecutionStatus::Running,
+            json!({"max_duration_ms": 210_000}),
+        );
+        assert_eq!(
+            max_duration_from_execution(&execution),
+            Some(Duration::from_millis(210_000))
+        );
+
+        let missing = session_execution("exe-max", ExecutionStatus::Running, json!({}));
+        assert_eq!(max_duration_from_execution(&missing), None);
+
+        let wrong_type = session_execution(
+            "exe-max",
+            ExecutionStatus::Running,
+            json!({"max_duration_ms": "210000"}),
+        );
+        assert_eq!(max_duration_from_execution(&wrong_type), None);
+
+        let zero = session_execution(
+            "exe-max",
+            ExecutionStatus::Running,
+            json!({"max_duration_ms": 0}),
+        );
+        assert_eq!(max_duration_from_execution(&zero), None);
+    }
+
+    #[test]
+    fn duration_options_pass_none_through() {
+        assert_eq!(duration_options(None, None).unwrap(), (None, None));
+        assert_eq!(
+            duration_options(Some(1_000), None).unwrap(),
+            (Some(Duration::from_millis(1_000)), None)
+        );
+        assert_eq!(
+            duration_options(None, Some(2_000)).unwrap(),
+            (None, Some(Duration::from_millis(2_000)))
+        );
+    }
+
+    #[test]
+    fn duration_options_reject_zero_values() {
+        assert!(duration_options(Some(0), None).is_err());
+        assert!(duration_options(None, Some(0)).is_err());
+    }
+
+    #[test]
+    fn duration_options_reject_idle_above_max() {
+        let error = duration_options(Some(3_000), Some(2_000)).unwrap_err();
+        assert!(error.to_string().contains("less than or equal to"));
+        assert_eq!(
+            duration_options(Some(2_000), Some(2_000)).unwrap(),
+            (
+                Some(Duration::from_millis(2_000)),
+                Some(Duration::from_millis(2_000))
+            )
+        );
+    }
+
+    #[test]
+    fn runtime_error_failure_class_covers_the_dispatchable_variants() {
+        assert_eq!(
+            runtime_error_failure_class(&SessionRuntimeError::BadRequest("bad".into())),
+            "bad_request"
+        );
+        assert_eq!(
+            runtime_error_failure_class(&SessionRuntimeError::ShuttingDown),
+            "shutting_down"
+        );
+        assert_eq!(
+            runtime_error_failure_class(&SessionRuntimeError::Store(
+                SessionStoreError::ExecutionNotFound {
+                    execution_id: "exe-x".into()
+                }
+            )),
+            "store"
+        );
+        assert_eq!(
+            runtime_error_failure_class(&SessionRuntimeError::Sandbox(SandboxError::NotFound(
+                "sbx-x".into()
+            ))),
+            "sandbox_not_found"
+        );
+        assert_eq!(
+            runtime_error_failure_class(&SessionRuntimeError::Sandbox(SandboxError::NotReady(
+                "warming".into()
+            ))),
+            "sandbox_not_ready"
+        );
+        assert_eq!(
+            runtime_error_failure_class(&SessionRuntimeError::CapacityExceeded {
+                operation: "enqueue",
+                running: 4,
+                max_running: 4
+            }),
+            "capacity"
+        );
+    }
+
+    #[test]
+    fn sandbox_capabilities_match_requires_default_enabled_when_existing_is_none() {
+        let default_enabled = SessionSandboxCapabilities::default_enabled();
+        assert!(sandbox_capabilities_match(None, &default_enabled));
+
+        let restricted = SessionSandboxCapabilities {
+            repo_cache: SessionRepoCacheAccess::None,
+            observability_enabled: false,
+        };
+        assert!(!sandbox_capabilities_match(None, &restricted));
+
+        assert!(sandbox_capabilities_match(
+            Some(&default_enabled),
+            &default_enabled
+        ));
+        assert!(!sandbox_capabilities_match(
+            Some(&restricted),
+            &default_enabled
+        ));
+    }
+
+    #[test]
     fn redacts_sensitive_values_from_output_lines() {
         let line = r#"{"type":"item.completed","item":{"aggregatedOutput":"Authorization: Bearer sbx1.threadpayload.signature\nSANDBOX_TOKEN=sbx1.otherpayload.othersig\nSLACK_BOT_TOKEN=xoxb-1234567890-abcdef\n"}}"#;
 
