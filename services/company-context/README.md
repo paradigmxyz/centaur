@@ -1,0 +1,56 @@
+# Company Context
+
+Standalone company-context ingestion service. The initial implementation indexes text-bearing PDF files from Google Drive using durable Absurd tasks.
+
+The service owns these Postgres schemas:
+
+- `company_context_system`: private cursors, staging, and processing state.
+- `company_context_data`: retrieval-facing Drive documents, access observations, and embeddings.
+
+The initial migrations deliberately add no retrieval-role grants or RLS policies. The corpus is populated for validation but is not exposed through the company-context tool yet.
+
+## Required infrastructure
+
+- Postgres with the existing Absurd schema and the `vector` and `pg_search` extensions available.
+- `pdftotext` from Poppler.
+- Google Drive API authorization, either through `GOOGLE_DRIVE_ACCESS_TOKEN` or an outbound credential-injecting proxy.
+- OpenAI-compatible embedding authorization, either through `OPENAI_API_KEY` or an outbound credential-injecting proxy.
+
+## Configuration
+
+Required:
+
+- `DATABASE_URL`
+
+Common optional settings:
+
+- `BIND_ADDR` (default `0.0.0.0:8080`)
+- `GOOGLE_DRIVE_API_BASE_URL`
+- `GOOGLE_DRIVE_ACCESS_TOKEN`
+- `OPENAI_BASE_URL`
+- `OPENAI_API_KEY`
+- `COMPANY_CONTEXT_SCAN_INTERVAL_SECONDS` (default `300`)
+- `COMPANY_CONTEXT_DRIVE_PAGE_SIZE` (default `100`)
+- `COMPANY_CONTEXT_MAX_SCAN_PAGES` (default `10`)
+- `COMPANY_CONTEXT_MAX_PDF_BYTES` (default `26214400`)
+- `COMPANY_CONTEXT_MAX_EXTRACTED_BYTES` (default `52428800`)
+- `COMPANY_CONTEXT_EXTRACTION_TIMEOUT_SECONDS` (default `120`)
+- `COMPANY_CONTEXT_CHUNK_CHARS` (default `6000`)
+- `COMPANY_CONTEXT_CHUNK_OVERLAP_CHARS` (default `500`)
+- `COMPANY_CONTEXT_WORKER_CONCURRENCY` (default `4`)
+- `COMPANY_CONTEXT_EMBEDDINGS_MODEL` (default `text-embedding-3-small`)
+- `COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS` (currently required to be `1536`)
+
+## Endpoints
+
+- `GET /healthz`
+- `GET /readyz`
+- `GET /metrics`
+
+## Development
+
+```bash
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
