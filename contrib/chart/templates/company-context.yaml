@@ -1,0 +1,153 @@
+{{- if .Values.companyContext.enabled }}
+{{- $name := include "centaur.componentName" (dict "root" . "component" "company-context") }}
+{{- $secretEnv := include "centaur.secretEnvName" . }}
+{{- $prefix := .Values.secretManager.envPrefix }}
+{{- $metricsAnnotations := dict -}}
+{{- if .Values.companyContext.metrics.scrapeAnnotations -}}
+{{- $metricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" .Values.companyContext.metrics.path "prometheus.io/port" (printf "%v" .Values.companyContext.port) -}}
+{{- $metricsAnnotations = mergeOverwrite $metricsAnnotations (.Values.companyContext.metrics.annotations | default dict) -}}
+{{- end -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "company-context") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "company-context") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.companyContext.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "company-context") | nindent 4 }}
+spec:
+  replicas: {{ .Values.companyContext.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "company-context") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+{{- with $metricsAnnotations }}
+{{ toYaml . | nindent 8 }}
+{{- end }}
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "company-context") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+{{- include "centaur.podScheduling" (dict "values" .Values.companyContext "indent" 6) }}
+      containers:
+        - name: company-context
+          image: {{ printf "%s:%s" .Values.companyContext.image.repository .Values.companyContext.image.tag | quote }}
+          imagePullPolicy: {{ .Values.companyContext.image.pullPolicy }}
+          env:
+            - name: BIND_ADDR
+              value: {{ printf "0.0.0.0:%v" .Values.companyContext.port | quote }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sDATABASE_URL" $prefix }}
+            - name: GOOGLE_DRIVE_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sGOOGLE_DRIVE_ACCESS_TOKEN" $prefix }}
+                  optional: true
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sOPENAI_API_KEY" $prefix }}
+                  optional: true
+            - name: COMPANY_CONTEXT_SCAN_INTERVAL_SECONDS
+              value: {{ .Values.companyContext.scanIntervalSeconds | quote }}
+            - name: COMPANY_CONTEXT_DRIVE_PAGE_SIZE
+              value: {{ .Values.companyContext.drivePageSize | quote }}
+            - name: COMPANY_CONTEXT_MAX_SCAN_PAGES
+              value: {{ .Values.companyContext.maxScanPages | quote }}
+            - name: COMPANY_CONTEXT_MAX_PDF_BYTES
+              value: {{ .Values.companyContext.maxPdfBytes | quote }}
+            - name: COMPANY_CONTEXT_MAX_EXTRACTED_BYTES
+              value: {{ .Values.companyContext.maxExtractedBytes | quote }}
+            - name: COMPANY_CONTEXT_EXTRACTION_TIMEOUT_SECONDS
+              value: {{ .Values.companyContext.extractionTimeoutSeconds | quote }}
+            - name: COMPANY_CONTEXT_CHUNK_CHARS
+              value: {{ .Values.companyContext.chunkChars | quote }}
+            - name: COMPANY_CONTEXT_CHUNK_OVERLAP_CHARS
+              value: {{ .Values.companyContext.chunkOverlapChars | quote }}
+            - name: COMPANY_CONTEXT_WORKER_CONCURRENCY
+              value: {{ .Values.companyContext.workerConcurrency | quote }}
+            - name: COMPANY_CONTEXT_EMBEDDINGS_MODEL
+              value: {{ .Values.companyContext.embeddingsModel | quote }}
+            - name: COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS
+              value: {{ .Values.companyContext.embeddingsDimensions | quote }}
+            - name: RUST_LOG
+              value: info
+{{- range $name, $value := .Values.companyContext.extraEnv }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+{{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.companyContext.port }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+{{ toYaml .Values.companyContext.resources | nindent 12 }}
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "company-context") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "company-context") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.companyContext.port }}
+  egress:
+{{- if .Values.postgres.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- else }}
+    - ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}
+    - ports:
+        - protocol: TCP
+          port: 443
+{{- end }}
+{{- end }}

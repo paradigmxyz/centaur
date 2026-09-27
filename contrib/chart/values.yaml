@@ -485,6 +485,38 @@ proxySync:
     annotations: {}
   resources: {}
 
+# Standalone company-context ingestion service. The first version indexes PDFs
+# from Google Drive into its private system and data schemas. Disabled while the
+# corpus is validated alongside the legacy Python workflows.
+companyContext:
+  enabled: false
+  replicaCount: 1
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  image:
+    repository: centaur-company-context
+    tag: latest
+    pullPolicy: Always
+  port: 8080
+  scanIntervalSeconds: 300
+  drivePageSize: 100
+  maxScanPages: 10
+  maxPdfBytes: 26214400
+  maxExtractedBytes: 52428800
+  extractionTimeoutSeconds: 120
+  chunkChars: 6000
+  chunkOverlapChars: 500
+  workerConcurrency: 4
+  embeddingsModel: text-embedding-3-small
+  embeddingsDimensions: 1536
+  extraEnv: {}
+  metrics:
+    scrapeAnnotations: true
+    path: /metrics
+    annotations: {}
+  resources: {}
+
 # Rust session control plane (services/api-rs). Owns sessions, agent-k8s
 # sandboxes (via the agents.x-k8s.io Sandbox CRD), and the per-sandbox
 # iron-proxy/firewall.
