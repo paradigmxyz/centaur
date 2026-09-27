@@ -34,19 +34,61 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to console_threads_path
   end
 
-  test "secrets table shows backend labels (not refs) and links to detail" do
+  test "secrets table combines kinds and links names to detail" do
     secret = static_secrets(:acme_prod_api_key)
     get console_secrets_url
     assert_response :ok
+
+    assert_select "table", count: 1
+    assert_select "th", text: "Name"
+    assert_select "th", text: "Type"
+    assert_select "th", text: "Source"
+    assert_select "th", text: "Created"
     # Source column shows only the backend label, not the underlying reference.
     assert_select "td span", text: "Env"
     assert_select "body", text: /GITHUB_TOKEN/, count: 0
-    # The foreign_id links to the detail page (full value as a hover tooltip),
-    # with the opaque oid shown beneath it.
-    assert_select "a[href=?][title=?]", console_secret_path("static", secret.oid), secret.foreign_id
-    assert_select "div", text: secret.oid
-    # The name is plain text (not a link) with the full value as a tooltip.
-    assert_select "span[title=?]", secret.name
+    assert_select "a[href=?][title=?]", console_secret_path("static", secret.oid), secret.name
+    assert_select "time[datetime=?]", secret.created_at.iso8601
+  end
+
+  test "secrets table filters by type and searches by name" do
+    matching = static_secrets(:acme_prod_api_key)
+    excluded_by_name = static_secrets(:acme_staging_api_key)
+    excluded_by_type = pg_dsn_secrets(:acme_reporting_pg)
+
+    get console_secrets_url, params: { q: "PROD-API", type: "static" }
+    assert_response :ok
+
+    assert_select "select[name=type] option[value=static][selected]"
+    assert_select "a[href=?]", console_secret_path("static", matching.oid)
+    assert_select "a[href=?]", console_secret_path("static", excluded_by_name.oid), count: 0
+    assert_select "a[href=?]", console_secret_path("pg_dsn", excluded_by_type.oid), count: 0
+  end
+
+  test "secrets table paginates fifty filtered records per page" do
+    now = Time.current
+    StaticSecret.insert_all!((1..51).map do |number|
+      {
+        created_at: now,
+        updated_at: now,
+        name: "Pagination secret #{number}",
+        inject_config: { header: "Authorization" }
+      }
+    end)
+
+    filters = { q: "Pagination secret", type: "static" }
+    get console_secrets_url, params: filters
+
+    assert_response :ok
+    assert_select "tbody tr", count: 50
+    assert_select "a[href*='page=2'][href*='type=static']", text: "Next"
+    assert_select "div", text: /51 secrets.*page 1 of 2/
+
+    get console_secrets_url, params: filters.merge(page: 2)
+
+    assert_response :ok
+    assert_select "tbody tr", count: 1
+    assert_select "a[href*='page=1']", text: "Previous"
   end
 
   test "secret detail page offers delete for an editable kind but not for others" do

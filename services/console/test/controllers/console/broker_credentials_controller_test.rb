@@ -22,10 +22,12 @@ module Console
     test "GET new and edit render without error" do
       get new_console_broker_credential_url
       assert_response :ok
+      assert_select "input[name='credential[foreign_id]'][readonly]", count: 0
       assert_select "input[name='credential[namespace]']", count: 0
       assert_select ".form-label", text: "Namespace", count: 0
       get edit_console_broker_credential_url(broker_credentials(:acme_managed_gmail).oid)
       assert_response :ok
+      assert_select "input[name='credential[foreign_id]'][readonly]", count: 1
       assert_select ".form-label", text: "Namespace", count: 0
     end
 

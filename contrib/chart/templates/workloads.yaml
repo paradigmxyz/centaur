@@ -27,6 +27,7 @@ spec:
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
       {{- end }}
+{{- include "centaur.podScheduling" (dict "values" .Values.postgres "indent" 6) }}
       containers:
         - name: postgres
           image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}

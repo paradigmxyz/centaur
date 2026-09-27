@@ -88,8 +88,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 RUN useradd -m -s /bin/bash -u 1001 agent \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/agent
 
-ARG CLAUDE_CODE_VERSION=2.1.154
-ARG CODEX_VERSION=0.144.0
+ARG CLAUDE_CODE_VERSION=2.1.281
+ARG CODEX_VERSION=0.155.1
 # Hermes Agent (NousResearch) — pinned by commit SHA per the dependency policy.
 ARG HERMES_AGENT_REF=e5e2fb8b2dbe1cae85aa5ad6ce45aef376016e43
 ARG PI_CODING_AGENT_VERSION=0.67.2
@@ -227,9 +227,11 @@ RUN --mount=type=cache,target=/home/agent/.cache/uv,uid=1001,gid=1001,sharing=lo
 RUN curl -L https://foundry.paradigm.xyz | bash \
     && /home/agent/.foundry/bin/foundryup --install ${FOUNDRY_VERSION} \
     && for bin in forge cast anvil chisel; do \
-      rm -f "$HOME/.foundry/bin/$bin"; \
-      ln -s "$HOME/.foundry/versions/${FOUNDRY_VERSION}/$bin" "$HOME/.foundry/bin/$bin"; \
-    done
+      src="$(find "$HOME/.foundry/versions" -type f -name "$bin" | head -n1)"; \
+      [ -n "$src" ] || { echo "foundry: $bin not found under ~/.foundry/versions" >&2; exit 1; }; \
+      ln -sf "$src" "$HOME/.foundry/bin/$bin"; \
+    done \
+    && cast --version && forge --version && anvil --version
 RUN set -eux; \
     amp_platform="$(case "$(dpkg --print-architecture)" in \
       amd64) echo linux-x64 ;; \
@@ -258,8 +260,10 @@ RUN uv tool install "playwright==${PLAYWRIGHT_VERSION}" \
     && playwright --version | grep -F "${PLAYWRIGHT_VERSION}"
 
 # ── Agent skills + workspace setup (rarely changes) ─────────────────────────
+# Codex installs into .agents/skills, which startup shares with every harness.
 RUN --mount=type=cache,target=/home/agent/.npm,uid=1001,gid=1001,sharing=locked \
-    npx -y skills add vercel-labs/agent-browser
+    npx -y skills add vercel-labs/agent-browser --agent codex --skill agent-browser --yes \
+    && test -s .agents/skills/agent-browser/SKILL.md
 # git-branch configures each writable clone with the publishing GitHub account.
 # A baked agent identity would reappear as a co-author when GitHub squash-merges its commits.
 RUN mkdir -p ~/.amp/bin ~/.config/amp ~/.codex ~/.pi/agent ~/github ~/workspace \
@@ -282,7 +286,8 @@ RUN rm -f /etc/sudoers.d/agent
 # BuildKit's COPY --link creates parent directories without an explicit mode,
 # which can leave /etc/centaur without the execute bit for non-root users.
 # Pre-create it as 0755 so the agent user can traverse into it at runtime.
-RUN install -d -m 0755 /etc/centaur /opt/centaur
+RUN install -d -m 0755 /etc/centaur /opt/centaur \
+    && install -d -o 1001 -g 1001 -m 0700 /tmp/downloads
 COPY --link centaur_sdk/ /opt/centaur/centaur_sdk/
 COPY --link --chmod=0755 services/sandbox/git-hooks/ /opt/centaur/git-hooks/
 COPY --link --chown=1001:1001 tools/ /opt/centaur/tools/
@@ -294,6 +299,7 @@ COPY --link services/workflow-python/api/ /usr/local/bin/api/
 COPY --link --chmod=755 services/sandbox/git-branch.sh /usr/local/bin/git-branch
 COPY --link --chmod=755 services/sandbox/install_tool_shims.py /usr/local/bin/install-tool-shims
 COPY --link --chmod=755 services/sandbox/seed_hermes_codex_auth.py /usr/local/bin/seed-hermes-codex-auth
+COPY --link --chmod=755 services/sandbox/centaur_artifact_get.py /usr/local/bin/centaur-artifact-get
 COPY --link --chmod=755 services/sandbox/centaur_tool_host.py /usr/local/bin/centaur-tool-host
 COPY --link --chmod=755 services/sandbox/compose_system_prompt.py /usr/local/bin/compose-system-prompt
 COPY --link --chmod=755 services/sandbox/repo_cache_sync.py /usr/local/bin/repo-cache-sync

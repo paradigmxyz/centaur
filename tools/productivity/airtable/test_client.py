@@ -323,6 +323,103 @@ def test_create_record_posts_fields_and_compacts_response() -> None:
     }
 
 
+def test_create_table_posts_default_primary_field() -> None:
+    module = _load_airtable_module()
+    client = module.AirtableClient(api_key="test-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v0/meta/bases/appBase123/tables"
+        assert json.loads(request.content) == {
+            "name": "Dan's House Party",
+            "fields": [{"name": "Name", "type": "singleLineText"}],
+        }
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "tblParty123",
+                "name": "Dan's House Party",
+                "fields": [{"id": "fldName123", "name": "Name", "type": "singleLineText"}],
+                "views": [],
+            },
+        )
+
+    _mock_client(client, handler)
+    try:
+        result = client.create_table("appBase123", "Dan's House Party")
+    finally:
+        client.close()
+
+    assert result["id"] == "tblParty123"
+    assert result["name"] == "Dan's House Party"
+
+
+def test_create_table_posts_custom_fields_and_description() -> None:
+    module = _load_airtable_module()
+    client = module.AirtableClient(api_key="test-key")
+    fields = [
+        {"name": "Event", "type": "singleLineText"},
+        {"name": "Date", "type": "date", "options": {"dateFormat": {"name": "iso"}}},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body == {
+            "name": "Events",
+            "description": "Upcoming events",
+            "fields": fields,
+        }
+        return httpx.Response(200, request=request, json={"id": "tblEvents", **body})
+
+    _mock_client(client, handler)
+    try:
+        result = client.create_table(
+            "appBase123",
+            "Events",
+            fields=fields,
+            description="Upcoming events",
+        )
+    finally:
+        client.close()
+
+    assert result["fields"] == fields
+
+
+def test_cli_create_table_uses_default_field(monkeypatch) -> None:
+    cli = _load_airtable_cli_module()
+    calls: list[dict] = []
+
+    class FakeClient:
+        def create_table(self, base_id, name, fields=None, description=None) -> dict:
+            calls.append(
+                {
+                    "base_id": base_id,
+                    "name": name,
+                    "fields": fields,
+                    "description": description,
+                }
+            )
+            return {"id": "tblParty123", "name": name}
+
+    monkeypatch.setattr(cli, "AirtableClient", FakeClient)
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["create-table", "appBase123", "Dan's House Party"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        {
+            "base_id": "appBase123",
+            "name": "Dan's House Party",
+            "fields": None,
+            "description": None,
+        }
+    ]
+
+
 def test_update_records_batches_and_uses_patch() -> None:
     module = _load_airtable_module()
     client = module.AirtableClient(api_key="test-key")

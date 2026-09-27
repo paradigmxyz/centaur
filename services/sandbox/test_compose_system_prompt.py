@@ -65,6 +65,45 @@ class ComposeSystemPromptTest(unittest.TestCase):
                 "persona base\n\n\n---\n\nhome overlay\n\n\n---\n\nrepo overlay\n",
             )
 
+    def test_appends_persona_after_deployment_overlays_and_restrictions_last(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            workspace = root / "workspace"
+            home.mkdir()
+            workspace.mkdir()
+            (home / "AGENTS.md").write_text("base\n")
+            (home / "AGENTS_OVERLAY.md").write_text("home overlay\n")
+
+            repo_mount = home / "github"
+            repo_overlay = (
+                repo_mount
+                / "acme"
+                / "overlay"
+                / "services"
+                / "sandbox"
+                / "SYSTEM_PROMPT.md"
+            )
+            repo_overlay.parent.mkdir(parents=True)
+            repo_overlay.write_text("repo overlay\n")
+
+            persona_prompt = "engineering persona\n"
+            (home / "AGENTS_PERSONA.md").write_text(persona_prompt)
+            target = workspace / "AGENTS.md"
+            compose_system_prompt.compose_system_prompt(
+                home_dir=home,
+                target_prompt=target,
+                repo_mount=repo_mount,
+                observability_enabled=False,
+            )
+
+            self.assertEqual(
+                target.read_text(),
+                "base\n\n\n---\n\nhome overlay\n\n\n---\n\nrepo overlay\n"
+                "\n\n---\n\nengineering persona\n\n\n---\n\n"
+                f"{compose_system_prompt.OBSERVABILITY_DISABLED_PROMPT}",
+            )
+
     def test_skips_mounted_copy_of_baked_root_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

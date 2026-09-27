@@ -73,6 +73,10 @@ class CentaurApiClient
     post("/api/admin/google/docs-sync/batch", payload)
   end
 
+  def get_google_docs_content_status(files:)
+    post("/api/admin/google/docs-sync/content-status", { files: files })
+  end
+
   def get_granola_sync_checkpoint(scope_id:)
     get("/api/admin/granola/sync/checkpoint", scope_id: scope_id)
   end

@@ -154,6 +154,25 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     http.verify
   end
 
+  test "gets Google Docs content status" do
+    http = Minitest::Mock.new
+    expect_request(http, status: 200, body: { missing: [] }.to_json) do |request|
+      assert_equal :post, request[:method]
+      assert_equal "http://api.internal:8080/api/admin/google/docs-sync/content-status", request[:url]
+      assert_equal(
+        { "files" => [ { "file_id" => "doc-123", "source_version" => "7" } ] },
+        JSON.parse(request[:body])
+      )
+    end
+    client = api_client(base_url: "http://api.internal:8080", http: http)
+
+    client.get_google_docs_content_status(
+      files: [ { file_id: "doc-123", source_version: "7" } ]
+    )
+
+    http.verify
+  end
+
   test "creates app sessions with encoded thread keys" do
     http = Minitest::Mock.new
     expect_request(http, status: 200, body: { ok: true }.to_json) do |request|

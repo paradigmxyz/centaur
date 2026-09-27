@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
+ActiveRecord::Schema[8.1].define(version: 2026_09_24_155807) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pg_search"
@@ -383,7 +383,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
   create_table "scheduled_tasks", force: :cascade do |t|
     t.bigint "author_id", null: false
     t.datetime "created_at", null: false
-    t.string "cron_expression", null: false
+    t.string "cron_expression"
     t.string "delivery_channel", null: false
     t.boolean "enabled", default: true, null: false
     t.datetime "last_enqueued_at"
@@ -402,6 +402,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
 
   create_table "secret_sources", force: :cascade do |t|
     t.bigint "aws_auth_secret_id"
+    t.bigint "broker_credential_id"
     t.jsonb "config", default: {}, null: false
     t.datetime "created_at", null: false
     t.bigint "gcp_auth_secret_id"
@@ -417,6 +418,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
     t.datetime "updated_at", null: false
     t.index ["aws_auth_secret_id", "role", "role_kind"], name: "index_secret_sources_on_aws_owner_and_role", unique: true
     t.index ["aws_auth_secret_id"], name: "index_secret_sources_on_aws_auth_secret_id"
+    t.index ["broker_credential_id"], name: "index_secret_sources_on_broker_credential_id"
     t.index ["gcp_auth_secret_id"], name: "index_secret_sources_on_gcp_auth_secret_id", unique: true
     t.index ["gcp_id_token_secret_id"], name: "index_secret_sources_on_gcp_id_token_secret_id", unique: true
     t.index ["hmac_secret_id", "role", "role_kind"], name: "index_secret_sources_on_hmac_owner_and_role", unique: true
@@ -426,6 +428,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
     t.index ["pg_dsn_secret_id"], name: "index_secret_sources_on_pg_dsn_secret_id", unique: true
     t.index ["source_type"], name: "index_secret_sources_on_source_type"
     t.index ["static_secret_id"], name: "index_secret_sources_on_static_secret_id", unique: true
+    t.check_constraint "broker_credential_id IS NULL OR source_type::text = 'token_broker'::text", name: "secret_sources_broker_credential_requires_token_broker"
   end
 
   create_table "skill_editors", force: :cascade do |t|
@@ -608,6 +611,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
   add_foreign_key "roles", "users", column: "created_by_id"
   add_foreign_key "scheduled_tasks", "users", column: "author_id"
   add_foreign_key "secret_sources", "aws_auth_secrets"
+  add_foreign_key "secret_sources", "broker_credentials"
   add_foreign_key "secret_sources", "gcp_auth_secrets"
   add_foreign_key "secret_sources", "gcp_id_token_secrets"
   add_foreign_key "secret_sources", "hmac_secrets"

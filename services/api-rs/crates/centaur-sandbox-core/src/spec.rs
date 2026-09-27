@@ -59,6 +59,10 @@ pub struct SandboxSpec {
     pub command: Option<Vec<String>>,
     pub args: Vec<String>,
     pub env: Vec<EnvVar>,
+    /// Files materialized in the sandbox before the workload starts.
+    /// Target paths are absolute paths inside the sandbox.
+    #[serde(default)]
+    pub files: Vec<SandboxFile>,
     pub working_dir: Option<String>,
     pub mounts: Vec<Mount>,
     pub resources: Option<ResourceRequirements>,
@@ -89,6 +93,7 @@ impl SandboxSpec {
             command: None,
             args: Vec::new(),
             env: Vec::new(),
+            files: Vec::new(),
             working_dir: None,
             mounts: Vec::new(),
             resources: None,
@@ -129,6 +134,11 @@ impl SandboxSpec {
         self
     }
 
+    pub fn file(mut self, target_path: impl Into<String>, contents: impl Into<String>) -> Self {
+        self.files.push(SandboxFile::new(target_path, contents));
+        self
+    }
+
     pub fn working_dir(mut self, working_dir: impl Into<String>) -> Self {
         self.working_dir = Some(working_dir.into());
         self
@@ -142,6 +152,22 @@ impl SandboxSpec {
     pub fn resources(mut self, resources: ResourceRequirements) -> Self {
         self.resources = Some(resources);
         self
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SandboxFile {
+    /// Absolute destination path inside the sandbox.
+    pub target_path: String,
+    pub contents: String,
+}
+
+impl SandboxFile {
+    pub fn new(target_path: impl Into<String>, contents: impl Into<String>) -> Self {
+        Self {
+            target_path: target_path.into(),
+            contents: contents.into(),
+        }
     }
 }
 

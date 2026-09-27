@@ -1,0 +1,24 @@
+[package]
+name = "centaur-proxy-sync"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+active-record-encryption = { path = "../../crates/active-record-encryption" }
+axum = "0.8"
+chrono = { version = "0.4", features = ["clock", "serde"] }
+crc32fast = "1"
+hex = "0.4"
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqids = "0.4"
+sqlx = { version = "0.8", default-features = false, features = ["json", "postgres", "runtime-tokio-rustls", "chrono"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"

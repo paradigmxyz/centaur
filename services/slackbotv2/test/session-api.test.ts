@@ -6,8 +6,10 @@ import {
   forwardToSessionApi,
   harnessRestartPreamble,
   interruptSessionExecution,
+  isSessionPrincipalAdmissionDenied,
   openSessionEventStream,
   resolveSlackHomeTeamId,
+  SessionApiError,
   serializeAttachment,
   serializeMessage
 } from '../src/session-api'
@@ -24,6 +26,21 @@ type RecordedRequest = {
   body: unknown
   url: string
 }
+
+describe('session admission errors', () => {
+  test('recognizes only the typed preapproval denial', () => {
+    const error = new SessionApiError({
+      action: 'create session',
+      body: JSON.stringify({ code: 'session_principal_not_preapproved' }),
+      retryable: false,
+      status: 403,
+      statusText: 'Forbidden'
+    })
+
+    expect(isSessionPrincipalAdmissionDenied(error)).toBe(true)
+    expect(isSessionPrincipalAdmissionDenied(new Error('forbidden'))).toBe(false)
+  })
+})
 
 function apiMessage(
   text: string,
@@ -615,6 +632,25 @@ describe('forwardToSessionApi overrides', () => {
     )
     const create = requests.find(request => request.url.endsWith('.000100'))
     expect((create?.body as { harness_type?: string }).harness_type).toBe('claudecode')
+  })
+
+  test('creates session with persona independent from harness override', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(
+      options(fetchFn),
+      forwardInput(apiMessage('review this'), {
+        harnessType: 'claudecode',
+        personaId: 'invest'
+      })
+    )
+    const create = requests.find(request => request.url.endsWith('.000100'))
+    expect(create?.body).toEqual(
+      expect.objectContaining({
+        harness_type: 'claudecode',
+        on_harness_conflict: 'restart',
+        persona_id: 'invest'
+      })
+    )
   })
 
   test('includes model override on the execute input line', async () => {

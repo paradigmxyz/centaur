@@ -39,6 +39,7 @@ spec:
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
       {{- end }}
+{{- include "centaur.podScheduling" (dict "values" $console.worker "indent" 6) }}
       initContainers:
         # Wait for the Solid Queue database (created by the web pod's Rails
         # db:prepare) so a cold start does not crash-loop before it exists.
@@ -170,6 +171,8 @@ spec:
             - name: CENTAUR_CONSOLE_SLACK_DM_SYNC_OAUTH_APP_SLUG
               value: {{ . | quote }}
 {{- end }}
+            - name: CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED
+              value: {{ $console.googleDocsSync.enabled | quote }}
             - name: RAILS_LOG_TO_STDOUT
               value: "1"
 {{- if .Values.apiRs.enabled }}

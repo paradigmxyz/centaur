@@ -745,6 +745,100 @@ class WorkflowHostTests(unittest.TestCase):
         self.assertEqual(discovered, {})
         self.assertFalse(marker.exists())
 
+    def test_slack_buttons_post_workflow_target_and_replay_message(self) -> None:
+        source = '''
+from api import app
+from api.workflow_engine import Button
+# Exercise tool calls through the test RPC, independent of installed CLI shims.
+app.resolve_tool_shim = lambda: None
+WORKFLOW_NAME = "buttons"
+async def handler(inp, ctx):
+    return await ctx.slack_buttons(
+        "review", channel=inp["channel"], text="Proceed?", workflow="review_release",
+        input={"release_id": "release-1"},
+        buttons={"approve": Button("Approve", style="primary"),
+                 "reject": Button("Reject", style="danger"),
+                 "later": "Decide later", "details": Button("Details")},
+    )
+'''
+        message = {"ok": True, "channel": "C1", "ts": "1.0"}
+        group_ids = []
+        for channel, replay in [("C1", False), ("general", True), ("general", False)]:
+            with self.subTest(channel=channel, replay=replay), self.workflow_host(source) as proc:
+                self.send_host_message(proc, {
+                    "type": "workflow.start", "workflow_name": "buttons",
+                    "task_id": "task-1", "run_id": "run-1", "input": {"channel": channel},
+                })
+                posts = 0
+                lookups = 0
+                while True:
+                    request = self.read_host_message(proc)
+                    kind = request["type"]
+                    if kind == "workflow.result":
+                        self.assertEqual(request["result"], message)
+                        break
+                    if kind == "ctx.step.get":
+                        self.assertEqual(request["step"], "review.post")
+                        value = {"done": replay, "value": message if replay else None, "checkpoint_name": "review.post"}
+                    elif kind == "ctx.call_tool":
+                        lookups += 1
+                        self.assertEqual(request["tool"], "slack")
+                        self.assertEqual(request["method"], "resolve_channel")
+                        self.assertEqual(request["args"], {"channel": channel})
+                        value = "C1"
+                    elif kind == "ctx.post_to_slack":
+                        posts += 1
+                        self.assertEqual(request["channel"], "C1")
+                        elements = request["args"]["blocks"][1]["elements"]
+                        group_id = request["args"]["client_msg_id"]
+                        group_ids.append(group_id)
+                        self.assertEqual([b["action_id"] for b in elements], [
+                            f"centaur.workflow.action:{group_id}:approve",
+                            f"centaur.workflow.action:{group_id}:reject",
+                            f"centaur.workflow.action:{group_id}:later",
+                            f"centaur.workflow.action:{group_id}:details",
+                        ])
+                        self.assertEqual([b["text"]["text"] for b in elements], ["Approve", "Reject", "Decide later", "Details"])
+                        self.assertEqual([b.get("style") for b in elements], ["primary", "danger", None, None])
+                        for button in elements:
+                            self.assertEqual(json.loads(button["value"]), {
+                                "workflow_name": "review_release", "input": {"release_id": "release-1"},
+                            })
+                        value = message
+                    elif kind == "ctx.step.put":
+                        self.assertEqual(request["value"], message)
+                        value = None
+                    else:
+                        self.fail(f"unexpected host output: {request}")
+                    self.send_host_message(proc, {"type": "ctx.response", "request_id": request["request_id"], "ok": True, "value": value})
+                self.assertEqual(posts, int(not replay))
+                self.assertEqual(lookups, int(not replay and channel == "general"))
+                proc.wait(timeout=2)
+                self.assertEqual(proc.returncode, 0)
+        self.assertEqual(group_ids[0], group_ids[1])
+
+    def test_button_configuration_is_validated_before_posting(self) -> None:
+        source = """
+from api.workflow_engine import Button
+WORKFLOW_NAME = "buttons"
+async def handler(inp, ctx):
+    return await ctx.slack_buttons(
+        "review", channel="C1", workflow="review_release",
+        text=inp.get("text", "Proceed?"), input=inp.get("data", {}),
+        buttons={"approve": Button("Approve", style=inp["style"])} if "style" in inp else inp.get("buttons", {"approve": "Approve"}),
+    )
+"""
+        for inp in [{"buttons": {}}, {"text": "x" * 3001}, {"data": {"large": "x" * 2000}},
+                    {"buttons": {"bad:action": "Bad"}}, {"buttons": {"approve": "x" * 76}},
+                    {"style": "blue"}, {"style": "default"}, {"style": ""}]:
+            with self.subTest(input=inp), self.workflow_host(source) as proc:
+                self.send_host_message(proc, {
+                    "type": "workflow.start", "workflow_name": "buttons",
+                    "task_id": "task-1", "run_id": "run-1", "input": inp,
+                })
+                self.assertEqual(self.read_host_message(proc)["type"], "workflow.error")
+                proc.wait(timeout=2)
+
     def test_failed_workflow_host_exits_with_stdin_open(self) -> None:
         source = (
             "WORKFLOW_NAME = 'failing_workflow'\n"

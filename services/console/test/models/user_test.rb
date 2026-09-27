@@ -116,6 +116,16 @@ class UserTest < ActiveSupport::TestCase
     assert_equal [ [ "google", "sub-1" ] ], user.user_identities.pluck(:provider, :subject)
   end
 
+  test "link_or_provision supports an Okta identity" do
+    user = User.link_or_provision(
+      provider: "okta",
+      identity: identity(subject: "okta-sub", email: "okta-user@example.com")
+    )
+
+    assert user.active?
+    assert_equal [ [ "okta", "okta-sub" ] ], user.user_identities.pluck(:provider, :subject)
+  end
+
   test "link_or_provision rejects SSO emails outside the configured domain allowlist" do
     ENV["CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS"] = "acme.example example.org"
     assert_no_difference [ "User.count", "UserIdentity.count" ] do

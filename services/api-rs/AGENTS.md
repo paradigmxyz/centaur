@@ -14,7 +14,8 @@ Important crate boundaries:
 - `centaur-session-runtime`: orchestration, execution, recovery, and lifecycle.
 - `centaur-session-sqlx`: persistence and embedded SQLx migrations.
 - `centaur-sandbox-*`: backend-neutral sandbox contract and implementations.
-- `centaur-workflows` and `absurd-sdk`: durable workflow scheduling and state.
+- `centaur-workflows`: durable workflow scheduling and state, built on the
+  shared `crates/absurd-sdk` library.
 - `centaur-iron-control`, `centaur-iron-proxy`, and `centaur-perms`: credential
   control-plane integration and authorization resources.
 - `centaur-telemetry`: shared tracing and metrics support.
@@ -52,7 +53,8 @@ disposable Postgres as required by the packages you run:
 - `SESSION_RUNTIME_TEST_DATABASE_URL`: session SQLx, runtime, and warm-pool
   tests; the SQLx RLS integration tests also accept it as a fallback.
 - `SESSION_SQLX_TEST_DATABASE_URL`: SQLx RLS integration tests specifically.
-- `ABSURD_TEST_DATABASE_URL`: `absurd-sdk` database tests.
+- `ABSURD_TEST_DATABASE_URL`: top-level `crates/absurd-sdk` database tests;
+  initialize the database with the Absurd schema before running them.
 
 Do not report full database coverage from `cargo test --workspace` unless the
 relevant variables were set and the database-backed tests actually ran.
@@ -73,6 +75,12 @@ During iteration, prefer a focused package/test first, for example:
 cargo test -p centaur-session-runtime
 cargo test -p centaur-session-sqlx
 cargo test -p centaur-workflows
+```
+
+The shared Absurd SDK is validated separately from the API workspace:
+
+```bash
+cargo test --manifest-path ../../crates/absurd-sdk/Cargo.toml
 ```
 
 Sandbox backend invariants have a local Kind suite. Prepare the cluster and

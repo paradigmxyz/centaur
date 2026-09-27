@@ -23,10 +23,14 @@ MAX_SEARCH_LIMIT = 50
 MIN_HYBRID_CANDIDATE_LIMIT = 30
 RRF_K = 60
 DEFAULT_EMBEDDINGS_MODEL = "text-embedding-3-small"
-EMBEDDINGS_DIMENSIONS = 1_536
+DEFAULT_EMBEDDINGS_DIMENSIONS = 1_536
+# pgvector will not index above 2000 dimensions; see the workflow that writes
+# these vectors for the matching bound.
+MAX_EMBEDDINGS_DIMENSIONS = 2_000
 OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
 COMPANY_CONTEXT_EMBEDDINGS_ENABLED_ENV = "COMPANY_CONTEXT_EMBEDDINGS_ENABLED"
 COMPANY_CONTEXT_EMBEDDINGS_MODEL_ENV = "COMPANY_CONTEXT_EMBEDDINGS_MODEL"
+COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS_ENV = "COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS"
 DEFAULT_QUERY_LIMIT = 100
 MAX_QUERY_LIMIT = 1_000
 DEFAULT_QUERY_TIMEOUT_SECONDS = 10
@@ -485,9 +489,7 @@ def _dm_document_summary(row: Any) -> dict[str, Any]:
         "url": str(_row_value(row, "permalink", "")),
         "author_name": user_id or bot_id,
         "access_scope": (
-            "slack_private_channel"
-            if conversation_type == "private_channel"
-            else "slack_dm"
+            "slack_private_channel" if conversation_type == "private_channel" else "slack_dm"
         ),
         "occurred_at": _isoformat(_row_value(row, "occurred_at")),
         "source_updated_at": _isoformat(_row_value(row, "source_updated_at")),
@@ -640,7 +642,7 @@ class CompanyContextClient:
         response = await client.embeddings.create(
             model=self._embeddings_model(),
             input=query,
-            dimensions=EMBEDDINGS_DIMENSIONS,
+            dimensions=self._embeddings_dimensions(),
             encoding_format="float",
         )
         data = list(response.data or [])
@@ -657,6 +659,33 @@ class CompanyContextClient:
             ).strip()
             or DEFAULT_EMBEDDINGS_MODEL
         )
+
+    @staticmethod
+    def _embeddings_dimensions() -> int:
+        """Vector width to request for a query embedding.
+
+        Reads the same variable the embeddings workflow writes with. The two
+        must agree: a query vector of a different width than the stored column
+        is a Postgres error, not a worse ranking.
+        """
+        configured = os.getenv(  # noqa: TID251 - non-secret model configuration
+            COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS_ENV,
+        )
+        if configured is None or not configured.strip():
+            return DEFAULT_EMBEDDINGS_DIMENSIONS
+        try:
+            dimensions = int(configured)
+        except ValueError as error:
+            raise RuntimeError(
+                f"{COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS_ENV} must be an integer, "
+                f"got {configured!r}"
+            ) from error
+        if not 1 <= dimensions <= MAX_EMBEDDINGS_DIMENSIONS:
+            raise RuntimeError(
+                f"{COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS_ENV} must be between 1 "
+                f"and {MAX_EMBEDDINGS_DIMENSIONS}, got {dimensions}"
+            )
+        return dimensions
 
     async def _query_async(
         self,
@@ -879,8 +908,8 @@ class CompanyContextClient:
                         occurred_before=occurred_before,
                     )
                 except Exception:
-                    # Embedding generation and the experimental vector schema are
-                    # both optional. Any incompatibility falls back to lexical.
+                    # Embedding generation and vector search are optional. Any
+                    # incompatibility falls back to lexical search.
                     vector_results = []
 
             if vector_results:
@@ -1141,7 +1170,7 @@ class CompanyContextClient:
                     result["result_type"] = GOOGLE_DOCS_SOURCE_TYPE
                     results.append(result)
             except Exception:
-                # Optional projections may lag the embedding experiment schema.
+                # Optional projections may lag the embedding schema.
                 pass
 
         if _include_granola_source(source, source_type):
@@ -1197,7 +1226,7 @@ class CompanyContextClient:
                     result["result_type"] = GRANOLA_SOURCE_TYPE
                     results.append(result)
             except Exception:
-                # Optional projections may lag the embedding experiment schema.
+                # Optional projections may lag the embedding schema.
                 pass
 
         results.sort(

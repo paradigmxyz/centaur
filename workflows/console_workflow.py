@@ -52,7 +52,12 @@ async def _deliver_to_slack(
         chunks.append(footer)
 
     def message_args(index: int) -> dict[str, Any]:
-        args: dict[str, Any] = {"mrkdwn": True}
+        args: dict[str, Any] = {
+            "mrkdwn": True,
+            # Preserve the pre-eligibility workflow's request-derived IDs so
+            # in-flight runs remain idempotent across rollout.
+            "client_msg_id": f"{ctx.task_id}:slack:{3 + (3 * index)}",
+        }
         if index == len(chunks) - 1:
             args["blocks"] = _scheduled_task_blocks(final_body, footer)
         return args
@@ -144,17 +149,30 @@ async def handler(params: Any, ctx: Any) -> dict[str, Any]:
     scheduled_task_id = _required_string(params, "scheduled_task_id")
     slack_user_id = str(params.get("slack_user_id") or "").strip()
 
-    result = await ctx.agent_turn(
-        _prompt_for_slack(prompt),
-        principal=principal,
-        metadata={
-            "scheduled_task_id": scheduled_task_id,
-            "scheduled_task_name": str(params.get("scheduled_task_name") or ""),
-        },
-    )
+    async def run_agent() -> dict[str, str]:
+        message_id = f"absurd-workflow:{ctx.task_id}:1:user"
+        result = await ctx.agent_turn(
+            _prompt_for_slack(prompt),
+            principal=principal,
+            message_id=message_id,
+            idempotency_key=f"absurd-workflow-agent-turn:{message_id}",
+            metadata={
+                "scheduled_task_id": scheduled_task_id,
+                "scheduled_task_name": str(params.get("scheduled_task_name") or ""),
+            },
+        )
+        return {
+            "execution_id": str(result.get("execution_id") or ""),
+            "result_text": str(result.get("result_text") or "").strip()[
+                :SLACK_MESSAGE_MAX_LENGTH
+            ],
+        }
+
+    result = await ctx.step("agent_result", run_agent)
     response_text = str(result.get("result_text") or "").strip()
     if not response_text:
         response_text = "The task completed without a text response."
+
     delivery = await _deliver_to_slack(
         ctx,
         channel,

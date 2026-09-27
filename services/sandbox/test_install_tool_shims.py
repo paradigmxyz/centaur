@@ -165,6 +165,60 @@ class GeneratedShimTest(unittest.TestCase):
             self.assertNotIn("uvx --from", content)
             self.assertNotIn("/app/tools/research/websearch", content)
 
+    def test_centaur_tools_list_emits_analytics_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            index_path = bin_dir / ".centaur-tools.json"
+            index_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "websearch",
+                            "project_dir": "/app/tools/research/websearch",
+                        }
+                    ]
+                )
+                + "\n"
+            )
+            install_tool_shims._write_catalog(
+                bin_dir / "centaur-tools", index_path, ""
+            )
+            analytics_log = root / "tool-analytics.log"
+            env = {
+                **os.environ,
+                "CENTAUR_THREAD_KEY": "cli:test-thread",
+                "CENTAUR_TOOL_ANALYTICS_LOG_PATH": str(analytics_log),
+            }
+
+            result = subprocess.run(
+                [str(bin_dir / "centaur-tools"), "list"],
+                check=False,
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                result.stdout, "websearch\t/app/tools/research/websearch\n"
+            )
+            analytics_events = [
+                json.loads(line) for line in analytics_log.read_text().splitlines()
+            ]
+            self.assertEqual(
+                [event["event"] for event in analytics_events],
+                ["tool_call_started", "tool_call_completed"],
+            )
+            for event in analytics_events:
+                self.assertEqual(event["tool_name"], "centaur-tools")
+                self.assertEqual(event["tool_method"], "list")
+                self.assertEqual(event["thread_key"], "cli:test-thread")
+            self.assertEqual(analytics_events[1]["exit_code"], 0)
+            self.assertEqual(analytics_events[1]["success"], "true")
+            self.assertIn("duration_ms", analytics_events[1])
+
     def test_centaur_tools_run_uses_catalog_entry_directly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
