@@ -18,6 +18,17 @@ class PwaTest < ActionDispatch::IntegrationTest
                  manifest["shortcuts"].map { |shortcut| shortcut["url"] }
   end
 
+  test "manifest omits the chat shortcut when console chat is disabled" do
+    with_env("CENTAUR_CONSOLE_CHAT_ENABLED" => "false") do
+      get pwa_manifest_url(format: :json)
+      assert_response :ok
+
+      manifest = JSON.parse(response.body)
+      assert_equal %w[/console/workflows /console/integrations],
+                   manifest["shortcuts"].map { |shortcut| shortcut["url"] }
+    end
+  end
+
   test "launch maps web+centaur targets onto in-app paths" do
     post login_url, params: { email: users(:member_user).email, password: "password123456" }
 

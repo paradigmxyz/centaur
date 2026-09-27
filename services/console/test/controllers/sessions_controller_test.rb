@@ -62,6 +62,14 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     assert_equal member.id, session[:user_id]
   end
 
+  test "a non-admin lands on integrations when console chat is disabled" do
+    member = users(:member_user)
+    with_env("CENTAUR_CONSOLE_CHAT_ENABLED" => "false") do
+      post login_url, params: { email: member.email, password: "password123456" }
+      assert_redirected_to console_integrations_path
+    end
+  end
+
   test "email match is case-insensitive" do
     post login_url, params: { email: @operator.email.upcase, password: "password123456" }
     assert_equal @operator.id, session[:user_id]

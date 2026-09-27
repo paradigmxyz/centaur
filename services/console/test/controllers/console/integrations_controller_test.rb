@@ -6,6 +6,17 @@ class Console::IntegrationsControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to login_path
   end
 
+  test "chat navigation is hidden when console chat is disabled" do
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+
+    with_env("CENTAUR_CONSOLE_CHAT_ENABLED" => "false") do
+      get console_integrations_url
+      assert_response :ok
+      assert_select "a[aria-label=?]", "New chat", count: 0
+      assert_select ".console-thread-group-title", text: /Chats/, count: 0
+    end
+  end
+
   test "a non-admin sees enabled apps with their start links, logos, and no disabled apps" do
     post login_url, params: { email: users(:member_user).email, password: "password123456" }
 

@@ -251,3 +251,180 @@ def test_attio_handler_records_partial_detail_progress(monkeypatch):
         "transcripts_upserted": 1,
     }
     assert ctx.logs == [("attio_sync_meeting_details_failed", {"failures": 1})]
+
+
+def test_attio_sync_uses_one_week_cutoff_on_every_page(monkeypatch):
+    attio = _load("workflows.attio_sync")
+    now = dt.datetime(2026, 9, 17, 13, 15, tzinfo=dt.UTC)
+
+    class Clock(dt.datetime):
+        @classmethod
+        def now(cls, _tz=None):
+            nonlocal now
+            value = now
+            now += dt.timedelta(minutes=1)
+            return value
+
+    monkeypatch.setattr(attio.dt, "datetime", Clock)
+    calls = []
+
+    class Client:
+        async def list_meetings(self, **kwargs):
+            calls.append(kwargs)
+            return {"data": [], "next_cursor": "page-2" if len(calls) == 1 else None}
+
+    asyncio.run(
+        attio._sync_meetings(
+            client=Client(),
+            pool=None,
+            page_size=17,
+            updated_after=Clock(2026, 9, 16, 9, tzinfo=dt.UTC),
+            max_meetings=None,
+            include_transcripts=False,
+            run_id="run_1",
+        )
+    )
+    assert calls == [
+        {
+            "limit": 17,
+            "cursor": cursor,
+            "sort": "start_asc",
+            "ends_from": "2026-09-16T09:00:00Z",
+            "starts_before": "2026-09-24T13:15:00Z",
+        }
+        for cursor in (None, "page-2")
+    ]
+
+
+def test_attio_sync_parallelism_limit_counts_and_failure_order(monkeypatch):
+    attio = _load("workflows.attio_sync")
+    active = peak = 0
+    fetched = []
+    written = []
+    first_batch_started = asyncio.Event()
+    later_meeting_written = asyncio.Event()
+
+    class Client:
+        async def list_meetings(self, **kwargs):
+            assert kwargs["cursor"] is None
+            return {
+                "data": [{"id": {"meeting_id": str(i)}} for i in range(8)],
+                "next_cursor": "next-page",
+            }
+
+        async def get_meeting(self, meeting_id):
+            nonlocal active, peak
+            fetched.append(meeting_id)
+            active += 1
+            peak = max(peak, active)
+            if active == 5:
+                first_batch_started.set()
+            await first_batch_started.wait()
+            await asyncio.sleep(0)
+            active -= 1
+            return {"id": {"meeting_id": meeting_id}}
+
+        async def list_call_recordings(self, meeting_id, **_kwargs):
+            return {
+                "data": [{"id": {"call_recording_id": meeting_id}}]
+                if int(meeting_id) % 2
+                else []
+            }
+
+        async def get_call_transcript(self, meeting_id, recording_id, **_kwargs):
+            assert meeting_id == recording_id
+            return {"data": [{"text": f"Transcript {meeting_id}"}]}
+
+    async def upsert(_pool, *, meeting, call_recordings, transcript_payload, run_id):
+        meeting_id = meeting["id"]["meeting_id"]
+        assert run_id == "run_parallel"
+        assert (
+            bool(call_recordings)
+            == bool(transcript_payload)
+            == bool(int(meeting_id) % 2)
+        )
+        if meeting_id == "1":
+            await later_meeting_written.wait()
+            raise RuntimeError("database write failed")
+        written.append(meeting_id)
+        if meeting_id == "4":
+            later_meeting_written.set()
+        return dt.datetime(2026, 7, 1 + int(meeting_id), tzinfo=dt.UTC)
+
+    monkeypatch.setattr(attio, "_upsert_meeting", upsert)
+
+    async def run():
+        return await asyncio.wait_for(
+            attio._sync_meetings(
+                client=Client(),
+                pool=None,
+                page_size=8,
+                updated_after=None,
+                max_meetings=7,
+                include_transcripts=True,
+                run_id="run_parallel",
+            ),
+            timeout=2,
+        )
+
+    result = asyncio.run(run())
+    assert peak == 5
+    assert fetched == [str(i) for i in range(7)]
+    assert set(written) == {"0", "2", "3", "4", "5", "6"}
+    assert result.meetings_seen == 7
+    assert result.meetings_upserted == 6
+    assert result.call_recordings_seen == result.transcripts_upserted == 3
+    assert result.detail_failures == ["1: database write failed"]
+    assert result.watermark == dt.datetime(2026, 7, 1, tzinfo=dt.UTC)
+
+
+def test_attio_nested_dates_do_not_advance_watermark_into_future(monkeypatch):
+    attio = _load("workflows.attio_sync")
+    now = dt.datetime(2026, 9, 17, 13, 15, tzinfo=dt.UTC)
+
+    class Clock(dt.datetime):
+        @classmethod
+        def now(cls, _tz=None):
+            return now
+
+    monkeypatch.setattr(attio.dt, "datetime", Clock)
+    writes = []
+
+    class Pool:
+        async def execute(self, _sql, *args):
+            writes.append(args)
+
+    class Client:
+        async def list_meetings(self, **kwargs):
+            assert kwargs["starts_before"] == "2026-09-24T13:15:00Z"
+            return {"data": [{"id": {"meeting_id": "upcoming"}}]}
+
+        async def get_meeting(self, meeting_id):
+            return {
+                "id": {"meeting_id": meeting_id},
+                "start": {"datetime": "2026-09-23T10:00:00+02:00"},
+                "end": {"datetime": "2026-09-23T11:30:00+02:00"},
+                "created_at": "2025-12-09T19:21:06.771Z",
+            }
+
+    result = asyncio.run(
+        attio._sync_meetings(
+            client=Client(),
+            pool=Pool(),
+            page_size=50,
+            updated_after=None,
+            max_meetings=None,
+            include_transcripts=False,
+            run_id="run_1",
+        )
+    )
+    assert result.meetings_upserted == 1
+    assert writes[0][14] == Clock(2026, 9, 23, 8, tzinfo=dt.UTC)
+    assert writes[0][15] == writes[0][17] == Clock(2026, 9, 23, 9, 30, tzinfo=dt.UTC)
+    assert result.watermark == now
+    assert attio._source_datetime({"start": {"date": "2026-09-20"}}, "start") == Clock(
+        2026, 9, 20, tzinfo=dt.UTC
+    )
+    assert attio._source_datetime(
+        {"starts_at": "2026-09-19T16:00:00Z"}, "starts_at"
+    ) == Clock(2026, 9, 19, 16, tzinfo=dt.UTC)

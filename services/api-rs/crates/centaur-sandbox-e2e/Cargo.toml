@@ -12,7 +12,9 @@ centaur-sandbox-core.workspace = true
 centaur-sandbox-local.workspace = true
 centaur-sandbox-manager.workspace = true
 clap.workspace = true
+k8s-openapi.workspace = true
 kube.workspace = true
+rustls.workspace = true
 test-case.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread", "time"] }
 

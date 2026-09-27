@@ -12,6 +12,7 @@ class ConsoleController < ApplicationController
 
   PRINCIPALS_PER_PAGE = 50
   PRINCIPAL_DETAIL_PER_PAGE = 50
+  SECRETS_PER_PAGE = 50
 
   # Friendly labels for the source backend (and the gcp_auth credentials_provider
   # type). The secrets table shows only this -- the full reference lives on the
@@ -100,13 +101,27 @@ class ConsoleController < ApplicationController
   end
 
   def secrets
-    @secrets_by_kind = SECRET_KINDS.transform_values do |cfg|
-      rel = cfg[:model].includes(cfg[:includes]).order(created_at: :asc, id: :asc)
+    @search_query = params[:q].to_s.strip
+    @selected_secret_type = params[:type].to_s if SECRET_KINDS.key?(params[:type].to_s)
+    @total_secrets = SECRET_KINDS.sum { |_kind, cfg| cfg[:model].count }
+
+    kinds = @selected_secret_type ? SECRET_KINDS.slice(@selected_secret_type) : SECRET_KINDS
+    @secrets = kinds.flat_map do |kind, cfg|
+      rel = cfg[:model].includes(cfg[:includes])
+      if @search_query.present?
+        pattern = "%#{cfg[:model].sanitize_sql_like(@search_query)}%"
+        rel = rel.where("name ILIKE ?", pattern)
+      end
       # Static secrets may wrap a broker credential (the "managed" badge); eager
       # load the credential and its app so the list doesn't fan out per row.
       rel = rel.includes(broker_credential: :oauth_app) if cfg[:model] == StaticSecret
-      rel
+      rel.map { |secret| [ kind, secret ] }
     end
+    @secrets.sort_by! { |_kind, secret| [ secret.name.to_s.downcase, secret.created_at, secret.id ] }
+    @total_count = @secrets.size
+    @total_pages = total_pages(@total_count, SECRETS_PER_PAGE)
+    @page = bounded_page(params[:page], @total_pages)
+    @secrets = @secrets.slice((@page - 1) * SECRETS_PER_PAGE, SECRETS_PER_PAGE) || []
   end
 
   def secret

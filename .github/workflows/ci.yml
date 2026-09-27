@@ -20,6 +20,8 @@ jobs:
       migration_order: ${{ steps.filter.outputs.migration_order }}
       harness_server_checks: ${{ steps.filter.outputs.harness_server_checks }}
       rust_api: ${{ steps.filter.outputs.rust_api }}
+      proxy_sync_checks: ${{ steps.filter.outputs.proxy_sync_checks }}
+      sandbox_e2e: ${{ steps.filter.outputs.sandbox_e2e }}
       sandbox_tests: ${{ steps.filter.outputs.sandbox_tests }}
       workflow_python_tests: ${{ steps.filter.outputs.workflow_python_tests }}
       tool_tests: ${{ steps.filter.outputs.tool_tests }}
@@ -74,10 +76,22 @@ jobs:
           set_output harness_server_checks \
             '^crates/harness-server/' \
             '^\.github/workflows/ci\.yml$'
+          set_output proxy_sync_checks \
+            '^crates/active-record-encryption/' \
+            '^services/proxy-sync/' \
+            '^services/console/' \
+            '^\.github/scripts/start-paradedb-postgres\.sh$' \
+            '^\.github/workflows/ci\.yml$'
           set_output rust_api \
+            '^crates/absurd-sdk/' \
             '^services/api-rs/' \
             '^services/workflow-python/' \
             '^workflows/' \
+            '^\.github/workflows/ci\.yml$'
+          set_output sandbox_e2e \
+            '^services/api-rs/Cargo\.(toml|lock)$' \
+            '^services/api-rs/Justfile$' \
+            '^services/api-rs/crates/centaur-sandbox-(core|manager|local|agent-k8s|e2e)/' \
             '^\.github/workflows/ci\.yml$'
           set_output sandbox_tests \
             '^services/sandbox/' \
@@ -96,6 +110,7 @@ jobs:
             '^package\.json$' \
             '^pnpm-lock\.yaml$' \
             '^pnpm-workspace\.yaml$' \
+            '^patches/' \
             '^\.github/workflows/ci\.yml$'
           set_output discordbot_checks \
             '^services/discordbot/' \
@@ -140,7 +155,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -161,6 +176,77 @@ jobs:
         working-directory: crates/harness-server
         run: cargo test --locked
 
+  proxy-sync-checks:
+    name: Proxy sync fmt, clippy, and tests
+    runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.proxy_sync_checks == 'true'
+    defaults:
+      run:
+        working-directory: services/proxy-sync
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            crates/active-record-encryption
+            services/proxy-sync
+
+      - name: Format Active Record encryption crate
+        working-directory: crates/active-record-encryption
+        run: cargo fmt --all --check
+
+      - name: Clippy Active Record encryption crate
+        working-directory: crates/active-record-encryption
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test Active Record encryption crate
+        working-directory: crates/active-record-encryption
+        run: cargo test --locked
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build parity test server
+        run: cargo build --locked
+
+      - name: Start parity database
+        working-directory: .
+        run: .github/scripts/start-paradedb-postgres.sh proxy-sync-parity-postgres 5432 proxy_sync_parity_test
+
+      - name: Install Console packages
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
+
+      - uses: ruby/setup-ruby@762794c140bbeda0f1224786aa33b4b46783a6c1 # v1.326.0
+        with:
+          working-directory: services/console
+          bundler-cache: true
+
+      - name: Compare Rails and Rust sync responses
+        working-directory: services/console
+        env:
+          RAILS_ENV: test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/proxy_sync_parity_test
+          PROXY_SYNC_BINARY: ../proxy-sync/target/debug/centaur-proxy-sync
+        run: |
+          export CENTAUR_CONSOLE_DATABASE_URL="$DATABASE_URL"
+          bin/rails db:prepare
+          bin/rails test ../proxy-sync/tests/rails_parity_test.rb --verbose
+
   rust-api:
     name: Rust API fmt, clippy, and tests
     runs-on: depot-ubuntu-24.04-16
@@ -178,19 +264,40 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
 
       - name: Set up Console Ruby
-        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        uses: ruby/setup-ruby@762794c140bbeda0f1224786aa33b4b46783a6c1 # v1.326.0
         with:
           working-directory: services/console
           bundler-cache: true
 
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: stable
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: services/api-rs
+          workspaces: |
+            crates/absurd-sdk
+            services/api-rs
+
+      - name: Format Absurd SDK
+        working-directory: crates/absurd-sdk
+        run: cargo fmt --all --check
+
+      - name: Clippy Absurd SDK
+        working-directory: crates/absurd-sdk
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test Absurd SDK
+        working-directory: crates/absurd-sdk
+        env:
+          ABSURD_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/absurd_sdk
+        run: |
+          docker exec centaur-api-test-postgres createdb -U postgres absurd_sdk
+          docker exec -i centaur-api-test-postgres \
+            psql -v ON_ERROR_STOP=1 -U postgres -d absurd_sdk \
+            < ../../services/api-rs/crates/centaur-session-sqlx/migrations/0007_absurd_workflows.sql
+          cargo test --locked -- --test-threads=1
 
       - name: Format
         working-directory: services/api-rs
@@ -204,7 +311,12 @@ jobs:
         working-directory: services/api-rs
         env:
           SESSION_SQLX_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-        run: cargo test --workspace
+        run: |
+          cargo test --workspace
+
+          PGPASSWORD=postgres createdb --host localhost --username postgres session_runtime
+          SESSION_RUNTIME_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/session_runtime \
+            cargo test -p centaur-session-runtime -- --test-threads=1
 
       - name: Run API integration test
         working-directory: services/api-rs
@@ -288,6 +400,43 @@ jobs:
           fi
           docker rm -f centaur-api-test-postgres || true
 
+  sandbox-e2e:
+    name: Sandbox Kind e2e
+    runs-on: ubuntu-latest
+    needs: ci_changes
+    if: needs.ci_changes.outputs.sandbox_e2e == 'true'
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          install_only: true
+          version: v0.30.0
+
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/api-rs
+
+      - name: Run sandbox backend invariants in Kind
+        working-directory: services/api-rs
+        run: just e2e-kind
+
+      - name: Dump Kind diagnostics
+        if: ${{ failure() }}
+        run: |
+          kubectl --context kind-centaur-api-rs-e2e get pods,sandboxes -A -o wide || true
+          kubectl --context kind-centaur-api-rs-e2e get events -A --sort-by=.lastTimestamp || true
+          kubectl --context kind-centaur-api-rs-e2e -n agent-sandbox-system logs deploy/agent-sandbox-controller --all-containers --tail=-1 || true
+
   sandbox-tests:
     name: Sandbox Python tests
     runs-on: ubuntu-latest
@@ -301,6 +450,9 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
+
+      # Tool-host integration tests execute real CLIs through uvx.
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
 
       - name: Sandbox Python tests
         env:
@@ -322,7 +474,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
           prune-cache: true
@@ -354,7 +506,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
           prune-cache: true
@@ -377,7 +529,7 @@ jobs:
         with:
           node-version: "24"
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.28.1
           run_install: false
@@ -403,7 +555,7 @@ jobs:
         with:
           node-version: "24"
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.28.1
           run_install: false
@@ -435,7 +587,7 @@ jobs:
         with:
           node-version: "24"
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.28.1
           run_install: false
@@ -469,7 +621,7 @@ jobs:
         with:
           node-version: "24"
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.28.1
           run_install: false
@@ -503,7 +655,7 @@ jobs:
         with:
           node-version: "24"
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.28.1
           run_install: false
@@ -529,7 +681,9 @@ jobs:
       - ci_changes
       - migration-order
       - harness-server-checks
+      - proxy-sync-checks
       - rust-api
+      - sandbox-e2e
       - sandbox-tests
       - workflow-python-tests
       - tool-tests
@@ -540,7 +694,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed
-        uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
+        uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
-          allowed-skips: migration-order, harness-server-checks, rust-api, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
+          allowed-skips: migration-order, harness-server-checks, proxy-sync-checks, rust-api, sandbox-e2e, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
           jobs: ${{ toJSON(needs) }}

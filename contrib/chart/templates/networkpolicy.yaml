@@ -89,6 +89,11 @@ spec:
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
+{{- if .Values.proxySync.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "proxy-sync") | nindent 14 }}
+{{- end }}
         # console Solid Queue worker (bin/jobs) reaches the app + queue DBs.
         - podSelector:
             matchLabels:
@@ -229,6 +234,15 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
+{{- if .Values.proxySync.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "proxy-sync") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.proxySync.port }}
+{{- end }}
 ---
 {{- if .Values.networkPolicy.observabilityEgress.enabled }}
 {{- if not .Values.networkPolicy.observabilityEgress.destinations }}

@@ -30,18 +30,26 @@ class GoogleDriveReadonlyClient:
             "q": query,
             "pageSize": page_size,
             "fields": (
-                "nextPageToken, files("
+                "nextPageToken, incompleteSearch, files("
                 "id, name, mimeType, webViewLink, driveId, parents, owners, "
                 "lastModifyingUser, trashed, createdTime, modifiedTime"
                 ")"
             ),
+            # The default "user" corpus omits shared drive content reached only
+            # through membership, even with includeItemsFromAllDrives.
+            "corpora": "allDrives",
             "includeItemsFromAllDrives": True,
             "supportsAllDrives": True,
             "orderBy": "modifiedTime",
         }
         if page_token:
             kwargs["pageToken"] = page_token
-        return service.files().list(**kwargs).execute()
+        result = service.files().list(**kwargs).execute()
+        if result.get("incompleteSearch"):
+            raise RuntimeError(
+                "Google Drive could not search all drives; narrow the search corpus"
+            )
+        return result
 
     def docs_get_text(self, document_id: str) -> str:
         return str(docs_get_text(document_id) or "")

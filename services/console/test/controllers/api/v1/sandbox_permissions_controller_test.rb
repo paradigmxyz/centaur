@@ -85,6 +85,19 @@ module Api
         refute_includes response.body, "postgres_setting_templates"
       end
 
+      test "returns tools linked to effective credential grants" do
+        static_secrets(:github_token_inject).update!(labels: { "centaur-tool" => "github" })
+        static_secrets(:acme_prod_api_key).update!(labels: { "centaur-tool" => " github " })
+        pg_dsn_secrets(:acme_analytics_pg).update!(labels: { "centaur-tool" => "analytics" })
+
+        with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+          get "/api/v1/sandbox/permissions", headers: auth_headers(token_for(@proxy))
+        end
+        assert_response :ok
+
+        assert_equal %w[analytics github], json_body.dig("data", "connected_tools")
+      end
+
       test "returns merged role Slack channel permissions" do
         roles(:acme_infra).slack_channel_permissions.create!(
           channel_id: "C0123456789",

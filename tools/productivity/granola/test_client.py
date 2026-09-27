@@ -1,3 +1,6 @@
+from unittest.mock import patch
+
+import httpx
 from client import (
     GranolaClient,
     _normalize_note_ref,
@@ -29,11 +32,15 @@ def test_rest_client_resolves_share_link_before_getting_note():
                 "notes": [
                     {
                         "id": "not_1234567890abcd",
-                        "web_url": f"https://notes.granola.ai/d/{meeting_id}",
                     }
                 ],
                 "hasMore": False,
                 "cursor": None,
+            }
+        if len(calls) == 2:
+            return {
+                "id": "not_1234567890abcd",
+                "web_url": f"https://notes.granola.ai/d/{meeting_id}",
             }
         return {"id": "not_1234567890abcd", "title": "Stripe risk"}
 
@@ -46,8 +53,33 @@ def test_rest_client_resolves_share_link_before_getting_note():
     assert note["title"] == "Stripe risk"
     assert calls == [
         ("/v1/notes", {"page_size": 30}),
+        ("/v1/notes/not_1234567890abcd", None),
         ("/v1/notes/not_1234567890abcd", {}),
     ]
+
+
+def test_rest_client_retries_rate_limit_response():
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"})
+        return httpx.Response(200, json={"notes": [], "hasMore": False, "cursor": None})
+
+    client = GranolaClient(api_key="test")
+    client._client = httpx.Client(
+        base_url="https://public-api.granola.ai",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with patch("client.time.sleep") as sleep:
+        result = client.list_notes()
+
+    assert result == {"notes": [], "hasMore": False, "cursor": None}
+    assert attempts == 2
+    sleep.assert_called_once_with(0.0)
 
 
 def test_parse_meetings_accepts_extra_attributes_and_decodes_entities():

@@ -78,6 +78,7 @@ class BrokerCredential < ApplicationRecord
   validates :grant, inclusion: { in: GRANTS, message: "must be one of #{GRANTS.join(", ")}" }
   validates :foreign_id, uniqueness: { allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
+  validate :foreign_id_cannot_change, on: :update
   validates :token_endpoint, presence: true
   # client_id is sourced from the linked OauthApp for flow-minted credentials, so
   # it is only required for standalone grants whose strategy uses it.
@@ -222,6 +223,12 @@ class BrokerCredential < ApplicationRecord
   def backoff_delay(attempt)
     exp = BACKOFF_BASE_SECONDS * (2**[ attempt - 1, 6 ].min)
     [ exp, BACKOFF_MAX_SECONDS ].min
+  end
+
+  def foreign_id_cannot_change
+    return unless foreign_id_in_database.present? && will_save_change_to_foreign_id?
+
+    errors.add(:foreign_id, "cannot be changed once set")
   end
 
   def ensure_not_referenced

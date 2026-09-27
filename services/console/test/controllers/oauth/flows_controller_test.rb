@@ -14,6 +14,7 @@ module Oauth
     GITHUB_CLIENT_ID = "acme-github-client-id".freeze
     ATTIO_CLIENT_ID = "acme-attio-client-id".freeze
     LINEAR_CLIENT_ID = "acme-linear-client-id".freeze
+    ZOOM_CLIENT_ID = "acme-zoom-client-id".freeze
 
     setup do
       @exchange_http_mocks = []
@@ -24,6 +25,7 @@ module Oauth
       oauth_apps(:acme_github).update!(client_secret: "github-secret")
       oauth_apps(:acme_attio).update!(client_secret: "attio-secret")
       oauth_apps(:acme_linear).update!(client_secret: "linear-secret")
+      oauth_apps(:acme_zoom).update!(client_secret: "zoom-secret")
       @user = users(:member_user)
       sign_in @user
       clear_enqueued_jobs
@@ -37,9 +39,9 @@ module Oauth
       @identity_http_mocks.each(&:verify)
     end
 
-    def stub_exchange(status:, body:, expected: true)
+    def stub_exchange(status:, body:, expected: true, &assert_request)
       http = Minitest::Mock.new
-      expect_http_call(http, status: status, body: body) if expected
+      expect_http_call(http, status: status, body: body, &assert_request) if expected
       @exchange_http_mocks << http
       FlowsController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new(http: http) }
     end
@@ -133,6 +135,16 @@ module Oauth
         refresh_token: "lin-refresh-token",
         token_type: "Bearer",
         expires_in: 86_399,
+        scope: scope
+      }.merge(overrides).to_json
+    end
+
+    def zoom_token_body(scope: "user:read:user meeting:write recording:read", **overrides)
+      {
+        access_token: "zoom-access-token",
+        refresh_token: "zoom-refresh-token",
+        token_type: "bearer",
+        expires_in: 3600,
         scope: scope
       }.merge(overrides).to_json
     end
@@ -250,6 +262,20 @@ module Oauth
       scopes = q["scope"].split(",")
       assert_includes scopes, "read"
       assert_includes scopes, "write"
+    end
+
+    test "start redirects to Zoom with its required identity scope" do
+      get oauth_start_url(slug: "zoom"), params: { scopes: "meeting:write" }
+      assert_response :redirect
+      uri = URI.parse(response.location)
+      assert_equal "zoom.us", uri.host
+      assert_equal "/oauth/authorize", uri.path
+      q = URI.decode_www_form(uri.query).to_h
+      assert_equal ZOOM_CLIENT_ID, q["client_id"]
+      assert_equal "http://www.example.com/oauth/zoom/callback", q["redirect_uri"]
+      assert_equal "code", q["response_type"]
+      assert_equal "S256", q["code_challenge_method"]
+      assert_equal %w[meeting:write user:read:user], q["scope"].split
     end
 
     test "start redirects signed-out users to login" do
@@ -512,6 +538,45 @@ module Oauth
       assert cred.next_attempt_at.present?
       assert_equal [ "api.linear.app" ], cred.static_secret.rules.map(&:host)
       assert_equal "Linear – Ada Lovelace token", cred.static_secret.name
+    end
+
+    test "callback happy path supports Zoom OAuth app tokens" do
+      state = start_flow(slug: "zoom")
+      stub_exchange(status: 200, body: zoom_token_body) do |request|
+        expected = Base64.strict_encode64("#{ZOOM_CLIENT_ID}:zoom-secret")
+        assert_equal "Basic #{expected}", request.dig(:headers, "Authorization")
+        assert_nil request[:form]["client_id"]
+        assert_nil request[:form]["client_secret"]
+      end
+      stub_identity(
+        body: {
+          id: "ZoomUser_ID",
+          email: "scheduler@example.com",
+          display_name: "Scheduler"
+        }.to_json
+      ) do |request|
+        assert_equal :get, request[:method]
+        assert_equal Oauth::Providers::Zoom::SELF_ENDPOINT, request[:url]
+        assert_equal "Bearer zoom-access-token", request[:headers]["Authorization"]
+      end
+
+      assert_difference -> { BrokerCredential.count } => 1 do
+        get oauth_callback_url(slug: "zoom"), params: { state: state, code: "auth-code" }
+      end
+      assert_redirected_to console_integrations_path
+      assert_equal "zoom connected as scheduler@example.com.", flash[:notice]
+
+      app = oauth_apps(:acme_zoom)
+      cred = BrokerCredential.find_by!(oauth_app: app, provider_subject: "ZoomUser_ID")
+      assert_equal "zoom-zoom-ZoomUser_ID", cred.foreign_id
+      assert_equal "Zoom – Scheduler", cred.name
+      assert_equal Oauth::Providers::Zoom::TOKEN_ENDPOINT, cred.token_endpoint
+      assert_equal "scheduler@example.com", cred.provider_email
+      assert_equal %w[user:read:user meeting:write recording:read], cred.scopes
+      assert_equal "zoom-access-token", cred.access_token
+      assert_equal "zoom-refresh-token", cred.refresh_token
+      assert cred.next_attempt_at.present?
+      assert_equal [ "api.zoom.us" ], cred.static_secret.rules.map(&:host)
     end
 
     test "GitHub re-consent updates the existing credential synchronously" do

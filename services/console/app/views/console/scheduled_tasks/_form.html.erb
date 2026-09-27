@@ -101,7 +101,7 @@
               schedule_fields_target: "preset",
               action: "schedule-fields#update"
             } %>
-      <p class="mt-2 text-xs text-zinc-500">Presets run at 9:00 AM Pacific Time.</p>
+      <p class="mt-2 text-xs text-zinc-500">Choose Manual only for an ad-hoc task, or run a preset at 9:00 AM Pacific Time.</p>
     </div>
 
     <fieldset class="mt-4 rounded-lg border border-ink-600 bg-ink-900/50 p-4"
@@ -147,8 +147,8 @@
   <label class="flex items-start gap-3 rounded border border-ink-700 bg-ink-900/50 px-4 py-3">
     <%= form.check_box :enabled, class: "mt-0.5 rounded border-ink-500 bg-ink-900 text-centaur-500" %>
     <span>
-      <span class="block text-sm font-medium text-zinc-200">Schedule enabled</span>
-      <span class="mt-1 block text-xs text-zinc-500">Disabled tasks remain saved and can still be run manually.</span>
+      <span class="block text-sm font-medium text-zinc-200">Task enabled</span>
+      <span class="mt-1 block text-xs text-zinc-500">Disabled tasks remain saved but cannot run.</span>
     </span>
   </label>
 

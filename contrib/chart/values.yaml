@@ -29,16 +29,14 @@ ironProxy:
     # one port so callers can reach it.
     pgPort: 5432
   # CIDRs iron-proxy must never dial upstream, even when the host allowlist
-  # matches. Keep the local/IMDS defaults and include the default k3s pod/service
-  # CIDRs so sandboxes cannot proxy back into in-cluster services like
-  # onepassword-connect.
+  # matches. Block the default k3s pod range so upstreams must use Services;
+  # Kubernetes NetworkPolicies restrict which Service backends are reachable.
   upstreamDenyCidrs:
     - "169.254.169.254/32"
     - "fd00:ec2::254/128"
     - "127.0.0.0/8"
     - "::1/128"
     - "10.42.0.0/16"
-    - "10.43.0.0/16"
   secretSource: onepassword
   secretTtl: 10m
   # Requests/limits for each per-sandbox iron-proxy pod (k8s resources map).
@@ -49,11 +47,9 @@ ironProxy:
 # each sandbox's /app/tools, so adding a tool is a push to the repo, not an image
 # rebuild. Prefer overlays.sources for new deployments; toolServer.* remains as
 # a compatibility input and maps to the first ordered overlay source when
-# overlays.sources is empty. `port` is legacy (the deprecated tool-server
-# sidecar) and unused here.
+# overlays.sources is empty.
 toolServer:
   enabled: true
-  port: 8001
   # owner/name of the GitHub repo carrying the tools tree. REQUIRED when enabled;
   # override for forks. Private repos additionally need githubToken below.
   repo: paradigmxyz/centaur
@@ -101,11 +97,22 @@ toolServer:
 # existing values files keep working. Prefer `console` for new configuration.
 console:
   replicaCount: 1
+  # Node steering for the Console web pods. Use tolerations with a matching
+  # nodeSelector to schedule onto a dedicated tainted node pool. Empty values
+  # leave placement to the default scheduler.
+  nodeSelector: {}
+  #   workload: centaur-control-plane
+  affinity: {}
+  tolerations: []
+  # - key: centaur.ai/control-plane
+  #   operator: Exists
+  #   effect: NoSchedule
   # Public URL users reach in a browser (e.g. https://console.example.com), used
   # as CENTAUR_CONSOLE_PUBLIC_URL. Set this when console is exposed behind
   # Tailscale/Ingress so MCP OAuth issuer metadata and JWT validation agree.
-  # When set, the slackbotv2 deployment also links the first assistant message
-  # in a Slack thread to the Console session view; leave empty to omit the link.
+  # When set and console.chat.enabled is true, the slackbotv2 deployment also
+  # links the first assistant message in a Slack thread to the Console session
+  # view. Leave empty to omit the link.
   publicUrl: ""
   # Additional exact Host headers accepted by Rails Host Authorization. Use for
   # service DNS names that differ from the chart's short in-cluster URL;
@@ -117,6 +124,10 @@ console:
   # Break-glass email/password login. Disable when console is reachable from
   # the public internet and SSO is configured.
   passwordLoginEnabled: true
+  # Console's browser-based chat UI is deprecated and will be removed in
+  # October. Disable it to hide chat navigation and reject its HTTP routes.
+  chat:
+    enabled: true
   # When enabled, every authenticated Console user can browse conversations
   # originating in public Slack channels. Private channels and DMs remain
   # owner-only. Requires apiRs.etl.slack.enabled so channel privacy is synced;
@@ -124,7 +135,7 @@ console:
   # be shared by their owner from the Threads UI.
   publicSlackThreadsEnabled: false
   # Optional SSO admission policy. When non-empty, only identities whose email
-  # domain matches this list can sign in through Google or Slack.
+  # domain matches this list can sign in through Google, Slack, or Okta.
   ssoEmailDomains: []
   image:
     repository: centaur-console
@@ -158,6 +169,17 @@ console:
   # bot and DM sync use.
   slackOauth:
     enabled: false
+  # Okta as an OIDC identity provider for console sign-in. Set issuer to the
+  # authorization-server issuer (for example, https://id.example.com or
+  # https://id.example.com/oauth2/default). The Console discovers endpoints and
+  # signing keys from it. The shared infra Secret must contain keys
+  # <secretManager.envPrefix>CENTAUR_CONSOLE_OKTA_CLIENT_ID and
+  # <secretManager.envPrefix>CENTAUR_CONSOLE_OKTA_CLIENT_SECRET when enabled.
+  oktaOauth:
+    enabled: false
+    issuer: ""
+    # Must match token_endpoint_auth_method on the Okta client application.
+    tokenEndpointAuthMethod: client_secret_basic
   # OAuth app slug whose user-level Slack credentials are used by the DM sync
   # worker. Keep this aligned with the Console OAuth app users authorize.
   slackDmSync:
@@ -201,6 +223,11 @@ console:
   # without this those jobs never execute.
   worker:
     replicaCount: 1
+    # Node steering for Console background worker pods. Configure separately
+    # from the web pods when workers run on a different node pool.
+    nodeSelector: {}
+    affinity: {}
+    tolerations: []
     resources: {}
   # Prometheus SQL Exporter for Console database metrics, initially Solid Queue.
   # This runs as one internal-only replica because every instance would report
@@ -293,7 +320,6 @@ codex:
   customProviders: {}
 
 sandbox:
-  controller: pod
   image:
     repository: centaur-agent
     tag: latest
@@ -309,6 +335,13 @@ sandbox:
   # placement to the default scheduler.
   nodeSelector: {}
   #   workload: centaur-sandbox
+  # Extra metadata annotations for sandbox **and** iron-proxy pods, as string
+  # key/value pairs. The motivating case is keeping a cluster autoscaler from
+  # reclaiming a node while a pod is serving a turn, e.g.
+  # `karpenter.sh/do-not-disrupt: "true"` (or the cluster-autoscaler
+  # `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`). Empty adds none.
+  podAnnotations: {}
+  #   karpenter.sh/do-not-disrupt: "true"
   tolerations: []
   # - key: centaur.ai/sandbox
   #   operator: Exists
@@ -427,12 +460,47 @@ agentSandbox:
   controller:
     extensions: false
 
+# Rust proxy sync endpoint. When enabled, api-rs directs managed iron-proxy
+# instances here for POST /api/v1/proxy/sync while all operator/admin traffic
+# continues to use Console. The service reads Console's database directly.
+# This component is under active development and must not be used yet.
+proxySync:
+  enabled: false
+  # Two replicas keep sync available during pod restarts and rolling updates.
+  replicaCount: 2
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  image:
+    repository: centaur-proxy-sync
+    tag: latest
+    pullPolicy: Always
+  port: 8080
+  databaseMaxConnections: 5
+  metrics:
+    # proxy-sync serves Prometheus text metrics at /metrics. This flag only
+    # controls scrape annotations for Prometheus/VictoriaMetrics-style discovery.
+    scrapeAnnotations: true
+    path: /metrics
+    annotations: {}
+  resources: {}
+
 # Rust session control plane (services/api-rs). Owns sessions, agent-k8s
 # sandboxes (via the agents.x-k8s.io Sandbox CRD), and the per-sandbox
 # iron-proxy/firewall.
 apiRs:
   enabled: true
   replicaCount: 1
+  # Node steering for api-rs pods. Use tolerations with a matching nodeSelector
+  # to schedule onto a dedicated tainted node pool. Empty values leave
+  # placement to the default scheduler.
+  nodeSelector: {}
+  #   workload: centaur-control-plane
+  affinity: {}
+  tolerations: []
+  # - key: centaur.ai/control-plane
+  #   operator: Exists
+  #   effect: NoSchedule
   image:
     repository: centaur-api-rs
     tag: latest
@@ -442,6 +510,15 @@ apiRs:
   # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
   mcpPublicUrl: ""
   runMigrations: true
+  # Controls whether a missing automatically derived session principal may be
+  # created. "preapproved" admits only principals already present in the
+  # Console; missing requester principals are omitted rather than created.
+  # HTTP ingress families with unpredictable per-thread principals, including
+  # new Console chats, are incompatible with preapproved mode. Internal
+  # workflow/MCP sessions use separate principal-provisioning paths.
+  sessionPrincipalAdmission: automatic
+  # Expose the experimental centaur MCP dispatcher (currently action=list).
+  mcpV2Enabled: false
   sandboxBackend: agent-k8s
   sandboxWorkload: codex-app-server
   sandboxReadyTimeoutSecs: 90
@@ -506,14 +583,35 @@ apiRs:
     companyContextEmbeddings:
       # Enables the embedding workflow and hybrid search in agent sandboxes.
       enabled: false
+      # Delay between scheduled scans for missing or stale embeddings.
       intervalSeconds: 300
+      # Maximum documents claimed by each workflow run.
       batchSize: 250
+      # Maximum characters sent per document. Inputs are capped at 8192.
+      maxInputChars: 8192
       # Shared by the embedding workflow and company-context searches in agent sandboxes.
       model: text-embedding-3-small
+      # Vector width requested from the model by both the write and query sides.
+      # This must match the database column width. Changing it requires a schema
+      # migration, index rebuild, and re-embedding existing rows. pgvector will
+      # not build an HNSW or IVFFlat index above 2000.
+      dimensions: 1536
   # Reaper: stop sandboxes older than the max lifetime, regardless of whether
   # they are running or suspended. 0 disables the sweep. Interval must be >= 1.
   sandboxMaxLifetimeSecs: 259200 # 3 days
   sandboxReapIntervalSecs: 300
+  # Delete session.output.line events older than this many days, once their
+  # execution also completed before the cutoff. Accepts 0 through 3650;
+  # 0 disables retention. Other session event types are preserved.
+  # Events without an execution expire by event age alone. Sweeps are bounded
+  # per pass, so a large first backlog drains over several sweeps.
+  # First install the manual session_events_retention_index.sql migration.
+  # Sweeps skip deletion if session_events_stdout_created_at_idx is missing
+  # or invalid. See the configuration reference for setup and recovery.
+  sessionEventsRetentionDays: 0
+  sessionEventsRetentionSweepIntervalSecs: 300
+  # Minimum age before proxy resources without a live Sandbox are reaped.
+  sandboxOrphanSweepGraceSecs: 600
   # Cleanup worker: stop unreferenced session/warm-pool sandboxes after two
   # consecutive sweeps and restore idle-pauses lost across api-rs restarts.
   # The idle backstop is only used when older execution rows have no persisted
@@ -529,6 +627,11 @@ apiRs:
     timeoutSecs: 5
     maxFacts: 12
     maxOutputTokens: 128
+    # Reasoning effort for the summary call. The output budget above is small,
+    # so a server that resolves an absent effort to its highest level spends
+    # the whole budget reasoning and returns no message. Empty omits the
+    # parameter, for a server that rejects it outright.
+    reasoningEffort: low
   metrics:
     # The Rust API always serves Prometheus text metrics at /metrics. This flag
     # only controls scrape annotations for Prometheus/VictoriaMetrics-style
@@ -571,6 +674,9 @@ slackbotv2:
     pullPolicy: Always
   userName: centaur
   assistantStatus: ""
+  # Match Slack's features.agent_view manifest setting. Changing Slack's
+  # manifest is irreversible; this switch only controls the service behavior.
+  agentViewEnabled: false
   # React to mentioned follow-ups while an execution is active, then remove
   # their reactions after the assistant response is posted. Requires the Slack
   # app to grant reactions:write. Slackbot disables the feature for the running
@@ -643,6 +749,14 @@ linearbot:
     tag: latest
     pullPolicy: Always
   userName: centaur
+  # Reasoning effort per turn type (codex turn/start.effort). Both unset run at
+  # the harness default. These turns are autonomous, so there is no message for
+  # a -rsn flag to ride on, and one global setting suits neither an assignment
+  # turn implementing a whole ticket nor a one-line comment reply.
+  # Accepts none | minimal | low | medium | high | xhigh | max.
+  reasoningEffort:
+    assignment: ""
+    comment: ""
   extraEnv: {}
   resources: {}
 
@@ -735,6 +849,13 @@ teamsbot:
 
 postgres:
   enabled: true
+  # Scheduling for the PostgreSQL pod. When persistence is enabled, ensure the
+  # selected node pool can mount the configured storage class. Changing these
+  # settings rolls the pod but does not delete its PVC.
+  nodeSelector: {}
+  #   workload: centaur-database
+  affinity: {}
+  tolerations: []
   image:
     repository: paradedb/paradedb
     tag: 0.23.0-pg16

@@ -2,7 +2,16 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "definitions": {
+    "podScheduling": {
+      "type": "object",
+      "properties": {
+        "nodeSelector": { "type": "object" },
+        "affinity": { "type": "object" },
+        "tolerations": { "type": "array" }
+      }
+    },
     "consoleConfig": {
+      "allOf": [{ "$ref": "#/definitions/podScheduling" }],
       "type": "object",
       "properties": {
         "replicaCount": { "type": "integer" },
@@ -14,6 +23,23 @@
         },
         "sentryDsn": { "type": "string" },
         "railsEnv": { "type": "string" },
+        "oktaOauth": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "issuer": { "type": "string" },
+            "tokenEndpointAuthMethod": {
+              "type": "string",
+              "enum": ["client_secret_basic", "client_secret_post"]
+            }
+          }
+        },
+        "chat": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        },
         "image": {
           "type": "object",
           "properties": {
@@ -58,6 +84,7 @@
           }
         },
         "worker": {
+          "allOf": [{ "$ref": "#/definitions/podScheduling" }],
           "type": "object",
           "properties": {
             "replicaCount": { "type": "integer" },
@@ -147,7 +174,6 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
-        "port": { "type": "integer" },
         "repo": { "type": "string" },
         "ref": { "type": "string" },
         "visibility": { "type": "string" },
@@ -242,6 +268,7 @@
       }
     },
     "repoCache": {
+      "allOf": [{ "$ref": "#/definitions/podScheduling" }],
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
@@ -298,9 +325,6 @@
             "failureThreshold": { "type": "integer" }
           }
         },
-        "nodeSelector": { "type": "object" },
-        "tolerations": { "type": "array" },
-        "affinity": { "type": "object" },
         "resources": { "type": "object" }
       }
     },
@@ -331,13 +355,52 @@
         }
       }
     },
+    "proxySync": {
+      "allOf": [{ "$ref": "#/definitions/podScheduling" }],
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicaCount": { "type": "integer", "minimum": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "databaseMaxConnections": { "type": "integer", "minimum": 1 },
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "scrapeAnnotations": { "type": "boolean" },
+            "path": { "type": "string" },
+            "annotations": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        },
+        "resources": { "type": "object" },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string" }
+          }
+        }
+      }
+    },
     "apiRs": {
+      "allOf": [{ "$ref": "#/definitions/podScheduling" }],
       "type": "object",
       "properties": {
         "syncInfraSecrets": { "type": "boolean" },
+        "mcpV2Enabled": { "type": "boolean" },
         "mcpPublicUrl": { "type": "string" },
+        "sessionPrincipalAdmission": {
+          "type": "string",
+          "enum": ["automatic", "preapproved"]
+        },
         "sandboxRunningLimit": { "type": "integer", "minimum": 0 },
         "sandboxHotIdleGraceSecs": { "type": "integer", "minimum": 0 },
+        "sessionEventsRetentionDays": { "type": "integer", "minimum": 0, "maximum": 3650 },
+        "sessionEventsRetentionSweepIntervalSecs": { "type": "integer", "minimum": 1 },
+        "sandboxOrphanSweepGraceSecs": { "type": "integer", "minimum": 1 },
         "workflowHostSandbox": { "type": "boolean" },
         "workflowHostResources": { "type": "object" },
         "etl": {
@@ -415,7 +478,13 @@
                 "enabled": { "type": "boolean" },
                 "intervalSeconds": { "type": "integer", "minimum": 1 },
                 "batchSize": { "type": "integer", "minimum": 1 },
-                "model": { "type": "string", "minLength": 1 }
+                "maxInputChars": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 8192
+                },
+                "model": { "type": "string", "minLength": 1 },
+                "dimensions": { "type": "integer", "minimum": 1, "maximum": 2000 }
               }
             }
           }
@@ -440,6 +509,7 @@
     "slackbotv2": {
       "type": "object",
       "properties": {
+        "agentViewEnabled": { "type": "boolean" },
         "mcpPublicUrl": { "type": "string" },
         "codexNanocodexRolloutPercent": {
           "type": "integer",
@@ -469,6 +539,7 @@
       }
     },
     "postgres": {
+      "allOf": [{ "$ref": "#/definitions/podScheduling" }],
       "type": "object",
       "properties": {
         "persistence": {

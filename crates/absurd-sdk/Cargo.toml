@@ -25,5 +25,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
-[lints]
-workspace = true
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"

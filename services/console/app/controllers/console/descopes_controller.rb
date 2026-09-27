@@ -14,7 +14,7 @@ module Console
       session[:descoped] = true
       Rails.logger.info("console_descope_started admin=#{current_user.email}")
       # No flash: the persistent descope banner already announces the state.
-      redirect_to console_threads_path
+      redirect_to default_console_landing_path
     end
 
     def destroy

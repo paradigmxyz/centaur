@@ -1,3 +1,5 @@
+import { escapeRegExp } from './utils'
+
 export type SlackDisplayTextSource = 'text' | 'raw_blocks' | 'raw_attachments' | 'empty'
 
 export type SlackDisplayText = {
@@ -189,10 +191,6 @@ function richValueMentionsUser(value: unknown, userId: string, mention: RegExp):
     return true
   }
   return Object.values(value).some(item => richValueMentionsUser(item, userId, mention))
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function collectSlackAttachmentText(value: unknown, lines: string[]): void {

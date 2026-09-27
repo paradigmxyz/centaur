@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "crates/absurd-sdk",
     "crates/centaur-api-server",
     "crates/centaur-api-integration-test",
     "crates/centaur-iron-control",
@@ -36,7 +35,7 @@ unimplemented = "warn"
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"
-absurd-sdk = { path = "crates/absurd-sdk" }
+absurd-sdk = { path = "../../crates/absurd-sdk" }
 axum = "0.8.9"
 aws-config = "1"
 aws-sdk-s3 = "1"
@@ -77,10 +76,10 @@ sha2 = "0.11"
 reqwest = { version = "0.13.4", default-features = false, features = ["form", "json", "rustls", "stream"] }
 ratatui = "0.30"
 rustls = "0.23"
-opentelemetry = "0.32.0"
-opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
+opentelemetry = "0.33.0"
+opentelemetry-otlp = { version = "0.33.0", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
 opentelemetry-proto = { version = "0.32.0", default-features = false, features = ["trace", "gen-tonic-messages"] }
-opentelemetry_sdk = { version = "0.32.1", features = ["trace"] }
+opentelemetry_sdk = { version = "0.33.0", features = ["trace"] }
 prost = "0.14"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
@@ -99,7 +98,7 @@ toml = "1.1"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7.0", features = ["trace"] }
 tracing = "0.1"
-tracing-opentelemetry = "0.33.0"
+tracing-opentelemetry = "0.34.0"
 tracing-subscriber = "0.3"
 urlencoding = "2"
 uuid = { version = "1", features = ["serde", "v4", "v5"] }

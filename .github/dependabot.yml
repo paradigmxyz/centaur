@@ -54,6 +54,38 @@ updates:
           - "*"
 
   - package-ecosystem: cargo
+    directory: /crates/absurd-sdk
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Denver
+    commit-message:
+      prefix: chore
+      include: scope
+    open-pull-requests-limit: 5
+    groups:
+      absurd-sdk-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: cargo
+    directory: /crates/active-record-encryption
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Denver
+    commit-message:
+      prefix: chore
+      include: scope
+    open-pull-requests-limit: 5
+    groups:
+      active-record-encryption-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: cargo
     directory: /crates/harness-server
     schedule:
       interval: weekly
@@ -92,6 +124,10 @@ updates:
       prefix: chore
       include: scope
     open-pull-requests-limit: 5
+    ignore:
+      # Chat SDK packages must stay aligned with the locally patched adapters.
+      - dependency-name: "@chat-adapter/*"
+      - dependency-name: chat
     groups:
       typescript-dependencies:
         patterns:
@@ -108,6 +144,9 @@ updates:
       prefix: chore
       include: scope
     open-pull-requests-limit: 5
+    ignore:
+      # The pinned Vocs snapshot depends on Waku's alpha plugin API.
+      - dependency-name: waku
     groups:
       docs-dependencies:
         patterns:

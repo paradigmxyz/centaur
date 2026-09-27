@@ -93,7 +93,7 @@ e2e-kind: kind-e2e-up
     SANDBOX_E2E_IMPLS=all \
     SANDBOX_E2E_K8S_CONTEXT="{{kind_e2e_context}}" \
     SANDBOX_E2E_K8S_NAMESPACE="{{kind_e2e_namespace}}" \
-    cargo test -p centaur-sandbox-e2e --test invariants -- --ignored --nocapture
+    cargo test -p centaur-sandbox-e2e --tests -- --ignored --nocapture
 
 kind-e2e-down:
     kind delete cluster --name "{{kind_e2e_cluster}}"

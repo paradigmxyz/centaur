@@ -46,6 +46,7 @@ const consoleLogger = {
 
 const options: SlackbotV2Options = {
   apiUrl,
+  agentViewEnabled: booleanEnv('SLACKBOTV2_AGENT_VIEW_ENABLED', false),
   apiKey: optionalEnv('SLACKBOT_API_KEY'),
   assistantStatus: optionalEnv('SLACKBOTV2_ASSISTANT_STATUS'),
   activitySummaryStatusEnabled: booleanEnv('SLACKBOTV2_ACTIVITY_SUMMARY_STATUS_ENABLED', false),
@@ -115,6 +116,7 @@ console.log(
     level: 'info',
     event: 'slackbotv2_started',
     service: 'slackbotv2',
+    agent_view_enabled: options.agentViewEnabled,
     activity_summary_status_enabled: options.activitySummaryStatusEnabled,
     auto_join_created_channels_enabled: options.autoJoinCreatedChannels,
     message_overrides_strategy: messageOverridesStrategyMode,

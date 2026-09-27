@@ -272,6 +272,10 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         )
         .route("/api/workflows/events", post(emit_workflow_event))
         .route(
+            "/api/workflows/actions/invoke",
+            post(invoke_workflow_button),
+        )
+        .route(
             "/api/admin/slack/archive-imports",
             get(list_slack_archive_imports).post(presign_slack_archive_import),
         )
@@ -552,6 +556,9 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
             capability(Capability::WorkflowsWrite)
         }
         (&Method::POST, "/api/workflows/events") => capability(Capability::WorkflowsEvents),
+        (&Method::POST, "/api/workflows/actions/invoke") => {
+            capability(Capability::WorkflowsActions)
+        }
         (&Method::POST, "/api/admin/slack/archive-imports/{import_id}/download-url") => {
             Some(RouteAccess::ArchiveDownload)
         }
@@ -632,7 +639,7 @@ async fn create_or_get_session(
         Some(OnHarnessConflict::Reject) | None => HarnessConflictPolicy::Reject,
     };
     let outcome = runtime
-        .create_or_get_session(
+        .create_or_get_admitted_session(
             &thread_key,
             &harness_type,
             request.persona_id.as_deref(),
@@ -643,6 +650,7 @@ async fn create_or_get_session(
     Ok(Json(CreateSessionResponse {
         session: outcome.session,
         harness_switched: outcome.harness_switched,
+        unavailable_requested_persona_id: outcome.unavailable_requested_persona_id,
     }))
 }
 
@@ -828,8 +836,19 @@ async fn interrupt_session_execution(
     }))
 }
 
-async fn drain_sandboxes(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let report = state.runtime()?.drain().await?;
+#[derive(Debug, Default, serde::Deserialize)]
+struct DrainQuery {
+    /// When true, stop every non-terminal sandbox. Defaults to false, which
+    /// stops only sandboxes durably known to be idle.
+    #[serde(default)]
+    force: bool,
+}
+
+async fn drain_sandboxes(
+    State(state): State<AppState>,
+    Query(query): Query<DrainQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let report = state.runtime()?.drain(query.force).await?;
     let failed = report
         .failed
         .iter()
@@ -839,6 +858,8 @@ async fn drain_sandboxes(State(state): State<AppState>) -> Result<Json<Value>, A
         "ok": report.failed.is_empty(),
         "stopped_count": report.stopped.len(),
         "stopped": report.stopped,
+        "busy_count": report.busy.len(),
+        "busy": report.busy,
         "failed": failed,
     })))
 }
@@ -2833,6 +2854,19 @@ async fn ingest_google_docs_sync_batch(
             "checkpoint": request.checkpoint.is_some(),
         }
     })))
+}
+
+async fn invoke_workflow_button(
+    State(state): State<AppState>,
+    Json(request): Json<centaur_workflows::slack_buttons::Invocation>,
+) -> Result<Json<Value>, ApiError> {
+    let feedback =
+        centaur_workflows::slack_button_feedback::ButtonFeedback::from_invocation(&request);
+    let request = state.auth.verify_workflow_button(request)?;
+    let run = workflow_runtime(&state)?
+        .create_button_run(request, feedback)
+        .await?;
+    Ok(Json(serde_json::to_value(run)?))
 }
 
 async fn create_workflow_run(
