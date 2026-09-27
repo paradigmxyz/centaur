@@ -14,8 +14,8 @@ OP_SERVICE_ACCOUNT_TOKEN, OP_VAULT, SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET,
 and SLACKBOT_API_KEY in the shell environment. Existing Secrets are only topped
 up with newly generated optional keys when absent.
 
-Optional 1Password Connect bootstrap (when ironProxy.manager.secretSource is
-set to onepassword-connect in the Helm values):
+Optional 1Password Connect bootstrap (when ironProxy.secretSource is set to
+onepassword-connect in the Helm values):
   OP_CONNECT_CREDENTIALS_FILE  path to 1password-credentials.json; if set,
                                creates Secret centaur-onepassword-connect-credentials
   OP_CONNECT_TOKEN             Connect API token; added to centaur-infra-env

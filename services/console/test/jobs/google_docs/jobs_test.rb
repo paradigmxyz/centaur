@@ -324,6 +324,20 @@ module GoogleDocs
       assert_equal "google_docs:doc-123:chunk-0000", batch[:context_documents].first[:document_id]
     end
 
+    test "document fetch retries when the Centaur API refuses the connection" do
+      credential = create_credential
+      api_client = Object.new
+      api_client.define_singleton_method(:get_google_docs_content_status) do |files:|
+        raise Errno::ECONNREFUSED
+      end
+
+      assert_enqueued_with(job: FetchDocumentJob, args: [ credential.id, google_doc ]) do
+        with_clients(api_client, ->(**) { flunk "documents.get should not be called" }) do
+          FetchDocumentJob.perform_now(credential.id, google_doc)
+        end
+      end
+    end
+
     test "credential crawler jobs block conflicts for the full crawl" do
       assert_equal "google_docs", InitialSyncJob.queue_name
       assert_equal InitialSyncJob.queue_name, IncrementalSyncJob.queue_name

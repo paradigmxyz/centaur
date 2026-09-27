@@ -664,6 +664,32 @@ def emit_tool_call_event(event, tool, method, tool_args=None, started_at=None, r
         pass
 
 
+def list_tools(tools):
+    catalog = {{"name": "centaur-tools"}}
+    started_at = time.monotonic()
+    emit_tool_call_event("tool_call_started", catalog, "list")
+    try:
+        for tool in tools:
+            print(f'{{tool["name"]}}\t{{tool["project_dir"]}}')
+    except Exception:
+        emit_tool_call_event(
+            "tool_call_completed",
+            catalog,
+            "list",
+            started_at=started_at,
+            returncode=1,
+        )
+        raise
+    emit_tool_call_event(
+        "tool_call_completed",
+        catalog,
+        "list",
+        started_at=started_at,
+        returncode=0,
+    )
+    return 0
+
+
 def run_tool(tool, args):
     project_dir = Path(tool["project_dir"])
     started_at = time.monotonic()
@@ -745,9 +771,7 @@ def main(argv):
         tools = load()
         by_name = {{tool["name"]: tool for tool in tools}}
         if command == "list":
-            for tool in tools:
-                print(f'{{tool["name"]}}\\t{{tool["project_dir"]}}')
-            return 0
+            return list_tools(tools)
         if command == "json":
             print(json.dumps(tools, indent=2, sort_keys=True))
             return 0

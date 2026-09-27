@@ -1,4 +1,4 @@
-"""GSuite API client for Gmail, Calendar, and Drive."""
+"""GSuite API client for Gmail, Calendar, Directory, and Drive."""
 
 import base64
 import io
@@ -6,6 +6,7 @@ import mimetypes
 import os
 import re
 import urllib.request
+from collections.abc import Callable
 from email.mime.text import MIMEText
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse, urlsplit
@@ -14,7 +15,7 @@ import httplib2
 import socks
 from google.auth.credentials import AnonymousCredentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+from googleapiclient.http import HttpRequest, MediaIoBaseDownload, MediaIoBaseUpload
 
 from centaur_sdk import current_thread_key, save_attachment, secret
 
@@ -83,6 +84,11 @@ def get_gmail_service():
 def get_calendar_service():
     """Get authenticated Calendar service."""
     return build("calendar", "v3", http=_build_http())
+
+
+def get_people_service():
+    """Get the People service using the shared proxy transport."""
+    return build("people", "v1", http=_build_http())
 
 
 def get_drive_service():
@@ -687,15 +693,22 @@ def drive_list(
 
     q_parts.append("trashed = false")
 
+    # The default "user" corpus omits shared drive content reached only through
+    # membership, even with includeItemsFromAllDrives.
     kwargs = {
         "pageSize": max_results,
-        "fields": "files(id, name, mimeType, size, modifiedTime, webViewLink, parents)",
+        "fields": "incompleteSearch,files(id, name, mimeType, size, modifiedTime, webViewLink, parents)",
         "q": " and ".join(q_parts) if q_parts else None,
+        "corpora": "allDrives",
         "includeItemsFromAllDrives": True,
         "supportsAllDrives": True,
     }
 
     results = service.files().list(**kwargs).execute()
+    if results.get("incompleteSearch"):
+        raise RuntimeError(
+            "Google Drive could not search all drives; narrow the search to a specific drive"
+        )
 
     return [
         {
@@ -709,6 +722,43 @@ def drive_list(
         }
         for f in results.get("files", [])
     ]
+
+
+def drive_list_drives(max_results: int = 100) -> list[dict]:
+    """List the shared drives the account is a member of.
+
+    Args:
+        max_results: Maximum number of results
+
+    Returns:
+        List of drive dicts with id and name. Use the id as ``folder_id`` in
+        ``drive_list`` to browse a drive's top level.
+    """
+    if max_results < 1:
+        raise ValueError("max_results must be at least 1")
+
+    service = get_drive_service()
+    drives: list[dict] = []
+    page_token: str | None = None
+
+    while len(drives) < max_results:
+        request_args = {
+            "pageSize": min(100, max_results - len(drives)),
+            "fields": "nextPageToken,drives(id,name)",
+        }
+        if page_token:
+            request_args["pageToken"] = page_token
+
+        result = service.drives().list(**request_args).execute()
+        drives.extend(
+            {"id": drive["id"], "name": drive.get("name", "")}
+            for drive in result.get("drives", [])
+        )
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+
+    return drives[:max_results]
 
 
 def _drive_download_bytes(file_id: str) -> tuple[dict, bytes]:
@@ -1435,13 +1485,13 @@ def drive_label_folder(
 def drive_setup_channel_permissions(
     file_id: str,
     channel_member_emails: list[str],
-    requester_email: str,
+    requester_email: str | None,
 ) -> dict:
-    """Set up file permissions for Slack channel members and transfer ownership.
+    """Set up file permissions for Slack channel members and optionally transfer ownership.
 
     This function:
     1. Shares the file with all channel members (writer role)
-    2. Transfers ownership to the requester
+    2. Transfers ownership when a requester is provided
 
     Note: The original owner (service account) is automatically downgraded to
     editor by Google Drive when ownership is transferred, and retains access.
@@ -1452,7 +1502,7 @@ def drive_setup_channel_permissions(
         file_id: The Google Drive file ID
         channel_member_emails: List of email addresses for channel members
             (obtained from Slack via get_channel_members_with_emails)
-        requester_email: Email of the person who requested the file (new owner)
+        requester_email: Optional email of the person who requested the file (new owner)
 
     Returns:
         Dict with results: shared_with, new_owner, errors
@@ -1759,6 +1809,101 @@ def docs_get_text(document_id: str) -> str:
         return extract_text_from_content(content)
 
 
+DRIVE_COMMENT_FIELDS = (
+    "id,content,htmlContent,anchor,quotedFileContent,resolved,deleted,"
+    "createdTime,modifiedTime,assigneeEmailAddress,mentionedEmailAddresses,"
+    "author(displayName,photoLink,me),"
+    "replies(id,content,htmlContent,action,deleted,createdTime,modifiedTime,"
+    "assigneeEmailAddress,mentionedEmailAddresses,author(displayName,photoLink,me))"
+)
+
+
+def _normalize_drive_comment_user(user: dict) -> dict:
+    return {
+        "display_name": user.get("displayName", ""),
+        "photo_link": user.get("photoLink", ""),
+        "is_me": user.get("me", False),
+    }
+
+
+def _normalize_drive_reply(reply: dict) -> dict:
+    return {
+        "id": reply.get("id", ""),
+        "content": reply.get("content", ""),
+        "html_content": reply.get("htmlContent", ""),
+        "action": reply.get("action", ""),
+        "deleted": reply.get("deleted", False),
+        "created_time": reply.get("createdTime", ""),
+        "modified_time": reply.get("modifiedTime", ""),
+        "author": _normalize_drive_comment_user(reply.get("author") or {}),
+        "assignee_email": reply.get("assigneeEmailAddress", ""),
+        "mentioned_emails": reply.get("mentionedEmailAddresses") or [],
+    }
+
+
+def _normalize_drive_comment(comment: dict) -> dict:
+    quoted_content = comment.get("quotedFileContent") or {}
+    return {
+        "id": comment.get("id", ""),
+        "content": comment.get("content", ""),
+        "html_content": comment.get("htmlContent", ""),
+        "anchor": comment.get("anchor", ""),
+        "quoted_file_content": {
+            "mime_type": quoted_content.get("mimeType", ""),
+            "value": quoted_content.get("value", ""),
+        },
+        "resolved": comment.get("resolved", False),
+        "deleted": comment.get("deleted", False),
+        "created_time": comment.get("createdTime", ""),
+        "modified_time": comment.get("modifiedTime", ""),
+        "author": _normalize_drive_comment_user(comment.get("author") or {}),
+        "assignee_email": comment.get("assigneeEmailAddress", ""),
+        "mentioned_emails": comment.get("mentionedEmailAddresses") or [],
+        "replies": [_normalize_drive_reply(reply) for reply in comment.get("replies", [])],
+    }
+
+
+def docs_list_comments(
+    document_id: str,
+    max_results: int = 100,
+    include_deleted: bool = False,
+) -> list[dict]:
+    """List comments and replies on a Google Doc.
+
+    Args:
+        document_id: The document ID
+        max_results: Maximum number of comments to return
+        include_deleted: Whether to include deleted comments and replies
+
+    Returns:
+        Comments with their quoted document content and replies
+    """
+    if max_results < 1:
+        raise ValueError("max_results must be at least 1")
+
+    service = get_drive_service()
+    comments: list[dict] = []
+    page_token: str | None = None
+
+    while len(comments) < max_results:
+        request_args = {
+            "fileId": document_id,
+            "pageSize": min(100, max_results - len(comments)),
+            "includeDeleted": include_deleted,
+            "fields": f"nextPageToken,comments({DRIVE_COMMENT_FIELDS})",
+        }
+        if page_token:
+            request_args["pageToken"] = page_token
+
+        result = service.comments().list(**request_args).execute()
+        comments.extend(_normalize_drive_comment(comment) for comment in result.get("comments", []))
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+
+    return comments[:max_results]
+
+
 def docs_append(
     document_id: str,
     text: str,
@@ -2017,20 +2162,51 @@ def docs_insert(
     return {"document_id": result.get("document_id", "")}
 
 
-def docs_create(title: str, content: str | None = None) -> dict:
+def _drive_create_native(title: str, mime_type: str, folder_id: str) -> tuple[str, str]:
+    """Create an empty native Google file inside a folder or shared drive.
+
+    The Docs, Sheets, and Slides ``create`` calls cannot set a parent, so a
+    file that must live in a specific folder is created through Drive.
+
+    Returns:
+        Tuple of file id and name
+    """
+    created = (
+        get_drive_service()
+        .files()
+        .create(
+            body={"name": title, "mimeType": mime_type, "parents": [folder_id]},
+            fields="id, name",
+            supportsAllDrives=True,
+        )
+        .execute()
+    )
+    return created.get("id", ""), created.get("name", "")
+
+
+def docs_create(
+    title: str, content: str | None = None, folder_id: str | None = None
+) -> dict:
     """Create a new Google Doc.
 
     Args:
         title: Document title
         content: Optional initial content to add
+        folder_id: Optional parent folder or shared drive ID
 
     Returns:
         Dict with document_id, title, and url
     """
     service = get_docs_service()
 
-    doc = service.documents().create(body={"title": title}).execute()
-    document_id = doc.get("documentId", "")
+    if folder_id:
+        document_id, doc_title = _drive_create_native(
+            title, "application/vnd.google-apps.document", folder_id
+        )
+    else:
+        doc = service.documents().create(body={"title": title}).execute()
+        document_id = doc.get("documentId", "")
+        doc_title = doc.get("title", "")
 
     if content:
         requests = [{"insertText": {"location": {"index": 1}, "text": content}}]
@@ -2040,7 +2216,7 @@ def docs_create(title: str, content: str | None = None) -> dict:
 
     return {
         "document_id": document_id,
-        "title": doc.get("title", ""),
+        "title": doc_title,
         "url": f"https://docs.google.com/document/d/{document_id}/edit",
     }
 
@@ -2059,20 +2235,31 @@ def _quote_sheet_title(title: str) -> str:
     return f"'{escaped_title}'"
 
 
-def sheets_create(title: str, content: list[list[str]] | None = None) -> dict:
+def sheets_create(
+    title: str, content: list[list[str]] | None = None, folder_id: str | None = None
+) -> dict:
     """Create a new Google Sheet.
 
     Args:
         title: Spreadsheet title
         content: Optional 2D array of initial data (rows x cols)
+        folder_id: Optional parent folder or shared drive ID
 
     Returns:
         Dict with spreadsheet_id, title, and url
     """
     service = get_sheets_service()
 
-    spreadsheet = service.spreadsheets().create(body={"properties": {"title": title}}).execute()
-    spreadsheet_id = spreadsheet.get("spreadsheetId", "")
+    if folder_id:
+        spreadsheet_id, sheet_title = _drive_create_native(
+            title, "application/vnd.google-apps.spreadsheet", folder_id
+        )
+    else:
+        spreadsheet = (
+            service.spreadsheets().create(body={"properties": {"title": title}}).execute()
+        )
+        spreadsheet_id = spreadsheet.get("spreadsheetId", "")
+        sheet_title = spreadsheet.get("properties", {}).get("title", "")
 
     if content:
         service.spreadsheets().values().update(
@@ -2084,7 +2271,7 @@ def sheets_create(title: str, content: list[list[str]] | None = None) -> dict:
 
     return {
         "spreadsheet_id": spreadsheet_id,
-        "title": spreadsheet.get("properties", {}).get("title", ""),
+        "title": sheet_title,
         "url": f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit",
     }
 
@@ -2149,6 +2336,41 @@ def sheets_read(spreadsheet_id: str, range_notation: str = "A1:Z1000") -> dict:
         .execute()
     )
 
+    return _sheets_read_result(spreadsheet_id, range_notation, result)
+
+
+def sheets_batch_read(spreadsheet_id: str, range_notations: list[str]) -> list[dict]:
+    """Read data from one Google Sheet, across several ranges.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID (from URL)
+        range_notations: A1 notation range (e.g., "Sheet1!A1:D10" or "A1:Z1000")
+
+    Returns:
+        List of dicts in requested order, each with the same spreadsheet_id,
+        range, headers, rows, and raw_values fields as sheets_read.
+        The first row of each range is treated as its headers.
+    """
+    if not range_notations:
+        raise ValueError("Provide at least one range")
+
+    service = get_sheets_service()
+
+    result = (
+        service.spreadsheets()
+        .values()
+        .batchGet(spreadsheetId=spreadsheet_id, ranges=range_notations)
+        .execute()
+    )
+
+    return [
+        _sheets_read_result(spreadsheet_id, range_notation, value_range)
+        for range_notation, value_range in zip(range_notations, result["valueRanges"], strict=True)
+    ]
+
+
+def _sheets_read_result(spreadsheet_id: str, range_notation: str, result: dict) -> dict:
+    """Normalize a values response for single and batch reads."""
     values = result.get("values", [])
 
     if not values:
@@ -2324,23 +2546,29 @@ def get_slides_service():
     return build("slides", "v1", http=_build_http())
 
 
-def slides_create(title: str) -> dict:
+def slides_create(title: str, folder_id: str | None = None) -> dict:
     """Create a new Google Slides presentation.
 
     Args:
         title: Presentation title
+        folder_id: Optional parent folder or shared drive ID
 
     Returns:
         Dict with presentation_id, title, and url
     """
-    service = get_slides_service()
-
-    presentation = service.presentations().create(body={"title": title}).execute()
-    presentation_id = presentation.get("presentationId", "")
+    if folder_id:
+        presentation_id, presentation_title = _drive_create_native(
+            title, "application/vnd.google-apps.presentation", folder_id
+        )
+    else:
+        service = get_slides_service()
+        presentation = service.presentations().create(body={"title": title}).execute()
+        presentation_id = presentation.get("presentationId", "")
+        presentation_title = presentation.get("title", "")
 
     return {
         "presentation_id": presentation_id,
-        "title": presentation.get("title", ""),
+        "title": presentation_title,
         "url": f"https://docs.google.com/presentation/d/{presentation_id}/edit",
     }
 
@@ -2662,8 +2890,89 @@ def analytics_get_daily_users(
     )
 
 
+# Directory functions
+
+
+def directory_list() -> list[dict]:
+    """List all visible Directory profiles.
+
+    Returns:
+        People with resource_name, name, and email_addresses
+    """
+    service = get_people_service()
+    request_args = {
+        "readMask": "names,emailAddresses",
+        "sources": ["DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE"],
+        "pageSize": 1000,
+    }
+
+    return _paginate_directory_people(service.people().listDirectoryPeople, request_args)
+
+
+def directory_search(query: str, max_results: int = 20) -> list[dict]:
+    """Search Directory profiles.
+
+    Args:
+        query: People API prefix search query, e.g. name, email
+        max_results: Maximum number of people to return
+
+    Returns:
+        People with resource_name, name, and email_addresses.
+    """
+    service = get_people_service()
+    request_args = {
+        "readMask": "names,emailAddresses",
+        "sources": ["DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE"],
+        "query": query,
+        "pageSize": max_results,
+    }
+
+    return _paginate_directory_people(
+        service.people().searchDirectoryPeople, request_args, max_results=max_results
+    )
+
+
+def _paginate_directory_people(
+    request: Callable[..., HttpRequest],
+    request_args: dict,
+    max_results: int | None = None,
+) -> list[dict]:
+    """Execute directory requests, paginate, and return normalized people."""
+    people: list[dict] = []
+
+    while max_results is None or len(people) < max_results:
+        result = request(**request_args).execute()
+
+        for person in result.get("people") or []:
+            names = person.get("names") or []
+            primary_name = next(
+                (name for name in names if (name.get("metadata") or {}).get("primary")),
+                names[0] if names else {},
+            )
+            people.append(
+                {
+                    "resource_name": person.get("resourceName", ""),
+                    "name": primary_name.get("displayName", ""),
+                    "email_addresses": [
+                        email["value"]
+                        for email in person.get("emailAddresses") or []
+                        if email.get("value")
+                    ],
+                }
+            )
+
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+        # People requires every other parameter, including pageSize, to stay
+        # unchanged while following a page token.
+        request_args["pageToken"] = page_token
+
+    return people[:max_results]
+
+
 class GSuiteClient:
-    """GSuite API client wrapping Gmail, Calendar, Drive, Docs, Sheets, Slides, and Analytics."""
+    """GSuite client for Gmail, Calendar, Directory, Drive, Docs, Sheets, Slides, and Analytics."""
 
     # --- Gmail ---
 
@@ -2939,6 +3248,18 @@ class GSuiteClient:
         """
         return drive_list(query=query, max_results=max_results, full_text=full_text)
 
+    def drive_list_drives(self, max_results: int = 100) -> list[dict]:
+        """List the shared drives the account is a member of.
+
+        Args:
+            max_results: Maximum number of results
+
+        Returns:
+            List of drive dicts with id and name. Pass an id as ``folder_id`` to
+            ``drive_list`` to browse that drive's top level.
+        """
+        return drive_list_drives(max_results=max_results)
+
     def drive_get(self, file_id: str) -> dict:
         """Get file metadata from Google Drive.
 
@@ -3175,14 +3496,14 @@ class GSuiteClient:
         self,
         file_id: str,
         channel_member_emails: list[str],
-        requester_email: str,
+        requester_email: str | None,
     ) -> dict:
-        """Set up file permissions for Slack channel members and transfer ownership.
+        """Set up file permissions and optionally transfer ownership.
 
         Args:
             file_id: The Google Drive file ID
             channel_member_emails: List of email addresses for channel members
-            requester_email: Email of the person who requested the file (new owner)
+            requester_email: Optional email of the person who requested the file (new owner)
 
         Returns:
             Dict with results: shared_with, new_owner, errors
@@ -3225,6 +3546,28 @@ class GSuiteClient:
             Plain text content of the document
         """
         return docs_get_text(document_id)
+
+    def docs_list_comments(
+        self,
+        document_id: str,
+        max_results: int = 100,
+        include_deleted: bool = False,
+    ) -> list[dict]:
+        """List comments and replies on a Google Doc.
+
+        Args:
+            document_id: The document ID
+            max_results: Maximum number of comments to return
+            include_deleted: Whether to include deleted comments and replies
+
+        Returns:
+            Comments with their quoted document content and replies
+        """
+        return docs_list_comments(
+            document_id,
+            max_results=max_results,
+            include_deleted=include_deleted,
+        )
 
     def docs_append(
         self,
@@ -3368,31 +3711,40 @@ class GSuiteClient:
             expected_revision_id=expected_revision_id,
         )
 
-    def docs_create(self, title: str, content: str | None = None) -> dict:
+    def docs_create(
+        self, title: str, content: str | None = None, folder_id: str | None = None
+    ) -> dict:
         """Create a new Google Doc.
 
         Args:
             title: Document title
             content: Optional initial content to add
+            folder_id: Optional parent folder or shared drive ID
 
         Returns:
             Dict with document_id, title, and url
         """
-        return docs_create(title, content=content)
+        return docs_create(title, content=content, folder_id=folder_id)
 
     # --- Sheets ---
 
-    def sheets_create(self, title: str, content: list[list[str]] | None = None) -> dict:
+    def sheets_create(
+        self,
+        title: str,
+        content: list[list[str]] | None = None,
+        folder_id: str | None = None,
+    ) -> dict:
         """Create a new Google Sheet.
 
         Args:
             title: Spreadsheet title
             content: Optional 2D array of initial data (rows x cols)
+            folder_id: Optional parent folder or shared drive ID
 
         Returns:
             Dict with spreadsheet_id, title, and url
         """
-        return sheets_create(title, content=content)
+        return sheets_create(title, content=content, folder_id=folder_id)
 
     def sheets_add_tab(
         self,
@@ -3423,6 +3775,15 @@ class GSuiteClient:
             Dict with spreadsheet_id, range, headers, and rows (list of dicts)
         """
         return sheets_read(spreadsheet_id, range_notation=range_notation)
+
+    def sheets_batch_read(self, spreadsheet_id: str, range_notations: list[str]) -> list[dict]:
+        """Read multiple A1 ranges from one spreadsheet in one API request.
+
+        Returns a list of dicts in requested order with the same fields as
+        sheets_read. The range list must be non-empty; the first row of each
+        range is treated as its headers.
+        """
+        return sheets_batch_read(spreadsheet_id, range_notations)
 
     def sheets_update(
         self,
@@ -3503,16 +3864,17 @@ class GSuiteClient:
 
     # --- Slides ---
 
-    def slides_create(self, title: str) -> dict:
+    def slides_create(self, title: str, folder_id: str | None = None) -> dict:
         """Create a new Google Slides presentation.
 
         Args:
             title: Presentation title
+            folder_id: Optional parent folder or shared drive ID
 
         Returns:
             Dict with presentation_id, title, and url
         """
-        return slides_create(title)
+        return slides_create(title, folder_id=folder_id)
 
     # --- Analytics ---
 
@@ -3636,6 +3998,16 @@ class GSuiteClient:
     ) -> dict:
         """Get daily active users over time."""
         return analytics_get_daily_users(start_date=start_date, end_date=end_date)
+
+    # --- Directory ---
+
+    def directory_list(self) -> list[dict]:
+        """List all visible Workspace directory profiles with names and emails."""
+        return directory_list()
+
+    def directory_search(self, query: str, max_results: int = 20) -> list[dict]:
+        """Search Workspace directory profiles by prefix query."""
+        return directory_search(query, max_results=max_results)
 
 
 def _client() -> GSuiteClient:

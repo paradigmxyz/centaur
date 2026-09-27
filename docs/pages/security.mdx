@@ -50,6 +50,17 @@ in the cluster or on the internet is directly reachable. Because
 iron-proxy is per-sandbox rather than shared, a compromise of one
 sandbox's proxy cannot leak into another sandbox.
 
+This boundary requires a CNI that enforces Kubernetes NetworkPolicy; proxy
+environment variables alone do not prevent a compromised sandbox from making
+direct connections. The per-sandbox proxy policy admits only the intended
+in-cluster backends and ports, including the Console control plane. As an
+additional guard, `ironProxy.upstreamDenyCidrs` blocks loopback, cloud metadata,
+and the default k3s pod CIDR. It deliberately does not block the k3s Service
+CIDR because sandboxes reach authenticated control-plane APIs through ClusterIP
+Services. On clusters with a different pod CIDR, add that range to
+`ironProxy.upstreamDenyCidrs`; do not add the Service CIDR unless those required
+Services are exposed through another permitted route.
+
 ### Egress policy
 
 All outbound traffic from the sandbox routes through iron-proxy, so

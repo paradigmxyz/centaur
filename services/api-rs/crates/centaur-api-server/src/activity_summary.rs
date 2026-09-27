@@ -40,6 +40,8 @@ pub(crate) struct ActivitySummaryConfig {
     pub(crate) max_output_tokens: u16,
     pub(crate) min_interval: Duration,
     pub(crate) model: String,
+    /// `None` omits the parameter, for servers that reject an unknown field.
+    pub(crate) reasoning_effort: Option<String>,
     pub(crate) timeout: Duration,
 }
 
@@ -856,6 +858,7 @@ struct ActivitySummaryClient {
     client: reqwest::Client,
     max_output_tokens: u16,
     model: String,
+    reasoning_effort: Option<String>,
     responses_url: String,
 }
 
@@ -871,8 +874,30 @@ impl ActivitySummaryClient {
             client,
             max_output_tokens: config.max_output_tokens,
             model: config.model.clone(),
+            reasoning_effort: config.reasoning_effort.clone(),
             responses_url,
         })
+    }
+
+    /// The summary budget is small, so a server that resolves an absent effort
+    /// to its highest level spends the whole budget reasoning and returns an
+    /// `incomplete` response with no message. Sending an explicit effort avoids
+    /// depending on the server's default; `None` omits it for servers that
+    /// reject the field.
+    fn request_body(&self, prompt: &str) -> Value {
+        let mut body = json!({
+            "model": self.model.as_str(),
+            "instructions": SYSTEM_PROMPT,
+            "input": prompt,
+            "max_output_tokens": self.max_output_tokens,
+            "store": false,
+        });
+        if let Some(effort) = &self.reasoning_effort
+            && let Some(object) = body.as_object_mut()
+        {
+            object.insert("reasoning".to_owned(), json!({ "effort": effort }));
+        }
+        body
     }
 
     async fn summarize(&self, prompt: &str) -> Result<String, ActivitySummaryError> {
@@ -880,13 +905,7 @@ impl ActivitySummaryClient {
             .client
             .post(&self.responses_url)
             .bearer_auth(&self.api_key)
-            .json(&json!({
-                "model": self.model.as_str(),
-                "instructions": SYSTEM_PROMPT,
-                "input": prompt,
-                "max_output_tokens": self.max_output_tokens,
-                "store": false,
-            }))
+            .json(&self.request_body(prompt))
             .send()
             .await?;
         let status = response.status();
@@ -1172,5 +1191,34 @@ mod tests {
             "I'm checking USDG yield sources",
             "I'm comparing vault contract events"
         ));
+    }
+
+    fn client_with_effort(effort: Option<&str>) -> ActivitySummaryClient {
+        ActivitySummaryClient::new(&ActivitySummaryConfig {
+            base_url: "http://localhost/v1".to_owned(),
+            api_key: "key".to_owned(),
+            max_facts: 10,
+            max_output_tokens: 128,
+            min_interval: Duration::from_secs(1),
+            model: "gpt-5.4-nano".to_owned(),
+            reasoning_effort: effort.map(str::to_owned),
+            timeout: Duration::from_secs(5),
+        })
+        .expect("client")
+    }
+
+    #[test]
+    fn summary_request_carries_the_reasoning_effort() {
+        let body = client_with_effort(Some("low")).request_body("prompt");
+        assert_eq!(body["reasoning"]["effort"], "low");
+        assert_eq!(body["max_output_tokens"], 128);
+    }
+
+    /// A server that rejects an unknown field needs the parameter gone, not
+    /// set to something it also does not understand.
+    #[test]
+    fn summary_request_omits_the_effort_when_unset() {
+        let body = client_with_effort(None).request_body("prompt");
+        assert!(body.get("reasoning").is_none());
     }
 }

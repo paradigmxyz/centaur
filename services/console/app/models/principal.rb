@@ -31,6 +31,7 @@ class Principal < ApplicationRecord
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
   URL_SAFE_MESSAGE = "must contain only URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)"
   SANDBOX_REPO_CACHE_LABEL = "centaur.sandbox_repo_cache".freeze
+  TOOL_LABEL = "centaur-tool".freeze
   SANDBOX_REPO_CACHE_VALUES = %w[none public all].freeze
   UNKNOWN_KIND = "unknown".freeze
   KINDS = %w[
@@ -69,6 +70,21 @@ class Principal < ApplicationRecord
   # path collapse naturally because callers select distinct secret rows.
   def effective_grants
     Grant.where(principal_id: id).or(Grant.where(role_id: role_ids))
+  end
+
+  # Tools associated with credentials granted directly or through roles. Each
+  # credential's centaur-tool label names one tool.
+  def connected_tool_names
+    effective_grants
+      .includes(*Grant::GRANTABLE_ASSOCIATIONS)
+      .filter_map(&:grantable)
+      .filter_map do |credential|
+        label = credential.labels.to_h[TOOL_LABEL]
+        label.strip if label.is_a?(String)
+      end
+      .reject(&:blank?)
+      .uniq
+      .sort
   end
 
   # Static secrets this principal resolves to, via its effective grants.

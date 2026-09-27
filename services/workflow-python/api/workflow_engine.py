@@ -3,7 +3,10 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import inspect
-from typing import Any
+import json
+import re
+import uuid
+from typing import Any, Literal
 
 from api.app import WorkflowToolManager, WorkflowTools, bind_context_rpc, reset_context_rpc
 
@@ -14,6 +17,25 @@ class Delivery:
     thread_ts: str = ""
     mode: str = ""
     metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass(frozen=True)
+class Button:
+    label: str
+    style: Literal["primary", "danger"] | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class ButtonClick:
+    """Slack click identity supplied by the verified ingress. `id` identifies the button group."""
+
+    id: str
+    action: str
+    user_id: str
+    team_id: str
+    channel_id: str
+    message_ts: str
+    action_ts: str
 
 
 class WorkflowContext:
@@ -32,6 +54,7 @@ class WorkflowContext:
         self.task_id = task_id
         self.workflow_name = workflow_name
         self._pool = pool
+        self._action_names: set[str] = set()
         # Module-level `AGENT_DEFAULTS` (e.g. {"model": ..., "reasoning": ...})
         # applied to every ctx.agent_turn as a per-workflow default; explicit
         # per-call kwargs always win. See agent_turn().
@@ -169,7 +192,7 @@ class WorkflowContext:
         *,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Queue another workflow and return its durable task identifiers."""
+        """Queue a child; use a stable idempotency key to prevent duplicate starts."""
         request: dict[str, Any] = {
             "type": "ctx.workflow.start",
             "workflow_name": workflow_name,
@@ -178,6 +201,56 @@ class WorkflowContext:
         if idempotency_key:
             request["idempotency_key"] = idempotency_key
         return await self._rpc.request(request)
+
+    async def slack_buttons(
+        self, name: str, *, channel: str, text: str, workflow: str,
+        buttons: dict[str, str | Button], input: dict[str, Any] | None = None,
+        thread_ts: str | None = None,
+    ) -> dict[str, Any]:
+        """Post workflow buttons to a channel ID or raw channel name."""
+        normalized = {action: Button(button) if isinstance(button, str) else button
+                      for action, button in buttons.items()}
+        if (
+            not name.strip() or len(name) > 200 or name in self._action_names
+            or not channel.strip() or not workflow.strip() or not text.strip() or len(text) > 3000
+            or not 1 <= len(buttons) <= 5
+            or any(not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", action)
+                   or not isinstance(button, Button)
+                   or not button.label.strip() or len(button.label) > 75
+                   or button.style not in (None, "primary", "danger")
+                   for action, button in normalized.items())
+            or (input is not None and not isinstance(input, dict))
+        ):
+            raise ValueError("invalid Slack button configuration or duplicate step name")
+        value = json.dumps({"workflow_name": workflow, "input": input or {}}, separators=(",", ":"))
+        if len(value.encode("utf-8")) > 2000:
+            raise ValueError("Slack button workflow and input must fit within 2000 bytes")
+        self._action_names.add(name)
+        group_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{self.task_id}:{name}"))
+        blocks = [
+            {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+            {"type": "actions", "elements": [
+                {"type": "button", "text": {"type": "plain_text", "text": button.label},
+                 "action_id": f"centaur.workflow.action:{group_id}:{action}", "value": value,
+                 **({"style": button.style} if button.style else {})}
+                for action, button in normalized.items()
+            ]},
+        ]
+        async def post() -> Any:
+            destination = channel
+            if not re.fullmatch(r"[CDG][A-Z0-9]+", destination):
+                destination = await self.call_tool("slack", "resolve_channel", {"channel": channel})
+            return await self.post_to_slack(
+                destination, text, blocks=blocks, client_msg_id=group_id, thread_ts=thread_ts,
+            )
+
+        return await self.step(f"{name}.post", post)
+
+    async def update_slack(self, channel: str, message_ts: str, text: str, **kwargs: Any) -> Any:
+        return await self._rpc.request({
+            "type": "ctx.update_slack",
+            "message": {**kwargs, "channel": channel, "ts": message_ts, "text": text},
+        })
 
     async def call_tool(self, tool: str, method: str, args: dict[str, Any] | None = None) -> Any:
         return await WorkflowToolManager(self._rpc).call_tool_raw(tool, method, args or {})

@@ -51,6 +51,7 @@ spec:
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
       {{- end }}
+{{- include "centaur.podScheduling" (dict "values" $console "indent" 6) }}
       initContainers:
         # Create the console logical databases on the bundled Postgres: the
         # primary plus the Solid Cache/Queue/Cable databases (see
@@ -204,6 +205,8 @@ spec:
 {{- end }}
             - name: CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED
               value: {{ $console.passwordLoginEnabled | quote }}
+            - name: CENTAUR_CONSOLE_CHAT_ENABLED
+              value: {{ $console.chat.enabled | quote }}
             - name: CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED
               value: {{ $console.publicSlackThreadsEnabled | quote }}
 {{- with $console.ssoEmailDomains }}
@@ -242,6 +245,24 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sCENTAUR_CONSOLE_SLACK_CLIENT_SECRET" $prefix }}
+{{- end }}
+{{- if $console.oktaOauth.enabled }}
+            # Okta OIDC console sign-in. Client credentials come from the shared
+            # infra Secret; endpoints and signing keys are discovered from issuer.
+            - name: CENTAUR_CONSOLE_OKTA_ISSUER
+              value: {{ required "console.oktaOauth.issuer is required when Okta OAuth is enabled" $console.oktaOauth.issuer | quote }}
+            - name: CENTAUR_CONSOLE_OKTA_TOKEN_ENDPOINT_AUTH_METHOD
+              value: {{ $console.oktaOauth.tokenEndpointAuthMethod | quote }}
+            - name: CENTAUR_CONSOLE_OKTA_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sCENTAUR_CONSOLE_OKTA_CLIENT_ID" $prefix }}
+            - name: CENTAUR_CONSOLE_OKTA_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sCENTAUR_CONSOLE_OKTA_CLIENT_SECRET" $prefix }}
 {{- end }}
             - name: RAILS_ENV
               value: {{ $console.railsEnv | quote }}

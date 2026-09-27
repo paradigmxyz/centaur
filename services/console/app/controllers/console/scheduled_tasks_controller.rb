@@ -44,6 +44,10 @@ class Console::ScheduledTasksController < ApplicationController
   end
 
   def run
+    unless @task.enabled?
+      return redirect_to console_scheduled_tasks_path, alert: "Enable the task before running it."
+    end
+
     ScheduledTaskRunJob.perform_later(@task.id, Time.current.iso8601)
     redirect_to console_scheduled_tasks_path, notice: "Task queued."
   end
@@ -60,14 +64,17 @@ class Console::ScheduledTasksController < ApplicationController
     schedule_preset = attributes.delete(:schedule_preset)
     custom_days = attributes.delete(:custom_days)
     custom_time = attributes.delete(:custom_time)
+    cron_expression = ScheduledTask.cron_for(
+      schedule_preset,
+      nil,
+      custom_days: custom_days,
+      custom_time: custom_time
+    )
+    cron_expression = "invalid custom schedule" if schedule_preset == "custom" && cron_expression.blank?
+
     attributes.merge(
       delivery_channel: delivery_channel_for(delivery_mode, attributes[:delivery_channel]),
-      cron_expression: ScheduledTask.cron_for(
-        schedule_preset,
-        nil,
-        custom_days: custom_days,
-        custom_time: custom_time
-      )
+      cron_expression: cron_expression
     )
   end
 

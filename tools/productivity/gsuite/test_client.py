@@ -1,6 +1,7 @@
 import base64
 import tomllib
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -91,23 +92,57 @@ class _FakeRevisionsApi:
         return _CreateRequest(self.get_result)
 
 
+class _FakeDrivesApi:
+    def __init__(self, list_results: list[dict] | None = None):
+        self.list_results = list(list_results or [])
+        self.list_calls: list[dict] = []
+
+    def list(self, **kwargs):
+        self.list_calls.append(kwargs)
+        if not self.list_results:
+            raise AssertionError("Unexpected extra drives.list call")
+        return _CreateRequest(self.list_results.pop(0))
+
+
+class _FakeCommentsApi:
+    def __init__(self, list_results: list[dict] | None = None):
+        self.list_results = list(list_results or [])
+        self.list_calls: list[dict] = []
+
+    def list(self, **kwargs):
+        self.list_calls.append(kwargs)
+        if not self.list_results:
+            raise AssertionError("Unexpected extra comments.list call")
+        return _CreateRequest(self.list_results.pop(0))
+
+
 class _FakeDriveService:
     def __init__(
         self,
         revision_list_results: list[dict] | None = None,
         revision_get_result: dict | None = None,
+        comment_list_results: list[dict] | None = None,
+        drive_list_results: list[dict] | None = None,
     ):
         self.files_api = _FakeFilesApi()
         self.revisions_api = _FakeRevisionsApi(
             revision_list_results,
             revision_get_result,
         )
+        self.comments_api = _FakeCommentsApi(comment_list_results)
+        self.drives_api = _FakeDrivesApi(drive_list_results)
 
     def files(self):
         return self.files_api
 
     def revisions(self):
         return self.revisions_api
+
+    def comments(self):
+        return self.comments_api
+
+    def drives(self):
+        return self.drives_api
 
 
 class _FakeGmailMessagesApi:
@@ -307,10 +342,24 @@ def test_drive_list_searches_name_by_default(monkeypatch):
 
     list_call = fake_service.files_api.list_calls[0]
     assert list_call["q"] == "name contains 'report' and trashed = false"
+    assert list_call["corpora"] == "allDrives"
     assert list_call["includeItemsFromAllDrives"] is True
     assert list_call["supportsAllDrives"] is True
     assert result[0]["id"] == "file-123"
     assert result[0]["size"] == 1024
+
+
+def test_drive_list_rejects_incomplete_all_drives_search(monkeypatch):
+    fake_service = _FakeDriveService()
+    fake_service.files_api.list = Mock(
+        return_value=_CreateRequest({"files": [], "incompleteSearch": True})
+    )
+    monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
+
+    with pytest.raises(RuntimeError, match="could not search all drives"):
+        client.drive_list()
+
+    assert "incompleteSearch" in fake_service.files_api.list.call_args.kwargs["fields"]
 
 
 def test_drive_list_supports_full_text_contains_and_escapes_literals(monkeypatch):
@@ -331,6 +380,39 @@ def test_drive_list_supports_full_text_contains_and_escapes_literals(monkeypatch
         "mimeType = 'application/pdf' and "
         "trashed = false"
     )
+
+
+def test_drive_list_drives_paginates_and_stops_at_limit(monkeypatch):
+    fake_service = _FakeDriveService(
+        drive_list_results=[
+            {
+                "drives": [
+                    {"id": "drive-1", "name": "Engineering"},
+                    {"id": "drive-2", "name": "Bizz&Plans"},
+                ],
+                "nextPageToken": "page-2",
+            },
+            {
+                "drives": [{"id": "drive-3", "name": "meeting-artifacts"}],
+                "nextPageToken": "page-3",
+            },
+        ]
+    )
+    monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
+
+    result = client.drive_list_drives(max_results=3)
+
+    assert result == [
+        {"id": "drive-1", "name": "Engineering"},
+        {"id": "drive-2", "name": "Bizz&Plans"},
+        {"id": "drive-3", "name": "meeting-artifacts"},
+    ]
+    assert [c.get("pageToken") for c in fake_service.drives_api.list_calls] == [None, "page-2"]
+
+
+def test_drive_list_drives_rejects_non_positive_limit():
+    with pytest.raises(ValueError):
+        client.drive_list_drives(max_results=0)
 
 
 def test_gsuite_client_drive_search_supports_full_text(monkeypatch):
@@ -548,6 +630,149 @@ def test_drive_list_revisions_rejects_non_positive_limit(monkeypatch):
 
     with pytest.raises(ValueError, match="max_results must be at least 1"):
         client.drive_list_revisions("file-123", max_results=0)
+
+
+def test_docs_list_comments_paginates_and_normalizes_threads(monkeypatch):
+    fake_service = _FakeDriveService(
+        comment_list_results=[
+            {
+                "comments": [
+                    {
+                        "id": "comment-1",
+                        "content": "Can we make this more specific?",
+                        "htmlContent": "Can we make this <b>more specific</b>?",
+                        "anchor": '{"r":"head","a":[{"txt":{"o":12,"l":8}}]}',
+                        "quotedFileContent": {
+                            "mimeType": "text/html",
+                            "value": "the proposal",
+                        },
+                        "resolved": True,
+                        "createdTime": "2026-08-10T10:00:00Z",
+                        "modifiedTime": "2026-08-10T11:00:00Z",
+                        "author": {
+                            "displayName": "Ada Lovelace",
+                            "photoLink": "https://example.com/ada.jpg",
+                            "me": False,
+                        },
+                        "assigneeEmailAddress": "grace@example.com",
+                        "mentionedEmailAddresses": ["grace@example.com"],
+                        "replies": [
+                            {
+                                "id": "reply-1",
+                                "content": "Updated.",
+                                "htmlContent": "Updated.",
+                                "action": "resolve",
+                                "createdTime": "2026-08-10T11:00:00Z",
+                                "modifiedTime": "2026-08-10T11:00:00Z",
+                                "author": {"displayName": "Grace Hopper", "me": True},
+                            }
+                        ],
+                    }
+                ],
+                "nextPageToken": "page-2",
+            },
+            {
+                "comments": [
+                    {
+                        "id": "comment-2",
+                        "deleted": True,
+                        "createdTime": "2026-08-11T10:00:00Z",
+                    }
+                ]
+            },
+        ]
+    )
+    monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
+
+    result = client.docs_list_comments(
+        "doc-123",
+        max_results=2,
+        include_deleted=True,
+    )
+
+    fields = f"nextPageToken,comments({client.DRIVE_COMMENT_FIELDS})"
+    assert fake_service.comments_api.list_calls == [
+        {
+            "fileId": "doc-123",
+            "pageSize": 2,
+            "includeDeleted": True,
+            "fields": fields,
+        },
+        {
+            "fileId": "doc-123",
+            "pageSize": 1,
+            "includeDeleted": True,
+            "fields": fields,
+            "pageToken": "page-2",
+        },
+    ]
+    assert result == [
+        {
+            "id": "comment-1",
+            "content": "Can we make this more specific?",
+            "html_content": "Can we make this <b>more specific</b>?",
+            "anchor": '{"r":"head","a":[{"txt":{"o":12,"l":8}}]}',
+            "quoted_file_content": {
+                "mime_type": "text/html",
+                "value": "the proposal",
+            },
+            "resolved": True,
+            "deleted": False,
+            "created_time": "2026-08-10T10:00:00Z",
+            "modified_time": "2026-08-10T11:00:00Z",
+            "author": {
+                "display_name": "Ada Lovelace",
+                "photo_link": "https://example.com/ada.jpg",
+                "is_me": False,
+            },
+            "assignee_email": "grace@example.com",
+            "mentioned_emails": ["grace@example.com"],
+            "replies": [
+                {
+                    "id": "reply-1",
+                    "content": "Updated.",
+                    "html_content": "Updated.",
+                    "action": "resolve",
+                    "deleted": False,
+                    "created_time": "2026-08-10T11:00:00Z",
+                    "modified_time": "2026-08-10T11:00:00Z",
+                    "author": {
+                        "display_name": "Grace Hopper",
+                        "photo_link": "",
+                        "is_me": True,
+                    },
+                    "assignee_email": "",
+                    "mentioned_emails": [],
+                }
+            ],
+        },
+        {
+            "id": "comment-2",
+            "content": "",
+            "html_content": "",
+            "anchor": "",
+            "quoted_file_content": {"mime_type": "", "value": ""},
+            "resolved": False,
+            "deleted": True,
+            "created_time": "2026-08-11T10:00:00Z",
+            "modified_time": "",
+            "author": {"display_name": "", "photo_link": "", "is_me": False},
+            "assignee_email": "",
+            "mentioned_emails": [],
+            "replies": [],
+        },
+    ]
+
+
+def test_docs_list_comments_rejects_non_positive_limit(monkeypatch):
+    monkeypatch.setattr(
+        client,
+        "get_drive_service",
+        lambda: (_ for _ in ()).throw(AssertionError("Drive API should not be called")),
+    )
+
+    with pytest.raises(ValueError, match="max_results must be at least 1"):
+        client.docs_list_comments("doc-123", max_results=0)
 
 
 def test_drive_get_revision_returns_metadata_and_export_links(monkeypatch):
@@ -810,6 +1035,107 @@ def test_gsuite_client_exposes_drive_revisions(monkeypatch):
         {"file_id": "file-123", "revision_id": "rev-1", "export_format": "pdf"}
     ]
     assert download_calls == [{"file_id": "file-123", "revision_id": "rev-1"}]
+
+
+def test_gsuite_client_exposes_doc_comments(monkeypatch):
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        client,
+        "docs_list_comments",
+        lambda document_id, max_results, include_deleted: (
+            calls.append(
+                {
+                    "document_id": document_id,
+                    "max_results": max_results,
+                    "include_deleted": include_deleted,
+                }
+            )
+            or [{"id": "comment-1"}]
+        ),
+    )
+
+    result = client.GSuiteClient().docs_list_comments(
+        "doc-123",
+        max_results=25,
+        include_deleted=True,
+    )
+
+    assert result == [{"id": "comment-1"}]
+    assert calls == [
+        {
+            "document_id": "doc-123",
+            "max_results": 25,
+            "include_deleted": True,
+        }
+    ]
+
+
+def test_sheets_batch_read_uses_one_request_and_preserves_range_order(monkeypatch):
+    service = Mock()
+    values_api = service.spreadsheets.return_value.values.return_value
+    response = {
+        "valueRanges": [
+            {"range": "Data!A1:B3", "values": [["Name", "Count"], ["Alice", 2], ["Bob"]]},
+            {"range": "Empty!A1:B3"},
+            {"range": "Headers!A1:B1", "values": [["Name", "Count"]]},
+            {"range": "Data!A1:B3", "values": [["Name", "Count"], ["Alice", 2], ["Bob"]]},
+        ]
+    }
+    values_api.batchGet.return_value.execute.return_value = response
+    monkeypatch.setattr(client, "get_sheets_service", lambda: service)
+    range_notations = ["Data!A1:B3", "Empty!A1:B3", "Headers!A1:B1", "Data!A1:B3"]
+
+    result = client.GSuiteClient().sheets_batch_read(
+        "spreadsheet-123", range_notations=range_notations
+    )
+
+    values_api.batchGet.assert_called_once_with(
+        spreadsheetId="spreadsheet-123", ranges=range_notations
+    )
+    values_api.batchGet.return_value.execute.assert_called_once_with()
+    values_api.get.assert_not_called()
+    assert isinstance(result, list)
+    assert [entry["range"] for entry in result] == range_notations
+    assert result[0] == {
+        "spreadsheet_id": "spreadsheet-123",
+        "range": range_notations[0],
+        "headers": ["Name", "Count"],
+        "rows": [{"Name": "Alice", "Count": 2}, {"Name": "Bob", "Count": ""}],
+        "raw_values": response["valueRanges"][0]["values"],
+    }
+    assert result[1]["raw_values"] == []
+    assert result[1]["headers"] == []
+    assert result[1]["rows"] == []
+    assert result[2]["headers"] == ["Name", "Count"]
+    assert result[2]["rows"] == []
+    assert result[3] == result[0]
+
+    for range_notation, value_range, expected in zip(
+        range_notations, response["valueRanges"], result, strict=True
+    ):
+        values_api.get.return_value.execute.return_value = value_range
+        assert client.sheets_read("spreadsheet-123", range_notation) == expected
+
+
+def test_sheets_batch_read_rejects_empty_range_list_before_connecting(monkeypatch):
+    get_service = Mock()
+    monkeypatch.setattr(client, "get_sheets_service", get_service)
+
+    with pytest.raises(ValueError, match="Provide at least one range"):
+        client.sheets_batch_read("spreadsheet-123", range_notations=[])
+
+    get_service.assert_not_called()
+
+
+def test_sheets_batch_read_propagates_api_errors(monkeypatch):
+    service = Mock()
+    service.spreadsheets.return_value.values.return_value.batchGet.return_value.execute.side_effect = RuntimeError(
+        "Unable to read spreadsheet"
+    )
+    monkeypatch.setattr(client, "get_sheets_service", lambda: service)
+
+    with pytest.raises(RuntimeError, match="Unable to read spreadsheet"):
+        client.sheets_batch_read("spreadsheet-123", ["Data!A1"])
 
 
 def test_sheets_add_tab_uses_batch_update(monkeypatch):
@@ -1110,6 +1436,71 @@ def test_docs_bullets_requires_revision_for_writes(monkeypatch):
     assert fake_service.documents_api.batch_update_calls == []
 
 
+def test_docs_create_with_folder_creates_through_drive(monkeypatch):
+    fake_drive = _FakeDriveService()
+    fake_docs = _FakeDocsService([])
+    monkeypatch.setattr(client, "get_drive_service", lambda: fake_drive)
+    monkeypatch.setattr(client, "get_docs_service", lambda: fake_docs)
+
+    result = client.docs_create("Design Notes", content="Hello", folder_id="drive-123")
+
+    create_call = fake_drive.files_api.create_calls[0]
+    assert create_call["body"] == {
+        "name": "Design Notes",
+        "mimeType": "application/vnd.google-apps.document",
+        "parents": ["drive-123"],
+    }
+    assert create_call["supportsAllDrives"] is True
+    assert fake_docs.documents_api.batch_update_calls == [
+        {
+            "documentId": "file-123",
+            "body": {"requests": [{"insertText": {"location": {"index": 1}, "text": "Hello"}}]},
+        }
+    ]
+    assert result == {
+        "document_id": "file-123",
+        "title": "Design Notes",
+        "url": "https://docs.google.com/document/d/file-123/edit",
+    }
+
+
+def test_sheets_create_with_folder_creates_through_drive_then_writes(monkeypatch):
+    fake_drive = _FakeDriveService()
+    fake_sheets = _FakeSheetsService()
+    monkeypatch.setattr(client, "get_drive_service", lambda: fake_drive)
+    monkeypatch.setattr(client, "get_sheets_service", lambda: fake_sheets)
+
+    result = client.sheets_create("Budget", content=[["a", "b"]], folder_id="drive-123")
+
+    create_call = fake_drive.files_api.create_calls[0]
+    assert create_call["body"]["mimeType"] == "application/vnd.google-apps.spreadsheet"
+    assert create_call["body"]["parents"] == ["drive-123"]
+    assert fake_sheets.spreadsheets_api.values_api.update_calls[0]["spreadsheetId"] == "file-123"
+    assert result["spreadsheet_id"] == "file-123"
+    assert result["url"] == "https://docs.google.com/spreadsheets/d/file-123/edit"
+
+
+def test_slides_create_with_folder_creates_through_drive(monkeypatch):
+    fake_drive = _FakeDriveService()
+    monkeypatch.setattr(client, "get_drive_service", lambda: fake_drive)
+    monkeypatch.setattr(
+        client,
+        "get_slides_service",
+        lambda: (_ for _ in ()).throw(AssertionError("Slides API should not be used")),
+    )
+
+    result = client.slides_create("Roadmap", folder_id="drive-123")
+
+    create_call = fake_drive.files_api.create_calls[0]
+    assert create_call["body"]["mimeType"] == "application/vnd.google-apps.presentation"
+    assert create_call["body"]["parents"] == ["drive-123"]
+    assert result == {
+        "presentation_id": "file-123",
+        "title": "Roadmap",
+        "url": "https://docs.google.com/presentation/d/file-123/edit",
+    }
+
+
 def test_docs_append_passes_expected_revision_id_through(monkeypatch):
     fake_service = _FakeDocsService([])
     monkeypatch.setattr(client, "get_docs_service", lambda: fake_service)
@@ -1147,3 +1538,142 @@ def test_docs_insert_passes_expected_revision_id_through(monkeypatch):
     assert len(calls) == 2
     assert "writeControl" not in calls[0]["body"]
     assert calls[1]["body"]["writeControl"] == {"requiredRevisionId": "rev-99"}
+
+
+def test_people_service_uses_proxy_transport(monkeypatch):
+    transport = object()
+    build = Mock()
+    monkeypatch.setattr(client, "_build_http", lambda: transport)
+    monkeypatch.setattr(client, "build", build)
+
+    assert client.get_people_service() is build.return_value
+    build.assert_called_once_with("people", "v1", http=transport)
+
+
+def test_directory_host_is_allowed_and_authenticated():
+    config = tomllib.loads(Path(client.__file__).with_name("pyproject.toml").read_text())
+    tool = config["tool"]["centaur"]
+
+    assert "people.googleapis.com" in tool["hosts"]
+    assert "people.googleapis.com" in tool["secrets"][0]["hosts"]
+
+
+def test_directory_normalizes_profiles(monkeypatch):
+    service = Mock()
+    service.people.return_value.listDirectoryPeople.return_value.execute.return_value = {
+        "people": [
+            {
+                "resourceName": "people/123",
+                "names": [
+                    {"displayName": "Alternate name"},
+                    {"displayName": "Alex Example", "metadata": {"primary": True}},
+                ],
+                "emailAddresses": [
+                    {"value": "alex@example.com"},
+                    {"value": "alex.alias@example.com"},
+                    {},
+                ],
+            },
+            {"names": [{"displayName": "Fallback name"}]},
+            {},
+            {"names": None, "emailAddresses": None},
+        ]
+    }
+    monkeypatch.setattr(client, "get_people_service", lambda: service)
+
+    results = client.directory_list()
+
+    assert results == [
+        {
+            "resource_name": "people/123",
+            "name": "Alex Example",
+            "email_addresses": ["alex@example.com", "alex.alias@example.com"],
+        },
+        {"resource_name": "", "name": "Fallback name", "email_addresses": []},
+        {"resource_name": "", "name": "", "email_addresses": []},
+        {"resource_name": "", "name": "", "email_addresses": []},
+    ]
+
+
+def test_directory_search_keeps_parameters_stable_and_stops_at_limit(monkeypatch):
+    service = Mock()
+    search = service.people.return_value.searchDirectoryPeople
+    search.return_value.execute.side_effect = [
+        {"people": [{"resourceName": "people/1"}], "nextPageToken": "second"},
+        {"people": [], "nextPageToken": "third"},
+        {
+            "people": [{"resourceName": "people/2"}, {"resourceName": "people/3"}],
+            "nextPageToken": "unused",
+        },
+    ]
+    monkeypatch.setattr(client, "get_people_service", lambda: service)
+
+    results = client.directory_search("Alex", max_results=2)
+
+    assert [person["resource_name"] for person in results] == ["people/1", "people/2"]
+    calls = [call.kwargs for call in search.call_args_list]
+    first = {
+        "readMask": "names,emailAddresses",
+        "sources": ["DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE"],
+        "query": "Alex",
+        "pageSize": 2,
+    }
+    assert calls == [
+        first,
+        {**first, "pageToken": "second"},
+        {**first, "pageToken": "third"},
+    ]
+
+
+@pytest.mark.parametrize("response", [{}, {"people": []}, {"people": None}])
+def test_directory_empty_results(monkeypatch, response):
+    service = Mock()
+    request = service.people.return_value.listDirectoryPeople
+    request.return_value.execute.return_value = response
+    monkeypatch.setattr(client, "get_people_service", lambda: service)
+
+    results = client.directory_list()
+
+    assert results == []
+    request.assert_called_once()
+
+
+def test_directory_list_fetches_every_page_including_empty_pages(monkeypatch):
+    service = Mock()
+    request = service.people.return_value.listDirectoryPeople
+    profiles = [{"resourceName": f"people/{index}"} for index in range(1002)]
+    request.return_value.execute.side_effect = [
+        {"people": profiles[:1000], "nextPageToken": "second"},
+        {"people": [], "nextPageToken": "third"},
+        {"people": profiles[1000:]},
+    ]
+    monkeypatch.setattr(client, "get_people_service", lambda: service)
+
+    results = client.directory_list()
+
+    assert [person["resource_name"] for person in results] == [
+        profile["resourceName"] for profile in profiles
+    ]
+    first = {
+        "readMask": "names,emailAddresses",
+        "sources": ["DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE"],
+        "pageSize": 1000,
+    }
+    assert [call.kwargs for call in request.call_args_list] == [
+        first,
+        {**first, "pageToken": "second"},
+        {**first, "pageToken": "third"},
+    ]
+
+
+def test_directory_list_does_not_return_partial_results_on_page_failure(monkeypatch):
+    service = Mock()
+    request = service.people.return_value.listDirectoryPeople
+    request.return_value.execute.side_effect = [
+        {"people": [{"resourceName": "people/1"}], "nextPageToken": "second"},
+        RuntimeError("Page request failed"),
+    ]
+    monkeypatch.setattr(client, "get_people_service", lambda: service)
+
+    with pytest.raises(RuntimeError, match="Page request failed"):
+        client.directory_list()

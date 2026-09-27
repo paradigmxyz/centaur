@@ -102,6 +102,7 @@ jobs:
         uses: helm/chart-releaser-action@cae68fefc6b5f367a0275617c9f83181ba54714f # v1.7.0
         with:
           skip_existing: true
+          mark_as_latest: false
           charts_dir: contrib
         env:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
