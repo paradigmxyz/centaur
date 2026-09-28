@@ -2317,14 +2317,20 @@ mod tests {
             .spawn_with(&mut *tx, "noop", json!({}), Default::default())
             .await?;
         tx.rollback().await?;
-        assert!(app.fetch_task_result(&rolled_back.task_id, None).await?.is_none());
+        assert!(app
+            .fetch_task_result(&rolled_back.task_id, None)
+            .await?
+            .is_none());
 
         let mut tx = pool.begin().await?;
         let committed = app
             .spawn_with(&mut *tx, "noop", json!({}), Default::default())
             .await?;
         tx.commit().await?;
-        assert!(app.fetch_task_result(&committed.task_id, None).await?.is_some());
+        assert!(app
+            .fetch_task_result(&committed.task_id, None)
+            .await?
+            .is_some());
 
         Ok(())
     }
