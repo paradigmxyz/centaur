@@ -51,42 +51,10 @@ server must have `pg_search` installed and available to the Console database.
 
 All of the console's environment variables use the `CENTAUR_CONSOLE_` prefix. For backwards compatibility, every variable also resolves from the legacy `IRON_CONTROL_` name when the `CENTAUR_CONSOLE_` one is unset, so existing deployments keep working until they migrate. The `CENTAUR_CONSOLE_` name wins when both are set.
 
-The Threads tab reads api-rs session rows from the Centaur API database. Set
-`CENTAUR_CONSOLE_CENTAUR_DATABASE_URL` to that database URL when it differs from
-the console's primary database. In the Helm chart this is sourced from the
-shared `DATABASE_URL` secret key.
-
 For local development, sign in through the normal login form at
 `http://localhost:3000/login` with the seeded initial user's
 `CENTAUR_CONSOLE_INITIAL_USER_EMAIL` / `CENTAUR_CONSOLE_INITIAL_USER_PASSWORD`
 credentials, the same as every other environment.
-
-To build the Threads UX against production-shaped data without connecting the
-Console to production, create a bounded local snapshot:
-
-```bash
-export CENTAUR_PROD_DATABASE_URL=postgresql://readonly:...@.../ai_v2
-scripts/mirror-prod-threads-snapshot.sh all
-```
-
-The script exports recent `sessions`, `session_messages`,
-`session_executions`, terminal `session_events` plus reasoning
-`session.output.line` events (capped by `THINKING_EVENT_LIMIT_PER_THREAD`,
-default 200 per thread), and referenced `slack_sync_users` rows with the source
-connection forced read-only, then imports them into the local `ai_v2` database
-used by the Console dev container. The Console never writes directly to those
-session tables; starting and continuing accessible chats goes through api-rs.
-
-Threads extras beyond the Slack surface:
-
-- Thinking traces: reasoning items the harness streamed over stdout are
-  persisted by api-rs as `session.output.line` events; the transcript renders
-  each completed reasoning block as a collapsed "Thinking" disclosure.
-- Split view: Cmd/Ctrl-click a sidebar thread to open it alongside the current
-  one, up to four threads in a grid. The `thread` param carries the open keys
-  comma-separated (`?thread=<primary>,<key2>,<key3>,<key4>`), primary first.
-  All keys resolve through the same owner scope as a single thread, and each
-  panel has a close control.
 
 ## First Boot
 
@@ -123,7 +91,6 @@ The operator console supports email and password sign-in by default. To add Goog
 | `CENTAUR_CONSOLE_OKTA_TOKEN_ENDPOINT_AUTH_METHOD` | no | Okta token-endpoint client authentication method. Must match the app registration: `client_secret_basic` (default) or `client_secret_post`. |
 | `CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS`      | recommended for public exposure | Comma- or whitespace-separated domain allowlist for SSO users, for example `acme.com example.org`. Empty allows any IdP-authenticated email. |
 | `CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED` | no       | Set to `false` to disable email and password sign-in. Defaults to enabled.                    |
-| `CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED` | no | Set to `true` to let every authenticated Console user browse public Slack channel conversations. Requires the Slack ETL channel catalog; access fails closed when it is unavailable. Private channels and DMs remain owner-only. Defaults to disabled. |
 | `CENTAUR_CONSOLE_BOOTSTRAP_ADMINS`       | no       | Comma- or whitespace-separated email allowlist. Matching users become active admins on first SSO login. Other accepted SSO users become active non-admin operators and land on the console directly. |
 
 Register these callback URLs with the provider:

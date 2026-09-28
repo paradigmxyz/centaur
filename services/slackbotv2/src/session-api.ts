@@ -1420,7 +1420,7 @@ async function executeSession(
   const body: SlackbotV2ExecuteSessionRequest = {
     idempotency_key: message.id,
     // Record the model this execution runs on (explicit override, else the
-    // configured/baked harness default) so readers like the Console can show
+    // configured/baked harness default) so downstream readers can show
     // it. Metadata only; the harness receives `model` via input_lines and only
     // when explicitly overridden.
     metadata: sessionMetadata(

@@ -1,7 +1,7 @@
 # Entry point for the web+centaur:// protocol handler the PWA manifest
 # registers. When the OS opens such a link, the installed app navigates here
 # with the full custom-scheme URL in ?target=; we map it onto an in-app path
-# and redirect. web+centaur://console/threads lands on /console/threads.
+# and redirect. web+centaur://console/workflows lands on /console/workflows.
 #
 # Only strictly path-shaped targets survive the mapping (no dots, queries, or
 # protocol-relative tricks), so a crafted link can never bounce the operator

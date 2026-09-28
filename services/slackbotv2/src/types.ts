@@ -144,13 +144,6 @@ export type SlackbotV2Options = {
   autoJoinCreatedChannels?: boolean
   botToken: string
   botUserId?: string
-  /**
-   * Public origin of the Console UI (same value the Console itself uses,
-   * `CENTAUR_CONSOLE_PUBLIC_URL`). When set, the first assistant message in a
-   * Slack thread gets an "Open chat in Console" context link. Unset skips the
-   * link; response metadata renders independently according to its configured mode.
-   */
-  consolePublicUrl?: string
   /** Controls whether response metadata renders on the first, every, or no live responses. */
   responseMetadataMode?: 'first' | 'always' | 'never'
   /** Include the Codex service tier in response metadata footers when they render. */
@@ -174,7 +167,7 @@ export type SlackbotV2Options = {
    * codex), from the CLAUDE_MODEL / CODEX_MODEL env vars the chart mirrors
    * out of sandbox.extraEnv. Display/metadata only — never forwarded to the
    * harness. Unset harnesses fall back to the models pinned in this repo's
-   * harness config files (see console-session-link.ts).
+   * harness config files (see response-context.ts).
    */
   harnessDefaultModels?: Record<string, string>
   /**
@@ -298,7 +291,7 @@ export type ForwardSessionInput = {
   /** Effective model selected by sticky thread flags (--model/--opus/...). */
   model?: string
   /**
-   * Model recorded in execute metadata for readers like the Console: the
+   * Model recorded in execute metadata for downstream readers: the
    * explicit override when one is set, else the configured/baked harness
    * default. Metadata only — never forwarded to the harness (that is `model`).
    */

@@ -65,13 +65,13 @@ class Console::EtlsControllerTest < ActionDispatch::IntegrationTest
     post login_url, params: { email: users(:member_user).email, password: "password123456" }
 
     get console_etls_url
-    assert_redirected_to console_threads_path
+    assert_redirected_to console_integrations_path
     assert_nil flash[:alert]
     # The gate fires before the action, so the api client is never touched.
     assert_empty @client.calls
 
     post console_slack_archive_imports_url, params: { filename: "export.zip" }
-    assert_redirected_to console_threads_path
+    assert_redirected_to console_integrations_path
     assert_empty @client.calls
   end
 

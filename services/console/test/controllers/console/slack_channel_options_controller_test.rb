@@ -170,7 +170,7 @@ module Console
       get console_principal_slack_channel_options_url(principals(:acme_channel).oid),
           params: { owner_type: "scheduled_task" }
 
-      assert_redirected_to console_threads_path
+      assert_redirected_to console_integrations_path
     end
 
     test "non-admins can search scheduled task delivery channels" do

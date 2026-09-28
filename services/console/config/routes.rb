@@ -46,12 +46,6 @@ Rails.application.routes.draw do
   end
   get "console/principals/:id", to: "console#principal", as: :console_principal
   namespace :console do
-    resources :threads, only: %i[index create]
-    post "threads/share", to: "threads#share", as: :thread_share
-    # Single-panel transcript refresh polled by thread_poller_controller.js
-    # while a turn is running. thread_key rides as a query param: keys carry
-    # colons and dots a path segment would mangle.
-    get "threads/panel", to: "threads#panel", as: :thread_panel
     resources :workflows, only: %i[index show] do
       member do
         post :run, action: :force_start
@@ -73,10 +67,6 @@ Rails.application.routes.draw do
         post :unshare
       end
     end
-    # Lazily-loaded sidebar thread list (Turbo Frame src). Kept off the main
-    # page render so the unindexed cross-database sessions query does not block
-    # every console page. See ApplicationController#load_console_sidebar_threads.
-    get "sidebar_threads", to: "threads#sidebar", as: :sidebar_threads
   end
   namespace :console do
     resources :roles, only: %i[index show new create edit update] do

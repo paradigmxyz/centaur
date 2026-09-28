@@ -1,9 +1,8 @@
 /**
- * Slack-only response metadata and Console-link context line.
+ * Slack-only response metadata context line.
  *
  * Slackbotv2 appends a Block Kit `context` block according to the configured
- * metadata mode. The first assistant message may also link to the Console
- * session view. The block is passed to the chat adapter via
+ * metadata mode. The block is passed to the chat adapter via
  * `StreamOptions.stopBlocks`, which the adapter forwards to Slack's
  * `chat.stopStream` `blocks` argument. This keeps the rendering Slack-only and
  * out of the shared `@centaur/rendering` package used by Discord/Teams.
@@ -210,22 +209,6 @@ function reasoningDisplayName(reasoning: string | null | undefined): string | un
   return REASONING_DISPLAY_NAMES[key] ?? titleCase(key)
 }
 
-/**
- * Builds the Console session URL for a Slack thread key, or undefined when no
- * Console base URL is configured (in which case no link/block should render).
- * The thread key is the exact value slackbotv2 sends as `thread_key` to the
- * session API, URL-encoded into the `thread` query parameter the Console reads.
- */
-export function consoleSessionUrl(
-  consoleBaseUrl: string | null | undefined,
-  threadKey: string
-): string | undefined {
-  const base = consoleBaseUrl?.trim()
-  if (!base) return undefined
-  const normalized = base.replace(/\/+$/, '')
-  return `${normalized}/console/threads?thread=${encodeURIComponent(threadKey)}`
-}
-
 export type SlackContextBlock = {
   type: 'context'
   elements: Array<{ type: 'mrkdwn'; text: string }>
@@ -241,13 +224,8 @@ export function personaFallbackNotice(
     : `Persona "${unavailablePersonaId}" isn't available. Continuing without a persona.`
 }
 
-/**
- * Builds a Slack context block containing the optional Console link and
- * response metadata. Metadata inclusion is independent of the Console URL.
- */
+/** Builds a Slack context block containing response metadata or a notice. */
 export function buildSlackResponseContextBlock(params: {
-  consoleBaseUrl: string | null | undefined
-  threadKey: string
   harnessType?: string | null
   metadataEnabled?: boolean
   model?: string | null
@@ -255,13 +233,11 @@ export function buildSlackResponseContextBlock(params: {
   reasoning?: string | null
   serviceTier?: string | null
 }): SlackContextBlock | undefined {
-  const url = consoleSessionUrl(params.consoleBaseUrl, params.threadKey)
   const includeMetadata = params.metadataEnabled === true
   const notice = params.notice?.trim()
-  if (!url && !includeMetadata && !notice) return undefined
+  if (!includeMetadata && !notice) return undefined
   const segments: string[] = []
   if (notice) segments.push(`:warning: ${escapeSlackMrkdwn(notice)}`)
-  if (url) segments.push(`<${url}|Open chat in Console>`)
   if (includeMetadata) {
     const model = params.model?.trim()
     if (model) segments.push(escapeSlackMrkdwn(model.toUpperCase()))

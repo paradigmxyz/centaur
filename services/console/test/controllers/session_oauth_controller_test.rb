@@ -135,7 +135,7 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
 
     get auth_callback_url(provider: "slack"), params: { code: "the-code", state: state }
 
-    assert_redirected_to console_threads_path
+    assert_redirected_to console_integrations_path
     user = User.find_by!(email: "rotating@example.com")
     assert_equal "Rotating User", user.name
     assert_equal [ [ "slack", "U123ROTATING" ] ], user.user_identities.pluck(:provider, :subject)
@@ -203,7 +203,7 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
       end
     end
 
-    assert_redirected_to console_threads_path
+    assert_redirected_to console_integrations_path
   end
 
   # --- callback: provisioning ------------------------------------------------
@@ -212,7 +212,7 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     assert_difference -> { User.count }, 1 do
       run_callback(sub: "new-sub", email: "newcomer@example.com")
     end
-    assert_redirected_to console_threads_path
+    assert_redirected_to console_integrations_path
     user = User.find_by(email: "newcomer@example.com")
     assert user.active?
     assert_not user.admin?
@@ -237,7 +237,7 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     assert_difference -> { User.count }, 1 do
       run_callback(sub: "allowed-sub", email: "newcomer@example.com")
     end
-    assert_redirected_to console_threads_path
+    assert_redirected_to console_integrations_path
     assert_equal User.find_by!(email: "newcomer@example.com").id, session[:user_id]
   end
 

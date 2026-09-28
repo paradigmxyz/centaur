@@ -89,7 +89,6 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
     assert_select "a[href=?]", console_workflow_path("slack_sync"), text: /slack_sync/
     assert_select "span", text: "running"
     assert_select "a[href=?]", console_workflows_path
-    assert response.body.index('href="/console/workflows"') < response.body.index('href="/console/threads"')
   end
 
   test "the workflow index does not show run ids" do
@@ -110,7 +109,7 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
 
     get console_workflows_url
 
-    assert_redirected_to console_threads_path
+    assert_redirected_to console_integrations_path
     assert_nil flash[:alert]
   end
 
@@ -118,12 +117,11 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
     delete logout_url
     post login_url, params: { email: users(:member_user).email, password: "password123456" }
 
-    get console_threads_url
+    get console_integrations_url
 
     assert_response :ok
     assert_select ".console-nav-link", text: "Control", count: 0
     assert_select ".console-nav-link", text: "Data Sync", count: 0
-    assert_select ".console-thread-group-title", text: /Chats/
     assert_select "a[href=?]", console_scheduled_tasks_path, text: /Scheduled/
     assert_select ".console-thread-group-title", text: /Workflows/, count: 0
   end
@@ -187,7 +185,7 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
 
     post run_console_workflow_url("slack_sync")
 
-    assert_redirected_to console_threads_path
+    assert_redirected_to console_integrations_path
     assert_empty client.created_runs
   end
 

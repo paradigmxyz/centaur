@@ -5,8 +5,7 @@
 The console is a Rails application that provides the operator UI and the
 credential-control JSON API. It manages principals, roles, grants, encrypted
 secret records, proxy synchronization, broker credentials, console login, and
-MCP OAuth flows. Its Threads surface reads Centaur session data and is not a
-second session control plane.
+MCP OAuth flows.
 
 Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
 
@@ -23,8 +22,6 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
 - OAuth/MCP changes must cover redirect validation, consent, PKCE, refresh-token
   family rotation and replay, revocation, account disablement, and identity
   reconciliation. A connected UI state alone is not proof of usable access.
-- The Threads UI is an observer of durable session data. Do not make it write
-  chat messages or bypass the session API.
 - Put business logic in models or `app/services`, keep controllers thin, and
   preserve JSON error and pagination contracts.
 - Generate migrations with Rails and commit the resulting `db/schema.rb` change.

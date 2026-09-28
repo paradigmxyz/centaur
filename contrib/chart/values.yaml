@@ -110,9 +110,6 @@ console:
   # Public URL users reach in a browser (e.g. https://console.example.com), used
   # as CENTAUR_CONSOLE_PUBLIC_URL. Set this when console is exposed behind
   # Tailscale/Ingress so MCP OAuth issuer metadata and JWT validation agree.
-  # When set and console.chat.enabled is true, the slackbotv2 deployment also
-  # links the first assistant message in a Slack thread to the Console session
-  # view. Leave empty to omit the link.
   publicUrl: ""
   # Additional exact Host headers accepted by Rails Host Authorization. Use for
   # service DNS names that differ from the chart's short in-cluster URL;
@@ -124,16 +121,6 @@ console:
   # Break-glass email/password login. Disable when console is reachable from
   # the public internet and SSO is configured.
   passwordLoginEnabled: true
-  # Console's browser-based chat UI is deprecated and will be removed in
-  # October. Disable it to hide chat navigation and reject its HTTP routes.
-  chat:
-    enabled: true
-  # When enabled, every authenticated Console user can browse conversations
-  # originating in public Slack channels. Private channels and DMs remain
-  # owner-only. Requires apiRs.etl.slack.enabled so channel privacy is synced;
-  # visibility fails closed without that catalog. Individual chats can still
-  # be shared by their owner from the Threads UI.
-  publicSlackThreadsEnabled: false
   # Optional SSO admission policy. When non-empty, only identities whose email
   # domain matches this list can sign in through Google, Slack, or Okta.
   ssoEmailDomains: []
@@ -513,9 +500,9 @@ apiRs:
   # Controls whether a missing automatically derived session principal may be
   # created. "preapproved" admits only principals already present in the
   # Console; missing requester principals are omitted rather than created.
-  # HTTP ingress families with unpredictable per-thread principals, including
-  # new Console chats, are incompatible with preapproved mode. Internal
-  # workflow/MCP sessions use separate principal-provisioning paths.
+  # HTTP ingress families with unpredictable per-thread principals are
+  # incompatible with preapproved mode. Internal workflow/MCP sessions use
+  # separate principal-provisioning paths.
   sessionPrincipalAdmission: automatic
   # Expose the experimental centaur MCP dispatcher (currently action=list).
   mcpV2Enabled: false

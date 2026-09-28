@@ -64,7 +64,7 @@ import {
   personaFallbackNotice,
   reasoningForModel,
   type SlackContextBlock
-} from './console-session-link'
+} from './response-context'
 import { resolveChannelDefault } from './channel-defaults'
 import {
   extractMessageOverrides,
@@ -1265,11 +1265,8 @@ async function syncThreadMessageToSession(
     })
   }
   const effectiveOverrides = resolveStickyThreadOverrides(state, stickyOverridesUpdate)
-  // Slack-only "Open chat in Console" link on the FIRST assistant message in
-  // a thread (the reply to the first message that starts an execution). The
-  // block is undefined when no Console base URL is configured. `thread.id`
-  // (`slack:CHANNEL:THREAD_TS`) is the exact value sent to the session API as
-  // `thread_key`, which the Console indexes by.
+  // The default response-metadata mode renders on the first assistant message
+  // in a thread (the reply to the first message that starts an execution).
   const isFirstAssistantMessage = shouldStartExecution && executedMessageIds.size === 0
   // Channel default: below a per-thread flag, above the deployment default, and
   // (unlike it) ridden on the input line to take effect. harness/model/provider
@@ -1607,8 +1604,6 @@ async function syncThreadMessageToSession(
           })
         }
         responseContextBlock = buildSlackResponseContextBlock({
-          consoleBaseUrl: isFirstAssistantMessage ? input.options.consolePublicUrl : undefined,
-          threadKey: thread.id,
           harnessType,
           metadataEnabled: includeResponseMetadata,
           model,
@@ -2709,9 +2704,8 @@ async function renderExecutionStream(
       recipientTeamId: message.teamId,
       recipientUserId: message.author.userId,
       ...(taskDisplayMode === 'none' ? {} : { taskDisplayMode }),
-      // stopBlocks are appended to the end of the finalized Slack message via
-      // chat.stopStream. The Console link is only included on the first assistant
-      // message; optional response metadata may be appended on every live response.
+      // stopBlocks append optional response metadata to the finalized Slack
+      // message via chat.stopStream.
       ...(responseContextBlock ? { stopBlocks: [responseContextBlock] } : {})
     }) ?? await thread.post(visibleStream)
     return { diverged: capture.diverged, messageId: sent?.id }

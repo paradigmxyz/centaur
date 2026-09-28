@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
   buildSlackResponseContextBlock,
-  consoleSessionUrl,
   defaultModelForHarness,
   defaultReasoningForHarness,
   defaultServiceTierForHarness,
@@ -9,7 +8,7 @@ import {
   harnessDisplayName,
   personaFallbackNotice,
   reasoningForModel
-} from '../src/console-session-link'
+} from '../src/response-context'
 import claudeSettings from '../../../harness/claude/settings.json'
 import codexConfig from '../../../harness/codex/config.toml'
 
@@ -168,106 +167,47 @@ describe('defaultServiceTierForHarness', () => {
   })
 })
 
-describe('consoleSessionUrl', () => {
-  test('builds the /console/threads URL with an encoded thread key', () => {
-    expect(consoleSessionUrl('https://console.centaur.dev', 'slack:C123:1700000000.000100')).toBe(
-      'https://console.centaur.dev/console/threads?thread=slack%3AC123%3A1700000000.000100'
-    )
-  })
-
-  test('strips trailing slashes from the base URL', () => {
-    expect(consoleSessionUrl('https://console.centaur.dev/', 'slack:C1:1')).toBe(
-      'https://console.centaur.dev/console/threads?thread=slack%3AC1%3A1'
-    )
-  })
-
-  test('returns undefined when no base URL is configured', () => {
-    expect(consoleSessionUrl(undefined, 'slack:C1:1')).toBeUndefined()
-    expect(consoleSessionUrl(null, 'slack:C1:1')).toBeUndefined()
-    expect(consoleSessionUrl('   ', 'slack:C1:1')).toBeUndefined()
-  })
-})
-
 describe('buildSlackResponseContextBlock', () => {
   test('builds a context block with uppercased model then harness, middot separated', () => {
     const block = buildSlackResponseContextBlock({
-      consoleBaseUrl: 'https://console.centaur.dev',
-      threadKey: 'slack:C123:1700000000.000100',
       harnessType: 'codex',
       metadataEnabled: true,
       model: 'gpt-5.2',
       reasoning: 'xhigh'
     })
-    expect(block).toEqual({
-      type: 'context',
-      elements: [
-        {
-          type: 'mrkdwn',
-          text:
-            '<https://console.centaur.dev/console/threads?thread=slack%3AC123%3A1700000000.000100|Open chat in Console> · GPT-5.2 · Codex · XHigh'
-        }
-      ]
-    })
+    expect(block?.elements[0]?.text).toBe('GPT-5.2 · Codex · XHigh')
   })
 
   test('omits the model segment when no model is provided', () => {
     const block = buildSlackResponseContextBlock({
-      consoleBaseUrl: 'https://console.centaur.dev',
-      threadKey: 'slack:C1:1',
       harnessType: 'claudecode',
       metadataEnabled: true
     })
-    expect(block?.elements[0]?.text).toBe(
-      '<https://console.centaur.dev/console/threads?thread=slack%3AC1%3A1|Open chat in Console> · Claude Code'
-    )
+    expect(block?.elements[0]?.text).toBe('Claude Code')
   })
 
   test('shows the resolved Nanocodex harness', () => {
     const block = buildSlackResponseContextBlock({
-      consoleBaseUrl: 'https://console.centaur.dev',
-      threadKey: 'slack:C1:1',
       harnessType: 'nanocodex',
       metadataEnabled: true,
       model: 'gpt-5.6-sol',
       reasoning: 'low'
     })
 
-    expect(block?.elements[0]?.text).toBe(
-      '<https://console.centaur.dev/console/threads?thread=slack%3AC1%3A1|Open chat in Console> · GPT-5.6-SOL · Nanocodex · Low'
-    )
+    expect(block?.elements[0]?.text).toBe('GPT-5.6-SOL · Nanocodex · Low')
   })
 
-  test('skips the block entirely when no console base URL is set', () => {
+  test('skips the block when metadata and notices are absent', () => {
     expect(
       buildSlackResponseContextBlock({
-        consoleBaseUrl: undefined,
-        threadKey: 'slack:C1:1',
         harnessType: 'codex',
         model: 'gpt-5.2'
       })
     ).toBeUndefined()
   })
 
-  test('builds a Console link without metadata when metadata is disabled', () => {
+  test('builds response metadata when enabled', () => {
     const block = buildSlackResponseContextBlock({
-      consoleBaseUrl: 'https://console.centaur.dev',
-      threadKey: 'slack:C1:1',
-      harnessType: 'codex',
-      metadataEnabled: false,
-      model: 'gpt-5.6-sol',
-      reasoning: 'low',
-      serviceTier: 'fast'
-    })
-
-    expect(block?.elements[0]?.text).toBe(
-      '<https://console.centaur.dev/console/threads?thread=slack%3AC1%3A1|Open chat in Console>'
-    )
-  })
-
-  test('builds metadata without a Console URL when independently enabled', () => {
-    const block = buildSlackResponseContextBlock({
-      consoleBaseUrl: undefined,
-      threadKey: 'slack:C1:1',
       harnessType: 'codex',
       metadataEnabled: true,
       model: 'gpt-5.6-sol',
@@ -281,8 +221,6 @@ describe('buildSlackResponseContextBlock', () => {
   test('renders and escapes a notice when response metadata is absent', () => {
     expect(
       buildSlackResponseContextBlock({
-        consoleBaseUrl: undefined,
-        threadKey: 'slack:C1:1',
         notice: 'Persona "<unsafe&persona>" cannot be used.'
       })
     ).toEqual({
