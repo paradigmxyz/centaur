@@ -41,7 +41,7 @@ instead of retrying them. A credential reconciliation task deactivates
 observations from dead or deleted broker credentials and removes files only when
 no live user credential can still observe them. Each scan interval also lists
 every credential's Shared Drives and the Shared Drive items shared with it,
-enqueues a scan per member drive and a folder walk per other drive, and revokes
+enqueues a scan per member drive, starts a folder walk per other drive, and revokes
 that credential's access to files in drives it can no longer reach. A folder
 walk runs as one Absurd task per batch of folders: each batch lists its
 folders' children in a single Drive search and spawns batches for the

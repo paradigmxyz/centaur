@@ -19,7 +19,7 @@ use crate::{
     config::{
         Config, DOCUMENT_DELETE_TASK, DOCUMENT_EMBED_TASK, DRIVE_CREDENTIALS_RECONCILE_TASK,
         DRIVE_SCAN_TASK, PDF_EXTRACT_TASK, SHARED_DRIVE_SCAN_TASK, SHARED_DRIVES_DISCOVER_TASK,
-        SHARED_FOLDERS_BATCH_TASK, SHARED_FOLDERS_WALK_TASK,
+        SHARED_FOLDERS_BATCH_TASK,
     },
     credentials::GoogleCredential,
     drive::{DriveChange, DriveClient, DriveFile, Permission},
@@ -62,13 +62,6 @@ pub struct SharedDriveScanParams {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct SharedFoldersWalkParams {
-    pub credential_id: i64,
-    pub drive_id: String,
-    pub roots: SharedFolderRoots,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
 pub struct FolderBatchParams {
     pub credential_id: i64,
     pub drive_id: String,
@@ -76,7 +69,7 @@ pub struct FolderBatchParams {
     pub started_at: DateTime<Utc>,
     pub batch_id: String,
     pub folder_ids: Vec<String>,
-    /// Directly shared files, carried by a walk's first batch.
+    /// Directly shared files, carried by one root batch.
     pub files: Vec<DriveFile>,
 }
 
@@ -147,15 +140,6 @@ pub fn register(state: TaskState) -> Result<()> {
         move |params: DiscoverSharedDrivesParams, ctx| {
             let state = discover_state.clone();
             async move { task_result(discover_shared_drives(&state, params, &ctx).await) }
-        },
-    )?;
-
-    let walk_state = state.clone();
-    state.absurd.register_task(
-        SHARED_FOLDERS_WALK_TASK,
-        move |params: SharedFoldersWalkParams, ctx| {
-            let state = walk_state.clone();
-            async move { task_result(start_shared_folders_walk(&state, params, &ctx).await) }
         },
     )?;
 
@@ -490,25 +474,9 @@ async fn discover_shared_drives(
             )
             .await?;
     }
+    let mut walks_started = 0;
     for (drive_id, roots) in folder_roots {
-        state
-            .absurd
-            .spawn(
-                SHARED_FOLDERS_WALK_TASK,
-                SharedFoldersWalkParams {
-                    credential_id: credential.id,
-                    drive_id: drive_id.clone(),
-                    roots,
-                },
-                SpawnOptions {
-                    idempotency_key: Some(format!(
-                        "drive.shared_folders.walk:{}:{drive_id}:{}",
-                        credential.id, params.bucket
-                    )),
-                    ..SpawnOptions::default()
-                },
-            )
-            .await?;
+        walks_started += start_folder_walk(state, credential.id, &drive_id, roots).await? as usize;
     }
     info!(
         event = "company_context_shared_drives_discovered",
@@ -516,6 +484,7 @@ async fn discover_shared_drives(
         credential_id = credential.id,
         member_drives = member_drive_ids.len(),
         shared_folder_drives = folder_drive_ids.len(),
+        walks_started,
         departed_files = departed_files.len()
     );
     Ok(TaskSummary {
@@ -553,65 +522,33 @@ fn group_folder_roots(
 }
 
 /// Starts a walk of the shared folders of one Shared Drive the user is not a
-/// member of, unless one is already running.
+/// member of, unless one is already running. Returns whether it started one.
 ///
 /// Absurd runs the walk as one task per folder batch. Each batch lists its
 /// folders' children and spawns batches for the subfolders it finds. When the
 /// last batch finishes, the credential's observations in the drive that the
 /// walk did not reach are removed.
-async fn start_shared_folders_walk(
+async fn start_folder_walk(
     state: &TaskState,
-    params: SharedFoldersWalkParams,
-    ctx: &TaskContext,
-) -> Result<TaskSummary> {
-    let credential = state
-        .drive
-        .credentials()
-        .google_credential(params.credential_id)
-        .await?;
-    let drive_id = params.drive_id.as_str();
-    let scope = folder_walk_scope(credential.id, drive_id);
+    credential_id: i64,
+    drive_id: &str,
+    roots: SharedFolderRoots,
+) -> Result<bool> {
+    let scope = folder_walk_scope(credential_id, drive_id);
     let mut tx = state.pool.begin().await?;
-    let running = sqlx::query_scalar::<_, bool>(
+    // A batch that failed permanently leaves its walk unfinished. Abandon such
+    // a walk without cleanup; its remaining batches become no-ops.
+    sqlx::query(
         r#"
-        SELECT started_at >= NOW() - make_interval(secs => $2)
-        FROM company_context_system.google_drive_folder_walks
+        DELETE FROM company_context_system.google_drive_folder_walks
         WHERE scope_id = $1
-        FOR UPDATE
+          AND started_at < NOW() - make_interval(secs => $2)
         "#,
     )
     .bind(&scope)
     .bind(FOLDER_WALK_MAX_AGE_SECONDS)
-    .fetch_optional(&mut *tx)
+    .execute(&mut *tx)
     .await?;
-    match running {
-        Some(true) => {
-            tx.rollback().await?;
-            return Ok(TaskSummary {
-                status: "in_progress",
-                files: 0,
-            });
-        }
-        Some(false) => {
-            // A batch that failed permanently leaves its walk unfinished. Abandon
-            // the walk without cleanup; its remaining batches become no-ops.
-            warn!(
-                event = "company_context_shared_folders_walk_abandoned",
-                task_id = ctx.task_id(),
-                scope
-            );
-            sqlx::query(
-                r#"
-                DELETE FROM company_context_system.google_drive_folder_walks
-                WHERE scope_id = $1
-                "#,
-            )
-            .bind(&scope)
-            .execute(&mut *tx)
-            .await?;
-        }
-        None => {}
-    }
     let Some(started_at) = sqlx::query_scalar::<_, DateTime<Utc>>(
         r#"
         INSERT INTO company_context_system.google_drive_folder_walks (
@@ -623,41 +560,29 @@ async fn start_shared_folders_walk(
         "#,
     )
     .bind(&scope)
-    .bind(credential.id)
+    .bind(credential_id)
     .bind(drive_id)
     .fetch_optional(&mut *tx)
     .await?
     else {
-        // A concurrent run started this walk first.
+        // The previous walk is still running.
         tx.rollback().await?;
-        return Ok(TaskSummary {
-            status: "in_progress",
-            files: 0,
-        });
+        return Ok(false);
     };
     let walk = FolderWalk {
-        credential_id: credential.id,
+        credential_id,
         drive_id,
         scope: &scope,
         started_at,
     };
     let batches = plan_folder_batches(
-        params.roots.folder_ids,
-        params.roots.files,
+        roots.folder_ids,
+        roots.files,
         state.config.folder_walk_batch_size,
     );
-    let spawned = spawn_folder_batches(state, &mut tx, &walk, batches).await?;
+    spawn_folder_batches(state, &mut tx, &walk, batches).await?;
     tx.commit().await?;
-    info!(
-        event = "company_context_shared_folders_walk_started",
-        task_id = ctx.task_id(),
-        scope,
-        batches = spawned
-    );
-    Ok(TaskSummary {
-        status: "started",
-        files: 0,
-    })
+    Ok(true)
 }
 
 /// Lists one batch of a walk's folders, records the PDFs found, and spawns
@@ -675,12 +600,6 @@ async fn walk_folder_batch(
         scope: &scope,
         started_at: params.started_at,
     };
-    if !folder_batch_pending(&state.pool, &walk, &params.batch_id).await? {
-        return Ok(TaskSummary {
-            status: "superseded",
-            files: 0,
-        });
-    }
     let credential = state
         .drive
         .credentials()
@@ -694,15 +613,12 @@ async fn walk_folder_batch(
             files += enqueue_file(state, &credential, file).await? as usize;
         }
     }
-    let child_folder_ids = if params.folder_ids.is_empty() {
-        Vec::new()
-    } else {
-        let (folder_files, child_folder_ids) =
-            list_folder_batch(state, &credential, walk.drive_id, &params.folder_ids).await?;
-        files += folder_files;
-        child_folder_ids
-    };
+    let (folder_files, child_folder_ids) =
+        list_folder_children(state, &credential, walk.drive_id, &params.folder_ids).await?;
+    files += folder_files;
 
+    // Locking the walk serializes batch finishes, so exactly one batch sees
+    // that none remain pending and runs the cleanup.
     let mut tx = state.pool.begin().await?;
     let current = sqlx::query_scalar::<_, bool>(
         r#"
@@ -781,22 +697,19 @@ struct FolderWalk<'a> {
     started_at: DateTime<Utc>,
 }
 
-/// Groups folders into batches of at most `batch_size`, attaching directly
-/// shared files to the first batch.
+/// Groups folders into batches of at most `batch_size`; directly shared files
+/// form one more batch.
 fn plan_folder_batches(
     folder_ids: Vec<String>,
     files: Vec<DriveFile>,
     batch_size: usize,
 ) -> Vec<(Vec<String>, Vec<DriveFile>)> {
-    let mut batches: Vec<(Vec<String>, Vec<DriveFile>)> = folder_ids
+    let mut batches: Vec<_> = folder_ids
         .chunks(batch_size)
         .map(|chunk| (chunk.to_vec(), Vec::new()))
         .collect();
     if !files.is_empty() {
-        match batches.first_mut() {
-            Some(first) => first.1 = files,
-            None => batches.push((Vec::new(), files)),
-        }
+        batches.push((Vec::new(), files));
     }
     batches
 }
@@ -856,32 +769,6 @@ async fn spawn_folder_batches(
     Ok(count)
 }
 
-async fn folder_batch_pending(
-    pool: &PgPool,
-    walk: &FolderWalk<'_>,
-    batch_id: &str,
-) -> Result<bool> {
-    Ok(sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM company_context_system.google_drive_folder_walks walks
-            JOIN company_context_system.google_drive_folder_walk_batches batches
-              ON batches.scope_id = walks.scope_id
-            WHERE walks.scope_id = $1
-              AND walks.started_at = $2
-              AND batches.batch_id = $3::uuid
-              AND NOT batches.done
-        )
-        "#,
-    )
-    .bind(walk.scope)
-    .bind(walk.started_at)
-    .bind(batch_id)
-    .fetch_one(pool)
-    .await?)
-}
-
 /// Ends the walk once no batch is pending, returning the files it did not
 /// reach. Runs in the transaction that marks the last batch done.
 async fn finish_walk_if_drained(
@@ -933,43 +820,6 @@ async fn finish_walk_if_drained(
     Ok(Some(unreached))
 }
 
-/// Lists a folder batch, retrying folder by folder if Drive rejects the
-/// combined query, and skipping folders deleted or unshared during the walk.
-async fn list_folder_batch(
-    state: &TaskState,
-    credential: &GoogleCredential,
-    drive_id: &str,
-    folder_ids: &[String],
-) -> Result<(usize, Vec<String>)> {
-    match list_folder_children(state, credential, drive_id, folder_ids).await {
-        Err(error) if is_rejected(&error) && folder_ids.len() > 1 => {
-            let mut files = 0;
-            let mut child_folder_ids = Vec::new();
-            for folder_id in folder_ids {
-                let (folder_files, folder_children) = Box::pin(list_folder_batch(
-                    state,
-                    credential,
-                    drive_id,
-                    std::slice::from_ref(folder_id),
-                ))
-                .await?;
-                files += folder_files;
-                child_folder_ids.extend(folder_children);
-            }
-            Ok((files, child_folder_ids))
-        }
-        Err(error) if is_rejected(&error) => {
-            warn!(
-                event = "company_context_shared_folder_skipped",
-                folder_id = folder_ids.first().map(String::as_str),
-                error = %error
-            );
-            Ok((0, Vec::new()))
-        }
-        result => result,
-    }
-}
-
 async fn list_folder_children(
     state: &TaskState,
     credential: &GoogleCredential,
@@ -978,6 +828,9 @@ async fn list_folder_children(
 ) -> Result<(usize, Vec<String>)> {
     let mut files = 0;
     let mut child_folder_ids = Vec::new();
+    if folder_ids.is_empty() {
+        return Ok((files, child_folder_ids));
+    }
     let mut page_token: Option<String> = None;
     loop {
         let page = state
@@ -2160,19 +2013,15 @@ mod tests {
     }
 
     #[test]
-    fn folder_batches_are_bounded_and_carry_shared_files_once() {
+    fn folder_batches_are_bounded_and_shared_files_form_one_batch() {
         let folders = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
         let batches = plan_folder_batches(folders(&["a", "b", "c"]), vec![pdf("drive-a")], 2);
-        assert_eq!(batches.len(), 2);
+        assert_eq!(batches.len(), 3);
         assert_eq!(batches[0].0, ["a", "b"]);
-        assert_eq!(batches[0].1.len(), 1);
         assert_eq!(batches[1].0, ["c"]);
-        assert!(batches[1].1.is_empty());
-
-        let files_only = plan_folder_batches(Vec::new(), vec![pdf("drive-a")], 2);
-        assert_eq!(files_only.len(), 1);
-        assert!(files_only[0].0.is_empty());
-        assert_eq!(files_only[0].1.len(), 1);
+        assert!(batches[..2].iter().all(|batch| batch.1.is_empty()));
+        assert!(batches[2].0.is_empty());
+        assert_eq!(batches[2].1.len(), 1);
 
         assert!(plan_folder_batches(Vec::new(), Vec::new(), 2).is_empty());
     }

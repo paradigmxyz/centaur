@@ -16,20 +16,15 @@ use crate::{
 
 const DRIVE_REQUEST_ATTEMPTS: u32 = 4;
 const FILE_FIELDS: &str = "id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress),permissions(id,type,role,emailAddress,domain,allowFileDiscovery)";
+/// Drive caps pages at 100 when permissions are requested, and omits Shared
+/// Drive permissions for non-members anyway, so walks list without them.
+const WALK_PAGE_SIZE: u16 = 1_000;
 const WALK_FILE_FIELDS: &str = "id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress)";
 const FOLDER_OR_PDF_QUERY: &str = "trashed = false and (mimeType = 'application/vnd.google-apps.folder' or mimeType = 'application/pdf')";
 /// The user corpus plus Shared Drive items the user can reach without membership.
 const ACCESSIBLE_CORPUS: &[(&str, &str)] =
     &[("corpora", "user"), ("includeItemsFromAllDrives", "true")];
 const DRIVE_SERVER_RETRY_BASE: Duration = Duration::from_secs(1);
-
-enum ListShape {
-    /// Includes permissions, which limits pages to the configured size.
-    WithPermissions(u16),
-    /// Omits permissions so pages can hold 1,000 files. Drive omits Shared
-    /// Drive permissions for non-members anyway.
-    Walk,
-}
 
 #[derive(Clone)]
 pub struct DriveClient {
@@ -243,7 +238,8 @@ impl DriveClient {
             credential_id,
             &format!("mimeType = '{PDF_MIME_TYPE}' and trashed = false"),
             corpus,
-            ListShape::WithPermissions(page_size),
+            FILE_FIELDS,
+            page_size,
             page_token,
         )
         .await
@@ -260,7 +256,8 @@ impl DriveClient {
             credential_id,
             &format!("sharedWithMe = true and {FOLDER_OR_PDF_QUERY}"),
             ACCESSIBLE_CORPUS,
-            ListShape::Walk,
+            WALK_FILE_FIELDS,
+            WALK_PAGE_SIZE,
             page_token,
         )
         .await
@@ -283,7 +280,8 @@ impl DriveClient {
             credential_id,
             &folder_children_query(folder_ids),
             ACCESSIBLE_CORPUS,
-            ListShape::Walk,
+            WALK_FILE_FIELDS,
+            WALK_PAGE_SIZE,
             page_token,
         )
         .await
@@ -294,13 +292,10 @@ impl DriveClient {
         credential_id: i64,
         query: &str,
         corpus: &[(&str, &str)],
-        shape: ListShape,
+        file_fields: &str,
+        page_size: u16,
         page_token: Option<&str>,
     ) -> Result<FilePage> {
-        let (page_size, file_fields) = match shape {
-            ListShape::WithPermissions(page_size) => (page_size, FILE_FIELDS),
-            ListShape::Walk => (1_000, WALK_FILE_FIELDS),
-        };
         let fields = format!("nextPageToken,incompleteSearch,files({file_fields})");
         let mut request = self
             .http
