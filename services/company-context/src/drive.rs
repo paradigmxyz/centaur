@@ -52,11 +52,13 @@ pub struct DriveFile {
 }
 
 impl DriveFile {
-    pub fn is_active_user_pdf(&self) -> bool {
-        !self.trashed
-            && self.mime_type == PDF_MIME_TYPE
-            && !self.id.is_empty()
-            && self.drive_id.is_empty()
+    pub fn is_active_pdf(&self) -> bool {
+        !self.trashed && self.mime_type == PDF_MIME_TYPE && !self.id.is_empty()
+    }
+
+    /// Whether the file lives in the given Shared Drive, or in My Drive for `None`.
+    pub fn belongs_to(&self, shared_drive_id: Option<&str>) -> bool {
+        self.drive_id == shared_drive_id.unwrap_or_default()
     }
 
     pub fn source_version(&self) -> String {
@@ -127,6 +129,19 @@ pub struct DriveChange {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SharedDrivePage {
+    #[serde(default)]
+    pub drives: Vec<SharedDrive>,
+    pub next_page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SharedDrive {
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct StartPageToken {
     start_page_token: String,
 }
@@ -147,13 +162,20 @@ impl DriveClient {
         &self.credentials
     }
 
-    pub async fn start_page_token(&self, credential_id: i64) -> Result<String> {
+    pub async fn start_page_token(
+        &self,
+        credential_id: i64,
+        shared_drive_id: Option<&str>,
+    ) -> Result<String> {
+        let mut request = self
+            .http
+            .get(format!("{}/changes/startPageToken", self.base_url))
+            .query(&[("supportsAllDrives", "true")]);
+        if let Some(drive_id) = shared_drive_id {
+            request = request.query(&[("driveId", drive_id)]);
+        }
         let response = self
-            .send(
-                self.http
-                    .get(format!("{}/changes/startPageToken", self.base_url)),
-                credential_id,
-            )
+            .send(request, credential_id)
             .await?
             .json::<StartPageToken>()
             .await
@@ -164,9 +186,30 @@ impl DriveClient {
         Ok(response.start_page_token)
     }
 
-    pub async fn list_user_pdfs(
+    pub async fn list_shared_drives(
         &self,
         credential_id: i64,
+        page_token: Option<&str>,
+    ) -> Result<SharedDrivePage> {
+        let mut request = self
+            .http
+            .get(format!("{}/drives", self.base_url))
+            .query(&[("pageSize", "100"), ("fields", "nextPageToken,drives(id)")]);
+        if let Some(page_token) = page_token {
+            request = request.query(&[("pageToken", page_token)]);
+        }
+        self.send(request, credential_id)
+            .await?
+            .json::<SharedDrivePage>()
+            .await
+            .context("decode Drive shared drive page")
+    }
+
+    /// Lists PDFs in the user's corpus, or in one Shared Drive when `shared_drive_id` is set.
+    pub async fn list_pdfs(
+        &self,
+        credential_id: i64,
+        shared_drive_id: Option<&str>,
         page_size: u16,
         page_token: Option<&str>,
     ) -> Result<FilePage> {
@@ -178,11 +221,17 @@ impl DriveClient {
             ),
             ("pageSize", page_size.to_string()),
             ("fields", fields.to_owned()),
-            ("corpora", "user".to_owned()),
-            ("includeItemsFromAllDrives", "false".to_owned()),
             ("supportsAllDrives", "true".to_owned()),
             ("orderBy", "modifiedTime".to_owned()),
         ]);
+        request = match shared_drive_id {
+            Some(drive_id) => request.query(&[
+                ("corpora", "drive"),
+                ("driveId", drive_id),
+                ("includeItemsFromAllDrives", "true"),
+            ]),
+            None => request.query(&[("corpora", "user"), ("includeItemsFromAllDrives", "false")]),
+        };
         if let Some(page_token) = page_token {
             request = request.query(&[("pageToken", page_token)]);
         }
@@ -193,26 +242,32 @@ impl DriveClient {
             .await
             .context("decode Drive file page")?;
         if page.incomplete_search {
-            bail!("Google Drive reported an incomplete user corpus search");
+            bail!("Google Drive reported an incomplete corpus search");
         }
         Ok(page)
     }
 
-    pub async fn list_user_changes(
+    pub async fn list_changes(
         &self,
         credential_id: i64,
+        shared_drive_id: Option<&str>,
         page_size: u16,
         page_token: &str,
     ) -> Result<ChangePage> {
         let fields = "nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress),permissions(id,type,role,emailAddress,domain,allowFileDiscovery)))";
-        let request = self.http.get(format!("{}/changes", self.base_url)).query(&[
+        let mut request = self.http.get(format!("{}/changes", self.base_url)).query(&[
             ("pageToken", page_token.to_owned()),
             ("pageSize", page_size.to_string()),
             ("fields", fields.to_owned()),
-            ("includeItemsFromAllDrives", "false".to_owned()),
             ("supportsAllDrives", "true".to_owned()),
             ("includeRemoved", "true".to_owned()),
         ]);
+        request = match shared_drive_id {
+            Some(drive_id) => {
+                request.query(&[("driveId", drive_id), ("includeItemsFromAllDrives", "true")])
+            }
+            None => request.query(&[("includeItemsFromAllDrives", "false")]),
+        };
         self.send(request, credential_id)
             .await?
             .json::<ChangePage>()
@@ -349,14 +404,27 @@ mod tests {
     }
 
     #[test]
-    fn only_active_non_shared_drive_pdfs_are_processable() {
-        assert!(file(PDF_MIME_TYPE, false).is_active_user_pdf());
-        assert!(!file(PDF_MIME_TYPE, true).is_active_user_pdf());
-        assert!(!file("application/vnd.google-apps.document", false).is_active_user_pdf());
+    fn only_active_pdfs_are_processable() {
+        assert!(file(PDF_MIME_TYPE, false).is_active_pdf());
+        assert!(!file(PDF_MIME_TYPE, true).is_active_pdf());
+        assert!(!file("application/vnd.google-apps.document", false).is_active_pdf());
 
         let mut shared_drive_file = file(PDF_MIME_TYPE, false);
         shared_drive_file.drive_id = "shared-drive-1".to_owned();
-        assert!(!shared_drive_file.is_active_user_pdf());
+        assert!(shared_drive_file.is_active_pdf());
+    }
+
+    #[test]
+    fn files_belong_to_exactly_one_corpus() {
+        let my_drive_file = file(PDF_MIME_TYPE, false);
+        assert!(my_drive_file.belongs_to(None));
+        assert!(!my_drive_file.belongs_to(Some("shared-drive-1")));
+
+        let mut shared_drive_file = file(PDF_MIME_TYPE, false);
+        shared_drive_file.drive_id = "shared-drive-1".to_owned();
+        assert!(!shared_drive_file.belongs_to(None));
+        assert!(shared_drive_file.belongs_to(Some("shared-drive-1")));
+        assert!(!shared_drive_file.belongs_to(Some("shared-drive-2")));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Company Context
 
-Standalone company-context ingestion service. The initial implementation indexes text-bearing PDFs from users' My Drive and shared folders using durable Absurd tasks. Shared Drives are intentionally excluded until they receive independent drive-scoped tasks and checkpoints.
+Standalone company-context ingestion service. The initial implementation indexes text-bearing PDFs from users' My Drive, shared folders, and the Shared Drives they are members of using durable Absurd tasks. Each user corpus and each Shared Drive is scanned by its own task with an independent checkpoint. Shared Drive files that a user can reach only through a directly shared folder, without drive membership, are not yet indexed.
 
 The service owns these Postgres schemas:
 
@@ -39,7 +39,9 @@ on rate limits and retry server errors with bounded exponential backoff. Durable
 document tasks record known permanent content and request failures as `rejected`
 instead of retrying them. A credential reconciliation task deactivates
 observations from dead or deleted broker credentials and removes files only when
-no live user credential can still observe them. The Helm deployment reads
+no live user credential can still observe them. Each scan interval also lists
+every credential's Shared Drives, enqueues a scan per drive, and revokes that
+credential's access to files in drives it has left. The Helm deployment reads
 `OPENAI_API_KEY` directly from the shared Kubernetes Secret.
 
 Common optional settings:

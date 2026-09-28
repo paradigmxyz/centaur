@@ -10,10 +10,10 @@ use tracing::{error, info, warn};
 use crate::{
     config::{
         Config, DOCUMENT_DELETE_TASK, DOCUMENT_EMBED_TASK, DRIVE_CREDENTIALS_RECONCILE_TASK,
-        DRIVE_SCAN_TASK, PDF_EXTRACT_TASK,
+        DRIVE_SCAN_TASK, PDF_EXTRACT_TASK, SHARED_DRIVE_SCAN_TASK, SHARED_DRIVES_DISCOVER_TASK,
     },
     credentials::GoogleCredential,
-    drive::{DriveClient, DriveFile, Permission},
+    drive::{DriveChange, DriveClient, DriveFile, Permission},
     embeddings::EmbeddingsClient,
     errors::{is_rejected, rejected},
     extraction::{chunk_text, extract_pdf_text, hex_sha256},
@@ -37,6 +37,19 @@ pub struct ReconcileCredentialsParams {
 pub struct ScanParams {
     pub credential_id: i64,
     pub requested_at: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DiscoverSharedDrivesParams {
+    pub credential_id: i64,
+    pub bucket: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SharedDriveScanParams {
+    pub credential_id: i64,
+    pub drive_id: String,
+    pub bucket: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -85,6 +98,24 @@ pub fn register(state: TaskState) -> Result<()> {
             let state = scan_state.clone();
             async move { task_result(scan_drive(&state, params, &ctx).await) }
         })?;
+
+    let discover_state = state.clone();
+    state.absurd.register_task(
+        SHARED_DRIVES_DISCOVER_TASK,
+        move |params: DiscoverSharedDrivesParams, ctx| {
+            let state = discover_state.clone();
+            async move { task_result(discover_shared_drives(&state, params, &ctx).await) }
+        },
+    )?;
+
+    let shared_scan_state = state.clone();
+    state.absurd.register_task(
+        SHARED_DRIVE_SCAN_TASK,
+        move |params: SharedDriveScanParams, ctx| {
+            let state = shared_scan_state.clone();
+            async move { task_result(scan_shared_drive(&state, params, &ctx).await) }
+        },
+    )?;
 
     let extract_state = state.clone();
     state
@@ -263,19 +294,168 @@ async fn scan_drive(
     params: ScanParams,
     ctx: &TaskContext,
 ) -> Result<TaskSummary> {
+    scan_corpus(state, params.credential_id, None, ctx).await
+}
+
+async fn scan_shared_drive(
+    state: &TaskState,
+    params: SharedDriveScanParams,
+    ctx: &TaskContext,
+) -> Result<TaskSummary> {
+    scan_corpus(state, params.credential_id, Some(&params.drive_id), ctx).await
+}
+
+/// Lists the Shared Drives a credential belongs to, revokes that credential's
+/// observations of files in drives it has left, and enqueues one scan per drive.
+async fn discover_shared_drives(
+    state: &TaskState,
+    params: DiscoverSharedDrivesParams,
+    ctx: &TaskContext,
+) -> Result<TaskSummary> {
     let credential = state
         .drive
         .credentials()
         .google_credential(params.credential_id)
         .await?;
-    let scope = format!("user:broker:{}", credential.id);
+    let mut drive_ids = BTreeSet::new();
+    let mut page_token: Option<String> = None;
+    loop {
+        let page = state
+            .drive
+            .list_shared_drives(credential.id, page_token.as_deref())
+            .await?;
+        drive_ids.extend(
+            page.drives
+                .into_iter()
+                .map(|drive| drive.id)
+                .filter(|id| !id.is_empty()),
+        );
+        match page.next_page_token {
+            Some(next) if !next.is_empty() => page_token = Some(next),
+            _ => break,
+        }
+    }
+    let drive_ids: Vec<String> = drive_ids.into_iter().collect();
+
+    let departed_files: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT observations.file_id
+        FROM company_context_system.google_drive_broker_observations observations
+        JOIN company_context_system.google_drive_files files
+          ON files.file_id = observations.file_id
+        WHERE observations.broker_credential_id = $1
+          AND observations.active
+          AND files.drive_id <> ''
+          AND NOT (files.drive_id = ANY($2::text[]))
+        "#,
+    )
+    .bind(credential.id)
+    .bind(&drive_ids)
+    .fetch_all(&state.pool)
+    .await?;
+    let change_key = format!("shared_drives:{}", params.bucket);
+    for file_id in &departed_files {
+        enqueue_delete(state, credential.id, file_id.clone(), &change_key).await?;
+    }
+
+    // Forget cursors for departed drives so rejoining one starts a full scan.
+    let current_scopes: Vec<String> = drive_ids
+        .iter()
+        .map(|drive_id| checkpoint_scope(credential.id, Some(drive_id)))
+        .collect();
+    sqlx::query(
+        r#"
+        DELETE FROM company_context_system.google_drive_checkpoints
+        WHERE scope_id LIKE $1
+          AND NOT (scope_id = ANY($2::text[]))
+        "#,
+    )
+    .bind(format!("shared_drive:%:broker:{}", credential.id))
+    .bind(&current_scopes)
+    .execute(&state.pool)
+    .await?;
+
+    for drive_id in &drive_ids {
+        state
+            .absurd
+            .spawn(
+                SHARED_DRIVE_SCAN_TASK,
+                SharedDriveScanParams {
+                    credential_id: credential.id,
+                    drive_id: drive_id.clone(),
+                    bucket: params.bucket,
+                },
+                SpawnOptions {
+                    idempotency_key: Some(format!(
+                        "drive.shared_drive.scan:{}:{drive_id}:{}",
+                        credential.id, params.bucket
+                    )),
+                    ..SpawnOptions::default()
+                },
+            )
+            .await?;
+    }
+    info!(
+        event = "company_context_shared_drives_discovered",
+        task_id = ctx.task_id(),
+        credential_id = credential.id,
+        shared_drives = drive_ids.len(),
+        departed_files = departed_files.len()
+    );
+    Ok(TaskSummary {
+        status: "completed",
+        files: departed_files.len(),
+    })
+}
+
+fn checkpoint_scope(credential_id: i64, shared_drive_id: Option<&str>) -> String {
+    match shared_drive_id {
+        Some(drive_id) => format!("shared_drive:{drive_id}:broker:{credential_id}"),
+        None => format!("user:broker:{credential_id}"),
+    }
+}
+
+#[derive(Debug)]
+enum ChangeAction {
+    Observe(Box<DriveFile>),
+    Remove(String),
+    Skip,
+}
+
+/// Each file is scanned by exactly one corpus: My Drive (`None`) or its Shared
+/// Drive. Files in another corpus are left to that corpus's scan.
+fn classify_change(change: DriveChange, shared_drive_id: Option<&str>) -> ChangeAction {
+    match change.file {
+        Some(file) if !file.belongs_to(shared_drive_id) => ChangeAction::Skip,
+        Some(file) if !change.removed && file.is_active_pdf() => {
+            ChangeAction::Observe(Box::new(file))
+        }
+        _ => ChangeAction::Remove(change.file_id),
+    }
+}
+
+async fn scan_corpus(
+    state: &TaskState,
+    credential_id: i64,
+    shared_drive_id: Option<&str>,
+    ctx: &TaskContext,
+) -> Result<TaskSummary> {
+    let credential = state
+        .drive
+        .credentials()
+        .google_credential(credential_id)
+        .await?;
+    let scope = checkpoint_scope(credential.id, shared_drive_id);
     ensure_checkpoint(&state.pool, &scope).await?;
     let mut total = 0;
     for _ in 0..state.config.max_scan_pages {
         let checkpoint = load_checkpoint(&state.pool, &scope).await?;
         if !checkpoint.initial_scan_completed {
             let start_token = if checkpoint.initial_start_page_token.is_empty() {
-                let token = state.drive.start_page_token(credential.id).await?;
+                let token = state
+                    .drive
+                    .start_page_token(credential.id, shared_drive_id)
+                    .await?;
                 sqlx::query(
                     r#"
                     UPDATE company_context_system.google_drive_checkpoints
@@ -294,13 +474,14 @@ async fn scan_drive(
             };
             let page = state
                 .drive
-                .list_user_pdfs(
+                .list_pdfs(
                     credential.id,
+                    shared_drive_id,
                     state.config.scan_page_size,
                     nonempty(&checkpoint.initial_page_token),
                 )
                 .await?;
-            total += enqueue_files(state, &credential, page.files).await?;
+            total += enqueue_files(state, &credential, shared_drive_id, page.files).await?;
             if let Some(next_page_token) = page.next_page_token {
                 sqlx::query(
                     r#"
@@ -343,29 +524,23 @@ async fn scan_drive(
         }
         let page = state
             .drive
-            .list_user_changes(
+            .list_changes(
                 credential.id,
+                shared_drive_id,
                 state.config.scan_page_size,
                 &checkpoint.changes_page_token,
             )
             .await?;
+        let change_key = format!("{scope}:{}", checkpoint.changes_page_token);
         for change in page.changes {
-            match change.file {
-                Some(file) if !file.drive_id.is_empty() => {
-                    // Shared Drives will use independent drive-scoped tasks and checkpoints.
+            match classify_change(change, shared_drive_id) {
+                ChangeAction::Observe(file) => {
+                    total += enqueue_file(state, &credential, *file).await? as usize;
                 }
-                Some(file) if !change.removed && file.is_active_user_pdf() => {
-                    total += enqueue_file(state, &credential, file).await? as usize;
+                ChangeAction::Remove(file_id) => {
+                    enqueue_delete(state, credential.id, file_id, &change_key).await?;
                 }
-                _ => {
-                    enqueue_delete(
-                        state,
-                        &credential,
-                        change.file_id,
-                        &checkpoint.changes_page_token,
-                    )
-                    .await?;
-                }
+                ChangeAction::Skip => {}
             }
         }
         if let Some(next_page_token) = page.next_page_token {
@@ -404,8 +579,9 @@ async fn scan_drive(
         break;
     }
     info!(
-        event = "company_context_drive_user_scan_completed",
+        event = "company_context_drive_scan_completed",
         task_id = ctx.task_id(),
+        scope,
         files_enqueued = total
     );
     Ok(TaskSummary {
@@ -417,10 +593,14 @@ async fn scan_drive(
 async fn enqueue_files(
     state: &TaskState,
     credential: &GoogleCredential,
+    shared_drive_id: Option<&str>,
     files: Vec<DriveFile>,
 ) -> Result<usize> {
     let mut count = 0;
-    for file in files.into_iter().filter(DriveFile::is_active_user_pdf) {
+    for file in files
+        .into_iter()
+        .filter(|file| file.is_active_pdf() && file.belongs_to(shared_drive_id))
+    {
         count += enqueue_file(state, credential, file).await? as usize;
     }
     Ok(count)
@@ -461,15 +641,15 @@ async fn enqueue_file(
 
 async fn enqueue_delete(
     state: &TaskState,
-    credential: &GoogleCredential,
+    credential_id: i64,
     file_id: String,
     change_key: &str,
 ) -> Result<()> {
     if file_id.is_empty() {
         return Ok(());
     }
-    let observation_key = format!("delete:{}:{file_id}:{change_key}", credential.id);
-    if !observe_delete(&state.pool, credential.id, &file_id, &observation_key).await? {
+    let observation_key = format!("delete:{credential_id}:{file_id}:{change_key}");
+    if !observe_delete(&state.pool, credential_id, &file_id, &observation_key).await? {
         return Ok(());
     }
     state
@@ -482,8 +662,7 @@ async fn enqueue_delete(
             },
             SpawnOptions {
                 idempotency_key: Some(format!(
-                    "drive.document.delete:{}:{file_id}:{change_key}",
-                    credential.id
+                    "drive.document.delete:{credential_id}:{file_id}:{change_key}"
                 )),
                 ..SpawnOptions::default()
             },
@@ -601,7 +780,7 @@ async fn observe_delete(
     observation_key: &str,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
-    sqlx::query(
+    let observed = sqlx::query(
         r#"
         UPDATE company_context_system.google_drive_broker_observations
         SET active = FALSE,
@@ -615,7 +794,15 @@ async fn observe_delete(
     .bind(file_id)
     .bind(observation_key)
     .execute(&mut *tx)
-    .await?;
+    .await?
+    .rows_affected()
+        > 0;
+    if !observed {
+        // Changes also report folders and other files this credential never
+        // observed; there is nothing to revoke for them.
+        tx.rollback().await?;
+        return Ok(false);
+    }
     sqlx::query(
         r#"
         DELETE FROM company_context_data.google_drive_document_access
@@ -682,10 +869,8 @@ async fn extract_pdf(
         });
     }
     let result = async {
-        if !file.is_active_user_pdf() {
-            return Err(rejected(
-                "extract task received a non-PDF, trashed, or Shared Drive file",
-            ));
+        if !file.is_active_pdf() {
+            return Err(rejected("extract task received a non-PDF or trashed file"));
         }
         let pdf = state
             .drive
@@ -1354,6 +1539,68 @@ mod tests {
     fn blank_page_tokens_are_omitted() {
         assert_eq!(nonempty(""), None);
         assert_eq!(nonempty("next"), Some("next"));
+    }
+
+    fn change(file_id: &str, removed: bool, file: Option<DriveFile>) -> DriveChange {
+        DriveChange {
+            file_id: file_id.to_owned(),
+            removed,
+            file,
+        }
+    }
+
+    fn pdf(drive_id: &str) -> DriveFile {
+        serde_json::from_value(json!({
+            "id": "file-1",
+            "mimeType": "application/pdf",
+            "driveId": drive_id,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn changes_are_owned_by_the_file_corpus() {
+        let shared = Some("shared-drive-1");
+        assert!(matches!(
+            classify_change(change("file-1", false, Some(pdf("shared-drive-1"))), shared),
+            ChangeAction::Observe(_)
+        ));
+        assert!(matches!(
+            classify_change(change("file-1", false, Some(pdf("shared-drive-1"))), None),
+            ChangeAction::Skip
+        ));
+        assert!(matches!(
+            classify_change(change("file-1", false, Some(pdf(""))), shared),
+            ChangeAction::Skip
+        ));
+        assert!(matches!(
+            classify_change(change("file-1", false, Some(pdf(""))), None),
+            ChangeAction::Observe(_)
+        ));
+    }
+
+    #[test]
+    fn removed_and_inaccessible_changes_remove_the_observation() {
+        let shared = Some("shared-drive-1");
+        assert!(matches!(
+            classify_change(change("file-1", true, None), shared),
+            ChangeAction::Remove(id) if id == "file-1"
+        ));
+        let mut trashed = pdf("shared-drive-1");
+        trashed.trashed = true;
+        assert!(matches!(
+            classify_change(change("file-1", false, Some(trashed)), shared),
+            ChangeAction::Remove(_)
+        ));
+    }
+
+    #[test]
+    fn checkpoint_scopes_are_distinct_per_corpus() {
+        assert_eq!(checkpoint_scope(7, None), "user:broker:7");
+        assert_eq!(
+            checkpoint_scope(7, Some("drive-a")),
+            "shared_drive:drive-a:broker:7"
+        );
     }
 
     #[test]
