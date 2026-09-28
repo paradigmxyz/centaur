@@ -1,7 +1,11 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use absurd::{Client as AbsurdClient, Error as AbsurdError, SpawnOptions, TaskContext};
 use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -11,6 +15,7 @@ use crate::{
     config::{
         Config, DOCUMENT_DELETE_TASK, DOCUMENT_EMBED_TASK, DRIVE_CREDENTIALS_RECONCILE_TASK,
         DRIVE_SCAN_TASK, PDF_EXTRACT_TASK, SHARED_DRIVE_SCAN_TASK, SHARED_DRIVES_DISCOVER_TASK,
+        SHARED_FOLDERS_SCAN_TASK,
     },
     credentials::GoogleCredential,
     drive::{DriveChange, DriveClient, DriveFile, Permission},
@@ -50,6 +55,20 @@ pub struct SharedDriveScanParams {
     pub credential_id: i64,
     pub drive_id: String,
     pub bucket: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SharedFoldersScanParams {
+    pub credential_id: i64,
+    pub drive_id: String,
+    pub roots: SharedFolderRoots,
+}
+
+/// Folders and files in one Shared Drive shared directly with a non-member.
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct SharedFolderRoots {
+    pub folder_ids: Vec<String>,
+    pub files: Vec<DriveFile>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -105,6 +124,15 @@ pub fn register(state: TaskState) -> Result<()> {
         move |params: DiscoverSharedDrivesParams, ctx| {
             let state = discover_state.clone();
             async move { task_result(discover_shared_drives(&state, params, &ctx).await) }
+        },
+    )?;
+
+    let folders_state = state.clone();
+    state.absurd.register_task(
+        SHARED_FOLDERS_SCAN_TASK,
+        move |params: SharedFoldersScanParams, ctx| {
+            let state = folders_state.clone();
+            async move { task_result(scan_shared_folders(&state, params, &ctx).await) }
         },
     )?;
 
@@ -335,7 +363,34 @@ async fn discover_shared_drives(
             _ => break,
         }
     }
-    let drive_ids: Vec<String> = drive_ids.into_iter().collect();
+    let member_drive_ids: Vec<String> = drive_ids.into_iter().collect();
+
+    // Shared Drive items shared with this user outside drive membership are
+    // reachable only by walking down from the shared folders and files.
+    let mut shared_with_me = Vec::new();
+    let mut page_token: Option<String> = None;
+    loop {
+        let page = state
+            .drive
+            .list_shared_with_me(
+                credential.id,
+                state.config.scan_page_size,
+                page_token.as_deref(),
+            )
+            .await?;
+        shared_with_me.extend(page.files);
+        match page.next_page_token {
+            Some(next) if !next.is_empty() => page_token = Some(next),
+            _ => break,
+        }
+    }
+    let folder_roots = group_folder_roots(shared_with_me, &member_drive_ids);
+    let folder_drive_ids: Vec<String> = folder_roots.keys().cloned().collect();
+    let reachable_drive_ids: Vec<String> = member_drive_ids
+        .iter()
+        .chain(&folder_drive_ids)
+        .cloned()
+        .collect();
 
     let departed_files: Vec<String> = sqlx::query_scalar(
         r#"
@@ -350,7 +405,7 @@ async fn discover_shared_drives(
         "#,
     )
     .bind(credential.id)
-    .bind(&drive_ids)
+    .bind(&reachable_drive_ids)
     .fetch_all(&state.pool)
     .await?;
     let change_key = format!("shared_drives:{}", params.bucket);
@@ -358,8 +413,9 @@ async fn discover_shared_drives(
         enqueue_delete(state, credential.id, file_id.clone(), &change_key).await?;
     }
 
-    // Forget cursors for departed drives so rejoining one starts a full scan.
-    let current_scopes: Vec<String> = drive_ids
+    // Forget progress for drives no longer reached this way so that returning
+    // to one starts from a full scan.
+    let member_scopes: Vec<String> = member_drive_ids
         .iter()
         .map(|drive_id| checkpoint_scope(credential.id, Some(drive_id)))
         .collect();
@@ -371,11 +427,22 @@ async fn discover_shared_drives(
         "#,
     )
     .bind(format!("shared_drive:%:broker:{}", credential.id))
-    .bind(&current_scopes)
+    .bind(&member_scopes)
+    .execute(&state.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        DELETE FROM company_context_system.google_drive_folder_scans
+        WHERE broker_credential_id = $1
+          AND NOT (drive_id = ANY($2::text[]))
+        "#,
+    )
+    .bind(credential.id)
+    .bind(&folder_drive_ids)
     .execute(&state.pool)
     .await?;
 
-    for drive_id in &drive_ids {
+    for drive_id in &member_drive_ids {
         state
             .absurd
             .spawn(
@@ -395,17 +462,313 @@ async fn discover_shared_drives(
             )
             .await?;
     }
+    for (drive_id, roots) in folder_roots {
+        state
+            .absurd
+            .spawn(
+                SHARED_FOLDERS_SCAN_TASK,
+                SharedFoldersScanParams {
+                    credential_id: credential.id,
+                    drive_id: drive_id.clone(),
+                    roots,
+                },
+                SpawnOptions {
+                    idempotency_key: Some(format!(
+                        "drive.shared_folders.scan:{}:{drive_id}:{}",
+                        credential.id, params.bucket
+                    )),
+                    ..SpawnOptions::default()
+                },
+            )
+            .await?;
+    }
     info!(
         event = "company_context_shared_drives_discovered",
         task_id = ctx.task_id(),
         credential_id = credential.id,
-        shared_drives = drive_ids.len(),
+        member_drives = member_drive_ids.len(),
+        shared_folder_drives = folder_drive_ids.len(),
         departed_files = departed_files.len()
     );
     Ok(TaskSummary {
         status: "completed",
         files: departed_files.len(),
     })
+}
+
+/// Groups items shared with the user by the Shared Drive they live in, keeping
+/// only drives the user is not a member of; member drives are scanned whole.
+fn group_folder_roots(
+    shared_with_me: Vec<DriveFile>,
+    member_drive_ids: &[String],
+) -> BTreeMap<String, SharedFolderRoots> {
+    let mut roots: BTreeMap<String, SharedFolderRoots> = BTreeMap::new();
+    for file in shared_with_me {
+        if file.drive_id.is_empty() || member_drive_ids.contains(&file.drive_id) {
+            continue;
+        }
+        if file.is_active_folder() {
+            roots
+                .entry(file.drive_id.clone())
+                .or_default()
+                .folder_ids
+                .push(file.id);
+        } else if file.is_active_pdf() {
+            roots
+                .entry(file.drive_id.clone())
+                .or_default()
+                .files
+                .push(file);
+        }
+    }
+    roots
+}
+
+/// Walks the shared folders of one Shared Drive the user is not a member of.
+/// Each run advances the walk by a bounded number of pages; once the queue
+/// drains, observations in the drive not seen since the walk began are removed.
+async fn scan_shared_folders(
+    state: &TaskState,
+    params: SharedFoldersScanParams,
+    ctx: &TaskContext,
+) -> Result<TaskSummary> {
+    let credential = state
+        .drive
+        .credentials()
+        .google_credential(params.credential_id)
+        .await?;
+    let drive_id = params.drive_id.as_str();
+    let scope = folder_scan_scope(credential.id, drive_id);
+    sqlx::query(
+        r#"
+        INSERT INTO company_context_system.google_drive_folder_scans (
+            scope_id, broker_credential_id, drive_id
+        )
+        VALUES ($1, $2, $3)
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(&scope)
+    .bind(credential.id)
+    .bind(drive_id)
+    .execute(&state.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO company_context_system.google_drive_folder_scan_queue (scope_id, folder_id)
+        SELECT $1, folder_id
+        FROM UNNEST($2::text[]) AS roots(folder_id)
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(&scope)
+    .bind(&params.roots.folder_ids)
+    .execute(&state.pool)
+    .await?;
+
+    // Re-observe directly shared files every run so the sweep keeps them.
+    let mut total = 0;
+    for file in params.roots.files {
+        if file.is_active_pdf() && file.belongs_to(Some(drive_id)) {
+            total += enqueue_file(state, &credential, file).await? as usize;
+        }
+    }
+
+    let mut swept = None;
+    for _ in 0..state.config.max_scan_pages {
+        let mut tx = state.pool.begin().await?;
+        // Concurrent runs of this scope each take a different folder.
+        let Some(row) = sqlx::query(
+            r#"
+            SELECT folder_id, page_token
+            FROM company_context_system.google_drive_folder_scan_queue
+            WHERE scope_id = $1
+              AND NOT done
+            ORDER BY folder_id
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+            "#,
+        )
+        .bind(&scope)
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
+            tx.rollback().await?;
+            swept = complete_folder_scan(state, credential.id, &scope, drive_id).await?;
+            break;
+        };
+        let folder_id: String = row.try_get("folder_id")?;
+        let page_token: String = row.try_get("page_token")?;
+        let page = match state
+            .drive
+            .list_folder_children(
+                credential.id,
+                &folder_id,
+                state.config.scan_page_size,
+                nonempty(&page_token),
+            )
+            .await
+        {
+            Ok(page) => page,
+            Err(error) if is_rejected(&error) => {
+                // The folder was deleted or unshared during the walk.
+                warn!(
+                    event = "company_context_shared_folder_skipped",
+                    task_id = ctx.task_id(),
+                    folder_id,
+                    error = %error
+                );
+                mark_folder_done(&mut tx, &scope, &folder_id, "").await?;
+                tx.commit().await?;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let mut child_folder_ids = Vec::new();
+        for child in page.files {
+            if !child.belongs_to(Some(drive_id)) {
+                continue;
+            }
+            if child.is_active_folder() {
+                child_folder_ids.push(child.id);
+            } else if child.is_active_pdf() {
+                // Observe before the page commits so a crash never lets the
+                // sweep remove a file this walk has reached.
+                total += enqueue_file(state, &credential, child).await? as usize;
+            }
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO company_context_system.google_drive_folder_scan_queue (scope_id, folder_id)
+            SELECT $1, folder_id
+            FROM UNNEST($2::text[]) AS children(folder_id)
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(&scope)
+        .bind(&child_folder_ids)
+        .execute(&mut *tx)
+        .await?;
+        let next_page_token = page.next_page_token.unwrap_or_default();
+        mark_folder_done(&mut tx, &scope, &folder_id, &next_page_token).await?;
+        tx.commit().await?;
+    }
+    info!(
+        event = "company_context_shared_folders_scanned",
+        task_id = ctx.task_id(),
+        scope,
+        files_enqueued = total,
+        completed = swept.is_some(),
+        files_removed = swept.unwrap_or_default()
+    );
+    Ok(TaskSummary {
+        status: "completed",
+        files: total,
+    })
+}
+
+/// Records progress through a folder; an empty next page token finishes it.
+async fn mark_folder_done(
+    tx: &mut Transaction<'_, Postgres>,
+    scope: &str,
+    folder_id: &str,
+    next_page_token: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE company_context_system.google_drive_folder_scan_queue
+        SET page_token = $3,
+            done = $3 = ''
+        WHERE scope_id = $1
+          AND folder_id = $2
+        "#,
+    )
+    .bind(scope)
+    .bind(folder_id)
+    .bind(next_page_token)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Ends a drained walk and removes files it did not reach. Returns the number
+/// of removals, or `None` when another run still holds part of the walk.
+async fn complete_folder_scan(
+    state: &TaskState,
+    credential_id: i64,
+    scope: &str,
+    drive_id: &str,
+) -> Result<Option<usize>> {
+    let mut tx = state.pool.begin().await?;
+    let Some(started_at) = sqlx::query_scalar::<_, DateTime<Utc>>(
+        r#"
+        SELECT started_at
+        FROM company_context_system.google_drive_folder_scans
+        WHERE scope_id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(scope)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    let pending = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM company_context_system.google_drive_folder_scan_queue
+            WHERE scope_id = $1
+              AND NOT done
+        )
+        "#,
+    )
+    .bind(scope)
+    .fetch_one(&mut *tx)
+    .await?;
+    if pending {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    let unreached: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT observations.file_id
+        FROM company_context_system.google_drive_broker_observations observations
+        JOIN company_context_system.google_drive_files files
+          ON files.file_id = observations.file_id
+        WHERE observations.broker_credential_id = $1
+          AND observations.active
+          AND files.drive_id = $2
+          AND observations.last_seen_at < $3
+        "#,
+    )
+    .bind(credential_id)
+    .bind(drive_id)
+    .bind(started_at)
+    .fetch_all(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        DELETE FROM company_context_system.google_drive_folder_scans
+        WHERE scope_id = $1
+        "#,
+    )
+    .bind(scope)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    // A failed removal is retried by the next walk's sweep.
+    let change_key = format!("{scope}:{}", started_at.to_rfc3339());
+    for file_id in &unreached {
+        enqueue_delete(state, credential_id, file_id.clone(), &change_key).await?;
+    }
+    Ok(Some(unreached.len()))
+}
+
+fn folder_scan_scope(credential_id: i64, drive_id: &str) -> String {
+    format!("shared_folders:{drive_id}:broker:{credential_id}")
 }
 
 fn checkpoint_scope(credential_id: i64, shared_drive_id: Option<&str>) -> String {
@@ -1549,13 +1912,45 @@ mod tests {
         }
     }
 
-    fn pdf(drive_id: &str) -> DriveFile {
+    fn drive_file(id: &str, mime_type: &str, drive_id: &str) -> DriveFile {
         serde_json::from_value(json!({
-            "id": "file-1",
-            "mimeType": "application/pdf",
+            "id": id,
+            "mimeType": mime_type,
             "driveId": drive_id,
         }))
         .unwrap()
+    }
+
+    fn pdf(drive_id: &str) -> DriveFile {
+        drive_file("file-1", "application/pdf", drive_id)
+    }
+
+    #[test]
+    fn folder_roots_are_grouped_by_non_member_drive() {
+        let folder = "application/vnd.google-apps.folder";
+        let roots = group_folder_roots(
+            vec![
+                drive_file("folder-a", folder, "drive-a"),
+                drive_file("pdf-a", "application/pdf", "drive-a"),
+                drive_file("doc-a", "application/vnd.google-apps.document", "drive-a"),
+                drive_file("folder-b", folder, "drive-b"),
+                drive_file("folder-member", folder, "drive-member"),
+                drive_file("folder-my-drive", folder, ""),
+            ],
+            &["drive-member".to_owned()],
+        );
+        assert_eq!(roots.keys().collect::<Vec<_>>(), ["drive-a", "drive-b"]);
+        assert_eq!(roots["drive-a"].folder_ids, ["folder-a"]);
+        assert_eq!(
+            roots["drive-a"]
+                .files
+                .iter()
+                .map(|file| file.id.as_str())
+                .collect::<Vec<_>>(),
+            ["pdf-a"]
+        );
+        assert_eq!(roots["drive-b"].folder_ids, ["folder-b"]);
+        assert!(roots["drive-b"].files.is_empty());
     }
 
     #[test]

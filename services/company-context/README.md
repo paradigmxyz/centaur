@@ -1,6 +1,6 @@
 # Company Context
 
-Standalone company-context ingestion service. The initial implementation indexes text-bearing PDFs from users' My Drive, shared folders, and the Shared Drives they are members of using durable Absurd tasks. Each user corpus and each Shared Drive is scanned by its own task with an independent checkpoint. Shared Drive files that a user can reach only through a directly shared folder, without drive membership, are not yet indexed.
+Standalone company-context ingestion service. The initial implementation indexes text-bearing PDFs from users' My Drive, shared folders, Shared Drives they are members of, and Shared Drive folders shared with them without membership, using durable Absurd tasks. Each user corpus and each member Shared Drive is followed through its own Drive change feed and checkpoint. Shared Drive folders shared with non-members have no change feed, so they are walked recursively each cycle; when a walk finishes, files it no longer reached are removed.
 
 The service owns these Postgres schemas:
 
@@ -40,8 +40,11 @@ document tasks record known permanent content and request failures as `rejected`
 instead of retrying them. A credential reconciliation task deactivates
 observations from dead or deleted broker credentials and removes files only when
 no live user credential can still observe them. Each scan interval also lists
-every credential's Shared Drives, enqueues a scan per drive, and revokes that
-credential's access to files in drives it has left. The Helm deployment reads
+every credential's Shared Drives and the Shared Drive items shared with it,
+enqueues a scan per member drive and a folder walk per other drive, and revokes
+that credential's access to files in drives it can no longer reach. A folder
+walk advances by at most `COMPANY_CONTEXT_MAX_SCAN_PAGES` folder pages per
+interval, so a large tree takes several intervals to index and to refresh. The Helm deployment reads
 `OPENAI_API_KEY` directly from the shared Kubernetes Secret.
 
 Common optional settings:

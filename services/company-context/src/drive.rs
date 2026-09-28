@@ -9,12 +9,17 @@ use tokio::time::sleep;
 use tracing::warn;
 
 use crate::{
-    config::{Config, PDF_MIME_TYPE},
+    config::{Config, FOLDER_MIME_TYPE, PDF_MIME_TYPE},
     credentials::ConsoleCredentials,
     errors::rejected,
 };
 
 const DRIVE_REQUEST_ATTEMPTS: u32 = 4;
+const FILE_FIELDS: &str = "id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress),permissions(id,type,role,emailAddress,domain,allowFileDiscovery)";
+const FOLDER_OR_PDF_QUERY: &str = "trashed = false and (mimeType = 'application/vnd.google-apps.folder' or mimeType = 'application/pdf')";
+/// The user corpus plus Shared Drive items the user can reach without membership.
+const ACCESSIBLE_CORPUS: &[(&str, &str)] =
+    &[("corpora", "user"), ("includeItemsFromAllDrives", "true")];
 const DRIVE_SERVER_RETRY_BASE: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
@@ -54,6 +59,10 @@ pub struct DriveFile {
 impl DriveFile {
     pub fn is_active_pdf(&self) -> bool {
         !self.trashed && self.mime_type == PDF_MIME_TYPE && !self.id.is_empty()
+    }
+
+    pub fn is_active_folder(&self) -> bool {
+        !self.trashed && self.mime_type == FOLDER_MIME_TYPE && !self.id.is_empty()
     }
 
     /// Whether the file lives in the given Shared Drive, or in My Drive for `None`.
@@ -213,25 +222,82 @@ impl DriveClient {
         page_size: u16,
         page_token: Option<&str>,
     ) -> Result<FilePage> {
-        let fields = "nextPageToken,incompleteSearch,files(id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress),permissions(id,type,role,emailAddress,domain,allowFileDiscovery))";
-        let mut request = self.http.get(format!("{}/files", self.base_url)).query(&[
-            (
-                "q",
-                "mimeType = 'application/pdf' and trashed = false".to_owned(),
-            ),
-            ("pageSize", page_size.to_string()),
-            ("fields", fields.to_owned()),
-            ("supportsAllDrives", "true".to_owned()),
-            ("orderBy", "modifiedTime".to_owned()),
-        ]);
-        request = match shared_drive_id {
-            Some(drive_id) => request.query(&[
+        let corpus: &[(&str, &str)] = match shared_drive_id {
+            Some(drive_id) => &[
                 ("corpora", "drive"),
                 ("driveId", drive_id),
                 ("includeItemsFromAllDrives", "true"),
-            ]),
-            None => request.query(&[("corpora", "user"), ("includeItemsFromAllDrives", "false")]),
+            ],
+            None => &[("corpora", "user"), ("includeItemsFromAllDrives", "false")],
         };
+        self.list_files(
+            credential_id,
+            &format!("mimeType = '{PDF_MIME_TYPE}' and trashed = false"),
+            corpus,
+            page_size,
+            page_token,
+        )
+        .await
+    }
+
+    /// Lists folders and PDFs shared with the user, including Shared Drive items
+    /// shared with users who are not members of that drive.
+    pub async fn list_shared_with_me(
+        &self,
+        credential_id: i64,
+        page_size: u16,
+        page_token: Option<&str>,
+    ) -> Result<FilePage> {
+        self.list_files(
+            credential_id,
+            &format!("sharedWithMe = true and {FOLDER_OR_PDF_QUERY}"),
+            ACCESSIBLE_CORPUS,
+            page_size,
+            page_token,
+        )
+        .await
+    }
+
+    /// Lists the folders and PDFs directly inside a folder.
+    pub async fn list_folder_children(
+        &self,
+        credential_id: i64,
+        folder_id: &str,
+        page_size: u16,
+        page_token: Option<&str>,
+    ) -> Result<FilePage> {
+        if !is_drive_id(folder_id) {
+            return Err(rejected("Drive folder ID contains unexpected characters"));
+        }
+        self.list_files(
+            credential_id,
+            &format!("'{folder_id}' in parents and {FOLDER_OR_PDF_QUERY}"),
+            ACCESSIBLE_CORPUS,
+            page_size,
+            page_token,
+        )
+        .await
+    }
+
+    async fn list_files(
+        &self,
+        credential_id: i64,
+        query: &str,
+        corpus: &[(&str, &str)],
+        page_size: u16,
+        page_token: Option<&str>,
+    ) -> Result<FilePage> {
+        let fields = format!("nextPageToken,incompleteSearch,files({FILE_FIELDS})");
+        let mut request = self
+            .http
+            .get(format!("{}/files", self.base_url))
+            .query(&[
+                ("q", query),
+                ("pageSize", &page_size.to_string()),
+                ("fields", &fields),
+                ("supportsAllDrives", "true"),
+            ])
+            .query(corpus);
         if let Some(page_token) = page_token {
             request = request.query(&[("pageToken", page_token)]);
         }
@@ -254,11 +320,12 @@ impl DriveClient {
         page_size: u16,
         page_token: &str,
     ) -> Result<ChangePage> {
-        let fields = "nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress),permissions(id,type,role,emailAddress,domain,allowFileDiscovery)))";
+        let fields =
+            format!("nextPageToken,newStartPageToken,changes(fileId,removed,file({FILE_FIELDS}))");
         let mut request = self.http.get(format!("{}/changes", self.base_url)).query(&[
             ("pageToken", page_token.to_owned()),
             ("pageSize", page_size.to_string()),
-            ("fields", fields.to_owned()),
+            ("fields", fields),
             ("supportsAllDrives", "true".to_owned()),
             ("includeRemoved", "true".to_owned()),
         ]);
@@ -348,6 +415,13 @@ impl DriveClient {
     }
 }
 
+fn is_drive_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
 fn server_retry_delay(failed_attempt: u32) -> Duration {
     DRIVE_SERVER_RETRY_BASE.saturating_mul(2_u32.saturating_pow(failed_attempt - 1))
 }
@@ -425,6 +499,14 @@ mod tests {
         assert!(!shared_drive_file.belongs_to(None));
         assert!(shared_drive_file.belongs_to(Some("shared-drive-1")));
         assert!(!shared_drive_file.belongs_to(Some("shared-drive-2")));
+    }
+
+    #[test]
+    fn folder_ids_cannot_escape_the_parents_query() {
+        assert!(is_drive_id("0AbC-d_9"));
+        assert!(!is_drive_id(""));
+        assert!(!is_drive_id("x' or '1' = '1"));
+        assert!(!is_drive_id("x\\"));
     }
 
     #[test]
