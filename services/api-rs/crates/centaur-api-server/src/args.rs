@@ -656,22 +656,15 @@ struct SandboxArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     warm_pool_replenish_interval_secs: u64,
-    /// Hard cap on observed running-like sandboxes. 0 disables capacity
-    /// admission.
+    /// Best-effort admission limit for sandboxes observed as running. The
+    /// limit rejects new creates and resumes but never evicts existing work.
+    /// 0 disables capacity admission.
     #[arg(
         long = "session-sandbox-running-limit",
         env = "SESSION_SANDBOX_RUNNING_LIMIT",
         default_value_t = 0
     )]
     sandbox_running_limit: usize,
-    /// Do not evict assigned idle sandboxes that were active within this
-    /// window. Warm sandboxes can still be discarded first.
-    #[arg(
-        long = "session-sandbox-hot-idle-grace-secs",
-        env = "SESSION_SANDBOX_HOT_IDLE_GRACE_SECS",
-        default_value_t = 300
-    )]
-    sandbox_hot_idle_grace_secs: u64,
     /// Stop any sandbox older than this regardless of status; sessions replace
     /// reaped sandboxes on their next message. 0 disables the max-lifetime
     /// sweep.
@@ -1490,9 +1483,8 @@ impl SandboxArgs {
     }
 
     fn sandbox_capacity_config(&self) -> Option<SandboxCapacityConfig> {
-        (self.sandbox_running_limit > 0).then(|| SandboxCapacityConfig {
+        (self.sandbox_running_limit > 0).then_some(SandboxCapacityConfig {
             max_running: self.sandbox_running_limit,
-            hot_idle_grace: Duration::from_secs(self.sandbox_hot_idle_grace_secs),
         })
     }
 

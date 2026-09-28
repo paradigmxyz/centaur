@@ -228,10 +228,7 @@ impl WarmPoolManager {
 }
 
 fn status_consumes_running_slot(status: &SandboxStatus) -> bool {
-    matches!(
-        status,
-        SandboxStatus::Created | SandboxStatus::Running | SandboxStatus::Unknown(_)
-    )
+    matches!(status, SandboxStatus::Running)
 }
 
 #[derive(Debug, Error)]
@@ -262,6 +259,16 @@ mod tests {
     /// concurrently running tests would fail each other's sandboxes.
     /// Serialize the database-backed tests in this module.
     static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[test]
+    fn running_limit_counts_only_observed_running_sandboxes() {
+        assert!(status_consumes_running_slot(&SandboxStatus::Running));
+        assert!(!status_consumes_running_slot(&SandboxStatus::Created));
+        assert!(!status_consumes_running_slot(&SandboxStatus::Suspended));
+        assert!(!status_consumes_running_slot(&SandboxStatus::Unknown(
+            "unavailable".to_owned()
+        )));
+    }
 
     #[tokio::test]
     async fn replenisher_prunes_missing_ready_rows_before_counting() {
