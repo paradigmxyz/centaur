@@ -1,6 +1,6 @@
 # Company Context
 
-Standalone company-context ingestion service. The initial implementation indexes text-bearing PDFs from users' My Drive, shared folders, Shared Drives they are members of, and Shared Drive folders shared with them without membership, using durable Absurd tasks. Each user corpus and each member Shared Drive is followed through its own Drive change feed and checkpoint. Shared Drive folders shared with non-members have no change feed, so they are walked recursively each cycle; when a walk finishes, files it no longer reached are removed.
+Standalone company-context ingestion service. The initial implementation indexes text-bearing PDFs from users' My Drive, shared folders, Shared Drives they are members of, and Shared Drive folders shared with them without membership, using durable Absurd tasks. Each user corpus and each member Shared Drive is followed through its own Drive change feed and checkpoint. Shared Drive folders shared with non-members have no change feed, so they are walked recursively each cycle, and files no walk has reached for 24 hours are removed.
 
 The service owns these Postgres schemas:
 
@@ -45,8 +45,7 @@ enqueues a scan per member drive, starts a folder walk per other drive, and revo
 that credential's access to files in drives it can no longer reach. A folder
 walk runs as one Absurd task per batch of folders: each batch lists its
 folders' children in a single Drive search and spawns batches for the
-subfolders, so batches run concurrently up to the worker concurrency. When the
-last batch finishes, the next walk starts on the following interval. The Helm deployment reads
+subfolders. The Helm deployment reads
 `OPENAI_API_KEY` directly from the shared Kubernetes Secret.
 
 Common optional settings:

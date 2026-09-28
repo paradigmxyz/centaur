@@ -627,23 +627,6 @@ impl Client {
         params: P,
         options: SpawnOptions,
     ) -> Result<SpawnResult> {
-        self.spawn_with(&self.pool, task_name, params, options)
-            .await
-    }
-
-    /// Spawns a task through `executor`, so the spawn commits or rolls back
-    /// with the caller's transaction.
-    pub async fn spawn_with<'e, E, P>(
-        &self,
-        executor: E,
-        task_name: &str,
-        params: P,
-        options: SpawnOptions,
-    ) -> Result<SpawnResult>
-    where
-        E: sqlx::PgExecutor<'e>,
-        P: Serialize,
-    {
         let params_value = serde_json::to_value(params)?;
         let (queue, effective_options) = self.resolve_spawn(task_name, options)?;
         let effective_options = if let Some(hook) = &self.hooks.before_spawn {
@@ -668,7 +651,7 @@ impl Client {
         .bind(task_name)
         .bind(Json(params_value))
         .bind(Json(Value::Object(payload)))
-        .fetch_one(executor)
+        .fetch_one(&self.pool)
         .await?;
 
         spawn_result_from_row(row)
@@ -2291,46 +2274,6 @@ mod tests {
             Output { value: 42 }
         );
         assert_eq!(step_calls.load(Ordering::SeqCst), 1);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn integration_spawn_with_follows_the_callers_transaction() -> Result<()> {
-        let Some(pool) = optional_test_pool().await? else {
-            return Ok(());
-        };
-
-        let queue = unique_queue("rust_spawn_with");
-        let app = Client::from_pool_with_options(
-            pool.clone(),
-            ClientOptions {
-                queue_name: queue,
-                ..ClientOptions::default()
-            },
-        )?;
-        app.create_queue(None, Default::default()).await?;
-        app.register_task("noop", |_: Value, _| async move { Ok(json!({})) })?;
-
-        let mut tx = pool.begin().await?;
-        let rolled_back = app
-            .spawn_with(&mut *tx, "noop", json!({}), Default::default())
-            .await?;
-        tx.rollback().await?;
-        assert!(app
-            .fetch_task_result(&rolled_back.task_id, None)
-            .await?
-            .is_none());
-
-        let mut tx = pool.begin().await?;
-        let committed = app
-            .spawn_with(&mut *tx, "noop", json!({}), Default::default())
-            .await?;
-        tx.commit().await?;
-        assert!(app
-            .fetch_task_result(&committed.task_id, None)
-            .await?
-            .is_some());
 
         Ok(())
     }
