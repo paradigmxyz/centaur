@@ -499,6 +499,11 @@ companyContext:
     tag: latest
     pullPolicy: Always
   port: 8080
+  # Foreign IDs configured in Rails Console. Google must identify a live broker
+  # credential; embeddings must identify a static credential backed by a
+  # control_plane or token_broker source.
+  googleCredentialForeignId: ""
+  embeddingsCredentialForeignId: ""
   scanIntervalSeconds: 300
   drivePageSize: 100
   maxScanPages: 10

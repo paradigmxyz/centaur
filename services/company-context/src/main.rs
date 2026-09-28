@@ -1,4 +1,5 @@
 mod config;
+mod credentials;
 mod database;
 mod drive;
 mod embeddings;
@@ -26,6 +27,7 @@ use uuid::Uuid;
 
 use crate::{
     config::{Config, QUEUE_NAME},
+    credentials::ConsoleCredentials,
     drive::DriveClient,
     embeddings::EmbeddingsClient,
     tasks::TaskState,
@@ -34,6 +36,7 @@ use crate::{
 #[derive(Clone)]
 struct HttpState {
     pool: sqlx::PgPool,
+    credentials: Arc<ConsoleCredentials>,
     metrics: PrometheusHandle,
 }
 
@@ -45,6 +48,7 @@ async fn main() -> Result<()> {
 
     let config = Arc::new(Config::from_env()?);
     let pool = database::connect_and_migrate(&config.database_url).await?;
+    let credentials = Arc::new(ConsoleCredentials::connect(&config).await?);
     let absurd = Client::from_pool_with_options(
         pool.clone(),
         ClientOptions {
@@ -58,8 +62,8 @@ async fn main() -> Result<()> {
         .await
         .context("create company context Absurd queue")?;
 
-    let drive = DriveClient::new(&config)?;
-    let embeddings = EmbeddingsClient::new(&config)?;
+    let drive = DriveClient::new(&config, credentials.clone())?;
+    let embeddings = EmbeddingsClient::new(&config, credentials.clone())?;
     tasks::register(TaskState {
         config: config.clone(),
         pool: pool.clone(),
@@ -71,6 +75,7 @@ async fn main() -> Result<()> {
     let metrics = telemetry::init_metrics()?;
     let http_state = HttpState {
         pool: pool.clone(),
+        credentials: credentials.clone(),
         metrics,
     };
     let app = Router::new()
@@ -107,12 +112,13 @@ async fn main() -> Result<()> {
     scheduler.abort();
     worker.close().await?;
     server.await.context("join HTTP server")??;
+    credentials.close().await;
     pool.close().await;
     Ok(())
 }
 
 async fn ready(State(state): State<HttpState>) -> StatusCode {
-    if database::ready(&state.pool).await {
+    if database::ready(&state.pool).await && state.credentials.ready().await {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE

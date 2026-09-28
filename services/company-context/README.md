@@ -13,22 +13,31 @@ The initial migrations deliberately add no retrieval-role grants or RLS policies
 
 - Postgres with the existing Absurd schema and the `vector` and `pg_search` extensions available.
 - `pdftotext` from Poppler.
-- Google Drive API authorization, either through `GOOGLE_DRIVE_ACCESS_TOKEN` or an outbound credential-injecting proxy.
-- OpenAI-compatible embedding authorization, either through `OPENAI_API_KEY` or an outbound credential-injecting proxy.
+- A Rails Console database containing a live Google broker credential and an embeddings static credential.
+- The Active Record encryption primary key and derivation salt used by Rails Console.
 
 ## Configuration
 
 Required:
 
 - `DATABASE_URL`
+- `IRON_CONTROL_DATABASE_URL`
+- `IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY`
+- `IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT`
+- `COMPANY_CONTEXT_GOOGLE_CREDENTIAL_FOREIGN_ID`
+- `COMPANY_CONTEXT_EMBEDDINGS_CREDENTIAL_FOREIGN_ID`
+
+The Google foreign ID selects a Rails Console `broker_credentials` row. The
+embeddings foreign ID selects a `static_secrets` row backed by a
+`control_plane` or `token_broker` source. Encrypted values are loaded at request
+time so broker token rotation does not require restarting the daemon.
 
 Common optional settings:
 
+- `IRON_CONTROL_DATABASE_NAME`
 - `BIND_ADDR` (default `0.0.0.0:8080`)
 - `GOOGLE_DRIVE_API_BASE_URL`
-- `GOOGLE_DRIVE_ACCESS_TOKEN`
 - `OPENAI_BASE_URL`
-- `OPENAI_API_KEY`
 - `COMPANY_CONTEXT_SCAN_INTERVAL_SECONDS` (default `300`)
 - `COMPANY_CONTEXT_DRIVE_PAGE_SIZE` (default `100`)
 - `COMPANY_CONTEXT_MAX_SCAN_PAGES` (default `10`)

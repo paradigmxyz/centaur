@@ -79,6 +79,7 @@ jobs:
             '^\.github/workflows/ci\.yml$'
           set_output company_context_checks \
             '^crates/absurd-sdk/' \
+            '^crates/active-record-encryption/' \
             '^services/company-context/' \
             '^\.github/workflows/ci\.yml$'
           set_output proxy_sync_checks \
@@ -203,6 +204,7 @@ jobs:
         with:
           workspaces: |
             crates/absurd-sdk
+            crates/active-record-encryption
             services/company-context
 
       - name: Format

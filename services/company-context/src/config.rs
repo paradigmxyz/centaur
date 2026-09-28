@@ -12,11 +12,15 @@ pub const DOCUMENT_DELETE_TASK: &str = "drive.document.delete";
 #[derive(Clone, Debug)]
 pub struct Config {
     pub database_url: String,
+    pub console_database_url: String,
+    pub console_database_name: Option<String>,
+    pub active_record_primary_key: String,
+    pub active_record_key_derivation_salt: String,
+    pub google_credential_foreign_id: String,
+    pub embeddings_credential_foreign_id: String,
     pub bind_addr: SocketAddr,
     pub google_api_base_url: String,
-    pub google_access_token: Option<String>,
     pub openai_base_url: String,
-    pub openai_api_key: Option<String>,
     pub embeddings_model: String,
     pub embeddings_dimensions: usize,
     pub scan_interval: Duration,
@@ -33,6 +37,7 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Result<Self> {
         let database_url = required_env("DATABASE_URL")?;
+        let console_database_url = required_env("IRON_CONTROL_DATABASE_URL")?;
         let bind_addr = env::var("BIND_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:8080".to_owned())
             .parse()
@@ -59,14 +64,24 @@ impl Config {
 
         Ok(Self {
             database_url,
+            console_database_url,
+            console_database_name: optional_env("IRON_CONTROL_DATABASE_NAME"),
+            active_record_primary_key: required_env("IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY")?,
+            active_record_key_derivation_salt: required_env(
+                "IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT",
+            )?,
+            google_credential_foreign_id: required_env(
+                "COMPANY_CONTEXT_GOOGLE_CREDENTIAL_FOREIGN_ID",
+            )?,
+            embeddings_credential_foreign_id: required_env(
+                "COMPANY_CONTEXT_EMBEDDINGS_CREDENTIAL_FOREIGN_ID",
+            )?,
             bind_addr,
             google_api_base_url: normalized_base_url(
                 "GOOGLE_DRIVE_API_BASE_URL",
                 "https://www.googleapis.com/drive/v3",
             ),
-            google_access_token: optional_env("GOOGLE_DRIVE_ACCESS_TOKEN"),
             openai_base_url: normalized_base_url("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            openai_api_key: optional_env("OPENAI_API_KEY"),
             embeddings_model: env::var("COMPANY_CONTEXT_EMBEDDINGS_MODEL")
                 .unwrap_or_else(|_| "text-embedding-3-small".to_owned()),
             embeddings_dimensions,

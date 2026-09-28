@@ -1,16 +1,21 @@
+use std::sync::Arc;
+
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use reqwest::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Config, PDF_MIME_TYPE};
+use crate::{
+    config::{Config, PDF_MIME_TYPE},
+    credentials::ConsoleCredentials,
+};
 
 #[derive(Clone)]
 pub struct DriveClient {
     http: Client,
     base_url: String,
-    access_token: Option<String>,
+    credentials: Arc<ConsoleCredentials>,
     max_pdf_bytes: usize,
 }
 
@@ -118,13 +123,13 @@ struct StartPageToken {
 }
 
 impl DriveClient {
-    pub fn new(config: &Config) -> Result<Self> {
+    pub fn new(config: &Config, credentials: Arc<ConsoleCredentials>) -> Result<Self> {
         Ok(Self {
             http: Client::builder()
                 .timeout(config.extraction_timeout)
                 .build()?,
             base_url: config.google_api_base_url.clone(),
-            access_token: config.google_access_token.clone(),
+            credentials,
             max_pdf_bytes: config.max_pdf_bytes,
         })
     }
@@ -132,10 +137,8 @@ impl DriveClient {
     pub async fn start_page_token(&self) -> Result<String> {
         let response = self
             .send(
-                self.authorize(
-                    self.http
-                        .get(format!("{}/changes/startPageToken", self.base_url)),
-                ),
+                self.http
+                    .get(format!("{}/changes/startPageToken", self.base_url)),
             )
             .await?
             .json::<StartPageToken>()
@@ -165,7 +168,7 @@ impl DriveClient {
             request = request.query(&[("pageToken", page_token)]);
         }
         let page = self
-            .send(self.authorize(request))
+            .send(request)
             .await?
             .json::<FilePage>()
             .await
@@ -186,7 +189,7 @@ impl DriveClient {
             ("supportsAllDrives", "true".to_owned()),
             ("includeRemoved", "true".to_owned()),
         ]);
-        self.send(self.authorize(request))
+        self.send(request)
             .await?
             .json::<ChangePage>()
             .await
@@ -198,7 +201,7 @@ impl DriveClient {
             .http
             .get(format!("{}/files/{file_id}", self.base_url))
             .query(&[("alt", "media"), ("supportsAllDrives", "true")]);
-        let response = self.send(self.authorize(request)).await?;
+        let response = self.send(request).await?;
         if response
             .content_length()
             .is_some_and(|length| length > self.max_pdf_bytes as u64)
@@ -220,15 +223,10 @@ impl DriveClient {
         Ok(bytes)
     }
 
-    fn authorize(&self, request: RequestBuilder) -> RequestBuilder {
-        match &self.access_token {
-            Some(token) => request.bearer_auth(token),
-            None => request,
-        }
-    }
-
     async fn send(&self, request: RequestBuilder) -> Result<reqwest::Response> {
+        let access_token = self.credentials.google_access_token().await?;
         request
+            .bearer_auth(access_token)
             .send()
             .await
             .context("send Google Drive request")?

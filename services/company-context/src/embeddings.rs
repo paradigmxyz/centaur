@@ -1,8 +1,10 @@
+use std::sync::Arc;
+
 use anyhow::{Context, Result, bail};
-use reqwest::{Client, RequestBuilder};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
+use crate::{config::Config, credentials::ConsoleCredentials};
 
 const EMBEDDING_BATCH_SIZE: usize = 25;
 
@@ -10,7 +12,7 @@ const EMBEDDING_BATCH_SIZE: usize = 25;
 pub struct EmbeddingsClient {
     http: Client,
     endpoint: String,
-    api_key: Option<String>,
+    credentials: Arc<ConsoleCredentials>,
     model: String,
     dimensions: usize,
 }
@@ -35,13 +37,13 @@ struct EmbeddingItem {
 }
 
 impl EmbeddingsClient {
-    pub fn new(config: &Config) -> Result<Self> {
+    pub fn new(config: &Config, credentials: Arc<ConsoleCredentials>) -> Result<Self> {
         Ok(Self {
             http: Client::builder()
                 .timeout(config.extraction_timeout)
                 .build()?,
             endpoint: format!("{}/embeddings", config.openai_base_url),
-            api_key: config.openai_api_key.clone(),
+            credentials,
             model: config.embeddings_model.clone(),
             dimensions: config.embeddings_dimensions,
         })
@@ -64,9 +66,12 @@ impl EmbeddingsClient {
                 dimensions: self.dimensions,
                 encoding_format: "float",
             };
-            let builder = self.http.post(&self.endpoint).json(&request);
+            let api_key = self.credentials.embeddings_api_key().await?;
             let response = self
-                .authorize(builder)
+                .http
+                .post(&self.endpoint)
+                .bearer_auth(api_key)
+                .json(&request)
                 .send()
                 .await
                 .context("send embeddings request")?
@@ -97,13 +102,6 @@ impl EmbeddingsClient {
             }
         }
         Ok(output)
-    }
-
-    fn authorize(&self, request: RequestBuilder) -> RequestBuilder {
-        match &self.api_key {
-            Some(api_key) => request.bearer_auth(api_key),
-            None => request,
-        }
     }
 }
 

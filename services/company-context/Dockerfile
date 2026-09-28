@@ -19,6 +19,7 @@ ENV CARGO_INCREMENTAL=0 \
     SCCACHE_DIR=/var/cache/sccache
 WORKDIR /build
 COPY crates/absurd-sdk/ crates/absurd-sdk/
+COPY crates/active-record-encryption/ crates/active-record-encryption/
 COPY services/company-context/ services/company-context/
 WORKDIR /build/services/company-context
 ARG RUST_BUILD_PROFILE=release
