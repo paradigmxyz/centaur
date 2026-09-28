@@ -104,7 +104,12 @@ async fn scan_drive(
             let start_token = if checkpoint.initial_start_page_token.is_empty() {
                 let token = state.drive.start_page_token().await?;
                 sqlx::query(
-                    "UPDATE company_context_system.google_drive_checkpoints SET initial_start_page_token = $2, updated_at = NOW() WHERE scope_id = $1",
+                    r#"
+                    UPDATE company_context_system.google_drive_checkpoints
+                    SET initial_start_page_token = $2,
+                        updated_at = NOW()
+                    WHERE scope_id = $1
+                    "#,
                 )
                 .bind(DRIVE_SCOPE)
                 .bind(&token)
@@ -124,7 +129,13 @@ async fn scan_drive(
             total += enqueue_files(state, page.files).await?;
             if let Some(next_page_token) = page.next_page_token {
                 sqlx::query(
-                    "UPDATE company_context_system.google_drive_checkpoints SET initial_page_token = $2, last_error = '', updated_at = NOW() WHERE scope_id = $1",
+                    r#"
+                    UPDATE company_context_system.google_drive_checkpoints
+                    SET initial_page_token = $2,
+                        last_error = '',
+                        updated_at = NOW()
+                    WHERE scope_id = $1
+                    "#,
                 )
                 .bind(DRIVE_SCOPE)
                 .bind(next_page_token)
@@ -133,7 +144,16 @@ async fn scan_drive(
                 continue;
             }
             sqlx::query(
-                "UPDATE company_context_system.google_drive_checkpoints SET initial_scan_completed = TRUE, initial_page_token = '', changes_page_token = $2, last_success_at = NOW(), last_error = '', updated_at = NOW() WHERE scope_id = $1",
+                r#"
+                UPDATE company_context_system.google_drive_checkpoints
+                SET initial_scan_completed = TRUE,
+                    initial_page_token = '',
+                    changes_page_token = $2,
+                    last_success_at = NOW(),
+                    last_error = '',
+                    updated_at = NOW()
+                WHERE scope_id = $1
+                "#,
             )
             .bind(DRIVE_SCOPE)
             .bind(start_token)
@@ -163,7 +183,13 @@ async fn scan_drive(
         }
         if let Some(next_page_token) = page.next_page_token {
             sqlx::query(
-                "UPDATE company_context_system.google_drive_checkpoints SET changes_page_token = $2, last_error = '', updated_at = NOW() WHERE scope_id = $1",
+                r#"
+                UPDATE company_context_system.google_drive_checkpoints
+                SET changes_page_token = $2,
+                    last_error = '',
+                    updated_at = NOW()
+                WHERE scope_id = $1
+                "#,
             )
             .bind(DRIVE_SCOPE)
             .bind(next_page_token)
@@ -175,7 +201,14 @@ async fn scan_drive(
             .new_start_page_token
             .context("Drive change page omitted both nextPageToken and newStartPageToken")?;
         sqlx::query(
-            "UPDATE company_context_system.google_drive_checkpoints SET changes_page_token = $2, last_success_at = NOW(), last_error = '', updated_at = NOW() WHERE scope_id = $1",
+            r#"
+            UPDATE company_context_system.google_drive_checkpoints
+            SET changes_page_token = $2,
+                last_success_at = NOW(),
+                last_error = '',
+                updated_at = NOW()
+            WHERE scope_id = $1
+            "#,
         )
         .bind(DRIVE_SCOPE)
         .bind(new_token)
@@ -247,16 +280,73 @@ async fn enqueue_delete(state: &TaskState, file_id: String, change_key: &str) ->
 }
 
 async fn observe_file(pool: &PgPool, file: &DriveFile, observation_key: &str) -> Result<()> {
-    sqlx::query("INSERT INTO company_context_system.google_drive_files (file_id,name,mime_type,drive_id,web_view_link,source_version,observation_key,source_created_at,source_modified_at,extraction_status,embedding_status,last_error,metadata,last_seen_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending','pending','',$10,NOW(),NOW()) ON CONFLICT (file_id) DO UPDATE SET name=EXCLUDED.name,mime_type=EXCLUDED.mime_type,drive_id=EXCLUDED.drive_id,web_view_link=EXCLUDED.web_view_link,source_version=EXCLUDED.source_version,observation_key=EXCLUDED.observation_key,source_created_at=EXCLUDED.source_created_at,source_modified_at=EXCLUDED.source_modified_at,extraction_status='pending',embedding_status='pending',last_error='',metadata=EXCLUDED.metadata,last_seen_at=NOW(),updated_at=NOW() WHERE google_drive_files.observation_key IS DISTINCT FROM EXCLUDED.observation_key")
-        .bind(&file.id).bind(&file.name).bind(&file.mime_type).bind(&file.drive_id)
-        .bind(&file.web_view_link).bind(file.source_version()).bind(observation_key)
-        .bind(file.created_time).bind(file.modified_time).bind(json!(file)).execute(pool).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO company_context_system.google_drive_files (
+            file_id, name, mime_type, drive_id, web_view_link, source_version,
+            observation_key, source_created_at, source_modified_at,
+            extraction_status, embedding_status, last_error, metadata,
+            last_seen_at, updated_at
+        )
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9,
+            'pending', 'pending', '', $10, NOW(), NOW()
+        )
+        ON CONFLICT (file_id) DO UPDATE
+        SET name = EXCLUDED.name,
+            mime_type = EXCLUDED.mime_type,
+            drive_id = EXCLUDED.drive_id,
+            web_view_link = EXCLUDED.web_view_link,
+            source_version = EXCLUDED.source_version,
+            observation_key = EXCLUDED.observation_key,
+            source_created_at = EXCLUDED.source_created_at,
+            source_modified_at = EXCLUDED.source_modified_at,
+            extraction_status = 'pending',
+            embedding_status = 'pending',
+            last_error = '',
+            metadata = EXCLUDED.metadata,
+            last_seen_at = NOW(),
+            updated_at = NOW()
+        WHERE google_drive_files.observation_key IS DISTINCT FROM EXCLUDED.observation_key
+        "#,
+    )
+    .bind(&file.id)
+    .bind(&file.name)
+    .bind(&file.mime_type)
+    .bind(&file.drive_id)
+    .bind(&file.web_view_link)
+    .bind(file.source_version())
+    .bind(observation_key)
+    .bind(file.created_time)
+    .bind(file.modified_time)
+    .bind(json!(file))
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
 async fn observe_delete(pool: &PgPool, file_id: &str, observation_key: &str) -> Result<()> {
-    sqlx::query("INSERT INTO company_context_system.google_drive_files (file_id,source_version,observation_key,extraction_status,embedding_status,last_error,updated_at) VALUES ($1,$2,$2,'deleted','deleted','',NOW()) ON CONFLICT (file_id) DO UPDATE SET source_version=EXCLUDED.source_version,observation_key=EXCLUDED.observation_key,extraction_status='deleted',embedding_status='deleted',last_error='',updated_at=NOW() WHERE google_drive_files.observation_key IS DISTINCT FROM EXCLUDED.observation_key")
-        .bind(file_id).bind(observation_key).execute(pool).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO company_context_system.google_drive_files (
+            file_id, source_version, observation_key, extraction_status,
+            embedding_status, last_error, updated_at
+        )
+        VALUES ($1, $2, $2, 'deleted', 'deleted', '', NOW())
+        ON CONFLICT (file_id) DO UPDATE
+        SET source_version = EXCLUDED.source_version,
+            observation_key = EXCLUDED.observation_key,
+            extraction_status = 'deleted',
+            embedding_status = 'deleted',
+            last_error = '',
+            updated_at = NOW()
+        WHERE google_drive_files.observation_key IS DISTINCT FROM EXCLUDED.observation_key
+        "#,
+    )
+    .bind(file_id)
+    .bind(observation_key)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -284,7 +374,11 @@ async fn extract_pdf(
             state.config.max_extracted_bytes,
         )
         .await?;
-        let chunks = chunk_text(&text, state.config.chunk_chars, state.config.chunk_overlap_chars);
+        let chunks = chunk_text(
+            &text,
+            state.config.chunk_chars,
+            state.config.chunk_overlap_chars,
+        );
         if chunks.is_empty() {
             return Err(anyhow!("PDF produced no non-empty chunks"));
         }
@@ -294,28 +388,72 @@ async fn extract_pdf(
             tx.rollback().await?;
             return Ok(0);
         }
-        sqlx::query("UPDATE company_context_system.google_drive_files SET content_hash=$3,extraction_status='completed',embedding_status='pending',last_error='',updated_at=NOW() WHERE file_id=$1 AND observation_key=$2")
-            .bind(&file.id).bind(&observation_key).bind(&content_hash)
-            .execute(&mut *tx).await?;
-        sqlx::query("DELETE FROM company_context_system.google_drive_chunks WHERE file_id = $1")
-            .bind(&file.id).execute(&mut *tx).await?;
+        sqlx::query(
+            r#"
+            UPDATE company_context_system.google_drive_files
+            SET content_hash = $3,
+                extraction_status = 'completed',
+                embedding_status = 'pending',
+                last_error = '',
+                updated_at = NOW()
+            WHERE file_id = $1
+              AND observation_key = $2
+            "#,
+        )
+        .bind(&file.id)
+        .bind(&observation_key)
+        .bind(&content_hash)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            DELETE FROM company_context_system.google_drive_chunks
+            WHERE file_id = $1
+            "#,
+        )
+        .bind(&file.id)
+        .execute(&mut *tx)
+        .await?;
         for chunk in &chunks {
-            sqlx::query("INSERT INTO company_context_system.google_drive_chunks (file_id,chunk_id,ordinal,body,content_hash) VALUES ($1,$2,$3,$4,$5)")
-                .bind(&file.id).bind(&chunk.chunk_id).bind(chunk.ordinal as i32).bind(&chunk.body).bind(&chunk.content_hash)
-                .execute(&mut *tx).await?;
+            sqlx::query(
+                r#"
+                INSERT INTO company_context_system.google_drive_chunks (
+                    file_id, chunk_id, ordinal, body, content_hash
+                )
+                VALUES ($1, $2, $3, $4, $5)
+                "#,
+            )
+            .bind(&file.id)
+            .bind(&chunk.chunk_id)
+            .bind(chunk.ordinal as i32)
+            .bind(&chunk.body)
+            .bind(&chunk.content_hash)
+            .execute(&mut *tx)
+            .await?;
         }
         tx.commit().await?;
-        state.absurd.spawn(
-            DOCUMENT_EMBED_TASK,
-            EmbedParams {
-                file_id: file.id.clone(),
-                content_hash: content_hash.clone(),
-                observation_key: observation_key.clone(),
-            },
-            SpawnOptions { idempotency_key: Some(format!("drive.document.embed:{}:{content_hash}:{}", file.id, state.embeddings.model())), ..SpawnOptions::default() },
-        ).await?;
+        state
+            .absurd
+            .spawn(
+                DOCUMENT_EMBED_TASK,
+                EmbedParams {
+                    file_id: file.id.clone(),
+                    content_hash: content_hash.clone(),
+                    observation_key: observation_key.clone(),
+                },
+                SpawnOptions {
+                    idempotency_key: Some(format!(
+                        "drive.document.embed:{}:{content_hash}:{}",
+                        file.id,
+                        state.embeddings.model()
+                    )),
+                    ..SpawnOptions::default()
+                },
+            )
+            .await?;
         Result::<usize>::Ok(chunks.len())
-    }.await;
+    }
+    .await;
 
     match result {
         Ok(0) => Ok(TaskSummary {
@@ -353,10 +491,33 @@ async fn embed_document(
     params: EmbedParams,
     ctx: &TaskContext,
 ) -> Result<TaskSummary> {
-    let Some(row) = sqlx::query("SELECT name,mime_type,drive_id,web_view_link,source_version,source_created_at,source_modified_at,content_hash,metadata FROM company_context_system.google_drive_files WHERE file_id=$1 AND observation_key=$2 AND extraction_status='completed'")
-        .bind(&params.file_id).bind(&params.observation_key).fetch_optional(&state.pool).await? else {
-            return Ok(TaskSummary { status: "superseded", files: 0 });
-        };
+    let Some(row) = sqlx::query(
+        r#"
+        SELECT name,
+               mime_type,
+               drive_id,
+               web_view_link,
+               source_version,
+               source_created_at,
+               source_modified_at,
+               content_hash,
+               metadata
+        FROM company_context_system.google_drive_files
+        WHERE file_id = $1
+          AND observation_key = $2
+          AND extraction_status = 'completed'
+        "#,
+    )
+    .bind(&params.file_id)
+    .bind(&params.observation_key)
+    .fetch_optional(&state.pool)
+    .await?
+    else {
+        return Ok(TaskSummary {
+            status: "superseded",
+            files: 0,
+        });
+    };
     let staged_hash: String = row.try_get("content_hash")?;
     if staged_hash != params.content_hash {
         info!(
@@ -369,8 +530,17 @@ async fn embed_document(
             files: 0,
         });
     }
-    let chunk_rows = sqlx::query("SELECT chunk_id,body FROM company_context_system.google_drive_chunks WHERE file_id=$1 ORDER BY ordinal")
-        .bind(&params.file_id).fetch_all(&state.pool).await?;
+    let chunk_rows = sqlx::query(
+        r#"
+        SELECT chunk_id, body
+        FROM company_context_system.google_drive_chunks
+        WHERE file_id = $1
+        ORDER BY ordinal
+        "#,
+    )
+    .bind(&params.file_id)
+    .fetch_all(&state.pool)
+    .await?;
     if chunk_rows.is_empty() {
         return Err(anyhow!("staged Drive file has no chunks"));
     }
@@ -419,20 +589,96 @@ async fn embed_document(
         let content_hash = hex_sha256(format!("{}\n\n{}", file.name, body).as_bytes());
         let document_id = format!("google-drive:{}:{chunk_id}", file.id);
         document_ids.push(document_id.clone());
-        sqlx::query("INSERT INTO company_context_data.google_drive_documents (document_id,file_id,chunk_id,document_type,mime_type,title,body,url,drive_id,source_created_at,source_modified_at,source_version,content_hash,metadata,updated_at) VALUES ($1,$2,$3,'pdf',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW()) ON CONFLICT (document_id) DO UPDATE SET title=EXCLUDED.title,body=EXCLUDED.body,url=EXCLUDED.url,drive_id=EXCLUDED.drive_id,source_created_at=EXCLUDED.source_created_at,source_modified_at=EXCLUDED.source_modified_at,source_version=EXCLUDED.source_version,content_hash=EXCLUDED.content_hash,metadata=EXCLUDED.metadata,updated_at=NOW()")
-            .bind(&document_id).bind(&file.id).bind(&chunk_id).bind(&file.mime_type).bind(&file.name)
-            .bind(&body).bind(&file.web_view_link).bind(&file.drive_id).bind(file.created_time)
-            .bind(file.modified_time).bind(file.source_version()).bind(&content_hash).bind(&metadata)
-            .execute(&mut *tx).await?;
+        sqlx::query(
+            r#"
+            INSERT INTO company_context_data.google_drive_documents (
+                document_id, file_id, chunk_id, document_type, mime_type, title,
+                body, url, drive_id, source_created_at, source_modified_at,
+                source_version, content_hash, metadata, updated_at
+            )
+            VALUES (
+                $1, $2, $3, 'pdf', $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                $13, NOW()
+            )
+            ON CONFLICT (document_id) DO UPDATE
+            SET title = EXCLUDED.title,
+                body = EXCLUDED.body,
+                url = EXCLUDED.url,
+                drive_id = EXCLUDED.drive_id,
+                source_created_at = EXCLUDED.source_created_at,
+                source_modified_at = EXCLUDED.source_modified_at,
+                source_version = EXCLUDED.source_version,
+                content_hash = EXCLUDED.content_hash,
+                metadata = EXCLUDED.metadata,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(&document_id)
+        .bind(&file.id)
+        .bind(&chunk_id)
+        .bind(&file.mime_type)
+        .bind(&file.name)
+        .bind(&body)
+        .bind(&file.web_view_link)
+        .bind(&file.drive_id)
+        .bind(file.created_time)
+        .bind(file.modified_time)
+        .bind(file.source_version())
+        .bind(&content_hash)
+        .bind(&metadata)
+        .execute(&mut *tx)
+        .await?;
         let vector = serde_json::to_string(&embedding)?;
-        sqlx::query("INSERT INTO company_context_data.google_drive_document_embeddings (document_id,model,dimensions,content_hash,embedding) VALUES ($1,$2,$3,$4,$5::vector) ON CONFLICT (document_id) DO UPDATE SET model=EXCLUDED.model,dimensions=EXCLUDED.dimensions,content_hash=EXCLUDED.content_hash,embedding=EXCLUDED.embedding,updated_at=NOW()")
-            .bind(&document_id).bind(state.embeddings.model()).bind(state.embeddings.dimensions() as i32)
-            .bind(&content_hash).bind(vector).execute(&mut *tx).await?;
+        sqlx::query(
+            r#"
+            INSERT INTO company_context_data.google_drive_document_embeddings (
+                document_id, model, dimensions, content_hash, embedding
+            )
+            VALUES ($1, $2, $3, $4, $5::vector)
+            ON CONFLICT (document_id) DO UPDATE
+            SET model = EXCLUDED.model,
+                dimensions = EXCLUDED.dimensions,
+                content_hash = EXCLUDED.content_hash,
+                embedding = EXCLUDED.embedding,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(&document_id)
+        .bind(state.embeddings.model())
+        .bind(state.embeddings.dimensions() as i32)
+        .bind(&content_hash)
+        .bind(vector)
+        .execute(&mut *tx)
+        .await?;
     }
-    sqlx::query("DELETE FROM company_context_data.google_drive_documents WHERE file_id=$1 AND NOT (document_id = ANY($2::text[]))")
-        .bind(&file.id).bind(&document_ids).execute(&mut *tx).await?;
-    sqlx::query("UPDATE company_context_system.google_drive_files SET embedding_status='completed',last_error='',published_at=NOW(),updated_at=NOW() WHERE file_id=$1 AND content_hash=$2 AND observation_key=$3")
-        .bind(&file.id).bind(&params.content_hash).bind(&params.observation_key).execute(&mut *tx).await?;
+    sqlx::query(
+        r#"
+        DELETE FROM company_context_data.google_drive_documents
+        WHERE file_id = $1
+          AND NOT (document_id = ANY($2::text[]))
+        "#,
+    )
+    .bind(&file.id)
+    .bind(&document_ids)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE company_context_system.google_drive_files
+        SET embedding_status = 'completed',
+            last_error = '',
+            published_at = NOW(),
+            updated_at = NOW()
+        WHERE file_id = $1
+          AND content_hash = $2
+          AND observation_key = $3
+        "#,
+    )
+    .bind(&file.id)
+    .bind(&params.content_hash)
+    .bind(&params.observation_key)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     info!(
         event = "company_context_drive_document_published",
@@ -452,18 +698,38 @@ async fn replace_access(
     source_version: &str,
     permissions: &[Permission],
 ) -> Result<()> {
-    sqlx::query("DELETE FROM company_context_data.google_drive_document_access WHERE file_id=$1")
-        .bind(file_id)
-        .execute(&mut **tx)
-        .await?;
+    sqlx::query(
+        r#"
+        DELETE FROM company_context_data.google_drive_document_access
+        WHERE file_id = $1
+        "#,
+    )
+    .bind(file_id)
+    .execute(&mut **tx)
+    .await?;
     for permission in permissions
         .iter()
         .filter(|permission| !permission.id.is_empty())
     {
-        sqlx::query("INSERT INTO company_context_data.google_drive_document_access (file_id,permission_id,permission_type,role,email_address,domain,allow_file_discovery,source_version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
-            .bind(file_id).bind(&permission.id).bind(&permission.permission_type).bind(&permission.role)
-            .bind(&permission.email_address).bind(&permission.domain).bind(permission.allow_file_discovery)
-            .bind(source_version).execute(&mut **tx).await?;
+        sqlx::query(
+            r#"
+            INSERT INTO company_context_data.google_drive_document_access (
+                file_id, permission_id, permission_type, role, email_address,
+                domain, allow_file_discovery, source_version
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            "#,
+        )
+        .bind(file_id)
+        .bind(&permission.id)
+        .bind(&permission.permission_type)
+        .bind(&permission.role)
+        .bind(&permission.email_address)
+        .bind(&permission.domain)
+        .bind(permission.allow_file_discovery)
+        .bind(source_version)
+        .execute(&mut **tx)
+        .await?;
     }
     Ok(())
 }
@@ -481,19 +747,48 @@ async fn delete_document(
             files: 0,
         });
     }
-    sqlx::query("DELETE FROM company_context_data.google_drive_documents WHERE file_id=$1")
-        .bind(&params.file_id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("DELETE FROM company_context_data.google_drive_document_access WHERE file_id=$1")
-        .bind(&params.file_id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("DELETE FROM company_context_system.google_drive_chunks WHERE file_id=$1")
-        .bind(&params.file_id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("UPDATE company_context_system.google_drive_files SET extraction_status='deleted',embedding_status='deleted',last_error='',updated_at=NOW() WHERE file_id=$1 AND observation_key=$2").bind(&params.file_id).bind(&params.observation_key).execute(&mut *tx).await?;
+    sqlx::query(
+        r#"
+        DELETE FROM company_context_data.google_drive_documents
+        WHERE file_id = $1
+        "#,
+    )
+    .bind(&params.file_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        DELETE FROM company_context_data.google_drive_document_access
+        WHERE file_id = $1
+        "#,
+    )
+    .bind(&params.file_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        DELETE FROM company_context_system.google_drive_chunks
+        WHERE file_id = $1
+        "#,
+    )
+    .bind(&params.file_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE company_context_system.google_drive_files
+        SET extraction_status = 'deleted',
+            embedding_status = 'deleted',
+            last_error = '',
+            updated_at = NOW()
+        WHERE file_id = $1
+          AND observation_key = $2
+        "#,
+    )
+    .bind(&params.file_id)
+    .bind(&params.observation_key)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     info!(
         event = "company_context_drive_document_deleted",
@@ -514,14 +809,33 @@ struct Checkpoint {
 }
 
 async fn ensure_checkpoint(pool: &PgPool) -> Result<()> {
-    sqlx::query("INSERT INTO company_context_system.google_drive_checkpoints (scope_id) VALUES ($1) ON CONFLICT DO NOTHING")
-        .bind(DRIVE_SCOPE).execute(pool).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO company_context_system.google_drive_checkpoints (scope_id)
+        VALUES ($1)
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(DRIVE_SCOPE)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
 async fn load_checkpoint(pool: &PgPool) -> Result<Checkpoint> {
-    let row = sqlx::query("SELECT initial_start_page_token,initial_page_token,initial_scan_completed,changes_page_token FROM company_context_system.google_drive_checkpoints WHERE scope_id=$1")
-        .bind(DRIVE_SCOPE).fetch_one(pool).await?;
+    let row = sqlx::query(
+        r#"
+        SELECT initial_start_page_token,
+               initial_page_token,
+               initial_scan_completed,
+               changes_page_token
+        FROM company_context_system.google_drive_checkpoints
+        WHERE scope_id = $1
+        "#,
+    )
+    .bind(DRIVE_SCOPE)
+    .fetch_one(pool)
+    .await?;
     Ok(Checkpoint {
         initial_start_page_token: row.try_get("initial_start_page_token")?,
         initial_page_token: row.try_get("initial_page_token")?,
@@ -535,8 +849,20 @@ async fn observation_is_current(
     file_id: &str,
     observation_key: &str,
 ) -> Result<bool> {
-    Ok(sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM company_context_system.google_drive_files WHERE file_id=$1 AND observation_key=$2)")
-        .bind(file_id).bind(observation_key).fetch_one(pool).await?)
+    Ok(sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM company_context_system.google_drive_files
+            WHERE file_id = $1
+              AND observation_key = $2
+        )
+        "#,
+    )
+    .bind(file_id)
+    .bind(observation_key)
+    .fetch_one(pool)
+    .await?)
 }
 
 async fn lock_current_observation(
@@ -544,9 +870,18 @@ async fn lock_current_observation(
     file_id: &str,
     observation_key: &str,
 ) -> Result<bool> {
-    Ok(sqlx::query_scalar::<_, String>("SELECT observation_key FROM company_context_system.google_drive_files WHERE file_id=$1 FOR UPDATE")
-        .bind(file_id).fetch_optional(&mut **tx).await?
-        .is_some_and(|current| current == observation_key))
+    Ok(sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT observation_key
+        FROM company_context_system.google_drive_files
+        WHERE file_id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(file_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .is_some_and(|current| current == observation_key))
 }
 
 async fn record_file_failure(
@@ -563,7 +898,14 @@ async fn record_file_failure(
         "embedding_status"
     };
     let query = format!(
-        "UPDATE company_context_system.google_drive_files SET {status_column}='failed',last_error=$3,updated_at=NOW() WHERE file_id=$1 AND observation_key=$2"
+        r#"
+        UPDATE company_context_system.google_drive_files
+        SET {status_column} = 'failed',
+            last_error = $3,
+            updated_at = NOW()
+        WHERE file_id = $1
+          AND observation_key = $2
+        "#
     );
     if let Err(db_error) = sqlx::query(&query)
         .bind(file_id)
@@ -582,8 +924,22 @@ async fn record_embedding_failure(
     observation_key: &str,
     error: &anyhow::Error,
 ) {
-    if let Err(db_error) = sqlx::query("UPDATE company_context_system.google_drive_files SET embedding_status='failed',last_error=$3,updated_at=NOW() WHERE file_id=$1 AND observation_key=$2")
-        .bind(file_id).bind(observation_key).bind(bounded_error(error)).execute(pool).await {
+    if let Err(db_error) = sqlx::query(
+        r#"
+        UPDATE company_context_system.google_drive_files
+        SET embedding_status = 'failed',
+            last_error = $3,
+            updated_at = NOW()
+        WHERE file_id = $1
+          AND observation_key = $2
+        "#,
+    )
+    .bind(file_id)
+    .bind(observation_key)
+    .bind(bounded_error(error))
+    .execute(pool)
+    .await
+    {
         error!(event = "company_context_failure_record_failed", file_id, error = %db_error);
     }
 }

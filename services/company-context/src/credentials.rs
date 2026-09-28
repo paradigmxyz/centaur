@@ -140,11 +140,17 @@ impl ConsoleCredentials {
 
     async fn load_google_credential(&self) -> Result<GoogleCredential> {
         let row = sqlx::query(
-            "SELECT credentials.scopes, credentials.subject, credentials.credentials_provider, \
-                    sources.source_type, sources.secret \
-             FROM gcp_auth_secrets credentials \
-             LEFT JOIN secret_sources sources ON sources.gcp_auth_secret_id = credentials.id \
-             WHERE credentials.foreign_id = $1",
+            r#"
+            SELECT credentials.scopes,
+                   credentials.subject,
+                   credentials.credentials_provider,
+                   sources.source_type,
+                   sources.secret
+            FROM gcp_auth_secrets credentials
+            LEFT JOIN secret_sources sources
+              ON sources.gcp_auth_secret_id = credentials.id
+            WHERE credentials.foreign_id = $1
+            "#,
         )
         .bind(&self.google_foreign_id)
         .fetch_optional(&self.pool)
