@@ -598,14 +598,20 @@ struct RuntimeContext {
 }
 
 struct SandboxCapacityController {
+    store: PgSessionStore,
     manager: Arc<SandboxManager>,
     lock: Mutex<()>,
     config: SandboxCapacityConfig,
 }
 
 impl SandboxCapacityController {
-    fn new(manager: Arc<SandboxManager>, config: SandboxCapacityConfig) -> Self {
+    fn new(
+        store: PgSessionStore,
+        manager: Arc<SandboxManager>,
+        config: SandboxCapacityConfig,
+    ) -> Self {
         Self {
+            store,
             manager,
             lock: Mutex::new(()),
             config,
@@ -649,12 +655,21 @@ impl SandboxCapacityController {
     }
 
     async fn running_slot_count(&self) -> Result<usize, SessionRuntimeError> {
-        Ok(self
-            .manager
-            .list_observed()
+        let observed = self.manager.list_observed().await?;
+        // Ready warm sandboxes are bounded by the warm-pool target and serve
+        // requests without a new sandbox, so they do not block cold admission.
+        let ready_warm = self
+            .store
+            .list_ready_warm_sandbox_ids()
             .await?
             .into_iter()
-            .filter(|observed| status_consumes_running_slot(&observed.status))
+            .collect::<HashSet<_>>();
+        Ok(observed
+            .iter()
+            .filter(|observed| {
+                status_consumes_running_slot(&observed.status)
+                    && !ready_warm.contains(observed.id.as_str())
+            })
             .count())
     }
 }
@@ -1386,6 +1401,7 @@ impl SessionRuntime {
             return self;
         }
         self.capacity = Some(Arc::new(SandboxCapacityController::new(
+            self.store.clone(),
             self.sandbox_runtime.manager.clone(),
             config,
         )));
@@ -10815,14 +10831,19 @@ mod adoption_tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn running_limit_rejects_without_mutating_existing_sandboxes() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
         backend.set_observed_status("sbx-created", SandboxStatus::Created);
         backend.set_observed_status("sbx-running-1", SandboxStatus::Running);
         backend.set_observed_status("sbx-running-2", SandboxStatus::Running);
         backend.set_observed_status("sbx-paused", SandboxStatus::Suspended);
         let controller = SandboxCapacityController::new(
+            store,
             Arc::new(SandboxManager::new(backend.clone())),
             SandboxCapacityConfig { max_running: 2 },
         );
@@ -10857,13 +10878,24 @@ mod adoption_tests {
         );
     }
 
-    #[tokio::test]
-    async fn running_limit_admits_below_observed_limit() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn running_limit_admits_below_limit_excluding_ready_warm_sandboxes() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let warm_id = format!("sbx-warm-{}", uuid::Uuid::new_v4());
+        store
+            .insert_ready_warm_sandbox(&warm_id, "test-workload")
+            .await
+            .expect("insert ready warm sandbox");
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
         backend.set_observed_status("sbx-created", SandboxStatus::Created);
         backend.set_observed_status("sbx-running", SandboxStatus::Running);
         backend.set_observed_status("sbx-paused", SandboxStatus::Suspended);
+        backend.set_observed_status(&warm_id, SandboxStatus::Running);
         let controller = SandboxCapacityController::new(
+            store.clone(),
             Arc::new(SandboxManager::new(backend)),
             SandboxCapacityConfig { max_running: 2 },
         );
@@ -10876,9 +10908,13 @@ mod adoption_tests {
                 Ok(())
             })
             .await
-            .expect("admit below observed limit");
+            .expect("admit below limit");
 
         assert!(action_ran.load(Ordering::SeqCst));
+        store
+            .mark_warm_sandbox_failed(&warm_id, "test cleanup")
+            .await
+            .expect("clean up warm sandbox");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

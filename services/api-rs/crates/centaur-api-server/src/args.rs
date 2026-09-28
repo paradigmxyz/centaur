@@ -656,7 +656,8 @@ struct SandboxArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     warm_pool_replenish_interval_secs: u64,
-    /// Best-effort admission limit for sandboxes observed as running. The
+    /// Best-effort admission limit for sandboxes observed as running,
+    /// excluding ready warm sandboxes. The
     /// limit rejects new creates and resumes but never evicts existing work.
     /// 0 disables capacity admission.
     #[arg(

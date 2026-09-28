@@ -547,8 +547,8 @@ apiRs:
   sandboxWarmPoolSize: 3
   sandboxWarmPoolReplenishIntervalSecs: 5
   # Best-effort admission gate: when nonzero, api-rs rejects sandbox creates
-  # and resumes at or above this observed running count. Existing
-  # sandboxes are never evicted. 0 disables.
+  # and resumes at or above this observed running count, excluding ready warm
+  # sandboxes. Existing sandboxes are never evicted. 0 disables.
   sandboxRunningLimit: 0
   # When true, api-rs upserts the shared iron-control infra role and its
   # backing secrets at startup and on tool-secret reconciliation intervals.
