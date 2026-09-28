@@ -150,7 +150,7 @@ deploy:
       ghcr)
         extra_args+=(
           --set apiRs.image.repository=ghcr.io/paradigmxyz/centaur/centaur-api-rs
-          --set companyContext.image.repository=ghcr.io/paradigmxyz/centaur/centaur-company-context
+          --set experimentalCompanyContext.image.repository=ghcr.io/paradigmxyz/centaur/centaur-company-context
           --set proxySync.image.repository=ghcr.io/paradigmxyz/centaur/centaur-proxy-sync
           --set ironProxy.image.repository=ghcr.io/paradigmxyz/centaur/centaur-iron-proxy
           --set slackbotv2.image.repository=ghcr.io/paradigmxyz/centaur/centaur-slackbotv2

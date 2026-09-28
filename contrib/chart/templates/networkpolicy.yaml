@@ -94,7 +94,7 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "proxy-sync") | nindent 14 }}
 {{- end }}
-{{- if .Values.companyContext.enabled }}
+{{- if .Values.experimentalCompanyContext.enabled }}
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "company-context") | nindent 14 }}

@@ -488,7 +488,7 @@ proxySync:
 # Standalone company-context ingestion service. The first version indexes PDFs
 # from Google Drive into its private system and data schemas. Disabled while the
 # corpus is validated alongside the legacy Python workflows.
-companyContext:
+experimentalCompanyContext:
   enabled: false
   replicaCount: 1
   nodeSelector: {}

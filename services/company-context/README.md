@@ -7,7 +7,7 @@ The service owns these Postgres schemas:
 - `company_context_system`: private cursors, staging, and processing state.
 - `company_context_data`: retrieval-facing Drive documents, access observations, and embeddings.
 
-The initial migrations deliberately add no retrieval-role grants or RLS policies. The corpus is populated for validation but is not exposed through the company-context tool yet.
+The initial migrations deliberately add no retrieval-role grants or RLS policies. The corpus is populated for validation but is not exposed through the company-context tool yet. The Helm deployment is gated by `experimentalCompanyContext.enabled` until it is ready for production.
 
 ## Required infrastructure
 
