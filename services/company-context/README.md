@@ -13,7 +13,7 @@ The initial migrations deliberately add no retrieval-role grants or RLS policies
 
 - Postgres with the existing Absurd schema and the `vector` and `pg_search` extensions available.
 - `pdftotext` from Poppler.
-- A Rails Console database containing a live Google broker credential and an embeddings static credential.
+- A Rails Console database containing a GCP auth credential with a control-plane service-account keyfile and an embeddings static credential.
 - The Active Record encryption primary key and derivation salt used by Rails Console.
 
 ## Configuration
@@ -27,10 +27,12 @@ Required:
 - `COMPANY_CONTEXT_GOOGLE_CREDENTIAL_FOREIGN_ID`
 - `COMPANY_CONTEXT_EMBEDDINGS_CREDENTIAL_FOREIGN_ID`
 
-The Google foreign ID selects a Rails Console `broker_credentials` row. The
-embeddings foreign ID selects a `static_secrets` row backed by a
-`control_plane` or `token_broker` source. Encrypted values are loaded at request
-time so broker token rotation does not require restarting the daemon.
+The Google foreign ID selects a Rails Console `gcp_auth_secrets` row backed by
+a `control_plane` keyfile source. Its configured scopes and optional delegated
+subject are used to mint short-lived Google access tokens. The embeddings
+foreign ID selects a `static_secrets` row backed by a `control_plane` or
+`token_broker` source. Encrypted values are loaded from Rails Console with the
+shared Active Record encryption implementation.
 
 Common optional settings:
 
