@@ -13,8 +13,9 @@ The initial migrations deliberately add no retrieval-role grants or RLS policies
 
 - Postgres with the existing Absurd schema and the `vector` and `pg_search` extensions available.
 - `pdftotext` from Poppler.
-- A Rails Console database containing a GCP auth credential with a control-plane service-account keyfile and an embeddings static credential.
+- A Rails Console database containing a GCP auth credential with a control-plane service-account keyfile.
 - The Active Record encryption primary key and derivation salt used by Rails Console.
+- An embeddings API key supplied through a Kubernetes Secret.
 
 ## Configuration
 
@@ -29,14 +30,12 @@ Required:
 - `IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY`
 - `IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT`
 - `COMPANY_CONTEXT_GOOGLE_CREDENTIAL_FOREIGN_ID`
-- `COMPANY_CONTEXT_EMBEDDINGS_CREDENTIAL_FOREIGN_ID`
+- `OPENAI_API_KEY`
 
 The Google foreign ID selects a Rails Console `gcp_auth_secrets` row backed by
 a `control_plane` keyfile source. Its configured scopes and optional delegated
-subject are used to mint short-lived Google access tokens. The embeddings
-foreign ID selects a `static_secrets` row backed by a `control_plane` or
-`token_broker` source. Encrypted values are loaded from Rails Console with the
-shared Active Record encryption implementation.
+subject are used to mint short-lived Google access tokens. The Helm deployment
+reads `OPENAI_API_KEY` directly from the shared Kubernetes Secret.
 
 Common optional settings:
 

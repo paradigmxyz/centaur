@@ -47,10 +47,11 @@ pub struct Config {
     pub google_credential_foreign_id: String,
     #[arg(
         long,
-        env = "COMPANY_CONTEXT_EMBEDDINGS_CREDENTIAL_FOREIGN_ID",
-        value_parser = nonempty
+        env = "OPENAI_API_KEY",
+        value_parser = nonempty,
+        hide_env_values = true
     )]
-    pub embeddings_credential_foreign_id: String,
+    pub openai_api_key: String,
     #[arg(long, env = "BIND_ADDR", default_value = "0.0.0.0:8080")]
     pub bind_addr: SocketAddr,
     #[arg(
@@ -232,8 +233,8 @@ mod tests {
             "salt",
             "--google-credential-foreign-id",
             "google",
-            "--embeddings-credential-foreign-id",
-            "embeddings",
+            "--openai-api-key",
+            "test-key",
         ]
     }
 

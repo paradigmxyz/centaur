@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
         .context("create company context Absurd queue")?;
 
     let drive = DriveClient::new(&config, credentials.clone())?;
-    let embeddings = EmbeddingsClient::new(&config, credentials.clone())?;
+    let embeddings = EmbeddingsClient::new(&config)?;
     tasks::register(TaskState {
         config: config.clone(),
         pool: pool.clone(),

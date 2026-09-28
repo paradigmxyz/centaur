@@ -26,7 +26,6 @@ pub struct ConsoleCredentials {
     encryption: Arc<ActiveRecordEncryption>,
     http: Client,
     google_foreign_id: String,
-    embeddings_foreign_id: String,
     google_token: Arc<Mutex<Option<CachedToken>>>,
 }
 
@@ -85,11 +84,9 @@ impl ConsoleCredentials {
             )),
             http: Client::new(),
             google_foreign_id: config.google_credential_foreign_id.clone(),
-            embeddings_foreign_id: config.embeddings_credential_foreign_id.clone(),
             google_token: Arc::new(Mutex::new(None)),
         };
         credentials.load_google_credential().await?;
-        credentials.embeddings_api_key().await?;
         Ok(credentials)
     }
 
@@ -189,52 +186,8 @@ impl ConsoleCredentials {
         })
     }
 
-    pub async fn embeddings_api_key(&self) -> Result<String> {
-        let row = sqlx::query(
-            "SELECT sources.source_type, sources.secret, broker.access_token, \
-                    broker.dead, broker.expires_at \
-             FROM static_secrets credentials \
-             JOIN secret_sources sources ON sources.static_secret_id = credentials.id \
-             LEFT JOIN broker_credentials broker ON broker.id = sources.broker_credential_id \
-             WHERE credentials.foreign_id = $1",
-        )
-        .bind(&self.embeddings_foreign_id)
-        .fetch_optional(&self.pool)
-        .await
-        .context("load embeddings credential from Rails Console")?
-        .with_context(|| {
-            format!(
-                "Rails Console static credential {:?} was not found",
-                self.embeddings_foreign_id
-            )
-        })?;
-        let source_type: String = row.try_get("source_type")?;
-        match source_type.as_str() {
-            "control_plane" => self.decrypt_required(
-                row.try_get("secret")?,
-                "embeddings control-plane credential",
-            ),
-            "token_broker" => {
-                ensure_live_broker(
-                    row.try_get("dead")?,
-                    row.try_get("expires_at")?,
-                    &self.embeddings_foreign_id,
-                )?;
-                self.decrypt_required(
-                    row.try_get("access_token")?,
-                    "embeddings broker credential access token",
-                )
-            }
-            _ => bail!(
-                "Rails Console embeddings credential {:?} uses unsupported source type {:?}; expected control_plane or token_broker",
-                self.embeddings_foreign_id,
-                source_type
-            ),
-        }
-    }
-
     pub async fn ready(&self) -> bool {
-        self.google_access_token().await.is_ok() && self.embeddings_api_key().await.is_ok()
+        self.google_access_token().await.is_ok()
     }
 
     pub async fn close(&self) {
@@ -265,20 +218,6 @@ fn google_jwt_claims(credential: &GoogleCredential, now: DateTime<Utc>) -> Googl
     }
 }
 
-fn ensure_live_broker(
-    dead: bool,
-    expires_at: Option<DateTime<Utc>>,
-    credential_name: &str,
-) -> Result<()> {
-    if dead {
-        bail!("Rails Console broker credential {credential_name:?} is marked dead");
-    }
-    if expires_at.is_some_and(|expires_at| expires_at <= Utc::now()) {
-        bail!("Rails Console broker credential {credential_name:?} is expired");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,22 +236,5 @@ mod tests {
         assert_eq!(claims.scope, "scope-a scope-b");
         assert_eq!(claims.sub, Some("user@example.invalid"));
         assert_eq!(claims.exp - claims.iat, 3_600);
-    }
-
-    #[test]
-    fn rejects_dead_and_expired_broker_credentials() {
-        assert!(ensure_live_broker(true, None, "embeddings").is_err());
-        assert!(
-            ensure_live_broker(false, Some(Utc::now() - Duration::seconds(1)), "embeddings")
-                .is_err()
-        );
-        assert!(
-            ensure_live_broker(
-                false,
-                Some(Utc::now() + Duration::seconds(60)),
-                "embeddings"
-            )
-            .is_ok()
-        );
     }
 }

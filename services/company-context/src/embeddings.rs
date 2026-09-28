@@ -1,10 +1,8 @@
-use std::sync::Arc;
-
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::{config::Config, credentials::ConsoleCredentials};
+use crate::config::Config;
 
 const EMBEDDING_BATCH_SIZE: usize = 25;
 
@@ -12,7 +10,7 @@ const EMBEDDING_BATCH_SIZE: usize = 25;
 pub struct EmbeddingsClient {
     http: Client,
     endpoint: String,
-    credentials: Arc<ConsoleCredentials>,
+    api_key: String,
     model: String,
     dimensions: usize,
 }
@@ -37,13 +35,13 @@ struct EmbeddingItem {
 }
 
 impl EmbeddingsClient {
-    pub fn new(config: &Config, credentials: Arc<ConsoleCredentials>) -> Result<Self> {
+    pub fn new(config: &Config) -> Result<Self> {
         Ok(Self {
             http: Client::builder()
                 .timeout(config.extraction_timeout)
                 .build()?,
             endpoint: format!("{}/embeddings", config.openai_base_url),
-            credentials,
+            api_key: config.openai_api_key.clone(),
             model: config.embeddings_model.clone(),
             dimensions: config.embeddings_dimensions,
         })
@@ -66,11 +64,10 @@ impl EmbeddingsClient {
                 dimensions: self.dimensions,
                 encoding_format: "float",
             };
-            let api_key = self.credentials.embeddings_api_key().await?;
             let response = self
                 .http
                 .post(&self.endpoint)
-                .bearer_auth(api_key)
+                .bearer_auth(&self.api_key)
                 .json(&request)
                 .send()
                 .await
