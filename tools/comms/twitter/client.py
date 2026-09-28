@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime
+from functools import wraps
 from typing import Any, Literal
+from urllib.parse import quote
 
 import httpx
 
@@ -41,6 +43,25 @@ class XAPIResponseError(RuntimeError):
         super().__init__(f"X API response contained errors: {details}")
 
 
+class XCreditsDepletedError(RuntimeError):
+    """X cannot serve the request because its paid credits are exhausted."""
+
+
+def _credit_fallback(method):
+    """Restart a supported read on FxTwitter, including any pagination."""
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        if self._credits_depleted:
+            return getattr(_FxTwitter(self), method.__name__)(*args, **kwargs)
+        try:
+            return method(self, *args, **kwargs)
+        except XCreditsDepletedError:
+            return getattr(_FxTwitter(self), method.__name__)(*args, **kwargs)
+
+    return wrapped
+
+
 class XClient:
     """Client for the X API v2."""
 
@@ -50,6 +71,7 @@ class XClient:
         self._api_key = api_key
         self.timeout = timeout
         self._client: httpx.Client | None = None
+        self._credits_depleted = False
 
     @property
     def client(self) -> httpx.Client:
@@ -64,10 +86,17 @@ class XClient:
         return api_key
 
     def _request(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self._credits_depleted and endpoint != "/usage/tweets":
+            raise XCreditsDepletedError(
+                "X credits depleted; this read requires a supported fallback."
+            )
         headers = {"Authorization": f"Bearer {self._get_api_key()}"}
         url = f"{self.BASE_URL}{endpoint}"
         try:
             response = self.client.get(url, params=self._clean_params(params), headers=headers)
+            if response.status_code == 402:
+                self._credits_depleted = True
+                raise XCreditsDepletedError("X credits depleted (HTTP 402).")
             response.raise_for_status()
             return self._validate_response(response.json())
         except httpx.HTTPStatusError as e:
@@ -260,6 +289,7 @@ class XClient:
             meta["next_token"] = token
         return limited_results, meta, includes
 
+    @_credit_fallback
     def get_user(self, handle: str) -> dict[str, Any] | None:
         """Get a user profile by username/handle."""
         data = self._request(
@@ -283,6 +313,7 @@ class XClient:
             users.extend(data.get("data") or [])
         return [self._normalize_user(user) for user in users]
 
+    @_credit_fallback
     def lookup_users_by_usernames(self, usernames: list[str]) -> list[dict[str, Any]]:
         """Lookup users by usernames/handles."""
         names = [name.lstrip("@") for name in usernames]
@@ -292,6 +323,7 @@ class XClient:
             users.extend(data.get("data") or [])
         return [self._normalize_user(user) for user in users]
 
+    @_credit_fallback
     def get_followers(
         self, handle: str, limit: int = 100, ids_only: bool = False
     ) -> tuple[list[dict[str, Any]] | list[str], dict[str, Any]]:
@@ -308,6 +340,7 @@ class XClient:
             return [item["user_id"] for item in normalized if item.get("user_id")], meta
         return normalized, meta
 
+    @_credit_fallback
     def get_following(
         self, handle: str, limit: int = 100, ids_only: bool = False
     ) -> tuple[list[dict[str, Any]] | list[str], dict[str, Any]]:
@@ -324,6 +357,7 @@ class XClient:
             return [item["user_id"] for item in normalized if item.get("user_id")], meta
         return normalized, meta
 
+    @_credit_fallback
     def search_tweets(
         self,
         query: str,
@@ -348,6 +382,7 @@ class XClient:
         )
         return [self._normalize_tweet(tweet, includes) for tweet in tweets[:limit]], meta
 
+    @_credit_fallback
     def lookup_tweets(self, ids: list[str]) -> list[dict[str, Any]]:
         """Lookup posts by IDs."""
         tweets: list[dict[str, Any]] = []
@@ -358,12 +393,14 @@ class XClient:
             self._merge_includes(includes, data.get("includes"))
         return [self._normalize_tweet(tweet, includes) for tweet in tweets]
 
+    @_credit_fallback
     def get_tweet(self, tweet_id: str) -> dict[str, Any] | None:
         """Lookup a single post by ID."""
         data = self._request(f"/tweets/{tweet_id}", self._tweet_params())
         tweet = data.get("data")
         return self._normalize_tweet(tweet, data.get("includes")) if tweet else None
 
+    @_credit_fallback
     def get_user_posts(
         self, handle: str, limit: int = 20
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any] | None]:
@@ -462,6 +499,7 @@ class XClient:
         if self._client:
             self._client.close()
             self._client = None
+        self._credits_depleted = False
 
     def __enter__(self) -> XClient:
         return self
@@ -472,3 +510,226 @@ class XClient:
 
 def _client() -> XClient:
     return XClient(api_key=secret("X_API_KEY", ""))
+
+
+class _FxTwitter:
+    """Public read adapter using the same FxTwitter v2 endpoints as nanocodex."""
+
+    def __init__(self, owner: XClient):
+        self.owner = owner
+
+    def _request(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        # Auth is request-scoped in XClient; never forward its bearer token here.
+        try:
+            response = self.owner.client.get(
+                f"https://api.fxtwitter.com/2/{path}",
+                params=params,
+                headers={"Accept": "application/json", "User-Agent": "centaur-twitter/1.0"},
+            )
+            response.raise_for_status()
+            data = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise RuntimeError(f"FxTwitter fallback failed: {exc}") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError("FxTwitter fallback returned an invalid response.")
+        code = data.get("code", 200)
+        if code != 200 or data.get("message") in {"NOT_FOUND", "PRIVATE_TWEET"}:
+            if path == "search" and code == 404:
+                raise RuntimeError("FxTwitter search is temporarily unavailable upstream.")
+            raise RuntimeError(f"FxTwitter fallback error: {code} - {data.get('message')}")
+        return data
+
+    @staticmethod
+    def _handle(handle: str) -> str:
+        return quote(handle.lstrip("@"), safe="")
+
+    def _user(self, raw: dict[str, Any]) -> dict[str, Any]:
+        verification = raw.get("verification") or {}
+        return {
+            **self.owner._normalize_user(
+                {
+                    **raw,
+                    "username": raw.get("screen_name"),
+                    "created_at": raw.get("joined"),
+                    "profile_image_url": raw.get("avatar_url"),
+                    "url": (raw.get("website") or {}).get("url"),
+                    "verified": verification.get("verified"),
+                    "verified_type": verification.get("type"),
+                    "public_metrics": {
+                        "followers_count": raw.get("followers"),
+                        "following_count": raw.get("following"),
+                        "tweet_count": raw.get("statuses"),
+                    },
+                }
+            ),
+            "provider": "fxtwitter",
+        }
+
+    def _tweet(self, raw: dict[str, Any], *, include_quote: bool = True) -> dict[str, Any]:
+        author = self._user(raw["author"]) if raw.get("author") else None
+        timestamp = raw.get("created_timestamp")
+        tweet = self.owner._normalize_tweet(
+            {
+                **raw,
+                "author_id": author.get("id") if author else None,
+                "public_metrics": {
+                    "like_count": raw.get("likes"),
+                    "retweet_count": raw.get("retweets", raw.get("reposts")),
+                    "reply_count": raw.get("replies"),
+                    "quote_count": raw.get("quotes"),
+                    "bookmark_count": raw.get("bookmarks"),
+                    "impression_count": raw.get("views"),
+                },
+            }
+        )
+        media = raw.get("media") or {}
+        items = media.get("all")
+        if items is None:
+            items = [
+                item for key in ("photos", "videos", "animated") for item in media.get(key, [])
+            ]
+        tweet.update(
+            {
+                "provider": "fxtwitter",
+                "author": author,
+                "screen_name": author.get("screen_name") if author else None,
+                "published_at": int(timestamp * 1000)
+                if timestamp is not None
+                else tweet["published_at"],
+                "media": [
+                    {
+                        **item,
+                        "alt_text": item.get("alt", item.get("altText")),
+                        "preview_image_url": item.get("thumbnail_url"),
+                        "duration_ms": item.get("duration_ms")
+                        or (item["duration"] * 1000 if item.get("duration") is not None else None),
+                        "variants": item.get("variants")
+                        or [
+                            {
+                                "url": variant.get("url"),
+                                "content_type": {
+                                    "mp4": "video/mp4",
+                                    "webm": "video/webm",
+                                    "m3u8": "application/vnd.apple.mpegurl",
+                                }.get(variant.get("container"), variant.get("container")),
+                                "bitrate": variant.get("bitrate"),
+                            }
+                            for variant in item.get("formats") or []
+                        ],
+                    }
+                    for item in items
+                ],
+                "polls": [raw["poll"]] if raw.get("poll") else [],
+            }
+        )
+        references = []
+        parent = raw.get("replying_to")
+        parent_id = parent.get("status") if isinstance(parent, dict) else None
+        parent_id = parent_id or next(iter(raw.get("replying_to_status") or []), None)
+        if parent_id:
+            references.append({"type": "replied_to", "id": str(parent_id)})
+        if include_quote and raw.get("quote"):
+            references.append(
+                {
+                    "type": "quoted",
+                    "id": raw["quote"].get("id"),
+                    "tweet": self._tweet(raw["quote"], include_quote=False),
+                }
+            )
+        tweet["referenced_tweets"] = references or None
+        return tweet
+
+    def _paged(self, path: str, limit: int, params: dict[str, Any] | None = None):
+        results = []
+        cursor = None
+        seen = set()
+        for _ in range(10):
+            if len(results) >= limit:
+                break
+            data = self._request(
+                path,
+                {
+                    **(params or {}),
+                    "count": min(20, limit - len(results)),
+                    **({"cursor": cursor} if cursor else {}),
+                },
+            )
+            page = data.get("results")
+            if not isinstance(page, list):
+                raise RuntimeError("FxTwitter fallback response is missing results.")
+            results.extend(page)
+            cursor = (data.get("cursor") or {}).get("bottom")
+            if not page or not cursor or cursor in seen:
+                break
+            seen.add(cursor)
+        results = results[: max(0, limit)]
+        meta = {"provider": "fxtwitter", "result_count": len(results)}
+        if cursor:
+            meta["next_token"] = cursor
+        return results, meta
+
+    def get_user(self, handle: str) -> dict[str, Any]:
+        data = self._request(f"profile/{self._handle(handle)}")
+        if not isinstance(data.get("user"), dict) or not data["user"].get("id"):
+            raise RuntimeError("FxTwitter fallback response is missing a user.")
+        return self._user(data["user"])
+
+    def lookup_users_by_usernames(self, usernames: list[str]) -> list[dict[str, Any]]:
+        return [self.get_user(handle) for handle in usernames]
+
+    def get_tweet(self, tweet_id: str) -> dict[str, Any]:
+        data = self._request(f"status/{quote(tweet_id, safe='')}")
+        raw = data.get("status") or data.get("tweet")
+        if not isinstance(raw, dict) or not raw.get("id"):
+            raise RuntimeError("FxTwitter fallback response is missing a post.")
+        return self._tweet(raw)
+
+    def lookup_tweets(self, ids: list[str]) -> list[dict[str, Any]]:
+        return [self.get_tweet(tweet_id) for tweet_id in ids]
+
+    def search_tweets(
+        self, query: str, search_type: str = "latest", limit: int = 20
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        if search_type not in {"latest", "recent", "top"}:
+            raise XCreditsDepletedError(
+                "X credits depleted; FxTwitter cannot provide full-archive search."
+            )
+        posts, meta = self._paged(
+            "search",
+            limit,
+            {
+                "q": query,
+                "feed": "top" if search_type == "top" else "latest",
+            },
+        )
+        return [self._tweet(post) for post in posts], meta
+
+    def _connections(self, handle: str, relation: str, limit: int, ids_only: bool):
+        users, meta = self._paged(f"profile/{self._handle(handle)}/{relation}", limit)
+        normalized = [self._user(user) for user in users]
+        return ([user["user_id"] for user in normalized] if ids_only else normalized), meta
+
+    def get_followers(
+        self, handle: str, limit: int = 100, ids_only: bool = False
+    ) -> tuple[list[dict[str, Any]] | list[str], dict[str, Any]]:
+        return self._connections(handle, "followers", limit, ids_only)
+
+    def get_following(
+        self, handle: str, limit: int = 100, ids_only: bool = False
+    ) -> tuple[list[dict[str, Any]] | list[str], dict[str, Any]]:
+        return self._connections(handle, "following", limit, ids_only)
+
+    def get_user_posts(
+        self, handle: str, limit: int = 20
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+        user = self.get_user(handle)
+        posts, meta = self._paged(
+            f"profile/{self._handle(handle)}/statuses",
+            limit,
+            {
+                "with_replies": "true",
+            },
+        )
+        normalized = [self._tweet(post) for post in posts if not post.get("reposted_by")]
+        meta["result_count"] = len(normalized)
+        return user, normalized, meta
