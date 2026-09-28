@@ -46,8 +46,11 @@ pub struct DriveFile {
 }
 
 impl DriveFile {
-    pub fn is_active_pdf(&self) -> bool {
-        !self.trashed && self.mime_type == PDF_MIME_TYPE && !self.id.is_empty()
+    pub fn is_active_user_pdf(&self) -> bool {
+        !self.trashed
+            && self.mime_type == PDF_MIME_TYPE
+            && !self.id.is_empty()
+            && self.drive_id.is_empty()
     }
 
     pub fn source_version(&self) -> String {
@@ -155,7 +158,7 @@ impl DriveClient {
         Ok(response.start_page_token)
     }
 
-    pub async fn list_pdfs(
+    pub async fn list_user_pdfs(
         &self,
         credential_id: i64,
         page_size: u16,
@@ -169,8 +172,8 @@ impl DriveClient {
             ),
             ("pageSize", page_size.to_string()),
             ("fields", fields.to_owned()),
-            ("corpora", "allDrives".to_owned()),
-            ("includeItemsFromAllDrives", "true".to_owned()),
+            ("corpora", "user".to_owned()),
+            ("includeItemsFromAllDrives", "false".to_owned()),
             ("supportsAllDrives", "true".to_owned()),
             ("orderBy", "modifiedTime".to_owned()),
         ]);
@@ -189,7 +192,7 @@ impl DriveClient {
         Ok(page)
     }
 
-    pub async fn list_changes(
+    pub async fn list_user_changes(
         &self,
         credential_id: i64,
         page_size: u16,
@@ -200,7 +203,7 @@ impl DriveClient {
             ("pageToken", page_token.to_owned()),
             ("pageSize", page_size.to_string()),
             ("fields", fields.to_owned()),
-            ("includeItemsFromAllDrives", "true".to_owned()),
+            ("includeItemsFromAllDrives", "false".to_owned()),
             ("supportsAllDrives", "true".to_owned()),
             ("includeRemoved", "true".to_owned()),
         ]);
@@ -276,10 +279,14 @@ mod tests {
     }
 
     #[test]
-    fn only_active_pdfs_are_processable() {
-        assert!(file(PDF_MIME_TYPE, false).is_active_pdf());
-        assert!(!file(PDF_MIME_TYPE, true).is_active_pdf());
-        assert!(!file("application/vnd.google-apps.document", false).is_active_pdf());
+    fn only_active_non_shared_drive_pdfs_are_processable() {
+        assert!(file(PDF_MIME_TYPE, false).is_active_user_pdf());
+        assert!(!file(PDF_MIME_TYPE, true).is_active_user_pdf());
+        assert!(!file("application/vnd.google-apps.document", false).is_active_user_pdf());
+
+        let mut shared_drive_file = file(PDF_MIME_TYPE, false);
+        shared_drive_file.drive_id = "shared-drive-1".to_owned();
+        assert!(!shared_drive_file.is_active_user_pdf());
     }
 
     #[test]

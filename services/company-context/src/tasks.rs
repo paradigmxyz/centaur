@@ -267,7 +267,7 @@ async fn scan_drive(
         .credentials()
         .google_credential(params.credential_id)
         .await?;
-    let scope = format!("broker:{}", credential.id);
+    let scope = format!("user:broker:{}", credential.id);
     ensure_checkpoint(&state.pool, &scope).await?;
     let mut total = 0;
     for _ in 0..state.config.max_scan_pages {
@@ -293,7 +293,7 @@ async fn scan_drive(
             };
             let page = state
                 .drive
-                .list_pdfs(
+                .list_user_pdfs(
                     credential.id,
                     state.config.scan_page_size,
                     nonempty(&checkpoint.initial_page_token),
@@ -342,7 +342,7 @@ async fn scan_drive(
         }
         let page = state
             .drive
-            .list_changes(
+            .list_user_changes(
                 credential.id,
                 state.config.scan_page_size,
                 &checkpoint.changes_page_token,
@@ -350,7 +350,10 @@ async fn scan_drive(
             .await?;
         for change in page.changes {
             match change.file {
-                Some(file) if !change.removed && file.is_active_pdf() => {
+                Some(file) if !file.drive_id.is_empty() => {
+                    // Shared Drives will use independent drive-scoped tasks and checkpoints.
+                }
+                Some(file) if !change.removed && file.is_active_user_pdf() => {
                     total += enqueue_file(state, &credential, file).await? as usize;
                 }
                 _ => {
@@ -400,7 +403,7 @@ async fn scan_drive(
         break;
     }
     info!(
-        event = "company_context_drive_scan_completed",
+        event = "company_context_drive_user_scan_completed",
         task_id = ctx.task_id(),
         files_enqueued = total
     );
@@ -416,7 +419,7 @@ async fn enqueue_files(
     files: Vec<DriveFile>,
 ) -> Result<usize> {
     let mut count = 0;
-    for file in files.into_iter().filter(DriveFile::is_active_pdf) {
+    for file in files.into_iter().filter(DriveFile::is_active_user_pdf) {
         count += enqueue_file(state, credential, file).await? as usize;
     }
     Ok(count)
@@ -671,8 +674,10 @@ async fn extract_pdf(
 ) -> Result<TaskSummary> {
     let file = params.file;
     let observation_key = params.observation_key;
-    if !file.is_active_pdf() {
-        return Err(anyhow!("extract task received a non-PDF or trashed file"));
+    if !file.is_active_user_pdf() {
+        return Err(anyhow!(
+            "extract task received a non-PDF, trashed, or Shared Drive file"
+        ));
     }
     if !observation_is_current(&state.pool, &file.id, &observation_key).await? {
         return Ok(TaskSummary {

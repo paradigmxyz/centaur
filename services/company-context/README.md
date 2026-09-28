@@ -1,6 +1,6 @@
 # Company Context
 
-Standalone company-context ingestion service. The initial implementation indexes text-bearing PDF files from Google Drive using durable Absurd tasks.
+Standalone company-context ingestion service. The initial implementation indexes text-bearing PDFs from users' My Drive and shared folders using durable Absurd tasks. Shared Drives are intentionally excluded until they receive independent drive-scoped tasks and checkpoints.
 
 The service owns these Postgres schemas:
 

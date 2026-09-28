@@ -66,7 +66,7 @@ pub async fn run(config: Arc<Config>, client: Client, credentials: Arc<ConsoleCr
                         requested_at,
                     },
                     SpawnOptions {
-                        idempotency_key: Some(format!("drive.scan:{credential_id}:{bucket}")),
+                        idempotency_key: Some(format!("drive.user.scan:{credential_id}:{bucket}")),
                         ..SpawnOptions::default()
                     },
                 )
@@ -75,7 +75,7 @@ pub async fn run(config: Arc<Config>, client: Client, credentials: Arc<ConsoleCr
                 Ok(result) => {
                     telemetry::task_enqueued(DRIVE_SCAN_TASK, result.created);
                     info!(
-                        event = "company_context_scan_enqueued",
+                        event = "company_context_user_scan_enqueued",
                         credential_id,
                         task_id = result.task_id,
                         created = result.created
@@ -84,7 +84,7 @@ pub async fn run(config: Arc<Config>, client: Client, credentials: Arc<ConsoleCr
                 Err(error) => {
                     metrics::counter!("company_context_scheduler_errors_total").increment(1);
                     error!(
-                        event = "company_context_scan_enqueue_failed",
+                        event = "company_context_user_scan_enqueue_failed",
                         credential_id,
                         error = %error
                     );
