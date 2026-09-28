@@ -93,9 +93,9 @@ spec:
             - name: COMPANY_CONTEXT_MAX_SCAN_PAGES
               value: {{ $companyContext.maxScanPages | quote }}
             - name: COMPANY_CONTEXT_MAX_PDF_BYTES
-              value: {{ $companyContext.maxPdfBytes | quote }}
+              value: {{ $companyContext.maxPdfBytes | int64 | quote }}
             - name: COMPANY_CONTEXT_MAX_EXTRACTED_BYTES
-              value: {{ $companyContext.maxExtractedBytes | quote }}
+              value: {{ $companyContext.maxExtractedBytes | int64 | quote }}
             - name: COMPANY_CONTEXT_EXTRACTION_TIMEOUT_SECONDS
               value: {{ $companyContext.extractionTimeoutSeconds | quote }}
             - name: COMPANY_CONTEXT_CHUNK_CHARS
