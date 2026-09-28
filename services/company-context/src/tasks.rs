@@ -374,11 +374,7 @@ async fn extract_pdf(
             state.config.max_extracted_bytes,
         )
         .await?;
-        let chunks = chunk_text(
-            &text,
-            state.config.chunk_chars,
-            state.config.chunk_overlap_chars,
-        );
+        let chunks = chunk_text(&text, state.config.chunk_chars);
         if chunks.is_empty() {
             return Err(anyhow!("PDF produced no non-empty chunks"));
         }

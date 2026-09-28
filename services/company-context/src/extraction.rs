@@ -61,7 +61,7 @@ pub async fn extract_pdf_text(
     Ok(normalized)
 }
 
-pub fn chunk_text(text: &str, max_chars: usize, overlap_chars: usize) -> Vec<Chunk> {
+pub fn chunk_text(text: &str, max_chars: usize) -> Vec<Chunk> {
     let paragraphs: Vec<&str> = text
         .split("\n\n")
         .map(str::trim)
@@ -74,19 +74,12 @@ pub fn chunk_text(text: &str, max_chars: usize, overlap_chars: usize) -> Vec<Chu
             if !current.is_empty() {
                 bodies.push(std::mem::take(&mut current));
             }
-            split_long_text(paragraph, max_chars, overlap_chars, &mut bodies);
+            split_long_text(paragraph, max_chars, &mut bodies);
             continue;
         }
         let separator = if current.is_empty() { 0 } else { 2 };
         if current.chars().count() + separator + paragraph.chars().count() > max_chars {
-            let previous = std::mem::take(&mut current);
-            let available_overlap = max_chars.saturating_sub(paragraph.chars().count() + 2);
-            let overlap = char_suffix(&previous, overlap_chars.min(available_overlap));
-            bodies.push(previous);
-            current = overlap;
-            if !current.is_empty() {
-                current.push_str("\n\n");
-            }
+            bodies.push(std::mem::take(&mut current));
         } else if !current.is_empty() {
             current.push_str("\n\n");
         }
@@ -118,23 +111,11 @@ pub fn hex_sha256(value: &[u8]) -> String {
     format!("{:x}", Sha256::digest(value))
 }
 
-fn split_long_text(text: &str, max_chars: usize, overlap_chars: usize, output: &mut Vec<String>) {
+fn split_long_text(text: &str, max_chars: usize, output: &mut Vec<String>) {
     let chars: Vec<char> = text.chars().collect();
-    let step = max_chars - overlap_chars;
-    let mut start = 0;
-    while start < chars.len() {
-        let end = (start + max_chars).min(chars.len());
-        output.push(chars[start..end].iter().collect());
-        if end == chars.len() {
-            break;
-        }
-        start += step;
+    for chunk in chars.chunks(max_chars) {
+        output.push(chunk.iter().collect());
     }
-}
-
-fn char_suffix(value: &str, count: usize) -> String {
-    let chars: Vec<char> = value.chars().collect();
-    chars[chars.len().saturating_sub(count)..].iter().collect()
 }
 
 fn normalize_text(text: &str) -> String {
@@ -155,7 +136,7 @@ mod tests {
     #[test]
     fn chunks_are_stable_and_bounded() {
         let text = "alpha beta gamma\n\ndelta epsilon zeta\n\neta theta iota";
-        let chunks = chunk_text(text, 25, 5);
+        let chunks = chunk_text(text, 25);
         assert_eq!(
             chunks
                 .iter()
@@ -164,18 +145,18 @@ mod tests {
             vec!["000000", "000001", "000002"]
         );
         assert!(chunks.iter().all(|chunk| chunk.body.chars().count() <= 25));
-        assert_eq!(chunks, chunk_text(text, 25, 5));
+        assert_eq!(chunks, chunk_text(text, 25));
     }
 
     #[test]
     fn splits_large_unicode_paragraphs_on_character_boundaries() {
-        let chunks = chunk_text("éééééééé", 5, 2);
+        let chunks = chunk_text("éééééééé", 5);
         assert_eq!(
             chunks
                 .iter()
                 .map(|chunk| chunk.body.as_str())
                 .collect::<Vec<_>>(),
-            vec!["ééééé", "ééééé"]
+            vec!["ééééé", "ééé"]
         );
     }
 }

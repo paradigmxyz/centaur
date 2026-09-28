@@ -1,9 +1,5 @@
 use std::{net::SocketAddr, time::Duration};
 
-#[cfg(test)]
-use std::ffi::OsString;
-
-use anyhow::{Result, bail};
 use clap::Parser;
 
 pub const PDF_MIME_TYPE: &str = "application/pdf";
@@ -133,12 +129,6 @@ pub struct Config {
     pub chunk_chars: usize,
     #[arg(
         long,
-        env = "COMPANY_CONTEXT_CHUNK_OVERLAP_CHARS",
-        default_value = "500"
-    )]
-    pub chunk_overlap_chars: usize,
-    #[arg(
-        long,
         env = "COMPANY_CONTEXT_WORKER_CONCURRENCY",
         default_value = "4",
         value_parser = positive_usize
@@ -147,28 +137,8 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn from_args() -> Result<Self> {
-        let config = Self::parse();
-        config.validate()?;
-        Ok(config)
-    }
-
-    fn validate(&self) -> Result<()> {
-        if self.chunk_overlap_chars >= self.chunk_chars {
-            bail!("--chunk-overlap-chars must be smaller than --chunk-chars");
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn try_from_args<I, T>(args: I) -> Result<Self>
-    where
-        I: IntoIterator<Item = T>,
-        T: Into<OsString> + Clone,
-    {
-        let config = Self::try_parse_from(args)?;
-        config.validate()?;
-        Ok(config)
+    pub fn from_args() -> Self {
+        Self::parse()
     }
 }
 
@@ -242,15 +212,8 @@ mod tests {
     fn parses_cli_arguments_and_normalizes_urls() {
         let mut args = required_args();
         args.extend(["--openai-base-url", "http://localhost:8080/v1///"]);
-        let config = Config::try_from_args(args).unwrap();
+        let config = Config::try_parse_from(args).unwrap();
         assert_eq!(config.openai_base_url, "http://localhost:8080/v1");
         assert_eq!(config.scan_interval, Duration::from_secs(300));
-    }
-
-    #[test]
-    fn rejects_overlaps_that_are_not_smaller_than_chunks() {
-        let mut args = required_args();
-        args.extend(["--chunk-chars", "100", "--chunk-overlap-chars", "100"]);
-        assert!(Config::try_from_args(args).is_err());
     }
 }

@@ -99,8 +99,6 @@ spec:
               value: {{ .Values.companyContext.extractionTimeoutSeconds | quote }}
             - name: COMPANY_CONTEXT_CHUNK_CHARS
               value: {{ .Values.companyContext.chunkChars | quote }}
-            - name: COMPANY_CONTEXT_CHUNK_OVERLAP_CHARS
-              value: {{ .Values.companyContext.chunkOverlapChars | quote }}
             - name: COMPANY_CONTEXT_WORKER_CONCURRENCY
               value: {{ .Values.companyContext.workerConcurrency | quote }}
             - name: COMPANY_CONTEXT_EMBEDDINGS_MODEL

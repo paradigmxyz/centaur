@@ -510,7 +510,6 @@ companyContext:
   maxExtractedBytes: 52428800
   extractionTimeoutSeconds: 120
   chunkChars: 6000
-  chunkOverlapChars: 500
   workerConcurrency: 4
   embeddingsModel: text-embedding-3-small
   embeddingsDimensions: 1536

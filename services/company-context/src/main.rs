@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    let config = Arc::new(Config::from_args()?);
+    let config = Arc::new(Config::from_args());
     let pool = database::connect_and_migrate(&config.database_url).await?;
     let credentials = Arc::new(ConsoleCredentials::connect(&config).await?);
     let absurd = Client::from_pool_with_options(
