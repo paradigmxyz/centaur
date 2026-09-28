@@ -2710,8 +2710,8 @@ async function renderExecutionStream(
     // (the thread.post fallback would re-inject the author's `B...` id).
     const recipientUserId = await slackStreamRecipientUserId(message, options, options.logger ?? noopLogger)
     if (recipientUserId === undefined && message.author.isBot === true) {
-      await postChatSdkStreamText(thread, visibleStream)
-      return { diverged: capture.diverged }
+      const posted = await postChatSdkStreamText(thread, visibleStream)
+      return { diverged: capture.diverged, messageId: posted?.id }
     }
     const sent = await thread.adapter.stream!(thread.id, visibleStream, {
       recipientTeamId: message.teamId,
@@ -2767,8 +2767,8 @@ async function renderRecoveredExecutionStream(
     // member id, structured streaming cannot succeed for a bot author.
     const recipientUserId = await slackStreamRecipientUserId(message, options, options.logger ?? noopLogger)
     if (recipientUserId === undefined && message.author.isBot === true) {
-      await postChatSdkStreamText(thread, visibleStream)
-      return { diverged: capture.diverged }
+      const posted = await postChatSdkStreamText(thread, visibleStream)
+      return { diverged: capture.diverged, messageId: posted?.id }
     }
     const sent = await thread.adapter.stream!(
       thread.id,
@@ -2844,13 +2844,13 @@ async function renderPlainTextExecutionStream(
 async function postChatSdkStreamText(
   thread: Thread,
   stream: AsyncIterable<ChatSDKStreamChunk>
-): Promise<void> {
+): Promise<{ id: string } | undefined> {
   let markdownText = ''
   for await (const chunk of stream) {
     if (chunk.type === 'markdown_text') markdownText += chunk.text
   }
-  if (!markdownText.trim()) return
-  await thread.post(
+  if (!markdownText.trim()) return undefined
+  return await thread.post(
     truncateSlackText(markdownText, SLACK_FALLBACK_TEXT_MAX_CHARS, 'Slack final answer')
   )
 }

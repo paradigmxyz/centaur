@@ -5989,48 +5989,10 @@ describe('slackbotv2', () => {
     expect(await threadText(botTrigger.ts)).toContain('Executed request 1.')
     expect(hasLog(logs, 'slackbotv2_render_failed')).toBe(false)
 
-    // Without a resolvable bot identity the recipient falls back to the app's
-    // own bot user id instead of the rejected B... id.
-    bot = createTestBot({ triggerBotAllowlist: ['bot:BOTHERBOT'] })
-    codexApi.reset()
-    slackApi.reset()
-    const fallbackTrigger = await postUserMessage('bot-authored fallback trigger placeholder')
-    const fallbackWaits: Promise<unknown>[] = []
-    const fallbackResponse = await bot.app.request(
-      '/api/webhooks/slack',
-      signedSlackEvent({
-        event_id: 'Ev-slackbotv2-bot-trigger-streaming-fallback',
-        event: {
-          type: 'message',
-          bot_id: 'BOTHERBOT',
-          channel: CHANNEL_ID,
-          subtype: 'bot_message',
-          team: TEAM_ID,
-          text: `<@${BOT_USER_ID}> run the fallback turn`,
-          ts: fallbackTrigger.ts,
-          username: 'otherbot'
-        }
-      }),
-      {},
-      waitUntilContext(fallbackWaits)
-    )
-    expect(fallbackResponse.status).toBe(200)
-    await Promise.all(fallbackWaits)
-    expect(codexApi.executes).toHaveLength(1)
-    const fallbackTranscripts = slackStreamTranscripts(slackApi.calls)
-    expect(fallbackTranscripts).toHaveLength(1)
-    expect(fallbackTranscripts[0]!.start.body).toEqual(
-      expect.objectContaining({
-        recipient_team_id: TEAM_ID,
-        recipient_user_id: BOT_USER_ID
-      })
-    )
-
-    // With no member id at all, structured streaming is skipped up front: no
+    // With no member id, structured streaming is skipped up front: no
     // rejected chat.startStream and no false slack_answer_lost render failure.
     const skipLogs: CapturedLog[] = []
     bot = createTestBot({
-      botUserId: undefined,
       logger: captureLogger(skipLogs),
       triggerBotAllowlist: ['bot:BOTHERBOT']
     })

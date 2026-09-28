@@ -166,8 +166,8 @@ type SlackStreamRecipientMessage = {
  * message. Slack only accepts `U...`/`W...` member ids there, but
  * bot-authored messages carry the bot's `B...` id in `author.userId`, which
  * makes every `chat.startStream` fail. For bots, resolve a member id the same
- * way the trigger-bot allowlist does (raw event fields, the cached
- * `bots.info` identity, then the app's own bot user id). Returns undefined
+ * way the trigger-bot allowlist does (raw event fields, then the cached
+ * `bots.info` identity). Returns undefined
  * when no member id exists so the render path skips structured streaming up
  * front instead of sending a start request Slack rejects.
  */
@@ -195,8 +195,7 @@ export async function slackStreamRecipientUserId(
       const identity = await resolveTriggerBotIdentity(botId, options, logger)
       if (identity?.userId && isSlackMemberId(identity.userId)) return identity.userId
     }
-    const appBotUserId = options.botUserId
-    return appBotUserId && isSlackMemberId(appBotUserId) ? appBotUserId : undefined
+    return undefined
   } catch (error) {
     logger.warn('slackbotv2_stream_recipient_resolution_failed', {
       author_user_id: message.author.userId,
