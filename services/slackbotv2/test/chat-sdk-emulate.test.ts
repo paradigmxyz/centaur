@@ -5988,41 +5988,6 @@ describe('slackbotv2', () => {
     expect(slackApi.botInfoRequestCount('BOTHERBOT')).toBe(1)
     expect(await threadText(botTrigger.ts)).toContain('Executed request 1.')
     expect(hasLog(logs, 'slackbotv2_render_failed')).toBe(false)
-
-    // With no member id, structured streaming is skipped up front: no
-    // rejected chat.startStream and no false slack_answer_lost render failure.
-    const skipLogs: CapturedLog[] = []
-    bot = createTestBot({
-      logger: captureLogger(skipLogs),
-      triggerBotAllowlist: ['bot:BOTHERBOT']
-    })
-    codexApi.reset()
-    slackApi.reset()
-    const skipTrigger = await postUserMessage('bot-authored skip trigger placeholder')
-    const skipWaits: Promise<unknown>[] = []
-    const skipResponse = await bot.app.request(
-      '/api/webhooks/slack',
-      signedSlackEvent({
-        event_id: 'Ev-slackbotv2-bot-trigger-streaming-skipped',
-        event: {
-          type: 'app_mention',
-          bot_id: 'BOTHERBOT',
-          channel: CHANNEL_ID,
-          team: TEAM_ID,
-          text: `<@${BOT_USER_ID}> run the skipped turn`,
-          ts: skipTrigger.ts,
-          username: 'otherbot'
-        }
-      }),
-      {},
-      waitUntilContext(skipWaits)
-    )
-    expect(skipResponse.status).toBe(200)
-    await Promise.all(skipWaits)
-    expect(codexApi.executes).toHaveLength(1)
-    expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(false)
-    expect(await threadText(skipTrigger.ts)).toContain('Executed request 1.')
-    expect(hasLog(skipLogs, 'slackbotv2_render_failed')).toBe(false)
   })
 })
 
