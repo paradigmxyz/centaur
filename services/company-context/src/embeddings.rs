@@ -1,8 +1,8 @@
-use anyhow::{Context, Result, bail};
-use reqwest::Client;
+use anyhow::{Context, Result};
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
+use crate::{config::Config, errors::rejected};
 
 const EMBEDDING_BATCH_SIZE: usize = 25;
 
@@ -71,31 +71,50 @@ impl EmbeddingsClient {
                 .json(&request)
                 .send()
                 .await
-                .context("send embeddings request")?
+                .context("send embeddings request")?;
+            let status = response.status();
+            if status.is_client_error()
+                && !matches!(
+                    status,
+                    StatusCode::REQUEST_TIMEOUT
+                        | StatusCode::TOO_MANY_REQUESTS
+                        | StatusCode::UNAUTHORIZED
+                        | StatusCode::FORBIDDEN
+                )
+            {
+                return Err(rejected(format!(
+                    "embeddings request was rejected with status {status}"
+                )));
+            }
+            let response = response
                 .error_for_status()
                 .context("embeddings request failed")?
                 .json::<EmbeddingResponse>()
                 .await
-                .context("decode embeddings response")?;
+                .map_err(|error| rejected(format!("decode embeddings response: {error}")))?;
             if response.data.len() != batch.len() {
-                bail!("embedding response item count does not match request");
+                return Err(rejected(
+                    "embedding response item count does not match request",
+                ));
             }
             let mut ordered: Vec<Option<Vec<f32>>> = vec![None; batch.len()];
             for item in response.data {
                 if item.index >= ordered.len() || ordered[item.index].is_some() {
-                    bail!("embedding response contains an invalid index");
+                    return Err(rejected("embedding response contains an invalid index"));
                 }
                 if item.embedding.len() != self.dimensions {
-                    bail!(
+                    return Err(rejected(format!(
                         "embedding response has dimension {}, expected {}",
                         item.embedding.len(),
                         self.dimensions
-                    );
+                    )));
                 }
                 ordered[item.index] = Some(item.embedding);
             }
             for embedding in ordered {
-                output.push(embedding.context("embedding response is missing an index")?);
+                output.push(
+                    embedding.ok_or_else(|| rejected("embedding response is missing an index"))?,
+                );
             }
         }
         Ok(output)

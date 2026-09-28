@@ -1,15 +1,21 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
-use reqwest::{Client, RequestBuilder};
+use reqwest::{Client, RequestBuilder, StatusCode, header::RETRY_AFTER};
 use serde::{Deserialize, Serialize};
+use tokio::time::sleep;
+use tracing::warn;
 
 use crate::{
     config::{Config, PDF_MIME_TYPE},
     credentials::ConsoleCredentials,
+    errors::rejected,
 };
+
+const DRIVE_REQUEST_ATTEMPTS: u32 = 4;
+const DRIVE_SERVER_RETRY_BASE: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 pub struct DriveClient {
@@ -187,7 +193,7 @@ impl DriveClient {
             .await
             .context("decode Drive file page")?;
         if page.incomplete_search {
-            bail!("Google Drive reported an incomplete all-drives search");
+            bail!("Google Drive reported an incomplete user corpus search");
         }
         Ok(page)
     }
@@ -224,37 +230,101 @@ impl DriveClient {
             .content_length()
             .is_some_and(|length| length > self.max_pdf_bytes as u64)
         {
-            bail!("PDF exceeds the configured byte limit");
+            return Err(rejected("PDF exceeds the configured byte limit"));
         }
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("read Drive PDF response")?;
             if bytes.len().saturating_add(chunk.len()) > self.max_pdf_bytes {
-                bail!("PDF exceeds the configured byte limit");
+                return Err(rejected("PDF exceeds the configured byte limit"));
             }
             bytes.extend_from_slice(&chunk);
         }
         if !bytes.starts_with(b"%PDF-") {
-            bail!("Drive response is not a PDF");
+            return Err(rejected("Drive response is not a PDF"));
         }
         Ok(bytes)
     }
 
     async fn send(&self, request: RequestBuilder, credential_id: i64) -> Result<reqwest::Response> {
-        let access_token = self
-            .credentials
-            .google_credential(credential_id)
-            .await?
-            .access_token;
-        request
-            .bearer_auth(access_token)
-            .send()
-            .await
-            .context("send Google Drive request")?
-            .error_for_status()
-            .context("Google Drive request failed")
+        for attempt in 1..=DRIVE_REQUEST_ATTEMPTS {
+            let access_token = self
+                .credentials
+                .google_credential(credential_id)
+                .await?
+                .access_token;
+            let response = request
+                .try_clone()
+                .context("clone Google Drive request for retry")?
+                .bearer_auth(access_token)
+                .send()
+                .await
+                .context("send Google Drive request")?;
+            let status = response.status();
+            if attempt < DRIVE_REQUEST_ATTEMPTS
+                && (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
+            {
+                let delay = if status == StatusCode::TOO_MANY_REQUESTS {
+                    retry_after_delay(&response).unwrap_or_else(|| server_retry_delay(attempt))
+                } else {
+                    server_retry_delay(attempt)
+                };
+                warn!(
+                    event = "company_context_drive_request_retry",
+                    credential_id,
+                    attempt,
+                    status = status.as_u16(),
+                    delay_ms = delay.as_millis()
+                );
+                sleep(delay).await;
+                continue;
+            }
+            if is_permanent_drive_status(status) {
+                return Err(rejected(format!(
+                    "Google Drive request was rejected with status {status}"
+                )));
+            }
+            return response
+                .error_for_status()
+                .context("Google Drive request failed");
+        }
+        unreachable!("Drive request loop always returns on its final attempt")
     }
+}
+
+fn server_retry_delay(failed_attempt: u32) -> Duration {
+    DRIVE_SERVER_RETRY_BASE.saturating_mul(2_u32.saturating_pow(failed_attempt - 1))
+}
+
+fn retry_after_delay(response: &reqwest::Response) -> Option<Duration> {
+    let value = response.headers().get(RETRY_AFTER)?.to_str().ok()?;
+    parse_retry_after(value, Utc::now())
+}
+
+fn parse_retry_after(value: &str, now: DateTime<Utc>) -> Option<Duration> {
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let retry_at = DateTime::parse_from_rfc2822(value)
+        .ok()?
+        .with_timezone(&Utc);
+    retry_at.signed_duration_since(now).to_std().ok()
+}
+
+fn is_permanent_drive_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::BAD_REQUEST
+            | StatusCode::NOT_FOUND
+            | StatusCode::METHOD_NOT_ALLOWED
+            | StatusCode::GONE
+            | StatusCode::LENGTH_REQUIRED
+            | StatusCode::PAYLOAD_TOO_LARGE
+            | StatusCode::URI_TOO_LONG
+            | StatusCode::UNSUPPORTED_MEDIA_TYPE
+            | StatusCode::UNPROCESSABLE_ENTITY
+    )
 }
 
 #[cfg(test)]
@@ -292,5 +362,24 @@ mod tests {
     #[test]
     fn drive_version_is_the_stable_revision_key() {
         assert_eq!(file(PDF_MIME_TYPE, false).source_version(), "42");
+    }
+
+    #[test]
+    fn retries_servers_exponentially() {
+        assert_eq!(server_retry_delay(1), Duration::from_secs(1));
+        assert_eq!(server_retry_delay(2), Duration::from_secs(2));
+        assert_eq!(server_retry_delay(3), Duration::from_secs(4));
+    }
+
+    #[test]
+    fn parses_retry_after_seconds_and_dates() {
+        let now = DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(parse_retry_after("17", now), Some(Duration::from_secs(17)));
+        assert_eq!(
+            parse_retry_after("Wed, 01 Jan 2025 00:00:09 GMT", now),
+            Some(Duration::from_secs(9))
+        );
     }
 }

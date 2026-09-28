@@ -37,8 +37,8 @@ create table company_context_system.google_drive_files (
     published_at timestamptz,
     updated_at timestamptz not null default now(),
     check (file_id <> ''),
-    check (extraction_status in ('pending', 'completed', 'failed', 'deleted')),
-    check (embedding_status in ('pending', 'completed', 'failed', 'deleted'))
+    check (extraction_status in ('pending', 'completed', 'failed', 'rejected', 'deleted')),
+    check (embedding_status in ('pending', 'completed', 'failed', 'rejected', 'deleted'))
 );
 
 create index google_drive_files_modified_idx

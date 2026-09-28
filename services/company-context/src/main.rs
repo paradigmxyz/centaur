@@ -3,6 +3,7 @@ mod credentials;
 mod database;
 mod drive;
 mod embeddings;
+mod errors;
 mod extraction;
 mod scheduler;
 mod tasks;

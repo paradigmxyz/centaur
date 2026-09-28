@@ -5,7 +5,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::{
     config::{
@@ -15,6 +15,7 @@ use crate::{
     credentials::GoogleCredential,
     drive::{DriveClient, DriveFile, Permission},
     embeddings::EmbeddingsClient,
+    errors::{is_rejected, rejected},
     extraction::{chunk_text, extract_pdf_text, hex_sha256},
 };
 
@@ -674,11 +675,6 @@ async fn extract_pdf(
 ) -> Result<TaskSummary> {
     let file = params.file;
     let observation_key = params.observation_key;
-    if !file.is_active_user_pdf() {
-        return Err(anyhow!(
-            "extract task received a non-PDF, trashed, or Shared Drive file"
-        ));
-    }
     if !observation_is_current(&state.pool, &file.id, &observation_key).await? {
         return Ok(TaskSummary {
             status: "superseded",
@@ -686,6 +682,11 @@ async fn extract_pdf(
         });
     }
     let result = async {
+        if !file.is_active_user_pdf() {
+            return Err(rejected(
+                "extract task received a non-PDF, trashed, or Shared Drive file",
+            ));
+        }
         let pdf = state
             .drive
             .download_pdf(params.credential_id, &file.id)
@@ -698,7 +699,7 @@ async fn extract_pdf(
         .await?;
         let chunks = chunk_text(&text, state.config.chunk_chars);
         if chunks.is_empty() {
-            return Err(anyhow!("PDF produced no non-empty chunks"));
+            return Err(rejected("PDF produced no non-empty chunks"));
         }
         let content_hash = hex_sha256(text.as_bytes());
         let mut tx = state.pool.begin().await?;
@@ -795,15 +796,30 @@ async fn extract_pdf(
             })
         }
         Err(error) => {
+            let rejected = is_rejected(&error);
             record_file_failure(
                 &state.pool,
                 &file.id,
                 &observation_key,
                 "extraction",
+                rejected,
                 &error,
             )
             .await;
-            Err(error)
+            if rejected {
+                warn!(
+                    event = "company_context_pdf_rejected",
+                    task_id = ctx.task_id(),
+                    file_id = file.id,
+                    error = %error
+                );
+                Ok(TaskSummary {
+                    status: "rejected",
+                    files: 0,
+                })
+            } else {
+                Err(error)
+            }
         }
     }
 }
@@ -864,7 +880,19 @@ async fn embed_document(
     .fetch_all(&state.pool)
     .await?;
     if chunk_rows.is_empty() {
-        return Err(anyhow!("staged Drive file has no chunks"));
+        let error = rejected("staged Drive file has no chunks");
+        record_embedding_failure(
+            &state.pool,
+            &params.file_id,
+            &params.observation_key,
+            true,
+            &error,
+        )
+        .await;
+        return Ok(TaskSummary {
+            status: "rejected",
+            files: 0,
+        });
     }
     let title: String = row.try_get("name")?;
     let inputs = chunk_rows
@@ -882,13 +910,27 @@ async fn embed_document(
     let embeddings = match result {
         Ok(embeddings) => embeddings,
         Err(error) => {
+            let rejected = is_rejected(&error);
             record_embedding_failure(
                 &state.pool,
                 &params.file_id,
                 &params.observation_key,
+                rejected,
                 &error,
             )
             .await;
+            if rejected {
+                warn!(
+                    event = "company_context_embedding_rejected",
+                    task_id = ctx.task_id(),
+                    file_id = params.file_id,
+                    error = %error
+                );
+                return Ok(TaskSummary {
+                    status: "rejected",
+                    files: 0,
+                });
+            }
             return Err(error);
         }
     };
@@ -1232,6 +1274,7 @@ async fn record_file_failure(
     file_id: &str,
     observation_key: &str,
     stage: &str,
+    rejected: bool,
     error: &anyhow::Error,
 ) {
     let message = bounded_error(error);
@@ -1240,10 +1283,11 @@ async fn record_file_failure(
     } else {
         "embedding_status"
     };
+    let status = if rejected { "rejected" } else { "failed" };
     let query = format!(
         r#"
         UPDATE company_context_system.google_drive_files
-        SET {status_column} = 'failed',
+        SET {status_column} = $4,
             last_error = $3,
             updated_at = NOW()
         WHERE file_id = $1
@@ -1254,6 +1298,7 @@ async fn record_file_failure(
         .bind(file_id)
         .bind(observation_key)
         .bind(message)
+        .bind(status)
         .execute(pool)
         .await
     {
@@ -1265,12 +1310,13 @@ async fn record_embedding_failure(
     pool: &PgPool,
     file_id: &str,
     observation_key: &str,
+    rejected: bool,
     error: &anyhow::Error,
 ) {
     if let Err(db_error) = sqlx::query(
         r#"
         UPDATE company_context_system.google_drive_files
-        SET embedding_status = 'failed',
+        SET embedding_status = $4,
             last_error = $3,
             updated_at = NOW()
         WHERE file_id = $1
@@ -1280,6 +1326,7 @@ async fn record_embedding_failure(
     .bind(file_id)
     .bind(observation_key)
     .bind(bounded_error(error))
+    .bind(if rejected { "rejected" } else { "failed" })
     .execute(pool)
     .await
     {

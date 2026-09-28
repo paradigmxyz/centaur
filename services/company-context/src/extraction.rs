@@ -1,9 +1,11 @@
 use std::{io::Write, process::Stdio, time::Duration};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 use tokio::{process::Command, time::timeout};
+
+use crate::errors::rejected;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Chunk {
@@ -39,24 +41,28 @@ pub async fn extract_pdf_text(
         .context("run pdftotext")?;
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
-        bail!(
+        return Err(rejected(format!(
             "pdftotext failed: {}",
             stderr.trim().chars().take(500).collect::<String>()
-        );
+        )));
     }
     let output_size = tokio::fs::metadata(output.path())
         .await
         .context("inspect extracted PDF text")?
         .len();
     if output_size > max_output_bytes as u64 {
-        bail!("extracted PDF text exceeds the configured byte limit");
+        return Err(rejected(
+            "extracted PDF text exceeds the configured byte limit",
+        ));
     }
-    let text = tokio::fs::read_to_string(output.path())
+    let text = tokio::fs::read(output.path())
         .await
         .context("read extracted PDF text")?;
+    let text = String::from_utf8(text)
+        .map_err(|error| rejected(format!("extracted PDF text is not UTF-8: {error}")))?;
     let normalized = normalize_text(&text);
     if normalized.is_empty() {
-        bail!("PDF contains no extractable text");
+        return Err(rejected("PDF contains no extractable text"));
     }
     Ok(normalized)
 }
