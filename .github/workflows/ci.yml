@@ -165,6 +165,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: crates/harness-server
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Format
         working-directory: crates/harness-server
@@ -201,6 +202,7 @@ jobs:
           workspaces: |
             crates/active-record-encryption
             services/proxy-sync
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Format Active Record encryption crate
         working-directory: crates/active-record-encryption
@@ -281,6 +283,7 @@ jobs:
           workspaces: |
             crates/absurd-sdk
             services/api-rs
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Format Absurd SDK
         working-directory: crates/absurd-sdk
