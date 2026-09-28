@@ -134,11 +134,16 @@ impl DriveClient {
         })
     }
 
-    pub async fn start_page_token(&self) -> Result<String> {
+    pub fn credentials(&self) -> &ConsoleCredentials {
+        &self.credentials
+    }
+
+    pub async fn start_page_token(&self, credential_id: i64) -> Result<String> {
         let response = self
             .send(
                 self.http
                     .get(format!("{}/changes/startPageToken", self.base_url)),
+                credential_id,
             )
             .await?
             .json::<StartPageToken>()
@@ -150,7 +155,12 @@ impl DriveClient {
         Ok(response.start_page_token)
     }
 
-    pub async fn list_pdfs(&self, page_size: u16, page_token: Option<&str>) -> Result<FilePage> {
+    pub async fn list_pdfs(
+        &self,
+        credential_id: i64,
+        page_size: u16,
+        page_token: Option<&str>,
+    ) -> Result<FilePage> {
         let fields = "nextPageToken,incompleteSearch,files(id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress),permissions(id,type,role,emailAddress,domain,allowFileDiscovery))";
         let mut request = self.http.get(format!("{}/files", self.base_url)).query(&[
             (
@@ -168,7 +178,7 @@ impl DriveClient {
             request = request.query(&[("pageToken", page_token)]);
         }
         let page = self
-            .send(request)
+            .send(request, credential_id)
             .await?
             .json::<FilePage>()
             .await
@@ -179,7 +189,12 @@ impl DriveClient {
         Ok(page)
     }
 
-    pub async fn list_changes(&self, page_size: u16, page_token: &str) -> Result<ChangePage> {
+    pub async fn list_changes(
+        &self,
+        credential_id: i64,
+        page_size: u16,
+        page_token: &str,
+    ) -> Result<ChangePage> {
         let fields = "nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress),permissions(id,type,role,emailAddress,domain,allowFileDiscovery)))";
         let request = self.http.get(format!("{}/changes", self.base_url)).query(&[
             ("pageToken", page_token.to_owned()),
@@ -189,19 +204,19 @@ impl DriveClient {
             ("supportsAllDrives", "true".to_owned()),
             ("includeRemoved", "true".to_owned()),
         ]);
-        self.send(request)
+        self.send(request, credential_id)
             .await?
             .json::<ChangePage>()
             .await
             .context("decode Drive change page")
     }
 
-    pub async fn download_pdf(&self, file_id: &str) -> Result<Vec<u8>> {
+    pub async fn download_pdf(&self, credential_id: i64, file_id: &str) -> Result<Vec<u8>> {
         let request = self
             .http
             .get(format!("{}/files/{file_id}", self.base_url))
             .query(&[("alt", "media"), ("supportsAllDrives", "true")]);
-        let response = self.send(request).await?;
+        let response = self.send(request, credential_id).await?;
         if response
             .content_length()
             .is_some_and(|length| length > self.max_pdf_bytes as u64)
@@ -223,8 +238,12 @@ impl DriveClient {
         Ok(bytes)
     }
 
-    async fn send(&self, request: RequestBuilder) -> Result<reqwest::Response> {
-        let access_token = self.credentials.google_access_token().await?;
+    async fn send(&self, request: RequestBuilder, credential_id: i64) -> Result<reqwest::Response> {
+        let access_token = self
+            .credentials
+            .google_credential(credential_id)
+            .await?
+            .access_token;
         request
             .bearer_auth(access_token)
             .send()

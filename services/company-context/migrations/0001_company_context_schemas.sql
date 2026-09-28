@@ -44,6 +44,24 @@ create table company_context_system.google_drive_files (
 create index google_drive_files_modified_idx
     on company_context_system.google_drive_files (source_modified_at desc);
 
+create table company_context_system.google_drive_broker_observations (
+    broker_credential_id bigint not null,
+    file_id text not null,
+    provider_email text not null default '',
+    provider_subject text not null default '',
+    observation_key text not null default '',
+    active boolean not null default true,
+    first_seen_at timestamptz not null default now(),
+    last_seen_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    primary key (broker_credential_id, file_id),
+    check (file_id <> '')
+);
+
+create index google_drive_broker_observations_active_file_idx
+    on company_context_system.google_drive_broker_observations (file_id)
+    where active;
+
 create table company_context_system.google_drive_chunks (
     file_id text not null references company_context_system.google_drive_files(file_id) on delete cascade,
     chunk_id text not null,

@@ -2,66 +2,30 @@ use std::{str::FromStr, sync::Arc};
 
 use active_record_encryption::ActiveRecordEncryption;
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Duration, Utc};
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use chrono::{DateTime, Utc};
 use sqlx::{
     PgPool, Row,
     postgres::{PgConnectOptions, PgPoolOptions},
     types::Json,
 };
-use tokio::sync::Mutex;
 
 use crate::config::Config;
 
-const GOOGLE_TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
-const GOOGLE_TOKEN_GRANT: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
-const TOKEN_REFRESH_MARGIN: Duration = Duration::minutes(5);
+const DRIVE_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/drive.readonly";
 
 #[derive(Clone)]
 pub struct ConsoleCredentials {
     pool: PgPool,
     encryption: Arc<ActiveRecordEncryption>,
-    http: Client,
-    google_foreign_id: String,
-    google_token: Arc<Mutex<Option<CachedToken>>>,
+    google_oauth_app_slug: String,
 }
 
-struct CachedToken {
-    value: String,
-    expires_at: DateTime<Utc>,
-}
-
-struct GoogleCredential {
-    client_email: String,
-    private_key: String,
-    scopes: Vec<String>,
-    subject: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ServiceAccountKeyfile {
-    client_email: String,
-    private_key: String,
-}
-
-#[derive(Serialize)]
-struct GoogleJwtClaims<'a> {
-    iss: &'a str,
-    scope: String,
-    aud: &'static str,
-    iat: i64,
-    exp: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sub: Option<&'a str>,
-}
-
-#[derive(Deserialize)]
-struct GoogleTokenResponse {
-    access_token: String,
-    expires_in: i64,
+#[derive(Clone, Debug)]
+pub struct GoogleCredential {
+    pub id: i64,
+    pub access_token: String,
+    pub provider_email: String,
+    pub provider_subject: String,
 }
 
 impl ConsoleCredentials {
@@ -82,118 +46,104 @@ impl ConsoleCredentials {
                 &config.active_record_primary_key,
                 &config.active_record_key_derivation_salt,
             )),
-            http: Client::new(),
-            google_foreign_id: config.google_credential_foreign_id.clone(),
-            google_token: Arc::new(Mutex::new(None)),
+            google_oauth_app_slug: config.google_oauth_app_slug.clone(),
         };
-        credentials.load_google_credential().await?;
+        credentials.google_credential_ids().await?;
         Ok(credentials)
     }
 
-    pub async fn google_access_token(&self) -> Result<String> {
-        let mut cached = self.google_token.lock().await;
-        let now = Utc::now();
-        if let Some(token) = cached
-            .as_ref()
-            .filter(|token| token.expires_at - TOKEN_REFRESH_MARGIN > now)
-        {
-            return Ok(token.value.clone());
-        }
-
-        let credential = self.load_google_credential().await?;
-        let claims = google_jwt_claims(&credential, now);
-        let assertion = encode(
-            &Header::new(Algorithm::RS256),
-            &claims,
-            &EncodingKey::from_rsa_pem(credential.private_key.as_bytes())
-                .context("parse Google service-account private key")?,
-        )
-        .context("sign Google service-account assertion")?;
-        let response = self
-            .http
-            .post(GOOGLE_TOKEN_ENDPOINT)
-            .form(&[
-                ("grant_type", GOOGLE_TOKEN_GRANT),
-                ("assertion", &assertion),
-            ])
-            .send()
-            .await
-            .context("request Google service-account access token")?;
-        let status = response.status();
-        if !status.is_success() {
-            bail!("Google service-account token endpoint returned {status}");
-        }
-        let token: GoogleTokenResponse = response
-            .json()
-            .await
-            .context("decode Google service-account token response")?;
-        if token.access_token.trim().is_empty() || token.expires_in <= 0 {
-            bail!("Google service-account token response was invalid");
-        }
-        let value = token.access_token;
-        *cached = Some(CachedToken {
-            value: value.clone(),
-            expires_at: now + Duration::seconds(token.expires_in),
-        });
-        Ok(value)
-    }
-
-    async fn load_google_credential(&self) -> Result<GoogleCredential> {
-        let row = sqlx::query(
+    pub async fn google_credential_ids(&self) -> Result<Vec<i64>> {
+        let rows = sqlx::query(
             r#"
-            SELECT credentials.scopes,
-                   credentials.subject,
-                   credentials.credentials_provider,
-                   sources.source_type,
-                   sources.secret
-            FROM gcp_auth_secrets credentials
-            LEFT JOIN secret_sources sources
-              ON sources.gcp_auth_secret_id = credentials.id
-            WHERE credentials.foreign_id = $1
+            SELECT credentials.id, credentials.scopes
+            FROM broker_credentials credentials
+            JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+            WHERE app.provider = 'google'
+              AND app.slug = $1
+              AND app.enabled = TRUE
+              AND credentials.dead = FALSE
+              AND credentials.access_token IS NOT NULL
+              AND (
+                  credentials.expires_at IS NULL
+                  OR credentials.expires_at > NOW()
+              )
+            ORDER BY credentials.id
             "#,
         )
-        .bind(&self.google_foreign_id)
+        .bind(&self.google_oauth_app_slug)
+        .fetch_all(&self.pool)
+        .await
+        .context("list Google broker credentials from Rails Console")?;
+
+        let mut ids = Vec::new();
+        for row in rows {
+            let Json(scopes): Json<Vec<String>> = row
+                .try_get("scopes")
+                .context("decode Google broker credential scopes")?;
+            if scopes.iter().any(|scope| scope == DRIVE_READONLY_SCOPE) {
+                ids.push(
+                    row.try_get("id")
+                        .context("decode Google broker credential ID")?,
+                );
+            }
+        }
+        Ok(ids)
+    }
+
+    pub async fn google_credential(&self, credential_id: i64) -> Result<GoogleCredential> {
+        let row = sqlx::query(
+            r#"
+            SELECT credentials.id,
+                   credentials.access_token,
+                   credentials.expires_at,
+                   credentials.scopes,
+                   credentials.provider_email,
+                   credentials.provider_subject
+            FROM broker_credentials credentials
+            JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+            WHERE credentials.id = $1
+              AND app.provider = 'google'
+              AND app.slug = $2
+              AND app.enabled = TRUE
+              AND credentials.dead = FALSE
+            "#,
+        )
+        .bind(credential_id)
+        .bind(&self.google_oauth_app_slug)
         .fetch_optional(&self.pool)
         .await
-        .context("load Google credential from Rails Console")?
-        .with_context(|| {
-            format!(
-                "Rails Console GCP auth credential {:?} was not found",
-                self.google_foreign_id
-            )
-        })?;
-        let provider: Option<Value> = row.try_get("credentials_provider")?;
-        if provider.is_some() {
-            bail!(
-                "Rails Console GCP auth credential {:?} uses a credentials provider; a control_plane keyfile source is required",
-                self.google_foreign_id
-            );
+        .context("load Google broker credential from Rails Console")?
+        .with_context(|| format!("Google broker credential {credential_id} is not syncable"))?;
+
+        let expires_at: Option<DateTime<Utc>> = row.try_get("expires_at")?;
+        if expires_at.is_some_and(|expires_at| expires_at <= Utc::now()) {
+            bail!("Google broker credential {credential_id} is expired");
         }
-        let source_type: Option<String> = row.try_get("source_type")?;
-        if source_type.as_deref() != Some("control_plane") {
-            bail!(
-                "Rails Console GCP auth credential {:?} must use a control_plane keyfile source",
-                self.google_foreign_id
-            );
-        }
-        let keyfile: ServiceAccountKeyfile = serde_json::from_str(
-            &self.decrypt_required(row.try_get("secret")?, "Google service-account keyfile")?,
-        )
-        .context("decode Google service-account keyfile")?;
         let Json(scopes): Json<Vec<String>> = row.try_get("scopes")?;
-        if scopes.is_empty() {
-            bail!("Google credential has no OAuth scopes");
+        if !scopes.iter().any(|scope| scope == DRIVE_READONLY_SCOPE) {
+            bail!("Google broker credential {credential_id} lacks Drive read access");
         }
         Ok(GoogleCredential {
-            client_email: keyfile.client_email,
-            private_key: keyfile.private_key,
-            scopes,
-            subject: row.try_get("subject")?,
+            id: credential_id,
+            access_token: self
+                .decrypt_required(row.try_get("access_token")?, "Google broker access token")?,
+            provider_email: row
+                .try_get::<Option<String>, _>("provider_email")?
+                .unwrap_or_default(),
+            provider_subject: row
+                .try_get::<Option<String>, _>("provider_subject")?
+                .unwrap_or_default(),
         })
     }
 
     pub async fn ready(&self) -> bool {
-        self.google_access_token().await.is_ok()
+        let Ok(ids) = self.google_credential_ids().await else {
+            return false;
+        };
+        let Some(id) = ids.first() else {
+            return false;
+        };
+        self.google_credential(*id).await.is_ok()
     }
 
     pub async fn close(&self) {
@@ -210,37 +160,5 @@ impl ConsoleCredentials {
             bail!("{description} is empty");
         }
         Ok(value)
-    }
-}
-
-fn google_jwt_claims(credential: &GoogleCredential, now: DateTime<Utc>) -> GoogleJwtClaims<'_> {
-    GoogleJwtClaims {
-        iss: &credential.client_email,
-        scope: credential.scopes.join(" "),
-        aud: GOOGLE_TOKEN_ENDPOINT,
-        iat: now.timestamp(),
-        exp: (now + Duration::hours(1)).timestamp(),
-        sub: credential.subject.as_deref(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn google_claims_include_scopes_and_delegated_subject() {
-        let now = Utc::now();
-        let credential = GoogleCredential {
-            client_email: "reader@example.invalid".to_owned(),
-            private_key: "unused".to_owned(),
-            scopes: vec!["scope-a".to_owned(), "scope-b".to_owned()],
-            subject: Some("user@example.invalid".to_owned()),
-        };
-        let claims = google_jwt_claims(&credential, now);
-        assert_eq!(claims.iss, "reader@example.invalid");
-        assert_eq!(claims.scope, "scope-a scope-b");
-        assert_eq!(claims.sub, Some("user@example.invalid"));
-        assert_eq!(claims.exp - claims.iat, 3_600);
     }
 }

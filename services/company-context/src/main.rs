@@ -93,7 +93,7 @@ async fn main() -> Result<()> {
         )),
         ..WorkerOptions::default()
     });
-    let scheduler = tokio::spawn(scheduler::run(config.clone(), absurd));
+    let scheduler = tokio::spawn(scheduler::run(config.clone(), absurd, credentials.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let server_shutdown = shutdown_rx.clone();
     let server = tokio::spawn(async move {

@@ -37,10 +37,11 @@ pub struct Config {
     pub active_record_key_derivation_salt: String,
     #[arg(
         long,
-        env = "COMPANY_CONTEXT_GOOGLE_CREDENTIAL_FOREIGN_ID",
+        env = "COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG",
+        default_value = "google",
         value_parser = nonempty
     )]
-    pub google_credential_foreign_id: String,
+    pub google_oauth_app_slug: String,
     #[arg(
         long,
         env = "OPENAI_API_KEY",
@@ -201,8 +202,6 @@ mod tests {
             "primary",
             "--active-record-key-derivation-salt",
             "salt",
-            "--google-credential-foreign-id",
-            "google",
             "--openai-api-key",
             "test-key",
         ]

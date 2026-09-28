@@ -11,12 +11,11 @@ use crate::{
     config::{
         Config, DOCUMENT_DELETE_TASK, DOCUMENT_EMBED_TASK, DRIVE_SCAN_TASK, PDF_EXTRACT_TASK,
     },
+    credentials::GoogleCredential,
     drive::{DriveClient, DriveFile, Permission},
     embeddings::EmbeddingsClient,
     extraction::{chunk_text, extract_pdf_text, hex_sha256},
 };
-
-const DRIVE_SCOPE: &str = "all_visible";
 
 #[derive(Clone)]
 pub struct TaskState {
@@ -29,11 +28,13 @@ pub struct TaskState {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ScanParams {
+    pub credential_id: i64,
     pub requested_at: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ExtractParams {
+    pub credential_id: i64,
     pub file: DriveFile,
     pub observation_key: String,
 }
@@ -93,16 +94,22 @@ pub fn register(state: TaskState) -> Result<()> {
 
 async fn scan_drive(
     state: &TaskState,
-    _params: ScanParams,
+    params: ScanParams,
     ctx: &TaskContext,
 ) -> Result<TaskSummary> {
-    ensure_checkpoint(&state.pool).await?;
+    let credential = state
+        .drive
+        .credentials()
+        .google_credential(params.credential_id)
+        .await?;
+    let scope = format!("broker:{}", credential.id);
+    ensure_checkpoint(&state.pool, &scope).await?;
     let mut total = 0;
     for _ in 0..state.config.max_scan_pages {
-        let checkpoint = load_checkpoint(&state.pool).await?;
+        let checkpoint = load_checkpoint(&state.pool, &scope).await?;
         if !checkpoint.initial_scan_completed {
             let start_token = if checkpoint.initial_start_page_token.is_empty() {
-                let token = state.drive.start_page_token().await?;
+                let token = state.drive.start_page_token(credential.id).await?;
                 sqlx::query(
                     r#"
                     UPDATE company_context_system.google_drive_checkpoints
@@ -111,7 +118,7 @@ async fn scan_drive(
                     WHERE scope_id = $1
                     "#,
                 )
-                .bind(DRIVE_SCOPE)
+                .bind(&scope)
                 .bind(&token)
                 .execute(&state.pool)
                 .await?;
@@ -122,11 +129,12 @@ async fn scan_drive(
             let page = state
                 .drive
                 .list_pdfs(
+                    credential.id,
                     state.config.scan_page_size,
                     nonempty(&checkpoint.initial_page_token),
                 )
                 .await?;
-            total += enqueue_files(state, page.files).await?;
+            total += enqueue_files(state, &credential, page.files).await?;
             if let Some(next_page_token) = page.next_page_token {
                 sqlx::query(
                     r#"
@@ -137,7 +145,7 @@ async fn scan_drive(
                     WHERE scope_id = $1
                     "#,
                 )
-                .bind(DRIVE_SCOPE)
+                .bind(&scope)
                 .bind(next_page_token)
                 .execute(&state.pool)
                 .await?;
@@ -155,7 +163,7 @@ async fn scan_drive(
                 WHERE scope_id = $1
                 "#,
             )
-            .bind(DRIVE_SCOPE)
+            .bind(&scope)
             .bind(start_token)
             .execute(&state.pool)
             .await?;
@@ -169,15 +177,25 @@ async fn scan_drive(
         }
         let page = state
             .drive
-            .list_changes(state.config.scan_page_size, &checkpoint.changes_page_token)
+            .list_changes(
+                credential.id,
+                state.config.scan_page_size,
+                &checkpoint.changes_page_token,
+            )
             .await?;
         for change in page.changes {
             match change.file {
                 Some(file) if !change.removed && file.is_active_pdf() => {
-                    total += enqueue_file(state, file).await? as usize;
+                    total += enqueue_file(state, &credential, file).await? as usize;
                 }
                 _ => {
-                    enqueue_delete(state, change.file_id, &checkpoint.changes_page_token).await?;
+                    enqueue_delete(
+                        state,
+                        &credential,
+                        change.file_id,
+                        &checkpoint.changes_page_token,
+                    )
+                    .await?;
                 }
             }
         }
@@ -191,7 +209,7 @@ async fn scan_drive(
                 WHERE scope_id = $1
                 "#,
             )
-            .bind(DRIVE_SCOPE)
+            .bind(&scope)
             .bind(next_page_token)
             .execute(&state.pool)
             .await?;
@@ -210,7 +228,7 @@ async fn scan_drive(
             WHERE scope_id = $1
             "#,
         )
-        .bind(DRIVE_SCOPE)
+        .bind(&scope)
         .bind(new_token)
         .execute(&state.pool)
         .await?;
@@ -227,23 +245,32 @@ async fn scan_drive(
     })
 }
 
-async fn enqueue_files(state: &TaskState, files: Vec<DriveFile>) -> Result<usize> {
+async fn enqueue_files(
+    state: &TaskState,
+    credential: &GoogleCredential,
+    files: Vec<DriveFile>,
+) -> Result<usize> {
     let mut count = 0;
     for file in files.into_iter().filter(DriveFile::is_active_pdf) {
-        count += enqueue_file(state, file).await? as usize;
+        count += enqueue_file(state, credential, file).await? as usize;
     }
     Ok(count)
 }
 
-async fn enqueue_file(state: &TaskState, file: DriveFile) -> Result<bool> {
+async fn enqueue_file(
+    state: &TaskState,
+    credential: &GoogleCredential,
+    file: DriveFile,
+) -> Result<bool> {
     let source_version = file.source_version();
     let observation_key = format!("file:{}:{source_version}", file.id);
-    observe_file(&state.pool, &file, &observation_key).await?;
+    observe_file(&state.pool, credential, &file, &observation_key).await?;
     let result = state
         .absurd
         .spawn(
             PDF_EXTRACT_TASK,
             ExtractParams {
+                credential_id: credential.id,
                 file: file.clone(),
                 observation_key: observation_key.clone(),
             },
@@ -256,12 +283,19 @@ async fn enqueue_file(state: &TaskState, file: DriveFile) -> Result<bool> {
     Ok(result.created)
 }
 
-async fn enqueue_delete(state: &TaskState, file_id: String, change_key: &str) -> Result<()> {
+async fn enqueue_delete(
+    state: &TaskState,
+    credential: &GoogleCredential,
+    file_id: String,
+    change_key: &str,
+) -> Result<()> {
     if file_id.is_empty() {
         return Ok(());
     }
-    let observation_key = format!("delete:{file_id}:{change_key}");
-    observe_delete(&state.pool, &file_id, &observation_key).await?;
+    let observation_key = format!("delete:{}:{file_id}:{change_key}", credential.id);
+    if !observe_delete(&state.pool, credential.id, &file_id, &observation_key).await? {
+        return Ok(());
+    }
     state
         .absurd
         .spawn(
@@ -271,7 +305,10 @@ async fn enqueue_delete(state: &TaskState, file_id: String, change_key: &str) ->
                 observation_key: observation_key.clone(),
             },
             SpawnOptions {
-                idempotency_key: Some(format!("drive.document.delete:{file_id}:{change_key}")),
+                idempotency_key: Some(format!(
+                    "drive.document.delete:{}:{file_id}:{change_key}",
+                    credential.id
+                )),
                 ..SpawnOptions::default()
             },
         )
@@ -279,7 +316,55 @@ async fn enqueue_delete(state: &TaskState, file_id: String, change_key: &str) ->
     Ok(())
 }
 
-async fn observe_file(pool: &PgPool, file: &DriveFile, observation_key: &str) -> Result<()> {
+async fn observe_file(
+    pool: &PgPool,
+    credential: &GoogleCredential,
+    file: &DriveFile,
+    observation_key: &str,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO company_context_system.google_drive_broker_observations (
+            broker_credential_id, file_id, provider_email, provider_subject,
+            observation_key, active, last_seen_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, TRUE, NOW(), NOW())
+        ON CONFLICT (broker_credential_id, file_id) DO UPDATE
+        SET provider_email = EXCLUDED.provider_email,
+            provider_subject = EXCLUDED.provider_subject,
+            observation_key = EXCLUDED.observation_key,
+            active = TRUE,
+            last_seen_at = NOW(),
+            updated_at = NOW()
+        "#,
+    )
+    .bind(credential.id)
+    .bind(&file.id)
+    .bind(&credential.provider_email)
+    .bind(&credential.provider_subject)
+    .bind(observation_key)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO company_context_data.google_drive_document_access (
+            file_id, permission_id, permission_type, role, email_address,
+            source_version, updated_at
+        )
+        VALUES ($1, $2, 'broker_user', 'reader', $3, $4, NOW())
+        ON CONFLICT (file_id, permission_id) DO UPDATE
+        SET email_address = EXCLUDED.email_address,
+            source_version = EXCLUDED.source_version,
+            updated_at = NOW()
+        "#,
+    )
+    .bind(&file.id)
+    .bind(format!("broker:{}", credential.id))
+    .bind(&credential.provider_email)
+    .bind(file.source_version())
+    .execute(&mut *tx)
+    .await?;
     sqlx::query(
         r#"
         INSERT INTO company_context_system.google_drive_files (
@@ -308,6 +393,11 @@ async fn observe_file(pool: &PgPool, file: &DriveFile, observation_key: &str) ->
             last_seen_at = NOW(),
             updated_at = NOW()
         WHERE google_drive_files.observation_key IS DISTINCT FROM EXCLUDED.observation_key
+          AND (
+              google_drive_files.source_modified_at IS NULL
+              OR EXCLUDED.source_modified_at IS NULL
+              OR EXCLUDED.source_modified_at >= google_drive_files.source_modified_at
+          )
         "#,
     )
     .bind(&file.id)
@@ -320,12 +410,62 @@ async fn observe_file(pool: &PgPool, file: &DriveFile, observation_key: &str) ->
     .bind(file.created_time)
     .bind(file.modified_time)
     .bind(json!(file))
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
-async fn observe_delete(pool: &PgPool, file_id: &str, observation_key: &str) -> Result<()> {
+async fn observe_delete(
+    pool: &PgPool,
+    credential_id: i64,
+    file_id: &str,
+    observation_key: &str,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        UPDATE company_context_system.google_drive_broker_observations
+        SET active = FALSE,
+            observation_key = $3,
+            updated_at = NOW()
+        WHERE broker_credential_id = $1
+          AND file_id = $2
+        "#,
+    )
+    .bind(credential_id)
+    .bind(file_id)
+    .bind(observation_key)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        DELETE FROM company_context_data.google_drive_document_access
+        WHERE file_id = $1
+          AND permission_id = $2
+        "#,
+    )
+    .bind(file_id)
+    .bind(format!("broker:{credential_id}"))
+    .execute(&mut *tx)
+    .await?;
+    let remains_visible = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM company_context_system.google_drive_broker_observations
+            WHERE file_id = $1
+              AND active
+        )
+        "#,
+    )
+    .bind(file_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if remains_visible {
+        tx.commit().await?;
+        return Ok(false);
+    }
     sqlx::query(
         r#"
         INSERT INTO company_context_system.google_drive_files (
@@ -340,14 +480,14 @@ async fn observe_delete(pool: &PgPool, file_id: &str, observation_key: &str) -> 
             embedding_status = 'deleted',
             last_error = '',
             updated_at = NOW()
-        WHERE google_drive_files.observation_key IS DISTINCT FROM EXCLUDED.observation_key
         "#,
     )
     .bind(file_id)
     .bind(observation_key)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-    Ok(())
+    tx.commit().await?;
+    Ok(true)
 }
 
 async fn extract_pdf(
@@ -367,7 +507,10 @@ async fn extract_pdf(
         });
     }
     let result = async {
-        let pdf = state.drive.download_pdf(&file.id).await?;
+        let pdf = state
+            .drive
+            .download_pdf(params.credential_id, &file.id)
+            .await?;
         let text = extract_pdf_text(
             pdf,
             state.config.extraction_timeout,
@@ -698,6 +841,7 @@ async fn replace_access(
         r#"
         DELETE FROM company_context_data.google_drive_document_access
         WHERE file_id = $1
+          AND permission_type <> 'broker_user'
         "#,
     )
     .bind(file_id)
@@ -804,7 +948,7 @@ struct Checkpoint {
     changes_page_token: String,
 }
 
-async fn ensure_checkpoint(pool: &PgPool) -> Result<()> {
+async fn ensure_checkpoint(pool: &PgPool, scope: &str) -> Result<()> {
     sqlx::query(
         r#"
         INSERT INTO company_context_system.google_drive_checkpoints (scope_id)
@@ -812,13 +956,13 @@ async fn ensure_checkpoint(pool: &PgPool) -> Result<()> {
         ON CONFLICT DO NOTHING
         "#,
     )
-    .bind(DRIVE_SCOPE)
+    .bind(scope)
     .execute(pool)
     .await?;
     Ok(())
 }
 
-async fn load_checkpoint(pool: &PgPool) -> Result<Checkpoint> {
+async fn load_checkpoint(pool: &PgPool, scope: &str) -> Result<Checkpoint> {
     let row = sqlx::query(
         r#"
         SELECT initial_start_page_token,
@@ -829,7 +973,7 @@ async fn load_checkpoint(pool: &PgPool) -> Result<Checkpoint> {
         WHERE scope_id = $1
         "#,
     )
-    .bind(DRIVE_SCOPE)
+    .bind(scope)
     .fetch_one(pool)
     .await?;
     Ok(Checkpoint {

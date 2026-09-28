@@ -499,10 +499,10 @@ companyContext:
     tag: latest
     pullPolicy: Always
   port: 8080
-  # Foreign ID configured in Rails Console for a GCP auth credential backed by
-  # a control_plane keyfile. The embeddings API key comes from OPENAI_API_KEY
-  # in the shared Kubernetes Secret.
-  googleCredentialForeignId: ""
+  # Rails Console OAuth app whose live per-user Google broker credentials are
+  # synchronized. The embeddings API key comes from OPENAI_API_KEY in the
+  # shared Kubernetes Secret.
+  googleOauthAppSlug: google
   scanIntervalSeconds: 300
   drivePageSize: 100
   maxScanPages: 10
