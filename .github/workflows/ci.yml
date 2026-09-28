@@ -43,10 +43,12 @@ jobs:
             base="${{ github.event.pull_request.base.sha }}"
             changed_files="$(git diff --name-only "${base}...HEAD")"
           elif [[ "${{ github.event_name }}" == "push" ]]; then
-            changed_files="$(git diff --name-only "${{ github.event.before }}...HEAD")"
+            base="${{ github.event.before }}"
+            changed_files="$(git diff --name-only "${base}...HEAD")"
           else
             git fetch --no-tags --depth=1 origin main
-            changed_files="$(git diff --name-only origin/main...HEAD)"
+            base="origin/main"
+            changed_files="$(git diff --name-only "${base}...HEAD")"
           fi
 
           matches() {
@@ -58,6 +60,22 @@ jobs:
             done
             return 1
           }
+
+          if matches '^contrib/chart/'; then
+            chart_yaml="contrib/chart/Chart.yaml"
+            previous_version="$(git show "${base}:${chart_yaml}" | awk '$1 == "version:" { print $2; exit }')"
+            current_version="$(awk '$1 == "version:" { print $2; exit }' "${chart_yaml}")"
+
+            if [[ -z "${previous_version}" || -z "${current_version}" ]]; then
+              echo "::error file=${chart_yaml}::Could not read chart version"
+              exit 1
+            fi
+
+            if [[ "${current_version}" == "${previous_version}" ]]; then
+              echo "::error file=${chart_yaml}::contrib/chart changed but chart version stayed at ${current_version}. Bump .version in the PR."
+              exit 1
+            fi
+          fi
 
           set_output() {
             local name="$1"
