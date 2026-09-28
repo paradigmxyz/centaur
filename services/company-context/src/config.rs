@@ -105,6 +105,22 @@ pub struct Config {
         value_parser = positive_usize
     )]
     pub max_scan_pages: usize,
+    /// Folders listed per Drive search while walking shared folders.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_FOLDER_WALK_BATCH_SIZE",
+        default_value = "50",
+        value_parser = folder_walk_batch_size
+    )]
+    pub folder_walk_batch_size: usize,
+    /// Concurrent folder batches per shared-folder walk.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_FOLDER_WALK_CONCURRENCY",
+        default_value = "4",
+        value_parser = positive_usize
+    )]
+    pub folder_walk_concurrency: usize,
     #[arg(
         long,
         env = "COMPANY_CONTEXT_MAX_PDF_BYTES",
@@ -182,6 +198,14 @@ fn drive_page_size(value: &str) -> Result<u16, String> {
         return Err("value must not exceed 1000".to_owned());
     }
     Ok(value as u16)
+}
+
+fn folder_walk_batch_size(value: &str) -> Result<usize, String> {
+    let value = positive_usize(value)?;
+    if value > 100 {
+        return Err("value must not exceed 100".to_owned());
+    }
+    Ok(value)
 }
 
 fn embeddings_dimensions(value: &str) -> Result<usize, String> {

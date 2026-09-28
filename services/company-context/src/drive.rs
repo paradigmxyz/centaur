@@ -16,11 +16,20 @@ use crate::{
 
 const DRIVE_REQUEST_ATTEMPTS: u32 = 4;
 const FILE_FIELDS: &str = "id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress),permissions(id,type,role,emailAddress,domain,allowFileDiscovery)";
+const WALK_FILE_FIELDS: &str = "id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress)";
 const FOLDER_OR_PDF_QUERY: &str = "trashed = false and (mimeType = 'application/vnd.google-apps.folder' or mimeType = 'application/pdf')";
 /// The user corpus plus Shared Drive items the user can reach without membership.
 const ACCESSIBLE_CORPUS: &[(&str, &str)] =
     &[("corpora", "user"), ("includeItemsFromAllDrives", "true")];
 const DRIVE_SERVER_RETRY_BASE: Duration = Duration::from_secs(1);
+
+enum ListShape {
+    /// Includes permissions, which limits pages to the configured size.
+    WithPermissions(u16),
+    /// Omits permissions so pages can hold 1,000 files. Drive omits Shared
+    /// Drive permissions for non-members anyway.
+    Walk,
+}
 
 #[derive(Clone)]
 pub struct DriveClient {
@@ -234,7 +243,7 @@ impl DriveClient {
             credential_id,
             &format!("mimeType = '{PDF_MIME_TYPE}' and trashed = false"),
             corpus,
-            page_size,
+            ListShape::WithPermissions(page_size),
             page_token,
         )
         .await
@@ -245,35 +254,36 @@ impl DriveClient {
     pub async fn list_shared_with_me(
         &self,
         credential_id: i64,
-        page_size: u16,
         page_token: Option<&str>,
     ) -> Result<FilePage> {
         self.list_files(
             credential_id,
             &format!("sharedWithMe = true and {FOLDER_OR_PDF_QUERY}"),
             ACCESSIBLE_CORPUS,
-            page_size,
+            ListShape::Walk,
             page_token,
         )
         .await
     }
 
-    /// Lists the folders and PDFs directly inside a folder.
+    /// Lists the folders and PDFs directly inside any of the given folders.
     pub async fn list_folder_children(
         &self,
         credential_id: i64,
-        folder_id: &str,
-        page_size: u16,
+        folder_ids: &[String],
         page_token: Option<&str>,
     ) -> Result<FilePage> {
-        if !is_drive_id(folder_id) {
+        if folder_ids.is_empty() {
+            bail!("no Drive folders to list");
+        }
+        if !folder_ids.iter().all(|id| is_drive_id(id)) {
             return Err(rejected("Drive folder ID contains unexpected characters"));
         }
         self.list_files(
             credential_id,
-            &format!("'{folder_id}' in parents and {FOLDER_OR_PDF_QUERY}"),
+            &folder_children_query(folder_ids),
             ACCESSIBLE_CORPUS,
-            page_size,
+            ListShape::Walk,
             page_token,
         )
         .await
@@ -284,10 +294,14 @@ impl DriveClient {
         credential_id: i64,
         query: &str,
         corpus: &[(&str, &str)],
-        page_size: u16,
+        shape: ListShape,
         page_token: Option<&str>,
     ) -> Result<FilePage> {
-        let fields = format!("nextPageToken,incompleteSearch,files({FILE_FIELDS})");
+        let (page_size, file_fields) = match shape {
+            ListShape::WithPermissions(page_size) => (page_size, FILE_FIELDS),
+            ListShape::Walk => (1_000, WALK_FILE_FIELDS),
+        };
+        let fields = format!("nextPageToken,incompleteSearch,files({file_fields})");
         let mut request = self
             .http
             .get(format!("{}/files", self.base_url))
@@ -415,6 +429,15 @@ impl DriveClient {
     }
 }
 
+fn folder_children_query(folder_ids: &[String]) -> String {
+    let parents = folder_ids
+        .iter()
+        .map(|id| format!("'{id}' in parents"))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    format!("({parents}) and {FOLDER_OR_PDF_QUERY}")
+}
+
 fn is_drive_id(value: &str) -> bool {
     !value.is_empty()
         && value
@@ -507,6 +530,12 @@ mod tests {
         assert!(!is_drive_id(""));
         assert!(!is_drive_id("x' or '1' = '1"));
         assert!(!is_drive_id("x\\"));
+    }
+
+    #[test]
+    fn batched_folder_query_filters_every_parent() {
+        let query = folder_children_query(&["a".to_owned(), "b".to_owned()]);
+        assert!(query.starts_with("('a' in parents or 'b' in parents) and trashed = false and ("));
     }
 
     #[test]
