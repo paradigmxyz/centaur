@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
+use centaur_iron_control::{IronControlError, Proxy};
 use centaur_iron_proxy::{ProxyFragment, SourceKind, SourcePolicy};
 use centaur_sandbox_core::{
     ResourceRequirements, SandboxError, SandboxId, SandboxResult, SandboxSpec,
@@ -703,7 +704,6 @@ impl AgentSandboxBackend {
         requester_principal_id: Option<&str>,
         labels: &BTreeMap<String, String>,
     ) -> SandboxResult<()> {
-        let iron_control = &self.config.iron_control;
         let mut proxy_id = self.proxy_id_for_sandbox(id).await?;
         if proxy_id.is_none() || !self.has_usable_iron_proxy_resources(id).await? {
             tracing::warn!(
@@ -727,11 +727,15 @@ impl AgentSandboxBackend {
                 id.as_str()
             ))
         })?;
-        let proxy = iron_control
-            .client
-            .assign_proxy_principal(&proxy_id, principal_id, requester_principal_id, labels)
-            .await
-            .map_err(|err| SandboxError::backend_source("iron-control assign proxy", err))?;
+        let proxy = self
+            .assign_current_proxy_principal(
+                id,
+                &proxy_id,
+                principal_id,
+                requester_principal_id,
+                labels,
+            )
+            .await?;
         self.proxy_ids
             .lock()
             .await
@@ -741,6 +745,37 @@ impl AgentSandboxBackend {
         self.wait_for_proxy_principal_applied(id, principal_id, proxy.config_hash.as_deref())
             .await;
         Ok(())
+    }
+
+    /// Another API replica can replace a proxy between discovery and assignment.
+    /// Retry only when Kubernetes identifies a different live proxy; do not
+    /// destroy a healthy proxy or hide authorization/control-plane failures.
+    async fn assign_current_proxy_principal(
+        &self,
+        id: &SandboxId,
+        proxy_id: &str,
+        principal_id: &str,
+        requester_principal_id: Option<&str>,
+        labels: &BTreeMap<String, String>,
+    ) -> SandboxResult<Proxy> {
+        let client = &self.config.iron_control.client;
+        let result = client
+            .assign_proxy_principal(proxy_id, principal_id, requester_principal_id, labels)
+            .await;
+        if matches!(&result, Err(IronControlError::Status { status: 404, .. }))
+            && let Some(current_id) = self.proxy_id_for_sandbox(id).await?
+            && current_id != proxy_id
+        {
+            tracing::info!(
+                sandbox_id = id.as_str(),
+                "iron-proxy changed during assignment; retrying current proxy"
+            );
+            return client
+                .assign_proxy_principal(&current_id, principal_id, requester_principal_id, labels)
+                .await
+                .map_err(|err| SandboxError::backend_source("iron-control assign proxy", err));
+        }
+        result.map_err(|err| SandboxError::backend_source("iron-control assign proxy", err))
     }
 
     pub(crate) async fn ensure_proxy_resources_for_principal(
@@ -771,12 +806,15 @@ impl AgentSandboxBackend {
                 return Ok(());
             }
 
-            let iron_control = &self.config.iron_control;
-            let proxy = iron_control
-                .client
-                .assign_proxy_principal(&proxy_id, principal_id, requester_principal_id, labels)
-                .await
-                .map_err(|err| SandboxError::backend_source("iron-control assign proxy", err))?;
+            let proxy = self
+                .assign_current_proxy_principal(
+                    id,
+                    &proxy_id,
+                    principal_id,
+                    requester_principal_id,
+                    labels,
+                )
+                .await?;
             self.patch_iron_control_principal_annotation(id, principal_id, requester_principal_id)
                 .await?;
             self.wait_for_proxy_principal_applied(id, principal_id, proxy.config_hash.as_deref())
@@ -1074,9 +1112,9 @@ impl AgentSandboxBackend {
     }
 
     async fn proxy_id_for_sandbox(&self, id: &SandboxId) -> SandboxResult<Option<String>> {
-        if let Some(proxy_id) = self.proxy_ids.lock().await.get(id.as_str()).cloned() {
-            return Ok(Some(proxy_id));
-        }
+        // The map is useful for cleanup, but cannot be authoritative for reuse:
+        // another API replica may have paused/resumed this sandbox and replaced
+        // its proxy since this process last handled it.
         let params = ListParams::default().labels(&format!(
             "{IRON_PROXY_LABEL}=true,{SANDBOX_ID_LABEL}={}",
             id.as_str()
@@ -1086,23 +1124,27 @@ impl AgentSandboxBackend {
             .list(&params)
             .await
             .map_err(|err| map_kube_error("list iron-proxy pods", err))?;
-        for pod in pods.items {
-            if let Some(proxy_id) = pod
-                .metadata
-                .annotations
-                .as_ref()
-                .and_then(|annotations| annotations.get(IRON_CONTROL_PROXY_ID_ANNOTATION))
-                .filter(|value| !value.trim().is_empty())
-            {
-                let proxy_id = proxy_id.to_owned();
-                self.proxy_ids
-                    .lock()
-                    .await
-                    .insert(id.as_str().to_owned(), proxy_id.clone());
-                return Ok(Some(proxy_id));
-            }
+        let proxy_id = pods
+            .items
+            .iter()
+            .filter(|pod| pod.metadata.deletion_timestamp.is_none())
+            .filter_map(|pod| {
+                pod.metadata
+                    .annotations
+                    .as_ref()
+                    .and_then(|annotations| annotations.get(IRON_CONTROL_PROXY_ID_ANNOTATION))
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|proxy_id| (pod, proxy_id))
+            })
+            .max_by_key(|(pod, _)| pod.metadata.creation_timestamp.as_ref())
+            .map(|(_, proxy_id)| proxy_id.clone());
+        let mut proxy_ids = self.proxy_ids.lock().await;
+        if let Some(proxy_id) = &proxy_id {
+            proxy_ids.insert(id.as_str().to_owned(), proxy_id.clone());
+        } else {
+            proxy_ids.remove(id.as_str());
         }
-        Ok(None)
+        Ok(proxy_id)
     }
 
     async fn has_usable_iron_proxy_resources(&self, id: &SandboxId) -> SandboxResult<bool> {
@@ -2345,6 +2387,269 @@ fn unique_suffix() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Exercise the real Kubernetes and iron-control clients against a scripted
+    // HTTP server so replica-local state cannot mask stale proxy selection.
+    async fn proxy_backend_stub(
+        steps: Vec<(&'static str, u16, Value)>,
+    ) -> (AgentSandboxBackend, tokio::task::JoinHandle<Vec<Value>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let client = kube::Client::try_from(kube::Config::new(url.parse().unwrap())).unwrap();
+        let config = crate::AgentSandboxConfig::new(
+            "test",
+            crate::IronControlSettings {
+                client: centaur_iron_control::IronControlClient::new(&url, "test-key"),
+                control_url: url,
+            },
+        );
+        let handle = tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for (expected, status, body) in steps {
+                let (mut stream, _) =
+                    tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0; 4096];
+                let header_end = loop {
+                    let n = stream.read(&mut buf).await.unwrap();
+                    assert!(n > 0, "request ended before headers");
+                    request.extend_from_slice(&buf[..n]);
+                    if let Some(i) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break i + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]).to_string();
+                assert!(
+                    headers.starts_with(expected),
+                    "expected {expected}, got {headers}"
+                );
+                let len = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                while request.len() < header_end + len {
+                    let n = stream.read(&mut buf).await.unwrap();
+                    assert!(n > 0, "request ended before body");
+                    request.extend_from_slice(&buf[..n]);
+                }
+                if len > 0 {
+                    bodies.push(
+                        serde_json::from_slice(&request[header_end..header_end + len]).unwrap(),
+                    );
+                }
+                let body = body.to_string();
+                stream.write_all(format!(
+                    "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+                ).as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+            bodies
+        });
+        (AgentSandboxBackend::new(client, config), handle)
+    }
+
+    fn proxy_list(ids: &[(&str, bool)]) -> Value {
+        json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": ids.iter().map(|(id, deleting)| {
+            let mut pod = json!({"metadata": {"name": id, "annotations": {IRON_CONTROL_PROXY_ID_ANNOTATION: id}}});
+            if *deleting { pod["metadata"]["deletionTimestamp"] = json!("2026-01-01T00:00:00Z"); }
+            pod
+        }).collect::<Vec<_>>()})
+    }
+
+    #[tokio::test]
+    async fn proxy_lookup_refreshes_stale_replica_cache_and_ignores_terminating_pod() {
+        let (backend, server) = proxy_backend_stub(vec![(
+            "GET /api/v1/namespaces/test/pods?",
+            200,
+            proxy_list(&[("prx_old", true), ("prx_new", false)]),
+        )])
+        .await;
+        let id = SandboxId::new("asbx-test");
+        backend
+            .proxy_ids
+            .lock()
+            .await
+            .insert(id.as_str().to_owned(), "prx_old".into());
+        assert_eq!(
+            backend.proxy_id_for_sandbox(&id).await.unwrap().as_deref(),
+            Some("prx_new")
+        );
+        assert_eq!(
+            backend
+                .proxy_ids
+                .lock()
+                .await
+                .get(id.as_str())
+                .map(String::as_str),
+            Some("prx_new")
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn proxy_lookup_clears_cache_when_no_live_proxy_exists() {
+        for pods in [proxy_list(&[]), proxy_list(&[("prx_old", true)])] {
+            let (backend, server) =
+                proxy_backend_stub(vec![("GET /api/v1/namespaces/test/pods?", 200, pods)]).await;
+            let id = SandboxId::new("asbx-test");
+            backend
+                .proxy_ids
+                .lock()
+                .await
+                .insert(id.as_str().to_owned(), "prx_old".into());
+            assert_eq!(backend.proxy_id_for_sandbox(&id).await.unwrap(), None);
+            assert!(!backend.proxy_ids.lock().await.contains_key(id.as_str()));
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_lookup_does_not_fall_back_to_cache_on_kubernetes_error() {
+        let (backend, server) = proxy_backend_stub(vec![("GET /api/v1/namespaces/test/pods?", 403,
+            json!({"apiVersion":"v1", "kind":"Status", "status":"Failure", "reason":"Forbidden", "message":"denied", "code":403}))]).await;
+        let id = SandboxId::new("asbx-test");
+        backend
+            .proxy_ids
+            .lock()
+            .await
+            .insert(id.as_str().to_owned(), "prx_old".into());
+        assert!(backend.proxy_id_for_sandbox(&id).await.is_err());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn proxy_assignment_recovers_replacement_race_and_preserves_identity() {
+        let (backend, server) = proxy_backend_stub(vec![
+            (
+                "PATCH /api/v1/proxies/prx_old ",
+                404,
+                json!({"error":{"message":"missing"}}),
+            ),
+            (
+                "GET /api/v1/namespaces/test/pods?",
+                200,
+                proxy_list(&[("prx_new", false)]),
+            ),
+            (
+                "PATCH /api/v1/proxies/prx_new ",
+                200,
+                json!({"data":{"id":"prx_new", "name":"test", "principal_id":"prn_session"}}),
+            ),
+        ])
+        .await;
+        let labels = BTreeMap::from([("scope".into(), "test".into())]);
+        let proxy = backend
+            .assign_current_proxy_principal(
+                &SandboxId::new("asbx-test"),
+                "prx_old",
+                "prn_session",
+                Some("prn_requester"),
+                &labels,
+            )
+            .await
+            .unwrap();
+        assert_eq!(proxy.id, "prx_new");
+        let bodies = server.await.unwrap();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0], bodies[1]);
+        assert_eq!(bodies[1]["data"]["principal_id"], "prn_session");
+        assert_eq!(bodies[1]["data"]["requester_principal_id"], "prn_requester");
+        assert_eq!(bodies[1]["data"]["labels"]["scope"], "test");
+    }
+
+    #[tokio::test]
+    async fn proxy_assignment_does_not_retry_authorization_or_server_errors() {
+        for status in [401, 403, 500] {
+            let (backend, server) = proxy_backend_stub(vec![(
+                "PATCH /api/v1/proxies/prx_old ",
+                status,
+                json!({"error":{"message":"failed"}}),
+            )])
+            .await;
+            let err = backend
+                .assign_current_proxy_principal(
+                    &SandboxId::new("asbx-test"),
+                    "prx_old",
+                    "prn_session",
+                    None,
+                    &BTreeMap::new(),
+                )
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains(&status.to_string()));
+            assert_eq!(server.await.unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_assignment_does_not_retry_missing_or_unchanged_proxy() {
+        for pods in [proxy_list(&[]), proxy_list(&[("prx_old", false)])] {
+            let (backend, server) = proxy_backend_stub(vec![
+                (
+                    "PATCH /api/v1/proxies/prx_old ",
+                    404,
+                    json!({"error":{"message":"missing"}}),
+                ),
+                ("GET /api/v1/namespaces/test/pods?", 200, pods),
+            ])
+            .await;
+            let err = backend
+                .assign_current_proxy_principal(
+                    &SandboxId::new("asbx-test"),
+                    "prx_old",
+                    "prn_session",
+                    None,
+                    &BTreeMap::new(),
+                )
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("404"));
+            assert_eq!(server.await.unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_assignment_retries_replacement_only_once() {
+        let (backend, server) = proxy_backend_stub(vec![
+            (
+                "PATCH /api/v1/proxies/prx_old ",
+                404,
+                json!({"error":{"message":"missing"}}),
+            ),
+            (
+                "GET /api/v1/namespaces/test/pods?",
+                200,
+                proxy_list(&[("prx_new", false)]),
+            ),
+            (
+                "PATCH /api/v1/proxies/prx_new ",
+                404,
+                json!({"error":{"message":"missing again"}}),
+            ),
+        ])
+        .await;
+        let err = backend
+            .assign_current_proxy_principal(
+                &SandboxId::new("asbx-test"),
+                "prx_old",
+                "prn_session",
+                None,
+                &BTreeMap::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("missing again"));
+        assert_eq!(server.await.unwrap().len(), 2);
+    }
 
     fn no_scheduling() -> ProxyPodScheduling<'static> {
         static EMPTY_SELECTOR: BTreeMap<String, String> = BTreeMap::new();
