@@ -11,7 +11,7 @@ anyhow = "1"
 axum = "0.8"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 futures-util = "0.3"
-jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
+jsonwebtoken = { version = "10", default-features = false, features = ["rsa", "sha2", "use_pem"] }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "query", "rustls", "stream"] }
