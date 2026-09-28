@@ -34,8 +34,10 @@ Required:
 The service discovers live per-user broker credentials belonging to the Google
 OAuth app selected by `COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG` (default
 `google`). Rails Console owns refreshing those tokens; the service decrypts the
-current access token before each Drive request. The Helm deployment reads
-`OPENAI_API_KEY` directly from the shared Kubernetes Secret.
+current access token before each Drive request. A durable reconciliation task
+deactivates observations from dead or deleted broker credentials and removes
+files only when no live user credential can still observe them. The Helm
+deployment reads `OPENAI_API_KEY` directly from the shared Kubernetes Secret.
 
 Common optional settings:
 

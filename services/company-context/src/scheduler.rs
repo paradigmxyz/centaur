@@ -8,9 +8,9 @@ use tokio::time::{MissedTickBehavior, interval};
 use tracing::{error, info};
 
 use crate::{
-    config::{Config, DRIVE_SCAN_TASK},
+    config::{Config, DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK},
     credentials::ConsoleCredentials,
-    tasks::ScanParams,
+    tasks::{ReconcileCredentialsParams, ScanParams},
     telemetry,
 };
 
@@ -24,6 +24,30 @@ pub async fn run(config: Arc<Config>, client: Client, credentials: Arc<ConsoleCr
             .unwrap_or_default()
             .as_secs();
         let bucket = now / config.scan_interval.as_secs().max(1);
+        match client
+            .spawn(
+                DRIVE_CREDENTIALS_RECONCILE_TASK,
+                ReconcileCredentialsParams { bucket },
+                SpawnOptions {
+                    idempotency_key: Some(format!("drive.credentials.reconcile:{bucket}")),
+                    ..SpawnOptions::default()
+                },
+            )
+            .await
+        {
+            Ok(result) => {
+                telemetry::task_enqueued(DRIVE_CREDENTIALS_RECONCILE_TASK, result.created);
+                info!(
+                    event = "company_context_credentials_reconcile_enqueued",
+                    task_id = result.task_id,
+                    created = result.created
+                );
+            }
+            Err(error) => {
+                metrics::counter!("company_context_scheduler_errors_total").increment(1);
+                error!(event = "company_context_credentials_reconcile_enqueue_failed", error = %error);
+            }
+        }
         let credential_ids = match credentials.google_credential_ids().await {
             Ok(ids) => ids,
             Err(error) => {

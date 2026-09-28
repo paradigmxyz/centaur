@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use absurd::{Client as AbsurdClient, Error as AbsurdError, SpawnOptions, TaskContext};
 use anyhow::{Context, Result, anyhow};
@@ -9,7 +9,8 @@ use tracing::{error, info};
 
 use crate::{
     config::{
-        Config, DOCUMENT_DELETE_TASK, DOCUMENT_EMBED_TASK, DRIVE_SCAN_TASK, PDF_EXTRACT_TASK,
+        Config, DOCUMENT_DELETE_TASK, DOCUMENT_EMBED_TASK, DRIVE_CREDENTIALS_RECONCILE_TASK,
+        DRIVE_SCAN_TASK, PDF_EXTRACT_TASK,
     },
     credentials::GoogleCredential,
     drive::{DriveClient, DriveFile, Permission},
@@ -27,6 +28,11 @@ pub struct TaskState {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct ReconcileCredentialsParams {
+    pub bucket: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ScanParams {
     pub credential_id: i64,
     pub requested_at: String,
@@ -35,12 +41,15 @@ pub struct ScanParams {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ExtractParams {
     pub credential_id: i64,
+    pub credential_revision: String,
     pub file: DriveFile,
     pub observation_key: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct EmbedParams {
+    pub credential_id: i64,
+    pub credential_revision: String,
     pub file_id: String,
     pub content_hash: String,
     pub observation_key: String,
@@ -59,6 +68,15 @@ pub struct TaskSummary {
 }
 
 pub fn register(state: TaskState) -> Result<()> {
+    let reconcile_state = state.clone();
+    state.absurd.register_task(
+        DRIVE_CREDENTIALS_RECONCILE_TASK,
+        move |params: ReconcileCredentialsParams, ctx| {
+            let state = reconcile_state.clone();
+            async move { task_result(reconcile_credentials(&state, params, &ctx).await) }
+        },
+    )?;
+
     let scan_state = state.clone();
     state
         .absurd
@@ -90,6 +108,153 @@ pub fn register(state: TaskState) -> Result<()> {
         async move { task_result(delete_document(&state, params, &ctx).await) }
     })?;
     Ok(())
+}
+
+async fn reconcile_credentials(
+    state: &TaskState,
+    params: ReconcileCredentialsParams,
+    ctx: &TaskContext,
+) -> Result<TaskSummary> {
+    let retained_ids = state
+        .drive
+        .credentials()
+        .retained_google_credential_ids()
+        .await?;
+    let mut tx = state.pool.begin().await?;
+    let stale_observations = sqlx::query(
+        r#"
+        UPDATE company_context_system.google_drive_broker_observations
+        SET active = FALSE,
+            updated_at = NOW()
+        WHERE active
+          AND NOT (broker_credential_id = ANY($1::bigint[]))
+        RETURNING broker_credential_id, file_id
+        "#,
+    )
+    .bind(&retained_ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    for observation in &stale_observations {
+        let credential_id: i64 = observation.try_get("broker_credential_id")?;
+        let file_id: String = observation.try_get("file_id")?;
+        sqlx::query(
+            r#"
+            DELETE FROM company_context_data.google_drive_document_access
+            WHERE file_id = $1
+              AND permission_id = $2
+            "#,
+        )
+        .bind(file_id)
+        .bind(format!("broker:{credential_id}"))
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    let candidate_rows = sqlx::query(
+        r#"
+        SELECT files.file_id
+        FROM company_context_system.google_drive_files files
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM company_context_system.google_drive_broker_observations observations
+            WHERE observations.file_id = files.file_id
+              AND observations.active
+        )
+          AND (
+              files.extraction_status <> 'deleted'
+              OR EXISTS (
+                  SELECT 1
+                  FROM company_context_data.google_drive_documents documents
+                  WHERE documents.file_id = files.file_id
+              )
+          )
+        "#,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut deletions = Vec::new();
+    let mut seen = BTreeSet::new();
+    for row in candidate_rows {
+        let file_id: String = row.try_get("file_id")?;
+        if !seen.insert(file_id.clone()) {
+            continue;
+        }
+        sqlx::query(
+            r#"
+            SELECT file_id
+            FROM company_context_system.google_drive_files
+            WHERE file_id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(&file_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let visible = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM company_context_system.google_drive_broker_observations
+                WHERE file_id = $1
+                  AND active
+            )
+            "#,
+        )
+        .bind(&file_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if visible {
+            continue;
+        }
+        let observation_key = format!("reconcile:{}:{file_id}", params.bucket);
+        sqlx::query(
+            r#"
+            UPDATE company_context_system.google_drive_files
+            SET source_version = $2,
+                observation_key = $2,
+                extraction_status = 'deleted',
+                embedding_status = 'deleted',
+                last_error = '',
+                updated_at = NOW()
+            WHERE file_id = $1
+            "#,
+        )
+        .bind(&file_id)
+        .bind(&observation_key)
+        .execute(&mut *tx)
+        .await?;
+        deletions.push((file_id, observation_key));
+    }
+    tx.commit().await?;
+
+    for (file_id, observation_key) in &deletions {
+        state
+            .absurd
+            .spawn(
+                DOCUMENT_DELETE_TASK,
+                DeleteParams {
+                    file_id: file_id.clone(),
+                    observation_key: observation_key.clone(),
+                },
+                SpawnOptions {
+                    idempotency_key: Some(format!(
+                        "drive.document.delete:reconcile:{observation_key}"
+                    )),
+                    ..SpawnOptions::default()
+                },
+            )
+            .await?;
+    }
+    info!(
+        event = "company_context_credentials_reconciled",
+        task_id = ctx.task_id(),
+        observations_deactivated = stale_observations.len(),
+        files_enqueued = deletions.len()
+    );
+    Ok(TaskSummary {
+        status: "completed",
+        files: deletions.len(),
+    })
 }
 
 async fn scan_drive(
@@ -264,18 +429,25 @@ async fn enqueue_file(
 ) -> Result<bool> {
     let source_version = file.source_version();
     let observation_key = format!("file:{}:{source_version}", file.id);
-    observe_file(&state.pool, credential, &file, &observation_key).await?;
+    let needs_processing = observe_file(&state.pool, credential, &file, &observation_key).await?;
+    if !needs_processing {
+        return Ok(false);
+    }
     let result = state
         .absurd
         .spawn(
             PDF_EXTRACT_TASK,
             ExtractParams {
                 credential_id: credential.id,
+                credential_revision: credential.revision.clone(),
                 file: file.clone(),
                 observation_key: observation_key.clone(),
             },
             SpawnOptions {
-                idempotency_key: Some(format!("drive.pdf.extract:{}:{source_version}", file.id)),
+                idempotency_key: Some(format!(
+                    "drive.pdf.extract:{}:{}:{source_version}:{}",
+                    credential.id, file.id, credential.revision
+                )),
                 ..SpawnOptions::default()
             },
         )
@@ -321,7 +493,7 @@ async fn observe_file(
     credential: &GoogleCredential,
     file: &DriveFile,
     observation_key: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let mut tx = pool.begin().await?;
     sqlx::query(
         r#"
@@ -365,7 +537,7 @@ async fn observe_file(
     .bind(file.source_version())
     .execute(&mut *tx)
     .await?;
-    sqlx::query(
+    let updated = sqlx::query(
         r#"
         INSERT INTO company_context_system.google_drive_files (
             file_id, name, mime_type, drive_id, web_view_link, source_version,
@@ -411,9 +583,11 @@ async fn observe_file(
     .bind(file.modified_time)
     .bind(json!(file))
     .execute(&mut *tx)
-    .await?;
+    .await?
+    .rows_affected()
+        > 0;
     tx.commit().await?;
-    Ok(())
+    Ok(updated)
 }
 
 async fn observe_delete(
@@ -576,15 +750,19 @@ async fn extract_pdf(
             .spawn(
                 DOCUMENT_EMBED_TASK,
                 EmbedParams {
+                    credential_id: params.credential_id,
+                    credential_revision: params.credential_revision.clone(),
                     file_id: file.id.clone(),
                     content_hash: content_hash.clone(),
                     observation_key: observation_key.clone(),
                 },
                 SpawnOptions {
                     idempotency_key: Some(format!(
-                        "drive.document.embed:{}:{content_hash}:{}",
+                        "drive.document.embed:{}:{}:{content_hash}:{}:{}",
+                        params.credential_id,
                         file.id,
-                        state.embeddings.model()
+                        state.embeddings.model(),
+                        params.credential_revision
                     )),
                     ..SpawnOptions::default()
                 },
@@ -881,6 +1059,26 @@ async fn delete_document(
 ) -> Result<TaskSummary> {
     let mut tx = state.pool.begin().await?;
     if !lock_current_observation(&mut tx, &params.file_id, &params.observation_key).await? {
+        tx.rollback().await?;
+        return Ok(TaskSummary {
+            status: "superseded",
+            files: 0,
+        });
+    }
+    let visible = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM company_context_system.google_drive_broker_observations
+            WHERE file_id = $1
+              AND active
+        )
+        "#,
+    )
+    .bind(&params.file_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if visible {
         tx.rollback().await?;
         return Ok(TaskSummary {
             status: "superseded",

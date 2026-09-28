@@ -26,6 +26,7 @@ pub struct GoogleCredential {
     pub access_token: String,
     pub provider_email: String,
     pub provider_subject: String,
+    pub revision: String,
 }
 
 impl ConsoleCredentials {
@@ -90,6 +91,24 @@ impl ConsoleCredentials {
         Ok(ids)
     }
 
+    pub async fn retained_google_credential_ids(&self) -> Result<Vec<i64>> {
+        sqlx::query_scalar(
+            r#"
+            SELECT credentials.id
+            FROM broker_credentials credentials
+            JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+            WHERE app.provider = 'google'
+              AND app.slug = $1
+              AND credentials.dead = FALSE
+            ORDER BY credentials.id
+            "#,
+        )
+        .bind(&self.google_oauth_app_slug)
+        .fetch_all(&self.pool)
+        .await
+        .context("list retained Google broker credentials from Rails Console")
+    }
+
     pub async fn google_credential(&self, credential_id: i64) -> Result<GoogleCredential> {
         let row = sqlx::query(
             r#"
@@ -98,7 +117,8 @@ impl ConsoleCredentials {
                    credentials.expires_at,
                    credentials.scopes,
                    credentials.provider_email,
-                   credentials.provider_subject
+                   credentials.provider_subject,
+                   credentials.updated_at
             FROM broker_credentials credentials
             JOIN oauth_apps app ON app.id = credentials.oauth_app_id
             WHERE credentials.id = $1
@@ -133,6 +153,7 @@ impl ConsoleCredentials {
             provider_subject: row
                 .try_get::<Option<String>, _>("provider_subject")?
                 .unwrap_or_default(),
+            revision: row.try_get::<DateTime<Utc>, _>("updated_at")?.to_rfc3339(),
         })
     }
 
