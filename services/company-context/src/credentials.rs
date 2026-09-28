@@ -2,7 +2,7 @@ use std::{str::FromStr, sync::Arc};
 
 use active_record_encryption::ActiveRecordEncryption;
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Utc};
+use chrono::{NaiveDateTime, Utc};
 use sqlx::{
     PgPool, Row,
     postgres::{PgConnectOptions, PgPoolOptions},
@@ -135,8 +135,8 @@ impl ConsoleCredentials {
         .context("load Google broker credential from Rails Console")?
         .with_context(|| format!("Google broker credential {credential_id} is not syncable"))?;
 
-        let expires_at: Option<DateTime<Utc>> = row.try_get("expires_at")?;
-        if expires_at.is_some_and(|expires_at| expires_at <= Utc::now()) {
+        let expires_at: Option<NaiveDateTime> = row.try_get("expires_at")?;
+        if expires_at.is_some_and(|expires_at| expires_at <= Utc::now().naive_utc()) {
             bail!("Google broker credential {credential_id} is expired");
         }
         let Json(scopes): Json<Vec<String>> = row.try_get("scopes")?;
@@ -153,7 +153,10 @@ impl ConsoleCredentials {
             provider_subject: row
                 .try_get::<Option<String>, _>("provider_subject")?
                 .unwrap_or_default(),
-            revision: row.try_get::<DateTime<Utc>, _>("updated_at")?.to_rfc3339(),
+            revision: row
+                .try_get::<NaiveDateTime, _>("updated_at")?
+                .and_utc()
+                .to_rfc3339(),
         })
     }
 
