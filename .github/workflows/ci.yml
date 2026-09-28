@@ -4,6 +4,8 @@ on:
   pull_request:
     branches: [main]
   merge_group:
+  push:
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -425,6 +427,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: services/api-rs
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run sandbox backend invariants in Kind
         working-directory: services/api-rs
