@@ -18,6 +18,10 @@ The initial migrations deliberately add no retrieval-role grants or RLS policies
 
 ## Configuration
 
+Every setting is available as both a command-line option and an environment
+variable. Command-line options take precedence; run
+`centaur-company-context --help` for the complete list.
+
 Required:
 
 - `DATABASE_URL`
