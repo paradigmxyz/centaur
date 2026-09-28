@@ -43,9 +43,10 @@ no live user credential can still observe them. Each scan interval also lists
 every credential's Shared Drives and the Shared Drive items shared with it,
 enqueues a scan per member drive and a folder walk per other drive, and revokes
 that credential's access to files in drives it can no longer reach. A folder
-walk lists batches of folders per Drive search, runs several batches
-concurrently, and continues itself until the whole tree is listed; the next
-walk starts on the following interval. The Helm deployment reads
+walk runs as one Absurd task per batch of folders: each batch lists its
+folders' children in a single Drive search and spawns batches for the
+subfolders, so batches run concurrently up to the worker concurrency. When the
+last batch finishes, the next walk starts on the following interval. The Helm deployment reads
 `OPENAI_API_KEY` directly from the shared Kubernetes Secret.
 
 Common optional settings:
@@ -57,10 +58,8 @@ Common optional settings:
 - `OPENAI_BASE_URL`
 - `COMPANY_CONTEXT_SCAN_INTERVAL_SECONDS` (default `300`)
 - `COMPANY_CONTEXT_DRIVE_PAGE_SIZE` (default `100`)
-- `COMPANY_CONTEXT_MAX_SCAN_PAGES` (default `10`; per folder-walk worker, this
-  is the number of folder batches listed per run)
+- `COMPANY_CONTEXT_MAX_SCAN_PAGES` (default `10`)
 - `COMPANY_CONTEXT_FOLDER_WALK_BATCH_SIZE` (default `50`, at most `100`)
-- `COMPANY_CONTEXT_FOLDER_WALK_CONCURRENCY` (default `4`)
 - `COMPANY_CONTEXT_MAX_PDF_BYTES` (default `26214400`)
 - `COMPANY_CONTEXT_MAX_EXTRACTED_BYTES` (default `52428800`)
 - `COMPANY_CONTEXT_EXTRACTION_TIMEOUT_SECONDS` (default `120`)

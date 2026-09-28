@@ -3,19 +3,23 @@ use std::{
     sync::Arc,
 };
 
-use absurd::{Client as AbsurdClient, Error as AbsurdError, SpawnOptions, TaskContext};
+use absurd::{
+    Client as AbsurdClient, Error as AbsurdError, RetryKind, RetryStrategy, SpawnOptions,
+    TaskContext,
+};
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use tracing::{error, info, warn};
+use uuid::Uuid;
 
 use crate::{
     config::{
         Config, DOCUMENT_DELETE_TASK, DOCUMENT_EMBED_TASK, DRIVE_CREDENTIALS_RECONCILE_TASK,
         DRIVE_SCAN_TASK, PDF_EXTRACT_TASK, SHARED_DRIVE_SCAN_TASK, SHARED_DRIVES_DISCOVER_TASK,
-        SHARED_FOLDERS_SCAN_TASK,
+        SHARED_FOLDERS_BATCH_TASK, SHARED_FOLDERS_WALK_TASK,
     },
     credentials::GoogleCredential,
     drive::{DriveChange, DriveClient, DriveFile, Permission},
@@ -58,17 +62,30 @@ pub struct SharedDriveScanParams {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct SharedFoldersScanParams {
+pub struct SharedFoldersWalkParams {
     pub credential_id: i64,
     pub drive_id: String,
     pub roots: SharedFolderRoots,
-    /// Start time of the walk a continuation belongs to; `None` starts or joins one.
-    pub generation: Option<DateTime<Utc>>,
-    pub continuation: u32,
 }
 
-/// How long a folder claim or a walk heartbeat stays valid without progress.
-const FOLDER_WALK_LEASE_SECONDS: f64 = 600.0;
+#[derive(Debug, Deserialize, Serialize)]
+pub struct FolderBatchParams {
+    pub credential_id: i64,
+    pub drive_id: String,
+    /// Identifies the walk; a batch from a replaced walk does nothing.
+    pub started_at: DateTime<Utc>,
+    pub batch_id: String,
+    pub folder_ids: Vec<String>,
+    /// Directly shared files, carried by a walk's first batch.
+    pub files: Vec<DriveFile>,
+}
+
+/// With exponential backoff, retries span about 45 minutes of Drive outage.
+const FOLDER_BATCH_MAX_ATTEMPTS: i32 = 8;
+
+/// A walk still unfinished after this long is presumed stuck on a batch that
+/// failed permanently, and is abandoned without cleanup.
+const FOLDER_WALK_MAX_AGE_SECONDS: f64 = 6.0 * 60.0 * 60.0;
 
 /// Folders and files in one Shared Drive shared directly with a non-member.
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -133,12 +150,21 @@ pub fn register(state: TaskState) -> Result<()> {
         },
     )?;
 
-    let folders_state = state.clone();
+    let walk_state = state.clone();
     state.absurd.register_task(
-        SHARED_FOLDERS_SCAN_TASK,
-        move |params: SharedFoldersScanParams, ctx| {
-            let state = folders_state.clone();
-            async move { task_result(scan_shared_folders(&state, params, &ctx).await) }
+        SHARED_FOLDERS_WALK_TASK,
+        move |params: SharedFoldersWalkParams, ctx| {
+            let state = walk_state.clone();
+            async move { task_result(start_shared_folders_walk(&state, params, &ctx).await) }
+        },
+    )?;
+
+    let batch_state = state.clone();
+    state.absurd.register_task(
+        SHARED_FOLDERS_BATCH_TASK,
+        move |params: FolderBatchParams, ctx| {
+            let state = batch_state.clone();
+            async move { task_result(walk_folder_batch(&state, params, &ctx).await) }
         },
     )?;
 
@@ -434,7 +460,7 @@ async fn discover_shared_drives(
     .await?;
     sqlx::query(
         r#"
-        DELETE FROM company_context_system.google_drive_folder_scans
+        DELETE FROM company_context_system.google_drive_folder_walks
         WHERE broker_credential_id = $1
           AND NOT (drive_id = ANY($2::text[]))
         "#,
@@ -468,17 +494,15 @@ async fn discover_shared_drives(
         state
             .absurd
             .spawn(
-                SHARED_FOLDERS_SCAN_TASK,
-                SharedFoldersScanParams {
+                SHARED_FOLDERS_WALK_TASK,
+                SharedFoldersWalkParams {
                     credential_id: credential.id,
                     drive_id: drive_id.clone(),
                     roots,
-                    generation: None,
-                    continuation: 0,
                 },
                 SpawnOptions {
                     idempotency_key: Some(format!(
-                        "drive.shared_folders.scan:{}:{drive_id}:{}",
+                        "drive.shared_folders.walk:{}:{drive_id}:{}",
                         credential.id, params.bucket
                     )),
                     ..SpawnOptions::default()
@@ -528,15 +552,16 @@ fn group_folder_roots(
     roots
 }
 
-/// Walks the shared folders of one Shared Drive the user is not a member of.
+/// Starts a walk of the shared folders of one Shared Drive the user is not a
+/// member of, unless one is already running.
 ///
-/// A walk is one chain of runs: the first run starts it, and each run that makes
-/// progress enqueues the next until the queue drains. Within a run, workers list
-/// batches of folders concurrently. Once the queue drains, observations in the
-/// drive not seen since the walk began are removed.
-async fn scan_shared_folders(
+/// Absurd runs the walk as one task per folder batch. Each batch lists its
+/// folders' children and spawns batches for the subfolders it finds. When the
+/// last batch finishes, the credential's observations in the drive that the
+/// walk did not reach are removed.
+async fn start_shared_folders_walk(
     state: &TaskState,
-    params: SharedFoldersScanParams,
+    params: SharedFoldersWalkParams,
     ctx: &TaskContext,
 ) -> Result<TaskSummary> {
     let credential = state
@@ -545,86 +570,202 @@ async fn scan_shared_folders(
         .google_credential(params.credential_id)
         .await?;
     let drive_id = params.drive_id.as_str();
-    let scope = folder_scan_scope(credential.id, drive_id);
-
-    let generation = match params.generation {
-        None => {
-            let generation =
-                start_folder_scan(state, &credential, &scope, drive_id, params.roots).await?;
-            let Some(generation) = generation else {
-                return Ok(TaskSummary {
-                    status: "in_progress",
-                    files: 0,
-                });
-            };
-            generation
+    let scope = folder_walk_scope(credential.id, drive_id);
+    let mut tx = state.pool.begin().await?;
+    let running = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT started_at >= NOW() - make_interval(secs => $2)
+        FROM company_context_system.google_drive_folder_walks
+        WHERE scope_id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(&scope)
+    .bind(FOLDER_WALK_MAX_AGE_SECONDS)
+    .fetch_optional(&mut *tx)
+    .await?;
+    match running {
+        Some(true) => {
+            tx.rollback().await?;
+            return Ok(TaskSummary {
+                status: "in_progress",
+                files: 0,
+            });
         }
-        Some(generation) => {
-            let current = sqlx::query_scalar::<_, DateTime<Utc>>(
+        Some(false) => {
+            // A batch that failed permanently leaves its walk unfinished. Abandon
+            // the walk without cleanup; its remaining batches become no-ops.
+            warn!(
+                event = "company_context_shared_folders_walk_abandoned",
+                task_id = ctx.task_id(),
+                scope
+            );
+            sqlx::query(
                 r#"
-                SELECT started_at
-                FROM company_context_system.google_drive_folder_scans
+                DELETE FROM company_context_system.google_drive_folder_walks
                 WHERE scope_id = $1
                 "#,
             )
             .bind(&scope)
-            .fetch_optional(&state.pool)
+            .execute(&mut *tx)
             .await?;
-            if current != Some(generation) {
-                return Ok(TaskSummary {
-                    status: "superseded",
-                    files: 0,
-                });
-            }
-            generation
         }
+        None => {}
+    }
+    let Some(started_at) = sqlx::query_scalar::<_, DateTime<Utc>>(
+        r#"
+        INSERT INTO company_context_system.google_drive_folder_walks (
+            scope_id, broker_credential_id, drive_id
+        )
+        VALUES ($1, $2, $3)
+        ON CONFLICT DO NOTHING
+        RETURNING started_at
+        "#,
+    )
+    .bind(&scope)
+    .bind(credential.id)
+    .bind(drive_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        // A concurrent run started this walk first.
+        tx.rollback().await?;
+        return Ok(TaskSummary {
+            status: "in_progress",
+            files: 0,
+        });
     };
-
-    let workers = (0..state.config.folder_walk_concurrency)
-        .map(|_| walk_folders(state, &credential, &scope, drive_id));
-    let mut files = 0;
-    let mut batches = 0;
-    for (worker_files, worker_batches) in futures_util::future::try_join_all(workers).await? {
-        files += worker_files;
-        batches += worker_batches;
-    }
-
-    let completion = complete_folder_scan(state, credential.id, &scope, drive_id).await?;
-    // A run that claimed nothing leaves remaining folders to their current
-    // claimants; if those have died, a stale heartbeat hands the walk to the
-    // next scheduled run.
-    if completion == FolderScanCompletion::Pending && batches > 0 {
-        let continuation = params.continuation + 1;
-        state
-            .absurd
-            .spawn(
-                SHARED_FOLDERS_SCAN_TASK,
-                SharedFoldersScanParams {
-                    credential_id: credential.id,
-                    drive_id: params.drive_id.clone(),
-                    roots: SharedFolderRoots::default(),
-                    generation: Some(generation),
-                    continuation,
-                },
-                SpawnOptions {
-                    idempotency_key: Some(format!(
-                        "drive.shared_folders.scan:{}:{drive_id}:{}:{continuation}",
-                        credential.id,
-                        generation.timestamp_micros()
-                    )),
-                    ..SpawnOptions::default()
-                },
-            )
-            .await?;
-    }
+    let walk = FolderWalk {
+        credential_id: credential.id,
+        drive_id,
+        scope: &scope,
+        started_at,
+    };
+    let batches = plan_folder_batches(
+        params.roots.folder_ids,
+        params.roots.files,
+        state.config.folder_walk_batch_size,
+    );
+    let spawned = spawn_folder_batches(state, &mut tx, &walk, batches).await?;
+    tx.commit().await?;
     info!(
-        event = "company_context_shared_folders_scanned",
+        event = "company_context_shared_folders_walk_started",
         task_id = ctx.task_id(),
         scope,
-        continuation = params.continuation,
-        folder_batches = batches,
+        batches = spawned
+    );
+    Ok(TaskSummary {
+        status: "started",
+        files: 0,
+    })
+}
+
+/// Lists one batch of a walk's folders, records the PDFs found, and spawns
+/// batches for the subfolders. The last batch of a walk removes the files the
+/// walk did not reach.
+async fn walk_folder_batch(
+    state: &TaskState,
+    params: FolderBatchParams,
+    ctx: &TaskContext,
+) -> Result<TaskSummary> {
+    let scope = folder_walk_scope(params.credential_id, &params.drive_id);
+    let walk = FolderWalk {
+        credential_id: params.credential_id,
+        drive_id: &params.drive_id,
+        scope: &scope,
+        started_at: params.started_at,
+    };
+    if !folder_batch_pending(&state.pool, &walk, &params.batch_id).await? {
+        return Ok(TaskSummary {
+            status: "superseded",
+            files: 0,
+        });
+    }
+    let credential = state
+        .drive
+        .credentials()
+        .google_credential(params.credential_id)
+        .await?;
+    // Record PDFs before the batch is marked done, so the walk's cleanup never
+    // removes a file the walk has reached.
+    let mut files = 0;
+    for file in params.files {
+        if file.is_active_pdf() && file.belongs_to(Some(walk.drive_id)) {
+            files += enqueue_file(state, &credential, file).await? as usize;
+        }
+    }
+    let child_folder_ids = if params.folder_ids.is_empty() {
+        Vec::new()
+    } else {
+        let (folder_files, child_folder_ids) =
+            list_folder_batch(state, &credential, walk.drive_id, &params.folder_ids).await?;
+        files += folder_files;
+        child_folder_ids
+    };
+
+    let mut tx = state.pool.begin().await?;
+    let current = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT started_at = $2
+        FROM company_context_system.google_drive_folder_walks
+        WHERE scope_id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(walk.scope)
+    .bind(walk.started_at)
+    .fetch_optional(&mut *tx)
+    .await?
+    .unwrap_or(false);
+    let finished_now = current
+        && sqlx::query(
+            r#"
+            UPDATE company_context_system.google_drive_folder_walk_batches
+            SET done = TRUE
+            WHERE scope_id = $1
+              AND batch_id = $2::uuid
+              AND NOT done
+            "#,
+        )
+        .bind(walk.scope)
+        .bind(&params.batch_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0;
+    if !finished_now {
+        // The walk was replaced, or a retry of this batch already committed.
+        tx.rollback().await?;
+        return Ok(TaskSummary {
+            status: "superseded",
+            files,
+        });
+    }
+    let batches = plan_folder_batches(
+        child_folder_ids,
+        Vec::new(),
+        state.config.folder_walk_batch_size,
+    );
+    let spawned = spawn_folder_batches(state, &mut tx, &walk, batches).await?;
+    let unreached = finish_walk_if_drained(&mut tx, &walk).await?;
+    tx.commit().await?;
+
+    if let Some(unreached) = &unreached {
+        // A failed removal is retried by the next walk's cleanup.
+        let change_key = format!("{}:{}", walk.scope, walk.started_at.timestamp_micros());
+        for file_id in unreached {
+            enqueue_delete(state, walk.credential_id, file_id.clone(), &change_key).await?;
+        }
+    }
+    info!(
+        event = "company_context_shared_folders_batch_walked",
+        task_id = ctx.task_id(),
+        scope,
+        folders = params.folder_ids.len(),
         files_enqueued = files,
-        completion = ?completion
+        batches_spawned = spawned,
+        walk_completed = unreached.is_some(),
+        files_removed = unreached.as_ref().map_or(0, Vec::len)
     );
     Ok(TaskSummary {
         status: "completed",
@@ -632,136 +773,164 @@ async fn scan_shared_folders(
     })
 }
 
-/// Records the walk and its roots, and observes directly shared files. Returns
-/// the walk's start time if this run should drive it, or `None` when another
-/// chain is actively walking it.
-async fn start_folder_scan(
-    state: &TaskState,
-    credential: &GoogleCredential,
-    scope: &str,
-    drive_id: &str,
-    roots: SharedFolderRoots,
-) -> Result<Option<DateTime<Utc>>> {
-    let generation = sqlx::query_scalar::<_, DateTime<Utc>>(
-        r#"
-        INSERT INTO company_context_system.google_drive_folder_scans (
-            scope_id, broker_credential_id, drive_id
-        )
-        VALUES ($1, $2, $3)
-        ON CONFLICT (scope_id) DO UPDATE
-        SET heartbeat_at = NOW()
-        WHERE google_drive_folder_scans.heartbeat_at < NOW() - make_interval(secs => $4)
-        RETURNING started_at
-        "#,
-    )
-    .bind(scope)
-    .bind(credential.id)
-    .bind(drive_id)
-    .bind(FOLDER_WALK_LEASE_SECONDS)
-    .fetch_optional(&state.pool)
-    .await?;
-    // Roots shared since the walk began join it, even when another chain drives it.
-    sqlx::query(
-        r#"
-        INSERT INTO company_context_system.google_drive_folder_scan_queue (scope_id, folder_id)
-        SELECT $1, folder_id
-        FROM UNNEST($2::text[]) AS roots(folder_id)
-        ON CONFLICT DO NOTHING
-        "#,
-    )
-    .bind(scope)
-    .bind(&roots.folder_ids)
-    .execute(&state.pool)
-    .await?;
-    // Directly shared files are re-observed every cycle so the sweep keeps them.
-    for file in roots.files {
-        if file.is_active_pdf() && file.belongs_to(Some(drive_id)) {
-            enqueue_file(state, credential, file).await?;
-        }
-    }
-    Ok(generation)
+/// One walk of a Shared Drive's shared folders for one credential.
+struct FolderWalk<'a> {
+    credential_id: i64,
+    drive_id: &'a str,
+    scope: &'a str,
+    started_at: DateTime<Utc>,
 }
 
-/// One walk worker: claims folder batches until the queue is empty or the
-/// per-run budget is spent. Returns the files enqueued and batches listed.
-async fn walk_folders(
-    state: &TaskState,
-    credential: &GoogleCredential,
-    scope: &str,
-    drive_id: &str,
-) -> Result<(usize, usize)> {
-    let mut files = 0;
-    let mut batches = 0;
-    for _ in 0..state.config.max_scan_pages {
-        let folder_ids: Vec<String> = sqlx::query_scalar(
-            r#"
-            UPDATE company_context_system.google_drive_folder_scan_queue
-            SET claimed_until = NOW() + make_interval(secs => $3)
-            WHERE (scope_id, folder_id) IN (
-                SELECT scope_id, folder_id
-                FROM company_context_system.google_drive_folder_scan_queue
-                WHERE scope_id = $1
-                  AND NOT done
-                  AND (claimed_until IS NULL OR claimed_until < NOW())
-                LIMIT $2
-                FOR UPDATE SKIP LOCKED
-            )
-            RETURNING folder_id
-            "#,
-        )
-        .bind(scope)
-        .bind(state.config.folder_walk_batch_size as i64)
-        .bind(FOLDER_WALK_LEASE_SECONDS)
-        .fetch_all(&state.pool)
-        .await?;
-        if folder_ids.is_empty() {
-            break;
+/// Groups folders into batches of at most `batch_size`, attaching directly
+/// shared files to the first batch.
+fn plan_folder_batches(
+    folder_ids: Vec<String>,
+    files: Vec<DriveFile>,
+    batch_size: usize,
+) -> Vec<(Vec<String>, Vec<DriveFile>)> {
+    let mut batches: Vec<(Vec<String>, Vec<DriveFile>)> = folder_ids
+        .chunks(batch_size)
+        .map(|chunk| (chunk.to_vec(), Vec::new()))
+        .collect();
+    if !files.is_empty() {
+        match batches.first_mut() {
+            Some(first) => first.1 = files,
+            None => batches.push((Vec::new(), files)),
         }
-        let (batch_files, child_folder_ids) =
-            list_folder_batch(state, credential, drive_id, &folder_ids).await?;
-        // PDFs were observed above, before their folders are marked done, so
-        // a crash never lets the sweep remove a file this walk has reached.
-        let mut tx = state.pool.begin().await?;
-        sqlx::query(
-            r#"
-            INSERT INTO company_context_system.google_drive_folder_scan_queue (scope_id, folder_id)
-            SELECT $1, folder_id
-            FROM UNNEST($2::text[]) AS children(folder_id)
-            ON CONFLICT DO NOTHING
-            "#,
-        )
-        .bind(scope)
-        .bind(&child_folder_ids)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            r#"
-            UPDATE company_context_system.google_drive_folder_scan_queue
-            SET done = TRUE,
-                claimed_until = NULL
-            WHERE scope_id = $1
-              AND folder_id = ANY($2::text[])
-            "#,
-        )
-        .bind(scope)
-        .bind(&folder_ids)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            r#"
-            UPDATE company_context_system.google_drive_folder_scans
-            SET heartbeat_at = NOW()
-            WHERE scope_id = $1
-            "#,
-        )
-        .bind(scope)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        files += batch_files;
-        batches += 1;
     }
-    Ok((files, batches))
+    batches
+}
+
+/// Records and spawns batches in the caller's transaction, so a batch row
+/// exists exactly when its task does.
+async fn spawn_folder_batches(
+    state: &TaskState,
+    tx: &mut Transaction<'_, Postgres>,
+    walk: &FolderWalk<'_>,
+    batches: Vec<(Vec<String>, Vec<DriveFile>)>,
+) -> Result<usize> {
+    let count = batches.len();
+    for (folder_ids, files) in batches {
+        let batch_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            r#"
+            INSERT INTO company_context_system.google_drive_folder_walk_batches (
+                scope_id, batch_id
+            )
+            VALUES ($1, $2::uuid)
+            "#,
+        )
+        .bind(walk.scope)
+        .bind(&batch_id)
+        .execute(&mut **tx)
+        .await?;
+        state
+            .absurd
+            .spawn_with(
+                &mut **tx,
+                SHARED_FOLDERS_BATCH_TASK,
+                FolderBatchParams {
+                    credential_id: walk.credential_id,
+                    drive_id: walk.drive_id.to_owned(),
+                    started_at: walk.started_at,
+                    batch_id: batch_id.clone(),
+                    folder_ids,
+                    files,
+                },
+                SpawnOptions {
+                    idempotency_key: Some(format!("drive.shared_folders.batch:{batch_id}")),
+                    // Ride out Drive outages: a batch that fails permanently
+                    // stalls its walk until the walk is abandoned.
+                    max_attempts: Some(FOLDER_BATCH_MAX_ATTEMPTS),
+                    retry_strategy: Some(RetryStrategy {
+                        kind: RetryKind::Exponential,
+                        base_seconds: Some(30.0),
+                        factor: Some(2.0),
+                        max_seconds: Some(900.0),
+                    }),
+                    ..SpawnOptions::default()
+                },
+            )
+            .await?;
+    }
+    Ok(count)
+}
+
+async fn folder_batch_pending(
+    pool: &PgPool,
+    walk: &FolderWalk<'_>,
+    batch_id: &str,
+) -> Result<bool> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM company_context_system.google_drive_folder_walks walks
+            JOIN company_context_system.google_drive_folder_walk_batches batches
+              ON batches.scope_id = walks.scope_id
+            WHERE walks.scope_id = $1
+              AND walks.started_at = $2
+              AND batches.batch_id = $3::uuid
+              AND NOT batches.done
+        )
+        "#,
+    )
+    .bind(walk.scope)
+    .bind(walk.started_at)
+    .bind(batch_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// Ends the walk once no batch is pending, returning the files it did not
+/// reach. Runs in the transaction that marks the last batch done.
+async fn finish_walk_if_drained(
+    tx: &mut Transaction<'_, Postgres>,
+    walk: &FolderWalk<'_>,
+) -> Result<Option<Vec<String>>> {
+    let pending = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM company_context_system.google_drive_folder_walk_batches
+            WHERE scope_id = $1
+              AND NOT done
+        )
+        "#,
+    )
+    .bind(walk.scope)
+    .fetch_one(&mut **tx)
+    .await?;
+    if pending {
+        return Ok(None);
+    }
+    let unreached: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT observations.file_id
+        FROM company_context_system.google_drive_broker_observations observations
+        JOIN company_context_system.google_drive_files files
+          ON files.file_id = observations.file_id
+        WHERE observations.broker_credential_id = $1
+          AND observations.active
+          AND files.drive_id = $2
+          AND observations.last_seen_at < $3
+        "#,
+    )
+    .bind(walk.credential_id)
+    .bind(walk.drive_id)
+    .bind(walk.started_at)
+    .fetch_all(&mut **tx)
+    .await?;
+    sqlx::query(
+        r#"
+        DELETE FROM company_context_system.google_drive_folder_walks
+        WHERE scope_id = $1
+        "#,
+    )
+    .bind(walk.scope)
+    .execute(&mut **tx)
+    .await?;
+    Ok(Some(unreached))
 }
 
 /// Lists a folder batch, retrying folder by folder if Drive rejects the
@@ -832,92 +1001,7 @@ async fn list_folder_children(
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum FolderScanCompletion {
-    /// The walk finished and removed this many unreached files.
-    Completed(usize),
-    /// Folders remain to be listed.
-    Pending,
-    /// The walk no longer exists, because it finished or was cancelled.
-    Missing,
-}
-
-/// Ends a drained walk and removes the files it did not reach.
-async fn complete_folder_scan(
-    state: &TaskState,
-    credential_id: i64,
-    scope: &str,
-    drive_id: &str,
-) -> Result<FolderScanCompletion> {
-    let mut tx = state.pool.begin().await?;
-    let Some(started_at) = sqlx::query_scalar::<_, DateTime<Utc>>(
-        r#"
-        SELECT started_at
-        FROM company_context_system.google_drive_folder_scans
-        WHERE scope_id = $1
-        FOR UPDATE
-        "#,
-    )
-    .bind(scope)
-    .fetch_optional(&mut *tx)
-    .await?
-    else {
-        tx.rollback().await?;
-        return Ok(FolderScanCompletion::Missing);
-    };
-    let pending = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM company_context_system.google_drive_folder_scan_queue
-            WHERE scope_id = $1
-              AND NOT done
-        )
-        "#,
-    )
-    .bind(scope)
-    .fetch_one(&mut *tx)
-    .await?;
-    if pending {
-        tx.rollback().await?;
-        return Ok(FolderScanCompletion::Pending);
-    }
-    let unreached: Vec<String> = sqlx::query_scalar(
-        r#"
-        SELECT observations.file_id
-        FROM company_context_system.google_drive_broker_observations observations
-        JOIN company_context_system.google_drive_files files
-          ON files.file_id = observations.file_id
-        WHERE observations.broker_credential_id = $1
-          AND observations.active
-          AND files.drive_id = $2
-          AND observations.last_seen_at < $3
-        "#,
-    )
-    .bind(credential_id)
-    .bind(drive_id)
-    .bind(started_at)
-    .fetch_all(&mut *tx)
-    .await?;
-    sqlx::query(
-        r#"
-        DELETE FROM company_context_system.google_drive_folder_scans
-        WHERE scope_id = $1
-        "#,
-    )
-    .bind(scope)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    // A failed removal is retried by the next walk's sweep.
-    let change_key = format!("{scope}:{}", started_at.to_rfc3339());
-    for file_id in &unreached {
-        enqueue_delete(state, credential_id, file_id.clone(), &change_key).await?;
-    }
-    Ok(FolderScanCompletion::Completed(unreached.len()))
-}
-
-fn folder_scan_scope(credential_id: i64, drive_id: &str) -> String {
+fn folder_walk_scope(credential_id: i64, drive_id: &str) -> String {
     format!("shared_folders:{drive_id}:broker:{credential_id}")
 }
 
@@ -2073,6 +2157,24 @@ mod tests {
 
     fn pdf(drive_id: &str) -> DriveFile {
         drive_file("file-1", "application/pdf", drive_id)
+    }
+
+    #[test]
+    fn folder_batches_are_bounded_and_carry_shared_files_once() {
+        let folders = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+        let batches = plan_folder_batches(folders(&["a", "b", "c"]), vec![pdf("drive-a")], 2);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].0, ["a", "b"]);
+        assert_eq!(batches[0].1.len(), 1);
+        assert_eq!(batches[1].0, ["c"]);
+        assert!(batches[1].1.is_empty());
+
+        let files_only = plan_folder_batches(Vec::new(), vec![pdf("drive-a")], 2);
+        assert_eq!(files_only.len(), 1);
+        assert!(files_only[0].0.is_empty());
+        assert_eq!(files_only[0].1.len(), 1);
+
+        assert!(plan_folder_batches(Vec::new(), Vec::new(), 2).is_empty());
     }
 
     #[test]

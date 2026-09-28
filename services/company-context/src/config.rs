@@ -8,7 +8,8 @@ pub const QUEUE_NAME: &str = "company_context";
 pub const DRIVE_SCAN_TASK: &str = "drive.user.scan";
 pub const SHARED_DRIVES_DISCOVER_TASK: &str = "drive.shared_drives.discover";
 pub const SHARED_DRIVE_SCAN_TASK: &str = "drive.shared_drive.scan";
-pub const SHARED_FOLDERS_SCAN_TASK: &str = "drive.shared_folders.scan";
+pub const SHARED_FOLDERS_WALK_TASK: &str = "drive.shared_folders.walk";
+pub const SHARED_FOLDERS_BATCH_TASK: &str = "drive.shared_folders.batch";
 pub const DRIVE_CREDENTIALS_RECONCILE_TASK: &str = "drive.credentials.reconcile";
 pub const PDF_EXTRACT_TASK: &str = "drive.pdf.extract";
 pub const DOCUMENT_EMBED_TASK: &str = "drive.document.embed";
@@ -113,14 +114,6 @@ pub struct Config {
         value_parser = folder_walk_batch_size
     )]
     pub folder_walk_batch_size: usize,
-    /// Concurrent folder batches per shared-folder walk.
-    #[arg(
-        long,
-        env = "COMPANY_CONTEXT_FOLDER_WALK_CONCURRENCY",
-        default_value = "4",
-        value_parser = positive_usize
-    )]
-    pub folder_walk_concurrency: usize,
     #[arg(
         long,
         env = "COMPANY_CONTEXT_MAX_PDF_BYTES",
