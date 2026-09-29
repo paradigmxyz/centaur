@@ -72,3 +72,23 @@ def test_search_no_hybrid_flag_forces_keyword_mode(monkeypatch):
             "hybrid": False,
         }
     ]
+
+
+def test_v2_subcommand_uses_drive_v2_client(monkeypatch):
+    clients = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            clients.append(kwargs)
+
+        def search(self, **kwargs):
+            return {"status": "ok", "results": []}
+
+    monkeypatch.setattr(cli, "CompanyContextClient", FakeClient)
+
+    v1 = CliRunner().invoke(cli.app, ["search", "roadmap"])
+    v2 = CliRunner().invoke(cli.app, ["v2", "search", "roadmap"])
+
+    assert v1.exit_code == 0, v1.output
+    assert v2.exit_code == 0, v2.output
+    assert clients == [{}, {"drive_v2": True}]

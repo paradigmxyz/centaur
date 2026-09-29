@@ -49,6 +49,26 @@ def health():
 
 console = Console()
 
+v2_app = typer.Typer(
+    help=(
+        "Preview: search, list, read, and check freshness with Google Docs and PDFs "
+        "from the company-context service's Drive index instead of the legacy Google "
+        "Docs index."
+    ),
+)
+app.add_typer(v2_app, name="v2")
+
+
+@v2_app.callback()
+def v2(ctx: typer.Context) -> None:
+    ctx.obj = {"drive_v2": True}
+
+
+def _client_for(ctx: typer.Context) -> CompanyContextClient:
+    if ctx.obj and ctx.obj.get("drive_v2"):
+        return CompanyContextClient(drive_v2=True)
+    return CompanyContextClient()
+
 
 def _print_json(data: dict[str, Any]) -> None:
     console.print(JSON(json.dumps(data, default=str)))
@@ -123,6 +143,7 @@ def query(
 
 @app.command("search")
 def search(
+    ctx: typer.Context,
     query: str = typer.Argument(..., help="Search query."),
     limit: int = typer.Option(10, "--limit", "-n", help="Max results."),
     source: str | None = typer.Option(
@@ -149,7 +170,7 @@ def search(
     ),
 ) -> None:
     """Search indexed company context, including Google Docs and Granola notes."""
-    result = CompanyContextClient().search(
+    result = _client_for(ctx).search(
         query=query,
         limit=limit,
         source=source,
@@ -278,6 +299,7 @@ def search_dms(
 
 @app.command("list")
 def list_documents(
+    ctx: typer.Context,
     limit: int = typer.Option(10, "--limit", "-n", help="Max documents."),
     source: str | None = typer.Option(
         None,
@@ -298,7 +320,7 @@ def list_documents(
     ),
 ) -> None:
     """List indexed company context documents, including Google Docs and Granola notes."""
-    result = CompanyContextClient().list_documents(
+    result = _client_for(ctx).list_documents(
         limit=limit,
         source=source,
         source_type=source_type,
@@ -328,6 +350,7 @@ def list_documents(
 
 @app.command("read")
 def read_document(
+    ctx: typer.Context,
     document_id: str = typer.Argument(..., help="Document ID returned by search/list."),
     max_chars: int = typer.Option(0, "--max-chars", help="Maximum content chars; 0 means full."),
     related: bool = typer.Option(
@@ -343,7 +366,7 @@ def read_document(
     ),
 ) -> None:
     """Read a company context document returned by search, including Granola notes."""
-    result = CompanyContextClient().read_document(
+    result = _client_for(ctx).read_document(
         document_id=document_id,
         max_chars=max_chars,
         include_related=related,
@@ -367,6 +390,7 @@ def read_document(
 
 @app.command("latest-date")
 def latest_date(
+    ctx: typer.Context,
     source: str | None = typer.Option(
         None,
         "--source",
@@ -375,9 +399,15 @@ def latest_date(
     source_type: str | None = typer.Option(None, "--source-type", help="Filter by source type."),
 ) -> None:
     """Show the latest indexed timestamp as JSON."""
-    result = CompanyContextClient().latest_date(source=source, source_type=source_type)
+    result = _client_for(ctx).latest_date(source=source, source_type=source_type)
     _require_ok(result)
     _print_json(result)
+
+
+v2_app.command("search")(search)
+v2_app.command("list")(list_documents)
+v2_app.command("read")(read_document)
+v2_app.command("latest-date")(latest_date)
 
 
 if __name__ == "__main__":

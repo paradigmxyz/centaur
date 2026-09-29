@@ -632,9 +632,6 @@ def test_search_emits_grouped_lookup_metrics(monkeypatch):
     monkeypatch.setattr(company_context_client, "_include_google_docs_source", lambda *_args: False)
     monkeypatch.setattr(company_context_client, "_include_granola_source", lambda *_args: False)
     monkeypatch.setattr(
-        company_context_client, "_include_google_drive_source", lambda *_args: False
-    )
-    monkeypatch.setattr(
         company_context_client,
         "_push_company_context_lookup_metric_lines",
         lambda lines: pushed_lines.extend(lines),
@@ -982,15 +979,17 @@ def _google_drive_row(**overrides):
     return row
 
 
-def test_search_docs_source_includes_company_context_service_drive_documents(monkeypatch):
-    fake = _FakeConnection(fetch_rows=[[], [], [_google_drive_row(score=1.5)]])
+def test_v2_search_replaces_legacy_google_docs_with_drive_documents(monkeypatch):
+    fake = _FakeConnection(fetch_rows=[[], [_google_drive_row(score=1.5)]])
 
     async def fake_connect(*args, **kwargs):
         return fake
 
     monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
 
-    result = CompanyContextClient("postgresql://example").search("roadmap", source="docs")
+    result = CompanyContextClient("postgresql://example", drive_v2=True).search(
+        "roadmap", source="docs"
+    )
 
     assert result["status"] == "ok"
     assert result["count"] == 1
@@ -1001,14 +1000,29 @@ def test_search_docs_source_includes_company_context_service_drive_documents(mon
     assert document["source_document_id"] == "file-1"
     assert document["metadata"]["drive_id"] == "shared-drive-1"
     assert document["metadata"]["page_start"] == 1
-    drive_query, _args = fake.fetch_calls[2]
-    assert "FROM company_context_data.google_drive_documents" in drive_query
+    queries = [query for query, _args in fake.fetch_calls]
+    assert len(queries) == 2
+    assert "FROM company_context_data.google_drive_documents" in queries[1]
+    assert not any("google_docs_context_documents" in query for query in queries)
 
 
-def test_search_skips_absent_company_context_service_drive_documents(monkeypatch):
+def test_search_without_v2_leaves_drive_documents_hidden(monkeypatch):
+    fake = _FakeConnection(rows=[])
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").search("roadmap", source="docs")
+
+    assert result["status"] == "ok"
+    assert not any("company_context_data" in query for query, _args in fake.fetch_calls)
+
+
+def test_v2_search_skips_absent_drive_documents(monkeypatch):
     fake = _FakeConnection(
         fetch_rows=[
-            [],
             [],
             asyncpg.UndefinedTableError(
                 'relation "company_context_data.google_drive_documents" does not exist'
@@ -1021,11 +1035,13 @@ def test_search_skips_absent_company_context_service_drive_documents(monkeypatch
 
     monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
 
-    result = CompanyContextClient("postgresql://example").search("roadmap", source="docs")
+    result = CompanyContextClient("postgresql://example", drive_v2=True).search(
+        "roadmap", source="docs"
+    )
 
     assert result["status"] == "ok"
     assert result["count"] == 0
-    assert len(fake.fetch_calls) == 3
+    assert len(fake.fetch_calls) == 2
 
 
 def test_search_granola_source_queries_private_note_projection(monkeypatch):
@@ -1727,15 +1743,17 @@ def test_read_document_falls_back_to_oauth_google_docs_index(monkeypatch):
     assert fake.closed is True
 
 
-def test_read_document_falls_back_to_company_context_service_drive_documents(monkeypatch):
-    fake = _FakeConnection(fetchrow_rows=[None, None, None, _google_drive_row()])
+def test_v2_read_document_falls_back_to_drive_documents(monkeypatch):
+    fake = _FakeConnection(fetchrow_rows=[None, _google_drive_row()])
 
     async def fake_connect(*args, **kwargs):
         return fake
 
     monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
 
-    result = CompanyContextClient("postgresql://example").read_document("google-drive:file-1:0")
+    result = CompanyContextClient("postgresql://example", drive_v2=True).read_document(
+        "google-drive:file-1:0"
+    )
 
     assert result["status"] == "ok"
     assert result["source"] == "docs"

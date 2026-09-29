@@ -671,9 +671,19 @@ class CompanyContextClient:
         database_url: str | None = None,
         *,
         embeddings_client: Any | None = None,
+        drive_v2: bool = False,
     ) -> None:
         self._database_url = (database_url or _scoped_database_url()).strip()
         self._embeddings_client = embeddings_client
+        # v2 reads Google Docs and PDFs from the company-context service tables
+        # instead of the legacy OAuth Google Docs projection.
+        self._drive_v2 = drive_v2
+
+    def _include_legacy_google_docs(self, source: str | None, source_type: str | None) -> bool:
+        return not self._drive_v2 and _include_google_docs_source(source, source_type)
+
+    def _include_google_drive(self, source: str | None, source_type: str | None) -> bool:
+        return self._drive_v2 and _include_google_drive_source(source, source_type)
 
     def _require_database_url(self) -> str:
         if not self._database_url:
@@ -897,7 +907,7 @@ class CompanyContextClient:
                 result["result_type"] = str(result["source_type"] or "indexed_document")
                 results.append(result)
 
-            if _include_google_docs_source(source, source_type):
+            if self._include_legacy_google_docs(source, source_type):
                 try:
                     google_rows = await self._search_google_docs_async(
                         conn,
@@ -943,7 +953,7 @@ class CompanyContextClient:
                 except asyncpg.UndefinedTableError as exc:
                     granola_error = str(exc)
 
-            if _include_google_drive_source(source, source_type):
+            if self._include_google_drive(source, source_type):
                 with suppress(asyncpg.UndefinedTableError):
                     drive_rows = await self._search_google_drive_async(
                         conn,
@@ -1238,7 +1248,7 @@ class CompanyContextClient:
             result["result_type"] = str(result["source_type"] or "indexed_document")
             results.append(result)
 
-        if _include_google_docs_source(source, source_type):
+        if self._include_legacy_google_docs(source, source_type):
             try:
                 google_rows = await conn.fetch(
                     """
@@ -1349,7 +1359,7 @@ class CompanyContextClient:
                 # Optional projections may lag the embedding schema.
                 pass
 
-        if _include_google_drive_source(source, source_type):
+        if self._include_google_drive(source, source_type):
             try:
                 drive_rows = await conn.fetch(
                     f"""
@@ -1462,7 +1472,7 @@ class CompanyContextClient:
         source: str | None,
         source_type: str | None,
     ) -> dict[str, Any]:
-        if not _include_google_docs_source(source, source_type):
+        if not self._include_legacy_google_docs(source, source_type):
             return self._empty_latest_date_result(source=source, source_type=source_type)
         row = await conn.fetchrow(
             """
@@ -1493,7 +1503,7 @@ class CompanyContextClient:
         source: str | None,
         source_type: str | None,
     ) -> dict[str, Any]:
-        if not _include_google_drive_source(source, source_type):
+        if not self._include_google_drive(source, source_type):
             return self._empty_latest_date_result(source=source, source_type=source_type)
         row = await conn.fetchrow(
             f"""
@@ -1990,7 +2000,7 @@ class CompanyContextClient:
                     query="",
                 )
                 results.append(result)
-            if _include_google_docs_source(source, source_type):
+            if self._include_legacy_google_docs(source, source_type):
                 try:
                     google_rows = await self._list_google_docs_async(
                         conn,
@@ -2024,7 +2034,7 @@ class CompanyContextClient:
                         results.append(result)
                 except asyncpg.UndefinedTableError as exc:
                     granola_error = str(exc)
-            if _include_google_drive_source(source, source_type):
+            if self._include_google_drive(source, source_type):
                 with suppress(asyncpg.UndefinedTableError):
                     drive_rows = await conn.fetch(
                         f"""
@@ -2339,10 +2349,20 @@ class CompanyContextClient:
                 document_id,
             )
             if not row:
-                try:
-                    google_doc = await self._read_google_doc_async(conn, document_id, max_chars)
-                except asyncpg.UndefinedTableError:
-                    google_doc = None
+                google_doc = None
+                with suppress(asyncpg.UndefinedTableError):
+                    if self._drive_v2:
+                        google_doc = await self._read_google_drive_doc_async(
+                            conn,
+                            document_id,
+                            max_chars,
+                        )
+                    else:
+                        google_doc = await self._read_google_doc_async(
+                            conn,
+                            document_id,
+                            max_chars,
+                        )
                 if google_doc is not None:
                     return google_doc
                 try:
@@ -2355,15 +2375,6 @@ class CompanyContextClient:
                     granola_doc = None
                 if granola_doc is not None:
                     return granola_doc
-                google_drive_doc = None
-                with suppress(asyncpg.UndefinedTableError):
-                    google_drive_doc = await self._read_google_drive_doc_async(
-                        conn,
-                        document_id,
-                        max_chars,
-                    )
-                if google_drive_doc is not None:
-                    return google_drive_doc
                 return {
                     "status": "error",
                     "error": f"document not found: {document_id}",
