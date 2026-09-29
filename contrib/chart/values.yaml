@@ -731,7 +731,7 @@ slackbotv2:
   # harness, so name the harness alongside it. Applied when a message in that
   # channel carries no explicit/sticky per-thread flag, below such a flag and
   # above the deployment/baked harness default, and forwarded onto the harness
-  # input line so it takes effect. reasoning affects the codex and claude harnesses.
+  # input line so it takes effect. reasoning only affects the codex harness.
   # Example:
   #   channelDefaults:
   #     C0ENG: { harness: claude, model: opus, reasoning: high }
