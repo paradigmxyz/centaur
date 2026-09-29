@@ -509,6 +509,13 @@
       "allOf": [{ "$ref": "#/definitions/podScheduling" }],
       "type": "object",
       "properties": {
+        "external": {
+          "type": "object",
+          "properties": {
+            "cidrs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        },
         "persistence": {
           "type": "object",
           "properties": {
