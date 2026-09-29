@@ -177,6 +177,7 @@ pub fn harness_auth_fragment(engine: &str, auth_mode: &str) -> Result<Option<Pro
         ("meta-ai", "api_key") => META_AI_API_KEY_FRAGMENT,
         ("claude-code", "api_key") => CLAUDE_CODE_API_KEY_FRAGMENT,
         ("claude-code", "access_token") => CLAUDE_CODE_ACCESS_TOKEN_FRAGMENT,
+        ("amp", "api_key") => AMP_API_KEY_FRAGMENT,
         _ => return Ok(None),
     };
     load_fragment_str(yaml).map(Some)
@@ -354,6 +355,18 @@ transforms:
             proxy_value: OPENROUTER_API_KEY
             match_headers: ["Authorization"]
           rules: [{ host: openrouter.ai }]
+"#;
+
+const AMP_API_KEY_FRAGMENT: &str = r#"
+transforms:
+  - name: secrets
+    config:
+      secrets:
+        - id: AMP_API_KEY_AUTHORIZATION
+          replace:
+            proxy_value: AMP_API_KEY
+            match_headers: ["Authorization", "X-Api-Key"]
+          rules: [{ host: ampcode.com }]
 "#;
 
 // Hermes's native Nous Portal provider authenticates with NOUS_API_KEY. Other
