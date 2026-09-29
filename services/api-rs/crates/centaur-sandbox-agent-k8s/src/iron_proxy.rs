@@ -203,7 +203,7 @@ impl AgentSandboxBackend {
             return Ok(None);
         }
         // iron-control is the only mode: the proxy pulls its entire effective
-        // config from iron-control over `/proxy/sync`, so no config is rendered
+        // config from proxy-sync over `/proxy/sync`, so no config is rendered
         // locally — the remaining local settings are passed as IRON_* env vars
         // on the pod. The sandbox must carry the principal its proxy binds to.
         let principal_id = spec.iron_control_principal.clone().ok_or_else(|| {
@@ -1577,8 +1577,8 @@ fn iron_proxy_env_vars(
         ),
     );
     // iron-proxy pulls its effective config (allowlist, secrets, management)
-    // from iron-control using this token; no local config file is rendered.
-    // The binary reads the control-plane base URL from IRON_CONTROL_PLANE_URL
+    // from proxy-sync using this token; no local config file is rendered.
+    // The binary reads the sync base URL from IRON_CONTROL_PLANE_URL
     // (distinct from api-rs's own IRON_CONTROL_URL admin-client var); a wrong
     // name makes it fall back to its built-in default endpoint.
     env.insert(

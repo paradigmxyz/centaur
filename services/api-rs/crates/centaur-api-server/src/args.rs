@@ -524,11 +524,15 @@ impl IronControlArgs {
         })
     }
 
-    /// Required backend sync settings (admin client + control-plane URL).
+    /// Required backend sync settings (admin client + proxy-sync URL).
     fn settings(&self) -> Result<IronControlSettings, ServerError> {
         let client = self.required_client()?;
         let admin_url = non_empty(self.url.as_deref()).expect("required client validates URL");
-        let control_url = non_empty(self.proxy_sync_url.as_deref()).unwrap_or(admin_url);
+        let control_url = non_empty(self.proxy_sync_url.as_deref()).ok_or_else(|| {
+            ServerError::UnsupportedConfig(
+                "proxy-sync is required: set IRON_CONTROL_PROXY_SYNC_URL".to_owned(),
+            )
+        })?;
         Ok(IronControlSettings {
             client,
             console_url: admin_url.to_owned(),
@@ -2704,6 +2708,8 @@ mod tests {
             "42",
             "--iron-control-url",
             "http://console.local",
+            "--iron-control-proxy-sync-url",
+            "http://proxy-sync.local:8080",
             "--iron-control-api-key",
             "iak_test",
         ])
@@ -2721,7 +2727,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_sync_url_override_preserves_console_url_and_egress_selector() {
+    fn proxy_sync_url_is_separate_from_console_url_and_egress_selector() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -2748,6 +2754,25 @@ mod tests {
     }
 
     #[test]
+    fn agent_sandboxes_require_proxy_sync_url() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--iron-control-url",
+            "http://console.local:3000",
+            "--iron-control-api-key",
+            "iak_test",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            args.sandbox.iron_control.settings(),
+            Err(ServerError::UnsupportedConfig(message)) if message.contains("IRON_CONTROL_PROXY_SYNC_URL")
+        ));
+    }
+
+    #[test]
     fn tools_config_read_from_flags() {
         let args = Args::try_parse_from([
             "centaur-api-server",
@@ -2757,6 +2782,8 @@ mod tests {
             "agent-k8s",
             "--iron-control-url",
             "http://console.local",
+            "--iron-control-proxy-sync-url",
+            "http://proxy-sync.local:8080",
             "--iron-control-api-key",
             "iak_test",
             "--kubernetes-tools-repo",
@@ -2800,6 +2827,8 @@ mod tests {
             "agent-k8s",
             "--iron-control-url",
             "http://console.local",
+            "--iron-control-proxy-sync-url",
+            "http://proxy-sync.local:8080",
             "--iron-control-api-key",
             "iak_test",
             "--kubernetes-tools-repo",
@@ -3526,6 +3555,8 @@ mod tests {
             r#"{"requests":{"cpu":"50m"}}"#,
             "--iron-control-url",
             "http://console.local",
+            "--iron-control-proxy-sync-url",
+            "http://proxy-sync.local:8080",
             "--iron-control-api-key",
             "iak_test",
         ])
@@ -3587,6 +3618,8 @@ mod tests {
             "",
             "--iron-control-url",
             "http://console.local",
+            "--iron-control-proxy-sync-url",
+            "http://proxy-sync.local:8080",
             "--iron-control-api-key",
             "iak_test",
         ])
