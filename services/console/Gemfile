@@ -3,7 +3,7 @@ source "https://rubygems.org"
 # Bundle edge Rails instead: gem "rails", github: "rails/rails", branch: "main"
 # Rails 8.1.4 cannot validate foreign keys in extension schemas outside the search path.
 # Fixed upstream by rails/rails#58875; remove the exclusion after the next patch release.
-gem "rails", "~> 8.1.3", "!= 8.1.4"
+gem "rails", "~> 8.1.4"
 # The modern asset pipeline for Rails [https://github.com/rails/propshaft]
 gem "propshaft"
 # Tailwind CSS, compiled by a standalone binary into app/assets/builds.
