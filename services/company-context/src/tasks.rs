@@ -17,7 +17,7 @@ use crate::{
         SHARED_DRIVE_SCAN_TASK, SHARED_DRIVES_DISCOVER_TASK, SHARED_FOLDERS_BATCH_TASK,
     },
     credentials::GoogleCredential,
-    drive::{DriveChange, DriveClient, DriveFile, Permission},
+    drive::{DriveChange, DriveClient, DriveFile},
     embeddings::EmbeddingsClient,
     errors::{is_rejected, rejected},
     extraction::{chunk_text, extract_google_doc_text, extract_pdf_text, hex_sha256},
@@ -187,32 +187,17 @@ async fn reconcile_credentials(
     let mut tx = state.pool.begin().await?;
     let stale_observations = sqlx::query(
         r#"
-        UPDATE company_context_system.google_drive_broker_observations
+        UPDATE company_context_data.google_drive_broker_observations
         SET active = FALSE,
             updated_at = NOW()
         WHERE active
           AND NOT (broker_credential_id = ANY($1::bigint[]))
-        RETURNING broker_credential_id, file_id
         "#,
     )
     .bind(&retained_ids)
-    .fetch_all(&mut *tx)
-    .await?;
-    for observation in &stale_observations {
-        let credential_id: i64 = observation.try_get("broker_credential_id")?;
-        let file_id: String = observation.try_get("file_id")?;
-        sqlx::query(
-            r#"
-            DELETE FROM company_context_data.google_drive_document_access
-            WHERE file_id = $1
-              AND permission_id = $2
-            "#,
-        )
-        .bind(file_id)
-        .bind(format!("broker:{credential_id}"))
-        .execute(&mut *tx)
-        .await?;
-    }
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
 
     let candidate_rows = sqlx::query(
         r#"
@@ -220,7 +205,7 @@ async fn reconcile_credentials(
         FROM company_context_system.google_drive_files files
         WHERE NOT EXISTS (
             SELECT 1
-            FROM company_context_system.google_drive_broker_observations observations
+            FROM company_context_data.google_drive_broker_observations observations
             WHERE observations.file_id = files.file_id
               AND observations.active
         )
@@ -258,7 +243,7 @@ async fn reconcile_credentials(
             r#"
             SELECT EXISTS (
                 SELECT 1
-                FROM company_context_system.google_drive_broker_observations
+                FROM company_context_data.google_drive_broker_observations
                 WHERE file_id = $1
                   AND active
             )
@@ -312,7 +297,7 @@ async fn reconcile_credentials(
     info!(
         event = "company_context_credentials_reconciled",
         task_id = ctx.task_id(),
-        observations_deactivated = stale_observations.len(),
+        observations_deactivated = stale_observations,
         files_enqueued = deletions.len()
     );
     Ok(TaskSummary {
@@ -397,7 +382,7 @@ async fn discover_shared_drives(
     let departed_files: Vec<String> = sqlx::query_scalar(
         r#"
         SELECT observations.file_id
-        FROM company_context_system.google_drive_broker_observations observations
+        FROM company_context_data.google_drive_broker_observations observations
         JOIN company_context_system.google_drive_files files
           ON files.file_id = observations.file_id
         WHERE observations.broker_credential_id = $1
@@ -882,7 +867,7 @@ async fn observe_file(
     let mut tx = pool.begin().await?;
     sqlx::query(
         r#"
-        INSERT INTO company_context_system.google_drive_broker_observations (
+        INSERT INTO company_context_data.google_drive_broker_observations (
             broker_credential_id, file_id, provider_email, provider_subject,
             observation_key, active, last_seen_at, updated_at
         )
@@ -901,25 +886,6 @@ async fn observe_file(
     .bind(&credential.provider_email)
     .bind(&credential.provider_subject)
     .bind(observation_key)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO company_context_data.google_drive_document_access (
-            file_id, permission_id, permission_type, role, email_address,
-            source_version, updated_at
-        )
-        VALUES ($1, $2, 'broker_user', 'reader', $3, $4, NOW())
-        ON CONFLICT (file_id, permission_id) DO UPDATE
-        SET email_address = EXCLUDED.email_address,
-            source_version = EXCLUDED.source_version,
-            updated_at = NOW()
-        "#,
-    )
-    .bind(&file.id)
-    .bind(format!("broker:{}", credential.id))
-    .bind(&credential.provider_email)
-    .bind(file.source_version())
     .execute(&mut *tx)
     .await?;
     let updated = sqlx::query(
@@ -984,7 +950,7 @@ async fn observe_delete(
     let mut tx = pool.begin().await?;
     let observed = sqlx::query(
         r#"
-        UPDATE company_context_system.google_drive_broker_observations
+        UPDATE company_context_data.google_drive_broker_observations
         SET active = FALSE,
             observation_key = $3,
             updated_at = NOW()
@@ -1005,22 +971,11 @@ async fn observe_delete(
         tx.rollback().await?;
         return Ok(false);
     }
-    sqlx::query(
-        r#"
-        DELETE FROM company_context_data.google_drive_document_access
-        WHERE file_id = $1
-          AND permission_id = $2
-        "#,
-    )
-    .bind(file_id)
-    .bind(format!("broker:{credential_id}"))
-    .execute(&mut *tx)
-    .await?;
     let remains_visible = sqlx::query_scalar::<_, bool>(
         r#"
         SELECT EXISTS (
             SELECT 1
-            FROM company_context_system.google_drive_broker_observations
+            FROM company_context_data.google_drive_broker_observations
             WHERE file_id = $1
               AND active
         )
@@ -1387,7 +1342,6 @@ async fn embed_document(
             files: 0,
         });
     }
-    replace_access(&mut tx, &file.id, &file.source_version(), &file.permissions).await?;
     let mut document_ids = Vec::with_capacity(chunks.len());
     for (document_id, chunk_id, body, content_hash) in &chunks {
         document_ids.push(document_id.clone());
@@ -1506,49 +1460,6 @@ async fn embed_document(
     })
 }
 
-async fn replace_access(
-    tx: &mut Transaction<'_, Postgres>,
-    file_id: &str,
-    source_version: &str,
-    permissions: &[Permission],
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        DELETE FROM company_context_data.google_drive_document_access
-        WHERE file_id = $1
-          AND permission_type <> 'broker_user'
-        "#,
-    )
-    .bind(file_id)
-    .execute(&mut **tx)
-    .await?;
-    for permission in permissions
-        .iter()
-        .filter(|permission| !permission.id.is_empty())
-    {
-        sqlx::query(
-            r#"
-            INSERT INTO company_context_data.google_drive_document_access (
-                file_id, permission_id, permission_type, role, email_address,
-                domain, allow_file_discovery, source_version
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            "#,
-        )
-        .bind(file_id)
-        .bind(&permission.id)
-        .bind(&permission.permission_type)
-        .bind(&permission.role)
-        .bind(&permission.email_address)
-        .bind(&permission.domain)
-        .bind(permission.allow_file_discovery)
-        .bind(source_version)
-        .execute(&mut **tx)
-        .await?;
-    }
-    Ok(())
-}
-
 async fn delete_document(
     state: &TaskState,
     params: DeleteParams,
@@ -1566,7 +1477,7 @@ async fn delete_document(
         r#"
         SELECT EXISTS (
             SELECT 1
-            FROM company_context_system.google_drive_broker_observations
+            FROM company_context_data.google_drive_broker_observations
             WHERE file_id = $1
               AND active
         )
@@ -1585,15 +1496,6 @@ async fn delete_document(
     sqlx::query(
         r#"
         DELETE FROM company_context_data.google_drive_documents
-        WHERE file_id = $1
-        "#,
-    )
-    .bind(&params.file_id)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        r#"
-        DELETE FROM company_context_data.google_drive_document_access
         WHERE file_id = $1
         "#,
     )

@@ -17,11 +17,8 @@ use crate::{
 };
 
 const DRIVE_REQUEST_ATTEMPTS: u32 = 4;
-const FILE_FIELDS: &str = "id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress),permissions(id,type,role,emailAddress,domain,allowFileDiscovery)";
-/// Drive caps pages at 100 when permissions are requested, and omits Shared
-/// Drive permissions for non-members anyway, so walks list without them.
+const FILE_FIELDS: &str = "id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress)";
 const WALK_PAGE_SIZE: u16 = 1_000;
-const WALK_FILE_FIELDS: &str = "id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress)";
 const FOLDER_OR_DOCUMENT_QUERY: &str = "trashed = false and (mimeType = 'application/vnd.google-apps.folder' or mimeType = 'application/pdf' or mimeType = 'application/vnd.google-apps.document')";
 /// The user corpus plus Shared Drive items the user can reach without membership.
 const ACCESSIBLE_CORPUS: &[(&str, &str)] =
@@ -59,8 +56,6 @@ pub struct DriveFile {
     pub modified_time: Option<DateTime<Utc>>,
     #[serde(default)]
     pub owners: Vec<Identity>,
-    #[serde(default)]
-    pub permissions: Vec<Permission>,
 }
 
 impl DriveFile {
@@ -110,22 +105,6 @@ pub struct Identity {
     pub display_name: String,
     #[serde(default)]
     pub email_address: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Permission {
-    #[serde(default)]
-    pub id: String,
-    #[serde(rename = "type", default)]
-    pub permission_type: String,
-    #[serde(default)]
-    pub role: String,
-    #[serde(default)]
-    pub email_address: String,
-    #[serde(default)]
-    pub domain: String,
-    pub allow_file_discovery: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -276,7 +255,7 @@ impl DriveClient {
             credential_id,
             &format!("sharedWithMe = true and {FOLDER_OR_DOCUMENT_QUERY}"),
             ACCESSIBLE_CORPUS,
-            WALK_FILE_FIELDS,
+            FILE_FIELDS,
             WALK_PAGE_SIZE,
             page_token,
         )
@@ -300,7 +279,7 @@ impl DriveClient {
             credential_id,
             &folder_children_query(folder_ids),
             ACCESSIBLE_CORPUS,
-            WALK_FILE_FIELDS,
+            FILE_FIELDS,
             WALK_PAGE_SIZE,
             page_token,
         )
@@ -581,7 +560,6 @@ mod tests {
             created_time: None,
             modified_time: None,
             owners: Vec::new(),
-            permissions: Vec::new(),
         }
     }
 
