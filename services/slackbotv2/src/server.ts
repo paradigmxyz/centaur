@@ -72,12 +72,17 @@ const options: SlackbotV2Options = {
       ? { codex: optionalEnv('CODEX_MODEL')!, nanocodex: optionalEnv('CODEX_MODEL')! }
       : {})
   },
-  harnessDefaultReasoning: optionalEnv('CODEX_MODEL_REASONING_EFFORT')
-    ? {
-        codex: optionalEnv('CODEX_MODEL_REASONING_EFFORT')!,
-        nanocodex: optionalEnv('CODEX_MODEL_REASONING_EFFORT')!
-      }
-    : {},
+  harnessDefaultReasoning: {
+    ...(optionalEnv('CLAUDE_CODE_EFFORT_LEVEL')
+      ? { claudecode: optionalEnv('CLAUDE_CODE_EFFORT_LEVEL')! }
+      : {}),
+    ...(optionalEnv('CODEX_MODEL_REASONING_EFFORT')
+      ? {
+          codex: optionalEnv('CODEX_MODEL_REASONING_EFFORT')!,
+          nanocodex: optionalEnv('CODEX_MODEL_REASONING_EFFORT')!
+        }
+      : {})
+  },
   idleTimeoutMs: optionalNumberEnv('SESSION_IDLE_TIMEOUT_MS'),
   maxDurationMs: optionalNumberEnv('SESSION_MAX_DURATION_MS'),
   messageOverridesStrategy: createMessageOverridesStrategy(),

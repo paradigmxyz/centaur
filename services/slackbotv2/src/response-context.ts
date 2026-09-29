@@ -173,6 +173,9 @@ export function effectiveReasoningForHarness(
   configured?: Record<string, string>
 ): string | undefined {
   const key = harnessType?.trim().toLowerCase()
+  // Claude Code reads CLAUDE_CODE_EFFORT_LEVEL from the sandbox environment;
+  // per-turn reasoning selections are not forwarded to it.
+  if (key === 'claudecode') return defaultReasoningForHarness(key, configured)
   if (key !== 'codex' && key !== 'nanocodex') return undefined
   const reasoning = requested?.trim().toLowerCase() || defaultReasoningForHarness(key, configured)
   // Nanocodex has no distinct Minimal level; its adapter maps Minimal to Low.

@@ -149,6 +149,13 @@ describe('defaultReasoningForHarness', () => {
     expect(defaultReasoningForHarness('nanocodex', configured)).toBe('high')
   })
 
+  test('reports the deployment-configured Claude Code effort level', () => {
+    const configured = { claudecode: 'HIGH' }
+    expect(defaultReasoningForHarness('claudecode', configured)).toBe('high')
+    expect(effectiveReasoningForHarness('claudecode', undefined, configured)).toBe('high')
+    expect(effectiveReasoningForHarness('claudecode', 'low', configured)).toBe('high')
+  })
+
   test('reports the effort the selected harness actually runs', () => {
     expect(effectiveReasoningForHarness('codex', 'xhigh')).toBe('xhigh')
     expect(effectiveReasoningForHarness('nanocodex', 'minimal')).toBe('low')

@@ -171,9 +171,10 @@ export type SlackbotV2Options = {
    */
   harnessDefaultModels?: Record<string, string>
   /**
-   * Deployment-configured default reasoning per Codex-compatible harness,
-   * mirrored from CODEX_MODEL_REASONING_EFFORT. Display only; explicit and
-   * channel reasoning selections are forwarded separately on each turn.
+   * Deployment-configured default reasoning per harness, mirrored from
+   * CODEX_MODEL_REASONING_EFFORT (Codex-compatible harnesses) and
+   * CLAUDE_CODE_EFFORT_LEVEL (Claude Code). Display only; explicit and channel
+   * reasoning selections are forwarded separately on each turn.
    */
   harnessDefaultReasoning?: Record<string, string>
   /** Strategy for resolving message-level harness/model/provider/reasoning overrides. */
