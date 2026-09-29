@@ -1,6 +1,6 @@
--- Existing checkpoints completed a PDF-only initial scan. Restart each corpus
--- from a fresh point-in-time token so pre-existing Google Docs are discovered
--- before its change feed resumes.
+-- Run with company-context workers stopped to force a fresh metadata scan of
+-- every user and Shared Drive corpus. Unchanged files retain their observation
+-- keys, so the scan does not enqueue them for extraction again.
 update company_context_system.google_drive_checkpoints
 set initial_start_page_token = '',
     initial_page_token = '',

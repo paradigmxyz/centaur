@@ -67,6 +67,19 @@ Common optional settings:
 - `COMPANY_CONTEXT_EMBEDDINGS_MODEL` (default `text-embedding-3-small`)
 - `COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS` (currently required to be `1536`)
 
+## Backfilling newly supported Drive file types
+
+To discover existing files after adding a supported Drive MIME type, stop the
+company-context workers and run:
+
+```bash
+psql "$DATABASE_URL" --file scripts/reset_drive_checkpoints.sql
+```
+
+Restart the workers afterward. This resets only Drive scan cursors. The fresh
+metadata scan does not enqueue extraction for unchanged files, so previously
+indexed PDFs are not downloaded again.
+
 ## Endpoints
 
 - `GET /healthz`
