@@ -221,9 +221,11 @@ manifest or restore Slack's old UI. Keep the service setting matched to the
 app, and test the migration with a separate development app first.
 
 In Agent mode, each new top-level DM starts its own session. Replies continue
-that thread's session without a mention. Channel replies still require a
-mention. Existing DM thread replies retain their thread identity. Older
-conversation-wide DM subscriptions do not override Agent mode's thread roots.
+that thread's session without a mention. Channel messages still require a
+mention unless their channel id is listed in
+`SLACKBOTV2_RESPOND_WITHOUT_MENTION_CHANNEL_IDS`. Existing DM thread replies
+retain their thread identity. Older conversation-wide DM subscriptions do not
+override Agent mode's thread roots.
 
 Streaming progress and titles continue through the existing renderer. Native
 Stop support is deferred. Do not subscribe to `agent_session_stopped` yet;

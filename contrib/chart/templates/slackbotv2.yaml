@@ -112,6 +112,10 @@ spec:
             - name: SLACKBOT_TRIGGER_BOT_ALLOWLIST
               value: {{ .Values.slackbotv2.triggerBotAllowlist | quote }}
 {{- end }}
+{{- if .Values.slackbotv2.respondWithoutMentionChannelIds }}
+            - name: SLACKBOTV2_RESPOND_WITHOUT_MENTION_CHANNEL_IDS
+              value: {{ .Values.slackbotv2.respondWithoutMentionChannelIds | quote }}
+{{- end }}
 {{- if .Values.slackbotv2.channelDefaults }}
             # Per-channel default harness / model / provider / reasoning, keyed
             # by Slack conversation id (each value an object of harness/model/

@@ -479,7 +479,9 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   // app_mention events. Alertmanager uses attachment.pretext, so inspect rich
   // payloads after Chat SDK has verified the webhook and before executing.
   chat.onNewMessage(/^.*$/s, async (thread, message) => {
-    if (!slackRichTextMentionsUser(message.raw, options.botUserId)) return
+    const richTextMention = slackRichTextMentionsUser(message.raw, options.botUserId)
+    const respondWithoutMention = shouldRespondWithoutMention(message, options)
+    if (!richTextMention && !respondWithoutMention) return
     if (!(await isAllowedSlackMessage(message, options, logger))) return
     message.isMention = true
     await handleSlackMessageHandoff(thread, message, {
@@ -489,14 +491,17 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       state,
       steeringReactions,
       subscribe: true,
-      trigger: 'new_mention'
+      trigger: respondWithoutMention && !richTextMention
+        ? 'mentionless_channel_message'
+        : 'new_mention'
     })
   })
 
   chat.onSubscribedMessage(async (thread, message) => {
     if (!(await isAllowedSlackMessage(message, options, logger))) return
     if (slackRichTextMentionsUser(message.raw, options.botUserId)) message.isMention = true
-    if (message.isMention !== true) {
+    const respondWithoutMention = shouldRespondWithoutMention(message, options)
+    if (message.isMention !== true && !respondWithoutMention) {
       traceLog(
         options,
         'slackbotv2_subscribed_message_without_mention_ignored',
@@ -505,6 +510,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       )
       return
     }
+    if (respondWithoutMention) message.isMention = true
     lateSlackFiles.rememberFilelessMention(thread, message)
     await handleSlackMessageHandoff(thread, message, {
       assistantStatusRequested: true,
@@ -632,6 +638,18 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   }
 
   return { app, chat }
+}
+
+function shouldRespondWithoutMention(
+  message: ChatMessage,
+  options: SlackbotV2Options
+): boolean {
+  if (message.author.isBot !== false) return false
+  const raw = isJsonObject(message.raw) ? message.raw : {}
+  const channelId = stringValue(raw.channel)
+  return Boolean(
+    channelId && options.respondWithoutMentionChannelIds?.includes(channelId)
+  )
 }
 
 async function handleSlackMessageHandoff(

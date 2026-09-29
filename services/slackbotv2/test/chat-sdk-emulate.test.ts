@@ -2437,6 +2437,119 @@ describe('slackbotv2', () => {
     })
   })
 
+  it('executes unmentioned root messages only in explicitly configured channels', async () => {
+    bot = createTestBot({ respondWithoutMentionChannelIds: ['COTHER'] })
+    const ignored = await postUserMessage('Keep this ordinary channel message ambient.')
+    const ignoredWaits: Promise<unknown>[] = []
+    const ignoredResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-unmentioned-root-not-allowlisted',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: ignored.ts,
+          text: 'Keep this ordinary channel message ambient.'
+        }
+      }),
+      {},
+      waitUntilContext(ignoredWaits)
+    )
+    expect(ignoredResponse.status).toBe(200)
+    await Promise.all(ignoredWaits)
+    expect(codexApi.creates).toHaveLength(0)
+    expect(codexApi.appends).toHaveLength(0)
+    expect(codexApi.executes).toHaveLength(0)
+
+    bot = createTestBot({ respondWithoutMentionChannelIds: [CHANNEL_ID] })
+    const allowed = await postUserMessage('Handle this dedicated-channel request.')
+    slackApi.failRepliesWithThreadNotFound(CHANNEL_ID, allowed.ts)
+    const allowedWaits: Promise<unknown>[] = []
+    const allowedResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-unmentioned-root-allowlisted',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: allowed.ts,
+          text: 'Handle this dedicated-channel request.'
+        }
+      }),
+      {},
+      waitUntilContext(allowedWaits)
+    )
+    expect(allowedResponse.status).toBe(200)
+    await Promise.all(allowedWaits)
+
+    expect(codexApi.creates.map(create => create.threadKey)).toEqual([threadKey(allowed.ts)])
+    expect(codexApi.appends).toHaveLength(1)
+    expect(sessionMessageTexts(codexApi.appends[0]!.body.messages)).toEqual([
+      'Handle this dedicated-channel request.'
+    ])
+    expect(codexApi.executes).toHaveLength(1)
+    expect(codexApi.executes[0]!.body.idempotency_key).toBe(allowed.ts)
+  })
+
+  it('executes unmentioned subscribed replies in an explicitly configured channel', async () => {
+    bot = createTestBot({ respondWithoutMentionChannelIds: [CHANNEL_ID] })
+    const parent = await postUserMessage(`<@${BOT_USER_ID}> start this dedicated thread`)
+    const firstWaits: Promise<unknown>[] = []
+    const firstResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-mentionless-reply-root',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: parent.ts,
+          text: `<@${BOT_USER_ID}> start this dedicated thread`
+        }
+      }),
+      {},
+      waitUntilContext(firstWaits)
+    )
+    expect(firstResponse.status).toBe(200)
+    await Promise.all(firstWaits)
+
+    const reply = await postUserMessage('Continue without another mention.', parent.ts)
+    const replyWaits: Promise<unknown>[] = []
+    const replyResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-mentionless-subscribed-reply',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: reply.ts,
+          thread_ts: parent.ts,
+          text: 'Continue without another mention.'
+        }
+      }),
+      {},
+      waitUntilContext(replyWaits)
+    )
+    expect(replyResponse.status).toBe(200)
+    await Promise.all(replyWaits)
+
+    expect(codexApi.appends).toHaveLength(2)
+    expect(sessionMessageTexts(codexApi.appends[1]!.body.messages)).toEqual([
+      'Continue without another mention.'
+    ])
+    expect(codexApi.executes.map(execute => execute.body.idempotency_key)).toEqual([
+      parent.ts,
+      reply.ts
+    ])
+  })
+
   it('ignores non-JSON sandbox bootstrap output lines instead of ending the stream', async () => {
     codexApi.autoRespond = false
 

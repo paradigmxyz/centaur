@@ -692,6 +692,10 @@ slackbotv2:
   mcpPublicUrl: "http://localhost:3000"
   externalOrgAllowlist: ""
   triggerBotAllowlist: ""
+  # Comma- or whitespace-separated Slack channel ids where every eligible
+  # human message may start or steer an execution without mentioning the bot.
+  # Empty preserves mention-gated behavior in every channel.
+  respondWithoutMentionChannelIds: ""
   # Per-channel default harness / model / provider / reasoning, keyed by Slack
   # conversation id (the C…/G…/D… id). Each value is an object of optional
   # harness / model / provider / reasoning fields, using the same vocabulary as

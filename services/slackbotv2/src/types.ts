@@ -148,6 +148,8 @@ export type SlackbotV2Options = {
   responseMetadataMode?: 'first' | 'always' | 'never'
   /** Include the Codex service tier in response metadata footers when they render. */
   responseServiceTierEnabled?: boolean
+  /** Channels accepting unmentioned human messages. */
+  respondWithoutMentionChannelIds?: readonly string[]
   /**
    * Per-channel default harness/model/provider/reasoning, keyed by Slack
    * conversation id (SLACKBOTV2_CHANNEL_DEFAULTS). See channel-defaults.ts.
