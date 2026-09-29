@@ -468,12 +468,50 @@ impl DriveClient {
                     "Google Drive request was rejected with status {status}"
                 )));
             }
+            if status == StatusCode::FORBIDDEN {
+                let body = response
+                    .bytes()
+                    .await
+                    .context("read Google Drive error response")?;
+                if is_export_size_limit_error(&body) {
+                    return Err(rejected("Google Doc exceeds Drive's export size limit"));
+                }
+                bail!("Google Drive request failed with status {status}");
+            }
             return response
                 .error_for_status()
                 .context("Google Drive request failed");
         }
         unreachable!("Drive request loop always returns on its final attempt")
     }
+}
+
+#[derive(Deserialize)]
+struct DriveErrorResponse {
+    error: DriveError,
+}
+
+#[derive(Deserialize)]
+struct DriveError {
+    #[serde(default)]
+    errors: Vec<DriveErrorReason>,
+}
+
+#[derive(Deserialize)]
+struct DriveErrorReason {
+    #[serde(default)]
+    reason: String,
+}
+
+/// Drive reports oversized exports as 403 with this reason; rate limits also use 403.
+fn is_export_size_limit_error(body: &[u8]) -> bool {
+    serde_json::from_slice::<DriveErrorResponse>(body).is_ok_and(|response| {
+        response
+            .error
+            .errors
+            .iter()
+            .any(|error| error.reason == "exportSizeLimitExceeded")
+    })
 }
 
 fn folder_children_query(folder_ids: &[String]) -> String {
@@ -595,6 +633,21 @@ mod tests {
     #[test]
     fn drive_version_is_the_stable_revision_key() {
         assert_eq!(file(PDF_MIME_TYPE, false).source_version(), "42");
+    }
+
+    #[test]
+    fn only_export_size_limit_errors_are_permanent_forbidden_errors() {
+        let error = |reason: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "error": {"code": 403, "errors": [{"domain": "global", "reason": reason}]}
+            }))
+            .unwrap()
+        };
+        assert!(is_export_size_limit_error(&error(
+            "exportSizeLimitExceeded"
+        )));
+        assert!(!is_export_size_limit_error(&error("userRateLimitExceeded")));
+        assert!(!is_export_size_limit_error(b"not json"));
     }
 
     #[test]
