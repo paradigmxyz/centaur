@@ -1860,6 +1860,20 @@ struct IronProxyArgs {
         value_delimiter = ','
     )]
     upstream_deny_cidrs: Vec<String>,
+    /// Address ranges of an external core database. Per-sandbox iron-proxy
+    /// NetworkPolicies allow egress to them on the database port.
+    #[arg(
+        long = "kubernetes-iron-proxy-database-cidrs",
+        env = "KUBERNETES_IRON_PROXY_DATABASE_CIDRS",
+        value_delimiter = ','
+    )]
+    database_cidrs: Vec<String>,
+    #[arg(
+        long = "kubernetes-iron-proxy-database-port",
+        env = "KUBERNETES_IRON_PROXY_DATABASE_PORT",
+        default_value_t = 5432
+    )]
+    database_port: u16,
     /// Per-sandbox iron-proxy container resources as a JSON Kubernetes
     /// `ResourceRequirements` object.
     #[arg(
@@ -1905,6 +1919,16 @@ impl IronProxyArgs {
             .filter_map(|cidr| non_empty(Some(cidr.as_str())))
             .map(ToOwned::to_owned)
             .collect();
+        config.database_cidrs = self
+            .database_cidrs
+            .iter()
+            .filter_map(|cidr| non_empty(Some(cidr.as_str())))
+            .map(|cidr| {
+                validate_cidr(cidr, "KUBERNETES_IRON_PROXY_DATABASE_CIDRS")?;
+                Ok(cidr.to_owned())
+            })
+            .collect::<Result<_, ServerError>>()?;
+        config.database_port = self.database_port;
         self.source.apply_to_config(&mut config);
         config.fragments = harness_fragments;
         config.env_from_secret_names = self.env_from_secret_names();
@@ -1966,6 +1990,28 @@ impl IronProxyArgs {
             names.insert(secret_name.to_owned());
         }
         names.into_iter().collect()
+    }
+}
+
+/// Reject malformed CIDRs at startup; otherwise every per-sandbox proxy
+/// NetworkPolicy would fail Kubernetes validation at claim time.
+fn validate_cidr(cidr: &str, env_name: &str) -> Result<(), ServerError> {
+    let valid = cidr.split_once('/').is_some_and(|(address, prefix)| {
+        let max_prefix = match address.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(_)) => 32,
+            Ok(std::net::IpAddr::V6(_)) => 128,
+            Err(_) => return false,
+        };
+        prefix
+            .parse::<u8>()
+            .is_ok_and(|prefix| prefix <= max_prefix)
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(ServerError::UnsupportedConfig(format!(
+            "{env_name} entry {cidr:?} is not a CIDR such as 10.0.0.0/16"
+        )))
     }
 }
 
@@ -3445,6 +3491,40 @@ mod tests {
         .unwrap();
 
         assert!(!args.sandbox.iron_control_sync_infra_secrets);
+    }
+
+    #[test]
+    fn iron_proxy_database_cidrs_are_parsed_and_validated() {
+        let parse = |cidrs: &str| {
+            Args::try_parse_from([
+                "centaur-api-server",
+                "--database-url",
+                "postgres://postgres:postgres@localhost/centaur",
+                "--kubernetes-firewall-ca-secret-name",
+                "centaur-firewall-ca",
+                "--kubernetes-firewall-ca-key-secret-name",
+                "centaur-firewall-ca-key",
+                "--kubernetes-iron-proxy-database-cidrs",
+                cidrs,
+                "--kubernetes-iron-proxy-database-port",
+                "6432",
+            ])
+            .unwrap()
+            .sandbox
+            .iron_proxy
+            .to_config()
+        };
+
+        let config = parse("10.0.32.0/20,fd00:1::/64").unwrap();
+        assert_eq!(
+            config.database_cidrs,
+            vec!["10.0.32.0/20".to_owned(), "fd00:1::/64".to_owned()]
+        );
+        assert_eq!(config.database_port, 6432);
+
+        for invalid in ["db.example.com", "10.0.32.0", "10.0.32.0/33"] {
+            assert!(parse(invalid).is_err(), "{invalid} must be rejected");
+        }
     }
 
     #[test]
