@@ -48,15 +48,20 @@ async fn assert_reader_visibility(conn: &mut PgConnection) -> Result<(), Box<dyn
         insert into company_context_system.google_drive_broker_observations
             (broker_credential_id, file_id, provider_subject, active)
         values
-            (1, 'file-visible', 'subject-viewer', true),
+            (1, 'file-viewer', 'subject-viewer', true),
             (2, 'file-other', 'subject-other', true),
-            (3, 'file-revoked', 'subject-viewer', false);
+            (3, 'file-revoked', 'subject-viewer', false),
+            (4, 'file-shared', 'subject-viewer', true),
+            (5, 'file-shared', 'subject-other', true),
+            (6, 'file-blank-subject', '', true);
 
         insert into company_context_data.google_drive_documents
             (document_id, file_id, chunk_id, document_type, mime_type, title, body, content_hash)
         select 'google-drive:' || file_id || ':0', file_id, '0', 'google_doc',
                'application/vnd.google-apps.document', 'Roadmap', 'Roadmap launch plan', 'hash'
-        from unnest(array['file-visible', 'file-other', 'file-revoked']) as files(file_id);
+        from unnest(array[
+            'file-viewer', 'file-other', 'file-revoked', 'file-shared', 'file-blank-subject'
+        ]) as files(file_id);
 
         insert into company_context_data.google_drive_document_embeddings
             (document_id, model, dimensions, content_hash, embedding)
@@ -67,17 +72,30 @@ async fn assert_reader_visibility(conn: &mut PgConnection) -> Result<(), Box<dyn
     )
     .await?;
 
-    assert_eq!(
-        visible_document_ids(conn, Some("subject-viewer")).await?,
+    let cases: [(Option<&str>, &[&str]); 5] = [
+        // Own files plus the shared file; never another user's or a revoked file.
         (
-            vec!["google-drive:file-visible:0".to_owned()],
-            vec!["google-drive:file-visible:0".to_owned()],
-        )
-    );
-    assert_eq!(
-        visible_document_ids(conn, None).await?,
-        (Vec::new(), Vec::new())
-    );
+            Some("subject-viewer"),
+            &["google-drive:file-shared:0", "google-drive:file-viewer:0"],
+        ),
+        (
+            Some("subject-other"),
+            &["google-drive:file-other:0", "google-drive:file-shared:0"],
+        ),
+        // A subject with no observations sees nothing, including shared files.
+        (Some("subject-third"), &[]),
+        // Unset or blank subjects never match, even observations with a blank subject.
+        (None, &[]),
+        (Some(""), &[]),
+    ];
+    for (subject, expected) in cases {
+        let expected: Vec<String> = expected.iter().map(|id| (*id).to_owned()).collect();
+        assert_eq!(
+            visible_document_ids(conn, subject).await?,
+            (expected.clone(), expected),
+            "google_subject = {subject:?}"
+        );
+    }
 
     let mut tx = conn.begin().await?;
     tx.execute("set local role centaur_company_context_reader")
@@ -112,16 +130,25 @@ async fn visible_document_ids(
             .execute(&mut *tx)
             .await?;
     }
-    let search_hits = sqlx::query_scalar(
+    // Same shape as the tool's keyword search. ParadeDB 0.23 fails with an
+    // internal error if paradedb.score is filtered in WHERE under RLS.
+    let mut search_hits: Vec<String> = sqlx::query_as::<_, (String, f32)>(
         r#"
-        select document_id
+        select document_id, paradedb.score(document_id)
         from company_context_data.google_drive_documents
         where body ||| 'roadmap'
         order by paradedb.score(document_id) desc, document_id
         "#,
     )
     .fetch_all(&mut *tx)
-    .await?;
+    .await?
+    .into_iter()
+    .map(|(document_id, score)| {
+        assert!(score > 0.0, "{document_id} must have a BM25 score");
+        document_id
+    })
+    .collect();
+    search_hits.sort();
     let embeddings = sqlx::query_scalar(
         "select document_id from company_context_data.google_drive_document_embeddings order by document_id",
     )
