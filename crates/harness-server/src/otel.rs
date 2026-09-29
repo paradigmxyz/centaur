@@ -1210,8 +1210,18 @@ fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
 
 fn openai_pricing(model: &str) -> Option<TokenPricing> {
     // Standard rates for <=272K input tokens, verified against the model pages:
+    // https://developers.openai.com/api/docs/models/gpt-6.1-sol
     // https://developers.openai.com/api/docs/models/gpt-6-sol
     // https://developers.openai.com/api/docs/models/gpt-6-luna
+    if model.contains("gpt-6-1-sol") {
+        return Some(TokenPricing {
+            input_per_mtok: 2.0,
+            cache_creation_per_mtok: 2.5,
+            cache_read_per_mtok: 0.1,
+            output_per_mtok: 10.0,
+            source: "centaur_estimate:openai:gpt-6.1-sol:standard-short-context",
+        });
+    }
     if model.contains("gpt-6-sol") {
         return Some(TokenPricing {
             input_per_mtok: 2.0,
@@ -1943,6 +1953,12 @@ mod tests {
         };
 
         for (model, input_cost, output_cost, source) in [
+            (
+                "gpt-6.1-sol",
+                0.167,
+                0.1,
+                "centaur_estimate:openai:gpt-6.1-sol:standard-short-context",
+            ),
             (
                 "gpt-6-sol",
                 0.169,
