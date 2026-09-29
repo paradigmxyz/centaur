@@ -63,7 +63,30 @@ jobs:
             return 1
           }
 
-          if matches '^contrib/chart/'; then
+          # Print a chart file without YAML/template comments and blank lines.
+          strip_chart_comments() {
+            case "$1" in
+              *.yaml | *.yml | *.tpl)
+                perl -0pe 's/\{\{-?\s*\/\*.*?\*\/\s*-?\}\}//gs; s/^[ \t]*#.*(\n|\z)//mg; s/^[ \t]*(\n|\z)//mg'
+                ;;
+              *) cat ;;
+            esac
+          }
+
+          chart_changed() {
+            local file
+            while IFS= read -r file; do
+              [[ -n "${file}" ]] || continue
+              if ! cmp -s \
+                <(git show "${base}:${file}" 2>/dev/null | strip_chart_comments "${file}") \
+                <(git show "HEAD:${file}" 2>/dev/null | strip_chart_comments "${file}"); then
+                return 0
+              fi
+            done < <(git diff --name-only --no-renames "${base}...HEAD" -- contrib/chart/)
+            return 1
+          }
+
+          if chart_changed; then
             chart_yaml="contrib/chart/Chart.yaml"
             previous_version="$(git show "${base}:${chart_yaml}" | awk '$1 == "version:" { print $2; exit }')"
             current_version="$(awk '$1 == "version:" { print $2; exit }' "${chart_yaml}")"
