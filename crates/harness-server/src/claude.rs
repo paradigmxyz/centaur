@@ -271,17 +271,19 @@ impl HarnessServer for ClaudeCodeHarness {
         Ok(bytes)
     }
 
-    /// The Claude process outlives each turn, so a requested effort is applied
-    /// in-band with an `apply_flag_settings` control request ahead of the
-    /// turn's user message. Unset keeps the settings.json `effortLevel`.
-    fn stdin_before_turn(&self, state: &ThreadState) -> Result<Vec<u8>> {
-        let Some(effort) = state.reasoning_effort.as_deref() else {
-            return Ok(Vec::new());
-        };
-        if !CLAUDE_EFFORT_LEVELS.contains(&effort) {
-            eprintln!("ignoring unsupported Claude Code effort level {effort:?}");
-            return Ok(Vec::new());
+    fn reasoning_effort(&self, requested: &str) -> Option<String> {
+        let effort = requested.trim().to_ascii_lowercase();
+        if CLAUDE_EFFORT_LEVELS.contains(&effort.as_str()) {
+            return Some(effort);
         }
+        eprintln!("ignoring unsupported Claude Code effort level {requested:?}");
+        None
+    }
+
+    /// The Claude process outlives each turn, so effort is applied in-band
+    /// with an `apply_flag_settings` control request ahead of the turn's user
+    /// message. A `null` effortLevel restores the configured default.
+    fn stdin_for_reasoning_effort(&self, effort: Option<&str>) -> Result<Vec<u8>> {
         let payload = json!({
             "type": "control_request",
             "request_id": format!("effort-{}", Uuid::new_v4().simple()),
@@ -330,12 +332,10 @@ impl HarnessServer for ClaudeCodeHarness {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
-    use codex_app_server_protocol::{ThreadStartParams, UserInput};
+    use codex_app_server_protocol::UserInput;
     use serde_json::{Value, json};
 
-    use crate::{HarnessServer, NormalizedContent, NormalizedEvent, ThreadState};
+    use crate::{HarnessServer, NormalizedContent, NormalizedEvent};
 
     use super::{ClaudeCodeHarness, ClaudeEventNormalizer};
 
@@ -590,36 +590,36 @@ mod tests {
         assert_eq!(value["message"]["content"][0]["text"], "new guidance");
     }
 
-    fn thread_state_with_effort(effort: Option<&str>) -> ThreadState {
-        let mut state =
-            ClaudeCodeHarness.thread_state(&ThreadStartParams::default(), PathBuf::from("/tmp"));
-        state.reasoning_effort = effort.map(str::to_owned);
-        state
-    }
-
     #[test]
-    fn requested_effort_is_applied_with_a_flag_settings_control_request() {
-        let bytes = ClaudeCodeHarness
-            .stdin_before_turn(&thread_state_with_effort(Some("max")))
-            .unwrap();
-        assert_eq!(bytes.last(), Some(&b'\n'));
-        let value: Value = serde_json::from_slice(&bytes).unwrap();
-
-        assert_eq!(value["type"], "control_request");
-        assert!(value["request_id"].as_str().unwrap().starts_with("effort-"));
+    fn normalizes_claude_code_effort_levels() {
         assert_eq!(
-            value["request"],
-            json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": "max"}})
+            ClaudeCodeHarness.reasoning_effort(" High ").as_deref(),
+            Some("high")
         );
+        assert_eq!(
+            ClaudeCodeHarness.reasoning_effort("max").as_deref(),
+            Some("max")
+        );
+        for effort in ["minimal", "none", "ultra"] {
+            assert_eq!(ClaudeCodeHarness.reasoning_effort(effort), None, "{effort}");
+        }
     }
 
     #[test]
-    fn unset_or_unsupported_effort_writes_nothing_before_the_turn() {
-        for effort in [None, Some("minimal"), Some("none")] {
+    fn effort_is_applied_with_a_flag_settings_control_request() {
+        for (effort, level) in [(Some("max"), json!("max")), (None, Value::Null)] {
             let bytes = ClaudeCodeHarness
-                .stdin_before_turn(&thread_state_with_effort(effort))
+                .stdin_for_reasoning_effort(effort)
                 .unwrap();
-            assert!(bytes.is_empty(), "{effort:?}");
+            assert_eq!(bytes.last(), Some(&b'\n'));
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+
+            assert_eq!(value["type"], "control_request");
+            assert!(value["request_id"].as_str().unwrap().starts_with("effort-"));
+            assert_eq!(
+                value["request"],
+                json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": level}})
+            );
         }
     }
 }

@@ -147,7 +147,7 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                 // Provider selection only applies to the codex harness; the
                 // emulated (claude/amp) app-server fixes its provider at thread
                 // start from session params. Reasoning effort is applied by
-                // harnesses that support it (see `stdin_before_turn`).
+                // per turn by harnesses that support it.
                 provider: _,
                 reasoning,
                 trace_context,
@@ -155,9 +155,9 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                 if let Some(model) = model {
                     state.model = model;
                 }
-                if let Some(reasoning) = reasoning {
-                    state.reasoning_effort = Some(reasoning);
-                }
+                state.reasoning_effort = reasoning
+                    .as_deref()
+                    .and_then(|reasoning| harness.reasoning_effort(reasoning));
                 let result = run_blocks_turn(
                     harness,
                     &mut state,
@@ -971,9 +971,13 @@ fn handle_request<H: HarnessServer, W: Write>(
                     thread_id: params.thread_id.clone(),
                 }
             })?;
-            if let Some(effort) = &params.effort {
-                state.reasoning_effort = serde_json::to_value(effort)?.as_str().map(str::to_owned);
-            }
+            let effort = match &params.effort {
+                Some(effort) => serde_json::to_value(effort)?.as_str().map(str::to_owned),
+                None => None,
+            };
+            state.reasoning_effort = effort
+                .as_deref()
+                .and_then(|effort| harness.reasoning_effort(effort));
             let turn_id = format!("turn-{}", Uuid::new_v4().simple());
             let mut normalizer = normalizer_for(harness, state, &turn_id);
             let response = TurnStartResponse {
@@ -1299,7 +1303,6 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
 ) -> Result<Option<codex_app_server_protocol::Turn>> {
     ensure_harness_process(harness, state)?;
     {
-        let before_turn = harness.stdin_before_turn(state)?;
         let process = state
             .process
             .as_mut()
@@ -1309,7 +1312,13 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
         // late `result` (and trailing rate-limit noise) behind, which would
         // otherwise read as this turn's instant terminal.
         while process.stdout.try_recv().is_ok() {}
-        process.stdin.write_all(&before_turn)?;
+        if process.reasoning_effort != state.reasoning_effort {
+            let effort = state.reasoning_effort.as_deref();
+            process
+                .stdin
+                .write_all(&harness.stdin_for_reasoning_effort(effort)?)?;
+            process.reasoning_effort = state.reasoning_effort.clone();
+        }
         process.stdin.write_all(&harness.stdin_for_turn(input)?)?;
         process.stdin.flush()?;
     }
@@ -1510,6 +1519,7 @@ fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState
         child,
         stdin,
         stdout: stdout_rx,
+        reasoning_effort: None,
     });
     Ok(())
 }

@@ -202,10 +202,10 @@ kwargs. They ride the turn exactly like the Slack `--model` / `--bedrock` /
 reasoning effort (codex: `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`;
 claude: `low`/`medium`/`high`/`xhigh`/`max`), and `provider` selects the codex
 model provider. `provider` only affects the codex harness, and amp ignores
-`reasoning`. A `reasoning` value the harness does not support is ignored. A
-selected effort stays in effect for the thread's later turns until another
-replaces it. `reasoning` also accepts
-the `reasoning_effort` and `effort` aliases. When a kwarg is omitted the
+`reasoning`. A `reasoning` value the harness does not support is ignored. On
+claude, `reasoning` applies to that turn only; a turn without it runs the
+configured default. `reasoning` also accepts the `reasoning_effort` and
+`effort` aliases. When a kwarg is omitted the
 deployment/baked harness default stands — dispatched turns are no longer pinned
 to the deployment default.
 

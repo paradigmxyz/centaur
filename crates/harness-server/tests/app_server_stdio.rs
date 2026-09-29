@@ -481,54 +481,74 @@ fn fake_claude_blocks_mode_accepts_user_blocks_by_default() {
 }
 
 #[test]
-fn fake_claude_blocks_mode_applies_requested_effort_before_the_user_message() {
-    // Claude Code outlives each turn, so the blocks `reasoning` field must reach
-    // it in-band as an `apply_flag_settings` control request ahead of the user
-    // message rather than as a spawn-time flag.
+fn fake_claude_blocks_mode_applies_reasoning_effort_per_turn() {
+    // Claude Code outlives each turn, so the blocks `reasoning` field reaches it
+    // in-band as an `apply_flag_settings` control request ahead of the user
+    // message. A turn without reasoning restores the configured default once.
     let stdin_log = temp_path("fake-claude-effort-stdin.jsonl");
     let fake_claude = format!(
         concat!(
-            "IFS= read -r control; IFS= read -r user; ",
-            "printf '%s\\n%s\\n' \"$control\" \"$user\" > '{log}'; ",
-            "printf '%s\\n' ",
-            "'{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}}' ",
-            "'{{\"type\":\"control_response\",\"response\":{{\"subtype\":\"success\"}}}}' ",
+            "printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}}'; ",
+            "while IFS= read -r line; do ",
+            "printf '%s\\n' \"$line\" >> '{log}'; ",
+            "case \"$line\" in ",
+            "*'\"type\":\"control_request\"'*) ",
+            "printf '%s\\n' '{{\"type\":\"control_response\",\"response\":{{\"subtype\":\"success\"}}}}' ;; ",
+            "*) printf '%s\\n' ",
             "'{{\"type\":\"assistant\",\"is_partial\":false,\"message\":{{\"id\":\"msg_1\",\"content\":[{{\"type\":\"text\",\"text\":\"effort\"}}]}}}}' ",
-            "'{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"effort\"}}'"
+            "'{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"effort\"}}' ;; ",
+            "esac; done"
         ),
         log = stdin_log.display()
     );
 
     let mut bridge =
         BridgeProcess::spawn_harness_blocks(Harness::ClaudeCode, Some(fake_claude), None);
-    let user_line = json!({
-        "type": "user",
-        "thread_key": "slack:C123:123.456",
-        "reasoning": "max",
-        "message": {
-            "role": "user",
-            "content": [{"type": "text", "text": "think hard"}],
-        },
-    });
-    let turn = bridge.run_blocks_user_line(user_line, Duration::from_secs(10));
+    for (text, reasoning) in [
+        ("think hard", Some("MAX")),
+        ("default", None),
+        ("again", None),
+    ] {
+        let mut user_line = json!({
+            "type": "user",
+            "thread_key": "slack:C123:123.456",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": text}],
+            },
+        });
+        if let Some(reasoning) = reasoning {
+            user_line["reasoning"] = json!(reasoning);
+        }
+        let turn = bridge.run_blocks_user_line(user_line, Duration::from_secs(10));
+        assert_completed_turn(&turn);
+        assert_eq!(turn.text_from_deltas, "effort");
+    }
     bridge.finish_successfully();
-
-    assert_completed_turn(&turn);
-    assert_eq!(turn.text_from_deltas, "effort");
 
     let stdin = std::fs::read_to_string(&stdin_log).expect("read fake claude stdin log");
     let lines: Vec<Value> = stdin
         .lines()
         .map(|line| serde_json::from_str(line).expect("fake claude stdin JSON"))
         .collect();
-    assert_eq!(lines.len(), 2, "stdin={stdin}");
-    assert_eq!(lines[0]["type"], "control_request");
+    let summary: Vec<Value> = lines
+        .iter()
+        .map(|line| match line["type"].as_str() {
+            Some("control_request") => line["request"].clone(),
+            _ => line["message"]["content"][0]["text"].clone(),
+        })
+        .collect();
     assert_eq!(
-        lines[0]["request"],
-        json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": "max"}})
+        summary,
+        vec![
+            json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": "max"}}),
+            json!("think hard"),
+            json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": null}}),
+            json!("default"),
+            json!("again"),
+        ],
+        "stdin={stdin}"
     );
-    assert_eq!(lines[1]["type"], "user");
-    assert_eq!(lines[1]["message"]["content"][0]["text"], "think hard");
 
     let _ = std::fs::remove_file(stdin_log);
 }

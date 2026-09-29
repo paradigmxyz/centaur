@@ -23,8 +23,8 @@ pub struct ThreadState {
     pub model: String,
     pub model_provider: String,
     pub service_tier: Option<String>,
-    /// Reasoning effort requested for this thread's turns. Like `model`, a
-    /// per-turn selection sticks for later turns until another replaces it.
+    /// Reasoning effort for the current turn, normalized by the harness;
+    /// `None` runs the harness's configured default.
     pub reasoning_effort: Option<String>,
     pub harness_session_id: Option<String>,
     pub completed_turns: Vec<Turn>,
@@ -36,6 +36,8 @@ pub struct HarnessChild {
     pub child: Child,
     pub stdin: ChildStdin,
     pub stdout: Receiver<io::Result<String>>,
+    /// Reasoning effort last applied in-band; a fresh process runs its default.
+    pub reasoning_effort: Option<String>,
 }
 
 impl Drop for HarnessChild {
@@ -69,9 +71,14 @@ pub trait HarnessServer {
     fn stdin_for_steer(&self, input: &[UserInput]) -> Result<Vec<u8>> {
         self.stdin_for_turn(input)
     }
-    /// Stdin written ahead of each turn's input, for per-turn settings a
-    /// long-lived harness process applies in-band. Empty by default.
-    fn stdin_before_turn(&self, _state: &ThreadState) -> Result<Vec<u8>> {
+    /// Normalizes a requested reasoning effort to a level this harness applies
+    /// per turn, or `None` to run its configured default. No control by default.
+    fn reasoning_effort(&self, _requested: &str) -> Option<String> {
+        None
+    }
+    /// Stdin that switches the running process to `effort` before a turn's
+    /// input; `None` restores the configured default.
+    fn stdin_for_reasoning_effort(&self, _effort: Option<&str>) -> Result<Vec<u8>> {
         Ok(Vec::new())
     }
     fn parse_stdout_line(&self, line: &str) -> Result<Self::Event>;
