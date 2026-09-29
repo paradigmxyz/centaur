@@ -2,6 +2,9 @@
 {{- if and .Values.repoCache.enabled (not $reposPath) -}}
 {{- $reposPath = .Values.repoCache.hostPath -}}
 {{- end -}}
+{{- if and .Values.postgres.enabled .Values.externalDatabase.cidrs }}
+{{- fail "externalDatabase.cidrs is set but postgres.enabled=true; set postgres.enabled=false to use the external database" }}
+{{- end }}
 {{- if .Values.postgres.enabled }}
 apiVersion: apps/v1
 kind: StatefulSet
