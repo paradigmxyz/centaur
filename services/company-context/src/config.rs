@@ -3,6 +3,8 @@ use std::{net::SocketAddr, time::Duration};
 use clap::Parser;
 
 pub const PDF_MIME_TYPE: &str = "application/pdf";
+pub const GOOGLE_DOC_MIME_TYPE: &str = "application/vnd.google-apps.document";
+pub const GOOGLE_DOC_EXPORT_MIME_TYPE: &str = "text/plain";
 pub const FOLDER_MIME_TYPE: &str = "application/vnd.google-apps.folder";
 pub const QUEUE_NAME: &str = "company_context";
 pub const DRIVE_SCAN_TASK: &str = "drive.user.scan";
@@ -10,7 +12,8 @@ pub const SHARED_DRIVES_DISCOVER_TASK: &str = "drive.shared_drives.discover";
 pub const SHARED_DRIVE_SCAN_TASK: &str = "drive.shared_drive.scan";
 pub const SHARED_FOLDERS_BATCH_TASK: &str = "drive.shared_folders.batch";
 pub const DRIVE_CREDENTIALS_RECONCILE_TASK: &str = "drive.credentials.reconcile";
-pub const PDF_EXTRACT_TASK: &str = "drive.pdf.extract";
+// Keep the original task name so durable PDF jobs queued by older versions remain runnable.
+pub const DOCUMENT_EXTRACT_TASK: &str = "drive.pdf.extract";
 pub const DOCUMENT_EMBED_TASK: &str = "drive.document.embed";
 pub const DOCUMENT_DELETE_TASK: &str = "drive.document.delete";
 

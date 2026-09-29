@@ -1,6 +1,6 @@
 # Company Context
 
-Standalone company-context ingestion service. The initial implementation indexes text-bearing PDFs from users' My Drive, shared folders, Shared Drives they are members of, and Shared Drive folders shared with them without membership, using durable Absurd tasks. Each user corpus and each member Shared Drive is followed through its own Drive change feed and checkpoint. Shared Drive folders shared with non-members have no change feed, so they are walked recursively each cycle, and files no walk has reached for 24 hours are removed.
+Standalone company-context ingestion service. It indexes regular Google Docs and text-bearing PDFs from users' My Drive, shared folders, Shared Drives they are members of, and Shared Drive folders shared with them without membership, using durable Absurd tasks. Google Docs are exported as plain text through the Drive API before chunking. Each user corpus and each member Shared Drive is followed through its own Drive change feed and checkpoint. Shared Drive folders shared with non-members have no change feed, so they are walked recursively each cycle, and files no walk has reached for 24 hours are removed.
 
 The service owns these Postgres schemas:
 
@@ -12,7 +12,7 @@ The initial migrations deliberately add no retrieval-role grants or RLS policies
 ## Required infrastructure
 
 - Postgres with the existing Absurd schema and the `vector` and `pg_search` extensions available.
-- `pdftotext` from Poppler.
+- `pdftotext` from Poppler (for PDF sources).
 - A Rails Console database containing live per-user Google OAuth broker credentials.
 - The Active Record encryption primary key and derivation salt used by Rails Console.
 - An embeddings API key supplied through a Kubernetes Secret.
@@ -60,7 +60,7 @@ Common optional settings:
 - `COMPANY_CONTEXT_MAX_SCAN_PAGES` (default `10`)
 - `COMPANY_CONTEXT_FOLDER_WALK_BATCH_SIZE` (default `50`, at most `100`)
 - `COMPANY_CONTEXT_MAX_PDF_BYTES` (default `26214400`)
-- `COMPANY_CONTEXT_MAX_EXTRACTED_BYTES` (default `52428800`)
+- `COMPANY_CONTEXT_MAX_EXTRACTED_BYTES` (default `52428800`; also limits exported Google Doc text)
 - `COMPANY_CONTEXT_EXTRACTION_TIMEOUT_SECONDS` (default `120`)
 - `COMPANY_CONTEXT_CHUNK_CHARS` (default `6000`)
 - `COMPANY_CONTEXT_WORKER_CONCURRENCY` (default `4`)

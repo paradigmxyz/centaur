@@ -9,7 +9,9 @@ use tokio::time::sleep;
 use tracing::warn;
 
 use crate::{
-    config::{Config, FOLDER_MIME_TYPE, PDF_MIME_TYPE},
+    config::{
+        Config, FOLDER_MIME_TYPE, GOOGLE_DOC_EXPORT_MIME_TYPE, GOOGLE_DOC_MIME_TYPE, PDF_MIME_TYPE,
+    },
     credentials::ConsoleCredentials,
     errors::rejected,
 };
@@ -20,7 +22,7 @@ const FILE_FIELDS: &str = "id,name,mimeType,webViewLink,driveId,version,md5Check
 /// Drive permissions for non-members anyway, so walks list without them.
 const WALK_PAGE_SIZE: u16 = 1_000;
 const WALK_FILE_FIELDS: &str = "id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress)";
-const FOLDER_OR_PDF_QUERY: &str = "trashed = false and (mimeType = 'application/vnd.google-apps.folder' or mimeType = 'application/pdf')";
+const FOLDER_OR_DOCUMENT_QUERY: &str = "trashed = false and (mimeType = 'application/vnd.google-apps.folder' or mimeType = 'application/pdf' or mimeType = 'application/vnd.google-apps.document')";
 /// The user corpus plus Shared Drive items the user can reach without membership.
 const ACCESSIBLE_CORPUS: &[(&str, &str)] =
     &[("corpora", "user"), ("includeItemsFromAllDrives", "true")];
@@ -32,6 +34,7 @@ pub struct DriveClient {
     base_url: String,
     credentials: Arc<ConsoleCredentials>,
     max_pdf_bytes: usize,
+    max_extracted_bytes: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -61,8 +64,21 @@ pub struct DriveFile {
 }
 
 impl DriveFile {
-    pub fn is_active_pdf(&self) -> bool {
-        !self.trashed && self.mime_type == PDF_MIME_TYPE && !self.id.is_empty()
+    pub fn is_active_document(&self) -> bool {
+        !self.trashed
+            && matches!(
+                self.mime_type.as_str(),
+                PDF_MIME_TYPE | GOOGLE_DOC_MIME_TYPE
+            )
+            && !self.id.is_empty()
+    }
+
+    pub fn document_type(&self) -> Option<&'static str> {
+        match self.mime_type.as_str() {
+            PDF_MIME_TYPE => Some("pdf"),
+            GOOGLE_DOC_MIME_TYPE => Some("google_doc"),
+            _ => None,
+        }
     }
 
     pub fn is_active_folder(&self) -> bool {
@@ -168,6 +184,7 @@ impl DriveClient {
             base_url: config.google_api_base_url.clone(),
             credentials,
             max_pdf_bytes: config.max_pdf_bytes,
+            max_extracted_bytes: config.max_extracted_bytes,
         })
     }
 
@@ -218,8 +235,9 @@ impl DriveClient {
             .context("decode Drive shared drive page")
     }
 
-    /// Lists PDFs in the user's corpus, or in one Shared Drive when `shared_drive_id` is set.
-    pub async fn list_pdfs(
+    /// Lists supported documents in the user's corpus, or in one Shared Drive when
+    /// `shared_drive_id` is set.
+    pub async fn list_documents(
         &self,
         credential_id: i64,
         shared_drive_id: Option<&str>,
@@ -236,7 +254,9 @@ impl DriveClient {
         };
         self.list_files(
             credential_id,
-            &format!("mimeType = '{PDF_MIME_TYPE}' and trashed = false"),
+            &format!(
+                "(mimeType = '{PDF_MIME_TYPE}' or mimeType = '{GOOGLE_DOC_MIME_TYPE}') and trashed = false"
+            ),
             corpus,
             FILE_FIELDS,
             page_size,
@@ -245,7 +265,7 @@ impl DriveClient {
         .await
     }
 
-    /// Lists folders and PDFs shared with the user, including Shared Drive items
+    /// Lists folders and supported documents shared with the user, including Shared Drive items
     /// shared with users who are not members of that drive.
     pub async fn list_shared_with_me(
         &self,
@@ -254,7 +274,7 @@ impl DriveClient {
     ) -> Result<FilePage> {
         self.list_files(
             credential_id,
-            &format!("sharedWithMe = true and {FOLDER_OR_PDF_QUERY}"),
+            &format!("sharedWithMe = true and {FOLDER_OR_DOCUMENT_QUERY}"),
             ACCESSIBLE_CORPUS,
             WALK_FILE_FIELDS,
             WALK_PAGE_SIZE,
@@ -263,7 +283,7 @@ impl DriveClient {
         .await
     }
 
-    /// Lists the folders and PDFs directly inside any of the given folders.
+    /// Lists the folders and supported documents directly inside any of the given folders.
     pub async fn list_folder_children(
         &self,
         credential_id: i64,
@@ -356,24 +376,56 @@ impl DriveClient {
             .http
             .get(format!("{}/files/{file_id}", self.base_url))
             .query(&[("alt", "media"), ("supportsAllDrives", "true")]);
+        let bytes = self
+            .download_bounded(
+                request,
+                credential_id,
+                self.max_pdf_bytes,
+                "PDF exceeds the configured byte limit",
+            )
+            .await?;
+        if !bytes.starts_with(b"%PDF-") {
+            return Err(rejected("Drive response is not a PDF"));
+        }
+        Ok(bytes)
+    }
+
+    pub async fn export_google_doc(&self, credential_id: i64, file_id: &str) -> Result<Vec<u8>> {
+        let request = self
+            .http
+            .get(format!("{}/files/{file_id}/export", self.base_url))
+            .query(&[("mimeType", GOOGLE_DOC_EXPORT_MIME_TYPE)]);
+        self.download_bounded(
+            request,
+            credential_id,
+            self.max_extracted_bytes,
+            "exported Google Doc exceeds the configured byte limit",
+        )
+        .await
+    }
+
+    async fn download_bounded(
+        &self,
+        request: RequestBuilder,
+        credential_id: i64,
+        max_bytes: usize,
+        limit_error: &'static str,
+    ) -> Result<Vec<u8>> {
         let response = self.send(request, credential_id).await?;
         if response
             .content_length()
-            .is_some_and(|length| length > self.max_pdf_bytes as u64)
+            .is_some_and(|length| length > max_bytes as u64)
         {
-            return Err(rejected("PDF exceeds the configured byte limit"));
+            return Err(rejected(limit_error));
         }
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("read Drive PDF response")?;
-            if bytes.len().saturating_add(chunk.len()) > self.max_pdf_bytes {
-                return Err(rejected("PDF exceeds the configured byte limit"));
+            let chunk = chunk.context("read Google Drive file response")?;
+            if bytes.len().saturating_add(chunk.len()) > max_bytes {
+                return Err(rejected(limit_error));
             }
             bytes.extend_from_slice(&chunk);
-        }
-        if !bytes.starts_with(b"%PDF-") {
-            return Err(rejected("Drive response is not a PDF"));
         }
         Ok(bytes)
     }
@@ -430,7 +482,7 @@ fn folder_children_query(folder_ids: &[String]) -> String {
         .map(|id| format!("'{id}' in parents"))
         .collect::<Vec<_>>()
         .join(" or ");
-    format!("({parents}) and {FOLDER_OR_PDF_QUERY}")
+    format!("({parents}) and {FOLDER_OR_DOCUMENT_QUERY}")
 }
 
 fn is_drive_id(value: &str) -> bool {
@@ -496,14 +548,21 @@ mod tests {
     }
 
     #[test]
-    fn only_active_pdfs_are_processable() {
-        assert!(file(PDF_MIME_TYPE, false).is_active_pdf());
-        assert!(!file(PDF_MIME_TYPE, true).is_active_pdf());
-        assert!(!file("application/vnd.google-apps.document", false).is_active_pdf());
+    fn only_active_supported_documents_are_processable() {
+        assert!(file(PDF_MIME_TYPE, false).is_active_document());
+        assert!(file(GOOGLE_DOC_MIME_TYPE, false).is_active_document());
+        assert!(!file(PDF_MIME_TYPE, true).is_active_document());
+        assert!(!file("application/vnd.google-apps.spreadsheet", false).is_active_document());
 
-        let mut shared_drive_file = file(PDF_MIME_TYPE, false);
+        assert_eq!(file(PDF_MIME_TYPE, false).document_type(), Some("pdf"));
+        assert_eq!(
+            file(GOOGLE_DOC_MIME_TYPE, false).document_type(),
+            Some("google_doc")
+        );
+
+        let mut shared_drive_file = file(GOOGLE_DOC_MIME_TYPE, false);
         shared_drive_file.drive_id = "shared-drive-1".to_owned();
-        assert!(shared_drive_file.is_active_pdf());
+        assert!(shared_drive_file.is_active_document());
     }
 
     #[test]

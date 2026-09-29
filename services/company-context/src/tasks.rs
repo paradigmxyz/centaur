@@ -12,15 +12,15 @@ use tracing::{error, info, warn};
 
 use crate::{
     config::{
-        Config, DOCUMENT_DELETE_TASK, DOCUMENT_EMBED_TASK, DRIVE_CREDENTIALS_RECONCILE_TASK,
-        DRIVE_SCAN_TASK, PDF_EXTRACT_TASK, SHARED_DRIVE_SCAN_TASK, SHARED_DRIVES_DISCOVER_TASK,
-        SHARED_FOLDERS_BATCH_TASK,
+        Config, DOCUMENT_DELETE_TASK, DOCUMENT_EMBED_TASK, DOCUMENT_EXTRACT_TASK,
+        DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK, GOOGLE_DOC_MIME_TYPE, PDF_MIME_TYPE,
+        SHARED_DRIVE_SCAN_TASK, SHARED_DRIVES_DISCOVER_TASK, SHARED_FOLDERS_BATCH_TASK,
     },
     credentials::GoogleCredential,
     drive::{DriveChange, DriveClient, DriveFile, Permission},
     embeddings::EmbeddingsClient,
     errors::{is_rejected, rejected},
-    extraction::{chunk_text, extract_pdf_text, hex_sha256},
+    extraction::{chunk_text, extract_google_doc_text, extract_pdf_text, hex_sha256},
 };
 
 #[derive(Clone)]
@@ -152,9 +152,9 @@ pub fn register(state: TaskState) -> Result<()> {
     let extract_state = state.clone();
     state
         .absurd
-        .register_task(PDF_EXTRACT_TASK, move |params: ExtractParams, ctx| {
+        .register_task(DOCUMENT_EXTRACT_TASK, move |params: ExtractParams, ctx| {
             let state = extract_state.clone();
-            async move { task_result(extract_pdf(&state, params, &ctx).await) }
+            async move { task_result(extract_document(&state, params, &ctx).await) }
         })?;
 
     let embed_state = state.clone();
@@ -505,7 +505,7 @@ fn group_folder_roots(
                 .or_default()
                 .folder_ids
                 .push(file.id);
-        } else if file.is_active_pdf() {
+        } else if file.is_active_document() {
             roots
                 .entry(file.drive_id.clone())
                 .or_default()
@@ -517,7 +517,7 @@ fn group_folder_roots(
 }
 
 /// Lists the children of a batch of shared folders in a Shared Drive the user
-/// is not a member of, records the PDFs, and spawns batches for the subfolders.
+/// is not a member of, records supported documents, and spawns batches for the subfolders.
 /// Discovery spawns the root batches each interval, and its sweep removes files
 /// that these walks have not reached for a while.
 async fn walk_folder_batch(
@@ -544,7 +544,7 @@ async fn walk_folder_batch(
             }
             if child.is_active_folder() {
                 child_folder_ids.push(child.id);
-            } else if child.is_active_pdf() {
+            } else if child.is_active_document() {
                 files += enqueue_file(state, &credential, child).await? as usize;
             }
         }
@@ -629,7 +629,7 @@ enum ChangeAction {
 fn classify_change(change: DriveChange, shared_drive_id: Option<&str>) -> ChangeAction {
     match change.file {
         Some(file) if !file.belongs_to(shared_drive_id) => ChangeAction::Skip,
-        Some(file) if !change.removed && file.is_active_pdf() => {
+        Some(file) if !change.removed && file.is_active_document() => {
             ChangeAction::Observe(Box::new(file))
         }
         _ => ChangeAction::Remove(change.file_id),
@@ -676,7 +676,7 @@ async fn scan_corpus(
             };
             let page = state
                 .drive
-                .list_pdfs(
+                .list_documents(
                     credential.id,
                     shared_drive_id,
                     state.config.scan_page_size,
@@ -801,7 +801,7 @@ async fn enqueue_files(
     let mut count = 0;
     for file in files
         .into_iter()
-        .filter(|file| file.is_active_pdf() && file.belongs_to(shared_drive_id))
+        .filter(|file| file.is_active_document() && file.belongs_to(shared_drive_id))
     {
         count += enqueue_file(state, credential, file).await? as usize;
     }
@@ -822,7 +822,7 @@ async fn enqueue_file(
     let result = state
         .absurd
         .spawn(
-            PDF_EXTRACT_TASK,
+            DOCUMENT_EXTRACT_TASK,
             ExtractParams {
                 credential_id: credential.id,
                 credential_revision: credential.revision.clone(),
@@ -831,7 +831,7 @@ async fn enqueue_file(
             },
             SpawnOptions {
                 idempotency_key: Some(format!(
-                    "drive.pdf.extract:{}:{}:{source_version}:{}",
+                    "drive.document.extract:{}:{}:{source_version}:{}",
                     credential.id, file.id, credential.revision
                 )),
                 ..SpawnOptions::default()
@@ -1057,7 +1057,7 @@ async fn observe_delete(
     Ok(true)
 }
 
-async fn extract_pdf(
+async fn extract_document(
     state: &TaskState,
     params: ExtractParams,
     ctx: &TaskContext,
@@ -1071,22 +1071,36 @@ async fn extract_pdf(
         });
     }
     let result = async {
-        if !file.is_active_pdf() {
-            return Err(rejected("extract task received a non-PDF or trashed file"));
+        if !file.is_active_document() {
+            return Err(rejected(
+                "extract task received an unsupported or trashed file",
+            ));
         }
-        let pdf = state
-            .drive
-            .download_pdf(params.credential_id, &file.id)
-            .await?;
-        let text = extract_pdf_text(
-            pdf,
-            state.config.extraction_timeout,
-            state.config.max_extracted_bytes,
-        )
-        .await?;
+        let text = match file.mime_type.as_str() {
+            PDF_MIME_TYPE => {
+                let pdf = state
+                    .drive
+                    .download_pdf(params.credential_id, &file.id)
+                    .await?;
+                extract_pdf_text(
+                    pdf,
+                    state.config.extraction_timeout,
+                    state.config.max_extracted_bytes,
+                )
+                .await?
+            }
+            GOOGLE_DOC_MIME_TYPE => {
+                let document = state
+                    .drive
+                    .export_google_doc(params.credential_id, &file.id)
+                    .await?;
+                extract_google_doc_text(document, state.config.max_extracted_bytes)?
+            }
+            _ => unreachable!("active documents have a supported MIME type"),
+        };
         let chunks = chunk_text(&text, state.config.chunk_chars);
         if chunks.is_empty() {
-            return Err(rejected("PDF produced no non-empty chunks"));
+            return Err(rejected("Drive document produced no non-empty chunks"));
         }
         let content_hash = hex_sha256(text.as_bytes());
         let mut tx = state.pool.begin().await?;
@@ -1172,7 +1186,7 @@ async fn extract_pdf(
         }),
         Ok(chunks) => {
             info!(
-                event = "company_context_pdf_extracted",
+                event = "company_context_drive_document_extracted",
                 task_id = ctx.task_id(),
                 file_id = file.id,
                 chunks
@@ -1195,7 +1209,7 @@ async fn extract_pdf(
             .await;
             if rejected {
                 warn!(
-                    event = "company_context_pdf_rejected",
+                    event = "company_context_drive_document_rejected",
                     task_id = ctx.task_id(),
                     file_id = file.id,
                     error = %error
@@ -1348,11 +1362,13 @@ async fn embed_document(
                 source_version, content_hash, metadata, updated_at
             )
             VALUES (
-                $1, $2, $3, 'pdf', $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                $13, NOW()
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                $14, NOW()
             )
             ON CONFLICT (document_id) DO UPDATE
-            SET title = EXCLUDED.title,
+            SET document_type = EXCLUDED.document_type,
+                mime_type = EXCLUDED.mime_type,
+                title = EXCLUDED.title,
                 body = EXCLUDED.body,
                 url = EXCLUDED.url,
                 drive_id = EXCLUDED.drive_id,
@@ -1367,6 +1383,10 @@ async fn embed_document(
         .bind(&document_id)
         .bind(&file.id)
         .bind(&chunk_id)
+        .bind(
+            file.document_type()
+                .context("staged Drive file has unsupported MIME type")?,
+        )
         .bind(&file.mime_type)
         .bind(&file.name)
         .bind(&body)
@@ -1761,7 +1781,11 @@ mod tests {
     }
 
     fn pdf(drive_id: &str) -> DriveFile {
-        drive_file("file-1", "application/pdf", drive_id)
+        drive_file("file-1", PDF_MIME_TYPE, drive_id)
+    }
+
+    fn google_doc(drive_id: &str) -> DriveFile {
+        drive_file("doc-1", GOOGLE_DOC_MIME_TYPE, drive_id)
     }
 
     #[test]
@@ -1770,8 +1794,8 @@ mod tests {
         let roots = group_folder_roots(
             vec![
                 drive_file("folder-a", folder, "drive-a"),
-                drive_file("pdf-a", "application/pdf", "drive-a"),
-                drive_file("doc-a", "application/vnd.google-apps.document", "drive-a"),
+                drive_file("pdf-a", PDF_MIME_TYPE, "drive-a"),
+                drive_file("doc-a", GOOGLE_DOC_MIME_TYPE, "drive-a"),
                 drive_file("folder-b", folder, "drive-b"),
                 drive_file("folder-member", folder, "drive-member"),
                 drive_file("folder-my-drive", folder, ""),
@@ -1786,7 +1810,7 @@ mod tests {
                 .iter()
                 .map(|file| file.id.as_str())
                 .collect::<Vec<_>>(),
-            ["pdf-a"]
+            ["pdf-a", "doc-a"]
         );
         assert_eq!(roots["drive-b"].folder_ids, ["folder-b"]);
         assert!(roots["drive-b"].files.is_empty());
@@ -1809,6 +1833,10 @@ mod tests {
         ));
         assert!(matches!(
             classify_change(change("file-1", false, Some(pdf(""))), None),
+            ChangeAction::Observe(_)
+        ));
+        assert!(matches!(
+            classify_change(change("doc-1", false, Some(google_doc(""))), None),
             ChangeAction::Observe(_)
         ));
     }
