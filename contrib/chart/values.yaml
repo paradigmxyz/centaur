@@ -442,9 +442,10 @@ proxySync:
     annotations: {}
   resources: {}
 
-# Standalone company-context ingestion service. The first version indexes PDFs
-# from Google Drive into its private system and data schemas. Disabled while the
-# corpus is validated alongside the legacy Python workflows.
+# Standalone company-context ingestion service. It indexes Google Docs and PDFs
+# from Google Drive and Granola meeting notes into its private system and data
+# schemas. Disabled while the corpus is validated alongside the legacy Python
+# workflows.
 experimentalCompanyContext:
   enabled: false
   replicaCount: 1
@@ -460,7 +461,11 @@ experimentalCompanyContext:
   # synchronized. The embeddings API key comes from OPENAI_API_KEY in the
   # shared Kubernetes Secret.
   googleOauthAppSlug: google
+  # Rails Console OAuth app whose live per-user Granola MCP credentials are
+  # synchronized.
+  granolaOauthAppSlug: granola
   scanIntervalSeconds: 300
+  granolaSyncIntervalSeconds: 1800
   drivePageSize: 100
   maxScanPages: 10
   maxPdfBytes: 26214400
