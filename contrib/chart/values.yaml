@@ -839,6 +839,9 @@ teamsbot:
   resources: {}
 
 postgres:
+  # Set false to use an external PostgreSQL server such as RDS or Cloud SQL.
+  # NetworkPolicy then allows database clients egress on port 5432 to any host;
+  # each component's database URL selects the server.
   enabled: true
   # Scheduling for the PostgreSQL pod. When persistence is enabled, ensure the
   # selected node pool can mount the configured storage class. Changing these

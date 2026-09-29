@@ -35,6 +35,28 @@ app.kubernetes.io/component: {{ .component }}
 app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
+{{/*
+NetworkPolicy egress rule for Postgres clients. With the bundled Postgres,
+allow only its pod. With an external database (postgres.enabled=false, e.g.
+RDS or Cloud SQL), the destination is outside the cluster, so allow the port
+and let the configured DSN select the host.
+*/}}
+{{- define "centaur.postgresEgress" -}}
+{{- if .Values.postgres.enabled -}}
+- to:
+    - podSelector:
+        matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | indent 10 }}
+  ports:
+    - protocol: TCP
+      port: 5432
+{{- else -}}
+- ports:
+    - protocol: TCP
+      port: 5432
+{{- end -}}
+{{- end -}}
+
 {{- define "centaur.componentName" -}}
 {{- printf "%s-%s" (include "centaur.fullname" .root) .component | trunc 63 | trimSuffix "-" -}}
 {{- end -}}

@@ -145,19 +145,7 @@ spec:
         - protocol: TCP
           port: {{ $companyContext.port }}
   egress:
-{{- if .Values.postgres.enabled }}
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: 5432
-{{- else }}
-    - ports:
-        - protocol: TCP
-          port: 5432
-{{- end }}
+    {{- include "centaur.postgresEgress" . | nindent 4 }}
     - ports:
         - protocol: TCP
           port: 443
