@@ -2514,6 +2514,28 @@ class CompanyContextClient:
             "content": content,
         }
 
+    async def _drive_v2_status_async(self) -> dict[str, Any]:
+        conn = await self._connect()
+        try:
+            await conn.fetchval(f"SELECT 1 FROM {GOOGLE_DRIVE_DOCUMENTS_TABLE} LIMIT 1")
+        except (asyncpg.UndefinedTableError, asyncpg.InsufficientPrivilegeError) as exc:
+            return {
+                "status": "ok",
+                "active": False,
+                "table": GOOGLE_DRIVE_DOCUMENTS_TABLE,
+                "reason": str(exc),
+            }
+        finally:
+            await conn.close()
+        return {"status": "ok", "active": True, "table": GOOGLE_DRIVE_DOCUMENTS_TABLE}
+
+    def drive_v2_status(self) -> dict:
+        """Report whether the company-context service Drive documents table is readable."""
+        try:
+            return asyncio.run(self._drive_v2_status_async())
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
     def read_document(
         self,
         document_id: str,

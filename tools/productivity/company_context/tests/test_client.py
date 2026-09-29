@@ -53,6 +53,15 @@ class _FakeConnection:
             return self.fetchrow_rows.pop(0)
         return self.row
 
+    async def fetchval(self, query, *args):
+        self.fetch_calls.append((query, args))
+        if self.fetch_rows:
+            result = self.fetch_rows.pop(0)
+            if isinstance(result, BaseException):
+                raise result
+            return result
+        return 1
+
     async def execute(self, query, *args):
         self.execute_calls.append((query, args))
 
@@ -1740,6 +1749,49 @@ def test_read_document_falls_back_to_oauth_google_docs_index(monkeypatch):
     assert result["total_chars"] == len(body)
     assert result["truncated"] is True
     assert len(fake.fetchrow_calls) == 2
+    assert fake.closed is True
+
+
+def test_drive_v2_status_is_active_when_documents_table_is_readable(monkeypatch):
+    fake = _FakeConnection()
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").drive_v2_status()
+
+    assert result == {
+        "status": "ok",
+        "active": True,
+        "table": "company_context_data.google_drive_documents",
+    }
+    assert fake.closed is True
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        asyncpg.UndefinedTableError(
+            'relation "company_context_data.google_drive_documents" does not exist'
+        ),
+        asyncpg.InsufficientPrivilegeError("permission denied for schema company_context_data"),
+    ],
+)
+def test_drive_v2_status_is_inactive_when_documents_table_is_unavailable(monkeypatch, error):
+    fake = _FakeConnection(fetch_rows=[error])
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").drive_v2_status()
+
+    assert result["status"] == "ok"
+    assert result["active"] is False
+    assert result["reason"] == str(error)
     assert fake.closed is True
 
 

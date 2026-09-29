@@ -20,7 +20,11 @@ app = typer.Typer(
     help=(
         "Search or run scoped SQL over company history, Slack DMs, Google Docs, and "
         "Granola notes. Search for and read the `company-context` skill with "
-        "`centaur-skills` before use."
+        "`centaur-skills` before use.\n\n"
+        "Preview: `company_context v2 search|list|read|latest-date` read Google Docs "
+        "and PDFs from the company-context service's Drive index instead of the "
+        "legacy Google Docs index. Run `company_context v2 status` to check whether "
+        "that index is available."
     ),
 )
 
@@ -53,7 +57,8 @@ v2_app = typer.Typer(
     help=(
         "Preview: search, list, read, and check freshness with Google Docs and PDFs "
         "from the company-context service's Drive index instead of the legacy Google "
-        "Docs index."
+        "Docs index. Run `company_context v2 status` first; v2 returns no Drive "
+        "results when the index is not active."
     ),
 )
 app.add_typer(v2_app, name="v2")
@@ -400,6 +405,14 @@ def latest_date(
 ) -> None:
     """Show the latest indexed timestamp as JSON."""
     result = _client_for(ctx).latest_date(source=source, source_type=source_type)
+    _require_ok(result)
+    _print_json(result)
+
+
+@v2_app.command("status")
+def v2_status() -> None:
+    """Show whether the v2 Drive index is readable, as JSON."""
+    result = CompanyContextClient().drive_v2_status()
     _require_ok(result)
     _print_json(result)
 
