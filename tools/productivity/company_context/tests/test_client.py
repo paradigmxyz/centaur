@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import asyncpg
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -631,6 +632,9 @@ def test_search_emits_grouped_lookup_metrics(monkeypatch):
     monkeypatch.setattr(company_context_client, "_include_google_docs_source", lambda *_args: False)
     monkeypatch.setattr(company_context_client, "_include_granola_source", lambda *_args: False)
     monkeypatch.setattr(
+        company_context_client, "_include_google_drive_source", lambda *_args: False
+    )
+    monkeypatch.setattr(
         company_context_client,
         "_push_company_context_lookup_metric_lines",
         lambda lines: pushed_lines.extend(lines),
@@ -955,6 +959,73 @@ def test_search_drive_source_is_not_docs_alias(monkeypatch):
     assert "FROM google_docs_context_documents" not in query
     assert args == ("roadmap", "roadmap", "drive", None, None, None, 10)
     assert fake.closed is True
+
+
+def _google_drive_row(**overrides):
+    row = {
+        "document_id": "google-drive:file-1:0",
+        "file_id": "file-1",
+        "chunk_id": "0",
+        "document_type": "pdf",
+        "title": "Roadmap.pdf",
+        "body": "Roadmap PDF covers launch sequencing.",
+        "url": "https://drive.google.com/file/d/file-1/view",
+        "mime_type": "application/pdf",
+        "drive_id": "shared-drive-1",
+        "page_start": 1,
+        "page_end": 2,
+        "source_created_at": dt.datetime(2026, 5, 1, 9, 0, tzinfo=dt.UTC),
+        "source_modified_at": dt.datetime(2026, 5, 8, 12, 0, tzinfo=dt.UTC),
+        "metadata": {},
+    }
+    row.update(overrides)
+    return row
+
+
+def test_search_docs_source_includes_company_context_service_drive_documents(monkeypatch):
+    fake = _FakeConnection(fetch_rows=[[], [], [_google_drive_row(score=1.5)]])
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").search("roadmap", source="docs")
+
+    assert result["status"] == "ok"
+    assert result["count"] == 1
+    document = result["results"][0]
+    assert document["document_id"] == "google-drive:file-1:0"
+    assert document["source"] == "docs"
+    assert document["source_type"] == "pdf"
+    assert document["source_document_id"] == "file-1"
+    assert document["metadata"]["drive_id"] == "shared-drive-1"
+    assert document["metadata"]["page_start"] == 1
+    drive_query, _args = fake.fetch_calls[2]
+    assert "FROM company_context_data.google_drive_documents" in drive_query
+
+
+def test_search_skips_absent_company_context_service_drive_documents(monkeypatch):
+    fake = _FakeConnection(
+        fetch_rows=[
+            [],
+            [],
+            asyncpg.UndefinedTableError(
+                'relation "company_context_data.google_drive_documents" does not exist'
+            ),
+        ]
+    )
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").search("roadmap", source="docs")
+
+    assert result["status"] == "ok"
+    assert result["count"] == 0
+    assert len(fake.fetch_calls) == 3
 
 
 def test_search_granola_source_queries_private_note_projection(monkeypatch):
@@ -1654,6 +1725,23 @@ def test_read_document_falls_back_to_oauth_google_docs_index(monkeypatch):
     assert result["truncated"] is True
     assert len(fake.fetchrow_calls) == 2
     assert fake.closed is True
+
+
+def test_read_document_falls_back_to_company_context_service_drive_documents(monkeypatch):
+    fake = _FakeConnection(fetchrow_rows=[None, None, None, _google_drive_row()])
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").read_document("google-drive:file-1:0")
+
+    assert result["status"] == "ok"
+    assert result["source"] == "docs"
+    assert result["source_type"] == "pdf"
+    assert result["content"] == "Roadmap PDF covers launch sequencing."
+    assert result["truncated"] is False
 
 
 def test_read_document_falls_back_to_granola_note_projection(monkeypatch):

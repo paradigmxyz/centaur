@@ -48,6 +48,26 @@ GRANOLA_SOURCE_TYPE = "granola_note"
 DOCS_SOURCE = "docs"
 LEGACY_GOOGLE_DRIVE_SOURCE = "google_drive"
 GOOGLE_DOCS_SOURCE_TYPE = "google_doc"
+GOOGLE_DRIVE_SOURCE_TYPES = (GOOGLE_DOCS_SOURCE_TYPE, "pdf")
+# Optional tables owned by the company-context service; absent unless it is deployed.
+GOOGLE_DRIVE_DOCUMENTS_TABLE = "company_context_data.google_drive_documents"
+GOOGLE_DRIVE_EMBEDDINGS_TABLE = "company_context_data.google_drive_document_embeddings"
+GOOGLE_DRIVE_DOCUMENT_COLUMNS = """
+    document_id,
+    file_id,
+    chunk_id,
+    document_type,
+    title,
+    body,
+    url,
+    mime_type,
+    drive_id,
+    page_start,
+    page_end,
+    source_created_at,
+    source_modified_at,
+    metadata
+"""
 COMPANY_CONTEXT_DSN_ENV = "CENTAUR_POSTGRES_DSN"
 COMPANY_CONTEXT_DATABASE_ENV = "COMPANY_CONTEXT_POSTGRES_DATABASE"
 DEFAULT_POSTGRES_DATABASE = "ai_v2"
@@ -438,6 +458,38 @@ def _google_doc_summary(row: Any) -> dict[str, Any]:
     }
 
 
+def _google_drive_doc_summary(row: Any) -> dict[str, Any]:
+    """Return the common result shape for company-context service Drive chunks."""
+    metadata = _as_dict(_row_value(row, "metadata", {}))
+    metadata.update(
+        {
+            "file_id": str(_row_value(row, "file_id", "")),
+            "chunk_id": str(_row_value(row, "chunk_id", "")),
+            "drive_id": str(_row_value(row, "drive_id", "")),
+            "mime_type": str(_row_value(row, "mime_type", "")),
+            "page_start": _row_value(row, "page_start"),
+            "page_end": _row_value(row, "page_end"),
+        }
+    )
+    return {
+        "document_id": str(_row_value(row, "document_id", "")),
+        "source": DOCS_SOURCE,
+        "source_type": str(_row_value(row, "document_type", "") or GOOGLE_DOCS_SOURCE_TYPE),
+        "source_document_id": str(_row_value(row, "file_id", "")),
+        "source_chunk_id": str(_row_value(row, "chunk_id", "")),
+        "parent_document_id": None,
+        "title": str(_row_value(row, "title", "")),
+        "url": str(_row_value(row, "url", "")),
+        "author_name": "",
+        "access_scope": "",
+        "occurred_at": _isoformat(
+            _row_value(row, "source_created_at") or _row_value(row, "source_modified_at")
+        ),
+        "source_updated_at": _isoformat(_row_value(row, "source_modified_at")),
+        "metadata": metadata,
+    }
+
+
 def _granola_doc_summary(row: Any) -> dict[str, Any]:
     """Return the common result shape for user-visible Granola notes."""
     metadata = _as_dict(_row_value(row, "metadata", {}))
@@ -529,6 +581,12 @@ def _include_google_docs_source(source: str | None, source_type: str | None) -> 
     return (source is None or source == DOCS_SOURCE) and source_type in (
         None,
         GOOGLE_DOCS_SOURCE_TYPE,
+    )
+
+
+def _include_google_drive_source(source: str | None, source_type: str | None) -> bool:
+    return (source is None or source == DOCS_SOURCE) and (
+        source_type is None or source_type in GOOGLE_DRIVE_SOURCE_TYPES
     )
 
 
@@ -885,6 +943,28 @@ class CompanyContextClient:
                 except asyncpg.UndefinedTableError as exc:
                     granola_error = str(exc)
 
+            if _include_google_drive_source(source, source_type):
+                with suppress(asyncpg.UndefinedTableError):
+                    drive_rows = await self._search_google_drive_async(
+                        conn,
+                        search_terms=search_terms,
+                        term_count=len(terms),
+                        limit=candidate_limit,
+                        document_type=source_type,
+                        modified_after=occurred_after,
+                        modified_before=occurred_before,
+                    )
+                    for row in drive_rows:
+                        result = _google_drive_doc_summary(row)
+                        result["score"] = float(_row_value(row, "score", 0.0) or 0.0)
+                        result["preview"] = _body_preview(
+                            str(_row_value(row, "body", "") or ""),
+                            query=query,
+                        )
+                        result["lane"] = "indexed"
+                        result["result_type"] = result["source_type"]
+                        results.append(result)
+
             results.sort(
                 key=lambda item: (
                     float(item.get("score") or 0.0),
@@ -995,6 +1075,46 @@ class CompanyContextClient:
             LIMIT ${limit_param}
             """,
             *search_terms,
+            modified_after,
+            modified_before,
+            limit,
+        )
+
+    async def _search_google_drive_async(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        search_terms: list[str],
+        term_count: int,
+        limit: int,
+        document_type: str | None,
+        modified_after: datetime | None,
+        modified_before: datetime | None,
+    ) -> list[Any]:
+        document_type_param = len(search_terms) + 1
+        modified_after_param = len(search_terms) + 2
+        modified_before_param = len(search_terms) + 3
+        limit_param = len(search_terms) + 4
+        return await conn.fetch(
+            f"""
+            SELECT
+                {GOOGLE_DRIVE_DOCUMENT_COLUMNS},
+                paradedb.score(document_id) AS score
+            FROM {GOOGLE_DRIVE_DOCUMENTS_TABLE}
+            WHERE {_search_where_clause(term_count)}
+              AND (${document_type_param}::text IS NULL
+                   OR document_type = ${document_type_param})
+              AND (${modified_after_param}::timestamptz IS NULL
+                   OR source_modified_at >= ${modified_after_param})
+              AND (${modified_before_param}::timestamptz IS NULL
+                   OR source_modified_at < ${modified_before_param})
+            ORDER BY paradedb.score(document_id) DESC,
+                     source_modified_at DESC NULLS LAST,
+                     document_id ASC
+            LIMIT ${limit_param}
+            """,
+            *search_terms,
+            document_type,
             modified_after,
             modified_before,
             limit,
@@ -1229,6 +1349,62 @@ class CompanyContextClient:
                 # Optional projections may lag the embedding schema.
                 pass
 
+        if _include_google_drive_source(source, source_type):
+            try:
+                drive_rows = await conn.fetch(
+                    f"""
+                    SELECT
+                        d.document_id,
+                        d.file_id,
+                        d.chunk_id,
+                        d.document_type,
+                        d.title,
+                        d.body,
+                        d.url,
+                        d.mime_type,
+                        d.drive_id,
+                        d.page_start,
+                        d.page_end,
+                        d.source_created_at,
+                        d.source_modified_at,
+                        d.metadata,
+                        1 - (e.embedding <=> $1::vector) AS vector_similarity
+                    FROM {GOOGLE_DRIVE_EMBEDDINGS_TABLE} e
+                    JOIN {GOOGLE_DRIVE_DOCUMENTS_TABLE} d
+                      ON d.document_id = e.document_id
+                    WHERE e.model = $2
+                      AND ($3::text IS NULL OR d.document_type = $3)
+                      AND ($4::timestamptz IS NULL OR d.source_modified_at >= $4)
+                      AND ($5::timestamptz IS NULL OR d.source_modified_at < $5)
+                    ORDER BY e.embedding <=> $1::vector,
+                             d.source_modified_at DESC NULLS LAST,
+                             d.document_id ASC
+                    LIMIT $6
+                    """,
+                    query_embedding,
+                    self._embeddings_model(),
+                    source_type,
+                    occurred_after,
+                    occurred_before,
+                    limit,
+                )
+                for row in drive_rows:
+                    result = _google_drive_doc_summary(row)
+                    result["vector_similarity"] = float(
+                        _row_value(row, "vector_similarity", 0.0) or 0.0
+                    )
+                    result["score"] = result["vector_similarity"]
+                    result["preview"] = _body_preview(
+                        str(_row_value(row, "body", "") or ""),
+                        query=query,
+                    )
+                    result["lane"] = "vector"
+                    result["result_type"] = result["source_type"]
+                    results.append(result)
+            except Exception:
+                # The company-context service tables are optional.
+                pass
+
         results.sort(
             key=lambda item: (
                 float(item.get("vector_similarity") or 0.0),
@@ -1309,6 +1485,33 @@ class CompanyContextClient:
             "latest_source_updated_at": _isoformat(row["latest_source_updated_at"]),
             "latest_occurred_at": _isoformat(row["latest_occurred_at"]),
         }
+
+    async def _latest_google_drive_for_connection(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        source: str | None,
+        source_type: str | None,
+    ) -> dict[str, Any]:
+        if not _include_google_drive_source(source, source_type):
+            return self._empty_latest_date_result(source=source, source_type=source_type)
+        row = await conn.fetchrow(
+            f"""
+            SELECT
+                MAX(COALESCE(source_modified_at, source_created_at)) AS latest_date,
+                MAX(source_modified_at) AS latest_source_updated_at,
+                MAX(source_created_at) AS latest_occurred_at,
+                COUNT(*)::bigint AS document_count
+            FROM {GOOGLE_DRIVE_DOCUMENTS_TABLE}
+            WHERE ($1::text IS NULL OR document_type = $1)
+            """,
+            source_type,
+        )
+        return self._latest_date_result_from_row(
+            row,
+            source=source,
+            source_type=source_type,
+        )
 
     async def _latest_granola_for_connection(
         self,
@@ -1449,6 +1652,7 @@ class CompanyContextClient:
         google_docs: dict[str, Any],
         slack_dms: dict[str, Any] | None = None,
         granola: dict[str, Any] | None = None,
+        google_drive: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         def latest(values: list[str | None]) -> str | None:
             present = [value for value in values if value]
@@ -1459,6 +1663,8 @@ class CompanyContextClient:
             latest_results.append(slack_dms)
         if granola is not None:
             latest_results.append(granola)
+        if google_drive is not None:
+            latest_results.append(google_drive)
 
         return {
             "status": "ok",
@@ -1818,6 +2024,32 @@ class CompanyContextClient:
                         results.append(result)
                 except asyncpg.UndefinedTableError as exc:
                     granola_error = str(exc)
+            if _include_google_drive_source(source, source_type):
+                with suppress(asyncpg.UndefinedTableError):
+                    drive_rows = await conn.fetch(
+                        f"""
+                        SELECT {GOOGLE_DRIVE_DOCUMENT_COLUMNS}
+                        FROM {GOOGLE_DRIVE_DOCUMENTS_TABLE}
+                        WHERE ($1::text IS NULL OR document_type = $1)
+                          AND ($2::timestamptz IS NULL OR source_modified_at >= $2)
+                          AND ($3::timestamptz IS NULL OR source_modified_at < $3)
+                        ORDER BY source_modified_at DESC NULLS LAST,
+                                 source_created_at DESC NULLS LAST,
+                                 document_id ASC
+                        LIMIT $4
+                        """,
+                        source_type,
+                        occurred_after,
+                        occurred_before,
+                        limit,
+                    )
+                    for row in drive_rows:
+                        result = _google_drive_doc_summary(row)
+                        result["preview"] = _body_preview(
+                            str(_row_value(row, "body", "") or ""),
+                            query="",
+                        )
+                        results.append(result)
             results.sort(
                 key=lambda item: (
                     str(item.get("occurred_at") or ""),
@@ -1979,6 +2211,13 @@ class CompanyContextClient:
                     source=source,
                     source_type=source_type,
                 )
+            google_drive = self._empty_latest_date_result(source=source, source_type=source_type)
+            with suppress(asyncpg.UndefinedTableError):
+                google_drive = await self._latest_google_drive_for_connection(
+                    conn,
+                    source=source,
+                    source_type=source_type,
+                )
             return self._merge_latest_dates(
                 source=source,
                 source_type=source_type,
@@ -1986,6 +2225,7 @@ class CompanyContextClient:
                 google_docs=google_docs,
                 slack_dms=slack_dms,
                 granola=granola,
+                google_drive=google_drive,
             )
         finally:
             await conn.close()
@@ -2115,6 +2355,15 @@ class CompanyContextClient:
                     granola_doc = None
                 if granola_doc is not None:
                     return granola_doc
+                google_drive_doc = None
+                with suppress(asyncpg.UndefinedTableError):
+                    google_drive_doc = await self._read_google_drive_doc_async(
+                        conn,
+                        document_id,
+                        max_chars,
+                    )
+                if google_drive_doc is not None:
+                    return google_drive_doc
                 return {
                     "status": "error",
                     "error": f"document not found: {document_id}",
@@ -2177,6 +2426,35 @@ class CompanyContextClient:
         return {
             "status": "ok",
             **_google_doc_summary(row),
+            "chars": len(content),
+            "total_chars": len(body),
+            "truncated": truncated,
+            "content": content,
+        }
+
+    async def _read_google_drive_doc_async(
+        self,
+        conn: asyncpg.Connection,
+        document_id: str,
+        max_chars: int | None,
+    ) -> dict[str, Any] | None:
+        row = await conn.fetchrow(
+            f"""
+            SELECT {GOOGLE_DRIVE_DOCUMENT_COLUMNS}
+            FROM {GOOGLE_DRIVE_DOCUMENTS_TABLE}
+            WHERE document_id = $1
+            """,
+            document_id,
+        )
+        if not row:
+            return None
+
+        body = str(row["body"] or "")
+        content = body if max_chars is None else body[:max_chars]
+        truncated = max_chars is not None and len(body) > max_chars
+        return {
+            "status": "ok",
+            **_google_drive_doc_summary(row),
             "chars": len(content),
             "total_chars": len(body),
             "truncated": truncated,

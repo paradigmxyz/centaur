@@ -19,6 +19,8 @@ Use one row-returning query. The command runs it inside a read-only transaction 
 company_context query "SELECT m.occurred_at, u.display_name, m.text, m.permalink FROM company_context_slack_messages m LEFT JOIN company_context_slack_users u ON u.user_id = m.user_id WHERE m.channel_id = 'CHANNEL_ID' AND m.occurred_at >= now() - interval '7 days' ORDER BY m.occurred_at DESC" --limit 100 --json
 ```
 
+When the company-context Drive indexer is deployed, `company_context_data.google_drive_documents` holds chunked Google Docs and PDFs (`document_type` is `google_doc` or `pdf`) visible to the requester's Google account. Search surfaces them under `--source docs`, and `--source-type pdf` narrows to PDFs.
+
 ## Default Workflow
 
 1. Search company context first:
