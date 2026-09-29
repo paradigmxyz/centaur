@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import asyncpg
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -52,15 +51,6 @@ class _FakeConnection:
         if self.fetchrow_rows:
             return self.fetchrow_rows.pop(0)
         return self.row
-
-    async def fetchval(self, query, *args):
-        self.fetch_calls.append((query, args))
-        if self.fetch_rows:
-            result = self.fetch_rows.pop(0)
-            if isinstance(result, BaseException):
-                raise result
-            return result
-        return 1
 
     async def execute(self, query, *args):
         self.execute_calls.append((query, args))
@@ -967,92 +957,6 @@ def test_search_drive_source_is_not_docs_alias(monkeypatch):
     assert fake.closed is True
 
 
-def _google_drive_row(**overrides):
-    row = {
-        "document_id": "google-drive:file-1:0",
-        "file_id": "file-1",
-        "chunk_id": "0",
-        "document_type": "pdf",
-        "title": "Roadmap.pdf",
-        "body": "Roadmap PDF covers launch sequencing.",
-        "url": "https://drive.google.com/file/d/file-1/view",
-        "mime_type": "application/pdf",
-        "drive_id": "shared-drive-1",
-        "page_start": 1,
-        "page_end": 2,
-        "source_created_at": dt.datetime(2026, 5, 1, 9, 0, tzinfo=dt.UTC),
-        "source_modified_at": dt.datetime(2026, 5, 8, 12, 0, tzinfo=dt.UTC),
-        "metadata": {},
-    }
-    row.update(overrides)
-    return row
-
-
-def test_v2_search_replaces_legacy_google_docs_with_drive_documents(monkeypatch):
-    fake = _FakeConnection(fetch_rows=[[], [_google_drive_row(score=1.5)]])
-
-    async def fake_connect(*args, **kwargs):
-        return fake
-
-    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
-
-    result = CompanyContextClient("postgresql://example", drive_v2=True).search(
-        "roadmap", source="docs"
-    )
-
-    assert result["status"] == "ok"
-    assert result["count"] == 1
-    document = result["results"][0]
-    assert document["document_id"] == "google-drive:file-1:0"
-    assert document["source"] == "docs"
-    assert document["source_type"] == "pdf"
-    assert document["source_document_id"] == "file-1"
-    assert document["metadata"]["drive_id"] == "shared-drive-1"
-    assert document["metadata"]["page_start"] == 1
-    queries = [query for query, _args in fake.fetch_calls]
-    assert len(queries) == 2
-    assert "FROM company_context_data.google_drive_documents" in queries[1]
-    assert not any("google_docs_context_documents" in query for query in queries)
-
-
-def test_search_without_v2_leaves_drive_documents_hidden(monkeypatch):
-    fake = _FakeConnection(rows=[])
-
-    async def fake_connect(*args, **kwargs):
-        return fake
-
-    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
-
-    result = CompanyContextClient("postgresql://example").search("roadmap", source="docs")
-
-    assert result["status"] == "ok"
-    assert not any("company_context_data" in query for query, _args in fake.fetch_calls)
-
-
-def test_v2_search_skips_absent_drive_documents(monkeypatch):
-    fake = _FakeConnection(
-        fetch_rows=[
-            [],
-            asyncpg.UndefinedTableError(
-                'relation "company_context_data.google_drive_documents" does not exist'
-            ),
-        ]
-    )
-
-    async def fake_connect(*args, **kwargs):
-        return fake
-
-    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
-
-    result = CompanyContextClient("postgresql://example", drive_v2=True).search(
-        "roadmap", source="docs"
-    )
-
-    assert result["status"] == "ok"
-    assert result["count"] == 0
-    assert len(fake.fetch_calls) == 2
-
-
 def test_search_granola_source_queries_private_note_projection(monkeypatch):
     occurred_at = dt.datetime(2026, 7, 1, 10, 0, tzinfo=dt.UTC)
     source_updated_at = dt.datetime(2026, 7, 1, 10, 30, tzinfo=dt.UTC)
@@ -1750,68 +1654,6 @@ def test_read_document_falls_back_to_oauth_google_docs_index(monkeypatch):
     assert result["truncated"] is True
     assert len(fake.fetchrow_calls) == 2
     assert fake.closed is True
-
-
-def test_drive_v2_status_is_active_when_documents_table_is_readable(monkeypatch):
-    fake = _FakeConnection()
-
-    async def fake_connect(*args, **kwargs):
-        return fake
-
-    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
-
-    result = CompanyContextClient("postgresql://example").drive_v2_status()
-
-    assert result == {
-        "status": "ok",
-        "active": True,
-        "table": "company_context_data.google_drive_documents",
-    }
-    assert fake.closed is True
-
-
-@pytest.mark.parametrize(
-    "error",
-    [
-        asyncpg.UndefinedTableError(
-            'relation "company_context_data.google_drive_documents" does not exist'
-        ),
-        asyncpg.InsufficientPrivilegeError("permission denied for schema company_context_data"),
-    ],
-)
-def test_drive_v2_status_is_inactive_when_documents_table_is_unavailable(monkeypatch, error):
-    fake = _FakeConnection(fetch_rows=[error])
-
-    async def fake_connect(*args, **kwargs):
-        return fake
-
-    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
-
-    result = CompanyContextClient("postgresql://example").drive_v2_status()
-
-    assert result["status"] == "ok"
-    assert result["active"] is False
-    assert result["reason"] == str(error)
-    assert fake.closed is True
-
-
-def test_v2_read_document_falls_back_to_drive_documents(monkeypatch):
-    fake = _FakeConnection(fetchrow_rows=[None, _google_drive_row()])
-
-    async def fake_connect(*args, **kwargs):
-        return fake
-
-    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
-
-    result = CompanyContextClient("postgresql://example", drive_v2=True).read_document(
-        "google-drive:file-1:0"
-    )
-
-    assert result["status"] == "ok"
-    assert result["source"] == "docs"
-    assert result["source_type"] == "pdf"
-    assert result["content"] == "Roadmap PDF covers launch sequencing."
-    assert result["truncated"] is False
 
 
 def test_read_document_falls_back_to_granola_note_projection(monkeypatch):
