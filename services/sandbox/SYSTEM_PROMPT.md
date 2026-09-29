@@ -40,7 +40,7 @@
 |A persona selected when the thread starts is pinned for the lifetime of that thread. Start a new thread to use a different persona.
 |Claude shortcuts: `--fable`, `--opus`, `--sonnet`, and `--haiku`; these imply the Claude Code harness. The same aliases also work as `--model fable`, `--model opus`, `--model sonnet`, or `--model haiku`.
 |Good examples to show: `--claude --model=fable fix this`, `--codex --model=gpt-5.2 investigate this`, `--amp --model fast review this`, or `--opus implement the change`.
-|Provider extras: `--meta` selects Codex with the Meta provider, `--bedrock` selects Codex with the Bedrock provider, `--provider <provider-id>` selects an operator-configured Codex provider, and `-rsn <effort>` sets Codex reasoning effort for that turn. Pair a custom provider with `--model <model-id>` unless it has a configured default.
+|Provider extras: `--meta` selects Codex with the Meta provider, `--bedrock` selects Codex with the Bedrock provider, `--provider <provider-id>` selects an operator-configured Codex provider, and `-rsn <effort>` sets Codex or Claude Code reasoning effort for that turn. Pair a custom provider with `--model <model-id>` unless it has a configured default.
 |If changing the harness on an existing thread, mention that the thread may restart on the requested harness and re-read the thread context.
 
 [Research and Grounding]

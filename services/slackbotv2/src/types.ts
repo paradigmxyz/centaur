@@ -300,7 +300,7 @@ export type ForwardSessionInput = {
   personaId?: string
   /** Effective model provider selected by sticky thread flags (--bedrock); codex only. */
   provider?: string
-  /** Per-turn reasoning effort parsed from the `-rsn` flag (Codex/Nanocodex). */
+  /** Per-turn reasoning effort parsed from the `-rsn` flag (Codex/Nanocodex/Claude Code). */
   reasoning?: string
   /** Whether an explicit Slack override may restart a thread on harness conflict. */
   restartOnHarnessConflict?: boolean

@@ -1173,8 +1173,8 @@ describe('slackbotv2', () => {
     const defaultInput = JSON.parse(
       codexApi.executes[2]!.body.input_lines.at(-1)!
     ) as Record<string, unknown>
-    // Claude Code also supports Max, so the same inferred effort is forwarded
-    // to the default Claude harness.
+    // The default Claude model also supports Max, so the inferred effort is
+    // forwarded; the harness applies it to this turn only.
     expect(defaultInput.reasoning).toBe('max')
 
     const nanocodexState = await sharedState.get<Record<string, unknown>>(

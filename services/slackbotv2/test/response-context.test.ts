@@ -104,6 +104,15 @@ describe('reasoningForModel', () => {
     }
   })
 
+  test('rejects Claude efforts the selected model does not support', () => {
+    expect(reasoningForModel('claudecode', 'claude-haiku-4-5', 'max')).toBeUndefined()
+    expect(reasoningForModel('claudecode', 'claude-haiku-4-5-20251001', 'low')).toBeUndefined()
+    expect(reasoningForModel('claudecode', 'claude-sonnet-4-6', 'xhigh')).toBeUndefined()
+    expect(reasoningForModel('claudecode', 'claude-sonnet-4-6', 'max')).toBe('max')
+    expect(reasoningForModel('claudecode', 'claude-opus-4-5', 'max')).toBeUndefined()
+    expect(reasoningForModel('claudecode', 'claude-opus-4-5', 'high')).toBe('high')
+  })
+
   test('rejects efforts for harnesses without an effort control', () => {
     expect(reasoningForModel('amp', 'fast', 'low')).toBeUndefined()
   })

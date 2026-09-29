@@ -52,6 +52,22 @@ const GPT_6_ASTRA_REASONING_EFFORTS = new Set([
 ])
 // Claude Code `effortLevel` values; applied per turn by the harness server.
 const CLAUDE_CODE_REASONING_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
+// Older Claude models Claude Code limits to fewer effort levels (none for
+// models without effort support); newer models support every level.
+const NO_REASONING_EFFORTS: ReadonlySet<string> = new Set()
+const CLAUDE_NO_XHIGH_REASONING_EFFORTS = new Set(['low', 'medium', 'high', 'max'])
+const CLAUDE_REASONING_EFFORTS_BY_MODEL: Record<string, ReadonlySet<string>> = {
+  'claude-haiku-4-5': NO_REASONING_EFFORTS,
+  'claude-opus-4': NO_REASONING_EFFORTS,
+  'claude-opus-4-0': NO_REASONING_EFFORTS,
+  'claude-opus-4-1': NO_REASONING_EFFORTS,
+  'claude-opus-4-5': new Set(['low', 'medium', 'high']),
+  'claude-opus-4-6': CLAUDE_NO_XHIGH_REASONING_EFFORTS,
+  'claude-sonnet-4': NO_REASONING_EFFORTS,
+  'claude-sonnet-4-0': NO_REASONING_EFFORTS,
+  'claude-sonnet-4-5': NO_REASONING_EFFORTS,
+  'claude-sonnet-4-6': CLAUDE_NO_XHIGH_REASONING_EFFORTS
+}
 const CODEX_REASONING_EFFORTS_BY_MODEL: Record<string, ReadonlySet<string>> = {
   'gpt-5.2': STANDARD_CODEX_REASONING_EFFORTS,
   'gpt-5.2-codex': CODEX_MODEL_REASONING_EFFORTS,
@@ -175,9 +191,9 @@ export function effectiveReasoningForHarness(
   configured?: Record<string, string>
 ): string | undefined {
   const key = harnessType?.trim().toLowerCase()
-  if (key === 'claudecode') {
-    return requested?.trim().toLowerCase() || defaultReasoningForHarness(key, configured)
-  }
+  // Claude Code's default effort depends on the model, so only a requested
+  // (already model-validated) effort is known.
+  if (key === 'claudecode') return requested?.trim().toLowerCase() || undefined
   if (key !== 'codex' && key !== 'nanocodex') return undefined
   const reasoning = requested?.trim().toLowerCase() || defaultReasoningForHarness(key, configured)
   // Nanocodex has no distinct Minimal level; its adapter maps Minimal to Low.
@@ -194,7 +210,11 @@ export function reasoningForModel(
   const selectedModel = model?.trim().toLowerCase()
   const effort = reasoning?.trim().toLowerCase()
   if (harness === 'claudecode') {
-    return effort && CLAUDE_CODE_REASONING_EFFORTS.has(effort) ? effort : undefined
+    const supported =
+      Object.entries(CLAUDE_REASONING_EFFORTS_BY_MODEL).find(
+        ([modelId]) => selectedModel === modelId || selectedModel?.startsWith(`${modelId}-20`)
+      )?.[1] ?? CLAUDE_CODE_REASONING_EFFORTS
+    return effort && supported.has(effort) ? effort : undefined
   }
   if (!selectedModel || !effort) return undefined
   if (harness !== 'codex' && harness !== 'nanocodex') return undefined
