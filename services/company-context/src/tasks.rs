@@ -16,11 +16,13 @@ use crate::{
         DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK, GOOGLE_DOC_MIME_TYPE, PDF_MIME_TYPE,
         SHARED_DRIVE_SCAN_TASK, SHARED_DRIVES_DISCOVER_TASK, SHARED_FOLDERS_BATCH_TASK,
     },
-    credentials::GoogleCredential,
+    credentials::{ConsoleCredentials, GoogleCredential},
     drive::{DriveChange, DriveClient, DriveFile},
     embeddings::EmbeddingsClient,
     errors::{is_rejected, rejected},
     extraction::{chunk_text, extract_google_doc_text, extract_pdf_text, hex_sha256},
+    granola::GranolaClient,
+    granola_tasks,
 };
 
 #[derive(Clone)]
@@ -28,7 +30,9 @@ pub struct TaskState {
     pub config: Arc<Config>,
     pub pool: PgPool,
     pub absurd: AbsurdClient,
+    pub credentials: Arc<ConsoleCredentials>,
     pub drive: DriveClient,
+    pub granola: GranolaClient,
     pub embeddings: EmbeddingsClient,
 }
 
@@ -105,6 +109,8 @@ pub struct TaskSummary {
 }
 
 pub fn register(state: TaskState) -> Result<()> {
+    granola_tasks::register(&state)?;
+
     let reconcile_state = state.clone();
     state.absurd.register_task(
         DRIVE_CREDENTIALS_RECONCILE_TASK,
@@ -1686,7 +1692,7 @@ async fn record_embedding_failure(
     }
 }
 
-fn bounded_error(error: &anyhow::Error) -> String {
+pub(crate) fn bounded_error(error: &anyhow::Error) -> String {
     error.to_string().chars().take(1_000).collect()
 }
 
@@ -1694,7 +1700,7 @@ fn nonempty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
-fn task_result<T>(result: Result<T>) -> absurd::Result<T> {
+pub(crate) fn task_result<T>(result: Result<T>) -> absurd::Result<T> {
     result.map_err(|error| AbsurdError::TaskFailed(error.into_boxed_dyn_error()))
 }
 

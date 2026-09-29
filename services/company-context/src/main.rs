@@ -5,6 +5,8 @@ mod drive;
 mod embeddings;
 mod errors;
 mod extraction;
+mod granola;
+mod granola_tasks;
 mod scheduler;
 mod tasks;
 mod telemetry;
@@ -31,6 +33,7 @@ use crate::{
     credentials::ConsoleCredentials,
     drive::DriveClient,
     embeddings::EmbeddingsClient,
+    granola::GranolaClient,
     tasks::TaskState,
 };
 
@@ -64,12 +67,15 @@ async fn main() -> Result<()> {
         .context("create company context Absurd queue")?;
 
     let drive = DriveClient::new(&config, credentials.clone())?;
+    let granola = GranolaClient::new(&config)?;
     let embeddings = EmbeddingsClient::new(&config)?;
     tasks::register(TaskState {
         config: config.clone(),
         pool: pool.clone(),
         absurd: absurd.clone(),
+        credentials: credentials.clone(),
         drive,
+        granola,
         embeddings,
     })?;
 
@@ -94,7 +100,16 @@ async fn main() -> Result<()> {
         )),
         ..WorkerOptions::default()
     });
-    let scheduler = tokio::spawn(scheduler::run(config.clone(), absurd, credentials.clone()));
+    let scheduler = tokio::spawn(scheduler::run(
+        config.clone(),
+        absurd.clone(),
+        credentials.clone(),
+    ));
+    let granola_scheduler = tokio::spawn(scheduler::run_granola(
+        config.clone(),
+        absurd,
+        credentials.clone(),
+    ));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let server_shutdown = shutdown_rx.clone();
     let server = tokio::spawn(async move {
@@ -111,6 +126,7 @@ async fn main() -> Result<()> {
     info!(event = "company_context_shutdown_started");
     let _ = shutdown_tx.send(true);
     scheduler.abort();
+    granola_scheduler.abort();
     worker.close().await?;
     server.await.context("join HTTP server")??;
     credentials.close().await;

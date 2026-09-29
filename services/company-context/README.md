@@ -2,18 +2,20 @@
 
 Standalone company-context ingestion service. It indexes regular Google Docs and text-bearing PDFs from users' My Drive, shared folders, Shared Drives they are members of, and Shared Drive folders shared with them without membership, using durable Absurd tasks. Google Docs are exported as plain text through the Drive API before chunking. Each user corpus and each member Shared Drive is followed through its own Drive change feed and checkpoint. Shared Drive folders shared with non-members have no change feed, so they are walked recursively each cycle, and files no walk has reached for 24 hours are removed.
 
+It also indexes Granola meeting notes, including transcripts when the user's Granola plan provides them, through each user's Granola MCP OAuth credential. Each sync lists the account's meetings from its checkpoint onward, fetches details and transcripts ten meetings at a time, and republishes a note only when its content changes. Notes that no live Granola credential still observes are removed.
+
 The service owns these Postgres schemas:
 
 - `company_context_system`: private cursors, staging, and processing state.
-- `company_context_data`: retrieval-facing Drive documents, access observations, and embeddings.
+- `company_context_data`: retrieval-facing Drive documents and Granola notes, access observations, and embeddings.
 
-The `centaur_company_context_reader` role used by the company-context tool can read `google_drive_documents` and `google_drive_document_embeddings`. Row-level security limits each reader to files that a live broker credential with the same Google subject (`centaur.google_subject`) still observes; `google_drive_broker_observations` is the only source of that access. The reader cannot query the observations or the system schema directly. The Helm deployment is gated by `experimentalCompanyContext.enabled` until it is ready for production.
+The `centaur_company_context_reader` role used by the company-context tool can read `google_drive_documents` and `google_drive_document_embeddings`. Row-level security limits each reader to files that a live broker credential with the same Google subject (`centaur.google_subject`) still observes; `google_drive_broker_observations` is the only source of that access. The reader cannot query the observations or the system schema directly. The reader has no access to Granola notes yet. The Helm deployment is gated by `experimentalCompanyContext.enabled` until it is ready for production.
 
 ## Required infrastructure
 
 - Postgres with the existing Absurd schema and the `vector` and `pg_search` extensions available.
 - `pdftotext` from Poppler (for PDF sources).
-- A Rails Console database containing live per-user Google OAuth broker credentials.
+- A Rails Console database containing live per-user Google and Granola OAuth broker credentials.
 - The Active Record encryption primary key and derivation salt used by Rails Console.
 - An embeddings API key supplied through a Kubernetes Secret.
 
@@ -34,7 +36,9 @@ Required:
 The service discovers live per-user broker credentials belonging to the Google
 OAuth app selected by `COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG` (default
 `google`). Rails Console owns refreshing those tokens; the service decrypts the
-current access token before each Drive request. Drive requests honor `Retry-After`
+current access token before each Drive request. Granola broker credentials are
+selected the same way by `COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG` (default
+`granola`). Drive requests honor `Retry-After`
 on rate limits and retry server errors with bounded exponential backoff. Durable
 document tasks record known permanent content and request failures as `rejected`
 instead of retrying them. A credential reconciliation task deactivates
@@ -52,10 +56,14 @@ Common optional settings:
 
 - `IRON_CONTROL_DATABASE_NAME`
 - `COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG` (default `google`)
+- `COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG` (default `granola`)
 - `BIND_ADDR` (default `0.0.0.0:8080`)
 - `GOOGLE_DRIVE_API_BASE_URL`
+- `GRANOLA_MCP_URL` (default `https://mcp.granola.ai/mcp`)
 - `OPENAI_BASE_URL`
 - `COMPANY_CONTEXT_SCAN_INTERVAL_SECONDS` (default `300`)
+- `COMPANY_CONTEXT_GRANOLA_SYNC_INTERVAL_SECONDS` (default `1800`)
+- `COMPANY_CONTEXT_GRANOLA_INITIAL_LOOKBACK_DAYS` (default `365`)
 - `COMPANY_CONTEXT_DRIVE_PAGE_SIZE` (default `100`)
 - `COMPANY_CONTEXT_MAX_SCAN_PAGES` (default `10`)
 - `COMPANY_CONTEXT_FOLDER_WALK_BATCH_SIZE` (default `50`, at most `100`)
