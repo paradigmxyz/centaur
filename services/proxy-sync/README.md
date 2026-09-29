@@ -5,15 +5,9 @@
 builds effective proxy configuration directly from Console's PostgreSQL schema.
 Console remains responsible for credential administration and token refresh.
 
-The service is disabled by default. Enable it in the Helm chart with:
-
-```yaml
-proxySync:
-  enabled: true
-```
-
-When enabled, `api-rs` continues sending administrative requests to Console but
-configures newly created managed proxies to poll this service.
+The Helm chart always deploys this service. `api-rs` sends administrative
+requests to Console and configures managed proxies to poll this service through
+`IRON_CONTROL_PROXY_SYNC_URL`.
 
 ## Metrics
 

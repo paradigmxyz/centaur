@@ -1,4 +1,3 @@
-{{- if .Values.proxySync.enabled }}
 {{- $name := include "centaur.proxySyncName" . }}
 {{- $secretEnv := include "centaur.secretEnvName" . }}
 {{- $prefix := .Values.secretManager.envPrefix }}
@@ -147,6 +146,5 @@ spec:
     - ports:
         - protocol: TCP
           port: 5432
-{{- end }}
 {{- end }}
 {{- end }}

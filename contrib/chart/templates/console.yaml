@@ -328,9 +328,8 @@ spec:
     - Egress
   ingress:
     # api-rs is the control-plane caller (it registers principals/roles/grants
-    # on startup and per session); per-sandbox
-    # iron-proxy pods sync their effective config from the control plane over
-    # /proxy/sync in managed mode. Widen this when another concrete client
+    # on startup and per session); per-sandbox iron-proxy pods forward sandbox
+    # entitlement requests. Widen this when another concrete client
     # integrates. (kubectl port-forward works regardless — it arrives via the
     # kubelet, not pod-to-pod.)
     - from:
@@ -339,7 +338,7 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
 {{- end }}
-        # Per-sandbox iron-proxy pods pulling their config in managed mode.
+        # Per-sandbox iron-proxy pods forwarding sandbox entitlement requests.
         - podSelector:
             matchLabels:
               centaur.ai/iron-proxy: "true"

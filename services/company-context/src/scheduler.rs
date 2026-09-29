@@ -4,13 +4,16 @@ use std::{
 };
 
 use absurd::{Client, SpawnOptions};
+use serde::Serialize;
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{error, info};
 
 use crate::{
-    config::{Config, DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK},
+    config::{
+        Config, DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK, SHARED_DRIVES_DISCOVER_TASK,
+    },
     credentials::ConsoleCredentials,
-    tasks::{ReconcileCredentialsParams, ScanParams},
+    tasks::{DiscoverSharedDrivesParams, ReconcileCredentialsParams, ScanParams},
     telemetry,
 };
 
@@ -57,39 +60,68 @@ pub async fn run(config: Arc<Config>, client: Client, credentials: Arc<ConsoleCr
             }
         };
         for credential_id in credential_ids {
-            let requested_at = chrono::Utc::now().to_rfc3339();
-            match client
-                .spawn(
-                    DRIVE_SCAN_TASK,
-                    ScanParams {
-                        credential_id,
-                        requested_at,
-                    },
-                    SpawnOptions {
-                        idempotency_key: Some(format!("drive.user.scan:{credential_id}:{bucket}")),
-                        ..SpawnOptions::default()
-                    },
-                )
-                .await
-            {
-                Ok(result) => {
-                    telemetry::task_enqueued(DRIVE_SCAN_TASK, result.created);
-                    info!(
-                        event = "company_context_user_scan_enqueued",
-                        credential_id,
-                        task_id = result.task_id,
-                        created = result.created
-                    );
-                }
-                Err(error) => {
-                    metrics::counter!("company_context_scheduler_errors_total").increment(1);
-                    error!(
-                        event = "company_context_user_scan_enqueue_failed",
-                        credential_id,
-                        error = %error
-                    );
-                }
-            }
+            spawn_credential_task(
+                &client,
+                DRIVE_SCAN_TASK,
+                ScanParams {
+                    credential_id,
+                    requested_at: chrono::Utc::now().to_rfc3339(),
+                },
+                format!("drive.user.scan:{credential_id}:{bucket}"),
+                credential_id,
+            )
+            .await;
+            spawn_credential_task(
+                &client,
+                SHARED_DRIVES_DISCOVER_TASK,
+                DiscoverSharedDrivesParams {
+                    credential_id,
+                    bucket,
+                },
+                format!("drive.shared_drives.discover:{credential_id}:{bucket}"),
+                credential_id,
+            )
+            .await;
+        }
+    }
+}
+
+async fn spawn_credential_task<P: Serialize>(
+    client: &Client,
+    task_name: &'static str,
+    params: P,
+    idempotency_key: String,
+    credential_id: i64,
+) {
+    match client
+        .spawn(
+            task_name,
+            params,
+            SpawnOptions {
+                idempotency_key: Some(idempotency_key),
+                ..SpawnOptions::default()
+            },
+        )
+        .await
+    {
+        Ok(result) => {
+            telemetry::task_enqueued(task_name, result.created);
+            info!(
+                event = "company_context_credential_task_enqueued",
+                task_name,
+                credential_id,
+                task_id = result.task_id,
+                created = result.created
+            );
+        }
+        Err(error) => {
+            metrics::counter!("company_context_scheduler_errors_total").increment(1);
+            error!(
+                event = "company_context_credential_task_enqueue_failed",
+                task_name,
+                credential_id,
+                error = %error
+            );
         }
     }
 }

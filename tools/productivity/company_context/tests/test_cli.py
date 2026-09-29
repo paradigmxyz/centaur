@@ -72,3 +72,48 @@ def test_search_no_hybrid_flag_forces_keyword_mode(monkeypatch):
             "hybrid": False,
         }
     ]
+
+
+def test_help_mentions_v2_status() -> None:
+    result = CliRunner().invoke(cli.app, ["--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "v2 status" in result.output
+
+
+def test_v2_search_queries_drive_index(monkeypatch):
+    calls = []
+
+    class FakeDriveClient:
+        def search(self, **kwargs):
+            calls.append(kwargs)
+            return {"status": "ok", "results": []}
+
+    monkeypatch.setattr(cli, "DriveV2Client", FakeDriveClient)
+
+    result = CliRunner().invoke(cli.app, ["v2", "search", "roadmap", "--source-type", "pdf"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        {
+            "query": "roadmap",
+            "limit": 10,
+            "source_type": "pdf",
+            "occurred_after": None,
+            "occurred_before": None,
+            "hybrid": True,
+        }
+    ]
+
+
+def test_v2_status_prints_drive_index_availability(monkeypatch):
+    class FakeDriveClient:
+        def status(self):
+            return {"status": "ok", "active": False, "reason": "missing"}
+
+    monkeypatch.setattr(cli, "DriveV2Client", FakeDriveClient)
+
+    result = CliRunner().invoke(cli.app, ["v2", "status"])
+
+    assert result.exit_code == 0, result.output
+    assert '"active": false' in result.output

@@ -67,6 +67,22 @@ pub async fn extract_pdf_text(
     Ok(normalized)
 }
 
+pub fn extract_google_doc_text(document: Vec<u8>, max_output_bytes: usize) -> Result<String> {
+    if document.len() > max_output_bytes {
+        return Err(rejected(
+            "exported Google Doc exceeds the configured byte limit",
+        ));
+    }
+    let text = String::from_utf8(document)
+        .map_err(|error| rejected(format!("exported Google Doc is not UTF-8: {error}")))?;
+    // Drive's plain-text export starts with a UTF-8 byte order mark.
+    let normalized = normalize_text(text.strip_prefix('\u{feff}').unwrap_or(&text));
+    if normalized.is_empty() {
+        return Err(rejected("Google Doc contains no extractable text"));
+    }
+    Ok(normalized)
+}
+
 pub fn chunk_text(text: &str, max_chars: usize) -> Vec<Chunk> {
     let paragraphs: Vec<&str> = text
         .split("\n\n")
@@ -138,6 +154,17 @@ fn normalize_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn google_doc_text_is_utf8_normalized_and_nonempty() {
+        assert_eq!(
+            extract_google_doc_text("\u{feff}heading\r\nbody  \r\n".into(), 100).unwrap(),
+            "heading\nbody"
+        );
+        assert!(extract_google_doc_text(vec![0xff], 100).is_err());
+        assert!(extract_google_doc_text("\u{feff}  \n".into(), 100).is_err());
+        assert!(extract_google_doc_text(b"too large".to_vec(), 3).is_err());
+    }
 
     #[test]
     fn chunks_are_stable_and_bounded() {

@@ -9,12 +9,20 @@ use tokio::time::sleep;
 use tracing::warn;
 
 use crate::{
-    config::{Config, PDF_MIME_TYPE},
+    config::{
+        Config, FOLDER_MIME_TYPE, GOOGLE_DOC_EXPORT_MIME_TYPE, GOOGLE_DOC_MIME_TYPE, PDF_MIME_TYPE,
+    },
     credentials::ConsoleCredentials,
     errors::rejected,
 };
 
 const DRIVE_REQUEST_ATTEMPTS: u32 = 4;
+const FILE_FIELDS: &str = "id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress)";
+const WALK_PAGE_SIZE: u16 = 1_000;
+const FOLDER_OR_DOCUMENT_QUERY: &str = "trashed = false and (mimeType = 'application/vnd.google-apps.folder' or mimeType = 'application/pdf' or mimeType = 'application/vnd.google-apps.document')";
+/// The user corpus plus Shared Drive items the user can reach without membership.
+const ACCESSIBLE_CORPUS: &[(&str, &str)] =
+    &[("corpora", "user"), ("includeItemsFromAllDrives", "true")];
 const DRIVE_SERVER_RETRY_BASE: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
@@ -23,6 +31,7 @@ pub struct DriveClient {
     base_url: String,
     credentials: Arc<ConsoleCredentials>,
     max_pdf_bytes: usize,
+    max_extracted_bytes: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -47,16 +56,33 @@ pub struct DriveFile {
     pub modified_time: Option<DateTime<Utc>>,
     #[serde(default)]
     pub owners: Vec<Identity>,
-    #[serde(default)]
-    pub permissions: Vec<Permission>,
 }
 
 impl DriveFile {
-    pub fn is_active_user_pdf(&self) -> bool {
+    pub fn is_active_document(&self) -> bool {
         !self.trashed
-            && self.mime_type == PDF_MIME_TYPE
+            && matches!(
+                self.mime_type.as_str(),
+                PDF_MIME_TYPE | GOOGLE_DOC_MIME_TYPE
+            )
             && !self.id.is_empty()
-            && self.drive_id.is_empty()
+    }
+
+    pub fn document_type(&self) -> Option<&'static str> {
+        match self.mime_type.as_str() {
+            PDF_MIME_TYPE => Some("pdf"),
+            GOOGLE_DOC_MIME_TYPE => Some("google_doc"),
+            _ => None,
+        }
+    }
+
+    pub fn is_active_folder(&self) -> bool {
+        !self.trashed && self.mime_type == FOLDER_MIME_TYPE && !self.id.is_empty()
+    }
+
+    /// Whether the file lives in the given Shared Drive, or in My Drive for `None`.
+    pub fn belongs_to(&self, shared_drive_id: Option<&str>) -> bool {
+        self.drive_id == shared_drive_id.unwrap_or_default()
     }
 
     pub fn source_version(&self) -> String {
@@ -79,22 +105,6 @@ pub struct Identity {
     pub display_name: String,
     #[serde(default)]
     pub email_address: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Permission {
-    #[serde(default)]
-    pub id: String,
-    #[serde(rename = "type", default)]
-    pub permission_type: String,
-    #[serde(default)]
-    pub role: String,
-    #[serde(default)]
-    pub email_address: String,
-    #[serde(default)]
-    pub domain: String,
-    pub allow_file_discovery: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,6 +137,19 @@ pub struct DriveChange {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SharedDrivePage {
+    #[serde(default)]
+    pub drives: Vec<SharedDrive>,
+    pub next_page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SharedDrive {
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct StartPageToken {
     start_page_token: String,
 }
@@ -140,6 +163,7 @@ impl DriveClient {
             base_url: config.google_api_base_url.clone(),
             credentials,
             max_pdf_bytes: config.max_pdf_bytes,
+            max_extracted_bytes: config.max_extracted_bytes,
         })
     }
 
@@ -147,13 +171,20 @@ impl DriveClient {
         &self.credentials
     }
 
-    pub async fn start_page_token(&self, credential_id: i64) -> Result<String> {
+    pub async fn start_page_token(
+        &self,
+        credential_id: i64,
+        shared_drive_id: Option<&str>,
+    ) -> Result<String> {
+        let mut request = self
+            .http
+            .get(format!("{}/changes/startPageToken", self.base_url))
+            .query(&[("supportsAllDrives", "true")]);
+        if let Some(drive_id) = shared_drive_id {
+            request = request.query(&[("driveId", drive_id)]);
+        }
         let response = self
-            .send(
-                self.http
-                    .get(format!("{}/changes/startPageToken", self.base_url)),
-                credential_id,
-            )
+            .send(request, credential_id)
             .await?
             .json::<StartPageToken>()
             .await
@@ -164,25 +195,117 @@ impl DriveClient {
         Ok(response.start_page_token)
     }
 
-    pub async fn list_user_pdfs(
+    pub async fn list_shared_drives(
         &self,
         credential_id: i64,
+        page_token: Option<&str>,
+    ) -> Result<SharedDrivePage> {
+        let mut request = self
+            .http
+            .get(format!("{}/drives", self.base_url))
+            .query(&[("pageSize", "100"), ("fields", "nextPageToken,drives(id)")]);
+        if let Some(page_token) = page_token {
+            request = request.query(&[("pageToken", page_token)]);
+        }
+        self.send(request, credential_id)
+            .await?
+            .json::<SharedDrivePage>()
+            .await
+            .context("decode Drive shared drive page")
+    }
+
+    /// Lists supported documents in the user's corpus, or in one Shared Drive when
+    /// `shared_drive_id` is set.
+    pub async fn list_documents(
+        &self,
+        credential_id: i64,
+        shared_drive_id: Option<&str>,
         page_size: u16,
         page_token: Option<&str>,
     ) -> Result<FilePage> {
-        let fields = "nextPageToken,incompleteSearch,files(id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress),permissions(id,type,role,emailAddress,domain,allowFileDiscovery))";
-        let mut request = self.http.get(format!("{}/files", self.base_url)).query(&[
-            (
-                "q",
-                "mimeType = 'application/pdf' and trashed = false".to_owned(),
+        let corpus: &[(&str, &str)] = match shared_drive_id {
+            Some(drive_id) => &[
+                ("corpora", "drive"),
+                ("driveId", drive_id),
+                ("includeItemsFromAllDrives", "true"),
+            ],
+            None => &[("corpora", "user"), ("includeItemsFromAllDrives", "false")],
+        };
+        self.list_files(
+            credential_id,
+            &format!(
+                "(mimeType = '{PDF_MIME_TYPE}' or mimeType = '{GOOGLE_DOC_MIME_TYPE}') and trashed = false"
             ),
-            ("pageSize", page_size.to_string()),
-            ("fields", fields.to_owned()),
-            ("corpora", "user".to_owned()),
-            ("includeItemsFromAllDrives", "false".to_owned()),
-            ("supportsAllDrives", "true".to_owned()),
-            ("orderBy", "modifiedTime".to_owned()),
-        ]);
+            corpus,
+            FILE_FIELDS,
+            page_size,
+            page_token,
+        )
+        .await
+    }
+
+    /// Lists folders and supported documents shared with the user, including Shared Drive items
+    /// shared with users who are not members of that drive.
+    pub async fn list_shared_with_me(
+        &self,
+        credential_id: i64,
+        page_token: Option<&str>,
+    ) -> Result<FilePage> {
+        self.list_files(
+            credential_id,
+            &format!("sharedWithMe = true and {FOLDER_OR_DOCUMENT_QUERY}"),
+            ACCESSIBLE_CORPUS,
+            FILE_FIELDS,
+            WALK_PAGE_SIZE,
+            page_token,
+        )
+        .await
+    }
+
+    /// Lists the folders and supported documents directly inside any of the given folders.
+    pub async fn list_folder_children(
+        &self,
+        credential_id: i64,
+        folder_ids: &[String],
+        page_token: Option<&str>,
+    ) -> Result<FilePage> {
+        if folder_ids.is_empty() {
+            bail!("no Drive folders to list");
+        }
+        if !folder_ids.iter().all(|id| is_drive_id(id)) {
+            return Err(rejected("Drive folder ID contains unexpected characters"));
+        }
+        self.list_files(
+            credential_id,
+            &folder_children_query(folder_ids),
+            ACCESSIBLE_CORPUS,
+            FILE_FIELDS,
+            WALK_PAGE_SIZE,
+            page_token,
+        )
+        .await
+    }
+
+    async fn list_files(
+        &self,
+        credential_id: i64,
+        query: &str,
+        corpus: &[(&str, &str)],
+        file_fields: &str,
+        page_size: u16,
+        page_token: Option<&str>,
+    ) -> Result<FilePage> {
+        let fields = format!("nextPageToken,incompleteSearch,files({file_fields})");
+        let mut request = self
+            .http
+            .get(format!("{}/files", self.base_url))
+            .query(&[
+                ("q", query),
+                ("pageSize", &page_size.to_string()),
+                ("fields", &fields),
+                ("supportsAllDrives", "true"),
+            ])
+            .query(corpus);
         if let Some(page_token) = page_token {
             request = request.query(&[("pageToken", page_token)]);
         }
@@ -193,26 +316,33 @@ impl DriveClient {
             .await
             .context("decode Drive file page")?;
         if page.incomplete_search {
-            bail!("Google Drive reported an incomplete user corpus search");
+            bail!("Google Drive reported an incomplete corpus search");
         }
         Ok(page)
     }
 
-    pub async fn list_user_changes(
+    pub async fn list_changes(
         &self,
         credential_id: i64,
+        shared_drive_id: Option<&str>,
         page_size: u16,
         page_token: &str,
     ) -> Result<ChangePage> {
-        let fields = "nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress),permissions(id,type,role,emailAddress,domain,allowFileDiscovery)))";
-        let request = self.http.get(format!("{}/changes", self.base_url)).query(&[
+        let fields =
+            format!("nextPageToken,newStartPageToken,changes(fileId,removed,file({FILE_FIELDS}))");
+        let mut request = self.http.get(format!("{}/changes", self.base_url)).query(&[
             ("pageToken", page_token.to_owned()),
             ("pageSize", page_size.to_string()),
-            ("fields", fields.to_owned()),
-            ("includeItemsFromAllDrives", "false".to_owned()),
+            ("fields", fields),
             ("supportsAllDrives", "true".to_owned()),
             ("includeRemoved", "true".to_owned()),
         ]);
+        request = match shared_drive_id {
+            Some(drive_id) => {
+                request.query(&[("driveId", drive_id), ("includeItemsFromAllDrives", "true")])
+            }
+            None => request.query(&[("includeItemsFromAllDrives", "false")]),
+        };
         self.send(request, credential_id)
             .await?
             .json::<ChangePage>()
@@ -225,24 +355,56 @@ impl DriveClient {
             .http
             .get(format!("{}/files/{file_id}", self.base_url))
             .query(&[("alt", "media"), ("supportsAllDrives", "true")]);
+        let bytes = self
+            .download_bounded(
+                request,
+                credential_id,
+                self.max_pdf_bytes,
+                "PDF exceeds the configured byte limit",
+            )
+            .await?;
+        if !bytes.starts_with(b"%PDF-") {
+            return Err(rejected("Drive response is not a PDF"));
+        }
+        Ok(bytes)
+    }
+
+    pub async fn export_google_doc(&self, credential_id: i64, file_id: &str) -> Result<Vec<u8>> {
+        let request = self
+            .http
+            .get(format!("{}/files/{file_id}/export", self.base_url))
+            .query(&[("mimeType", GOOGLE_DOC_EXPORT_MIME_TYPE)]);
+        self.download_bounded(
+            request,
+            credential_id,
+            self.max_extracted_bytes,
+            "exported Google Doc exceeds the configured byte limit",
+        )
+        .await
+    }
+
+    async fn download_bounded(
+        &self,
+        request: RequestBuilder,
+        credential_id: i64,
+        max_bytes: usize,
+        limit_error: &'static str,
+    ) -> Result<Vec<u8>> {
         let response = self.send(request, credential_id).await?;
         if response
             .content_length()
-            .is_some_and(|length| length > self.max_pdf_bytes as u64)
+            .is_some_and(|length| length > max_bytes as u64)
         {
-            return Err(rejected("PDF exceeds the configured byte limit"));
+            return Err(rejected(limit_error));
         }
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("read Drive PDF response")?;
-            if bytes.len().saturating_add(chunk.len()) > self.max_pdf_bytes {
-                return Err(rejected("PDF exceeds the configured byte limit"));
+            let chunk = chunk.context("read Google Drive file response")?;
+            if bytes.len().saturating_add(chunk.len()) > max_bytes {
+                return Err(rejected(limit_error));
             }
             bytes.extend_from_slice(&chunk);
-        }
-        if !bytes.starts_with(b"%PDF-") {
-            return Err(rejected("Drive response is not a PDF"));
         }
         Ok(bytes)
     }
@@ -285,12 +447,66 @@ impl DriveClient {
                     "Google Drive request was rejected with status {status}"
                 )));
             }
+            if status == StatusCode::FORBIDDEN {
+                let body = response
+                    .bytes()
+                    .await
+                    .context("read Google Drive error response")?;
+                if is_export_size_limit_error(&body) {
+                    return Err(rejected("Google Doc exceeds Drive's export size limit"));
+                }
+                bail!("Google Drive request failed with status {status}");
+            }
             return response
                 .error_for_status()
                 .context("Google Drive request failed");
         }
         unreachable!("Drive request loop always returns on its final attempt")
     }
+}
+
+#[derive(Deserialize)]
+struct DriveErrorResponse {
+    error: DriveError,
+}
+
+#[derive(Deserialize)]
+struct DriveError {
+    #[serde(default)]
+    errors: Vec<DriveErrorReason>,
+}
+
+#[derive(Deserialize)]
+struct DriveErrorReason {
+    #[serde(default)]
+    reason: String,
+}
+
+/// Drive reports oversized exports as 403 with this reason; rate limits also use 403.
+fn is_export_size_limit_error(body: &[u8]) -> bool {
+    serde_json::from_slice::<DriveErrorResponse>(body).is_ok_and(|response| {
+        response
+            .error
+            .errors
+            .iter()
+            .any(|error| error.reason == "exportSizeLimitExceeded")
+    })
+}
+
+fn folder_children_query(folder_ids: &[String]) -> String {
+    let parents = folder_ids
+        .iter()
+        .map(|id| format!("'{id}' in parents"))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    format!("({parents}) and {FOLDER_OR_DOCUMENT_QUERY}")
+}
+
+fn is_drive_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
 }
 
 fn server_retry_delay(failed_attempt: u32) -> Duration {
@@ -344,24 +560,72 @@ mod tests {
             created_time: None,
             modified_time: None,
             owners: Vec::new(),
-            permissions: Vec::new(),
         }
     }
 
     #[test]
-    fn only_active_non_shared_drive_pdfs_are_processable() {
-        assert!(file(PDF_MIME_TYPE, false).is_active_user_pdf());
-        assert!(!file(PDF_MIME_TYPE, true).is_active_user_pdf());
-        assert!(!file("application/vnd.google-apps.document", false).is_active_user_pdf());
+    fn only_active_supported_documents_are_processable() {
+        assert!(file(PDF_MIME_TYPE, false).is_active_document());
+        assert!(file(GOOGLE_DOC_MIME_TYPE, false).is_active_document());
+        assert!(!file(PDF_MIME_TYPE, true).is_active_document());
+        assert!(!file("application/vnd.google-apps.spreadsheet", false).is_active_document());
+
+        assert_eq!(file(PDF_MIME_TYPE, false).document_type(), Some("pdf"));
+        assert_eq!(
+            file(GOOGLE_DOC_MIME_TYPE, false).document_type(),
+            Some("google_doc")
+        );
+
+        let mut shared_drive_file = file(GOOGLE_DOC_MIME_TYPE, false);
+        shared_drive_file.drive_id = "shared-drive-1".to_owned();
+        assert!(shared_drive_file.is_active_document());
+    }
+
+    #[test]
+    fn files_belong_to_exactly_one_corpus() {
+        let my_drive_file = file(PDF_MIME_TYPE, false);
+        assert!(my_drive_file.belongs_to(None));
+        assert!(!my_drive_file.belongs_to(Some("shared-drive-1")));
 
         let mut shared_drive_file = file(PDF_MIME_TYPE, false);
         shared_drive_file.drive_id = "shared-drive-1".to_owned();
-        assert!(!shared_drive_file.is_active_user_pdf());
+        assert!(!shared_drive_file.belongs_to(None));
+        assert!(shared_drive_file.belongs_to(Some("shared-drive-1")));
+        assert!(!shared_drive_file.belongs_to(Some("shared-drive-2")));
+    }
+
+    #[test]
+    fn folder_ids_cannot_escape_the_parents_query() {
+        assert!(is_drive_id("0AbC-d_9"));
+        assert!(!is_drive_id(""));
+        assert!(!is_drive_id("x' or '1' = '1"));
+        assert!(!is_drive_id("x\\"));
+    }
+
+    #[test]
+    fn batched_folder_query_filters_every_parent() {
+        let query = folder_children_query(&["a".to_owned(), "b".to_owned()]);
+        assert!(query.starts_with("('a' in parents or 'b' in parents) and trashed = false and ("));
     }
 
     #[test]
     fn drive_version_is_the_stable_revision_key() {
         assert_eq!(file(PDF_MIME_TYPE, false).source_version(), "42");
+    }
+
+    #[test]
+    fn only_export_size_limit_errors_are_permanent_forbidden_errors() {
+        let error = |reason: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "error": {"code": 403, "errors": [{"domain": "global", "reason": reason}]}
+            }))
+            .unwrap()
+        };
+        assert!(is_export_size_limit_error(&error(
+            "exportSizeLimitExceeded"
+        )));
+        assert!(!is_export_size_limit_error(&error("userRateLimitExceeded")));
+        assert!(!is_export_size_limit_error(b"not json"));
     }
 
     #[test]

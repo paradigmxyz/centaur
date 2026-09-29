@@ -1173,9 +1173,9 @@ describe('slackbotv2', () => {
     const defaultInput = JSON.parse(
       codexApi.executes[2]!.body.input_lines.at(-1)!
     ) as Record<string, unknown>
-    // The same inferred effort is incompatible with the currently selected
-    // Claude model and is therefore dropped.
-    expect(defaultInput.reasoning).toBeUndefined()
+    // The default Claude model also supports Max, so the inferred effort is
+    // forwarded; the harness applies it to this turn only.
+    expect(defaultInput.reasoning).toBe('max')
 
     const nanocodexState = await sharedState.get<Record<string, unknown>>(
       `thread-state:${threadKey(nanocodexRoot.ts)}`
@@ -1428,9 +1428,9 @@ describe('slackbotv2', () => {
     await sharedState.connect()
     bot = createTestBot({
       state: sharedState,
-      // The channel pins Claude and also carries an incompatible Codex effort.
+      // The channel pins Claude and also carries a Codex-only effort.
       channelDefaults: {
-        [CHANNEL_ID]: { harnessType: 'claudecode', model: 'claude-opus-4-8', reasoning: 'high' }
+        [CHANNEL_ID]: { harnessType: 'claudecode', model: 'claude-opus-4-8', reasoning: 'minimal' }
       }
     })
 

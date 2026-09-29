@@ -63,7 +63,30 @@ jobs:
             return 1
           }
 
-          if matches '^contrib/chart/'; then
+          # Print a chart file without YAML/template comments and blank lines.
+          strip_chart_comments() {
+            case "$1" in
+              *.yaml | *.yml | *.tpl)
+                perl -0pe 's/\{\{-?\s*\/\*.*?\*\/\s*-?\}\}//gs; s/^[ \t]*#.*(\n|\z)//mg; s/^[ \t]*(\n|\z)//mg'
+                ;;
+              *) cat ;;
+            esac
+          }
+
+          chart_changed() {
+            local file
+            while IFS= read -r file; do
+              [[ -n "${file}" ]] || continue
+              if ! cmp -s \
+                <(git show "${base}:${file}" 2>/dev/null | strip_chart_comments "${file}") \
+                <(git show "HEAD:${file}" 2>/dev/null | strip_chart_comments "${file}"); then
+                return 0
+              fi
+            done < <(git diff --name-only --no-renames "${base}...HEAD" -- contrib/chart/)
+            return 1
+          }
+
+          if chart_changed; then
             chart_yaml="contrib/chart/Chart.yaml"
             previous_version="$(git show "${base}:${chart_yaml}" | awk '$1 == "version:" { print $2; exit }')"
             current_version="$(awk '$1 == "version:" { print $2; exit }' "${chart_yaml}")"
@@ -101,6 +124,7 @@ jobs:
             '^crates/absurd-sdk/' \
             '^crates/active-record-encryption/' \
             '^services/company-context/' \
+            '^\.github/scripts/start-paradedb-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
           set_output proxy_sync_checks \
             '^crates/active-record-encryption/' \
@@ -234,7 +258,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Start Test Postgres
+        working-directory: .
+        run: .github/scripts/start-paradedb-postgres.sh company-context-test-postgres 5432 postgres
+
       - name: Test
+        env:
+          COMPANY_CONTEXT_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: cargo test --locked
 
   proxy-sync-checks:

@@ -12,6 +12,7 @@ from rich.json import JSON
 from rich.table import Table
 
 from .client import CompanyContextClient
+from .drive_v2 import DriveV2Client
 
 load_dotenv()
 
@@ -20,9 +21,20 @@ app = typer.Typer(
     help=(
         "Search or run scoped SQL over company history, Slack DMs, Google Docs, and "
         "Granola notes. Search for and read the `company-context` skill with "
-        "`centaur-skills` before use."
+        "`centaur-skills` before use.\n\n"
+        "Preview: `company_context v2 search|list|read|latest-date` query only Google "
+        "Docs and PDFs from the company-context service's Drive index. Run "
+        "`company_context v2 status` to check whether that index is available."
     ),
 )
+v2_app = typer.Typer(
+    help=(
+        "Preview: query Google Docs and PDFs from the company-context service's Drive "
+        "index. Results cover only that index; use the top-level commands for other "
+        "sources. Run `company_context v2 status` first."
+    ),
+)
+app.add_typer(v2_app, name="v2")
 
 
 @app.command("health")
@@ -376,6 +388,147 @@ def latest_date(
 ) -> None:
     """Show the latest indexed timestamp as JSON."""
     result = CompanyContextClient().latest_date(source=source, source_type=source_type)
+    _require_ok(result)
+    _print_json(result)
+
+
+def _print_documents_table(title: str, results: list[dict[str, Any]]) -> None:
+    table = Table(title=title)
+    table.add_column("Document ID", style="dim", max_width=36)
+    table.add_column("Type", style="cyan", max_width=12)
+    table.add_column("Updated", style="green", max_width=20)
+    table.add_column("Title", style="bold", max_width=36)
+    table.add_column("Preview", max_width=72)
+    for item in results:
+        table.add_row(
+            str(item.get("document_id") or ""),
+            str(item.get("source_type") or ""),
+            str(item.get("source_updated_at") or ""),
+            str(item.get("title") or ""),
+            str(item.get("preview") or ""),
+        )
+    console.print(table)
+
+
+_V2_SOURCE_TYPE_HELP = "Filter by document type: google_doc or pdf."
+
+
+@v2_app.command("status")
+def v2_status() -> None:
+    """Show whether the Drive index is readable, as JSON."""
+    result = DriveV2Client().status()
+    _require_ok(result)
+    _print_json(result)
+
+
+@v2_app.command("search")
+def v2_search(
+    query: str = typer.Argument(..., help="Search query."),
+    limit: int = typer.Option(10, "--limit", "-n", help="Max results."),
+    source_type: str | None = typer.Option(None, "--source-type", help=_V2_SOURCE_TYPE_HELP),
+    occurred_after: str | None = typer.Option(
+        None, "--after", help="Only documents modified on/after this time."
+    ),
+    occurred_before: str | None = typer.Option(
+        None, "--before", help="Only documents modified before this time."
+    ),
+    hybrid: bool = typer.Option(
+        True,
+        "--hybrid/--no-hybrid",
+        help="Fuse keyword and vector results when embeddings are enabled.",
+    ),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or human-readable text.",
+    ),
+) -> None:
+    """Search Drive documents visible to the current user."""
+    result = DriveV2Client().search(
+        query=query,
+        limit=limit,
+        source_type=source_type,
+        occurred_after=occurred_after,
+        occurred_before=occurred_before,
+        hybrid=hybrid,
+    )
+    _require_ok(result)
+    if json_output:
+        _print_json(result)
+        return
+    results = result.get("results") or []
+    if not results:
+        console.print(f"[yellow]No Drive documents found for: {query}[/yellow]")
+        return
+    _print_documents_table(f"Drive Search ({len(results)})", results)
+
+
+@v2_app.command("list")
+def v2_list(
+    limit: int = typer.Option(10, "--limit", "-n", help="Max documents."),
+    source_type: str | None = typer.Option(None, "--source-type", help=_V2_SOURCE_TYPE_HELP),
+    occurred_after: str | None = typer.Option(
+        None, "--after", help="Only documents modified on/after this time."
+    ),
+    occurred_before: str | None = typer.Option(
+        None, "--before", help="Only documents modified before this time."
+    ),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or human-readable text.",
+    ),
+) -> None:
+    """List recently modified Drive documents visible to the current user."""
+    result = DriveV2Client().list_documents(
+        limit=limit,
+        source_type=source_type,
+        occurred_after=occurred_after,
+        occurred_before=occurred_before,
+    )
+    _require_ok(result)
+    if json_output:
+        _print_json(result)
+        return
+    results = result.get("results") or []
+    if not results:
+        console.print("[yellow]No Drive documents found.[/yellow]")
+        return
+    _print_documents_table(f"Drive Documents ({len(results)})", results)
+
+
+@v2_app.command("read")
+def v2_read(
+    document_id: str = typer.Argument(..., help="Document ID returned by v2 search/list."),
+    max_chars: int = typer.Option(0, "--max-chars", help="Maximum content chars; 0 means full."),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or human-readable text.",
+    ),
+) -> None:
+    """Read a Drive document returned by v2 search or list."""
+    result = DriveV2Client().read_document(document_id=document_id, max_chars=max_chars)
+    _require_ok(result)
+    if json_output:
+        _print_json(result)
+        return
+    console.print(f"[bold]{result.get('title') or result.get('document_id')}[/bold]")
+    if result.get("url"):
+        console.print(f"[dim]{result['url']}[/dim]")
+    console.print(result.get("content") or "")
+    if result.get("truncated"):
+        console.print(
+            f"[yellow]Truncated at {result.get('chars')} of {result.get('total_chars')} chars.[/yellow]"
+        )
+
+
+@v2_app.command("latest-date")
+def v2_latest_date(
+    source_type: str | None = typer.Option(None, "--source-type", help=_V2_SOURCE_TYPE_HELP),
+) -> None:
+    """Show the latest indexed Drive timestamp as JSON."""
+    result = DriveV2Client().latest_date(source_type=source_type)
     _require_ok(result)
     _print_json(result)
 

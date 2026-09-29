@@ -359,7 +359,6 @@
       "allOf": [{ "$ref": "#/definitions/podScheduling" }],
       "type": "object",
       "properties": {
-        "enabled": { "type": "boolean" },
         "replicaCount": { "type": "integer", "minimum": 1 },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "databaseMaxConnections": { "type": "integer", "minimum": 1 },
