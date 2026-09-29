@@ -472,7 +472,7 @@ proxySync:
     annotations: {}
   resources: {}
 
-# Standalone company-context ingestion service. It indexes Google Docs and PDFs
+# Standalone company-context ingestion service. The first version indexes PDFs
 # from Google Drive into its private system and data schemas. Disabled while the
 # corpus is validated alongside the legacy Python workflows.
 experimentalCompanyContext:
