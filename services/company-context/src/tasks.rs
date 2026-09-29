@@ -1165,7 +1165,7 @@ async fn extract_document(
                 },
                 SpawnOptions {
                     idempotency_key: Some(format!(
-                        "drive.document.embed:{}:{}:{content_hash}:{}:{}",
+                        "drive.document.embed:{}:{}:{content_hash}:{}:{}:{observation_key}",
                         params.credential_id,
                         file.id,
                         state.embeddings.model(),
@@ -1295,21 +1295,65 @@ async fn embed_document(
             files: 0,
         });
     }
-    let title: String = row.try_get("name")?;
-    let inputs = chunk_rows
+    let metadata: Value = row.try_get("metadata")?;
+    let file: DriveFile =
+        serde_json::from_value(metadata.clone()).context("decode staged Drive metadata")?;
+    let mut chunks = Vec::with_capacity(chunk_rows.len());
+    for chunk in &chunk_rows {
+        let chunk_id: String = chunk.try_get("chunk_id")?;
+        let body: String = chunk.try_get("body")?;
+        let content_hash = hex_sha256(format!("{}\n\n{}", file.name, body).as_bytes());
+        let document_id = format!("google-drive:{}:{chunk_id}", file.id);
+        chunks.push((document_id, chunk_id, body, content_hash));
+    }
+    // Drive versions change for metadata-only edits; reuse vectors for unchanged chunk text.
+    let reusable: BTreeSet<String> = sqlx::query_scalar(
+        r#"
+        SELECT embeddings.document_id
+        FROM company_context_data.google_drive_document_embeddings embeddings
+        JOIN unnest($1::text[], $2::text[]) AS chunks(document_id, content_hash)
+          ON chunks.document_id = embeddings.document_id
+         AND chunks.content_hash = embeddings.content_hash
+        WHERE embeddings.model = $3
+          AND embeddings.dimensions = $4
+        "#,
+    )
+    .bind(
+        chunks
+            .iter()
+            .map(|chunk| chunk.0.as_str())
+            .collect::<Vec<_>>(),
+    )
+    .bind(
+        chunks
+            .iter()
+            .map(|chunk| chunk.3.as_str())
+            .collect::<Vec<_>>(),
+    )
+    .bind(state.embeddings.model())
+    .bind(state.embeddings.dimensions() as i32)
+    .fetch_all(&state.pool)
+    .await?
+    .into_iter()
+    .collect();
+    let inputs = chunks
         .iter()
-        .map(|row| {
-            let body = row.get::<String, _>("body");
-            if title.is_empty() {
-                body
+        .filter(|chunk| !reusable.contains(&chunk.0))
+        .map(|(_, _, body, _)| {
+            if file.name.is_empty() {
+                body.clone()
             } else {
-                format!("{title}\n\n{body}")
+                format!("{}\n\n{body}", file.name)
             }
         })
         .collect::<Vec<_>>();
-    let result = state.embeddings.embed(&inputs).await;
-    let embeddings = match result {
-        Ok(embeddings) => embeddings,
+    let result = if inputs.is_empty() {
+        Ok(Vec::new())
+    } else {
+        state.embeddings.embed(&inputs).await
+    };
+    let mut embeddings = match result {
+        Ok(embeddings) => embeddings.into_iter(),
         Err(error) => {
             let rejected = is_rejected(&error);
             record_embedding_failure(
@@ -1335,9 +1379,6 @@ async fn embed_document(
             return Err(error);
         }
     };
-    let metadata: Value = row.try_get("metadata")?;
-    let file: DriveFile =
-        serde_json::from_value(metadata.clone()).context("decode staged Drive metadata")?;
     let mut tx = state.pool.begin().await?;
     if !lock_current_observation(&mut tx, &file.id, &params.observation_key).await? {
         tx.rollback().await?;
@@ -1347,12 +1388,8 @@ async fn embed_document(
         });
     }
     replace_access(&mut tx, &file.id, &file.source_version(), &file.permissions).await?;
-    let mut document_ids = Vec::with_capacity(chunk_rows.len());
-    for (chunk, embedding) in chunk_rows.iter().zip(embeddings) {
-        let chunk_id: String = chunk.try_get("chunk_id")?;
-        let body: String = chunk.try_get("body")?;
-        let content_hash = hex_sha256(format!("{}\n\n{}", file.name, body).as_bytes());
-        let document_id = format!("google-drive:{}:{chunk_id}", file.id);
+    let mut document_ids = Vec::with_capacity(chunks.len());
+    for (document_id, chunk_id, body, content_hash) in &chunks {
         document_ids.push(document_id.clone());
         sqlx::query(
             r#"
@@ -1380,25 +1417,31 @@ async fn embed_document(
                 updated_at = NOW()
             "#,
         )
-        .bind(&document_id)
+        .bind(document_id)
         .bind(&file.id)
-        .bind(&chunk_id)
+        .bind(chunk_id)
         .bind(
             file.document_type()
                 .context("staged Drive file has unsupported MIME type")?,
         )
         .bind(&file.mime_type)
         .bind(&file.name)
-        .bind(&body)
+        .bind(body)
         .bind(&file.web_view_link)
         .bind(&file.drive_id)
         .bind(file.created_time)
         .bind(file.modified_time)
         .bind(file.source_version())
-        .bind(&content_hash)
+        .bind(content_hash)
         .bind(&metadata)
         .execute(&mut *tx)
         .await?;
+        if reusable.contains(document_id) {
+            continue;
+        }
+        let embedding = embeddings
+            .next()
+            .context("embeddings response omitted a chunk")?;
         let vector = serde_json::to_string(&embedding)?;
         sqlx::query(
             r#"
@@ -1414,10 +1457,10 @@ async fn embed_document(
                 updated_at = NOW()
             "#,
         )
-        .bind(&document_id)
+        .bind(document_id)
         .bind(state.embeddings.model())
         .bind(state.embeddings.dimensions() as i32)
-        .bind(&content_hash)
+        .bind(content_hash)
         .bind(vector)
         .execute(&mut *tx)
         .await?;
