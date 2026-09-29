@@ -124,6 +124,7 @@ jobs:
             '^crates/absurd-sdk/' \
             '^crates/active-record-encryption/' \
             '^services/company-context/' \
+            '^\.github/scripts/start-paradedb-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
           set_output proxy_sync_checks \
             '^crates/active-record-encryption/' \
@@ -257,7 +258,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Start Test Postgres
+        working-directory: .
+        run: .github/scripts/start-paradedb-postgres.sh company-context-test-postgres 5432 postgres
+
       - name: Test
+        env:
+          COMPANY_CONTEXT_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: cargo test --locked
 
   proxy-sync-checks:

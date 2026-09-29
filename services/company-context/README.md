@@ -7,7 +7,7 @@ The service owns these Postgres schemas:
 - `company_context_system`: private cursors, staging, and processing state.
 - `company_context_data`: retrieval-facing Drive documents, access observations, and embeddings.
 
-The initial migrations deliberately add no retrieval-role grants or RLS policies. The corpus is populated for validation but is not exposed through the company-context tool yet. The Helm deployment is gated by `experimentalCompanyContext.enabled` until it is ready for production.
+The `centaur_company_context_reader` role used by the company-context tool can read `google_drive_documents` and `google_drive_document_embeddings`. Row-level security limits each reader to files that a live broker credential with the same Google subject (`centaur.google_subject`) still observes. The system schema and `google_drive_document_access` stay private. The Helm deployment is gated by `experimentalCompanyContext.enabled` until it is ready for production.
 
 ## Required infrastructure
 
