@@ -5,12 +5,16 @@ use std::time::Duration;
 
 use codex_app_server_protocol::UserInput;
 use serde_json::json;
+use uuid::Uuid;
 
 use crate::{
     HarnessKind, HarnessServer, NormalizedContent, NormalizedEvent, Result, ThreadState,
     anthropic::{AnthropicEventNormalizer, AnthropicStreamEvent},
     command_from_override, user_input_to_anthropic_content,
 };
+
+/// Effort levels Claude Code accepts for its `effortLevel` setting.
+const CLAUDE_EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
 /// Defers agent text until the owning message's fate is known, so agentMessage
 /// items can be emitted with an authoritative stop reason. Claude's per-block
@@ -267,6 +271,30 @@ impl HarnessServer for ClaudeCodeHarness {
         Ok(bytes)
     }
 
+    /// The Claude process outlives each turn, so a requested effort is applied
+    /// in-band with an `apply_flag_settings` control request ahead of the
+    /// turn's user message. Unset keeps the settings.json `effortLevel`.
+    fn stdin_before_turn(&self, state: &ThreadState) -> Result<Vec<u8>> {
+        let Some(effort) = state.reasoning_effort.as_deref() else {
+            return Ok(Vec::new());
+        };
+        if !CLAUDE_EFFORT_LEVELS.contains(&effort) {
+            eprintln!("ignoring unsupported Claude Code effort level {effort:?}");
+            return Ok(Vec::new());
+        }
+        let payload = json!({
+            "type": "control_request",
+            "request_id": format!("effort-{}", Uuid::new_v4().simple()),
+            "request": {
+                "subtype": "apply_flag_settings",
+                "settings": { "effortLevel": effort },
+            },
+        });
+        let mut bytes = serde_json::to_vec(&payload)?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+
     fn parse_stdout_line(&self, line: &str) -> Result<Self::Event> {
         AnthropicStreamEvent::parse_json_line(line)
     }
@@ -302,10 +330,12 @@ impl HarnessServer for ClaudeCodeHarness {
 
 #[cfg(test)]
 mod tests {
-    use codex_app_server_protocol::UserInput;
+    use std::path::PathBuf;
+
+    use codex_app_server_protocol::{ThreadStartParams, UserInput};
     use serde_json::{Value, json};
 
-    use crate::{HarnessServer, NormalizedContent, NormalizedEvent};
+    use crate::{HarnessServer, NormalizedContent, NormalizedEvent, ThreadState};
 
     use super::{ClaudeCodeHarness, ClaudeEventNormalizer};
 
@@ -558,5 +588,38 @@ mod tests {
         assert!(value.get("steer").is_none());
         assert_eq!(value["message"]["role"], "user");
         assert_eq!(value["message"]["content"][0]["text"], "new guidance");
+    }
+
+    fn thread_state_with_effort(effort: Option<&str>) -> ThreadState {
+        let mut state =
+            ClaudeCodeHarness.thread_state(&ThreadStartParams::default(), PathBuf::from("/tmp"));
+        state.reasoning_effort = effort.map(str::to_owned);
+        state
+    }
+
+    #[test]
+    fn requested_effort_is_applied_with_a_flag_settings_control_request() {
+        let bytes = ClaudeCodeHarness
+            .stdin_before_turn(&thread_state_with_effort(Some("max")))
+            .unwrap();
+        assert_eq!(bytes.last(), Some(&b'\n'));
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(value["type"], "control_request");
+        assert!(value["request_id"].as_str().unwrap().starts_with("effort-"));
+        assert_eq!(
+            value["request"],
+            json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": "max"}})
+        );
+    }
+
+    #[test]
+    fn unset_or_unsupported_effort_writes_nothing_before_the_turn() {
+        for effort in [None, Some("minimal"), Some("none")] {
+            let bytes = ClaudeCodeHarness
+                .stdin_before_turn(&thread_state_with_effort(effort))
+                .unwrap();
+            assert!(bytes.is_empty(), "{effort:?}");
+        }
     }
 }

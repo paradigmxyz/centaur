@@ -50,6 +50,8 @@ const GPT_6_ASTRA_REASONING_EFFORTS = new Set([
   'max',
   'ultra'
 ])
+// Claude Code `effortLevel` values; applied per turn by the harness server.
+const CLAUDE_CODE_REASONING_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
 const CODEX_REASONING_EFFORTS_BY_MODEL: Record<string, ReadonlySet<string>> = {
   'gpt-5.2': STANDARD_CODEX_REASONING_EFFORTS,
   'gpt-5.2-codex': CODEX_MODEL_REASONING_EFFORTS,
@@ -173,6 +175,9 @@ export function effectiveReasoningForHarness(
   configured?: Record<string, string>
 ): string | undefined {
   const key = harnessType?.trim().toLowerCase()
+  if (key === 'claudecode') {
+    return requested?.trim().toLowerCase() || defaultReasoningForHarness(key, configured)
+  }
   if (key !== 'codex' && key !== 'nanocodex') return undefined
   const reasoning = requested?.trim().toLowerCase() || defaultReasoningForHarness(key, configured)
   // Nanocodex has no distinct Minimal level; its adapter maps Minimal to Low.
@@ -188,6 +193,9 @@ export function reasoningForModel(
   const harness = harnessType?.trim().toLowerCase()
   const selectedModel = model?.trim().toLowerCase()
   const effort = reasoning?.trim().toLowerCase()
+  if (harness === 'claudecode') {
+    return effort && CLAUDE_CODE_REASONING_EFFORTS.has(effort) ? effort : undefined
+  }
   if (!selectedModel || !effort) return undefined
   if (harness !== 'codex' && harness !== 'nanocodex') return undefined
   // Nanocodex maps its compatibility-only Minimal value to Low before it

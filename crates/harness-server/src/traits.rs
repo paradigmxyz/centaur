@@ -23,6 +23,9 @@ pub struct ThreadState {
     pub model: String,
     pub model_provider: String,
     pub service_tier: Option<String>,
+    /// Reasoning effort requested for this thread's turns. Like `model`, a
+    /// per-turn selection sticks for later turns until another replaces it.
+    pub reasoning_effort: Option<String>,
     pub harness_session_id: Option<String>,
     pub completed_turns: Vec<Turn>,
     pub process: Option<HarnessChild>,
@@ -66,6 +69,11 @@ pub trait HarnessServer {
     fn stdin_for_steer(&self, input: &[UserInput]) -> Result<Vec<u8>> {
         self.stdin_for_turn(input)
     }
+    /// Stdin written ahead of each turn's input, for per-turn settings a
+    /// long-lived harness process applies in-band. Empty by default.
+    fn stdin_before_turn(&self, _state: &ThreadState) -> Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
     fn parse_stdout_line(&self, line: &str) -> Result<Self::Event>;
     fn normalize_events(
         &self,
@@ -97,6 +105,7 @@ pub trait HarnessServer {
             model,
             model_provider,
             service_tier: params.service_tier.clone().flatten(),
+            reasoning_effort: None,
             harness_session_id: None,
             completed_turns: Vec::new(),
             process: None,
