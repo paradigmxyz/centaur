@@ -24,7 +24,7 @@
     "@chat-adapter/state-memory": "4.31.0",
     "@types/pg": "^8.23.1",
     "@types/bun": "^1.4.2",
-    "@types/node": "^26.6.2",
+    "@types/node": "^26.6.3",
     "@typescript/native-preview": "^7.0.0-dev.20260707.2",
     "typescript": "^7.0.2"
   }
