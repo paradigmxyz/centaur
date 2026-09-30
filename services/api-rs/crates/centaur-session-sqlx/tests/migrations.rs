@@ -1,8 +1,5 @@
-//! Migration ordering across text-search backends.
-//!
-//! A fresh database applies every migration in version order. An existing
-//! database applied the same list in batches, one per release. Both must end
-//! with the same schema for every backend.
+//! Migrations for every text-search backend: fresh installs, databases from
+//! before the backends split, and backend mismatches.
 
 use std::{
     env,
@@ -64,78 +61,68 @@ async fn fresh_databases_migrate_and_index_every_searchable_table() -> Result<()
 }
 
 #[tokio::test]
-async fn every_upgrade_path_matches_a_fresh_database() -> Result<(), Box<dyn Error>> {
-    let Some(server) = TestServer::connect().await? else {
+async fn legacy_bm25_databases_adopt_paradedb() -> Result<(), Box<dyn Error>> {
+    let Some(server) = TestServer::legacy_bm25_server().await? else {
         return Ok(());
     };
-    for backend in server.backends.clone() {
-        let reference = server.fresh_schema(backend).await?;
-        let migrations = migration_list(backend);
-        // Roles are cluster-wide and later migrations drop some, so each
-        // upgrade path gets the server to itself.
-        for applied in 1..migrations.len() {
-            let stopped_after = migrations[applied - 1].version;
-            let mut database = server.create_database().await?;
-            let result = async {
-                run_list(&mut database.conn, migrations[..applied].to_vec()).await?;
-                migrate(&mut database.conn, backend).await?;
-                let schema = schema_snapshot(&mut database.conn).await?;
-                assert_same_schema(
-                    &reference,
-                    &schema,
-                    &format!("{backend} database upgraded after version {stopped_after}"),
-                );
-                Ok::<_, Box<dyn Error>>(())
-            }
-            .await;
-            server.drop_database(database, result).await?;
-        }
+    let reference = server.fresh_schema(TextSearchBackend::Paradedb).await?;
+    let mut database = server.create_legacy_bm25_database().await?;
+    let result = async {
+        migrate(&mut database.conn, TextSearchBackend::Paradedb).await?;
+        let schema = schema_snapshot(&mut database.conn).await?;
+        assert_same_schema(
+            &reference,
+            &schema,
+            "legacy BM25 database adopting paradedb",
+        );
+        Ok::<_, Box<dyn Error>>(())
     }
-    Ok(())
+    .await;
+    server.drop_database(database, result).await
 }
 
 #[tokio::test]
-async fn legacy_bm25_databases_adopt_either_backend() -> Result<(), Box<dyn Error>> {
-    let Some(server) = TestServer::connect().await? else {
+async fn legacy_bm25_databases_refuse_postgres_until_indexes_are_dropped()
+-> Result<(), Box<dyn Error>> {
+    let Some(server) = TestServer::legacy_bm25_server().await? else {
         return Ok(());
     };
-    if !server.backends.contains(&TextSearchBackend::Paradedb) {
-        eprintln!("skipping legacy BM25 upgrade test: pg_search is unavailable");
-        return Ok(());
-    }
-    for backend in TextSearchBackend::ALL {
-        let mut reference = server.fresh_schema(backend).await?;
-        let mut database = server.create_database().await?;
-        let result = async {
-            let legacy = migration_list(backend)
-                .into_iter()
-                .take_while(|migration| migration.version <= LAST_LEGACY_CORE_VERSION)
-                .collect();
-            run_list(&mut database.conn, legacy).await?;
-            sqlx::raw_sql(LEGACY_BM25_INDEXES_SQL)
-                .execute(&mut database.conn)
-                .await?;
-            migrate(&mut database.conn, backend).await?;
+    let mut reference = server.fresh_schema(TextSearchBackend::Postgres).await?;
+    let mut database = server.create_legacy_bm25_database().await?;
+    let result = async {
+        let before = schema_snapshot(&mut database.conn).await?;
+        let error = migrate(&mut database.conn, TextSearchBackend::Postgres)
+            .await
+            .expect_err("postgres must not adopt a database with BM25 indexes");
+        let SessionStoreError::Bm25IndexesPresent { indexes } = &error else {
+            panic!("unexpected error: {error}");
+        };
+        assert_eq!(indexes.len(), SEARCHABLE_TABLES.len());
+        assert_eq!(schema_snapshot(&mut database.conn).await?, before);
 
-            let mut schema = schema_snapshot(&mut database.conn).await?;
-            // The postgres backend leaves an installed pg_search in place, and
-            // ParadeDB images may preinstall it in new databases.
-            if backend == TextSearchBackend::Postgres {
-                for snapshot in [&mut reference, &mut schema] {
-                    snapshot.retain(|line| line != "extension pg_search");
-                }
-            }
-            assert_same_schema(
-                &reference,
-                &schema,
-                &format!("legacy BM25 database adopting {backend}"),
-            );
-            Ok::<_, Box<dyn Error>>(())
+        // Once the operator drops the indexes, the database adopts postgres.
+        for index in indexes {
+            database
+                .conn
+                .execute(format!(r#"drop index "{index}""#).as_str())
+                .await?;
         }
-        .await;
-        server.drop_database(database, result).await?;
+        migrate(&mut database.conn, TextSearchBackend::Postgres).await?;
+        let mut schema = schema_snapshot(&mut database.conn).await?;
+        // Dropping the indexes leaves pg_search installed, and ParadeDB
+        // images may preinstall it in new databases.
+        for snapshot in [&mut reference, &mut schema] {
+            snapshot.retain(|line| line != "extension pg_search");
+        }
+        assert_same_schema(
+            &reference,
+            &schema,
+            "legacy BM25 database adopting postgres",
+        );
+        Ok::<_, Box<dyn Error>>(())
     }
-    Ok(())
+    .await;
+    server.drop_database(database, result).await
 }
 
 #[tokio::test]
@@ -360,6 +347,41 @@ impl TestServer {
             database_url,
             backends,
         }))
+    }
+
+    /// A server that can reproduce databases from before the backends split.
+    async fn legacy_bm25_server() -> Result<Option<Self>, Box<dyn Error>> {
+        let server = Self::connect().await?;
+        if server
+            .as_ref()
+            .is_some_and(|server| !server.backends.contains(&TextSearchBackend::Paradedb))
+        {
+            eprintln!("skipping legacy BM25 test: pg_search is unavailable");
+            return Ok(None);
+        }
+        Ok(server)
+    }
+
+    /// A database as the pre-split releases left it: every core migration
+    /// applied, with the BM25 indexes those migrations created.
+    async fn create_legacy_bm25_database(&self) -> Result<TestDatabase, Box<dyn Error>> {
+        let mut database = self.create_database().await?;
+        let result = async {
+            let legacy = migration_list(TextSearchBackend::Paradedb)
+                .into_iter()
+                .take_while(|migration| migration.version <= LAST_LEGACY_CORE_VERSION)
+                .collect();
+            run_list(&mut database.conn, legacy).await?;
+            sqlx::raw_sql(LEGACY_BM25_INDEXES_SQL)
+                .execute(&mut database.conn)
+                .await?;
+            Ok::<_, Box<dyn Error>>(())
+        }
+        .await;
+        match result {
+            Ok(()) => Ok(database),
+            Err(error) => self.drop_database(database, Err(error)).await,
+        }
     }
 
     async fn create_database(&self) -> Result<TestDatabase, Box<dyn Error>> {
