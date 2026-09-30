@@ -131,3 +131,26 @@ Rotating any of these keys makes previously encrypted data unreadable. Treat the
 `iron-control` exposes a JSON API under `/api/v1`. All resource endpoints authenticate with an API key sent as a bearer token (`Authorization: Bearer iak_...`); the one exception is `POST /api/v1/proxy/sync`, which `iron-proxy` instances call with a proxy bearer token.
 
 See [docs/API.md](docs/API.md) for the full reference: authentication, request/response conventions, pagination, error formats, the shared secret-source and request-rule shapes, and detailed payloads for every endpoint (static secrets, GCP auth secrets, OAuth token secrets, principals, roles, grants, API keys, proxies, and proxy sync).
+
+### Shared Mercator connection
+
+Admins open **Integrations → Admin Integrations → Mercator** and choose
+**Connect**. Centaur registers its OAuth client with Mercator, then uses
+the existing browser-bound PKCE consent flow. Wallet creation and spending
+approval happen in Mercator/Tempo Wallet; Centaur never stores the wallet root
+key. Configure `CENTAUR_CONSOLE_PUBLIC_URL` to the stable public console origin
+before first connection so client registration and callbacks use the same URL.
+
+The connection is shared within one console deployment. Connecting creates no
+roles or grants. From **Connection settings → Agent access**, use the existing
+secret page to assign the credential to selected roles. Existing principal grants
+and role defaults remain unchanged on connection and reconnection.
+The encrypted broker credential refreshes
+through the normal broker jobs. Its wrapping secret injects the bearer token only
+for `POST https://mercator.sh/mcp/auth`. Keep the broker polling/worker running for
+unattended credential renewal.
+
+Reconnect requires the same wallet. Existing manually configured Mercator
+credentials are left untouched and require operator review before onboarding.
+Wallet connection and Slack MACH claiming are separate flows; Slack claiming is
+not implemented by this console connection.

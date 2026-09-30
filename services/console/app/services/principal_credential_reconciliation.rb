@@ -98,7 +98,7 @@ class PrincipalCredentialReconciliation
   # subject labels still reconciles by email, so new registry entries get
   # matching for free.
   def providers
-    Oauth::Providers.keys
+    Oauth::Providers.keys - [ "mercator" ]
   end
 
   def apply_entry(entry)

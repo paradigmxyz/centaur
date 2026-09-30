@@ -919,7 +919,7 @@
       { label: "Data Sync", icon: "database", path: console_etls_path, matches: [ "/console/etls" ] }
     ] %>
   <% end %>
-  <% nav_items << { label: "Integrations", icon: "link", path: console_integrations_path, matches: [ "/console/integrations" ] } %>
+  <% nav_items << { label: "Integrations", icon: "link", path: console_integrations_path, matches: [ "/console/integrations", "/console/mercator" ] } %>
 
   <body class="h-full overflow-hidden bg-ink-900 text-zinc-300 font-mono antialiased <%= "console-descoped" if descoped? %>">
     <% if descoped? %>

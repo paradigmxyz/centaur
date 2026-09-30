@@ -7,7 +7,7 @@ module Api
         before_action :authenticate_sandbox_jwt!
 
         def index
-          apps = OauthApp.where(enabled: true).order(:slug, :id)
+          apps = OauthApp.where(enabled: true).where.not(provider: "mercator").order(:slug, :id)
           render json: { data: apps.map { |app| app_payload(app) } }
         end
 

@@ -116,6 +116,9 @@ Rails.application.routes.draw do
   end
   get "console/credentials/:id", to: "console#credential", as: :console_credential
   get "console/oauth_apps", to: "console#oauth_apps", as: :console_oauth_apps
+  get "console/mercator", to: "console/mercator#show", as: :console_mercator
+  post "console/mercator/connect", to: "console/mercator#connect", as: :connect_console_mercator
+
   # User-facing list of enabled OAuth apps and their consent start links. Not
   # admin-gated: any signed-in team member connects integrations from here.
   get "console/integrations", to: "console/integrations#index", as: :console_integrations
