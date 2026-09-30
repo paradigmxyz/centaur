@@ -6,12 +6,14 @@ use std::{
     env,
     error::Error,
     future::Future,
+    panic::{self, AssertUnwindSafe},
     pin::Pin,
     str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use centaur_session_sqlx::{SessionStoreError, TextSearchBackend, migrate, migration_list};
+use futures_util::FutureExt;
 use sqlx::{
     Connection, Executor, PgConnection,
     error::BoxDynError,
@@ -70,7 +72,7 @@ async fn fresh_databases_migrate_and_index_every_searchable_table() -> Result<()
     };
     for backend in server.backends.clone() {
         let mut database = server.create_database().await?;
-        let result = async {
+        let result = AssertUnwindSafe(async {
             migrate(&mut database.conn, backend).await?;
             // A second run must find nothing to apply.
             migrate(&mut database.conn, backend).await?;
@@ -81,11 +83,68 @@ async fn fresh_databases_migrate_and_index_every_searchable_table() -> Result<()
                 );
             }
             Ok::<_, Box<dyn Error>>(())
-        }
+        })
+        .catch_unwind()
         .await;
         server.drop_database(database, result).await?;
     }
     Ok(())
+}
+
+/// SHA-384 of every released core migration file, pinned so neither an edit
+/// to a released file nor a stale legacy fixture goes unnoticed. The six edited
+/// files present their legacy checksums at runtime, so SQLx cannot catch edits
+/// to them.
+const RELEASED_CORE_CHECKSUMS: &str = include_str!("fixtures/released-core-migrations.sha384");
+
+#[test]
+fn released_core_migrations_are_unchanged() {
+    let pinned: Vec<(i64, &str)> = RELEASED_CORE_CHECKSUMS
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(|line| {
+            let (version, checksum) = line.split_once(' ').expect("version and checksum");
+            (version.parse().expect("numeric version"), checksum)
+        })
+        .collect();
+    let released: Vec<(i64, String)> = migration_list(TextSearchBackend::Paradedb)
+        .into_iter()
+        .filter(|migration| migration.version <= LAST_LEGACY_VERSION)
+        .map(|migration| {
+            // Recompute from the file: the legacy override replaces
+            // `checksum` but leaves `sql` as the file reads today.
+            let file = Migration::new(
+                migration.version,
+                migration.description,
+                migration.migration_type,
+                migration.sql,
+                migration.no_tx,
+            );
+            let checksum = file
+                .checksum
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            (migration.version, checksum)
+        })
+        .collect();
+    assert_eq!(
+        released
+            .iter()
+            .map(|(version, _)| *version)
+            .collect::<Vec<_>>(),
+        pinned
+            .iter()
+            .map(|(version, _)| *version)
+            .collect::<Vec<_>>(),
+        "released core migrations were added or removed"
+    );
+    for ((version, actual), (_, expected)) in released.iter().zip(&pinned) {
+        assert_eq!(
+            actual, expected,
+            "released core migration {version} was edited"
+        );
+    }
 }
 
 #[test]
@@ -115,12 +174,13 @@ async fn legacy_bm25_databases_adopt_paradedb() -> Result<(), Box<dyn Error>> {
     };
     let reference = server.fresh_schema(TextSearchBackend::Paradedb).await?;
     let mut database = server.create_legacy_database().await?;
-    let result = async {
+    let result = AssertUnwindSafe(async {
         migrate(&mut database.conn, TextSearchBackend::Paradedb).await?;
         let schema = schema_snapshot(&mut database.conn).await?;
         assert_same_schema(&reference, &schema, "legacy database adopting paradedb");
         Ok::<_, Box<dyn Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
     server.drop_database(database, result).await
 }
@@ -133,7 +193,7 @@ async fn legacy_bm25_databases_refuse_postgres_until_indexes_are_dropped()
     };
     let mut reference = server.fresh_schema(TextSearchBackend::Postgres).await?;
     let mut database = server.create_legacy_database().await?;
-    let result = async {
+    let result = AssertUnwindSafe(async {
         let before = schema_snapshot(&mut database.conn).await?;
         let error = migrate(&mut database.conn, TextSearchBackend::Postgres)
             .await
@@ -160,7 +220,8 @@ async fn legacy_bm25_databases_refuse_postgres_until_indexes_are_dropped()
         }
         assert_same_schema(&reference, &schema, "legacy database adopting postgres");
         Ok::<_, Box<dyn Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
     server.drop_database(database, result).await
 }
@@ -194,7 +255,7 @@ async fn databases_keep_their_text_search_backend() -> Result<(), Box<dyn Error>
         return Ok(());
     };
     let mut database = server.create_database().await?;
-    let result = async {
+    let result = AssertUnwindSafe(async {
         migrate(&mut database.conn, TextSearchBackend::Postgres).await?;
         let before = schema_snapshot(&mut database.conn).await?;
 
@@ -213,7 +274,8 @@ async fn databases_keep_their_text_search_backend() -> Result<(), Box<dyn Error>
         );
         assert_eq!(schema_snapshot(&mut database.conn).await?, before);
         Ok::<_, Box<dyn Error>>(())
-    }
+    })
+    .catch_unwind()
     .await;
     server.drop_database(database, result).await
 }
@@ -431,7 +493,7 @@ impl TestServer {
         let result = run_list(&mut database.conn, legacy_migrations()).await;
         match result {
             Ok(()) => Ok(database),
-            Err(error) => self.drop_database(database, Err(error.into())).await,
+            Err(error) => self.drop_database(database, Ok(Err(error.into()))).await,
         }
     }
 
@@ -465,15 +527,17 @@ impl TestServer {
         ))
     }
 
+    /// Drop a test database, then report the outcome of the work done in it.
+    /// Failed assertions arrive as a caught panic and resume after cleanup.
     async fn drop_database<T>(
         &self,
         database: TestDatabase,
-        result: Result<T, Box<dyn Error>>,
+        result: std::thread::Result<Result<T, Box<dyn Error>>>,
     ) -> Result<T, Box<dyn Error>> {
         let TestDatabase { name, conn } = database;
         let close_result = conn.close().await;
         self.drop_named(&name).await?;
-        let value = result?;
+        let value = result.unwrap_or_else(|panic| panic::resume_unwind(panic))?;
         close_result?;
         Ok(value)
     }
@@ -483,10 +547,11 @@ impl TestServer {
         backend: TextSearchBackend,
     ) -> Result<Vec<String>, Box<dyn Error>> {
         let mut database = self.create_database().await?;
-        let snapshot = async {
+        let snapshot = AssertUnwindSafe(async {
             migrate(&mut database.conn, backend).await?;
             Ok::<_, Box<dyn Error>>(schema_snapshot(&mut database.conn).await?)
-        }
+        })
+        .catch_unwind()
         .await;
         self.drop_database(database, snapshot).await
     }
