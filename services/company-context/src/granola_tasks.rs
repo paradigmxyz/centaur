@@ -17,7 +17,7 @@ use crate::{
     errors::{is_rejected, rejected},
     extraction::{chunk_text, hex_sha256},
     granola::Meeting,
-    tasks::{TaskState, bounded_error, task_result},
+    tasks::{TaskState, bounded_error, run_task},
 };
 
 /// Granola's `get_meetings` tool accepts at most ten meeting IDs.
@@ -67,7 +67,7 @@ pub fn register(state: &TaskState) -> Result<()> {
         GRANOLA_CREDENTIALS_RECONCILE_TASK,
         move |params: GranolaReconcileParams, ctx| {
             let state = reconcile_state.clone();
-            async move { task_result(reconcile_credentials(&state, params, &ctx).await) }
+            async move { run_task(&ctx, reconcile_credentials(&state, params, &ctx)).await }
         },
     )?;
 
@@ -76,7 +76,7 @@ pub fn register(state: &TaskState) -> Result<()> {
         .absurd
         .register_task(GRANOLA_SYNC_TASK, move |params: GranolaSyncParams, ctx| {
             let state = sync_state.clone();
-            async move { task_result(sync_account(&state, params, &ctx).await) }
+            async move { run_task(&ctx, sync_account(&state, params, &ctx)).await }
         })?;
 
     let fetch_state = state.clone();
@@ -84,7 +84,7 @@ pub fn register(state: &TaskState) -> Result<()> {
         GRANOLA_NOTES_FETCH_TASK,
         move |params: NotesFetchParams, ctx| {
             let state = fetch_state.clone();
-            async move { task_result(fetch_notes(&state, params, &ctx).await) }
+            async move { run_task(&ctx, fetch_notes(&state, params, &ctx)).await }
         },
     )?;
 
@@ -93,7 +93,7 @@ pub fn register(state: &TaskState) -> Result<()> {
         GRANOLA_NOTE_EMBED_TASK,
         move |params: NoteEmbedParams, ctx| {
             let state = embed_state.clone();
-            async move { task_result(embed_note(&state, params, &ctx).await) }
+            async move { run_task(&ctx, embed_note(&state, params, &ctx)).await }
         },
     )?;
     Ok(())
