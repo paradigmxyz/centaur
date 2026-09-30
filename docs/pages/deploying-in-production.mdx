@@ -59,7 +59,7 @@ Minimum keys:
 
 | Secret | Required for | Notes |
 |--------|--------------|-------|
-| `DATABASE_URL` | API | Postgres connection string. Make sure the password is URL-encoded. |
+| `DATABASE_URL` | API | Postgres connection string. Make sure the password is URL-encoded. For a managed server, see [Use an External PostgreSQL](#use-an-external-postgresql). |
 | `POSTGRES_PASSWORD` | Bundled Postgres | Password used when the chart manages Postgres. |
 | `IRON_MANAGEMENT_API_KEY` | [iron-proxy](https://docs.iron.sh) management API | Generate with `openssl rand -hex 32`. |
 | `SLACK_BOT_TOKEN` | Slackbot/API | Bot User OAuth Token from the Slack app. |
@@ -446,6 +446,78 @@ sandbox:
 
 Malformed selector/toleration JSON fails api-rs startup. Empty values keep
 default scheduling.
+
+### Use an External PostgreSQL
+
+By default the chart runs a bundled PostgreSQL built on ParadeDB. To use a
+managed server such as Amazon RDS, Aurora PostgreSQL, or Cloud SQL instead,
+prepare the server, point the database secrets at it, and disable the bundled
+Postgres.
+
+The server needs:
+
+- PostgreSQL 16, the version the bundled server and CI use.
+- The `vector` extension, pgvector 0.5.0 or newer, for embedding search.
+  `uuid-ossp` is also required. `pg_cron` is optional.
+- A `DATABASE_URL` user that can create extensions, roles, and databases.
+  Migrations create cluster-wide roles such as `centaur_readonly` and
+  `centaur_company_context_reader`, and the Console creates its own databases.
+  The RDS master user and the Cloud SQL `postgres` user can do all three. With a
+  less privileged user, have an administrator create the `vector` and
+  `uuid-ossp` extensions and the Console databases listed below first.
+- Enough connections. api-rs opens up to 500 connections under load, and the
+  bundled server allows 500.
+
+The deployment uses these databases on the server:
+
+| Database | Used by | Connection |
+| --- | --- | --- |
+| Any name, for example `centaur` | api-rs, Slackbot, and ETL workflows | `DATABASE_URL`, including the database name. |
+| `iron_control_production`, plus `_cache`, `_queue`, and `_cable` variants | Console | `IRON_CONTROL_DATABASE_URL` without a database name; the Console selects each database itself. The Console init container creates missing databases with the `DATABASE_URL` credentials. |
+
+Managed servers usually require TLS, so add `sslmode=require` to both URLs.
+`POSTGRES_PASSWORD` is not needed. Tools that declare `pg_dsn` secrets connect
+through iron-proxy with a DSN from your secret source; point those at the
+external server too. For `company_context`, that secret is
+`CENTAUR_POSTGRES_DSN`.
+
+Then set the chart values:
+
+```yaml
+postgres:
+  enabled: false
+
+externalDatabase:
+  # Address ranges the database endpoint resolves to, for NetworkPolicy egress.
+  cidrs:
+    - 10.0.32.0/20
+  port: 5432
+  textSearch: postgres
+```
+
+`externalDatabase.cidrs` is required when `networkPolicy.enabled` is true,
+because NetworkPolicy cannot match hostnames. Use the RDS DB subnet group's
+CIDRs, since the endpoint address moves on failover, or the Cloud SQL private IP
+as a `/32`. Control-plane pods and per-sandbox iron-proxies may reach only these
+ranges on `port`; see [Security](/security).
+
+`externalDatabase.textSearch` selects how company-context keyword search is
+indexed:
+
+- `postgres` (default) uses PostgreSQL's built-in full-text search and works on
+  any server above.
+- `paradedb` uses ParadeDB BM25 indexes and requires the `pg_search` extension,
+  which RDS and Cloud SQL do not offer. Use it only for a self-managed ParadeDB
+  server.
+
+A database keeps the backend it was first migrated with. api-rs refuses to start
+if the setting later disagrees, and refuses `postgres` for a database that
+already has BM25 indexes, such as one restored from the bundled Postgres. Set
+`paradedb` for such a database, or drop its BM25 indexes to switch.
+
+The experimental company-context ingestion service
+(`experimentalCompanyContext.enabled`) still requires `pg_search`, so leave it
+disabled on RDS and Cloud SQL.
 
 ## 7. Verify the Deployment
 
