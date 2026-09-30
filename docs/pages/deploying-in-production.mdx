@@ -529,10 +529,28 @@ subcommand also reads a passfile (`~/.pgpass`). Rerunning it is a no-op. When
 migrations run this way, set `apiRs.runMigrations: false` so api-rs starts with
 a user that does not need to create roles or extensions.
 
-A database keeps the backend it was first migrated with. api-rs refuses to start
-if the setting later disagrees, and refuses `postgres` for a database that
-already has BM25 indexes, such as one restored from the bundled Postgres. Set
-`paradedb` for such a database, or drop its BM25 indexes to switch.
+A database keeps the backend it was first migrated with; there is no in-place
+switch. Migrations, at startup or through `centaur-api-server migrate`, fail if
+the configured backend later disagrees.
+
+To change backends, including moving from the bundled Postgres (`paradedb`) to
+RDS or Cloud SQL (`postgres`), migrate a fresh database and move the data into
+it:
+
+1. Create an empty api-rs database on the new server and migrate it with
+   `centaur-api-server migrate --text-search postgres`.
+2. Stop the components that write to the old database.
+3. Copy the data only, not the schema, into the new database. Leave out
+   `_sqlx_migrations`: the new database already records its own migrations,
+   including its text-search backend. `search_vector` is a generated column,
+   so each row's value is computed as it is inserted. The tables have foreign
+   keys and triggers that maintain derived company-context rows, so plan the
+   copy order or disable triggers while copying.
+4. Point `DATABASE_URL` and the other database secrets at the new server,
+   update the chart values above, and deploy.
+
+The Console databases have no text-search backend and move with an ordinary
+dump and restore.
 
 ## 7. Verify the Deployment
 

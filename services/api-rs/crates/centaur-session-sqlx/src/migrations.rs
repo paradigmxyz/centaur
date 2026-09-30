@@ -151,8 +151,8 @@ async fn ensure_text_search_backend(
 ) -> Result<(), SessionStoreError> {
     if backend == TextSearchBackend::Postgres {
         // Databases migrated before the backends split carry BM25 indexes from
-        // core migrations. They can be large, so leave dropping them, or
-        // keeping them with the paradedb backend, to the operator.
+        // core migrations. They can be large, so never drop them implicitly;
+        // such a database keeps the paradedb backend.
         let indexes: Vec<String> = sqlx::query_scalar(
             "select index.relname::text
              from pg_index

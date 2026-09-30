@@ -891,10 +891,9 @@ externalDatabase:
   # uses built-in full-text search and works on RDS and Cloud SQL; "paradedb"
   # uses BM25 and requires the pg_search extension. Must be empty while
   # postgres.enabled=true: the bundled Postgres always uses "paradedb". A
-  # database keeps the backend it was first migrated with; api-rs refuses to
-  # start if this setting later disagrees. Databases migrated before this
-  # setting existed have BM25 indexes: keep them with "paradedb", or drop them
-  # before switching to "postgres".
+  # database keeps the backend it was first migrated with, and migrations fail
+  # if this setting later disagrees. To change backends, migrate a fresh
+  # database and move the data into it; see the production deployment guide.
   textSearch: ""
 
 ingress:
