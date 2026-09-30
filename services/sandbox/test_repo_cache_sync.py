@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -159,6 +160,52 @@ class RepoCacheSyncTest(unittest.TestCase):
 
             self.assertTrue((target / ".git").is_dir())
             self.assertFalse(old.exists())
+
+    def test_fetch_origin_updates_tags_moved_upstream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            upstream = root / "upstream"
+            checkout = root / "checkout"
+            env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "test",
+                "GIT_AUTHOR_EMAIL": "test@example.com",
+                "GIT_COMMITTER_NAME": "test",
+                "GIT_COMMITTER_EMAIL": "test@example.com",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+            }
+
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", *args], check=True, text=True, env=env, capture_output=True
+                ).stdout.strip()
+
+            git("init", "-q", "-b", "main", str(upstream))
+            git("-C", str(upstream), "commit", "-q", "--allow-empty", "-m", "one")
+            git("-C", str(upstream), "tag", "v1.0.0")
+            git("clone", "-q", str(upstream), str(checkout))
+            git("-C", str(upstream), "commit", "-q", "--allow-empty", "-m", "two")
+            git("-C", str(upstream), "tag", "-f", "v1.0.0")
+            sync = repo_cache_sync.RepoCacheSync(
+                cache_dir=root / "cache",
+                repositories=[],
+                repository_refs={},
+                repository_visibilities={},
+                sync_interval_seconds=30,
+                github_token_file=root / "missing-token",
+            )
+
+            sync.fetch_origin(checkout, "acme/tagged")
+
+            self.assertEqual(
+                git("-C", str(checkout), "rev-parse", "v1.0.0"),
+                git("-C", str(upstream), "rev-parse", "main"),
+            )
+            self.assertEqual(
+                git("-C", str(checkout), "rev-parse", "origin/main"),
+                git("-C", str(upstream), "rev-parse", "main"),
+            )
 
     def test_run_forever_restores_repo_cache_umask(self) -> None:
         class StopAfterUmask(repo_cache_sync.RepoCacheSync):

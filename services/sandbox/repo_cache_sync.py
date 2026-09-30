@@ -221,6 +221,24 @@ class RepoCacheSync:
             return False
         return True
 
+    def fetch_origin(self, repo_path: Path, label: str, *refspecs: str) -> None:
+        # Force tag updates so a tag moved upstream cannot fail the whole fetch.
+        self._run_git(
+            [
+                "-C",
+                str(repo_path),
+                "-c",
+                "gc.auto=0",
+                "fetch",
+                "--prune",
+                "--tags",
+                "--force",
+                "origin",
+                *refspecs,
+            ],
+            f"fetch {label}",
+        )
+
     def checkout_repo(self, repo: str, target: Path) -> None:
         requested_ref = self.repository_refs.get(repo)
         if requested_ref:
@@ -254,20 +272,7 @@ class RepoCacheSync:
                     f"checkout {repo}@{requested_ref}",
                 )
             else:
-                self._run_git(
-                    [
-                        "-C",
-                        str(target),
-                        "-c",
-                        "gc.auto=0",
-                        "fetch",
-                        "--prune",
-                        "--tags",
-                        "origin",
-                        requested_ref,
-                    ],
-                    f"fetch {repo}@{requested_ref}",
-                )
+                self.fetch_origin(target, f"{repo}@{requested_ref}", requested_ref)
                 self._run_git(
                     ["-C", str(target), "checkout", "-q", "--detach", "FETCH_HEAD"],
                     f"checkout {repo}@FETCH_HEAD",
@@ -312,19 +317,7 @@ class RepoCacheSync:
                     ["-C", str(target), "remote", "add", "origin", repo_url],
                     f"set origin for {repo}",
                 )
-            self._run_git(
-                [
-                    "-C",
-                    str(target),
-                    "-c",
-                    "gc.auto=0",
-                    "fetch",
-                    "--prune",
-                    "--tags",
-                    "origin",
-                ],
-                f"fetch {repo}",
-            )
+            self.fetch_origin(target, repo)
             self._git_ok(target, "remote", "set-head", "origin", "-a")
             self.checkout_repo(repo, target)
             self._run_git(["-C", str(target), "clean", "-fd"], f"clean {repo}")
@@ -338,10 +331,7 @@ class RepoCacheSync:
         _remove_path(target)
         self._run_git(["clone", "--quiet", repo_url, str(tmp)], f"clone {repo}")
         self._git_ok(tmp, "config", "gc.auto", "0")
-        self._run_git(
-            ["-C", str(tmp), "-c", "gc.auto=0", "fetch", "--prune", "--tags", "origin"],
-            f"fetch {repo}",
-        )
+        self.fetch_origin(tmp, repo)
         self._git_ok(tmp, "remote", "set-head", "origin", "-a")
         self.checkout_repo(repo, tmp)
         self._run_git(["-C", str(tmp), "clean", "-fd"], f"clean {repo}")
