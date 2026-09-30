@@ -695,6 +695,13 @@ slackbotv2:
     tag: latest
     pullPolicy: Always
   userName: centaur
+  # Optional named Slack apps backed by fixed Crew profiles. Credentials must
+  # be supplied through the shared Secret (never plaintext values):
+  # SLACK_CONFIGURATION_TOKEN, SLACK_CREW_ADMIN_TOKEN, SLACK_CREW_ENCRYPTION_KEY.
+  crew:
+    enabled: false
+    publicUrl: ""
+    allowedProfiles: []
   assistantStatus: ""
   # Match Slack's features.agent_view manifest setting. Changing Slack's
   # manifest is irreversible; this switch only controls the service behavior.

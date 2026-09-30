@@ -209,6 +209,30 @@ describe('Slack home team resolution', () => {
 })
 
 describe('Slack home team API metadata', () => {
+  test('isolates Crew sessions and pins the configured profile across every API call', async () => {
+    const { fetchFn, requests } = fakeApi({ createSession: [{ status: 200, body: { ok: true, persona_id: 'eng' } }] })
+    const config = { ...options(fetchFn), botAppId: 'A123', fixedPersonaId: 'eng', slackHomeTeamId: 'T123' }
+    await forwardToSessionApi(config, forwardInput(apiMessage('hello'), { personaId: 'legal' }))
+    await interruptSessionExecution(config, 'slack:C1:1700000000.000100', 'stop')
+    const key = 'slack:T123:A123:C1:1700000000.000100'
+    const sessionRequests = requests.filter(r => r.url.includes('/api/session/'))
+    expect(sessionRequests).toHaveLength(4)
+    expect(sessionRequests.every(r => decodeURIComponent(r.url).includes(key))).toBe(true)
+    expect(sessionRequests[0]?.body).toMatchObject({ persona_id: 'eng' })
+    expect(executeLine(requests).thread_key).toBe(key)
+    expect(JSON.stringify(executeLine(requests))).toContain('- session_context.slack.channel_id: C1')
+    expect(JSON.stringify(executeLine(requests))).toContain(`- thread_key: ${key}`)
+  })
+
+  test('never appends or executes when the configured Crew profile falls back', async () => {
+    const { fetchFn, requests } = fakeApi({ createSession: [{ status: 200, body: { ok: true, persona_id: 'legal' } }] })
+    await expect(forwardToSessionApi(
+      { ...options(fetchFn), fixedPersonaId: 'eng', botAppId: 'A123', slackHomeTeamId: 'T123' },
+      forwardInput(apiMessage('hello'))
+    )).rejects.toThrow('configured persona is unavailable')
+    expect(requests.filter(r => /\/(messages|execute)$/.test(r.url))).toHaveLength(0)
+  })
+
   test('exposes the home team ID throughout durable session requests', async () => {
     const { fetchFn, requests } = fakeApi()
 

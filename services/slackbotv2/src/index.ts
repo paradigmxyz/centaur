@@ -1242,7 +1242,10 @@ async function syncThreadMessageToSession(
   if (messageOverrides.cleanedText !== undefined) {
     setMessageText(serializedMessage, messageOverrides.cleanedText)
   }
-  const overrides = messageOverrides.overrides
+  const overrides = {
+    ...messageOverrides.overrides,
+    ...(input.options.fixedPersonaId ? { personaId: input.options.fixedPersonaId } : {})
+  }
   const requestedStickyOverrides = preservePinnedPersona(
     state,
     stickyThreadOverrideUpdate(overrides)

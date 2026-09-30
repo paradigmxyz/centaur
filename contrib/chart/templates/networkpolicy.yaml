@@ -239,6 +239,15 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
+{{- if and .Values.slackbotv2.enabled .Values.slackbotv2.crew.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 3001
+{{- end }}
 {{- if .Values.proxySync.enabled }}
     - to:
         - podSelector:
@@ -386,6 +395,15 @@ spec:
     - Ingress
     - Egress
   ingress:
+{{- if .Values.slackbotv2.crew.enabled }}
+    - from:
+        - podSelector:
+            matchLabels:
+              centaur.ai/iron-proxy: "true"
+      ports:
+        - protocol: TCP
+          port: 3001
+{{- end }}
     - from:
 {{- range $ingressSourceNamespaces }}
         - namespaceSelector:

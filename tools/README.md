@@ -59,6 +59,9 @@ my-tool --help
 
 ## Available Plugins
 
+- `slack-crew`: create and inspect named profile-backed Slackbots. Requires an
+  explicitly granted `SLACK_CREW_ADMIN_TOKEN`; see `services/slackbotv2/CREW.md`.
+
 The open-source tool inventory lives in this `tools/` tree and changes over time. To see what ships in a running sandbox, use `centaur-tools list`; private deployments may mount additional overlay tool directories.
 
 - `centaur_investigator`: parse Centaur Slack thread references and enrich them
