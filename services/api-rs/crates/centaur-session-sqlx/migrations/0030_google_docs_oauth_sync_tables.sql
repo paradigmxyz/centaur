@@ -1,5 +1,3 @@
-create extension if not exists pg_search;
-
 create table if not exists google_docs_sync_runs (
     run_id text primary key,
     workflow_run_id text,
@@ -181,46 +179,6 @@ create index if not exists idx_google_docs_context_documents_drive_modified
 
 create index if not exists idx_google_docs_context_documents_metadata
     on google_docs_context_documents using gin (metadata);
-
-drop index if exists idx_google_docs_context_documents_bm25;
-
-create index idx_google_docs_context_documents_bm25
-    on google_docs_context_documents
-    using bm25 (
-        document_id,
-        title,
-        body,
-        file_id,
-        chunk_id,
-        url,
-        provider_author_id,
-        provider_author_name,
-        mime_type,
-        drive_id,
-        source_created_at,
-        source_modified_at,
-        metadata
-    )
-    with (
-        key_field = 'document_id',
-        text_fields = '{
-            "document_id": {
-                "tokenizer": {"type": "keyword"}
-            },
-            "file_id": {
-                "tokenizer": {"type": "keyword"}
-            },
-            "chunk_id": {
-                "tokenizer": {"type": "keyword"}
-            },
-            "provider_author_id": {
-                "tokenizer": {"type": "keyword"}
-            },
-            "drive_id": {
-                "tokenizer": {"type": "keyword"}
-            }
-        }'
-    );
 
 create or replace function centaur_current_google_subject()
 returns text

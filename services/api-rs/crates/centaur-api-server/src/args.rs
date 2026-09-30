@@ -4,6 +4,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     process::Command,
+    str::FromStr,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -35,6 +36,7 @@ use centaur_session_runtime::{
     PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode, SessionEventRetentionConfig,
     SessionPrincipalAdmission, SessionSandboxCleanupConfig,
 };
+use centaur_session_sqlx::TextSearchBackend;
 use centaur_workflows::{WorkflowHostSandboxRuntime, WorkflowPrincipalRegistrar};
 use clap::{Args as ClapArgs, Parser, ValueEnum};
 use tracing::{info, warn};
@@ -553,6 +555,16 @@ pub(crate) struct ServerArgs {
     pub(crate) bind_addr: SocketAddr,
     #[arg(long, env = "RUN_MIGRATIONS", default_value_t = false)]
     pub(crate) run_migrations: bool,
+    /// Keyword search backend that migrations install: `paradedb` (requires
+    /// the pg_search extension) or `postgres` (built-in full-text search). A
+    /// database keeps the backend it was first migrated with.
+    #[arg(
+        long,
+        env = "DATABASE_TEXT_SEARCH",
+        default_value = "paradedb",
+        value_parser = TextSearchBackend::from_str
+    )]
+    pub(crate) text_search: TextSearchBackend,
     /// How long shutdown waits for in-flight executions to finish before
     /// releasing their stdout-owner leases for adoption by a peer. Keep
     /// below the pod's terminationGracePeriodSeconds (35s in the chart) so

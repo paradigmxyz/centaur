@@ -71,7 +71,7 @@ async fn main() -> Result<(), ServerError> {
 async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), ServerError> {
     let store = PgSessionStore::connect(&args.server.database_url).await?;
     if args.server.run_migrations {
-        store.run_migrations().await?;
+        store.run_migrations(args.server.text_search).await?;
     }
     if let Some(config) = args.activity_summary_config() {
         let worker = activity_summary::ActivitySummaryWorker::new(store.clone(), config)?;

@@ -47,6 +47,15 @@ the binary and tests. Add the next numbered SQL file; never edit or reorder an
 applied migration. Update SQLx repository code and add database-backed coverage
 for upgrade, read/write, and recovery behavior.
 
+Core migrations must run on stock PostgreSQL with pgvector. Keyword-search
+indexes belong to exactly one text-search backend per database, under
+`crates/centaur-session-sqlx/search-migrations/{paradedb,postgres}`. Backend
+migrations share the core version sequence and are merged into it by version;
+a paired change uses the same version in both backend directories. A change to
+a searchable table needs matching migrations for both backends.
+`.github/scripts/check-migration-order.sh` and `tests/migrations.rs` enforce the
+numbering, fresh installs, and upgrade ordering.
+
 Database-backed tests skip when their URL is absent. Point these variables at a
 disposable Postgres as required by the packages you run:
 
