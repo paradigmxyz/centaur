@@ -698,10 +698,7 @@ class CompanyContextClient:
         try:
             rows = []
             async with conn.transaction(readonly=True):
-                await conn.execute(
-                    "SELECT set_config('statement_timeout', $1, true)",
-                    f"{timeout_seconds}s",
-                )
+                await conn.execute(f"SET LOCAL statement_timeout = '{int(timeout_seconds)}s'")
                 cursor = conn.cursor(
                     sql,
                     prefetch=min(limit + 1, 100),

@@ -216,9 +216,7 @@ def test_query_runs_in_read_only_transaction_with_bounded_results(monkeypatch):
         ],
     }
     assert fake.transaction_calls == [{"readonly": True}]
-    assert fake.execute_calls == [
-        ("SELECT set_config('statement_timeout', $1, true)", ("7s",))
-    ]
+    assert fake.execute_calls == [("SET LOCAL statement_timeout = '7s'", ())]
     assert fake.cursor_calls == [
         (
             "SELECT source, count(*) AS count "
@@ -246,9 +244,7 @@ def test_query_clamps_limit_and_timeout(monkeypatch):
 
     assert result["status"] == "ok"
     assert result["limit"] == 1_000
-    assert fake.execute_calls == [
-        ("SELECT set_config('statement_timeout', $1, true)", ("30s",))
-    ]
+    assert fake.execute_calls == [("SET LOCAL statement_timeout = '30s'", ())]
     assert fake.cursor_calls == [
         (
             "SELECT 1 AS value",

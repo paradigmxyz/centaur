@@ -118,7 +118,7 @@ pub struct OtlpEgressTarget {
 
 /// iron-control coordinates for sync-mode egress proxies. A sandbox
 /// whose spec carries an `iron_control_principal` gets a per-sandbox proxy
-/// registered in iron-control (synced over `IRON_CONTROL_URL` with its
+/// registered in iron-control (synced from proxy-sync with its
 /// `iprx_` token) instead of a rendered static proxy config.
 #[derive(Clone, Debug)]
 pub struct IronControlSettings {

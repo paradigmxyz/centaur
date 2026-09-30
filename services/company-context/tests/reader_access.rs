@@ -45,7 +45,7 @@ async fn assert_reader_visibility(conn: &mut PgConnection) -> Result<(), Box<dyn
 
     conn.execute(
         r#"
-        insert into company_context_system.google_drive_broker_observations
+        insert into company_context_data.google_drive_broker_observations
             (broker_credential_id, file_id, provider_subject, active)
         values
             (1, 'file-viewer', 'subject-viewer', true),
@@ -100,11 +100,10 @@ async fn assert_reader_visibility(conn: &mut PgConnection) -> Result<(), Box<dyn
     let mut tx = conn.begin().await?;
     tx.execute("set local role centaur_company_context_reader")
         .await?;
-    let error =
-        sqlx::query("select 1 from company_context_system.google_drive_broker_observations")
-            .fetch_all(&mut *tx)
-            .await
-            .expect_err("reader must not read private system state");
+    let error = sqlx::query("select 1 from company_context_data.google_drive_broker_observations")
+        .fetch_all(&mut *tx)
+        .await
+        .expect_err("reader must not read observations directly");
     assert_eq!(
         error
             .as_database_error()

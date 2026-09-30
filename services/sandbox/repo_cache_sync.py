@@ -261,6 +261,7 @@ class RepoCacheSync:
                         "-c",
                         "gc.auto=0",
                         "fetch",
+                        "--force",
                         "--prune",
                         "--tags",
                         "origin",
@@ -319,6 +320,7 @@ class RepoCacheSync:
                     "-c",
                     "gc.auto=0",
                     "fetch",
+                    "--force",
                     "--prune",
                     "--tags",
                     "origin",
@@ -339,7 +341,17 @@ class RepoCacheSync:
         self._run_git(["clone", "--quiet", repo_url, str(tmp)], f"clone {repo}")
         self._git_ok(tmp, "config", "gc.auto", "0")
         self._run_git(
-            ["-C", str(tmp), "-c", "gc.auto=0", "fetch", "--prune", "--tags", "origin"],
+            [
+                "-C",
+                str(tmp),
+                "-c",
+                "gc.auto=0",
+                "fetch",
+                "--force",
+                "--prune",
+                "--tags",
+                "origin",
+            ],
             f"fetch {repo}",
         )
         self._git_ok(tmp, "remote", "set-head", "origin", "-a")

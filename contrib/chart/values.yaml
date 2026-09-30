@@ -216,34 +216,6 @@ console:
     affinity: {}
     tolerations: []
     resources: {}
-  # Prometheus SQL Exporter for Console database metrics, initially Solid Queue.
-  # This runs as one internal-only replica because every instance would report
-  # the same global database state. The exporter reads a dedicated, read-only DSN
-  # from secretManager.existingSecretName without writing the credential into
-  # its ConfigMap or command-line arguments.
-  sqlExporter:
-    # Enable after CONSOLE_SQLEXPORTER_DATABASE_URL has been added to the
-    # shared infra Secret and its PostgreSQL role has been granted SELECT on
-    # every table queried by a configured collector.
-    enabled: false
-    image:
-      repository: burningalchemist/sql_exporter
-      tag: 0.24.4
-      pullPolicy: IfNotPresent
-    port: 9399
-    # Key in secretManager.existingSecretName containing the complete database
-    # URL for a dedicated read-only PostgreSQL role.
-    databaseUrlSecretKey: CONSOLE_SQLEXPORTER_DATABASE_URL
-    # Used by NetworkPolicy when postgres.enabled=false and the queue database
-    # is externally managed.
-    databasePort: 5432
-    minInterval: 15s
-    scrapeTimeout: 5s
-    metrics:
-      scrapeAnnotations: true
-      path: /metrics
-      annotations: {}
-    resources: {}
 
 # Values for the upstream 1Password Connect subchart
 # (https://github.com/1Password/connect-helm-charts/tree/main/charts/connect).
@@ -447,12 +419,10 @@ agentSandbox:
   controller:
     extensions: false
 
-# Rust proxy sync endpoint. When enabled, api-rs directs managed iron-proxy
-# instances here for POST /api/v1/proxy/sync while all operator/admin traffic
-# continues to use Console. The service reads Console's database directly.
-# This component is under active development and must not be used yet.
+# Rust proxy sync endpoint. api-rs directs managed iron-proxy instances here
+# for POST /api/v1/proxy/sync while all operator/admin traffic continues to use
+# Console. The service reads Console's database directly.
 proxySync:
-  enabled: false
   # Two replicas keep sync available during pod restarts and rolling updates.
   replicaCount: 2
   nodeSelector: {}
@@ -546,11 +516,10 @@ apiRs:
   sandboxReadyTimeoutSecs: 90
   sandboxWarmPoolSize: 3
   sandboxWarmPoolReplenishIntervalSecs: 5
-  # Capacity manager: when nonzero, api-rs keeps observed running-like
-  # sandboxes at or below this limit by discarding ready warm sandboxes first,
-  # then pausing least-recently-active idle session sandboxes. 0 disables.
+  # Best-effort admission gate: when nonzero, api-rs rejects sandbox creates
+  # and resumes at or above this observed running count, excluding ready warm
+  # sandboxes. Existing sandboxes are never evicted. 0 disables.
   sandboxRunningLimit: 0
-  sandboxHotIdleGraceSecs: 300
   # When true, api-rs upserts the shared iron-control infra role and its
   # backing secrets at startup and on tool-secret reconciliation intervals.
   # Set false when multiple Centaur instances share one console/1Password
@@ -876,6 +845,8 @@ teamsbot:
   extraEnv: {}
   resources: {}
 
+# Bundled PostgreSQL. Set enabled=false to use an external server such as RDS
+# or Cloud SQL, and configure externalDatabase.
 postgres:
   enabled: true
   # Scheduling for the PostgreSQL pod. When persistence is enabled, ensure the
@@ -912,6 +883,18 @@ postgres:
     sizeLimit: 1Gi
   resources: {}
 
+# External PostgreSQL, used when postgres.enabled=false. Database URLs come from
+# secretManager.existingSecretName; these settings scope NetworkPolicy egress.
+externalDatabase:
+  # Address ranges the database endpoint can resolve to. Control-plane pods and
+  # per-sandbox iron-proxies may reach only these ranges on port. NetworkPolicy
+  # cannot match hostnames: use the RDS DB subnet group's CIDRs (the endpoint IP
+  # moves on failover) or the Cloud SQL private IP as a /32. Required when
+  # networkPolicy.enabled=true; must be empty while postgres.enabled=true.
+  cidrs: []
+  #   - 10.0.32.0/20
+  port: 5432
+
 ingress:
   enabled: false
   className: ""
@@ -928,10 +911,6 @@ networkPolicy:
   enabled: true
   ingressSourceNamespaces: []
   apiIngressSourceNamespaces: []
-  # Namespaces containing Prometheus-compatible collectors that may scrape
-  # internal metrics-only Services such as the Console queue SQL Exporter.
-  # Same-namespace collectors are always admitted.
-  metricsIngressSourceNamespaces: []
   ingressControllerNamespaces:
     - kube-system
   # Port the kubernetes.default ClusterIP forwards to for the API server. The

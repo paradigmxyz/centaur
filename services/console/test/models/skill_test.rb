@@ -85,6 +85,13 @@ class SkillTest < ActiveSupport::TestCase
     assert_not_includes results, skills(:other_private)
   end
 
+  test "search matches documents containing any query term" do
+    results = Skill.search("incidents spreadsheets")
+
+    assert_includes results, skills(:member_private)
+    assert_not_includes results, skills(:admin_shared)
+  end
+
   test "editors can access private skills without becoming owners" do
     skill = skills(:other_private)
     editor = users(:member_user)
