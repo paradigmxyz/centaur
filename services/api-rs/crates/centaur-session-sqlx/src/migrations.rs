@@ -52,6 +52,15 @@ const LEGACY_CHECKSUMS: [(i64, &str); 6] = [
     ),
 ];
 
+/// Tables whose keyword search indexes belong to the text-search backend.
+const SEARCHABLE_TABLES: [&str; 5] = [
+    "company_context_documents",
+    "google_docs_context_documents",
+    "granola_context_documents",
+    "slack_private_context_documents",
+    "slack_private_conversation_context_documents",
+];
+
 /// Keyword search implementation installed in a database.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TextSearchBackend {
@@ -122,7 +131,8 @@ pub fn migration_list(backend: TextSearchBackend) -> Vec<Migration> {
 /// Apply pending migrations for `backend`.
 ///
 /// Fails without changing the database when it was migrated with another
-/// text-search backend.
+/// text-search backend, or when `postgres` is configured for a database that
+/// still has BM25 indexes.
 pub async fn migrate(
     conn: &mut PgConnection,
     backend: TextSearchBackend,
@@ -139,6 +149,28 @@ async fn ensure_text_search_backend(
     conn: &mut PgConnection,
     backend: TextSearchBackend,
 ) -> Result<(), SessionStoreError> {
+    if backend == TextSearchBackend::Postgres {
+        // Databases migrated before the backends split carry BM25 indexes from
+        // core migrations. They can be large, so leave dropping them, or
+        // keeping them with the paradedb backend, to the operator.
+        let indexes: Vec<String> = sqlx::query_scalar(
+            "select index.relname::text
+             from pg_index
+             join pg_class index on index.oid = pg_index.indexrelid
+             join pg_class tables on tables.oid = pg_index.indrelid
+             join pg_am am on am.oid = index.relam
+             where am.amname = 'bm25'
+               and tables.relnamespace = current_schema()::regnamespace
+               and tables.relname = any($1)
+             order by 1",
+        )
+        .bind(&SEARCHABLE_TABLES[..])
+        .fetch_all(&mut *conn)
+        .await?;
+        if !indexes.is_empty() {
+            return Err(SessionStoreError::Bm25IndexesPresent { indexes });
+        }
+    }
     let tracked: bool = sqlx::query_scalar("select to_regclass('_sqlx_migrations') is not null")
         .fetch_one(&mut *conn)
         .await?;

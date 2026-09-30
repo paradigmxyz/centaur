@@ -1,15 +1,7 @@
 -- Built-in PostgreSQL full-text search for company context documents.
 --
--- Databases migrated before the text-search backends were split carry BM25
--- indexes from core migrations. Drop them so this backend owns keyword search;
--- the pg_search extension itself is left installed.
-drop index if exists idx_company_context_documents_bm25;
-drop index if exists idx_google_docs_context_documents_bm25;
-drop index if exists idx_granola_context_documents_bm25;
-drop index if exists idx_slack_dm_context_documents_bm25;
-drop index if exists idx_slack_dm_conversation_context_documents_bm25;
-drop index if exists idx_slack_private_context_documents_bm25;
-drop index if exists idx_slack_private_conversation_context_documents_bm25;
+-- api-rs refuses this backend while BM25 indexes from earlier core migrations
+-- remain, so these tables carry no other keyword index.
 
 -- Ranking reads the stored vector instead of re-parsing every matching body.
 -- Title terms carry weight A and body terms weight D. The body is capped so a

@@ -1771,6 +1771,11 @@ pub enum SessionStoreError {
         configured: TextSearchBackend,
         applied: TextSearchBackend,
     },
+    #[error(
+        "database has ParadeDB BM25 indexes ({}); configure the paradedb text search backend, or drop them to use postgres",
+        indexes.join(", ")
+    )]
+    Bm25IndexesPresent { indexes: Vec<String> },
 }
 
 #[derive(Debug, FromRow)]
