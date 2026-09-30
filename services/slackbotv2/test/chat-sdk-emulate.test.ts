@@ -2644,7 +2644,7 @@ describe('slackbotv2', () => {
       slackApi.calls
         .filter(call => call.method === 'assistant.threads.setStatus')
         .map(call => stringField(call.body.status))
-    ).toEqual(['Thinking...'])
+    ).toEqual(['Thinking...', 'Thinking...', 'Thinking...'])
 
     codexApi.emitOutputLines(
       threadKey(parent.ts),
@@ -4790,6 +4790,75 @@ describe('slackbotv2', () => {
     expect(text).not.toContain(summary)
     expect(text).not.toContain('Command execution')
     expect(text).not.toContain('Thinking')
+  })
+
+  it('restores the live activity summary status after a steering mention', async () => {
+    bot = createProductionDefaultTestBot({ activitySummaryStatusEnabled: true })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before steering status.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> start a long run`, parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-steering-status-first',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> start a long run`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    const key = threadKey(parent.ts)
+    const summary = "I'm reading the chain config"
+    codexApi.emitSessionEvent(key, 'session.activity_summary', {
+      execution_id: 'exe-steering-status',
+      summary
+    })
+    const statuses = () =>
+      slackApi.calls
+        .filter(call => call.method === 'assistant.threads.setStatus')
+        .map(call => stringField(call.body.status))
+    await waitFor(() => statuses().length === 2)
+
+    const followUpText = `<@${BOT_USER_ID}> also check the RPC`
+    const followUp = await postUserMessage(followUpText, parent.ts)
+    const followUpWaits: Promise<unknown>[] = []
+    const followUpResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-steering-status-follow-up',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: followUp.ts,
+          thread_ts: parent.ts,
+          text: followUpText
+        }
+      }),
+      {},
+      waitUntilContext(followUpWaits)
+    )
+    expect(followUpResponse.status).toBe(200)
+    await Promise.all(followUpWaits)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(statuses()).toEqual(['Thinking...', summary, summary])
+
+    codexApi.emitOutputLine(key, JSON.stringify({ type: 'turn.done', result: 'Done.' }))
+    await Promise.all(waits)
+    expect(statuses()).toEqual(['Thinking...', summary, summary, ''])
   })
 
   it('recovers unfinished render obligations from Chat SDK state on startup', async () => {
