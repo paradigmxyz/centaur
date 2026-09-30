@@ -222,7 +222,7 @@ export async function messageOverridesForText(
       : {}),
     overrides: {
       ...strategyOverrides,
-      ...(persona.personaId ? { personaId: persona.personaId } : {})
+      ...(options.crew ? { personaId: options.crew.id } : persona.personaId ? { personaId: persona.personaId } : {})
     }
   }
 }

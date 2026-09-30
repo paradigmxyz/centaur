@@ -164,6 +164,40 @@ function isJsonRecord(value: JsonValue | undefined): value is JsonObject {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
 
+describe('Crew session isolation', () => {
+  test('binds instructions and scopes create, append, execute, interrupt, and replay', async () => {
+    const { fetchFn, requests } = fakeApi({ createSession: [{ status: 200, body: { persona_id: 'atlas' } }] })
+    const configured = { ...options(fetchFn), slackHomeTeamId: 'T1', crew: { id: 'atlas', appId: 'A1' } }
+    const message = apiMessage('hello')
+    await forwardToSessionApi(configured, forwardInput(message, { personaId: 'other' }))
+    await interruptSessionExecution(configured, message.threadId, 'stop')
+    const sessionRequests = requests.filter(request => request.url.includes('/api/session/'))
+    expect(sessionRequests.length).toBe(4)
+    for (const request of sessionRequests) {
+      expect(decodeURIComponent(request.url)).toContain('/api/session/slack:T1:A1:C1:1700000000.000100')
+    }
+    expect(sessionRequests[0]?.body).toMatchObject({ persona_id: 'atlas' })
+    expect(executeLine(requests).thread_key).toBe('slack:T1:A1:C1:1700000000.000100')
+    const replayRequests: string[] = []
+    await openSessionEventStream({ ...configured, fetch: async input => {
+      replayRequests.push(String(input))
+      return new Response('', { headers: { 'content-type': 'text/event-stream' } })
+    } }, { threadId: message.threadId, afterEventId: 4, onEventId: () => {}, trace: {
+      threadId: message.threadId, messageId: message.id, includeContext: false,
+      mode: 'execute', openStream: true, startedAtMs: 0
+    } })
+    expect(decodeURIComponent(replayRequests[0]!)).toContain('slack:T1:A1:C1:1700000000.000100/events')
+  })
+
+  test('refuses to execute a missing or mismatched profile', async () => {
+    const { fetchFn, requests } = fakeApi({ createSession: [{ status: 200, body: { persona_id: 'eng' } }] })
+    await expect(forwardToSessionApi({ ...options(fetchFn), slackHomeTeamId: 'T1', crew: { id: 'atlas', appId: 'A1' } },
+      forwardInput(apiMessage('hello')))).rejects.toThrow('Crew instructions are unavailable')
+    expect(requests.some(request => request.url.endsWith('/execute'))).toBe(false)
+    expect(requests.some(request => request.url.endsWith('/messages'))).toBe(false)
+  })
+})
+
 describe('Slack home team resolution', () => {
   test('resolves the home team ID from auth.test', async () => {
     const realFetch = globalThis.fetch

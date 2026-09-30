@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { crewSessionKey } from './crew'
 import type { RustSessionStreamEvent } from '@centaur/harness-events'
 import { isRetryableCodexErrorNotification } from '@centaur/rendering'
 import type { Attachment, LinkPreview, Message } from 'chat'
@@ -499,6 +500,9 @@ export async function forwardToSessionApi(
     sessionApiTimeoutMs(options),
     'create session'
   )
+  if (options.crew && created.personaId !== options.crew.id) {
+    throw new Error('Crew instructions are unavailable or differ from the pinned session; execution refused')
+  }
   if (created.harnessType) input.metadataHarnessType = created.harnessType
   input.harnessAssignment = created.harnessAssignment
   traceLog(options, 'slackbotv2_session_create_complete', input.trace, {
@@ -905,7 +909,7 @@ async function postCreateSession(
     metadata: {
       source: 'slackbotv2',
       platform: 'slack',
-      thread_id: threadId,
+      thread_id: crewSessionKey(options, threadId),
       ...slackHomeTeamMetadata(options),
       ...sessionRequesterMetadata(message, requesterIdentity),
       ...(harnessAssignment
@@ -913,12 +917,12 @@ async function postCreateSession(
         : {}),
       ...(conversationName ? { slack_conversation_name: conversationName } : {})
     },
-    ...(personaId ? { persona_id: personaId } : {}),
+    ...(options.crew ? { persona_id: options.crew.id } : personaId ? { persona_id: personaId } : {}),
     ...(onHarnessConflict ? { on_harness_conflict: onHarnessConflict } : {})
   }
   return fetchWithTimeout(
     fetchFn,
-    apiSessionUrl(options.apiUrl, threadId),
+    apiSessionUrl(options.apiUrl, crewSessionKey(options, threadId)),
     {
       method: 'POST',
       headers: apiHeaders(options),
@@ -1388,7 +1392,7 @@ async function appendSessionMessages(
   }
   const response = await fetchWithTimeout(
     fetchFn,
-    apiSessionUrl(options.apiUrl, threadId, 'messages'),
+    apiSessionUrl(options.apiUrl, crewSessionKey(options, threadId), 'messages'),
     {
       method: 'POST',
       headers: apiHeaders(options),
@@ -1452,7 +1456,7 @@ async function executeSession(
   }
   const response = await fetchWithTimeout(
     fetchFn,
-    apiSessionUrl(options.apiUrl, threadId, 'execute'),
+    apiSessionUrl(options.apiUrl, crewSessionKey(options, threadId), 'execute'),
     {
       method: 'POST',
       headers: apiHeaders(options),
@@ -1473,7 +1477,7 @@ async function postInterruptSessionExecution(
   const fetchFn = options.fetch ?? fetch
   const response = await fetchWithTimeout(
     fetchFn,
-    apiSessionUrl(options.apiUrl, threadId, 'interrupt'),
+    apiSessionUrl(options.apiUrl, crewSessionKey(options, threadId), 'interrupt'),
     {
       method: 'POST',
       headers: apiHeaders(options),
@@ -1515,7 +1519,7 @@ async function streamSessionNotifications(
   onEventId: (eventId: number) => void
 ): Promise<AsyncIterable<SlackbotV2RendererSource>> {
   const fetchFn = options.fetch ?? fetch
-  const url = new URL(apiSessionUrl(options.apiUrl, threadId, 'events'))
+  const url = new URL(apiSessionUrl(options.apiUrl, crewSessionKey(options, threadId), 'events'))
   url.searchParams.set('after_event_id', String(afterEventId))
   if (executionId) url.searchParams.set('execution_id', executionId)
   const response = await fetchWithTimeout(
@@ -1612,7 +1616,7 @@ function sessionMetadata(
     source: 'slackbotv2',
     platform: 'slack',
     message_id: message.id,
-    thread_id: message.threadId,
+    thread_id: crewSessionKey(options, message.threadId),
     is_mention: message.isMention,
     timestamp: message.timestamp,
     user_id: message.author.userId,
@@ -1725,7 +1729,7 @@ function toCodexInputLineWithStaged(
 ): string {
   return JSON.stringify({
     type: 'user',
-    thread_key: threadId,
+    thread_key: crewSessionKey(options, threadId),
     trace_metadata: sessionMetadata(options, message, { action: 'execute' }, requesterIdentity),
     ...(model ? { model } : {}),
     ...(provider ? { provider } : {}),
@@ -1737,7 +1741,8 @@ function toCodexInputLineWithStaged(
         staged,
         requesterIdentity,
         contextMessages,
-        contextPreamble
+        contextPreamble,
+        crewSessionKey(options, threadId)
       )
     }
   })
@@ -1838,10 +1843,11 @@ function codexInputContent(
   staged: Map<SlackbotV2ApiAttachment, string> = new Map(),
   requesterIdentity?: RequesterIdentity,
   contextMessages?: SlackbotV2ApiMessage[],
-  contextPreamble?: string
+  contextPreamble?: string,
+  sessionThreadKey?: string
 ): JsonValue[] {
   const content: JsonValue[] = []
-  const slackSessionContext = slackUploadSessionContext(message.threadId)
+  const slackSessionContext = slackUploadSessionContext(message.threadId, sessionThreadKey)
   if (slackSessionContext) {
     content.push({ type: 'text', text: slackSessionContext })
   }
@@ -1884,7 +1890,7 @@ type SlackThreadDestination = {
   threadTs: string
 }
 
-function slackUploadSessionContext(threadId: string): string | undefined {
+function slackUploadSessionContext(threadId: string, sessionThreadKey?: string): string | undefined {
   const destination = slackThreadDestination(threadId)
   if (!destination) return undefined
 
@@ -1895,7 +1901,7 @@ function slackUploadSessionContext(threadId: string): string | undefined {
     ...(destination.teamId ? [`- session_context.slack.team_id: ${destination.teamId}`] : []),
     `- session_context.slack.channel_id: ${destination.channelId}`,
     `- session_context.slack.thread_ts: ${destination.threadTs}`,
-    `- thread_key: ${threadId}`,
+    `- thread_key: ${sessionThreadKey ?? threadId}`,
     '',
     'Use these exact IDs for Slack file uploads in this thread.',
     `Example: slack upload ${destination.channelId} /path/to/file --thread ${destination.threadTs}`,

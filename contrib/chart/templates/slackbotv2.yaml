@@ -38,6 +38,10 @@ spec:
           image: {{ printf "%s:%s" .Values.slackbotv2.image.repository .Values.slackbotv2.image.tag | quote }}
           imagePullPolicy: {{ .Values.slackbotv2.image.pullPolicy }}
           env:
+{{- if .Values.slackbotv2.crew.existingSecret }}
+            - name: SLACKBOTV2_CREW_FILE
+              value: /etc/centaur-crew/crew.json
+{{- end }}
             - name: PORT
               value: "3001"
             - name: CENTAUR_API_URL
@@ -160,6 +164,19 @@ spec:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:
 {{ toYaml .Values.slackbotv2.resources | nindent 12 }}
+{{- if .Values.slackbotv2.crew.existingSecret }}
+          volumeMounts:
+            - name: crew
+              mountPath: /etc/centaur-crew
+              readOnly: true
+      volumes:
+        - name: crew
+          secret:
+            secretName: {{ .Values.slackbotv2.crew.existingSecret | quote }}
+            items:
+              - key: crew.json
+                path: crew.json
+{{- end }}
 ---
 apiVersion: v1
 kind: Service

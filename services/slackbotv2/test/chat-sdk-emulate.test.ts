@@ -811,6 +811,29 @@ describe('slackbotv2', () => {
     expectSlackRenderedReply(renderedReplies[1]!, 'Executed request 2.')
   })
 
+  it('keeps Crew executions separate when members receive mentions in one Slack thread', async () => {
+    const parent = await postUserMessage('Shared team discussion.')
+    for (const [id, appId] of [['atlas', 'A1'], ['scout', 'A2']] as const) {
+      const instance = createTestBot({ crew: { id, appId }, slackHomeTeamId: TEAM_ID })
+      const text = `<@${BOT_USER_ID}> --persona=eng hello ${id}`
+      const mention = await postUserMessage(text, parent.ts)
+      const waits: Promise<unknown>[] = []
+      const response = await instance.app.request('/api/webhooks/slack', signedSlackEvent({
+        event_id: `Ev-crew-${id}`,
+        event: { type: 'app_mention', user: USER_ID, channel: CHANNEL_ID, team: TEAM_ID,
+          ts: mention.ts, thread_ts: parent.ts, text }
+      }), {}, waitUntilContext(waits))
+      expect(response.status).toBe(200)
+      await Promise.all(waits)
+    }
+    expect(codexApi.creates.map(item => item.body.persona_id)).toEqual(['atlas', 'scout'])
+    expect(codexApi.executes.map(item => item.threadKey)).toEqual([
+      `slack:${TEAM_ID}:A1:${CHANNEL_ID}:${parent.ts}`,
+      `slack:${TEAM_ID}:A2:${CHANNEL_ID}:${parent.ts}`
+    ])
+    expect((await threadTexts(parent.ts)).filter(text => text.includes('Executed request'))).toHaveLength(2)
+  })
+
   // The paragraph break (`\n\n`) after the model value is deliberate: the
   // unpatched chat SDK dropped it, gluing the value to the next word
   // (`fablefirst`); this exercises the patched extractPlainText end to end.

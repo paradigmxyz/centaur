@@ -1,4 +1,5 @@
 import { createSlackbotV2, type SlackbotV2Options } from './index'
+import { crewFetch, crewOptions, parseCrew } from './crew'
 import { parseChannelDefaults } from './channel-defaults'
 import { resolveSlackHomeTeamId } from './session-api'
 import { resolveSlackBotUserId } from './slack-user'
@@ -104,9 +105,27 @@ const options: SlackbotV2Options = {
 options.slackHomeTeamId = await resolveSlackHomeTeamId(options)
 
 const { app } = createSlackbotV2(options)
+const crewFile = optionalEnv('SLACKBOTV2_CREW_FILE')
+const crewApps = new Map<string, ReturnType<typeof createSlackbotV2>['app']>()
+if (crewFile) {
+  const members = parseCrew(await Bun.file(crewFile).text())
+  for (const member of members) {
+    if (member.botUserId === options.botUserId) throw new Error('Crew cannot reuse the default bot identity')
+    const memberOptions = crewOptions(options, member)
+    // Verify the saved credentials against Slack before admitting this identity.
+    const actualTeam = await resolveSlackHomeTeamId({ ...memberOptions, slackHomeTeamId: undefined })
+    const actualUser = await resolveSlackBotUserId({
+      botToken: member.botToken, slackApiUrl, timeoutMs: slackApiTimeoutMs
+    })
+    if (actualTeam !== member.teamId || actualUser !== member.botUserId) {
+      throw new Error(`Crew ${member.id} credentials do not match its configured identity`)
+    }
+    crewApps.set(member.id, createSlackbotV2(memberOptions).app)
+  }
+}
 const server = Bun.serve({
   port,
-  fetch: app.fetch
+  fetch: crewFetch(app, crewApps)
 })
 
 console.log(

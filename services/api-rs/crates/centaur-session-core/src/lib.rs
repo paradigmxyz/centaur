@@ -339,6 +339,9 @@ impl ThreadKey {
         }
         let parts = key.split(':').collect::<Vec<_>>();
         let (channel_id, thread_ts) = match parts.as_slice() {
+            ["slack", _team_id, app_id, channel_id, thread_ts] if app_id.starts_with('A') => {
+                (*channel_id, *thread_ts)
+            }
             ["slack", channel_id, thread_ts] => (*channel_id, *thread_ts),
             ["slack", _team_id, channel_id, thread_ts] => (*channel_id, *thread_ts),
             [channel_id, thread_ts] if is_slack_conversation_id(channel_id) => {
@@ -559,6 +562,19 @@ mod tests {
 
     #[test]
     fn chat_destination_resolves_slack_keys() {
+        for channel in ["C123", "D123", "G123"] {
+            let scoped = ThreadKey::parse(format!("slack:T999:A123:{channel}:123.456"))
+                .unwrap()
+                .chat_destination()
+                .unwrap();
+            assert_eq!(
+                scoped,
+                ChatDestination::Slack {
+                    channel_id: channel.to_owned(),
+                    thread_ts: "123.456".to_owned(),
+                }
+            );
+        }
         let dest = ThreadKey::parse("slack:C123:123.456")
             .unwrap()
             .chat_destination()
