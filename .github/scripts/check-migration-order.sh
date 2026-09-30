@@ -27,9 +27,10 @@ version_number() {
 # check_migrations <label> <regex> <primary-dir> [variant-dir...]
 #
 # All directories share one version sequence. A version may appear once in the
-# primary directory, or once in each variant directory (variants are mutually
-# exclusive alternatives, such as text-search backends). Every added file must
-# have a version greater than any version on the base ref.
+# primary directory, or once in every variant directory (variants are mutually
+# exclusive alternatives, such as text-search backends, so each must carry every
+# variant version). Every added file must have a version greater than any
+# version on the base ref.
 check_migrations() {
   local label="$1"
   local regex="$2"
@@ -89,6 +90,33 @@ check_migrations() {
     done <<<"${duplicate_versions}"
   fi
 
+  local variant_count=$(( ${#dirs[@]} - 1 ))
+  if (( variant_count > 1 )); then
+    local unpaired_versions
+    unpaired_versions="$(
+      printf '%s' "${head_entries}" | awk -v variants="${variant_count}" '
+        NF && $2 != 0 { dirs[$1 + 0, $2] = 1; versions[$1 + 0] = 1 }
+        END {
+          for (version in versions) {
+            for (dir = 1; dir <= variants; dir++) {
+              if (!((version, dir) in dirs)) { print version; break }
+            }
+          }
+        }
+      ' | sort -n
+    )"
+    if [[ -n "${unpaired_versions}" ]]; then
+      failed=1
+      dir_failed=1
+      echo "::error title=${label} unpaired variant migrations::Every variant directory needs each variant version (add a no-op migration where nothing changes): ${dirs[*]:1}"
+      while IFS= read -r version; do
+        [[ -n "${version}" ]] || continue
+        echo "  ${version}:"
+        printf '%s' "${head_entries}" | awk -v version="${version}" 'NF && $1 + 0 == version { print "    " $3 }'
+      done <<<"${unpaired_versions}"
+    fi
+  fi
+
   local base_max
   base_max="$(
     printf '%s' "${base_entries}" | awk 'NF { print $1 + 0 }' | sort -n | tail -n 1
@@ -116,7 +144,7 @@ check_migrations() {
   done <<<"${added_entries}"
 
   if [[ "${dir_failed}" -eq 0 ]]; then
-    echo "${label}: migration versions are unique and monotonic relative to ${base_ref}."
+    echo "${label}: migration versions are unique$( (( variant_count > 1 )) && echo ', paired,' ) and monotonic relative to ${base_ref}."
   fi
 }
 

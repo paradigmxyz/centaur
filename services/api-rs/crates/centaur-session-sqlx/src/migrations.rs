@@ -241,6 +241,18 @@ mod tests {
     }
 
     #[test]
+    fn every_backend_carries_every_search_version() {
+        let [first, rest @ ..] = TextSearchBackend::ALL;
+        for backend in rest {
+            assert_eq!(
+                versions(first.migrator()),
+                versions(backend.migrator()),
+                "{first} and {backend} migrations must share versions; add a no-op migration where nothing changes"
+            );
+        }
+    }
+
+    #[test]
     fn merged_list_is_ordered_and_complete() {
         for backend in TextSearchBackend::ALL {
             let merged = migration_list(backend);
