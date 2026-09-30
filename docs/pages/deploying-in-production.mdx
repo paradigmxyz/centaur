@@ -502,9 +502,10 @@ as a `/32`. Control-plane pods and per-sandbox iron-proxies may reach only these
 ranges on `port`; see [Security](/security).
 
 `externalDatabase.textSearch` selects how company-context keyword search is
-indexed:
+indexed. Set it only with `postgres.enabled: false`; the bundled Postgres always
+uses `paradedb`.
 
-- `postgres` (default) uses PostgreSQL's built-in full-text search and works on
+- `postgres` (the default when unset) uses PostgreSQL's built-in full-text search and works on
   any server above.
 - `paradedb` uses ParadeDB BM25 indexes and requires the `pg_search` extension,
   which RDS and Cloud SQL do not offer. Use it only for a self-managed ParadeDB

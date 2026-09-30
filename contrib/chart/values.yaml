@@ -887,14 +887,15 @@ externalDatabase:
   cidrs: []
   #   - 10.0.32.0/20
   port: 5432
-  # Keyword search backend for company context. "postgres" uses built-in
-  # full-text search and works on RDS and Cloud SQL; "paradedb" uses BM25 and
-  # requires the pg_search extension. The bundled Postgres always uses
-  # "paradedb". A database keeps the backend it was first migrated with; api-rs
-  # refuses to start if this setting later disagrees. Databases migrated before
-  # this setting existed have BM25 indexes: keep them with "paradedb", or drop
-  # them before switching to "postgres".
-  textSearch: postgres
+  # Keyword search backend for company context. "postgres" (used when empty)
+  # uses built-in full-text search and works on RDS and Cloud SQL; "paradedb"
+  # uses BM25 and requires the pg_search extension. Must be empty while
+  # postgres.enabled=true: the bundled Postgres always uses "paradedb". A
+  # database keeps the backend it was first migrated with; api-rs refuses to
+  # start if this setting later disagrees. Databases migrated before this
+  # setting existed have BM25 indexes: keep them with "paradedb", or drop them
+  # before switching to "postgres".
+  textSearch: ""
 
 ingress:
   enabled: false
