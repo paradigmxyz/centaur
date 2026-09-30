@@ -52,14 +52,11 @@ const LEGACY_CHECKSUMS: [(i64, &str); 6] = [
     ),
 ];
 
-/// Tables that core migrations gave BM25 indexes before the backends split,
-/// including their names before core migration 0045 renamed them.
-const LEGACY_BM25_TABLES: [&str; 7] = [
+/// Tables that core migrations gave BM25 indexes before the backends split.
+const LEGACY_BM25_TABLES: [&str; 5] = [
     "company_context_documents",
     "google_docs_context_documents",
     "granola_context_documents",
-    "slack_dm_context_documents",
-    "slack_dm_conversation_context_documents",
     "slack_private_context_documents",
     "slack_private_conversation_context_documents",
 ];

@@ -4,11 +4,6 @@
 -- these indexes from core migrations, so every statement is idempotent.
 create extension if not exists pg_search;
 
--- ParadeDB ties BM25 metadata to the indexed relation name. A database that
--- created these before core migration 0045 renamed their tables still has them.
-drop index if exists idx_slack_dm_context_documents_bm25;
-drop index if exists idx_slack_dm_conversation_context_documents_bm25;
-
 create index if not exists idx_company_context_documents_bm25
     on company_context_documents
     using bm25 (
