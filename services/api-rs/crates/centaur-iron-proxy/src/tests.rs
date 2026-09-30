@@ -62,6 +62,26 @@ fn harness_auth_fragments_are_baked_in() {
 
     assert!(harness_auth_fragment("codex", "bogus").unwrap().is_none());
 
+    let amp = harness_auth_fragment("amp", "api_key").unwrap().unwrap();
+    assert_eq!(
+        amp.transforms[0].config.secrets[0].rules[0]["host"].as_str(),
+        Some("ampcode.com")
+    );
+    assert_eq!(
+        amp.transforms[0].config.secrets[0]
+            .replace
+            .as_ref()
+            .unwrap()
+            .extra["match_headers"],
+        serde_yaml::to_value(["Authorization", "X-Api-Key"]).unwrap()
+    );
+    assert_eq!(
+        placeholder_env(&[amp])
+            .get("AMP_API_KEY")
+            .map(String::as_str),
+        Some("AMP_API_KEY")
+    );
+
     let infra = infra_fragment().unwrap();
     assert_eq!(
         infra.top_level["proxy"]["upstream_response_header_timeout"].as_str(),
