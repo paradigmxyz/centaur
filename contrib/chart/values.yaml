@@ -842,6 +842,8 @@ teamsbot:
   extraEnv: {}
   resources: {}
 
+# Bundled PostgreSQL. Set enabled=false to use an external server such as RDS
+# or Cloud SQL, and configure externalDatabase.
 postgres:
   enabled: true
   # Scheduling for the PostgreSQL pod. When persistence is enabled, ensure the
@@ -877,6 +879,18 @@ postgres:
     enabled: true
     sizeLimit: 1Gi
   resources: {}
+
+# External PostgreSQL, used when postgres.enabled=false. Database URLs come from
+# secretManager.existingSecretName; these settings scope NetworkPolicy egress.
+externalDatabase:
+  # Address ranges the database endpoint can resolve to. Control-plane pods and
+  # per-sandbox iron-proxies may reach only these ranges on port. NetworkPolicy
+  # cannot match hostnames: use the RDS DB subnet group's CIDRs (the endpoint IP
+  # moves on failover) or the Cloud SQL private IP as a /32. Required when
+  # networkPolicy.enabled=true; must be empty while postgres.enabled=true.
+  cidrs: []
+  #   - 10.0.32.0/20
+  port: 5432
 
 ingress:
   enabled: false

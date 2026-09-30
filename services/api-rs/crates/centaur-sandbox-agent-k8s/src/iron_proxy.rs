@@ -87,6 +87,11 @@ pub struct IronProxyConfig {
     pub env_from_secret_names: Vec<String>,
     pub extra_env: BTreeMap<String, String>,
     pub upstream_deny_cidrs: Vec<String>,
+    /// Address ranges of an external core database (for example RDS or Cloud
+    /// SQL). Proxies may reach them on `database_port`; the public-upstream rule
+    /// excludes private ranges, where managed databases usually live.
+    pub database_cidrs: Vec<String>,
+    pub database_port: u16,
     pub op_connect_app_name: String,
     pub op_connect_port: u16,
     pub api_pod_labels: BTreeMap<String, String>,
@@ -110,6 +115,8 @@ impl IronProxyConfig {
             env_from_secret_names: Vec::new(),
             extra_env: BTreeMap::new(),
             upstream_deny_cidrs: Vec::new(),
+            database_cidrs: Vec::new(),
+            database_port: 5432,
             op_connect_app_name: "onepassword-connect".to_owned(),
             op_connect_port: 8080,
             api_pod_labels: BTreeMap::from([(
@@ -1771,6 +1778,16 @@ fn proxy_egress_rules(
         vec![network_port(PG_LISTENER_PORT)],
     ));
     rules.push(egress_to(vec![public_ipv4_peer()], upstream_ports));
+    if !iron_proxy.database_cidrs.is_empty() {
+        rules.push(egress_to(
+            iron_proxy
+                .database_cidrs
+                .iter()
+                .map(|cidr| ip_block_peer(cidr))
+                .collect(),
+            vec![network_port(iron_proxy.database_port)],
+        ));
+    }
     if observability_enabled {
         rules.push(egress_to(
             vec![pod_peer(iron_proxy.api_pod_labels.clone())],
@@ -1829,6 +1846,16 @@ fn namespace_pod_peer(namespace: &str, labels: BTreeMap<String, String>) -> Netw
 fn all_namespaces_peer() -> NetworkPolicyPeer {
     NetworkPolicyPeer {
         namespace_selector: Some(LabelSelector::default()),
+        ..Default::default()
+    }
+}
+
+fn ip_block_peer(cidr: &str) -> NetworkPolicyPeer {
+    NetworkPolicyPeer {
+        ip_block: Some(IPBlock {
+            cidr: cidr.to_owned(),
+            except: None,
+        }),
         ..Default::default()
     }
 }
@@ -3013,6 +3040,44 @@ mod tests {
                 .iter()
                 .any(|rule| rule_allows_public_port(rule, 3000))
         );
+    }
+
+    #[test]
+    fn proxy_policy_allows_external_database_cidrs_on_database_port() {
+        let id = SandboxId::new("asbx-test");
+        let mut iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
+        iron_proxy.database_cidrs = vec!["10.0.32.0/20".to_owned(), "10.0.48.0/20".to_owned()];
+        iron_proxy.database_port = 6432;
+
+        let policies = build_iron_proxy_network_policies(
+            &id,
+            &resolved(),
+            &iron_proxy,
+            &control_target(),
+            None,
+            false,
+        );
+        let allows_database = |rule: &NetworkPolicyEgressRule| {
+            let cidrs: Vec<&str> = rule
+                .to
+                .iter()
+                .flatten()
+                .filter_map(|peer| peer.ip_block.as_ref())
+                .map(|block| block.cidr.as_str())
+                .collect();
+            cidrs == ["10.0.32.0/20", "10.0.48.0/20"]
+                && rule.ports.as_ref()
+                    == Some(&vec![NetworkPolicyPort {
+                        port: Some(IntOrString::Int(6432)),
+                        protocol: Some("TCP".to_owned()),
+                        ..Default::default()
+                    }])
+        };
+
+        let sandbox_egress = policies[0].spec.as_ref().unwrap().egress.as_ref().unwrap();
+        assert!(!sandbox_egress.iter().any(allows_database));
+        let proxy_egress = policies[1].spec.as_ref().unwrap().egress.as_ref().unwrap();
+        assert!(proxy_egress.iter().any(allows_database));
     }
 
     #[test]
