@@ -515,10 +515,6 @@ if the setting later disagrees, and refuses `postgres` for a database that
 already has BM25 indexes, such as one restored from the bundled Postgres. Set
 `paradedb` for such a database, or drop its BM25 indexes to switch.
 
-The experimental company-context ingestion service
-(`experimentalCompanyContext.enabled`) still requires `pg_search`, so leave it
-disabled on RDS and Cloud SQL.
-
 ## 7. Verify the Deployment
 
 Check health from inside the api-rs deployment first:
