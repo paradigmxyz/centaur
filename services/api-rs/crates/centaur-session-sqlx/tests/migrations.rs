@@ -2,6 +2,7 @@
 //! before the backends split, and backend mismatches.
 
 use std::{
+    borrow::Cow,
     env,
     error::Error,
     future::Future,
@@ -27,11 +28,42 @@ const SEARCHABLE_TABLES: [&str; 5] = [
     "slack_private_conversation_context_documents",
 ];
 
-/// Last core version released while core migrations created the BM25 indexes.
-const LAST_LEGACY_CORE_VERSION: i64 = 55;
+/// Last core version the pre-split releases shipped.
+const LAST_LEGACY_VERSION: i64 = 55;
 
-/// BM25 indexes as core migrations created them before the backends split.
-const LEGACY_BM25_INDEXES_SQL: &str = include_str!("fixtures/legacy_bm25_indexes.sql");
+/// Versions at which a database migrated by a pre-split release can stop: the
+/// last release, and one before core migration 0045 renamed the Slack DM tables
+/// under their BM25 indexes.
+const LEGACY_STOP_VERSIONS: [i64; 2] = [LAST_LEGACY_VERSION, 44];
+
+/// Core migrations as the pre-split releases shipped them, before their
+/// ParadeDB statements moved to the paradedb backend.
+const LEGACY_MIGRATIONS: [(i64, &str); 6] = [
+    (
+        12,
+        include_str!("fixtures/legacy-migrations/0012_company_context_documents.sql"),
+    ),
+    (
+        28,
+        include_str!("fixtures/legacy-migrations/0028_slack_dm_context_documents.sql"),
+    ),
+    (
+        29,
+        include_str!("fixtures/legacy-migrations/0029_slack_dm_conversation_context_documents.sql"),
+    ),
+    (
+        30,
+        include_str!("fixtures/legacy-migrations/0030_google_docs_oauth_sync_tables.sql"),
+    ),
+    (
+        40,
+        include_str!("fixtures/legacy-migrations/0040_granola_sync_tables.sql"),
+    ),
+    (
+        45,
+        include_str!("fixtures/legacy-migrations/0045_slack_private_channel_oauth_sync.sql"),
+    ),
+];
 
 static MIGRATION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -60,25 +92,48 @@ async fn fresh_databases_migrate_and_index_every_searchable_table() -> Result<()
     Ok(())
 }
 
+#[test]
+fn edited_core_migrations_present_their_legacy_checksums() {
+    // Every database migrated by a pre-split release recorded these.
+    let legacy = legacy_migrations(LAST_LEGACY_VERSION);
+    for backend in TextSearchBackend::ALL {
+        for migration in migration_list(backend) {
+            if let Some(recorded) = legacy
+                .iter()
+                .find(|legacy| legacy.version == migration.version)
+            {
+                assert_eq!(
+                    migration.checksum, recorded.checksum,
+                    "{backend} migration {} changes a recorded checksum",
+                    migration.version
+                );
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn legacy_bm25_databases_adopt_paradedb() -> Result<(), Box<dyn Error>> {
     let Some(server) = TestServer::legacy_bm25_server().await? else {
         return Ok(());
     };
     let reference = server.fresh_schema(TextSearchBackend::Paradedb).await?;
-    let mut database = server.create_legacy_bm25_database().await?;
-    let result = async {
-        migrate(&mut database.conn, TextSearchBackend::Paradedb).await?;
-        let schema = schema_snapshot(&mut database.conn).await?;
-        assert_same_schema(
-            &reference,
-            &schema,
-            "legacy BM25 database adopting paradedb",
-        );
-        Ok::<_, Box<dyn Error>>(())
+    for stopped_at in LEGACY_STOP_VERSIONS {
+        let mut database = server.create_legacy_database(stopped_at).await?;
+        let result = async {
+            migrate(&mut database.conn, TextSearchBackend::Paradedb).await?;
+            let schema = schema_snapshot(&mut database.conn).await?;
+            assert_same_schema(
+                &reference,
+                &schema,
+                &format!("legacy database at {stopped_at} adopting paradedb"),
+            );
+            Ok::<_, Box<dyn Error>>(())
+        }
+        .await;
+        server.drop_database(database, result).await?;
     }
-    .await;
-    server.drop_database(database, result).await
+    Ok(())
 }
 
 #[tokio::test]
@@ -88,41 +143,66 @@ async fn legacy_bm25_databases_refuse_postgres_until_indexes_are_dropped()
         return Ok(());
     };
     let mut reference = server.fresh_schema(TextSearchBackend::Postgres).await?;
-    let mut database = server.create_legacy_bm25_database().await?;
-    let result = async {
-        let before = schema_snapshot(&mut database.conn).await?;
-        let error = migrate(&mut database.conn, TextSearchBackend::Postgres)
-            .await
-            .expect_err("postgres must not adopt a database with BM25 indexes");
-        let SessionStoreError::Bm25IndexesPresent { indexes } = &error else {
-            panic!("unexpected error: {error}");
-        };
-        assert_eq!(indexes.len(), SEARCHABLE_TABLES.len());
-        assert_eq!(schema_snapshot(&mut database.conn).await?, before);
+    // Dropping the indexes leaves pg_search installed, and ParadeDB images may
+    // preinstall it in new databases.
+    reference.retain(|line| line != "extension pg_search");
+    for stopped_at in LEGACY_STOP_VERSIONS {
+        let mut database = server.create_legacy_database(stopped_at).await?;
+        let result = async {
+            let before = schema_snapshot(&mut database.conn).await?;
+            let error = migrate(&mut database.conn, TextSearchBackend::Postgres)
+                .await
+                .expect_err("postgres must not adopt a database with BM25 indexes");
+            let SessionStoreError::Bm25IndexesPresent { indexes } = &error else {
+                panic!("unexpected error: {error}");
+            };
+            assert_eq!(schema_snapshot(&mut database.conn).await?, before);
 
-        // Once the operator drops the indexes, the database adopts postgres.
-        for index in indexes {
-            database
-                .conn
-                .execute(format!(r#"drop index "{index}""#).as_str())
-                .await?;
+            // Once the operator drops the listed indexes, the database adopts
+            // postgres with no BM25 index left behind.
+            for index in indexes {
+                database
+                    .conn
+                    .execute(format!(r#"drop index "{index}""#).as_str())
+                    .await?;
+            }
+            migrate(&mut database.conn, TextSearchBackend::Postgres).await?;
+            let mut schema = schema_snapshot(&mut database.conn).await?;
+            schema.retain(|line| line != "extension pg_search");
+            assert_same_schema(
+                &reference,
+                &schema,
+                &format!("legacy database at {stopped_at} adopting postgres"),
+            );
+            Ok::<_, Box<dyn Error>>(())
         }
-        migrate(&mut database.conn, TextSearchBackend::Postgres).await?;
-        let mut schema = schema_snapshot(&mut database.conn).await?;
-        // Dropping the indexes leaves pg_search installed, and ParadeDB
-        // images may preinstall it in new databases.
-        for snapshot in [&mut reference, &mut schema] {
-            snapshot.retain(|line| line != "extension pg_search");
-        }
-        assert_same_schema(
-            &reference,
-            &schema,
-            "legacy BM25 database adopting postgres",
-        );
-        Ok::<_, Box<dyn Error>>(())
+        .await;
+        server.drop_database(database, result).await?;
     }
-    .await;
-    server.drop_database(database, result).await
+    Ok(())
+}
+
+/// Core migrations through `stopped_at` as a pre-split release applied them.
+fn legacy_migrations(stopped_at: i64) -> Vec<Migration> {
+    migration_list(TextSearchBackend::Paradedb)
+        .into_iter()
+        .filter(|migration| migration.version <= stopped_at.min(LAST_LEGACY_VERSION))
+        .map(|migration| {
+            match LEGACY_MIGRATIONS
+                .iter()
+                .find(|(version, _)| *version == migration.version)
+            {
+                Some((_, sql)) => Migration::new(
+                    migration.version,
+                    migration.description,
+                    migration.migration_type,
+                    Cow::Borrowed(sql),
+                    migration.no_tx,
+                ),
+                None => migration,
+            }
+        })
+        .collect()
 }
 
 #[tokio::test]
@@ -362,25 +442,16 @@ impl TestServer {
         Ok(server)
     }
 
-    /// A database as the pre-split releases left it: every core migration
-    /// applied, with the BM25 indexes those migrations created.
-    async fn create_legacy_bm25_database(&self) -> Result<TestDatabase, Box<dyn Error>> {
+    /// A database as a pre-split release left it after `stopped_at`.
+    async fn create_legacy_database(
+        &self,
+        stopped_at: i64,
+    ) -> Result<TestDatabase, Box<dyn Error>> {
         let mut database = self.create_database().await?;
-        let result = async {
-            let legacy = migration_list(TextSearchBackend::Paradedb)
-                .into_iter()
-                .take_while(|migration| migration.version <= LAST_LEGACY_CORE_VERSION)
-                .collect();
-            run_list(&mut database.conn, legacy).await?;
-            sqlx::raw_sql(LEGACY_BM25_INDEXES_SQL)
-                .execute(&mut database.conn)
-                .await?;
-            Ok::<_, Box<dyn Error>>(())
-        }
-        .await;
+        let result = run_list(&mut database.conn, legacy_migrations(stopped_at)).await;
         match result {
             Ok(()) => Ok(database),
-            Err(error) => self.drop_database(database, Err(error)).await,
+            Err(error) => self.drop_database(database, Err(error.into())).await,
         }
     }
 

@@ -52,11 +52,14 @@ const LEGACY_CHECKSUMS: [(i64, &str); 6] = [
     ),
 ];
 
-/// Tables whose keyword search indexes belong to the text-search backend.
-const SEARCHABLE_TABLES: [&str; 5] = [
+/// Tables that core migrations gave BM25 indexes before the backends split,
+/// including their names before core migration 0045 renamed them.
+const LEGACY_BM25_TABLES: [&str; 7] = [
     "company_context_documents",
     "google_docs_context_documents",
     "granola_context_documents",
+    "slack_dm_context_documents",
+    "slack_dm_conversation_context_documents",
     "slack_private_context_documents",
     "slack_private_conversation_context_documents",
 ];
@@ -164,7 +167,7 @@ async fn ensure_text_search_backend(
                and tables.relname = any($1)
              order by 1",
         )
-        .bind(&SEARCHABLE_TABLES[..])
+        .bind(&LEGACY_BM25_TABLES[..])
         .fetch_all(&mut *conn)
         .await?;
         if !indexes.is_empty() {
