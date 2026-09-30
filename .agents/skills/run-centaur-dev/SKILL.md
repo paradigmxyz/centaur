@@ -76,10 +76,13 @@ docker run --name centaur-api-rs-postgres \
   -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=centaur \
   -p 5432:5432 \
-  -d postgres:16
+  -d pgvector/pgvector:pg16
 
 export DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/centaur
 ```
+
+Core migrations need pgvector. This image has no ParadeDB, so run api-rs with
+`DATABASE_TEXT_SEARCH=postgres` (built-in full-text search) below.
 
 If port 5432 is occupied, map another host port and update `DATABASE_URL`.
 
@@ -98,6 +101,7 @@ cd services/api-rs
 RUST_LOG=info \
 DATABASE_URL="$DATABASE_URL" \
 RUN_MIGRATIONS=true \
+DATABASE_TEXT_SEARCH=postgres \
 BIND_ADDR=0.0.0.0:8080 \
 SESSION_SANDBOX_K8S_CONTEXT=kind-centaur-api-rs-e2e \
 SESSION_SANDBOX_K8S_NAMESPACE=centaur-sandbox-e2e \
