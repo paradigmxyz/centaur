@@ -114,16 +114,6 @@ impl McpSession<'_> {
         Ok(parse_meetings(&text)?.0)
     }
 
-    pub async fn transcript(&mut self, meeting_id: &str) -> Result<String> {
-        let text = self
-            .call_tool(
-                "get_meeting_transcript",
-                json!({ "meeting_id": meeting_id }),
-            )
-            .await?;
-        Ok(text.trim().to_owned())
-    }
-
     async fn initialize(&mut self) -> Result<()> {
         let result = self
             .request(
@@ -497,13 +487,14 @@ mod tests {
         if method == "notifications/initialized" {
             return StatusCode::ACCEPTED.into_response();
         }
-        let result = match body["params"]["name"].as_str().unwrap() {
+        let params = &body["params"];
+        let result = match params["name"].as_str().unwrap() {
             "get_account_info" => json!({
                 "content": [{ "type": "text", "text": "{\"email\":\" Owner@Example.com \"}" }]
             }),
-            "get_meeting_transcript" => json!({
+            "get_meetings" if params["arguments"]["meeting_ids"][0] == "too-many" => json!({
                 "isError": true,
-                "content": [{ "type": "text", "text": "Transcripts need a\n paid plan" }]
+                "content": [{ "type": "text", "text": "Invalid meeting_ids:\n maximum 10" }]
             }),
             "list_meetings" => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
             _ => return StatusCode::UNAUTHORIZED.into_response(),
@@ -535,11 +526,14 @@ mod tests {
         let mut session = client.session(&credential).await.unwrap();
 
         assert_eq!(session.account_email().await.unwrap(), "owner@example.com");
-        let tool_error = session.transcript("meeting-1").await.unwrap_err();
+        let tool_error = session
+            .get_meetings(&["too-many".to_owned()])
+            .await
+            .unwrap_err();
         assert!(is_rejected(&tool_error));
         assert_eq!(
             tool_error.to_string(),
-            "Granola MCP tool get_meeting_transcript failed: Transcripts need a paid plan"
+            "Granola MCP tool get_meetings failed: Invalid meeting_ids: maximum 10"
         );
         let date = NaiveDate::from_ymd_opt(2026, 7, 8).unwrap();
         let unavailable = session.list_meetings(date, date).await.unwrap_err();

@@ -179,7 +179,6 @@ async fn remove_unobserved_notes(pool: &PgPool, retained_ids: &[i64]) -> Result<
             owner = '{}'::jsonb,
             attendees = '[]'::jsonb,
             summary_markdown = '',
-            transcript = '',
             content_text = '',
             content_hash = '',
             metadata = '{}'::jsonb,
@@ -331,8 +330,8 @@ async fn sync_account(
     }
 }
 
-/// Fetches details and transcripts for a batch of meetings and stages the
-/// notes whose content changed.
+/// Fetches details for a batch of meetings and stages the notes whose content
+/// changed. Transcripts are left to the Granola tool, which fetches them on demand.
 async fn fetch_notes(
     state: &TaskState,
     params: NotesFetchParams,
@@ -358,28 +357,8 @@ async fn fetch_notes(
         let mut staged = 0;
         for listed in &params.meetings {
             let meeting = details.get(&listed.id).unwrap_or(listed);
-            // Transcripts need a paid Granola plan; keep the note without one.
-            let transcript = match session.transcript(&meeting.id).await {
-                Ok(transcript) => transcript,
-                Err(error) if is_rejected(&error) => {
-                    info!(
-                        event = "company_context_granola_transcript_unavailable",
-                        credential_id = credential.id,
-                        note_id = meeting.id,
-                        error = %error
-                    );
-                    String::new()
-                }
-                Err(error) => return Err(error),
-            };
-            let Some(revision) = stage_note(
-                &state.pool,
-                &credential,
-                &params.account_email,
-                meeting,
-                &transcript,
-            )
-            .await?
+            let Some(revision) =
+                stage_note(&state.pool, &credential, &params.account_email, meeting).await?
             else {
                 continue;
             };
@@ -431,16 +410,12 @@ async fn fetch_notes(
     }
 }
 
-fn note_content(meeting: &Meeting, transcript: &str) -> String {
-    [
-        meeting.title.trim(),
-        meeting.summary_markdown.trim(),
-        transcript.trim(),
-    ]
-    .into_iter()
-    .filter(|part| !part.is_empty())
-    .collect::<Vec<_>>()
-    .join("\n\n")
+fn note_content(meeting: &Meeting) -> String {
+    [meeting.title.trim(), meeting.summary_markdown.trim()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Records the credential's observation and stages the note. Returns the
@@ -450,11 +425,10 @@ async fn stage_note(
     credential: &GranolaCredential,
     account_email: &str,
     meeting: &Meeting,
-    transcript: &str,
 ) -> Result<Option<i64>> {
     let owner = json!(meeting.owner.clone().unwrap_or_default());
     let attendees = json!(meeting.attendees);
-    let content_text = note_content(meeting, transcript);
+    let content_text = note_content(meeting);
     let content_hash = hex_sha256(
         json!([meeting.date, owner, attendees, content_text])
             .to_string()
@@ -485,16 +459,15 @@ async fn stage_note(
     sqlx::query(
         r#"
         INSERT INTO company_context_system.granola_notes (
-            note_id, title, owner, attendees, summary_markdown, transcript,
-            content_text, content_hash, source_created_at, metadata
+            note_id, title, owner, attendees, summary_markdown, content_text,
+            content_hash, source_created_at, metadata
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT (note_id) DO UPDATE
         SET title = EXCLUDED.title,
             owner = EXCLUDED.owner,
             attendees = EXCLUDED.attendees,
             summary_markdown = EXCLUDED.summary_markdown,
-            transcript = EXCLUDED.transcript,
             content_text = EXCLUDED.content_text,
             content_hash = EXCLUDED.content_hash,
             source_created_at = EXCLUDED.source_created_at,
@@ -511,7 +484,6 @@ async fn stage_note(
     .bind(&owner)
     .bind(&attendees)
     .bind(&meeting.summary_markdown)
-    .bind(transcript)
     .bind(&content_text)
     .bind(&content_hash)
     .bind(meeting.occurred_at())
@@ -860,18 +832,13 @@ mod tests {
             &credential(1),
             "ada@example.com",
             &meeting("Ship it."),
-            "Ada: go",
         )
         .await
         .unwrap();
         assert_eq!(staged, Some(1));
         assert_eq!(
             note(&pool).await,
-            (
-                "Planning\n\nShip it.\n\nAda: go".to_owned(),
-                "pending".to_owned(),
-                1
-            )
+            ("Planning\n\nShip it.".to_owned(), "pending".to_owned(), 1)
         );
         (&pool)
             .execute(
@@ -889,7 +856,6 @@ mod tests {
             &credential(2),
             "bob@example.com",
             &meeting("Ship it."),
-            "Ada: go",
         )
         .await
         .unwrap();
@@ -899,7 +865,6 @@ mod tests {
             &credential(2),
             "bob@example.com",
             &meeting("Ship it today."),
-            "Ada: go",
         )
         .await
         .unwrap();
@@ -924,7 +889,6 @@ mod tests {
             &credential(1),
             "ada@example.com",
             &meeting("Ship it today."),
-            "Ada: go",
         )
         .await
         .unwrap();

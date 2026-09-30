@@ -2,7 +2,7 @@
 
 Standalone company-context ingestion service. It indexes regular Google Docs and text-bearing PDFs from users' My Drive, shared folders, Shared Drives they are members of, and Shared Drive folders shared with them without membership, using durable Absurd tasks. Google Docs are exported as plain text through the Drive API before chunking. Each user corpus and each member Shared Drive is followed through its own Drive change feed and checkpoint. Shared Drive folders shared with non-members have no change feed, so they are walked recursively each cycle, and files no walk has reached for 24 hours are removed.
 
-It also indexes Granola meeting notes, including transcripts when the user's Granola plan provides them, through each user's Granola MCP OAuth credential. Each sync lists the account's meetings from its checkpoint onward, fetches details and transcripts ten meetings at a time, and republishes a note only when its content changes. Notes that no live Granola credential still observes are removed.
+It also indexes Granola meeting notes (title, summary, owner, and attendees) through each user's Granola MCP OAuth credential. Each sync lists the account's meetings from its checkpoint onward, fetches their details ten meetings at a time, and republishes a note only when its content changes. Transcripts are not indexed; the Granola tool fetches them on demand. Notes that no live Granola credential still observes are removed.
 
 The service owns these Postgres schemas:
 

@@ -1,5 +1,6 @@
 -- Granola meeting notes synchronized through each user's Granola MCP OAuth
--- credential. Like the initial Drive corpus, no reader grants or RLS policies
+-- credential. Transcripts are not synchronized; the Granola tool fetches them
+-- on demand. Like the initial Drive corpus, no reader grants or RLS policies
 -- are added yet; the corpus is validated before it is exposed to retrieval.
 
 create table company_context_system.granola_checkpoints (
@@ -18,7 +19,6 @@ create table company_context_system.granola_notes (
     owner jsonb not null default '{}'::jsonb,
     attendees jsonb not null default '[]'::jsonb,
     summary_markdown text not null default '',
-    transcript text not null default '',
     content_text text not null default '',
     content_hash text not null default '',
     source_created_at timestamptz,
