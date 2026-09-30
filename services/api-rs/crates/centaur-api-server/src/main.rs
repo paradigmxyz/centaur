@@ -13,12 +13,18 @@ use thiserror::Error;
 use tokio::net::TcpListener;
 use tracing::info;
 
-use args::Args;
+use args::{Args, MigrateArgs};
 
 #[tokio::main]
 async fn main() -> Result<(), ServerError> {
     init_crypto_provider();
     let telemetry = init_telemetry(TelemetryConfig::from_env())?;
+
+    if let Some(args) = MigrateArgs::from_command_line() {
+        let result = migrate(args).await;
+        telemetry.shutdown();
+        return result;
+    }
 
     let args = Args::parse();
     let api_auth = ApiAuthConfig::from_env()?;
@@ -65,6 +71,13 @@ async fn main() -> Result<(), ServerError> {
 
     server.await??;
     telemetry.shutdown();
+    Ok(())
+}
+
+async fn migrate(args: MigrateArgs) -> Result<(), ServerError> {
+    let store = PgSessionStore::connect(&args.database_url).await?;
+    store.run_migrations(args.text_search).await?;
+    info!(text_search = %args.text_search, "database migrations applied");
     Ok(())
 }
 

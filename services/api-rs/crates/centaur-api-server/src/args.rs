@@ -59,7 +59,10 @@ const SANDBOX_OTLP_PASSTHROUGH_ENV_KEYS: [&str; 4] = [
 ];
 
 #[derive(Debug, Parser)]
-#[command(about = "Run the Centaur API Rust session control plane")]
+#[command(
+    about = "Run the Centaur API Rust session control plane",
+    after_help = "Run `centaur-api-server migrate --help` to apply database migrations without starting the server."
+)]
 pub(crate) struct Args {
     #[command(flatten)]
     pub(crate) server: ServerArgs,
@@ -545,6 +548,37 @@ impl IronControlArgs {
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+// `centaur-api-server migrate` is parsed before, and independently of, the
+// server arguments, so it needs none of the server's configuration and reads
+// nothing from the environment.
+#[derive(Debug, Parser)]
+#[command(
+    bin_name = "centaur-api-server migrate",
+    about = "Apply database migrations and exit without starting the server"
+)]
+pub(crate) struct MigrateArgs {
+    /// Postgres URL of the database to migrate. Leave the password out and
+    /// supply it through PGPASSWORD or a passfile (~/.pgpass) to keep it out of
+    /// the process list.
+    #[arg(long)]
+    pub(crate) database_url: String,
+    /// Keyword search backend to install: `paradedb` (requires the pg_search
+    /// extension) or `postgres` (built-in full-text search). It must match the
+    /// backend the database was first migrated with.
+    #[arg(long, value_parser = TextSearchBackend::from_str)]
+    pub(crate) text_search: TextSearchBackend,
+}
+
+impl MigrateArgs {
+    /// Parse `migrate` arguments when the command line starts with `migrate`.
+    pub(crate) fn from_command_line() -> Option<Self> {
+        if env::args_os().nth(1)? != "migrate" {
+            return None;
+        }
+        Some(Self::parse_from(env::args_os().skip(1)))
+    }
 }
 
 #[derive(Debug, ClapArgs)]
@@ -2379,6 +2413,40 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn migrate_takes_its_database_and_backend_only_from_flags() {
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let _env = EnvGuard::set(&[
+            ("DATABASE_URL", "postgres://env.example/centaur"),
+            ("DATABASE_TEXT_SEARCH", "postgres"),
+        ]);
+
+        let args = MigrateArgs::try_parse_from([
+            "migrate",
+            "--database-url",
+            "postgres://flag.example/centaur",
+            "--text-search",
+            "paradedb",
+        ])
+        .expect("migrate flags parse");
+        assert_eq!(args.database_url, "postgres://flag.example/centaur");
+        assert_eq!(args.text_search, TextSearchBackend::Paradedb);
+
+        for missing in [
+            vec!["migrate", "--text-search", "postgres"],
+            vec![
+                "migrate",
+                "--database-url",
+                "postgres://flag.example/centaur",
+            ],
+        ] {
+            assert!(
+                MigrateArgs::try_parse_from(&missing).is_err(),
+                "{missing:?} must fail without falling back to the environment"
+            );
         }
     }
 
