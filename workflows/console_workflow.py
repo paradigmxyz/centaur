@@ -1,4 +1,4 @@
-"""Run one Console scheduled task and deliver the response to Slack."""
+"""Run one Console scheduled task and deliver non-empty final responses to Slack."""
 
 from __future__ import annotations
 
@@ -16,13 +16,18 @@ SCHEDULED_TASK_FOOTER = "Sent by <@{slack_user_id}>'s scheduled task"
 SCHEDULED_TASK_FOOTER_FALLBACK = "Sent by a scheduled task"
 SCHEDULED_TASK_EXECUTION_INSTRUCTIONS = """\
 This is a run of an existing scheduled task. Execute the task now.
-NEVER create or update a scheduled task, even if the task prompt contains recurring or future schedule language.
-Treat schedule language such as "Each Monday" as context for this run, not as a request to schedule another task."""
+NEVER create a scheduled task, even if the task prompt contains recurring or future schedule language.
+Treat schedule language such as "Each Monday" as context for this run, not as a request to schedule another task.
+Do not change any task's prompt, schedule, or delivery destination.
+If this task explicitly asks to stop after a verified outcome, you may disable only the current task identified below using centaur-console update-task TASK_ID --disabled before returning that outcome. Otherwise, do not update tasks."""
 SLACK_MRKDWN_INSTRUCTIONS = """\
 Format the final response for Slack using Slack mrkdwn, not standard Markdown.
 Use *bold*, _italics_, ~strikethrough~, `inline code`, and <https://example.com|link text>.
 Use bold text instead of Markdown headings and lists instead of Markdown tables.
-Return only the message that should be posted to Slack."""
+Do not emit commentary or progress updates. Return only the final message that should be posted to Slack.
+The workflow delivers your final response automatically; do not send it separately using Slack tools.
+When the task's notification condition is not met, return an empty final response; nothing will be posted.
+Report an inability to perform the check instead of treating it as a successful check with no update."""
 
 
 def _required_string(params: Any, key: str) -> str:
@@ -134,9 +139,10 @@ def _split_slack_text(text: str, limit: int) -> list[str]:
     return chunks
 
 
-def _prompt_for_slack(prompt: str) -> str:
+def _prompt_for_slack(prompt: str, scheduled_task_id: str) -> str:
     return (
         f"{SCHEDULED_TASK_EXECUTION_INSTRUCTIONS}\n\n"
+        f"Current task ID: {scheduled_task_id}\n\n"
         f"Task to execute:\n{prompt}\n\n"
         f"{SLACK_MRKDWN_INSTRUCTIONS}"
     )
@@ -152,7 +158,7 @@ async def handler(params: Any, ctx: Any) -> dict[str, Any]:
     async def run_agent() -> dict[str, str]:
         message_id = f"absurd-workflow:{ctx.task_id}:1:user"
         result = await ctx.agent_turn(
-            _prompt_for_slack(prompt),
+            _prompt_for_slack(prompt, scheduled_task_id),
             principal=principal,
             message_id=message_id,
             idempotency_key=f"absurd-workflow-agent-turn:{message_id}",
@@ -170,15 +176,14 @@ async def handler(params: Any, ctx: Any) -> dict[str, Any]:
 
     result = await ctx.step("agent_result", run_agent)
     response_text = str(result.get("result_text") or "").strip()
-    if not response_text:
-        response_text = "The task completed without a text response."
-
-    delivery = await _deliver_to_slack(
-        ctx,
-        channel,
-        response_text,
-        slack_user_id,
-    )
+    delivery = None
+    if response_text:
+        delivery = await _deliver_to_slack(
+            ctx,
+            channel,
+            response_text,
+            slack_user_id,
+        )
 
     return {
         "agent_result": result,

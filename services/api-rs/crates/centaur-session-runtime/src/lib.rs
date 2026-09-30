@@ -5281,7 +5281,20 @@ impl StdoutPumpState {
         let Some(value) = value else {
             return false;
         };
-        if output_line_final_answer_text(value).is_some() {
+        // Streaming text still counts toward first-token latency, but untyped
+        // Codex deltas must not become a workflow's final answer.
+        if output_line_final_answer_text(value).is_some_and(|update| match update {
+            FinalAnswerTextUpdate::Append(text) | FinalAnswerTextUpdate::Replace(text) => {
+                !text.is_empty()
+            }
+        }) || (matches!(
+            value
+                .get("method")
+                .or_else(|| value.get("type"))
+                .and_then(Value::as_str),
+            Some("item/agentMessage/delta" | "item.agentMessage.delta")
+        ) && !terminal_payload_text(value).trim().is_empty())
+        {
             return true;
         }
         matches!(
@@ -6326,21 +6339,16 @@ fn output_line_final_answer_text(value: &Value) -> Option<FinalAnswerTextUpdate>
         let text = value
             .get("payload")
             .and_then(|payload| payload.get("text"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
+            .and_then(Value::as_str)?
             .to_owned();
-        return (!text.is_empty()).then_some(FinalAnswerTextUpdate::Replace(text));
-    }
-    if matches!(method, Some("item/agentMessage/delta"))
-        || matches!(event_type, Some("item.agentMessage.delta"))
-    {
-        let text = terminal_payload_text(value).trim().to_owned();
-        return (!text.is_empty()).then_some(FinalAnswerTextUpdate::Append(text));
+        return Some(FinalAnswerTextUpdate::Replace(text));
     }
     if event_type == Some("assistant") {
         let text = terminal_payload_text(value).trim().to_owned();
         return (!text.is_empty()).then_some(FinalAnswerTextUpdate::Replace(text));
     }
+    // Codex deltas do not carry a phase and may be commentary. Use the
+    // completed message's canonical text, preserving whitespace between tokens.
     if matches!(method, Some("item/completed")) || matches!(event_type, Some("item.completed")) {
         let item = value
             .get("item")
@@ -6356,7 +6364,8 @@ fn output_line_final_answer_text(value: &Value) -> Option<FinalAnswerTextUpdate>
             )
         {
             let text = terminal_payload_text(item).trim().to_owned();
-            return (!text.is_empty()).then_some(FinalAnswerTextUpdate::Replace(text));
+            // An explicitly empty final answer clears any earlier answer text.
+            return Some(FinalAnswerTextUpdate::Replace(text));
         }
     }
     None
@@ -7785,7 +7794,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_completed_after_answer_text_is_terminal() {
+    fn codex_deltas_are_not_final_answer_text() {
         let delta = json!({
             "method": "item/agentMessage/delta",
             "params": {"turnId": "turn-1", "delta": "Final answer"},
@@ -7795,15 +7804,12 @@ mod tests {
             "params": {"turn": {"id": "turn-1", "status": "completed"}},
         });
 
-        assert!(matches!(
-            output_line_final_answer_text(&delta),
-            Some(FinalAnswerTextUpdate::Append(_))
-        ));
+        assert!(output_line_final_answer_text(&delta).is_none());
         assert_eq!(
-            terminal_output(&terminal, "Final answer"),
+            terminal_output(&terminal, ""),
             Some(TerminalOutput::Completed {
                 reason: "turn_completed",
-                result_text: Some("Final answer".to_owned())
+                result_text: None
             })
         );
     }
@@ -8101,6 +8107,16 @@ mod tests {
         assert!(!state.should_record_first_token("exe-1", Some(&turn_started)));
         assert!(state.should_record_first_token("exe-1", Some(&delta)));
         assert!(state.should_record_first_token("exe-2", Some(&terminal_result)));
+        for empty_final in [
+            json!({"type": "item.completed", "item": {
+                "type": "agentMessage", "phase": "final_answer", "text": ""
+            }}),
+            json!({"type": "assistant.message", "payload": {
+                "phase": "final_answer", "text": ""
+            }}),
+        ] {
+            assert!(!state.should_record_first_token("exe-3", Some(&empty_final)));
+        }
     }
 
     #[test]
@@ -8376,6 +8392,92 @@ mod tests {
                 result_text: Some("Final canonical answer.".to_owned())
             })
         );
+    }
+
+    #[test]
+    fn codex_commentary_does_not_leak_into_silent_or_completed_answers() {
+        for final_text in [None, Some(""), Some("Scan complete.\n\nFound two issues.")] {
+            let mut lines = vec![
+                json!({"method": "item/started", "params": {"item": {
+                    "id": "progress", "type": "agentMessage", "phase": "commentary", "text": ""
+                }}})
+                .to_string(),
+            ];
+            for delta in ["I", " will", " check", " the", " scan", "."] {
+                lines.push(
+                    json!({"method": "item/agentMessage/delta", "params": {
+                        "itemId": "progress", "delta": delta
+                    }})
+                    .to_string(),
+                );
+            }
+            lines.push(
+                json!({"method": "item/completed", "params": {"item": {
+                    "id": "progress", "type": "agentMessage", "phase": "commentary",
+                    "text": "I will check the scan."
+                }}})
+                .to_string(),
+            );
+            if let Some(text) = final_text {
+                lines.push(json!({"method": "item/completed", "params": {"item": {
+                    "id": "answer", "type": "agentMessage", "phase": "final_answer", "text": text
+                }}}).to_string());
+            }
+            lines.push(
+                json!({"method": "turn/completed", "params": {
+                    "turn": {"id": "turn-1", "status": "completed"}
+                }})
+                .to_string(),
+            );
+
+            let expected = Some(TerminalOutput::Completed {
+                reason: "turn_completed",
+                result_text: final_text
+                    .filter(|text| !text.is_empty())
+                    .map(ToOwned::to_owned),
+            });
+            let mut state = StdoutPumpState::default();
+            let live = lines.iter().find_map(|line| state.observe("exe-1", line));
+            assert_eq!(live, expected);
+            assert_eq!(terminal_output_from_lines(&lines), expected);
+        }
+    }
+
+    #[test]
+    fn empty_final_answer_clears_earlier_text_in_live_and_replayed_output() {
+        for messages in [
+            vec![
+                json!({"type": "item.completed", "item": {
+                    "type": "agentMessage", "phase": "final_answer", "text": "Earlier answer"
+                }}),
+                json!({"type": "item.completed", "item": {
+                    "type": "agentMessage", "phase": "final_answer", "text": ""
+                }}),
+            ],
+            vec![
+                json!({"type": "assistant.delta", "payload": {
+                    "phase": "final_answer", "text": "Earlier answer"
+                }}),
+                json!({"type": "assistant.message", "payload": {
+                    "phase": "final_answer", "text": ""
+                }}),
+            ],
+        ] {
+            let mut lines = messages.iter().map(ToString::to_string).collect::<Vec<_>>();
+            lines.push(
+                json!({"type": "turn.completed", "turn": {"status": "completed"}}).to_string(),
+            );
+            let expected = Some(TerminalOutput::Completed {
+                reason: "turn_completed",
+                result_text: None,
+            });
+            let mut state = StdoutPumpState::default();
+            assert_eq!(
+                lines.iter().find_map(|line| state.observe("exe-1", line)),
+                expected
+            );
+            assert_eq!(terminal_output_from_lines(&lines), expected);
+        }
     }
 
     #[test]

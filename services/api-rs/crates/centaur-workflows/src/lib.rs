@@ -4548,7 +4548,7 @@ fn completed_final_answer_text(line: &str) -> Option<String> {
         ) {
             return None;
         }
-        return non_empty_text(payload.get("text"));
+        return final_message_text(payload.get("text"));
     }
 
     if !matches!(
@@ -4573,14 +4573,13 @@ fn completed_final_answer_text(line: &str) -> Option<String> {
     ) {
         return None;
     }
-    non_empty_text(item.get("text"))
+    final_message_text(item.get("text"))
 }
 
-fn non_empty_text(value: Option<&Value>) -> Option<String> {
+fn final_message_text(value: Option<&Value>) -> Option<String> {
     value
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|text| !text.is_empty())
         .map(ToOwned::to_owned)
 }
 
@@ -4815,6 +4814,37 @@ mod tests {
         ];
 
         assert_eq!(agent_turn_result_text(&json!({}), &output_lines), "");
+    }
+
+    #[test]
+    fn agent_turn_result_fallback_respects_an_empty_final_answer() {
+        for final_message in [
+            json!({
+                "method": "item/completed",
+                "params": {"item": {
+                    "type": "agentMessage", "phase": "final_answer", "text": ""
+                }}
+            }),
+            json!({
+                "type": "assistant.message",
+                "payload": {"phase": "final_answer", "text": ""}
+            }),
+        ] {
+            let output_lines = vec![
+                json!({
+                    "type": "item.completed",
+                    "item": {"type": "agentMessage", "text": "Earlier answer"}
+                })
+                .to_string(),
+                final_message.to_string(),
+            ];
+
+            assert_eq!(agent_turn_result_text(&json!({}), &output_lines), "");
+            assert_eq!(
+                agent_turn_result_text(&json!({"result_text": ""}), &output_lines),
+                ""
+            );
+        }
     }
 
     #[test]

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from workflows import console_workflow
 
 ACTION_STEPS = ["agent_result", "post_result"]
@@ -95,6 +97,7 @@ def test_handler_runs_one_scoped_agent_turn_and_delivers_its_text():
     prompt, kwargs = context.agent_calls[0]
     assert prompt == (
         f"{console_workflow.SCHEDULED_TASK_EXECUTION_INSTRUCTIONS}\n\n"
+        "Current task ID: tsk_123\n\n"
         "Task to execute:\nSummarize open incidents\n\n"
         f"{console_workflow.SLACK_MRKDWN_INSTRUCTIONS}"
     )
@@ -145,7 +148,7 @@ def test_handler_treats_recurring_language_as_an_instruction_to_execute_now():
     prompt, _kwargs = context.agent_calls[0]
     assert prompt.startswith(
         "This is a run of an existing scheduled task. Execute the task now.\n"
-        "NEVER create or update a scheduled task"
+        "NEVER create a scheduled task"
     )
     assert f"Task to execute:\n{task}\n\n" in prompt
 
@@ -289,6 +292,57 @@ def test_handler_delivers_canonical_result_text_instead_of_output_lines():
             slack_args(0, blocks=scheduled_task_blocks(body, footer)),
         )
     ]
+
+
+@pytest.mark.parametrize("result_text", ["", " \n\t "])
+def test_handler_keeps_silent_checks_silent_on_replay(result_text):
+    context = FakeContext(
+        result_text=result_text,
+        output_lines=["I will check the scan.", "The scan is still running."],
+    )
+    params = {
+        "prompt": "Notify only when the scan finishes",
+        "principal": "console-user-author",
+        "channel": "D0123456789",
+        "slack_user_id": "U0123456789",
+        "scheduled_task_id": "tsk_123",
+    }
+
+    first = asyncio.run(console_workflow.handler(params, context))
+    replay = asyncio.run(console_workflow.handler(params, context))
+
+    assert first == {
+        "agent_result": {"execution_id": "exec-123", "result_text": ""},
+        "delivery": None,
+        "scheduled_task_id": "tsk_123",
+    }
+    assert replay == first
+    assert context.slack_calls == []
+    assert context.step_calls == ["agent_result", "agent_result"]
+    assert len(context.agent_calls) == 1
+
+
+def test_handler_does_not_turn_a_failed_check_into_a_silent_success():
+    class FailedContext(FakeContext):
+        async def agent_turn(self, prompt, **kwargs):
+            raise RuntimeError("The scan status could not be checked")
+
+    context = FailedContext()
+    with pytest.raises(RuntimeError, match="The scan status could not be checked"):
+        asyncio.run(
+            console_workflow.handler(
+                {
+                    "prompt": "Notify only when the scan finishes",
+                    "principal": "console-user-author",
+                    "channel": "D0123456789",
+                    "scheduled_task_id": "tsk_123",
+                },
+                context,
+            )
+        )
+
+    assert context.slack_calls == []
+    assert context.step_results == {}
 
 
 def test_handler_does_not_repeat_checkpointed_slack_posts():
