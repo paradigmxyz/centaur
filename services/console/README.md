@@ -132,6 +132,16 @@ Rotating any of these keys makes previously encrypted data unreadable. Treat the
 
 See [docs/API.md](docs/API.md) for the full reference: authentication, request/response conventions, pagination, error formats, the shared secret-source and request-rule shapes, and detailed payloads for every endpoint (static secrets, GCP auth secrets, OAuth token secrets, principals, roles, grants, API keys, proxies, and proxy sync).
 
+### Organization integrations
+
+`OrganizationIntegrations` is the registry for built-in, deployment-wide
+connections. It defines their admin cards, canonical OAuth app slugs, connection
+services, and routes. Registered providers are excluded from personal onboarding
+and automatic user credential reconciliation. Their consent flows require an
+admin and preserve the existing account identity on reconnect. Provider
+strategies own API-specific credential labels and request rules; role assignment
+continues to use the existing credential controls.
+
 ### Shared Mercator connection
 
 Admins open **Integrations → Admin Integrations → Mercator** and choose

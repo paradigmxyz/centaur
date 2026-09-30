@@ -13,6 +13,10 @@ module Oauth
       def identity_scopes = []
       def required_scopes = [ SCOPE ]
       def api_hosts = [ "mercator.sh" ]
+      def credential_labels = { "centaur-tool" => KEY }
+      def credential_request_rules
+        [ { host: "mercator.sh", http_methods: [ "POST" ], paths: [ "/mcp/auth" ] } ]
+      end
       def authorization_scope_param = "scope"
       def scope_separator = " "
       def extra_authorization_params = { "resource" => "#{ORIGIN}/mcp/auth" }

@@ -7,6 +7,19 @@ module Api
         @proxy = proxies(:acme_proxy)
       end
 
+      test "organization providers are excluded from personal sandbox onboarding" do
+        definition = OrganizationIntegrations::Definition.new(provider: "google", slug: "google")
+        OrganizationIntegrations.stub(:all, [ definition ]) do
+          with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+            get "/api/v1/sandbox/oauth_apps", headers: auth_headers(token_for(@proxy))
+          end
+          assert_response :ok
+          providers = json_body.fetch("data").map { |app| app.fetch("provider") }
+          refute_includes providers, "google"
+          assert_includes providers, "slack"
+        end
+      end
+
       test "returns enabled OAuth app start URLs for a valid sandbox token" do
         with_env(
           "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",

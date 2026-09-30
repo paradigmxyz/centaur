@@ -94,11 +94,11 @@ class PrincipalCredentialReconciliation
 
   private
 
-  # Every registered OAuth-flow provider participates: a provider without
+  # Personal OAuth-flow providers participate: a provider without
   # subject labels still reconciles by email, so new registry entries get
   # matching for free.
   def providers
-    Oauth::Providers.keys - [ "mercator" ]
+    Oauth::Providers.keys - OrganizationIntegrations.providers
   end
 
   def apply_entry(entry)

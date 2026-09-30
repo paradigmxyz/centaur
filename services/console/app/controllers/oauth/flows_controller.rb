@@ -98,7 +98,7 @@ module Oauth
       # Back to the Integrations page the user started from; failures below
       # still render the standalone result page, which offers a retry link.
       connected_as = " as #{identity[:email]}" if identity[:email].present?
-      redirect_to(shared_connection? ? console_mercator_path : console_integrations_path, notice: "#{@app.slug} connected#{connected_as}.")
+      redirect_to(shared_connection? ? public_send(organization_integration.manage_route) : console_integrations_path, notice: "#{@app.slug} connected#{connected_as}.")
     rescue Broker::ExchangeError => e
       render_result(:error, message: "Connecting the integration failed (#{e.reason}).")
     rescue ActiveRecord::RecordInvalid => e
@@ -115,14 +115,18 @@ module Oauth
 
     private
 
+    def organization_integration
+      @app&.organization_integration
+    end
+
     def shared_connection?
-      @app&.provider == "mercator"
+      organization_integration.present?
     end
 
     def require_shared_connection_admin
       return unless shared_connection?
       return require_admin unless acting_admin?
-      render_result(:error, status: :not_found, message: "Unknown integration.") unless @app.slug == Mercator::Connection::SLUG
+      render_result(:error, status: :not_found, message: "Unknown integration.") unless @app.slug == organization_integration.slug
     end
 
     # Resolves the app from the well-known slug and derives its provider strategy.
@@ -193,7 +197,7 @@ module Oauth
           @app.lock!
           existing = @app.broker_credentials.first
           if existing && existing.provider_subject != identity[:subject]
-            raise Broker::ExchangeError.new("Reconnect the same organization wallet", stage: "oauth", code: "wallet_mismatch")
+            raise Broker::ExchangeError.new("Reconnect the same organization account", stage: "oauth", code: "account_mismatch")
           end
         end
         credential = BrokerCredential.find_or_initialize_by(oauth_app: @app, provider_subject: identity[:subject])
@@ -300,14 +304,18 @@ module Oauth
       return secret unless secret.new_record?
 
       secret.name = "#{credential.name} token"
-      secret.labels = { "centaur-tool" => "mercator" } if shared_connection?
+      secret.labels = @provider.credential_labels if @provider.respond_to?(:credential_labels)
       secret.kind = wrapping_secret_kind
       secret.assign_attributes(wrapping_secret_config) if secret.kind == CredentialProfiles::Registry::CUSTOM_KIND
       secret.source = SecretSource.new(source_type: "token_broker", config: { "credential_id" => credential.oid })
       rules = if secret.kind == CredentialProfiles::Registry::CUSTOM_KIND
-        Array(@provider.api_hosts).each_with_index.map do |host, position|
-          RequestRule.new(host: host, http_methods: shared_connection? ? [ "POST" ] : [],
-            paths: shared_connection? ? [ "/mcp/auth" ] : [], position: position)
+        attributes = if @provider.respond_to?(:credential_request_rules)
+          @provider.credential_request_rules
+        else
+          Array(@provider.api_hosts).map { |host| { host: host, http_methods: [], paths: [] } }
+        end
+        attributes.each_with_index.map do |rule, position|
+          RequestRule.new(rule.merge(position: position))
         end
       else
         []

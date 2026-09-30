@@ -46,7 +46,7 @@
   <p class="mt-6 text-xs text-zinc-600">Connecting opens the provider's consent screen. Once you approve, Centaur stores and refreshes the credential automatically.</p>
 <% end %>
 
-<% if acting_admin? %>
+<% if @organization_integrations.any? %>
   <section aria-labelledby="organization-integrations" class="mt-8">
     <header class="console-page-header">
       <div class="console-page-heading">
@@ -57,26 +57,8 @@
       </div>
     </header>
     <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-      <div class="console-panel flex flex-col gap-3 p-5">
-        <div class="flex items-center gap-3">
-          <span class="flex size-10 shrink-0 items-center justify-center rounded-lg bg-ink-700 text-2xl text-zinc-300" aria-hidden="true">🌐</span>
-          <div>
-            <h3 class="font-mono text-sm font-semibold text-zinc-100">Mercator</h3>
-            <div class="text-[11px] uppercase tracking-wide text-zinc-500">mercator</div>
-          </div>
-        </div>
-        <p class="text-xs text-zinc-400">A shared wallet for your agents to discover and pay for external tools and services.</p>
-        <div class="mt-auto flex items-center justify-between gap-3 pt-1">
-          <% if @mercator_credential %>
-            <%= link_to "Manage", console_mercator_path, class: "btn-secondary" %>
-            <span class="text-xs <%= @mercator_credential.dead? ? "text-amber-300" : "text-emerald-300" %>"><%= @mercator_credential.dead? ? "Needs reconnecting" : "Connected" %></span>
-          <% elsif @mercator_manual_configuration %>
-            <%= link_to "Review connection", console_mercator_path, class: "btn-secondary" %>
-          <% else %>
-            <%= button_to "Connect", connect_console_mercator_path, class: "btn-primary", form: { data: { turbo: false } } %>
-          <% end %>
-        </div>
-      </div>
+      <%= render partial: "console/integrations/organization_integration",
+                 collection: @organization_integrations, as: :integration %>
     </div>
   </section>
 <% end %>

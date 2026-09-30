@@ -1,0 +1,21 @@
+<% credential = integration.connection.credential %>
+<div class="console-panel flex flex-col gap-3 p-5">
+  <div class="flex items-center gap-3">
+    <span class="flex size-10 shrink-0 items-center justify-center rounded-lg bg-ink-700 text-2xl text-zinc-300" aria-hidden="true"><%= integration.icon %></span>
+    <div>
+      <h3 class="font-mono text-sm font-semibold text-zinc-100"><%= integration.name %></h3>
+      <div class="text-[11px] uppercase tracking-wide text-zinc-500"><%= integration.provider %></div>
+    </div>
+  </div>
+  <p class="text-xs text-zinc-400"><%= integration.description %></p>
+  <div class="mt-auto flex items-center justify-between gap-3 pt-1">
+    <% if credential %>
+      <%= link_to "Manage", public_send(integration.manage_route), class: "btn-secondary" %>
+      <span class="text-xs <%= credential.dead? ? "text-amber-300" : "text-emerald-300" %>"><%= credential.dead? ? "Needs reconnecting" : "Connected" %></span>
+    <% elsif integration.connection.manual_configuration? %>
+      <%= link_to "Review connection", public_send(integration.manage_route), class: "btn-secondary" %>
+    <% else %>
+      <%= button_to "Connect", public_send(integration.connect_route), class: "btn-primary", form: { data: { turbo: false } } %>
+    <% end %>
+  </div>
+</div>
