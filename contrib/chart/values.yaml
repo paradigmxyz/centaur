@@ -658,6 +658,11 @@ apiRs:
 # (:8080) and streams responses back. Listens on :3001.
 slackbotv2:
   enabled: true
+  crew:
+    # Secret key crew.json contains the operator-managed Crew array. It holds
+    # bot tokens and signing secrets; never put their values in Helm values.
+    # Restart slackbotv2 after updating this Secret.
+    existingSecret: ""
   replicaCount: 1
   image:
     repository: centaur-slackbotv2

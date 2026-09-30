@@ -207,6 +207,8 @@ export type SlackbotV2Options = {
   slackApiTimeoutMs?: number
   state?: StateAdapter
   stateKeyPrefix?: string
+  /** Fixed operator-managed Crew identity; message flags cannot change it. */
+  crew?: { id: string; appId: string }
   /** React to mentioned messages that are forwarded into an active execution. */
   steeringReactionEnabled?: boolean
   /** Slack emoji name used for active-execution acknowledgements. */
