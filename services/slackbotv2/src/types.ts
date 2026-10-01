@@ -188,13 +188,17 @@ export type SlackbotV2Options = {
    * instead and posts a visible error once the delays are exhausted.
    */
   handoffRetryDelaysMs?: readonly number[]
-  /** Startup delay before redelivering Slack inbox entries a previous process left. */
-  inboxReplayDelayMs?: number
-  /** Redeliver Slack inbox entries a previous process left behind. Defaults to true. */
+  /**
+   * How long a replaced process may keep running after this one starts. Its
+   * inbox requests are redelivered, and its unfinished thread marks treated as
+   * abandoned, only after this. Defaults to 60s.
+   */
+  previousProcessExitMs?: number
+  /** Redeliver Slack inbox requests a previous process left behind. Defaults to true. */
   replayInboxOnStart?: boolean
   /**
-   * Store for Slack webhook bodies awaiting delivery. Defaults to Postgres next
-   * to the default state, or to a process-local store when `state` is supplied.
+   * Store for Slack webhook requests awaiting delivery to the Chat SDK.
+   * Defaults to Postgres at `postgresUrl`, or a process-local store without one.
    */
   inboxStore?: SlackInboxStore
   /** Milliseconds before an idle execution pauses its sandbox. Defaults to up to 3h. */
@@ -245,6 +249,8 @@ export type SlackbotV2 = {
 
 export type SlackbotV2ThreadState = {
   activeExecution?: boolean
+  /** When a handoff last marked the thread active before starting an execution. */
+  executionStartMarkedAtMs?: number
   executedMessageIds?: string[]
   forwardedMessageIds?: string[]
   /** Last thread-level harness selected by Slack flags. Null clears persisted state. */

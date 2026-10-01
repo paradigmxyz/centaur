@@ -1,10 +1,13 @@
+import { createHmac } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'bun:test'
 import pg from 'pg'
 import {
   createMemorySlackInboxStore,
   createPostgresSlackInboxStore,
+  createSlackInbox,
   type SlackInboxStore
 } from '../src/inbox'
+import { noopLogger } from '../src/utils'
 
 const postgresUrl = process.env.SLACKBOTV2_TEST_DATABASE_URL
 const pool = postgresUrl ? new pg.Pool({ connectionString: postgresUrl }) : undefined
@@ -13,33 +16,96 @@ afterAll(async () => {
   await pool?.end()
 })
 
-const stores: Array<[string, (() => SlackInboxStore) | undefined]> = [
-  ['memory', createMemorySlackInboxStore],
+const stores: Array<[string, (() => Promise<SlackInboxStore>) | undefined]> = [
+  ['memory', async () => createMemorySlackInboxStore()],
   [
     'postgres',
-    pool ? () => createPostgresSlackInboxStore(pool, `test-${crypto.randomUUID()}`) : undefined
+    pool
+      ? async () => {
+          await pool.query('DROP TABLE IF EXISTS slackbotv2_inbox')
+          return createPostgresSlackInboxStore(pool)
+        }
+      : undefined
   ]
 ]
 
 for (const [name, create] of stores) {
   describe.skipIf(!create)(`${name} Slack inbox store`, () => {
-    it('keeps the first save of an event and lists pending bodies oldest first', async () => {
-      const store = create!()
+    it('lists saved requests oldest first and drops deleted and expired ones', async () => {
+      const store = await create!()
       const at = (seconds: number) => new Date(Date.UTC(2030, 0, 1, 0, 0, seconds))
 
-      expect(await store.save('Ev2', 'second', at(2))).toBe(true)
-      expect(await store.save('Ev1', 'first', at(1))).toBe(true)
-      expect(await store.save('Ev1', 'redelivered', at(3))).toBe(false)
-      expect(await store.save('Ev3', 'too new', at(4))).toBe(true)
+      const second = await store.save('second', at(2))
+      const first = await store.save('first', at(1))
+      const retry = await store.save('first', at(3))
+      await store.save('too new', at(5))
 
-      expect(await store.pending(at(0), at(4))).toEqual([
-        { body: 'first', eventId: 'Ev1' },
-        { body: 'second', eventId: 'Ev2' }
+      expect(await store.pending(at(0), at(5))).toEqual([
+        { body: 'first', id: first },
+        { body: 'second', id: second },
+        { body: 'first', id: retry }
       ])
-      expect(await store.pending(at(2), at(4))).toEqual([{ body: 'second', eventId: 'Ev2' }])
 
-      await store.delete('Ev2')
-      expect(await store.pending(at(0), at(5))).toEqual([{ body: 'too new', eventId: 'Ev3' }])
+      await store.delete(retry)
+      expect(await store.pending(at(2), at(5))).toEqual([{ body: 'second', id: second }])
+      expect(await store.pending(at(0), at(5))).toEqual([{ body: 'second', id: second }])
     })
   })
 }
+
+describe('Slack inbox', () => {
+  const signingSecret = 'inbox-signing-secret'
+  const signedHeaders = (body: string) => {
+    const timestamp = Math.floor(Date.now() / 1000).toString()
+    const signature = createHmac('sha256', signingSecret)
+      .update(`v0:${timestamp}:${body}`)
+      .digest('hex')
+    return new Headers({
+      'x-slack-request-timestamp': timestamp,
+      'x-slack-signature': `v0=${signature}`
+    })
+  }
+  const createInbox = (store: SlackInboxStore, delivered: string[]) =>
+    createSlackInbox({
+      deliver: async request => {
+        delivered.push(await request.text())
+        return new Response('ok')
+      },
+      logger: noopLogger,
+      maxAgeMs: 60_000,
+      replayDelayMs: 10,
+      replayOnStart: true,
+      signingSecret,
+      store
+    })
+
+  it('replays requests a previous process left, but not its own', async () => {
+    const store = createMemorySlackInboxStore()
+    await store.save('{"left":"behind"}', new Date())
+    await Bun.sleep(2)
+    const delivered: string[] = []
+    const inbox = createInbox(store, delivered)
+    // Saved but never delivered, as if this process were still working on it.
+    const accepted = await inbox.accept('{"still":"running"}', signedHeaders('{"still":"running"}'))
+    expect(accepted?.response.status).toBe(200)
+
+    await Bun.sleep(50)
+    expect(delivered).toEqual(['{"left":"behind"}'])
+    expect(await store.pending(new Date(0), new Date(Date.now() + 1000))).toEqual([
+      expect.objectContaining({ body: '{"still":"running"}' })
+    ])
+
+    await accepted?.deliver?.()
+    expect(delivered).toEqual(['{"left":"behind"}', '{"still":"running"}'])
+    expect(await store.pending(new Date(0), new Date(Date.now() + 1000))).toEqual([])
+  })
+
+  it('rejects unsigned requests without saving them', async () => {
+    const store = createMemorySlackInboxStore()
+    const inbox = createInbox(store, [])
+    const accepted = await inbox.accept('{}', new Headers())
+    expect(accepted?.response.status).toBe(401)
+    expect(accepted?.deliver).toBeUndefined()
+    expect(await store.pending(new Date(0), new Date(Date.now() + 1000))).toEqual([])
+  })
+})

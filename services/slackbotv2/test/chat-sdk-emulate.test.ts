@@ -4582,6 +4582,7 @@ describe('slackbotv2', () => {
     const inboxStore = createMemorySlackInboxStore()
     bot = createTestBot({
       inboxStore,
+      previousProcessExitMs: 50,
       // The first process dies mid-execute: its request never returns.
       fetch: async (input, init) =>
         String(input).endsWith('/execute') ? new Promise<Response>(() => {}) : fetch(input, init),
@@ -4612,7 +4613,7 @@ describe('slackbotv2', () => {
     await waitFor(() => codexApi.appends.length === 1)
 
     bot = createTestBot({
-      inboxReplayDelayMs: 0,
+      previousProcessExitMs: 50,
       inboxStore,
       replayInboxOnStart: true,
       state: sharedState
@@ -4621,47 +4622,6 @@ describe('slackbotv2', () => {
     await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 1.'), 3000)
     expect(codexApi.executes.map(execute => execute.body.idempotency_key)).toEqual([mention.ts])
     expect(codexApi.appends).toHaveLength(1)
-  })
-
-  it('does not replay an inbox message the current process is still handing off', async () => {
-    bot = createTestBot({
-      handoffRetryDelaysMs: [],
-      inboxReplayDelayMs: 50,
-      replayInboxOnStart: true
-    })
-    const releaseExecute = codexApi.holdNextExecute()
-    codexApi.failNextExecute = true
-
-    const parent = await postUserMessage('Context before the startup scan.')
-    const mention = await postUserMessage(`<@${BOT_USER_ID}> fail during the scan`, parent.ts)
-    const waits: Promise<unknown>[] = []
-    const response = await bot.app.request(
-      '/api/webhooks/slack',
-      signedSlackEvent({
-        event_id: 'Ev-slackbotv2-inbox-in-flight',
-        event: {
-          type: 'app_mention',
-          user: USER_ID,
-          channel: CHANNEL_ID,
-          team: TEAM_ID,
-          ts: mention.ts,
-          thread_ts: parent.ts,
-          text: `<@${BOT_USER_ID}> fail during the scan`
-        }
-      }),
-      {},
-      waitUntilContext(waits)
-    )
-    expect(response.status).toBe(200)
-    await waitFor(() => codexApi.executes.length === 1)
-    // Let the startup scan run while the execute is still held.
-    await sleep(150)
-
-    releaseExecute()
-    await waitFor(async () => (await threadText(parent.ts)).includes('Execution failed'), 3000)
-    await Promise.all(waits)
-    await sleep(150)
-    expect(codexApi.executes).toHaveLength(1)
   })
 
   it('does not wait for hung assistant status before creating Slack sessions', async () => {

@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { Buffer } from 'node:buffer'
-import { createHmac, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import { Hono, type Context } from 'hono'
 import {
   Chat,
@@ -12,8 +12,7 @@ import {
   type Logger,
   type Message as ChatMessage,
   type StateAdapter,
-  type Thread,
-  type WebhookOptions
+  type Thread
 } from 'chat'
 import { createSlackAdapter } from '@chat-adapter/slack'
 import {
@@ -21,13 +20,12 @@ import {
   callSlackApi,
   fetchSlackThreadReplies
 } from '@chat-adapter/slack/api'
-import { verifySlackSignature } from '@chat-adapter/slack/webhook'
 import { createPostgresState } from '@chat-adapter/state-pg'
 import pg from 'pg'
 import {
   createMemorySlackInboxStore,
   createPostgresSlackInboxStore,
-  type SlackInboxStore
+  createSlackInbox
 } from './inbox'
 import {
   harnessToChatSdkStream,
@@ -154,8 +152,6 @@ const MAX_SLACK_MESSAGE_ATTACHMENTS = 20
 type SlackbotV2RequestContext = {
   waitUntil(promise: Promise<unknown>): void
   actionError?: unknown
-  /** Set while redelivering a Slack inbox entry left by a previous process. */
-  inboxReplay?: boolean
 }
 
 type StateConnectionStatus = {
@@ -177,8 +173,9 @@ const RENDER_RETRY_INITIAL_DELAY_MS = 250
 const RENDER_RETRY_MAX_DELAY_MS = 5_000
 // Do not answer a request the user has likely given up on.
 const INBOX_MAX_AGE_MS = 10 * 60 * 1000
-// Lets the pod being replaced in a rolling update finish or die first.
-const INBOX_REPLAY_DELAY_MS = 60_000
+// How long a replaced pod in a rolling update may keep running after this one
+// starts. Work it left unfinished is only treated as abandoned after this.
+const PREVIOUS_PROCESS_EXIT_MS = 60_000
 const ASSISTANT_STATUS_MAX_CHARS = 50
 const SLACK_TASK_DETAILS_MAX_CHARS = 256
 const SLACK_FALLBACK_TEXT_MAX_CHARS = 35_000
@@ -333,13 +330,17 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     userName,
     logger
   })
-  const { pool, state } = options.state
-    ? { pool: undefined, state: options.state }
-    : createDefaultState(options, logger)
+  const state = options.state ?? createDefaultState(options, logger)
+  const startedAtMs = Date.now()
+  const previousProcessExitMs = options.previousProcessExitMs ?? PREVIOUS_PROCESS_EXIT_MS
   const chat = new Chat<{ slack: typeof slack }, SlackbotV2ThreadState>({
     userName,
     adapters: { slack },
     state,
+    // Long enough to collapse Slack's message + app_mention pair for a mention,
+    // short enough to expire before the inbox replays a request a previous
+    // process had already started on.
+    dedupeTtlMs: previousProcessExitMs / 2,
     onLockConflict: 'force',
     logger
   })
@@ -348,17 +349,18 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   const stateConnectionStatus: StateConnectionStatus = { attempts: 0, connected: false }
   const stateConnected = ensureStateConnected(state, options, stateConnectionStatus)
   backgroundWaitUntil(stateConnected)
+  // Thread marks older than this process are a previous process's; once that
+  // process must have exited, they are abandoned.
+  const abandonedMarkCutoffMs = () =>
+    Date.now() - startedAtMs >= previousProcessExitMs ? startedAtMs : undefined
   const inbox = createSlackInbox({
-    chat,
     deliver: (request, webhookOptions) => chat.webhooks.slack(request, webhookOptions),
-    options,
-    state,
-    stateConnected,
-    store:
-      options.inboxStore ??
-      (pool
-        ? createPostgresSlackInboxStore(pool, options.stateKeyPrefix ?? 'centaur-slackbotv2')
-        : createMemorySlackInboxStore())
+    logger,
+    maxAgeMs: INBOX_MAX_AGE_MS,
+    replayDelayMs: previousProcessExitMs,
+    replayOnStart: options.replayInboxOnStart !== false,
+    signingSecret: options.signingSecret,
+    store: options.inboxStore ?? createDefaultInboxStore(options, logger)
   })
 
   chat.onAction(async event => {
@@ -482,6 +484,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
         options,
         state,
         steeringReactions,
+        abandonedMarkCutoffMs,
         subscribe: true,
         trigger: 'direct_message'
       })
@@ -497,6 +500,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       options,
       state,
       steeringReactions,
+      abandonedMarkCutoffMs,
       subscribe: true,
       trigger: 'new_mention'
     })
@@ -515,6 +519,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       options,
       state,
       steeringReactions,
+      abandonedMarkCutoffMs,
       subscribe: true,
       trigger: 'new_mention'
     })
@@ -539,6 +544,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       options,
       state,
       steeringReactions,
+      abandonedMarkCutoffMs,
       trigger: 'subscribed_message'
     })
   })
@@ -582,18 +588,20 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       const context: SlackbotV2RequestContext = {
         waitUntil: promise => waitUntil(c, promise)
       }
-      if (shouldAwaitSlackHandoff(rawBody)) {
-        const accepted = await requestContext.run(context, () =>
-          inbox.accept(rawBody, c.req.raw.headers)
-        )
-        if (accepted) {
-          if (accepted.ok) {
-            const lateFileTask = lateSlackFiles.repairFromWebhook(rawBody)
-            if (lateFileTask) waitUntil(c, lateFileTask)
-          }
-          outcome = accepted.ok ? 'success' : 'error'
-          return accepted
+      // Message events go through the inbox so Slack is acknowledged before
+      // the Chat SDK handlers run; the rest need their response from them.
+      const accepted = shouldAwaitSlackHandoff(rawBody)
+        ? await inbox.accept(rawBody, c.req.raw.headers)
+        : null
+      if (accepted) {
+        const { deliver, response } = accepted
+        if (deliver) {
+          waitUntil(c, requestContext.run(context, deliver))
+          const lateFileTask = lateSlackFiles.repairFromWebhook(rawBody)
+          if (lateFileTask) waitUntil(c, lateFileTask)
         }
+        outcome = response.ok ? 'success' : 'error'
+        return response
       }
       const response = await requestContext.run(context, () => {
         return chat.webhooks.slack(c.req.raw, {
@@ -675,180 +683,32 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
 }
 
 /**
- * Durable inbox for Slack message events. The verified webhook body is saved
- * before Slack is acknowledged, then delivered to the Chat SDK in background
- * exactly as if Slack had just sent it, and deleted once the Chat SDK's
- * handlers finish. Slackbot v2 runs as a single replica, so the process that
- * starts next redelivers whatever the previous one left behind. In-process
- * handoff retries and late-file repair are not covered.
- */
-function createSlackInbox(deps: {
-  chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>
-  deliver: (request: Request, webhookOptions: WebhookOptions) => Promise<Response>
-  options: SlackbotV2Options
-  state: StateAdapter
-  stateConnected: Promise<void>
-  store: SlackInboxStore
-}) {
-  const { chat, options, state, store } = deps
-  const startedAt = new Date()
-
-  const deliver = async (eventId: string, body: string): Promise<void> => {
-    try {
-      const tasks: Promise<unknown>[] = []
-      const response = await deps.deliver(signedSlackRequest(body, options.signingSecret), {
-        waitUntil: task => {
-          tasks.push(task)
-        }
-      })
-      if (!response.ok) {
-        throw new Error(`Slack inbox delivery failed with HTTP ${response.status}`)
-      }
-      await Promise.all(tasks)
-    } finally {
-      // One delivery per entry; a leftover row is dropped once it is too old.
-      await store.delete(eventId).catch(() => undefined)
-    }
-  }
-
-  const scan = async (): Promise<void> => {
-    await chat.initialize()
-    // Entries accepted by this process are already being delivered by it.
-    const entries = await store.pending(new Date(Date.now() - INBOX_MAX_AGE_MS), startedAt)
-    // The Chat SDK already marked these messages as seen. Clear that first, for
-    // all entries at once: Slack sends a mention as both a message and an
-    // app_mention event, and the second must still dedupe against the first.
-    for (const entry of entries) {
-      const messageTs = slackWebhookMessageTs(entry.body)
-      if (messageTs) await state.delete(`dedupe:slack:${messageTs}`)
-    }
-    for (const entry of entries) {
-      const fields = slackWebhookLogFields(entry.body)
-      traceLog(options, 'slackbotv2_inbox_replay_started', undefined, fields)
-      try {
-        await requestContext.run(
-          { inboxReplay: true, waitUntil: promise => void promise.catch(() => undefined) },
-          () => deliver(entry.eventId, entry.body)
-        )
-        traceLog(options, 'slackbotv2_inbox_replay_complete', undefined, fields)
-      } catch (error) {
-        traceWarn(options, 'slackbotv2_inbox_replay_failed', undefined, {
-          ...fields,
-          error: errorMessage(error)
-        })
-      }
-    }
-  }
-
-  const replay = async (): Promise<void> => {
-    await deps.stateConnected
-    await sleep(options.inboxReplayDelayMs ?? INBOX_REPLAY_DELAY_MS)
-    const deadlineMs = Date.now() + INBOX_MAX_AGE_MS
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        await scan()
-        return
-      } catch (error) {
-        traceWarn(options, 'slackbotv2_inbox_replay_scan_failed', undefined, {
-          attempt: attempt + 1,
-          error: errorMessage(error)
-        })
-        // Every entry is too old to answer by then; stop retrying.
-        if (Date.now() >= deadlineMs) return
-        await sleep(renderRetryDelayMs(attempt))
-      }
-    }
-  }
-
-  if (options.replayInboxOnStart !== false) void replay()
-
-  return {
-    /**
-     * Saves a Slack message event and schedules its delivery. Returns the
-     * webhook response, or null when it could not be saved and the caller
-     * must deliver it synchronously instead.
-     */
-    async accept(body: string, headers: Headers): Promise<Response | null> {
-      try {
-        await verifySlackSignature(body, headers, { signingSecret: options.signingSecret })
-      } catch {
-        return new Response('Invalid signature', { status: 401 })
-      }
-      const eventId = stringValue(parseSlackWebhookPayload(body)?.event_id)
-      if (!eventId) return null
-      let saved: boolean
-      try {
-        saved = await store.save(eventId, body, new Date())
-      } catch (error) {
-        traceWarn(options, 'slackbotv2_inbox_write_failed', undefined, {
-          error: errorMessage(error),
-          ...slackWebhookLogFields(body)
-        })
-        return null
-      }
-      // A Slack redelivery of an event already saved needs no second delivery.
-      if (saved) {
-        backgroundWaitUntil(
-          deliver(eventId, body).catch(error => {
-            traceWarn(options, 'slackbotv2_inbox_delivery_failed', undefined, {
-              error: errorMessage(error),
-              ...slackWebhookLogFields(body)
-            })
-          })
-        )
-      }
-      return new Response('ok', { status: 200 })
-    }
-  }
-}
-
-/** A freshly signed copy of a verified Slack webhook body for redelivery. */
-function signedSlackRequest(body: string, signingSecret: string): Request {
-  const timestamp = Math.floor(Date.now() / 1000).toString()
-  const signature = createHmac('sha256', signingSecret)
-    .update(`v0:${timestamp}:${body}`)
-    .digest('hex')
-  return new Request('http://slackbotv2.internal/api/webhooks/slack', {
-    body,
-    headers: {
-      'content-type': 'application/json',
-      'x-slack-request-timestamp': timestamp,
-      'x-slack-signature': `v0=${signature}`
-    },
-    method: 'POST'
-  })
-}
-
-function slackWebhookMessageTs(body: string): string | undefined {
-  const payload = parseSlackWebhookPayload(body)
-  const event = payload && isJsonObject(payload.event) ? payload.event : undefined
-  return stringValue(event?.ts)
-}
-
-/**
- * A redelivered message's previous process may have died after marking the
- * thread active but before committing the execution. Without a render
- * obligation nothing would ever clear that mark, so clear it and let the
- * redelivery start the execution (execute is idempotent per message). This
- * only covers crashes during the inbox delivery itself: a crash during an
- * in-process retry, or a restart after the entry expired, can still leave the
- * mark behind.
+ * A handoff marks the thread active before create/append/execute and only
+ * records a render obligation once execute succeeds. A mark without an
+ * obligation that a previous process left, after that process must have
+ * exited, belongs to a handoff that died midway: nothing would ever clear it,
+ * so clear it and let this message start the execution (execute is idempotent
+ * per message).
  */
 async function clearAbandonedExecutionStart(
   thread: Thread<SlackbotV2ThreadState>,
   options: SlackbotV2Options,
-  trace: SlackbotV2Trace
+  trace: SlackbotV2Trace,
+  cutoffMs: number | undefined
 ): Promise<void> {
+  if (cutoffMs === undefined) return
   const state = (await thread.state) ?? {}
   if (state.activeExecution !== true || state.renderObligation) return
+  if ((state.executionStartMarkedAtMs ?? 0) >= cutoffMs) return
   await thread.setState({ activeExecution: false })
-  traceLog(options, 'slackbotv2_inbox_abandoned_execution_cleared', trace)
+  traceLog(options, 'slackbotv2_abandoned_execution_start_cleared', trace)
 }
 
 async function handleSlackMessageHandoff(
   thread: Thread<SlackbotV2ThreadState>,
   message: ChatMessage,
   input: {
+    abandonedMarkCutoffMs?: () => number | undefined
     assistantStatusRequested: boolean
     mode: SlackbotV2MessageMode
     options: SlackbotV2Options
@@ -867,9 +727,12 @@ async function handleSlackMessageHandoff(
   let initialAssistantStatusVisible = false
   let assistantStatus = Promise.resolve(false)
   try {
-    if (requestContext.getStore()?.inboxReplay) {
-      await clearAbandonedExecutionStart(thread, input.options, trace)
-    }
+    await clearAbandonedExecutionStart(
+      thread,
+      input.options,
+      trace,
+      input.abandonedMarkCutoffMs?.()
+    )
     if (await handleStopCommand(thread, message, input.options, input.trigger)) {
       return
     }
@@ -1225,10 +1088,7 @@ function recordFallback(outcome: string, startedAtMs: number): void {
   }
 }
 
-function createDefaultState(
-  options: SlackbotV2Options,
-  logger: Logger
-): { pool: pg.Pool; state: StateAdapter } {
+function createDefaultState(options: SlackbotV2Options, logger: Logger): StateAdapter {
   const stateLogger = logger.child('postgres-state')
   // Own the pool so we can attach an error handler. pg.Pool emits 'error' for
   // idle clients whose connection drops (Postgres restart, or a transient blip
@@ -1239,12 +1099,23 @@ function createDefaultState(
   pool.on('error', error => {
     stateLogger.warn('postgres pool error', { error: errorMessage(error) })
   })
-  const state = createPostgresState({
+  return createPostgresState({
     client: pool,
     keyPrefix: options.stateKeyPrefix ?? 'centaur-slackbotv2',
     logger: stateLogger
   })
-  return { pool, state }
+}
+
+function createDefaultInboxStore(options: SlackbotV2Options, logger: Logger) {
+  if (!options.postgresUrl) {
+    logger.warn('slackbotv2_inbox_not_durable', { reason: 'no Postgres URL configured' })
+    return createMemorySlackInboxStore()
+  }
+  const pool = new pg.Pool({ connectionString: options.postgresUrl })
+  pool.on('error', error => {
+    logger.warn('slackbotv2_inbox_postgres_pool_error', { error: errorMessage(error) })
+  })
+  return createPostgresSlackInboxStore(pool)
 }
 
 function healthResponse(c: Context, stateConnectionStatus: StateConnectionStatus): Response {
@@ -1772,7 +1643,7 @@ async function syncThreadMessageToSession(
 
   let responseContextBlock: SlackContextBlock | undefined
   try {
-    await thread.setState({ activeExecution: true })
+    await thread.setState({ activeExecution: true, executionStartMarkedAtMs: Date.now() })
     traceLog(input.options, 'slackbotv2_forward_active_execution_marked', trace)
     await forwardToSessionApi(input.options, forwardInput, {
       onExecutionStarted: commitExecutionStarted,
