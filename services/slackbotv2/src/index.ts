@@ -11,6 +11,7 @@ import {
   type Attachment,
   type Logger,
   type Message as ChatMessage,
+  type SerializedMessage,
   type StateAdapter,
   type Thread
 } from 'chat'
@@ -166,6 +167,12 @@ const RENDER_RECOVERY_THREAD_TIMEOUT_MS = 2 * 60 * 1000
 const RENDER_RECOVERY_MAX_THREAD_FAILURES = 5
 const RENDER_RETRY_INITIAL_DELAY_MS = 250
 const RENDER_RETRY_MAX_DELAY_MS = 5_000
+const INBOX_INDEX_KEY = 'slackbotv2:inbox:index'
+const INBOX_INDEX_MAX_LENGTH = 2000
+// Do not answer a request the user has likely given up on.
+const INBOX_MAX_AGE_MS = 10 * 60 * 1000
+// Lets the pod being replaced in a rolling update finish or die first.
+const INBOX_REPLAY_DELAY_MS = 60_000
 const ASSISTANT_STATUS_MAX_CHARS = 50
 const SLACK_TASK_DETAILS_MAX_CHARS = 256
 const SLACK_FALLBACK_TEXT_MAX_CHARS = 35_000
@@ -333,6 +340,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   const stateConnectionStatus: StateConnectionStatus = { attempts: 0, connected: false }
   const stateConnected = ensureStateConnected(state, options, stateConnectionStatus)
   backgroundWaitUntil(stateConnected)
+  const inbox = createSlackInbox({ chat, options, state, stateConnected, steeringReactions })
 
   chat.onAction(async event => {
     const payload = slackBlockActionPayload(event)
@@ -449,12 +457,9 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
         threadId
       })
       lateSlackFiles.rememberFilelessMention(thread, directMessage)
-      await handleSlackMessageHandoff(thread, directMessage, {
+      await inbox.submit(thread, directMessage, {
         assistantStatusRequested: true,
         mode: 'execute',
-        options,
-        state,
-        steeringReactions,
         subscribe: true,
         trigger: 'direct_message'
       })
@@ -464,12 +469,9 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   chat.onNewMention(async (thread, message) => {
     if (!(await isAllowedSlackMessage(message, options, logger))) return
     lateSlackFiles.rememberFilelessMention(thread, message)
-    await handleSlackMessageHandoff(thread, message, {
+    await inbox.submit(thread, message, {
       assistantStatusRequested: true,
       mode: 'execute',
-      options,
-      state,
-      steeringReactions,
       subscribe: true,
       trigger: 'new_mention'
     })
@@ -482,12 +484,9 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     if (!slackRichTextMentionsUser(message.raw, options.botUserId)) return
     if (!(await isAllowedSlackMessage(message, options, logger))) return
     message.isMention = true
-    await handleSlackMessageHandoff(thread, message, {
+    await inbox.submit(thread, message, {
       assistantStatusRequested: true,
       mode: 'execute',
-      options,
-      state,
-      steeringReactions,
       subscribe: true,
       trigger: 'new_mention'
     })
@@ -506,12 +505,9 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       return
     }
     lateSlackFiles.rememberFilelessMention(thread, message)
-    await handleSlackMessageHandoff(thread, message, {
+    await inbox.submit(thread, message, {
       assistantStatusRequested: true,
       mode: 'execute',
-      options,
-      state,
-      steeringReactions,
       trigger: 'subscribed_message'
     })
   })
@@ -634,17 +630,180 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   return { app, chat }
 }
 
+type SlackHandoffRequest = {
+  assistantStatusRequested: boolean
+  mode: SlackbotV2MessageMode
+  subscribe?: boolean
+  trigger: string
+}
+
+type SlackInboxEntry = {
+  message: SerializedMessage
+  request: SlackHandoffRequest
+  threadId: string
+}
+
+type SlackInboxIndexEntry = { acceptedAtMs: number; key: string }
+
+/**
+ * Durable inbox for accepted Slack messages. A message is written before its
+ * webhook is acknowledged and deleted once its handoff finishes, so the
+ * classifier and session API calls run after Slack's deadline without losing
+ * the message if the process dies. Handoffs run one at a time per thread, in
+ * arrival order. Slackbot v2 runs as a single replica, so the process that
+ * starts next replays whatever the previous one left behind.
+ */
+function createSlackInbox(deps: {
+  chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>
+  options: SlackbotV2Options
+  state: StateAdapter
+  stateConnected: Promise<void>
+  steeringReactions: SteeringReactionController
+}) {
+  const { chat, options, state, steeringReactions } = deps
+  const threadTails = new Map<string, Promise<void>>()
+
+  const runInThreadOrder = (threadId: string, task: () => Promise<void>): Promise<void> => {
+    const run = (threadTails.get(threadId) ?? Promise.resolve()).then(task)
+    const tail = run.catch(() => undefined)
+    threadTails.set(threadId, tail)
+    void tail.then(() => {
+      if (threadTails.get(threadId) === tail) threadTails.delete(threadId)
+    })
+    return run
+  }
+
+  const handoff = async (
+    key: string,
+    thread: Thread<SlackbotV2ThreadState>,
+    message: ChatMessage,
+    request: SlackHandoffRequest
+  ): Promise<void> => {
+    try {
+      await handleSlackMessageHandoff(thread, message, {
+        ...request,
+        options,
+        state,
+        steeringReactions
+      })
+    } finally {
+      // A leftover entry expires on its own; replaying it is idempotent.
+      await state.delete(key).catch(() => undefined)
+    }
+  }
+
+  const replay = async (): Promise<void> => {
+    await deps.stateConnected
+    await sleep(options.inboxReplayDelayMs ?? INBOX_REPLAY_DELAY_MS)
+    await chat.initialize()
+    const index = await state.getList<SlackInboxIndexEntry>(INBOX_INDEX_KEY)
+    const keys = new Set(
+      index
+        .filter(entry => Date.now() - entry.acceptedAtMs <= INBOX_MAX_AGE_MS)
+        .map(entry => entry.key)
+    )
+    for (const key of keys) {
+      const entry = await state.get<SlackInboxEntry>(key)
+      if (!entry) continue
+      const message = rehydrateInboxMessage(entry.message, options)
+      const thread = chat.thread(entry.threadId)
+      const trace = createHandoffTrace(thread, message, entry.request.mode)
+      traceLog(options, 'slackbotv2_inbox_replay_started', trace, {
+        trigger: entry.request.trigger
+      })
+      void runInThreadOrder(entry.threadId, async () => {
+        await clearAbandonedExecutionStart(thread, options, trace)
+        await handoff(key, thread, message, entry.request)
+      }).catch(error => {
+        traceWarn(options, 'slackbotv2_inbox_replay_failed', trace, { error: errorMessage(error) })
+      })
+    }
+  }
+
+  void replay().catch(error => {
+    traceLog(options, 'slackbotv2_inbox_replay_scan_failed', undefined, {
+      error: errorMessage(error)
+    }, 'error')
+  })
+
+  return {
+    async submit(
+      thread: Thread<SlackbotV2ThreadState>,
+      message: ChatMessage,
+      request: SlackHandoffRequest
+    ): Promise<void> {
+      const key = `slackbotv2:inbox:${thread.id}:${message.id}`
+      const entry: SlackInboxEntry = { message: message.toJSON(), request, threadId: thread.id }
+      try {
+        await state.set(key, entry, INBOX_MAX_AGE_MS)
+        await state.appendToList(
+          INBOX_INDEX_KEY,
+          { acceptedAtMs: Date.now(), key } satisfies SlackInboxIndexEntry,
+          { maxLength: INBOX_INDEX_MAX_LENGTH }
+        )
+      } catch (error) {
+        // Without a durable entry, hand off inline so the webhook still waits.
+        traceWarn(
+          options,
+          'slackbotv2_inbox_write_failed',
+          createHandoffTrace(thread, message, request.mode),
+          { error: errorMessage(error), trigger: request.trigger }
+        )
+        await state.delete(key).catch(() => undefined)
+        await handleSlackMessageHandoff(thread, message, {
+          ...request,
+          options,
+          state,
+          steeringReactions
+        })
+        return
+      }
+      // handleSlackMessageHandoff already logs its failures.
+      backgroundWaitUntil(
+        runInThreadOrder(thread.id, () => handoff(key, thread, message, request)).catch(
+          () => undefined
+        )
+      )
+    }
+  }
+}
+
+function rehydrateInboxMessage(
+  serialized: SerializedMessage,
+  options: SlackbotV2Options
+): ChatMessage {
+  const message = ChatSdkMessage.fromJSON(serialized)
+  message.attachments = message.attachments.map(attachment => {
+    const url = attachment.fetchMetadata?.url ?? attachment.url
+    return url ? { ...attachment, fetchData: () => fetchSlackFile(options, url) } : attachment
+  })
+  return message
+}
+
+/**
+ * A replayed message's previous process may have died after marking the
+ * thread active but before committing the execution. Without a render
+ * obligation nothing would ever clear that mark, so clear it and let the
+ * replay start the execution (execute is idempotent per message).
+ */
+async function clearAbandonedExecutionStart(
+  thread: Thread<SlackbotV2ThreadState>,
+  options: SlackbotV2Options,
+  trace: SlackbotV2Trace
+): Promise<void> {
+  const state = (await thread.state) ?? {}
+  if (state.activeExecution !== true || state.renderObligation) return
+  await thread.setState({ activeExecution: false })
+  traceLog(options, 'slackbotv2_inbox_abandoned_execution_cleared', trace)
+}
+
 async function handleSlackMessageHandoff(
   thread: Thread<SlackbotV2ThreadState>,
   message: ChatMessage,
-  input: {
-    assistantStatusRequested: boolean
-    mode: SlackbotV2MessageMode
+  input: SlackHandoffRequest & {
     options: SlackbotV2Options
     state: StateAdapter
     steeringReactions: SteeringReactionController
-    subscribe?: boolean
-    trigger: string
   }
 ): Promise<void> {
   const trace = createHandoffTrace(thread, message, input.mode)
@@ -1167,8 +1326,8 @@ function finishSteeringReaction(
 }
 
 /**
- * Persists a Slack thread update into the session API. In execute mode the create/append/execute
- * handoff completes before Slack is acknowledged; SSE rendering continues in background.
+ * Persists a Slack thread update into the session API. Runs from the Slack inbox after Slack was
+ * acknowledged; SSE rendering continues in background after create/append/execute.
  */
 async function syncThreadMessageToSession(
   thread: Thread<SlackbotV2ThreadState>,

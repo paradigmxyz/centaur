@@ -15,9 +15,11 @@ lifecycle, harness formatting, and durable execution state belong in `api-rs`.
 
 - Verify Slack signatures and policy gates before processing an event. Ignore
   bot/self events and unsupported event shapes without creating sessions.
-- For user-input webhooks, wait only for the create/append handoff needed to
-  make Slack retry a transient failure. Do not hold the webhook open for cold
-  sandbox execution or rendering.
+- For user-input webhooks, acknowledge Slack once the message is written to
+  the Slack inbox in Chat SDK state. The classifier, Slack context collection,
+  session API calls, and rendering run afterwards, one inbox message at a time
+  per thread; the next process start replays entries left by a crash. The
+  inbox assumes a single replica.
 - Preserve the boundary between create/reuse, durable append, execute, SSE
   replay, and final Slack delivery. Each phase needs its own timeout, retry,
   metrics, and idempotency behavior.

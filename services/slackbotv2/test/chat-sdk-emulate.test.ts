@@ -4468,7 +4468,7 @@ describe('slackbotv2', () => {
     expect(text).not.toContain('pnpm test')
   })
 
-  it('shows assistant status while waiting for slow session execute', async () => {
+  it('acknowledges Slack once recorded while a slow session execute shows status', async () => {
     const logs: CapturedLog[] = []
     bot = createTestBot({ logger: captureLogger(logs) })
     codexApi.autoRespond = false
@@ -4503,9 +4503,9 @@ describe('slackbotv2', () => {
       return response
     })
 
-    await waitFor(() => codexApi.executes.length === 1)
-    await sleep(50)
-    expect(responseSettled).toBe(false)
+    // The webhook does not wait for the held execute: the durable record is enough.
+    await waitFor(() => responseSettled && codexApi.executes.length === 1)
+    expect((await responsePromise).status).toBe(200)
     expect(
       slackApi.calls
         .filter(call => call.method === 'assistant.threads.setStatus')
@@ -4566,15 +4566,6 @@ describe('slackbotv2', () => {
     )
 
     releaseExecute()
-    const response = await responsePromise
-    expect(response.status).toBe(200)
-    await waitFor(() => hasLog(logs, 'slackbotv2_webhook_handoff_wait_complete'))
-    expect(logData(logs, 'slackbotv2_webhook_handoff_wait_complete')).toEqual(
-      expect.objectContaining({
-        phase_ms: expect.any(Number),
-        slack_event_id: 'Ev-slackbotv2-slow-execute'
-      })
-    )
     await waitFor(() => codexApi.eventRequests.length === 1)
     await waitFor(() => codexApi.streamCount === 1)
     codexApi.closeStreams()
@@ -4584,6 +4575,46 @@ describe('slackbotv2', () => {
         .filter(call => call.method === 'assistant.threads.setStatus')
         .map(call => stringField(call.body.status))
     ).toEqual(expect.arrayContaining(['Thinking...', '']))
+  })
+
+  it('replays an inbox message whose process died before the execution was committed', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({
+      // The first process dies mid-execute: its request never returns.
+      fetch: async (input, init) =>
+        String(input).endsWith('/execute') ? new Promise<Response>(() => {}) : fetch(input, init),
+      sessionApiTimeoutMs: 10 * 60 * 1000,
+      state: sharedState
+    })
+
+    const parent = await postUserMessage('Context before the crash.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> survive a crash`, parent.ts)
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-handoff-crash',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> survive a crash`
+        }
+      }),
+      {},
+      waitUntilContext([])
+    )
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.appends.length === 1)
+
+    bot = createTestBot({ inboxReplayDelayMs: 0, state: sharedState })
+
+    await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 1.'), 3000)
+    expect(codexApi.executes.map(execute => execute.body.idempotency_key)).toEqual([mention.ts])
+    expect(codexApi.appends).toHaveLength(1)
   })
 
   it('does not wait for hung assistant status before creating Slack sessions', async () => {
@@ -5221,9 +5252,6 @@ describe('slackbotv2', () => {
     // The retryable failure is retried in-process; Slack is acknowledged so
     // its own redelivery (which would be deduped anyway) is never needed.
     expect(response.status).toBe(200)
-    expect(codexApi.appends).toHaveLength(1)
-    expect(codexApi.executes).toHaveLength(1)
-    expect(codexApi.eventRequests).toHaveLength(0)
 
     await waitFor(() => codexApi.executes.length === 2, 3000)
     await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 1.'), 3000)
@@ -5380,7 +5408,7 @@ describe('slackbotv2', () => {
       waitUntilContext(waits)
     )
     expect(response.status).toBe(200)
-    expect(codexApi.executes).toHaveLength(1)
+    await waitFor(() => codexApi.executes.length === 1)
     expect(codexApi.eventRequests).toHaveLength(0)
 
     await waitFor(() => codexApi.executes.length === 2, 3000)
@@ -5430,7 +5458,7 @@ describe('slackbotv2', () => {
       waitUntilContext(firstWaits)
     )
     expect(firstResponse.status).toBe(200)
-    expect(codexApi.executes).toHaveLength(1)
+    await waitFor(() => codexApi.executes.length === 1)
 
     // A second mention lands while the first message's retry is still pending
     // and starts the thread's execution. Keep it running (no auto response)
@@ -5459,7 +5487,7 @@ describe('slackbotv2', () => {
       waitUntilContext(secondWaits)
     )
     expect(secondResponse.status).toBe(200)
-    expect(codexApi.executes).toHaveLength(2)
+    await waitFor(() => codexApi.executes.length === 2)
 
     // The first message's retry fires into the active execution and must not
     // start a third execution; its text is already in the session, so the
@@ -5503,7 +5531,7 @@ describe('slackbotv2', () => {
       waitUntilContext(waits)
     )
     expect(response.status).toBe(200)
-    expect(codexApi.executes).toHaveLength(1)
+    await waitFor(() => codexApi.executes.length === 1)
 
     // Fail the scheduled retry too so the budget of one retry is exhausted.
     codexApi.failNextExecute = true
@@ -6239,10 +6267,23 @@ function signedSlackInteraction(payload: Record<string, unknown>): RequestInit {
   }
 }
 
+// Like a platform waitUntil, keep awaiting work that background work registers
+// later, such as a render scheduled after the webhook acknowledged Slack.
 function waitUntilContext(waits: Promise<unknown>[]) {
+  const pending: Promise<unknown>[] = []
+  let draining: Promise<void> | undefined
   return {
     waitUntil(promise: Promise<unknown>) {
-      waits.push(promise)
+      pending.push(promise)
+      if (draining) return
+      draining = (async () => {
+        try {
+          while (pending.length > 0) await pending.shift()
+        } finally {
+          draining = undefined
+        }
+      })()
+      waits.push(draining)
     },
     passThroughOnException() {},
     props: {}
