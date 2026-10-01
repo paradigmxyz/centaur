@@ -16,6 +16,33 @@ updates:
         patterns:
           - "*"
 
+  - package-ecosystem: docker
+    directories:
+      - /services/api-rs
+      - /services/company-context
+      - /services/console
+      - /services/discordbot
+      - /services/githubbot
+      - /services/iron-proxy
+      - /services/linearbot
+      - /services/proxy-sync
+      - /services/sandbox
+      - /services/slackbotv2
+      - /services/teamsbot
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Denver
+    commit-message:
+      prefix: chore
+      include: scope
+    open-pull-requests-limit: 5
+    groups:
+      docker-base-images:
+        patterns:
+          - "*"
+
   - package-ecosystem: bundler
     directory: /services/console
     schedule:
