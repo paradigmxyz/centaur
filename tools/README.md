@@ -59,8 +59,9 @@ my-tool --help
 
 ## Available Plugins
 
-- `slack-crew`: create and inspect named profile-backed Slackbots. Requires an
-  explicitly granted `SLACK_CREW_ADMIN_TOKEN`; see `services/slackbotv2/CREW.md`.
+- `slack-crew`: read and edit only the current Crew bot's name and description,
+  using its sandbox identity. Operators create/install/manage bots in Console;
+  see `services/slackbotv2/CREW.md`. No management token is granted to sandboxes.
 
 The open-source tool inventory lives in this `tools/` tree and changes over time. To see what ships in a running sandbox, use `centaur-tools list`; private deployments may mount additional overlay tool directories.
 

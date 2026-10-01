@@ -31,6 +31,29 @@ test.skipIf(!databaseUrl)('Postgres encrypts installations, restores them, and s
     installed.status = 'active'
     installed.botToken = 'synthetic-bot-token'
     await store.save(installed)
+    let entered!: () => void
+    const locked = new Promise<void>(resolve => { entered = resolve })
+    let release!: () => void
+    const proceed = new Promise<void>(resolve => { release = resolve })
+    const rename = store.mutate({ id: 'research' }, async current => {
+      entered()
+      await proceed
+      current.name = 'Renamed'
+      return true
+    })
+    await locked
+    // A second writer must read after the first commits, not replace its name
+    // with a stale snapshot while pausing the app.
+    let secondEntered = false
+    const pause = store.mutate({ id: 'research' }, current => { secondEntered = true; current.paused = true; return true })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const readBeforeCommit = secondEntered
+    release()
+    await Promise.all([rename, pause])
+    expect(readBeforeCommit).toBe(false)
+    expect((await store.get('research'))?.botToken).toBe('synthetic-bot-token')
+    expect((await store.get('research'))?.paused).toBe(true)
+    expect((await store.get('research'))?.name).toBe('Renamed')
     expect((await new PgCrewStore(pool, key).list())[0]?.botToken).toBe('synthetic-bot-token')
     await expect(new PgCrewStore(pool, randomBytes(32).toString('hex')).get('research')).rejects.toThrow()
     await pool.query("UPDATE slackbotv2_crew SET id = 'tampered'")

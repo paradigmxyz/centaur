@@ -15,6 +15,15 @@ class MemoryStore implements CrewStore {
     return true
   }
   async save(record: CrewRecord) { this.records.set(record.id, structuredClone(record)) }
+  async mutate(selector: { id: string } | { appId: string }, update: (record: CrewRecord) => boolean | Promise<boolean>) {
+    const record = 'id' in selector ? this.records.get(selector.id)
+      : [...this.records.values()].find(candidate => candidate.appId === selector.appId)
+    if (!record) return undefined
+    const current = structuredClone(record)
+    if (!await update(current)) return undefined
+    this.records.set(current.id, structuredClone(current))
+    return current
+  }
   async beginInstall(id: string, ticket: string, state: string) {
     const record = this.records.get(id)
     if (!record || record.status !== 'needs_install' || !ticket || record.installTicket !== ticket) return undefined
@@ -35,6 +44,7 @@ class MemoryStore implements CrewStore {
 function fixture(overrides: { failCreate?: boolean; team?: string; appId?: string } = {}) {
   const store = new MemoryStore()
   const calls: string[] = []
+  const slackBodies: Record<string, URLSearchParams[]> = {}
   const botOptions: SlackbotV2Options[] = []
   let deliveries = 0
   const config = {
@@ -44,6 +54,7 @@ function fixture(overrides: { failCreate?: boolean; team?: string; appId?: strin
     fetch: (async (url: RequestInfo | URL, init?: RequestInit) => {
       const method = String(url).split('/').pop()!
       calls.push(method)
+      ;(slackBodies[method] ??= []).push(new URLSearchParams(init?.body as string))
       if (method === 'apps.manifest.create') {
         expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer configuration-test')
         if (overrides.failCreate) throw new Error('Lost response')
@@ -51,6 +62,7 @@ function fixture(overrides: { failCreate?: boolean; team?: string; appId?: strin
           client_id: 'client-test', client_secret: 'client-secret-test', signing_secret: 'signing-test'
         } })
       }
+      if (method === 'apps.manifest.update') return Response.json({ ok: true })
       expect(method).toBe('oauth.v2.access')
       expect(new URLSearchParams(init?.body as string).get('client_secret')).toBe('client-secret-test')
       return Response.json({ ok: true, app_id: overrides.appId ?? 'A123', team: { id: overrides.team ?? 'T123' },
@@ -68,7 +80,7 @@ function fixture(overrides: { failCreate?: boolean; team?: string; appId?: strin
     manager.app.request('/api/slack/crew', { method: 'POST', headers: {
       Authorization: `Bearer ${token}`, 'Content-Type': 'application/json'
     }, body: JSON.stringify(body) })
-  return { ...manager, config, store, calls, botOptions, create, deliveries: () => deliveries }
+  return { ...manager, config, store, calls, slackBodies, botOptions, create, deliveries: () => deliveries }
 }
 
 async function install(f: ReturnType<typeof fixture>) {
@@ -96,6 +108,46 @@ describe('Crew provisioning', () => {
     expect(f.calls).toEqual([])
   })
 
+  test('lists profiles and manages only validated mutable fields with preserved manifest configuration', async () => {
+    const f = fixture()
+    await install(f)
+    const list = await (await f.app.request('/api/slack/crew', { headers: { Authorization: 'Bearer management-test' } })).json()
+    expect(list.profiles).toEqual(['eng', 'legal'])
+    expect(list.crew[0]).toMatchObject({ description: 'A member of your Centaur crew', paused: false })
+    const path = '/api/slack/crew/research/manage'
+    expect((await f.app.request(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status).toBe(401)
+    for (const body of [{ crew_id: 'legal' }, { name: ' ' }, { name: 'x'.repeat(36) },
+      { description: 'x'.repeat(141) }, { paused: 'yes' }]) {
+      expect((await f.app.request(path, { method: 'POST', headers: { Authorization: 'Bearer management-test',
+        'Content-Type': 'application/json' }, body: JSON.stringify(body) })).status).toBe(400)
+    }
+    const response = await f.app.request(path, { method: 'POST', headers: { Authorization: 'Bearer management-test',
+      'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'New Research', description: 'New description', paused: true }) })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ name: 'New Research', description: 'New description', paused: true, crew_id: 'eng' })
+    const updateCall = f.calls.lastIndexOf('apps.manifest.update')
+    expect(updateCall).toBeGreaterThan(-1)
+    const manifest = JSON.parse(f.slackBodies['apps.manifest.update']![0]!.get('manifest')!)
+    expect(manifest.display_information).toEqual({ name: 'New Research', description: 'New description' })
+    expect(manifest.oauth_config.scopes.bot).toEqual(CREW_BOT_SCOPES)
+    expect(manifest.oauth_config.redirect_urls).toEqual(['https://bots.example.com/api/slack/crew/research/oauth'])
+    expect(manifest.settings.event_subscriptions.request_url).toBe('https://bots.example.com/api/slack/crew/research/events')
+  })
+
+  test('by-app management is authenticated, identity-bound, active, and cannot pause', async () => {
+    const f = fixture()
+    await install(f)
+    const path = '/api/slack/crew/by-app/A123/manage'
+    expect((await f.app.request(path)).status).toBe(401)
+    expect((await f.app.request('/api/slack/crew/by-app/AOTHER/manage', { headers: { Authorization: 'Bearer management-test' } })).status).toBe(404)
+    expect((await f.app.request(path, { method: 'POST', headers: { Authorization: 'Bearer management-test',
+      'Content-Type': 'application/json' }, body: JSON.stringify({ paused: true }) })).status).toBe(400)
+    const response = await f.app.request(path, { method: 'POST', headers: { Authorization: 'Bearer management-test',
+      'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Bound app' }) })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ id: 'research', app_id: 'A123', name: 'Bound app', paused: false })
+  })
+
   test('durably deduplicates creation, checks conflicting definitions, and redacts credentials', async () => {
     const f = fixture()
     const responses = await Promise.all([f.create(), f.create()])
@@ -109,6 +161,10 @@ describe('Crew provisioning', () => {
     expect(JSON.stringify(data)).not.toContain('secret')
     expect(JSON.stringify(data)).not.toContain('configuration-test')
     expect((await f.create({ id: 'research', name: 'Different', crew_id: 'eng' })).status).toBe(409)
+    expect((await f.app.request('/api/slack/crew', { method: 'POST',
+      headers: { Authorization: 'Bearer management-test', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'research', name: 'Research', crew_id: 'eng', description: 'Different definition' })
+    })).status).toBe(409)
     expect(f.calls).toHaveLength(1)
   })
 
@@ -159,6 +215,22 @@ describe('Crew provisioning', () => {
     expect((await f.app.request(path, event('signing-test', {}, '1'))).status).toBe(401)
     expect((await f.app.request(path, event('signing-test', { team_id: 'TOTHER' }))).status).toBe(403)
     expect(f.deliveries()).toBe(0)
+    expect((await f.app.request(path, event('signing-test'))).status).toBe(200)
+    expect(f.deliveries()).toBe(1)
+  })
+
+  test('acknowledges verified events without delivery while paused and resumes delivery', async () => {
+    const f = fixture()
+    await install(f)
+    const manage = (paused: boolean) => f.app.request('/api/slack/crew/research/manage', { method: 'POST',
+      headers: { Authorization: 'Bearer management-test', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paused }) })
+    expect((await manage(true)).status).toBe(200)
+    const path = '/api/slack/crew/research/events'
+    expect((await f.app.request(path, event('signing-test'))).status).toBe(200)
+    expect(f.deliveries()).toBe(0)
+    expect((await f.app.request(path, event('wrong'))).status).toBe(401)
+    expect((await manage(false)).status).toBe(200)
     expect((await f.app.request(path, event('signing-test'))).status).toBe(200)
     expect(f.deliveries()).toBe(1)
   })

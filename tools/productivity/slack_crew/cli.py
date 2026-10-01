@@ -6,7 +6,7 @@ import typer
 
 from .client import SlackCrewClient
 
-app = typer.Typer(help="Create and inspect named Centaur Crew Slackbots")
+app = typer.Typer(help="Read and edit your own Crew bot. Operators manage the crew in Console.")
 
 
 def output(data: dict, markdown: bool) -> None:
@@ -14,31 +14,23 @@ def output(data: dict, markdown: bool) -> None:
     typer.echo(f"```json\n{text}\n```" if markdown else text)
 
 
-@app.command("list")
-def list_bots(
+@app.command()
+def me(
     json_output: bool = typer.Option(False, "--json"),
     markdown: bool = typer.Option(False, "--markdown"),
 ) -> None:
-    """List apps and their installation status."""
-    output(SlackCrewClient().list_bots(), markdown)
+    """Read your own Crew profile."""
+    output(SlackCrewClient().me(), markdown)
 
 
 @app.command()
-def create(
-    id: str,
-    name: str = typer.Option(..., "--name"),
-    crew: str = typer.Option(..., "--crew"),
+def edit(
+    name: str | None = typer.Option(None, "--name"),
+    description: str | None = typer.Option(None, "--description"),
     json_output: bool = typer.Option(False, "--json"),
     markdown: bool = typer.Option(False, "--markdown"),
 ) -> None:
-    """Create an app once and return its Slack installation link."""
-    output(SlackCrewClient().create_bot(id, name, crew), markdown)
-
-
-@app.command()
-def health(
-    json_output: bool = typer.Option(False, "--json"),
-    markdown: bool = typer.Option(False, "--markdown"),
-) -> None:
-    """Check management access without creating an app."""
-    output(SlackCrewClient().health(), markdown)
+    """Update your name and description; other bots and permissions are inaccessible."""
+    if name is None and description is None:
+        raise typer.BadParameter("Provide --name or --description")
+    output(SlackCrewClient().edit(name, description), markdown)

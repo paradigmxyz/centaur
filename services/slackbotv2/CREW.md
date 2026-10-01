@@ -30,22 +30,54 @@ The service uses its existing Postgres connection and home workspace from
 API's profile registry; missing profiles fail closed before message execution.
 No new API key or app credentials are exposed to sandboxes.
 
-Grant the `slack_crew` tool and its management credential only to operators who
-may create Slack apps. Its default target is `http://centaur-slackbotv2:3001`.
-For another service name set `SLACK_CREW_URL` and the tool's credential host rule
-to that exact host. The credential proxy must be able to reach that service.
-The public ingress must forward `/api/slack/crew` and its subpaths here. The
-management GET/POST require the separate bearer credential; installation uses
-unguessable tickets, browser-bound OAuth state, expiry, and atomic replay checks.
+## Console management and installation
+
+Open **Crew** in the sidebar as an active Console admin. Choose a permanent bot ID,
+display name, description and allowed profile, then **Create and install in
+Slack**. Creation immediately takes the browser through Slack installation;
+there is no CLI step or URL to copy. After consent, OAuth activates the bot
+automatically. Pending installations can be resumed from the same page.
+
+**Slack still requires workspace consent.** A configuration token cannot bypass
+OAuth. Consent-free child-app installation requires Slack's partner-only
+[`managed_apps:install`](https://docs.slack.dev/reference/scopes/managed_apps.install/)
+capability, not an ordinary developer configuration token. Workspace policy can
+also require admin approval. Invite the installed bot to channels or open its DM.
+
+The Console can rename bots, change descriptions, and pause/resume new incoming
+work. Pausing does not cancel executions or terminal delivery already in flight.
+Profile bindings remain immutable. Interrupted `creating`/`installing` records
+are visible but cannot be edited or blindly retried.
+
+Helm wires `CENTAUR_CONSOLE_SLACK_CREW_URL`,
+`CENTAUR_CONSOLE_SLACK_CREW_PUBLIC_URL` and the server-only
+`CENTAUR_CONSOLE_SLACK_CREW_ADMIN_TOKEN` when Crew is enabled. Outside Helm,
+configure these explicitly. The Console also needs its existing API session DB
+connection for self-management. Neither the browser nor sandboxes receive the
+admin token. The public ingress must forward `/api/slack/crew` and subpaths.
+Management routes require the admin bearer; installation uses unguessable
+tickets, browser-bound OAuth state, expiry, and atomic replay checks.
+
+## Bot self-management
 
 ```bash
-slack-crew create research --name "Research" --crew eng --json
-slack-crew list --json
+slack-crew me --json
+slack-crew edit --name "Research" --description "Research and analysis" --json
 ```
 
-Open the returned `install_url` and complete Slack consent. Workspace policy may
-require admin approval. Creation does not bypass installation. Invite the new
-bot to its intended channels or start a DM after status becomes `active`.
+These commands call `GET/PATCH /api/v1/sandbox/crew/me` on the Console through
+iron-proxy. Its short-lived sandbox JWT identifies the proxy, sandbox and
+principal. The Console matches the current durable session's sandbox assignment
+and principal, then derives the app ID from its app-scoped thread key. Channel
+principal membership alone is not authority over other bots in that channel.
+Unassigned, non-Crew and ambiguous sessions fail closed. Bots can change only
+their own name and description, not other members, profiles, permissions or pause
+state. Names/descriptions use `apps.manifest.update` and need a current
+configuration access token; paused bots cannot self-edit.
+
+The tool no longer declares or uses `SLACK_CREW_ADMIN_TOKEN`. Remove any grants
+of that token from sandbox principals/roles left over from the old operator CLI.
+Admin creation and fleet management belong in the Console.
 
 ## Slack permissions
 

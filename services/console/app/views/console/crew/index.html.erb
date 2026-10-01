@@ -1,0 +1,53 @@
+<% content_for :title, "Crew · Centaur Console" %>
+
+<%= render "console/page_header", title: "Crew", subtitle: "Create and manage Slack bot identities." %>
+
+<section class="mb-8 form-section">
+  <h2 class="form-section-heading">Add Crew bot</h2>
+  <p class="mb-4 text-sm text-zinc-500">Creating a bot continues to Slack for explicit workspace consent.</p>
+  <%= form_with url: console_crew_index_path, scope: :crew, data: { turbo: false }, class: "grid gap-4 lg:grid-cols-2" do |form| %>
+    <div><%= form.label :id, "ID", class: "form-label" %><%= form.text_field :id, value: @form["id"], required: true, pattern: "[a-z][a-z0-9-]{1,47}", maxlength: 48, class: "form-input" %><p class="text-xs text-zinc-500">A permanent lowercase ID, e.g. research.</p></div>
+    <div><%= form.label :crew_id, "Profile", class: "form-label" %><%= form.select :crew_id, options_for_select(@profiles, @form["crew_id"]), { include_blank: "Select profile" }, required: true, class: "form-input" %></div>
+    <div><%= form.label :name, class: "form-label" %><%= form.text_field :name, value: @form["name"], required: true, maxlength: 35, class: "form-input" %></div>
+    <div><%= form.label :description, class: "form-label" %><%= form.text_field :description, value: @form["description"], maxlength: 140, class: "form-input" %></div>
+    <div><%= form.submit "Create and install in Slack", disabled: @profiles.empty?, class: "btn-primary" %></div>
+  <% end %>
+</section>
+
+<section class="console-scroll-panel" tabindex="0" role="region" aria-label="Crew bots, scroll horizontally for actions">
+  <table class="console-table min-w-[960px]">
+    <thead class="console-table-head"><tr><th class="console-th">Bot</th><th class="console-th">Profile</th><th class="console-th">Status</th><th class="console-th">Slack IDs</th><th class="console-th text-right">Actions</th></tr></thead>
+    <tbody class="divide-y divide-ink-700">
+      <% if @crew.empty? %><tr><td colspan="5" class="px-5 py-10 text-center text-zinc-600">No Crew bots yet.</td></tr><% end %>
+      <% @crew.each do |bot| %>
+        <% pending = bot["status"] == "needs_install" %>
+        <% active = bot["status"] == "active" %>
+        <tr class="console-row-hover align-top">
+          <td class="console-td">
+            <%= form_with url: console_crew_path(bot["id"]), method: :patch, scope: :crew, namespace: bot["id"], class: "grid gap-2" do |form| %>
+              <%= form.text_field :name, value: bot["name"], required: true, maxlength: 35, aria: { label: "#{bot['id']} name" }, class: "form-input" %>
+              <%= form.text_field :description, value: bot["description"], maxlength: 140, aria: { label: "#{bot['id']} description" }, placeholder: "Description", class: "form-input" %>
+              <%= form.submit "Save", disabled: !active && !pending, class: "btn-secondary" %>
+            <% end %>
+            <div class="mt-2 text-xs text-zinc-600"><%= bot["id"] %></div>
+          </td>
+          <td class="console-td-nowrap"><%= bot["crew_id"].presence || "—" %></td>
+          <td class="console-td-nowrap"><%= active && bot["paused"] ? "paused" : bot["status"].to_s.humanize.downcase %></td>
+          <td class="console-td-nowrap text-xs text-zinc-500"><div>app: <%= bot["app_id"].presence || "—" %></div><div>bot: <%= bot["bot_user_id"].presence || "—" %></div><div>team: <%= bot["team_id"].presence || "—" %></div></td>
+          <td class="console-td text-right min-w-48">
+            <% if pending && bot["install_url"].present? %>
+              <%= button_to "Install in Slack", install_console_crew_path(bot["id"]), method: :post, form: { data: { turbo: false } }, class: "btn-primary" %>
+            <% elsif active %>
+              <%= form_with url: console_crew_path(bot["id"]), method: :patch, scope: :crew do |form| %>
+                <%= form.hidden_field :paused, value: bot["paused"] ? "false" : "true" %>
+                <%= form.submit bot["paused"] ? "Resume" : "Pause", class: "btn-secondary" %>
+              <% end %>
+            <% else %>
+              <span class="text-xs text-zinc-500">Check Slack before retrying an interrupted setup.</span>
+            <% end %>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+</section>

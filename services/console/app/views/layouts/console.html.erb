@@ -916,6 +916,7 @@
     <% control_matches = [ "/console/principals", "/console/roles", "/console/secrets", "/console/credentials", "/console/oauth_apps", "/console/users" ] %>
     <% nav_items = [
       { label: "Control", icon: "shield-check", path: console_principals_path, matches: control_matches, root_active: true },
+      { label: "Crew", icon: "users", path: console_crew_index_path, matches: [ "/console/crew" ] },
       { label: "Data Sync", icon: "database", path: console_etls_path, matches: [ "/console/etls" ] }
     ] %>
   <% end %>

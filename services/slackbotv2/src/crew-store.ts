@@ -4,6 +4,8 @@ import { Pool } from 'pg'
 export type CrewRecord = {
   id: string
   name: string
+  description?: string
+  paused?: boolean
   personaId: string
   status: 'creating' | 'needs_install' | 'installing' | 'active'
   appId?: string
@@ -23,6 +25,8 @@ export interface CrewStore {
   get(id: string): Promise<CrewRecord | undefined>
   reserve(record: CrewRecord): Promise<boolean>
   save(record: CrewRecord): Promise<void>
+  /** Mutate the latest encrypted record while holding its database row lock. */
+  mutate(selector: { id: string } | { appId: string }, update: (record: CrewRecord) => boolean | Promise<boolean>): Promise<CrewRecord | undefined>
   beginInstall(id: string, ticket: string, state: string): Promise<CrewRecord | undefined>
   /** Atomically claim an installation before exchanging its single-use code. */
   claim(id: string, state: string): Promise<CrewRecord | undefined>
@@ -85,7 +89,8 @@ export class PgCrewStore implements CrewStore {
   }
 
   async claim(id: string, state: string): Promise<CrewRecord | undefined> {
-    return this.updateInstallation(id, record => {
+    return this.mutate({ id }, record => {
+      if (record.status !== 'needs_install') return false
       if (record.oauthState !== state || !record.oauthExpiresAt || record.oauthExpiresAt < Date.now()) return false
       record.status = 'installing'
       delete record.oauthState
@@ -95,7 +100,8 @@ export class PgCrewStore implements CrewStore {
   }
 
   async beginInstall(id: string, ticket: string, state: string): Promise<CrewRecord | undefined> {
-    return this.updateInstallation(id, record => {
+    return this.mutate({ id }, record => {
+      if (record.status !== 'needs_install') return false
       if (!ticket || record.installTicket !== ticket) return false
       record.oauthState = state
       record.oauthExpiresAt = Date.now() + 10 * 60_000
@@ -103,17 +109,20 @@ export class PgCrewStore implements CrewStore {
     })
   }
 
-  private async updateInstallation(id: string, update: (record: CrewRecord) => boolean): Promise<CrewRecord | undefined> {
+  async mutate(selector: { id: string } | { appId: string }, update: (record: CrewRecord) => boolean | Promise<boolean>): Promise<CrewRecord | undefined> {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
-      const result = await client.query('SELECT id, ciphertext FROM slackbotv2_crew WHERE id = $1 FOR UPDATE', [id])
-      const record = result.rows[0] ? this.decrypt(result.rows[0]) : undefined
-      if (!record || record.status !== 'needs_install' || !update(record)) {
+      const result = 'id' in selector
+        ? await client.query('SELECT id, ciphertext FROM slackbotv2_crew WHERE id = $1 FOR UPDATE', [selector.id])
+        : await client.query('SELECT id, ciphertext FROM slackbotv2_crew ORDER BY id FOR UPDATE')
+      const records = result.rows.map(row => this.decrypt(row))
+      const record = 'id' in selector ? records[0] : records.find(candidate => candidate.appId === selector.appId)
+      if (!record || !await update(record)) {
         await client.query('ROLLBACK')
         return undefined
       }
-      await client.query('UPDATE slackbotv2_crew SET ciphertext = $2 WHERE id = $1', [id, this.encrypt(record)])
+      await client.query('UPDATE slackbotv2_crew SET ciphertext = $2 WHERE id = $1', [record.id, this.encrypt(record)])
       await client.query('COMMIT')
       return record
     } catch (error) {

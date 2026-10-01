@@ -223,15 +223,6 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
-{{- if and .Values.slackbotv2.enabled .Values.slackbotv2.crew.enabled }}
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: 3001
-{{- end }}
     - to:
         - podSelector:
             matchLabels:
@@ -373,7 +364,7 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-              centaur.ai/iron-proxy: "true"
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
       ports:
         - protocol: TCP
           port: 3001

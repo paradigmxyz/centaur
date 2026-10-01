@@ -1,45 +1,49 @@
-"""Crew management API. Slack configuration and bot tokens remain server-side."""
+"""Self-management through the proxy-injected sandbox identity, never admin auth."""
 
+import os
 from typing import Any
 
 import httpx
 
-from centaur_sdk import secret
-
 
 class SlackCrewClient:
-    def __init__(self, base_url: str | None = None, token: str | None = None):
-        self.base_url = (base_url or secret("SLACK_CREW_URL", "http://centaur-slackbotv2:3001")).rstrip("/")
-        self.token = token
+    def __init__(self, base_url: str | None = None, transport: httpx.BaseTransport | None = None):
+        # Non-secret service discovery, also used by the other sandbox Console tools.
+        self.base_url = (
+            base_url or os.getenv("CENTAUR_CONSOLE_URL", "http://centaur-console:3000")  # noqa: TID251
+        ).rstrip("/")
+        self.transport = transport
 
     def _request(self, method: str, body: dict | None = None) -> dict[str, Any]:
-        token = self.token or secret("SLACK_CREW_ADMIN_TOKEN")
-        if not token:
-            raise RuntimeError("SLACK_CREW_ADMIN_TOKEN is not granted")
-        # No retries: an ambiguous app-creation response must be reconciled by ID.
-        with httpx.Client(timeout=30, follow_redirects=False) as client:
+        # iron-proxy injects a short-lived sandbox entitlement only for this path.
+        # The Console derives the app from the current durable sandbox assignment.
+        with httpx.Client(timeout=35, follow_redirects=False, transport=self.transport) as client:
             response = client.request(
-                method, f"{self.base_url}/api/slack/crew", json=body,
-                headers={"Authorization": f"Bearer {token}"},
+                method,
+                f"{self.base_url}/api/v1/sandbox/crew/me",
+                json={"data": body} if body is not None else None,
+                headers={"Accept": "application/json"},
             )
-        if response.status_code not in (200, 201):
-            raise RuntimeError(f"Crew API returned HTTP {response.status_code}; inspect status before retrying")
-        return response.json()
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Crew self-management returned HTTP {response.status_code}; only an active Crew sandbox can edit itself"
+            )
+        return response.json()["data"]
 
-    def list_bots(self) -> dict[str, Any]:
-        """List Crew installation states; never returns Slack credentials."""
+    def me(self) -> dict[str, Any]:
+        """Read this bot's profile, without credentials or access to other bots."""
         return self._request("GET")
 
-    def create_bot(self, id: str, name: str, crew_id: str) -> dict[str, Any]:
-        """Create an app for an allowed profile; stable id prevents duplicate creation.
-
-        Return its installation link. Slack consent is required before it can respond.
-        """
-        return self._request("POST", {"id": id, "name": name, "crew_id": crew_id})
-
-    def health(self) -> dict[str, Any]:
-        """Read-only management-auth check without returning installation links."""
-        return {"ok": True, "bot_count": len(self.list_bots()["crew"])}
+    def edit(self, name: str | None = None, description: str | None = None) -> dict[str, Any]:
+        """Change only this bot's Slack display name or short description."""
+        fields = {
+            key: value
+            for key, value in {"name": name, "description": description}.items()
+            if value is not None
+        }
+        if not fields:
+            raise ValueError("Provide a name or description")
+        return self._request("PATCH", fields)
 
 
 def _client() -> SlackCrewClient:
