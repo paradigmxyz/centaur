@@ -62,6 +62,9 @@ const options: SlackbotV2Options = {
   ),
   responseMetadataMode: responseMetadataModeEnv('SLACKBOTV2_RESPONSE_METADATA_MODE'),
   responseServiceTierEnabled: booleanEnv('SLACKBOTV2_RESPONSE_SERVICE_TIER_ENABLED', false),
+  respondWithoutMentionChannelIds: listEnv(
+    'SLACKBOTV2_RESPOND_WITHOUT_MENTION_CHANNEL_IDS'
+  ),
   defaultHarnessType: optionalEnv('SLACKBOTV2_DEFAULT_HARNESS'),
   // Same env vars deployers use to override the sandbox harness model
   // (sandbox.extraEnv); the chart mirrors them here so displayed defaults
@@ -123,6 +126,8 @@ console.log(
       messageOverridesStrategyMode !== 'llm' || Boolean(messageOverridesStrategyApiKey),
     response_metadata_mode: options.responseMetadataMode,
     response_service_tier_enabled: options.responseServiceTierEnabled,
+    respond_without_mention_channel_count:
+      options.respondWithoutMentionChannelIds?.length ?? 0,
     steering_reaction_enabled: options.steeringReactionEnabled,
     steering_reaction_name: options.steeringReactionName,
     port: server.port,
@@ -145,6 +150,13 @@ function requiredEnv(name: string): string {
 
 function stringEnv(name: string, fallback: string): string {
   return optionalEnv(name) ?? fallback
+}
+
+function listEnv(name: string): string[] {
+  return (optionalEnv(name) ?? '')
+    .split(/[\s,]+/)
+    .map(value => value.trim())
+    .filter(Boolean)
 }
 
 function numberEnv(name: string, fallback: number): number {
