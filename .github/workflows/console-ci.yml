@@ -61,7 +61,14 @@ jobs:
           bundler-cache: true
 
       - name: Scan for common Rails security vulnerabilities using static analysis
-        run: bin/brakeman --no-pager
+        run: |
+          # --ensure-latest (added by bin/brakeman) fails on new upstream releases;
+          # keep PRs independent of that and enforce it only on main/merge queue.
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            bundle exec brakeman --no-pager
+          else
+            bin/brakeman --no-pager
+          fi
 
   scan_js:
     runs-on: depot-ubuntu-24.04-16
