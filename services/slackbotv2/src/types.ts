@@ -3,6 +3,7 @@ import type { CodexAppServerToChatStreamOptions } from '@centaur/rendering'
 import type { Attachment, Chat, Logger, StateAdapter } from 'chat'
 import type { Hono } from 'hono'
 import type { ChannelDefaults } from './channel-defaults'
+import type { SlackInboxStore } from './inbox'
 import type { HarnessOverrides } from './overrides'
 import type { SlackDisplayTextSource } from './slack-display-text'
 
@@ -187,6 +188,18 @@ export type SlackbotV2Options = {
    * instead and posts a visible error once the delays are exhausted.
    */
   handoffRetryDelaysMs?: readonly number[]
+  /**
+   * Chat SDK duplicate window for a Slack message. The inbox waits this long
+   * after startup before replaying a previous process's requests. Defaults to 10s.
+   */
+  messageDedupeTtlMs?: number
+  /** Redeliver Slack inbox requests a previous process left behind. Defaults to true. */
+  replayInboxOnStart?: boolean
+  /**
+   * Store for Slack webhook requests awaiting delivery to the Chat SDK.
+   * Defaults to Postgres at `postgresUrl`, or a process-local store without one.
+   */
+  inboxStore?: SlackInboxStore
   /** Milliseconds before an idle execution pauses its sandbox. Defaults to up to 3h. */
   idleTimeoutMs?: number
   logger?: Logger
@@ -235,6 +248,8 @@ export type SlackbotV2 = {
 
 export type SlackbotV2ThreadState = {
   activeExecution?: boolean
+  /** When a handoff last marked the thread active before starting an execution. */
+  executionStartMarkedAtMs?: number
   executedMessageIds?: string[]
   forwardedMessageIds?: string[]
   /** Last thread-level harness selected by Slack flags. Null clears persisted state. */
