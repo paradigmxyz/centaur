@@ -1138,13 +1138,13 @@ describe('slackbotv2', () => {
     )
     await sendMention(
       nanocodexRoot.ts,
-      'continue without another flag',
+      'keep thinking without another flag',
       'Ev-slackbotv2-nanocodex-sticky'
     )
 
     const defaultRoot = await sendMention(
       undefined,
-      'use the configured default',
+      'use the configured default model',
       'Ev-slackbotv2-default-after-nanocodex'
     )
 

@@ -29,6 +29,13 @@ const SYSTEM_PROMPT = [
   'Do not treat ordinary discussion of model names as a selection request.'
 ].join('\n')
 
+// Only messages that mention a model name or selection term can ask for an
+// override, so other messages skip the classifier and its latency. The letter
+// lookarounds keep version suffixes ("gpt5", "opus-4.7") and plurals matching
+// while ignoring longer words such as "solve" or "terraform".
+const SELECTOR_TERM_PATTERN =
+  /(?<![a-z])(?:claude|claudecode|codex|amp|nanocodex|opus|sonnet|haiku|fable|gpt|astra|sol|luna|terra|model|harness|provider|reasoning|effort|mode|bedrock|openrouter|think|thinking)(?:s|es)?(?![a-z])/i
+
 const MODEL_VALUES = [
   'claude-fable-5',
   'claude-haiku-4-5',
@@ -125,7 +132,11 @@ export function createOpenAiMessageOverridesStrategy(
     if (!strategyText) {
       return { cleanedText, overrides: {} }
     }
+    if (!SELECTOR_TERM_PATTERN.test(strategyText)) {
+      return { overrides: {} }
+    }
 
+    const startedAtMs = Date.now()
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
     try {
@@ -161,6 +172,7 @@ export function createOpenAiMessageOverridesStrategy(
       const value = await response.json()
       const outputText = responseOutputText(value)
       options.logger?.info('slackbotv2_message_overrides_strategy_response_received', {
+        elapsed_ms: Date.now() - startedAtMs,
         model: options.model,
         output_text: outputText
       })
@@ -174,6 +186,7 @@ export function createOpenAiMessageOverridesStrategy(
       return { overrides: strategyOverrides }
     } catch (error) {
       options.logger?.warn('slackbotv2_message_overrides_strategy_request_failed', {
+        elapsed_ms: Date.now() - startedAtMs,
         error: errorMessage(error),
         model: options.model,
         timeout_ms: timeoutMs
