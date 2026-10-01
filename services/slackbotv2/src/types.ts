@@ -200,9 +200,10 @@ export type SlackbotV2Options = {
   /** Deadline for Centaur session API HTTP calls made during Slack handoff. */
   sessionApiTimeoutMs?: number
   signingSecret: string
-  /** Dedicated app identity; paired with a fixed persona and home workspace. */
+  /** Dedicated Slack app identity. */
   botAppId?: string
-  fixedPersonaId?: string
+  /** Crew bots never request or persist API personas; their prompt is Console-owned. */
+  crewBot?: boolean
   slackApiUrl?: string
   /** Bot workspace team ID resolved once from Slack's auth.test response. */
   slackHomeTeamId?: string

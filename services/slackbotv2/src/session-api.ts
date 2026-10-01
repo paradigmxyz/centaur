@@ -491,7 +491,7 @@ export async function forwardToSessionApi(
       options,
       input.threadId,
       input.harnessType,
-      options.fixedPersonaId ?? input.personaId,
+      options.crewBot ? undefined : input.personaId,
       sessionRequesterMessage(input),
       input.restartOnHarnessConflict,
       input.harnessAssignment
@@ -500,9 +500,6 @@ export async function forwardToSessionApi(
     'create session'
   )
   if (created.harnessType) input.metadataHarnessType = created.harnessType
-  if (options.fixedPersonaId && created.personaId !== options.fixedPersonaId) {
-    throw new Error('This bot’s configured persona is unavailable; contact its operator.')
-  }
   input.harnessAssignment = created.harnessAssignment
   traceLog(options, 'slackbotv2_session_create_complete', input.trace, {
     ab_test_experiment: created.harnessAssignment?.experiment,

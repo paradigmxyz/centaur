@@ -118,7 +118,6 @@ if (booleanEnv('SLACK_CREW_ENABLED', false)) {
     adminToken: requiredEnv('SLACK_CREW_ADMIN_TOKEN'),
     configurationToken: requiredEnv('SLACK_CONFIGURATION_TOKEN'),
     teamId: options.slackHomeTeamId!,
-    allowedPersonas: requiredEnv('SLACK_CREW_ALLOWED_PROFILES').split(',').map(value => value.trim()).filter(Boolean),
     store, botOptions: options
   })
   await crew.restore()

@@ -434,15 +434,15 @@ fi
 unset _centaur_tools_auto_reload
 
 # ── Assemble system prompt from bind mounts ──────────────────────────────────
+# AGENTS_CREW.md, when present, replaces the complete prompt (including when empty).
 # Base prompt: mounted as AGENTS_BASE.md when present, fallback to baked-in AGENTS.md.
-# Prompt overlays from mounted repos are appended when present.
-# The selected persona is appended when AGENTS_PERSONA.md exists in the sandbox home.
+# Without a crew prompt, repo overlays and the selected persona are appended as before.
 TARGET_PROMPT="$WORKSPACE_DIR/AGENTS.md"
 compose-system-prompt \
     --home-dir "$HOME_DIR" \
     --target-prompt "$TARGET_PROMPT"
 
-# Switch to workspace so the harness reads workspace/AGENTS.md (with persona overlay)
+# Switch to workspace so the harness reads the composed workspace/AGENTS.md.
 cd "$WORKSPACE_DIR"
 
 if [ "${1:-}" = "harness-server" ] && [ "${2:-}" = "amp" ] && [ -f "$TARGET_PROMPT" ]; then

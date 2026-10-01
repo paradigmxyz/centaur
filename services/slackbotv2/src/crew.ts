@@ -18,7 +18,6 @@ export type CrewConfig = {
   adminToken: string
   configurationToken: string
   teamId: string
-  allowedPersonas: readonly string[]
   store: CrewStore
   botOptions: SlackbotV2Options
   fetch?: typeof globalThis.fetch
@@ -62,7 +61,7 @@ function matches(a: string, b: string): boolean {
 function publicRecord(record: CrewRecord) {
   return {
     id: record.id, name: record.name, description: record.description ?? DEFAULT_DESCRIPTION,
-    paused: record.paused ?? false, crew_id: record.personaId, status: record.status,
+    paused: record.paused ?? false, status: record.status,
     app_id: record.appId, bot_user_id: record.botUserId, team_id: record.teamId,
     ...(record.installError ? { install_error: record.installError } : {})
   }
@@ -75,8 +74,9 @@ export function createCrewManager(config: CrewConfig) {
       || publicUrl.search || publicUrl.hash || publicUrl.pathname !== '/') {
     throw new Error('SLACK_CREW_PUBLIC_URL must be an HTTPS origin')
   }
-  if (!config.adminToken || !config.configurationToken || !/^T[A-Z0-9]+$/.test(config.teamId)
-      || config.allowedPersonas.length === 0) throw new Error('Incomplete Crew configuration')
+  if (!config.adminToken || !config.configurationToken || !/^T[A-Z0-9]+$/.test(config.teamId)) {
+    throw new Error('Incomplete Crew configuration')
+  }
   const app = new Hono()
   const bots = new Map<string, Promise<SlackbotV2>>()
   const fetchFn = config.fetch ?? globalThis.fetch
@@ -107,14 +107,14 @@ export function createCrewManager(config: CrewConfig) {
     if (!pending) {
       pending = Promise.resolve().then(() => {
         if (!record.botToken || !record.botUserId || !record.signingSecret || !record.appId
-            || record.teamId !== config.teamId || !config.allowedPersonas.includes(record.personaId)) {
+            || record.teamId !== config.teamId) {
           throw new Error('Crew installation is not active or allowed')
         }
         return (config.createBot ?? createSlackbotV2)({
           ...config.botOptions,
           botToken: record.botToken, botUserId: record.botUserId,
           botAppId: record.appId, signingSecret: record.signingSecret,
-          fixedPersonaId: record.personaId, slackHomeTeamId: record.teamId,
+          crewBot: true, slackHomeTeamId: record.teamId,
           userName: record.name,
           state: undefined,
           stateKeyPrefix: `${config.botOptions.stateKeyPrefix ?? 'centaur-slackbotv2'}:crew:${record.appId}`,
@@ -143,25 +143,22 @@ export function createCrewManager(config: CrewConfig) {
   app.use('/api/slack/crew/:id/install', requireAdmin)
   app.use('/api/slack/crew/:id/manage', requireAdmin)
   app.use('/api/slack/crew/by-app/:appId/manage', requireAdmin)
-  app.get('/api/slack/crew', async c => c.json({
-    crew: (await config.store.list()).map(publicRecord), profiles: config.allowedPersonas
-  }))
+  app.get('/api/slack/crew', async c => c.json({ crew: (await config.store.list()).map(publicRecord) }))
   app.post('/api/slack/crew', async c => {
     const input = await c.req.json().catch(() => null)
     if (!input || typeof input.id !== 'string' || !/^[a-z][a-z0-9-]{1,47}$/.test(input.id)
-        || typeof input.name !== 'string' || input.name.trim().length < 1 || input.name.length > 35
-        || !config.allowedPersonas.includes(input.crew_id)) {
-      return c.json({ error: 'Provide id (2–48 lowercase slug characters), name (1–35 characters), and an allowed crew_id.' }, 400)
+        || typeof input.name !== 'string' || input.name.trim().length < 1 || input.name.length > 35) {
+      return c.json({ error: 'Provide id (2–48 lowercase slug characters) and name (1–35 characters).' }, 400)
     }
     if (input.description !== undefined && (typeof input.description !== 'string' || input.description.length > 140)) {
       return c.json({ error: 'Description must be at most 140 characters.' }, 400)
     }
     const record: CrewRecord = { id: input.id, name: input.name.trim(),
       description: input.description ?? DEFAULT_DESCRIPTION, paused: false,
-      personaId: input.crew_id, status: 'creating' }
+      status: 'creating' }
     if (!await config.store.reserve(record)) {
       const existing = await config.store.get(record.id)
-      if (!existing || existing.name !== record.name || existing.personaId !== record.personaId
+      if (!existing || existing.name !== record.name
           || (existing.description ?? DEFAULT_DESCRIPTION) !== record.description) {
         return c.json({ error: 'That id belongs to a different Crew definition.' }, 409)
       }
@@ -183,7 +180,7 @@ export function createCrewManager(config: CrewConfig) {
     })
     await config.store.save(record)
     config.botOptions.logger?.info('slackbotv2_crew_app_created', {
-      crew_id: record.id, profile_id: record.personaId, app_id: record.appId
+      crew_id: record.id, app_id: record.appId
     })
     const installed = await install(record.id)
     return c.json(publicRecord(installed.record), installed.ok ? 201 : 502)
@@ -201,7 +198,7 @@ export function createCrewManager(config: CrewConfig) {
     }
     let blocked = false
     const updated = await config.store.mutate(selector, async record => {
-      if ((byApp && (record.status !== 'active' || record.paused || !config.allowedPersonas.includes(record.personaId)))
+      if ((byApp && (record.status !== 'active' || record.paused))
           || (!byApp && !['active', 'needs_install'].includes(record.status)) || !record.appId) {
         blocked = true
         return false
@@ -226,7 +223,7 @@ export function createCrewManager(config: CrewConfig) {
   app.post('/api/slack/crew/:id/manage', c => manage(c, { id: c.req.param('id') }, false))
   app.get('/api/slack/crew/by-app/:appId/manage', async c => {
     const found = (await config.store.list()).find(record => record.appId === c.req.param('appId'))
-    if (!found || found.status !== 'active' || found.paused || !config.allowedPersonas.includes(found.personaId)) {
+    if (!found || found.status !== 'active' || found.paused) {
       return c.json({ error: 'Crew app not found or unavailable.' }, 404)
     }
     return c.json(publicRecord(found))
@@ -329,7 +326,7 @@ export function createCrewManager(config: CrewConfig) {
     app,
     async restore() {
       for (const record of await config.store.list()) {
-        if (record.status === 'active' && config.allowedPersonas.includes(record.personaId)) await bot(record)
+        if (record.status === 'active') await bot(record)
       }
     }
   }

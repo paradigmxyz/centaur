@@ -6,7 +6,8 @@ export type CrewRecord = {
   name: string
   description?: string
   paused?: boolean
-  personaId: string
+  /** Legacy encrypted records may contain this field; Crew runtime ignores it. */
+  personaId?: string
   status: 'creating' | 'needs_install' | 'installing' | 'active'
   appId?: string
   clientId?: string

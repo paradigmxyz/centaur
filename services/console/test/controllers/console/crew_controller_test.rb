@@ -6,7 +6,7 @@ class Console::CrewControllerTest < ActionDispatch::IntegrationTest
     attr_reader :calls
     def initialize
       @calls = []
-      @result = { "crew" => [], "profiles" => [ "engineer" ] }
+      @result = { "crew" => [] }
     end
     def list
       raise error if error
@@ -30,7 +30,7 @@ class Console::CrewControllerTest < ActionDispatch::IntegrationTest
 
   setup do
     @client = FakeClient.new
-    @bot = { "id" => "alpha", "name" => "Alpha", "status" => "active", "app_id" => "A111", "team_id" => "T123", "crew_id" => "engineer" }
+    @bot = { "id" => "alpha", "name" => "Alpha", "status" => "active", "app_id" => "A111", "team_id" => "T123" }
     @client.result["created"] = @bot
     Console::CrewController.client_factory = -> { @client }
     login(users(:acme_admin))
@@ -64,6 +64,17 @@ class Console::CrewControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to login_path
   end
 
+  test "new bot has an editable baseline and no required profile" do
+    get new_console_crew_url
+    assert_response :ok
+    assert_select "select[name='crew[crew_id]']", count: 0
+    assert_select "textarea[name='crew[system_prompt]']" do |elements|
+      assert_includes elements.first.text, "# Identity and purpose"
+      assert_includes elements.first.text, "# Self-management"
+    end
+    assert_select "input[type=submit][disabled]", count: 0
+  end
+
   test "create automatically installs and provisions exactly the selected roles and behavior" do
     post console_crew_index_url, params: { crew: fields }
     assert_redirected_to edit_console_crew_path("alpha")
@@ -73,7 +84,17 @@ class Console::CrewControllerTest < ActionDispatch::IntegrationTest
     assert_equal "Investigate carefully.", profile.system_prompt
     assert_equal "reviewing-incidents", profile.skills.first["name"]
     assert_equal({ "codex" => "model-a", "claude" => "model-b" }, profile.default_models)
-    assert_equal %w[crew_id description id name], @client.calls.first.last.keys.sort
+    assert_equal %w[description id name], @client.calls.first.last.keys.sort
+  end
+
+  test "empty prompt stays empty on create and edit rather than restoring the baseline" do
+    post console_crew_index_url, params: { crew: fields.merge(system_prompt: "") }
+    assert_redirected_to edit_console_crew_path("alpha")
+    assert_equal "", CrewProfile.find_by!(crew_id: "alpha").runtime_configuration[:system_prompt]
+    @client.result["crew"] = [ @bot ]
+    get edit_console_crew_url("alpha")
+    assert_response :ok
+    assert_select "textarea[name='crew[system_prompt]']", text: ""
   end
 
   test "editor preserves settings and can remove all skills and roles without granting defaults" do
@@ -138,7 +159,7 @@ class Console::CrewControllerTest < ActionDispatch::IntegrationTest
   private
 
   def fields
-    { id: "alpha", name: "Alpha", crew_id: "engineer", description: "Helper", system_prompt: "Investigate carefully.",
+    { id: "alpha", name: "Alpha", description: "Helper", system_prompt: "Investigate carefully.",
       default_models: { codex: "model-a", claude: "model-b" }, role_oids: [ roles(:acme_infra).oid ],
       skills: { "0" => { name: "reviewing-incidents", description: "Reviews incidents when asked.", content: "Follow the runbook." } } }
   end

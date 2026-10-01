@@ -1242,10 +1242,8 @@ async function syncThreadMessageToSession(
   if (messageOverrides.cleanedText !== undefined) {
     setMessageText(serializedMessage, messageOverrides.cleanedText)
   }
-  const overrides = {
-    ...messageOverrides.overrides,
-    ...(input.options.fixedPersonaId ? { personaId: input.options.fixedPersonaId } : {})
-  }
+  const overrides = { ...messageOverrides.overrides }
+  if (input.options.crewBot) delete overrides.personaId
   const requestedStickyOverrides = preservePinnedPersona(
     state,
     stickyThreadOverrideUpdate(overrides)
@@ -1410,7 +1408,7 @@ async function syncThreadMessageToSession(
     messages: messagesToAppend,
     model: shouldStartExecution ? resolvedModel : undefined,
     metadataModel: shouldStartExecution ? effectiveModel : undefined,
-    personaId: shouldStartExecution ? effectiveOverrides.personaId : undefined,
+    personaId: shouldStartExecution && !input.options.crewBot ? effectiveOverrides.personaId : undefined,
     provider: shouldStartExecution ? resolvedProvider : undefined,
     reasoning: resolvedReasoning,
     restartOnHarnessConflict:

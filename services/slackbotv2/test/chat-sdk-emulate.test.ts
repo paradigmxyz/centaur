@@ -907,10 +907,10 @@ describe('slackbotv2', () => {
     )
   })
 
-  it('keeps two Crew apps in the same Slack thread on independent fixed profiles', async () => {
+  it('keeps two Crew apps independent and ignores explicit persona flags', async () => {
     const parent = await postUserMessage('Shared channel context.')
-    for (const [appId, profile] of [['A111', 'eng'], ['A222', 'legal']] as const) {
-      const member = createTestBot({ botAppId: appId, fixedPersonaId: profile, slackHomeTeamId: TEAM_ID })
+    for (const appId of ['A111', 'A222']) {
+      const member = createTestBot({ botAppId: appId, crewBot: true, slackHomeTeamId: TEAM_ID })
       const message = await postUserMessage(`<@${BOT_USER_ID}> --persona=other help`, parent.ts)
       const waits: Promise<unknown>[] = []
       const response = await member.app.request('/api/webhooks/slack', signedSlackEvent({
@@ -920,13 +920,13 @@ describe('slackbotv2', () => {
       }), {}, waitUntilContext(waits))
       expect(response.status).toBe(200)
       await Promise.all(waits)
-      expect(await member.chat.getState().get(`thread-state:${threadKey(parent.ts)}`)).toMatchObject({ personaId: profile })
+      expect(await member.chat.getState().get(`thread-state:${threadKey(parent.ts)}`)).toMatchObject({ personaId: null })
     }
     expect(codexApi.creates.map(c => c.threadKey)).toEqual([
       `slack:${TEAM_ID}:A111:${CHANNEL_ID}:${parent.ts}`,
       `slack:${TEAM_ID}:A222:${CHANNEL_ID}:${parent.ts}`
     ])
-    expect(codexApi.creates.map(c => c.body.persona_id)).toEqual(['eng', 'legal'])
+    expect(codexApi.creates.map(c => c.body.persona_id)).toEqual([undefined, undefined])
     expect(codexApi.executes).toHaveLength(2)
     expect(new Set(codexApi.executes.map(e => e.threadKey)).size).toBe(2)
   })

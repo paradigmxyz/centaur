@@ -8,7 +8,7 @@
     <% configuration = @configurations[bot["id"]] %>
     <article class="form-section flex flex-col gap-4">
       <div class="flex items-start justify-between gap-4">
-        <div><h2 class="text-lg text-zinc-100 font-semibold"><%= bot["name"] %></h2><p class="text-xs text-zinc-500 mt-1"><%= bot["id"] %> · <%= bot["crew_id"] %></p></div>
+        <div><h2 class="text-lg text-zinc-100 font-semibold"><%= bot["name"] %></h2><p class="text-xs text-zinc-500 mt-1"><%= bot["id"] %></p></div>
         <span class="text-xs rounded border border-ink-600 px-2 py-1 <%= bot['status'] == 'active' && !bot['paused'] ? 'text-emerald-400' : 'text-zinc-400' %>"><%= bot["paused"] ? "Paused" : bot["status"].to_s.humanize %></span>
       </div>
       <p class="text-sm text-zinc-400"><%= bot["description"].presence || "No description yet." %></p>

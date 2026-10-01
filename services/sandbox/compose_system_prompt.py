@@ -9,6 +9,7 @@ from pathlib import Path
 SEPARATOR = "\n\n---\n\n"
 OVERLAY_PROMPT = Path("services/sandbox/SYSTEM_PROMPT.md")
 PERSONA_PROMPT = Path("AGENTS_PERSONA.md")
+CREW_PROMPT = Path("AGENTS_CREW.md")
 OBSERVABILITY_DISABLED_PROMPT = """[Observability access]
 This sandbox does not have Centaur observability access. Do not use vlogs, vmetrics, Grafana, or related internal logs/metrics tools.
 """
@@ -39,8 +40,17 @@ def compose_system_prompt(
     repo_mount: Path,
     observability_enabled: bool = True,
 ) -> None:
-    base_prompt = home_dir / "AGENTS_BASE.md"
     baked_prompt = home_dir / "AGENTS.md"
+    crew_prompt = home_dir / CREW_PROMPT
+    if crew_prompt.is_file():
+        target_prompt.write_text(crew_prompt.read_text())
+        # Harnesses may also discover ancestor instructions above the workspace.
+        # Do not leave the baked Centaur prompt available through that path.
+        if baked_prompt != target_prompt:
+            baked_prompt.unlink(missing_ok=True)
+        return
+
+    base_prompt = home_dir / "AGENTS_BASE.md"
     selected_base = base_prompt if base_prompt.is_file() else baked_prompt
     if not selected_base.is_file():
         return

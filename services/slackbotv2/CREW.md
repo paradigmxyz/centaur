@@ -1,7 +1,8 @@
 # Crew: named Slackbots
 
-Crew gives each bot its own Slack app, fixed base profile, instructions, skills,
-model defaults, and credential roles. Slackbot stores app credentials encrypted
+Crew gives each bot its own Slack app, fully editable system prompt, skills,
+model defaults, and credential roles. Crew bots have no base profile or profile
+registry dependency. Slackbot stores app credentials encrypted
 with AES-256-GCM in Postgres. Console owns behavior and access configuration.
 
 ## Enable
@@ -20,18 +21,16 @@ slackbotv2:
   crew:
     enabled: true
     publicUrl: https://your-slack-ingress.example.com
-    allowedProfiles: [eng]
 ```
 
-Profiles must also exist in the API profile registry; missing profiles fail
-closed. Helm wires the Console's Slackbot management URL and server-only admin
+Helm wires the Console's Slackbot management URL and server-only admin
 token. Self-management also uses the Console's existing API session DB connection.
 The public ingress must forward `/api/slack/crew` and subpaths.
 
 ## Console management and automatic installation
 
-Open **Crew → Create bot** as a Console admin. Set identity, base profile,
-system prompt, custom skills, Codex/Claude default models, and secret roles.
+Open **Crew → Create bot** as a Console admin. Set identity, system prompt,
+custom skills, Codex/Claude default models, and secret roles.
 **Create and install bot** creates and installs the Slack app automatically.
 
 Installation reuses the preview provisioner's mechanism:
@@ -50,16 +49,26 @@ existing proxy sync/invalidation mechanism and do not grant access to another
 bot or the shared channel principal. Channel permissions can also be supplied
 by roles or configured on the bot principal.
 
-Custom prompts extend the fixed base profile. Custom skills become isolated
+The Crew system prompt replaces Centaur's base, deployment overlay, and persona
+prompts completely, including when it is empty. Provider/harness built-in
+instructions and code-enforced permissions still apply. Slackbot does not send
+personas, and the API skips requested, default, and legacy stored personas for
+Crew principals.
+New Console forms start with the editable six-section template in
+`services/console/config/crew_system_prompt.md`. Saving copies the text to that
+bot; later template changes never overwrite saved prompts. Existing bots keep
+their saved text (formerly additive), now used as their complete Crew prompt.
+Custom skills become isolated
 `SKILL.md` files alongside standard skills; replacing a standard skill with the
 same name is intentional, but the reserved `search` skill cannot be replaced.
 Model IDs map to `CODEX_MODEL` (Codex/Nanocodex) and `CLAUDE_MODEL` (Claude Code).
-Explicit model overrides retain precedence. Configuration is applied when a
-sandbox is created: running conversations keep their settings; new threads and
-rebuilt sandboxes receive the latest configuration. Stale editor writes are rejected.
+Explicit model overrides retain precedence. Running sandboxes keep their current
+configuration; new threads receive the latest configuration when their sandbox
+is created, and existing threads receive it after a sandbox rebuild. Stale editor
+writes are rejected.
 
 Pause stops new incoming work, not an execution or delivery already in flight.
-The base profile and Slack identity remain immutable.
+The Slack identity remains immutable.
 
 ## Bot self-management
 
@@ -80,7 +89,7 @@ sandbox JWT. Console verifies the unique current durable sandbox assignment,
 principal and app-scoped thread key, then matches the bot's configured principal.
 No bot selector or shared admin token is accepted. Bots can edit only their own
 name, description, prompt, skills and model defaults. They may read their own
-role names but **cannot grant/revoke roles**, change profile, pause bots, create
+role names but **cannot grant/revoke roles**, pause bots, create
 bots, or manage another bot. Behavior edits use optimistic revisions.
 Paused, unassigned, non-Crew and ambiguous sessions fail closed.
 
@@ -109,7 +118,7 @@ a known app in `needs_install` so an admin can retry without creating another ap
 A crash, timeout, malformed success, or failed final persistence leaves an
 ambiguous `creating`/`installing` state that requires operator reconciliation;
 do not blindly retry or create under a new ID. Existing active install requests
-are idempotent. Back up both the Slackbot encrypted table and Console profiles,
+are idempotent. Back up both the Slackbot encrypted table and Console Crew records,
 and retain the encryption key.
 
 Deploy the Console migration, API and Slackbot changes together. Older Crew

@@ -16,7 +16,7 @@ class Console::CrewController < ApplicationController
   def new
     load_crew
     @bot = {}
-    @configuration = CrewProfile.new
+    @configuration = CrewProfile.new(system_prompt: Rails.root.join("config/crew_system_prompt.md").read)
     prepare_editor
   rescue SlackCrewClient::Error => e
     redirect_to console_crew_index_path, alert: e.message
@@ -43,7 +43,6 @@ class Console::CrewController < ApplicationController
   rescue ActiveRecord::RecordInvalid, SlackCrewClient::Error, ActionController::ParameterMissing => e
     @configuration ||= CrewProfile.new
     @bot ||= {}
-    @profiles ||= []
     prepare_editor(submitted_role_oids)
     flash.now[:alert] = e.message
     render :new, status: :unprocessable_entity
@@ -65,7 +64,7 @@ class Console::CrewController < ApplicationController
       @configuration.assign_attributes(fields)
       @configuration.validate!
       @configuration.provision!(@bot, user: current_user, roles: selected_roles)
-      identity = identity_params.except(:id, :crew_id).to_h.reject { |key, value| @bot[key] == value }
+      identity = identity_params.except(:id).to_h.reject { |key, value| @bot[key] == value }
       @bot = client.update(params[:id], identity) if identity.any?
     end
     redirect_to edit_console_crew_path(params[:id]), notice: "Crew saved. Behavior changes apply when a sandbox is next created or rebuilt."
@@ -97,7 +96,6 @@ class Console::CrewController < ApplicationController
   def load_crew
     result = client.list
     @crew = Array(result["crew"])
-    @profiles = Array(result["profiles"])
   end
 
   def load_bot
@@ -109,7 +107,7 @@ class Console::CrewController < ApplicationController
   end
 
   def identity_params
-    params.require(:crew).permit(:id, :name, :crew_id, :description)
+    params.require(:crew).permit(:id, :name, :description)
   end
 
   def configuration_params
