@@ -4,10 +4,14 @@ Standalone company-context ingestion service. It indexes regular Google Docs and
 
 It also indexes Granola meeting notes (title, summary, owner, and attendees) through each user's Granola MCP OAuth credential. Each sync lists the account's meetings from its checkpoint onward, fetches their details ten meetings at a time, and republishes a note only when its content changes. Transcripts are not indexed; the Granola tool fetches them on demand. Notes that no live Granola credential still observes are removed.
 
+It also discovers the public and private Slack channels each user belongs to, through the same per-user Slack broker credentials the Rails Console Slack DM sync uses. Each discovery records the credential's Slack identity and its channel memberships; channels that no live Slack credential still observes are removed. Message history is not synchronized yet. Slack tasks run on their own `company_context_slack` queue and worker.
+
+Slack limits each Web API method per workspace per app, and every token the app issues shares that budget, including bot tokens used by other services. Workers therefore reserve request slots from a shared schedule in `company_context_system.slack_rate_limits`, spaced so that ingestion uses only `COMPANY_CONTEXT_SLACK_RATE_LIMIT_SHARE` of each method's documented tier. When Slack rate limits a method, every worker waits out its `Retry-After` and the spacing widens, then relaxes while no rate limits occur. A task that must wait longer than a few seconds suspends instead of holding a worker.
+
 The service owns these Postgres schemas:
 
 - `company_context_system`: private cursors, staging, and processing state.
-- `company_context_data`: retrieval-facing Drive documents and Granola notes, access observations, and embeddings.
+- `company_context_data`: retrieval-facing Drive documents and Granola notes, access observations (including Slack identities and channel memberships), and embeddings.
 
 The `centaur_company_context_reader` role used by the company-context tool can read `google_drive_documents` and `google_drive_document_embeddings`. Row-level security limits each reader to files that a live broker credential with the same Google subject (`centaur.google_subject`) still observes; `google_drive_broker_observations` is the only source of that access. The reader cannot query the observations or the system schema directly. The reader has no access to Granola notes yet. The Helm deployment is gated by `experimentalCompanyContext.enabled` until it is ready for production.
 
@@ -38,7 +42,9 @@ OAuth app selected by `COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG` (default
 `google`). Rails Console owns refreshing those tokens; the service decrypts the
 current access token before each Drive request. Granola broker credentials are
 selected the same way by `COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG` (default
-`granola`). Drive requests honor `Retry-After`
+`granola`), and Slack broker credentials by
+`COMPANY_CONTEXT_SLACK_OAUTH_APP_SLUG` (default `slack`), which should match the
+Console's Slack DM sync app. Drive requests honor `Retry-After`
 on rate limits and retry server errors with bounded exponential backoff. Durable
 document tasks record known permanent content and request failures as `rejected`
 instead of retrying them. A credential reconciliation task deactivates
@@ -57,13 +63,18 @@ Common optional settings:
 - `IRON_CONTROL_DATABASE_NAME`
 - `COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG` (default `google`)
 - `COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG` (default `granola`)
+- `COMPANY_CONTEXT_SLACK_OAUTH_APP_SLUG` (default `slack`)
 - `BIND_ADDR` (default `0.0.0.0:8080`)
 - `GOOGLE_DRIVE_API_BASE_URL`
 - `GRANOLA_MCP_URL` (default `https://mcp.granola.ai/mcp`)
+- `SLACK_API_BASE_URL` (default `https://slack.com/api`)
 - `OPENAI_BASE_URL`
 - `COMPANY_CONTEXT_SCAN_INTERVAL_SECONDS` (default `300`)
 - `COMPANY_CONTEXT_GRANOLA_SYNC_INTERVAL_SECONDS` (default `1800`)
 - `COMPANY_CONTEXT_GRANOLA_INITIAL_LOOKBACK_DAYS` (default `365`)
+- `COMPANY_CONTEXT_SLACK_DISCOVERY_INTERVAL_SECONDS` (default `1800`)
+- `COMPANY_CONTEXT_SLACK_RATE_LIMIT_SHARE` (default `0.3`, greater than 0 and at most 1)
+- `COMPANY_CONTEXT_SLACK_WORKER_CONCURRENCY` (default `4`)
 - `COMPANY_CONTEXT_DRIVE_PAGE_SIZE` (default `100`)
 - `COMPANY_CONTEXT_MAX_SCAN_PAGES` (default `10`)
 - `COMPANY_CONTEXT_FOLDER_WALK_BATCH_SIZE` (default `50`, at most `100`)
