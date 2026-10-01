@@ -1291,6 +1291,16 @@ async function syncThreadMessageToSession(
     stickyOverrideRaw(state, stickyOverridesUpdate, 'personaId') === null
       ? undefined
       : effectiveOverrides.personaId ?? channelDefault?.personaId
+  // Where the persona sent on session creation came from, for tracing. A pinned
+  // thread persona overrides any later flag (see preservePinnedPersona).
+  const personaSource =
+    resolvedPersonaId === undefined
+      ? undefined
+      : Object.prototype.hasOwnProperty.call(state, 'personaId')
+        ? 'thread'
+        : overrides.personaId
+          ? 'flag'
+          : 'channel'
   const effectiveHarnessType = resolvedHarnessType ?? input.options.defaultHarnessType ?? 'codex'
   // Without an explicit override or channel default the harness runs its
   // configured default (CLAUDE_MODEL/CODEX_MODEL, else the baked harness
@@ -1335,6 +1345,12 @@ async function syncThreadMessageToSession(
       persona_id: overrides.personaId,
       provider: overrides.provider,
       reasoning: overrides.reasoning
+    })
+  }
+  if (shouldStartExecution && personaSource) {
+    traceLog(input.options, 'slackbotv2_forward_persona_resolved', trace, {
+      persona_id: resolvedPersonaId,
+      persona_source: personaSource
     })
   }
   traceLog(input.options, 'slackbotv2_forward_message_serialized', trace, {
@@ -1580,6 +1596,7 @@ async function syncThreadMessageToSession(
           if (requestedPersonaId !== undefined && outcome.personaId !== requestedPersonaId) {
             traceLog(input.options, 'slackbotv2_session_persona_reconciled', trace, {
               requested_persona_id: requestedPersonaId,
+              requested_persona_source: personaSource,
               resolved_persona_id: outcome.personaId,
               unavailable_requested_persona_id: outcome.unavailableRequestedPersonaId
             })

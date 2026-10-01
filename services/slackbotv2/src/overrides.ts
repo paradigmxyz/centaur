@@ -136,10 +136,10 @@ const PROVIDER_FLAG_PATTERN = valueFlagPattern(
   '--provider',
   String.raw`[A-Za-z][A-Za-z0-9_-]*`
 )
-const PERSONA_FLAG_PATTERN = valueFlagPattern(
-  '--persona',
-  String.raw`[A-Za-z0-9][A-Za-z0-9._-]*`
-)
+const PERSONA_ID_SOURCE = String.raw`[A-Za-z0-9][A-Za-z0-9._-]*`
+const PERSONA_FLAG_PATTERN = valueFlagPattern('--persona', PERSONA_ID_SOURCE)
+/** Matches a whole persona id, in the shape `--persona` accepts. */
+export const PERSONA_ID_PATTERN = new RegExp(`^${PERSONA_ID_SOURCE}$`)
 
 // Single dash by design: a short per-turn knob (`-rsn high`).
 const REASONING_FLAG_PATTERN = valueFlagPattern('-rsn', String.raw`[A-Za-z-]+`)

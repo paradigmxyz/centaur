@@ -16,12 +16,9 @@
  * `persona` applies only when a session is created, like `--persona`.
  */
 
-import { normalizeHarnessOverrides, type HarnessOverrides } from './overrides'
+import { normalizeHarnessOverrides, PERSONA_ID_PATTERN, type HarnessOverrides } from './overrides'
 
 export type ChannelDefaults = Record<string, HarnessOverrides>
-
-// Same id shape the `--persona` flag accepts.
-const PERSONA_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
 /**
  * Parses `SLACKBOTV2_CHANNEL_DEFAULTS` into a channel→overrides map (empty for
