@@ -15,7 +15,7 @@
     "@chat-adapter/slack": "4.40.0",
     "@chat-adapter/state-pg": "4.40.0",
     "chat": "4.40.0",
-    "hono": "^4.13.9",
+    "hono": "^4.13.10",
     "pg": "^8.23.0"
   },
   "devDependencies": {
