@@ -90,8 +90,8 @@ importers:
         specifier: ^14.27.0
         version: 14.27.0
       hono:
-        specifier: ^4.13.9
-        version: 4.13.9
+        specifier: ^4.13.10
+        version: 4.13.10
       pg:
         specifier: ^8.23.0
         version: 8.23.0
@@ -139,8 +139,8 @@ importers:
         specifier: 4.31.0
         version: 4.31.0(zod@4.6.5)
       hono:
-        specifier: ^4.13.9
-        version: 4.13.9
+        specifier: ^4.13.10
+        version: 4.13.10
       pg:
         specifier: ^8.23.0
         version: 8.23.0
@@ -179,14 +179,14 @@ importers:
         specifier: 4.31.0
         version: 4.31.0(patch_hash=69262b03c278ca9d4af0bed7b4e05f9d7a5a36d3d79fad31df2a85da4d349274)(zod@4.6.5)
       '@linear/sdk':
-        specifier: ^96.0.0
-        version: 96.0.0(graphql@17.0.0)
+        specifier: ^97.0.0
+        version: 97.0.0(graphql@17.0.0)
       chat:
         specifier: 4.31.0
         version: 4.31.0(zod@4.6.5)
       hono:
-        specifier: ^4.13.9
-        version: 4.13.9
+        specifier: ^4.13.10
+        version: 4.13.10
       pg:
         specifier: ^8.23.0
         version: 8.23.0
@@ -228,8 +228,8 @@ importers:
         specifier: 4.40.0
         version: 4.40.0(zod@4.6.5)
       hono:
-        specifier: ^4.13.9
-        version: 4.13.9
+        specifier: ^4.13.10
+        version: 4.13.10
       pg:
         specifier: ^8.23.0
         version: 8.23.0
@@ -409,9 +409,9 @@ packages:
     resolution: {integrity: sha512-Xt0x5Kl6qBoWhGFypb8ykyP+c5kT7scmRPs1uJidSPOaRgkMJ/4y41QpmZCWCBUMmZtf/O0VktgQio6rLXT94w==}
     engines: {node: '>=18.x'}
 
-  '@linear/sdk@96.0.0':
-    resolution: {integrity: sha512-fkap/239ynKpOat9tzZyOQHBdQbupMCZuqXaCsx747JbBv6duwp4UxZ+p/+Qxr89FTj+xnjocDAv3yHmzsFgfg==}
-    engines: {node: '>=18.x'}
+  '@linear/sdk@97.0.0':
+    resolution: {integrity: sha512-ntgZI06I37DTp/XULYTPbOg1t7vJRo72JRSkMjdgG+GbUEHdSkYsUjN0dR42go/2LvLRKWJD3jVehm0wE5haEg==}
+    engines: {node: ^20.19.0 || >=22.12.0}
 
   '@microsoft/teams.api@2.1.0':
     resolution: {integrity: sha512-tS7NRqxpyzrgCwHCZh4xUys1Waon/cEtVb801Yx6DekOIOZaOgHA4KFuspM6FvlErzTt5tm6GGlXDstm4dkHbw==}
@@ -1232,8 +1232,8 @@ packages:
     resolution: {integrity: sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A==}
     engines: {node: '>= 0.4'}
 
-  hono@4.13.9:
-    resolution: {integrity: sha512-7dMkQmZoC4E6F7AtaQSPhlWAdnBti+j7rreMZl8QB4jFiEhP9TWbGWUMi8WYzBCgmgulxuvLQupKqo+Co6Omyg==}
+  hono@4.13.10:
+    resolution: {integrity: sha512-dQuLsa5oO+47QVMVMaaD9cIv8ctmVtK1iRvwWngkfloFJMeFeuoUFDswIqZGxmGX3hrRzREgEArjkK9OgsQEhA==}
     engines: {node: '>=16.9.0'}
 
   http-errors@2.0.1:
@@ -2196,7 +2196,7 @@ snapshots:
     transitivePeerDependencies:
       - graphql
 
-  '@linear/sdk@96.0.0(graphql@17.0.0)':
+  '@linear/sdk@97.0.0(graphql@17.0.0)':
     dependencies:
       '@graphql-typed-document-node/core': 3.2.0(graphql@17.0.0)
     transitivePeerDependencies:
@@ -2988,7 +2988,7 @@ snapshots:
     dependencies:
       function-bind: 1.1.2
 
-  hono@4.13.9: {}
+  hono@4.13.10: {}
 
   http-errors@2.0.1:
     dependencies:
