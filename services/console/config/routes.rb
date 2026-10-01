@@ -121,7 +121,7 @@ Rails.application.routes.draw do
   get "console/integrations", to: "console/integrations#index", as: :console_integrations
   get "console/etls", to: "console/etls#index", as: :console_etls
   namespace :console do
-    resources :crew, only: %i[index create update] do
+    resources :crew, only: %i[index new create edit update] do
       post :install, on: :member
     end
     post "etls/slack_archive_imports",

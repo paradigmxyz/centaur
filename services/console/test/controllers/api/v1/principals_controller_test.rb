@@ -13,6 +13,17 @@ module Api
         JSON.parse(response.body)
       end
 
+      test "Crew principal lookup supplies only that bot runtime configuration" do
+        profile = CrewProfile.new(crew_id: "research", system_prompt: "Research instructions", default_models: { codex: "model-a" })
+        profile.provision!({ "id" => "research", "name" => "Research", "app_id" => "A111", "team_id" => "T123" }, user: users(:acme_admin))
+        get "/api/v1/principals/lookup/slack-crew-t123-a111", headers: auth_headers
+        assert_response :ok
+        assert_equal "slack_crew", json_body["data"]["kind"]
+        assert_equal({ "system_prompt" => "Research instructions", "skills" => [], "default_models" => { "codex" => "model-a" } }, json_body["data"]["crew"])
+        get "/api/v1/principals/lookup/slack-crew-t123-a222", headers: auth_headers
+        assert_response :not_found
+      end
+
       test "rejects requests without an Authorization header" do
         get api_v1_principal_url(id: "prn_unknown")
         assert_response :unauthorized

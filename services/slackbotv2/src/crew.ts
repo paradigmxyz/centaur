@@ -1,6 +1,5 @@
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { Hono, type Context, type MiddlewareHandler } from 'hono'
-import { getCookie, setCookie, deleteCookie } from 'hono/cookie'
 import { createSlackbotV2 } from './index'
 import type { SlackbotV2, SlackbotV2Options } from './types'
 import type { CrewRecord, CrewStore } from './crew-store'
@@ -37,7 +36,6 @@ export function crewManifest(name: string, base: string, id: string, description
       app_home: { home_tab_enabled: false, messages_tab_enabled: true, messages_tab_read_only_enabled: false }
     },
     oauth_config: {
-      redirect_urls: [`${base}/api/slack/crew/${id}/oauth`],
       scopes: { bot: CREW_BOT_SCOPES }
     },
     settings: {
@@ -60,13 +58,12 @@ function matches(a: string, b: string): boolean {
   return timingSafeEqual(Buffer.from(digest(a)), Buffer.from(digest(b)))
 }
 
-function publicRecord(record: CrewRecord, base: string, includeInstallLink = true) {
+function publicRecord(record: CrewRecord) {
   return {
     id: record.id, name: record.name, description: record.description ?? DEFAULT_DESCRIPTION,
     paused: record.paused ?? false, crew_id: record.personaId, status: record.status,
     app_id: record.appId, bot_user_id: record.botUserId, team_id: record.teamId,
-    ...(includeInstallLink && record.status === 'needs_install' && record.installTicket
-      ? { install_url: `${base}/api/slack/crew/${record.id}/install?ticket=${record.installTicket}` } : {})
+    ...(record.installError ? { install_error: record.installError } : {})
   }
 }
 
@@ -83,15 +80,15 @@ export function createCrewManager(config: CrewConfig) {
   const bots = new Map<string, Promise<SlackbotV2>>()
   const fetchFn = config.fetch ?? globalThis.fetch
 
-  async function slack(method: string, body: Record<string, unknown>, token?: string) {
-    // Never retry app creation or OAuth exchange: ambiguous success requires reconciliation.
+  async function slack(method: string, body: Record<string, unknown>, token?: string, json = false) {
+    // Never retry side effects: ambiguous success requires reconciliation.
     const response = await fetchFn(`https://slack.com/api/${method}`, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Type': json ? 'application/json; charset=utf-8' : 'application/x-www-form-urlencoded',
         ...(token ? { Authorization: `Bearer ${token}` } : {})
       },
-      body: new URLSearchParams(Object.entries(body).map(([key, value]) => [key, String(value)])),
+      body: json ? JSON.stringify(body) : new URLSearchParams(Object.entries(body).map(([key, value]) => [key, String(value)])),
       signal: AbortSignal.timeout(20_000),
       redirect: 'error'
     })
@@ -142,10 +139,11 @@ export function createCrewManager(config: CrewConfig) {
     return next()
   }
   app.use('/api/slack/crew', requireAdmin)
+  app.use('/api/slack/crew/:id/install', requireAdmin)
   app.use('/api/slack/crew/:id/manage', requireAdmin)
   app.use('/api/slack/crew/by-app/:appId/manage', requireAdmin)
   app.get('/api/slack/crew', async c => c.json({
-    crew: (await config.store.list()).map(r => publicRecord(r, base)), profiles: config.allowedPersonas
+    crew: (await config.store.list()).map(publicRecord), profiles: config.allowedPersonas
   }))
   app.post('/api/slack/crew', async c => {
     const input = await c.req.json().catch(() => null)
@@ -168,7 +166,7 @@ export function createCrewManager(config: CrewConfig) {
       }
       // A lost create response cannot safely be retried at Slack. The durable reservation
       // remains visible for an operator to reconcile rather than spawning duplicates.
-      return c.json(publicRecord(existing, base), existing.status === 'creating' ? 409 : 200)
+      return c.json(publicRecord(existing), existing.status === 'creating' ? 409 : 200)
     }
     const created = await slack('apps.manifest.create', {
       manifest: JSON.stringify(crewManifest(record.name, base, record.id, record.description))
@@ -180,13 +178,14 @@ export function createCrewManager(config: CrewConfig) {
     Object.assign(record, {
       appId: created.app_id, clientId: created.credentials.client_id,
       clientSecret: created.credentials.client_secret, signingSecret: created.credentials.signing_secret,
-      installTicket: randomBytes(32).toString('hex'), status: 'needs_install'
+      teamId: config.teamId, status: 'needs_install'
     })
     await config.store.save(record)
     config.botOptions.logger?.info('slackbotv2_crew_app_created', {
       crew_id: record.id, profile_id: record.personaId, app_id: record.appId
     })
-    return c.json(publicRecord(record, base), 201)
+    const installed = await install(record.id)
+    return c.json(publicRecord(installed.record), installed.ok ? 201 : 502)
   })
 
   async function manage(c: Context, selector: { id: string } | { appId: string }, byApp: boolean) {
@@ -220,7 +219,7 @@ export function createCrewManager(config: CrewConfig) {
       return true
     })
     if (!updated) return c.json({ error: blocked ? 'Crew app cannot be managed in its current state.' : 'Crew app not found.' }, blocked ? 409 : 404)
-    return c.json(publicRecord(updated, base, !byApp))
+    return c.json(publicRecord(updated))
   }
 
   app.post('/api/slack/crew/:id/manage', c => manage(c, { id: c.req.param('id') }, false))
@@ -229,60 +228,73 @@ export function createCrewManager(config: CrewConfig) {
     if (!found || found.status !== 'active' || found.paused || !config.allowedPersonas.includes(found.personaId)) {
       return c.json({ error: 'Crew app not found or unavailable.' }, 404)
     }
-    return c.json(publicRecord(found, base, false))
+    return c.json(publicRecord(found))
   })
   app.post('/api/slack/crew/by-app/:appId/manage', c => manage(c, { appId: c.req.param('appId') }, true))
 
-  app.get('/api/slack/crew/:id/install', async c => {
-    const state = randomBytes(32).toString('hex')
-    const record = await config.store.beginInstall(c.req.param('id'), c.req.query('ticket') ?? '', digest(state))
-    if (!record) return c.text('Invalid installation link', 400)
-    setCookie(c, `crew_${record.id}`, state, {
-      httpOnly: true, secure: true, sameSite: 'Lax', path: `/api/slack/crew/${record.id}`, maxAge: 600
+  async function install(id: string): Promise<{ ok: boolean; record: CrewRecord }> {
+    let claimed = false
+    // Commit the claim BEFORE contacting Slack. A process crash or database
+    // failure after a successful install must not make the operation replayable.
+    const record = await config.store.mutate({ id }, async current => {
+      if (current.status === 'active') return true
+      if (current.status !== 'needs_install' || !current.appId
+          || (current.teamId && current.teamId !== config.teamId)) return false
+      current.teamId = config.teamId
+      current.status = 'installing'
+      current.installError = 'Slack installation is in progress; reconcile interrupted setup before retrying.'
+      claimed = true
+      return true
     })
-    c.header('Cache-Control', 'no-store')
-    c.header('Referrer-Policy', 'no-referrer')
-    const url = new URL('https://slack.com/oauth/v2/authorize')
-    url.search = new URLSearchParams({
-      client_id: record.clientId!, scope: CREW_BOT_SCOPES.join(','), state,
-      team: config.teamId, redirect_uri: `${base}/api/slack/crew/${record.id}/oauth`
-    }).toString()
-    return c.redirect(url.toString())
-  })
+    if (!record) throw new Error('Crew app is not available for installation')
+    if (!claimed) return { ok: record.status === 'active', record }
 
-  app.get('/api/slack/crew/:id/oauth', async c => {
-    const id = c.req.param('id')
-    const state = c.req.query('state') ?? ''
-    const cookie = getCookie(c, `crew_${id}`) ?? ''
-    c.header('Cache-Control', 'no-store')
-    c.header('Referrer-Policy', 'no-referrer')
-    if (!state || !cookie || !matches(state, cookie)) return c.text('Invalid installation state', 400)
-    if (c.req.query('error')) return c.text('Slack installation was not approved. Reopen your installation link to try again.', 400)
-    const code = c.req.query('code')
-    if (!code) return c.text('Missing authorization code', 400)
-    const record = await config.store.claim(id, digest(state))
-    if (!record) return c.text('Installation expired or already used', 400)
-    deleteCookie(c, `crew_${id}`, { path: `/api/slack/crew/${id}` })
-    const installed = await slack('oauth.v2.access', {
-      client_id: record.clientId, client_secret: record.clientSecret, code,
-      redirect_uri: `${base}/api/slack/crew/${id}/oauth`
-    })
-    if (installed.app_id !== record.appId || installed.team?.id !== config.teamId
-        || installed.token_type !== 'bot' || !installed.access_token || !installed.bot_user_id
-        || !CREW_BOT_SCOPES.every(scope => String(installed.scope).split(',').includes(scope))) {
-      throw new Error('Slack installation identity or scopes did not match the requested Crew')
+    let token: string | undefined
+    let botUserId: string | undefined
+    let rejected = false
+    let installError: string | undefined
+    try {
+      const installed = await slack('apps.developerInstall', {
+        app_id: record.appId, bot_scopes: [...CREW_BOT_SCOPES]
+      }, config.configurationToken, true)
+      if (typeof installed.api_access_tokens?.bot !== 'string' || !installed.api_access_tokens.bot
+          || (installed.team_id && installed.team_id !== config.teamId)
+          || (installed.app_id && installed.app_id !== record.appId)) {
+        throw new Error('Invalid installation identity')
+      }
+      token = installed.api_access_tokens.bot
+      const identity = await slack('auth.test', {}, token)
+      if (identity.team_id !== config.teamId || !/^U[A-Z0-9]+$/.test(identity.user_id ?? '')
+          || (identity.app_id && identity.app_id !== record.appId)) {
+        throw new Error('Invalid bot identity')
+      }
+      botUserId = identity.user_id
+    } catch (error) {
+      const message = error instanceof Error ? error.message : ''
+      rejected = /^Slack apps\.developerInstall: /.test(message)
+      installError = rejected ? message : 'Slack installation outcome is unknown; reconcile before retrying.'
     }
-    Object.assign(record, {
-      status: 'active', botToken: installed.access_token,
-      botUserId: installed.bot_user_id, teamId: installed.team.id
+    const completed = await config.store.mutate({ id }, current => {
+      if (current.status !== 'installing') return false
+      current.status = botUserId ? 'active' : rejected ? 'needs_install' : 'installing'
+      current.installError = installError
+      if (token) current.botToken = token
+      if (botUserId) current.botUserId = botUserId
+      return true
     })
-    delete record.installTicket
-    await config.store.save(record)
-    await bot(record)
-    config.botOptions.logger?.info('slackbotv2_crew_app_installed', {
-      crew_id: record.id, app_id: record.appId, team_id: record.teamId, bot_user_id: record.botUserId
-    })
-    return c.text(`${record.name} is installed. Invite it to a channel or open its Slack DM.`)
+    if (!completed) throw new Error('Crew installation state changed')
+    if (completed.status === 'active') {
+      await bot(completed)
+      config.botOptions.logger?.info('slackbotv2_crew_app_installed', {
+        crew_id: completed.id, app_id: completed.appId, team_id: completed.teamId, bot_user_id: completed.botUserId
+      })
+    }
+    return { ok: completed.status === 'active', record: completed }
+  }
+
+  app.post('/api/slack/crew/:id/install', async c => {
+    const result = await install(c.req.param('id'))
+    return c.json(publicRecord(result.record), result.ok ? 200 : 502)
   })
 
   app.post('/api/slack/crew/:id/events', async c => {

@@ -1,0 +1,7 @@
+<div class="rounded border border-ink-600 p-4 space-y-3" data-nested-fields-row>
+  <div class="flex justify-end"><button type="button" data-action="nested-fields#remove" class="text-xs text-zinc-500 hover:text-red-400">Remove skill</button></div>
+  <% { "name" => "Skill name", "description" => "When to use it" }.each do |key, label| %>
+    <div><%= label_tag "crew_skills_#{index}_#{key}", label, class: "form-label" %><%= text_field_tag "crew[skills][#{index}][#{key}]", skill[key], id: "crew_skills_#{index}_#{key}", required: true, maxlength: key == "name" ? 64 : 1024, placeholder: key == "name" ? "reviewing-incidents" : "Reviews incidents. Use when investigating a production failure.", class: "form-input" %></div>
+  <% end %>
+  <div><%= label_tag "crew_skills_#{index}_content", "Instructions", class: "form-label" %><%= text_area_tag "crew[skills][#{index}][content]", skill["content"], id: "crew_skills_#{index}_content", rows: 5, required: true, maxlength: 65536, class: "form-input font-mono text-sm" %></div>
+</div>

@@ -24,27 +24,12 @@ class MemoryStore implements CrewStore {
     this.records.set(current.id, structuredClone(current))
     return current
   }
-  async beginInstall(id: string, ticket: string, state: string) {
-    const record = this.records.get(id)
-    if (!record || record.status !== 'needs_install' || !ticket || record.installTicket !== ticket) return undefined
-    record.oauthState = state
-    record.oauthExpiresAt = Date.now() + 600_000
-    return structuredClone(record)
-  }
-  async claim(id: string, state: string) {
-    const record = this.records.get(id)
-    if (!record || record.status !== 'needs_install' || record.oauthState !== state
-        || !record.oauthExpiresAt || record.oauthExpiresAt < Date.now()) return undefined
-    record.status = 'installing'
-    delete record.oauthState
-    return structuredClone(record)
-  }
 }
 
-function fixture(overrides: { failCreate?: boolean; team?: string; appId?: string } = {}) {
+function fixture(overrides: { failCreate?: boolean; team?: string; appId?: string; rejectInstall?: boolean; invalidInstall?: boolean; onInstall?: () => Promise<void> } = {}) {
   const store = new MemoryStore()
   const calls: string[] = []
-  const slackBodies: Record<string, URLSearchParams[]> = {}
+  const slackBodies: Record<string, (URLSearchParams | Record<string, unknown>)[]> = {}
   const botOptions: SlackbotV2Options[] = []
   let deliveries = 0
   const config = {
@@ -54,7 +39,9 @@ function fixture(overrides: { failCreate?: boolean; team?: string; appId?: strin
     fetch: (async (url: RequestInfo | URL, init?: RequestInit) => {
       const method = String(url).split('/').pop()!
       calls.push(method)
-      ;(slackBodies[method] ??= []).push(new URLSearchParams(init?.body as string))
+      const contentType = (init?.headers as Record<string, string>)['Content-Type']
+      ;(slackBodies[method] ??= []).push(contentType?.startsWith('application/json')
+        ? JSON.parse(init?.body as string) : new URLSearchParams(init?.body as string))
       if (method === 'apps.manifest.create') {
         expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer configuration-test')
         if (overrides.failCreate) throw new Error('Lost response')
@@ -63,10 +50,19 @@ function fixture(overrides: { failCreate?: boolean; team?: string; appId?: strin
         } })
       }
       if (method === 'apps.manifest.update') return Response.json({ ok: true })
-      expect(method).toBe('oauth.v2.access')
-      expect(new URLSearchParams(init?.body as string).get('client_secret')).toBe('client-secret-test')
-      return Response.json({ ok: true, app_id: overrides.appId ?? 'A123', team: { id: overrides.team ?? 'T123' },
-        token_type: 'bot', access_token: 'installed-test', bot_user_id: 'UBOT', scope: CREW_BOT_SCOPES.join(',') })
+      if (method === 'apps.developerInstall') {
+        expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer configuration-test')
+        const body = JSON.parse(init?.body as string)
+        expect(body).toEqual({ app_id: 'A123', bot_scopes: [...CREW_BOT_SCOPES] })
+        await overrides.onInstall?.()
+        if (overrides.rejectInstall) return Response.json({ ok: false, error: 'not_allowed' })
+        return Response.json(overrides.invalidInstall ? { ok: true } : {
+          ok: true, team_id: overrides.team ?? 'T123', api_access_tokens: { bot: 'installed-test' }
+        })
+      }
+      expect(method).toBe('auth.test')
+      expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer installed-test')
+      return Response.json({ ok: true, app_id: overrides.appId ?? 'A123', team_id: overrides.team ?? 'T123', user_id: 'UBOT' })
     }) as typeof fetch,
     createBot: (options: SlackbotV2Options) => {
       botOptions.push(options)
@@ -84,12 +80,7 @@ function fixture(overrides: { failCreate?: boolean; team?: string; appId?: strin
 }
 
 async function install(f: ReturnType<typeof fixture>) {
-  const created = await (await f.create()).json()
-  const start = await f.app.request(created.install_url)
-  const state = new URL(start.headers.get('Location')!).searchParams.get('state')!
-  const cookie = start.headers.get('Set-Cookie')!.split(';')[0]!
-  const path = `/api/slack/crew/research/oauth?code=approved-test&state=${state}`
-  return { state, cookie, path, response: await f.app.request(path, { headers: { Cookie: cookie } }) }
+  return f.create()
 }
 
 function event(secret: string, extra = {}, timestamp = String(Math.floor(Date.now() / 1000))) {
@@ -127,10 +118,10 @@ describe('Crew provisioning', () => {
     expect(await response.json()).toMatchObject({ name: 'New Research', description: 'New description', paused: true, crew_id: 'eng' })
     const updateCall = f.calls.lastIndexOf('apps.manifest.update')
     expect(updateCall).toBeGreaterThan(-1)
-    const manifest = JSON.parse(f.slackBodies['apps.manifest.update']![0]!.get('manifest')!)
+    const manifest = JSON.parse((f.slackBodies['apps.manifest.update']![0] as URLSearchParams).get('manifest')!)
     expect(manifest.display_information).toEqual({ name: 'New Research', description: 'New description' })
     expect(manifest.oauth_config.scopes.bot).toEqual(CREW_BOT_SCOPES)
-    expect(manifest.oauth_config.redirect_urls).toEqual(['https://bots.example.com/api/slack/crew/research/oauth'])
+    expect('redirect_urls' in manifest.oauth_config).toBe(false)
     expect(manifest.settings.event_subscriptions.request_url).toBe('https://bots.example.com/api/slack/crew/research/events')
   })
 
@@ -152,12 +143,12 @@ describe('Crew provisioning', () => {
     const f = fixture()
     const responses = await Promise.all([f.create(), f.create()])
     expect(responses.some(r => r.status === 201)).toBe(true)
-    expect(f.calls).toEqual(['apps.manifest.create'])
+    expect(f.calls).toEqual(['apps.manifest.create', 'apps.developerInstall', 'auth.test'])
     const repeat = await f.create()
     expect(repeat.status).toBe(200)
     const data = await repeat.json()
-    expect(data.status).toBe('needs_install')
-    expect(data.install_url).toStartWith('https://bots.example.com/')
+    expect(data.status).toBe('active')
+    expect(data.team_id).toBe('T123')
     expect(JSON.stringify(data)).not.toContain('secret')
     expect(JSON.stringify(data)).not.toContain('configuration-test')
     expect((await f.create({ id: 'research', name: 'Different', crew_id: 'eng' })).status).toBe(409)
@@ -165,7 +156,7 @@ describe('Crew provisioning', () => {
       headers: { Authorization: 'Bearer management-test', 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: 'research', name: 'Research', crew_id: 'eng', description: 'Different definition' })
     })).status).toBe(409)
-    expect(f.calls).toHaveLength(1)
+    expect(f.calls).toHaveLength(3)
   })
 
   test('does not retry app creation after an ambiguous Slack failure', async () => {
@@ -176,32 +167,53 @@ describe('Crew provisioning', () => {
     expect((await f.store.get('research'))?.status).toBe('creating')
   })
 
-  test('requires the browser cookie, checks expiry, and prevents OAuth replay', async () => {
+  test('automatically installs once and authenticated install is idempotent', async () => {
     const f = fixture()
-    const result = await install(f)
-    expect(result.response.status).toBe(200)
-    expect((await f.app.request(result.path)).status).toBe(400)
-    expect((await f.app.request(result.path, { headers: { Cookie: result.cookie } })).status).toBe(400)
-    expect(f.calls).toEqual(['apps.manifest.create', 'oauth.v2.access'])
+    expect((await install(f)).status).toBe(201)
+    const path = '/api/slack/crew/research/install'
+    expect((await f.app.request(path, { method: 'POST' })).status).toBe(401)
+    expect((await f.app.request(path, { method: 'POST', headers: { Authorization: 'Bearer management-test' } })).status).toBe(200)
+    expect(f.calls).toEqual(['apps.manifest.create', 'apps.developerInstall', 'auth.test'])
     expect(f.botOptions[0]).toMatchObject({ botAppId: 'A123', fixedPersonaId: 'eng',
       botToken: 'installed-test', slackHomeTeamId: 'T123', stateKeyPrefix: 'centaur-slackbotv2:crew:A123' })
-    const expired = fixture()
-    const created = await (await expired.create()).json()
-    const start = await expired.app.request(created.install_url)
-    const state = new URL(start.headers.get('Location')!).searchParams.get('state')!
-    const record = (await expired.store.get('research'))!
-    record.oauthExpiresAt = 1
-    await expired.store.save(record)
-    expect((await expired.app.request(`/api/slack/crew/research/oauth?code=x&state=${state}`, {
-      headers: { Cookie: start.headers.get('Set-Cookie')!.split(';')[0]! }
-    })).status).toBe(400)
-    expect(expired.calls).toHaveLength(1)
+  })
+
+  test('keeps explicit developer-install rejection recoverable without activating', async () => {
+    const f = fixture({ rejectInstall: true })
+    const response = await f.create()
+    expect(response.status).toBe(502)
+    expect(await response.json()).toMatchObject({ status: 'needs_install', app_id: 'A123', team_id: 'T123' })
+    expect((await f.store.get('research'))?.botToken).toBeUndefined()
+    expect(f.botOptions).toHaveLength(0)
+  })
+
+  test('commits installing before contacting Slack and cannot replay after final persistence fails', async () => {
+    const f = fixture({ onInstall: async () => {
+      expect((await f.store.get('research'))?.status).toBe('installing')
+      const concurrent = await f.app.request('/api/slack/crew/research/install', {
+        method: 'POST', headers: { Authorization: 'Bearer management-test' }
+      })
+      expect(concurrent.status).toBe(502)
+    } })
+    const mutate = f.store.mutate.bind(f.store)
+    f.store.mutate = async (selector, update) => {
+      if (f.calls.includes('auth.test')) throw new Error('Database unavailable after installation')
+      return mutate(selector, update)
+    }
+    expect((await f.create()).status).toBe(502)
+    f.store.mutate = mutate
+    expect((await f.store.get('research'))?.status).toBe('installing')
+    expect((await f.app.request('/api/slack/crew/research/install', {
+      method: 'POST', headers: { Authorization: 'Bearer management-test' }
+    })).status).toBe(502)
+    expect(f.calls.filter(method => method === 'apps.developerInstall')).toHaveLength(1)
+    expect(f.botOptions).toHaveLength(0)
   })
 
   for (const overrides of [{ team: 'TOTHER' }, { appId: 'AOTHER' }]) {
     test(`rejects an installation for the wrong identity ${JSON.stringify(overrides)}`, async () => {
       const f = fixture(overrides)
-      expect((await install(f)).response.status).toBe(502)
+      expect((await install(f)).status).toBe(502)
       expect((await f.store.get('research'))?.status).toBe('installing')
       expect(f.botOptions).toHaveLength(0)
     })
@@ -235,23 +247,22 @@ describe('Crew provisioning', () => {
     expect(f.deliveries()).toBe(1)
   })
 
-  test('answers signed URL challenges before installation and restores active bots', async () => {
+  test('answers signed URL challenges and restores active bots', async () => {
     const f = fixture()
     await f.create()
     const challenge = await f.app.request('/api/slack/crew/research/events', event('signing-test', {
       type: 'url_verification', challenge: 'challenge-test'
     }))
     expect(await challenge.json()).toEqual({ challenge: 'challenge-test' })
-    expect(f.botOptions).toHaveLength(0)
-    await install(f)
+    expect(f.botOptions).toHaveLength(1)
     const restarted = createCrewManager(f.config)
     await restarted.restore()
     expect(f.botOptions).toHaveLength(2)
   })
 
-  test('manifest includes install callback, mentions, DMs, and no administration scopes', () => {
+  test('manifest includes mentions and DMs, with no browser callback or administration scopes', () => {
     const manifest = crewManifest('Research', 'https://bots.example.com', 'research')
-    expect(manifest.oauth_config.redirect_urls).toEqual(['https://bots.example.com/api/slack/crew/research/oauth'])
+    expect('redirect_urls' in manifest.oauth_config).toBe(false)
     expect(manifest.settings.event_subscriptions.bot_events).toContain('message.im')
     expect(manifest.settings.event_subscriptions.bot_events).toContain('app_mention')
     expect(CREW_BOT_SCOPES.some(scope => scope.startsWith('admin:'))).toBe(false)

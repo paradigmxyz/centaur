@@ -1,64 +1,97 @@
 class Console::CrewController < ApplicationController
   layout "console"
-
   before_action :require_admin
-
   class_attribute :client_factory, default: -> { SlackCrewClient.new }
 
   def index
     load_crew
-    @form = {}
+    @configurations = CrewProfile.includes(principal: :roles).index_by(&:crew_id)
   rescue SlackCrewClient::Error => e
-    service_unavailable(e)
+    @crew = []
+    @configurations = {}
+    flash.now[:alert] = e.message
+    render :index, status: :bad_gateway
+  end
+
+  def new
+    load_crew
+    @bot = {}
+    @configuration = CrewProfile.new
+    prepare_editor
+  rescue SlackCrewClient::Error => e
+    redirect_to console_crew_index_path, alert: e.message
+  end
+
+  def edit
+    load_bot
+    prepare_editor
+  rescue SlackCrewClient::Error => e
+    redirect_to console_crew_index_path, alert: e.message
   end
 
   def create
-    @form = create_params.to_h
-    record = client.create(@form)
-    if record["status"] == "active"
-      return redirect_to console_crew_index_path, notice: "Crew bot is already installed."
-    end
-    redirect_to validated_install_url!(record.fetch("install_url"), @form.fetch("id")), allow_other_host: true
-  rescue ActionController::ParameterMissing, KeyError => e
-    recover_create(e.message)
-  rescue SlackCrewClient::Error => e
-    recover_create(e.message)
-  rescue InvalidInstallUrl
-    recover_create("Crew was created, but the Slack install URL was invalid. Use Install in Slack to retry.")
+    load_crew
+    @bot = identity_params.to_h
+    @configuration = CrewProfile.new(crew_id: @bot["id"], **configuration_params)
+    prepare_editor(submitted_role_oids)
+    @configuration.validate!
+    roles = selected_roles
+    @bot = client.create(@bot)
+    @configuration.provision!(@bot, user: current_user, roles: roles)
+    notice = @bot["status"] == "active" ? "Crew bot created and installed in Slack." : "Crew app exists; review its installation status."
+    redirect_to edit_console_crew_path(@bot.fetch("id")), notice: notice
+  rescue ActiveRecord::RecordInvalid, SlackCrewClient::Error, ActionController::ParameterMissing => e
+    @configuration ||= CrewProfile.new
+    @bot ||= {}
+    @profiles ||= []
+    prepare_editor(submitted_role_oids)
+    flash.now[:alert] = e.message
+    render :new, status: :unprocessable_entity
   end
 
   def update
-    attributes = update_params.to_h
-    attributes["paused"] = ActiveModel::Type::Boolean.new.cast(attributes["paused"]) if attributes.key?("paused")
-    client.update(params[:id], attributes)
-    redirect_to console_crew_index_path, notice: "Crew bot updated."
-  rescue SlackCrewClient::Error, ActionController::ParameterMissing => e
-    redirect_to console_crew_index_path, alert: e.message
+    load_bot
+    if params.require(:crew).keys == [ "paused" ]
+      client.update(params[:id], "paused" => ActiveModel::Type::Boolean.new.cast(params[:crew][:paused]))
+      return redirect_to edit_console_crew_path(params[:id]), notice: "Crew status updated."
+    end
+    prepare_editor(submitted_role_oids)
+    CrewProfile.transaction do
+      @configuration.lock! if @configuration.persisted?
+      fields = configuration_params
+      if @configuration.persisted? && fields["lock_version"].to_s != @configuration.lock_version.to_s
+        raise ActiveRecord::StaleObjectError.new(@configuration, "update")
+      end
+      @configuration.assign_attributes(fields)
+      @configuration.validate!
+      @configuration.provision!(@bot, user: current_user, roles: selected_roles)
+      identity = identity_params.except(:id, :crew_id).to_h.reject { |key, value| @bot[key] == value }
+      @bot = client.update(params[:id], identity) if identity.any?
+    end
+    redirect_to edit_console_crew_path(params[:id]), notice: "Crew saved. Behavior changes apply when a sandbox is next created or rebuilt."
+  rescue ActiveRecord::StaleObjectError
+    redirect_to edit_console_crew_path(params[:id]), alert: "This bot changed since you opened it. Review the latest settings before saving."
+  rescue ActiveRecord::RecordInvalid, SlackCrewClient::Error, ActionController::ParameterMissing => e
+    return redirect_to console_crew_index_path, alert: e.message unless @configuration
+
+    prepare_editor(submitted_role_oids)
+    flash.now[:alert] = e.message
+    render :edit, status: :unprocessable_entity
   end
 
   def install
-    record = Array(client.list["crew"]).find { |item| item["id"].to_s == params[:id].to_s }
-    raise SlackCrewClient::Error, "Crew bot was not found" unless record
-
-    redirect_to validated_install_url!(record["install_url"], params[:id]), allow_other_host: true
-  rescue SlackCrewClient::Error, InvalidInstallUrl => e
-    redirect_to console_crew_index_path, alert: e.message
+    bot = client.install(params[:id])
+    configuration = CrewProfile.find_or_initialize_by(crew_id: params[:id])
+    configuration.provision!(bot, user: current_user)
+    redirect_to edit_console_crew_path(params[:id]), notice: "Crew bot installed in Slack."
+  rescue SlackCrewClient::Error, ActiveRecord::RecordInvalid => e
+    redirect_to edit_console_crew_path(params[:id]), alert: e.message
   end
 
   private
 
-  InvalidInstallUrl = Class.new(StandardError)
-
   def client
     @client ||= self.class.client_factory.call
-  end
-
-  def create_params
-    params.require(:crew).permit(:id, :name, :crew_id, :description)
-  end
-
-  def update_params
-    params.require(:crew).permit(:name, :description, :paused)
   end
 
   def load_crew
@@ -67,35 +100,36 @@ class Console::CrewController < ApplicationController
     @profiles = Array(result["profiles"])
   end
 
-  def recover_create(message)
-    @form ||= {}
+  def load_bot
     load_crew
-    flash.now[:alert] = message
-    render :index, status: :unprocessable_entity
-  rescue SlackCrewClient::Error => e
-    service_unavailable(e, status: :unprocessable_entity)
+    @bot = @crew.find { |record| record["id"] == params[:id] }
+    raise ActiveRecord::RecordNotFound, "Crew bot not found" unless @bot
+
+    @configuration = CrewProfile.find_or_initialize_by(crew_id: params[:id])
   end
 
-  def service_unavailable(error, status: :bad_gateway)
-    @crew = []
-    @profiles = []
-    @form ||= {}
-    flash.now[:alert] = error.message
-    render :index, status: status
+  def identity_params
+    params.require(:crew).permit(:id, :name, :crew_id, :description)
   end
 
-  def validated_install_url!(raw_url, id)
-    public_uri = URI.parse(ConsoleEnv["SLACK_CREW_PUBLIC_URL"].to_s)
-    install_uri = URI.parse(raw_url.to_s)
-    expected_path = "/api/slack/crew/#{CGI.escape(id.to_s)}/install"
-    valid_origin = install_uri.scheme == "https" && public_uri.scheme == "https" &&
-      install_uri.host == public_uri.host && install_uri.port == public_uri.port
-    query = URI.decode_www_form(install_uri.query.to_s)
-    valid_query = query.any? { |key, value| key == "ticket" && value.present? } && query.none? { |key, _| key == "return_url" }
-    raise InvalidInstallUrl, "Slack install URL was invalid" unless valid_origin && install_uri.userinfo.nil? && install_uri.path == expected_path && valid_query && install_uri.fragment.nil?
+  def configuration_params
+    fields = params.require(:crew).permit(:system_prompt, :lock_version, default_models: %i[codex claude], skills: %i[name description content]).to_h
+    # Nested-fields submits an indexed hash. Removing every row is an explicit
+    # replacement with an empty list, not a request to retain previous skills.
+    fields["skills"] = fields.fetch("skills", {}).values
+    fields
+  end
 
-    install_uri.to_s
-  rescue URI::InvalidURIError
-    raise InvalidInstallUrl, "Slack install URL was invalid"
+  def submitted_role_oids
+    Array(params.dig(:crew, :role_oids)).reject(&:blank?)
+  end
+
+  def prepare_editor(role_oids = nil)
+    @roles = Role.order(:name, :id)
+    @selected_role_oids = role_oids || @configuration.principal&.roles&.map(&:oid) || []
+  end
+
+  def selected_roles
+    @selected_role_oids.uniq.map { |oid| Role.find_by_oid!(oid) }
   end
 end

@@ -1,6 +1,8 @@
 """Thin agent-facing CLI for named Slack identities."""
 
 import json
+from pathlib import Path
+from typing import Annotated
 
 import typer
 
@@ -27,10 +29,38 @@ def me(
 def edit(
     name: str | None = typer.Option(None, "--name"),
     description: str | None = typer.Option(None, "--description"),
+    prompt_file: Annotated[Path | None, typer.Option("--prompt-file", exists=True, dir_okay=False)] = None,
+    skills_file: Annotated[Path | None, typer.Option("--skills-file", exists=True, dir_okay=False)] = None,
+    codex_model: str | None = typer.Option(None, "--codex-model"),
+    claude_model: str | None = typer.Option(None, "--claude-model"),
     json_output: bool = typer.Option(False, "--json"),
     markdown: bool = typer.Option(False, "--markdown"),
 ) -> None:
-    """Update your name and description; other bots and permissions are inaccessible."""
-    if name is None and description is None:
-        raise typer.BadParameter("Provide --name or --description")
-    output(SlackCrewClient().edit(name, description), markdown)
+    """Edit yourself. Skills JSON replaces your skills: [{name, description, content}].
+
+    Behavior applies to newly created or rebuilt sandboxes. Roles are admin-only.
+    """
+    if all(
+        value is None
+        for value in (name, description, prompt_file, skills_file, codex_model, claude_model)
+    ):
+        raise typer.BadParameter("Provide at least one field to edit")
+    skills = None
+    if skills_file:
+        try:
+            skills = json.loads(skills_file.read_text())
+        except (ValueError, OSError) as error:
+            raise typer.BadParameter("Skills file must contain a JSON array") from error
+        if not isinstance(skills, list):
+            raise typer.BadParameter("Skills file must contain a JSON array")
+    output(
+        SlackCrewClient().edit(
+            name,
+            description,
+            system_prompt=prompt_file.read_text() if prompt_file else None,
+            skills=skills,
+            codex_model=codex_model,
+            claude_model=claude_model,
+        ),
+        markdown,
+    )

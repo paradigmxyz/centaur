@@ -141,8 +141,10 @@ mod tests {
             id: id.to_owned(),
             foreign_id: Some("test".to_owned()),
             name: "Test".to_owned(),
+            kind: None,
             labels: Default::default(),
             sandbox_observability_enabled: true,
+            crew: None,
         }
     }
 

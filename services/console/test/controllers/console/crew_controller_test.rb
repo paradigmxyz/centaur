@@ -4,151 +4,144 @@ class Console::CrewControllerTest < ActionDispatch::IntegrationTest
   class FakeClient
     attr_accessor :result, :error
     attr_reader :calls
-
     def initialize
       @calls = []
       @result = { "crew" => [], "profiles" => [ "engineer" ] }
     end
-
     def list
       raise error if error
-      calls << [ :list ]
       result
     end
-
     def create(attributes)
       calls << [ :create, attributes ]
       raise error if error
       result.fetch("created")
     end
-
     def update(id, attributes)
       calls << [ :update, id, attributes ]
       raise error if error
-      {}
+      result["crew"].find { |bot| bot["id"] == id }.merge(attributes)
+    end
+    def install(id)
+      calls << [ :install, id ]
+      result.fetch("created")
     end
   end
 
   setup do
     @client = FakeClient.new
+    @bot = { "id" => "alpha", "name" => "Alpha", "status" => "active", "app_id" => "A111", "team_id" => "T123", "crew_id" => "engineer" }
+    @client.result["created"] = @bot
     Console::CrewController.client_factory = -> { @client }
-    @public_url = ENV["CENTAUR_CONSOLE_SLACK_CREW_PUBLIC_URL"]
-    ENV["CENTAUR_CONSOLE_SLACK_CREW_PUBLIC_URL"] = "https://slackbot.example"
     login(users(:acme_admin))
   end
 
   teardown do
     Console::CrewController.client_factory = -> { SlackCrewClient.new }
-    @public_url ? ENV["CENTAUR_CONSOLE_SLACK_CREW_PUBLIC_URL"] = @public_url : ENV.delete("CENTAUR_CONSOLE_SLACK_CREW_PUBLIC_URL")
   end
 
-  test "requires an active acting admin" do
+  test "requires active acting admin for configuration and secret roles" do
     delete logout_url
-    get console_crew_index_url
+    get new_console_crew_url
     assert_redirected_to login_path
-
     login(users(:member_user))
-    get console_crew_index_url
+    post console_crew_index_url, params: { crew: fields }
     assert_redirected_to console_integrations_path
-    assert_empty @client.calls
-
     delete logout_url
     login(users(:acme_admin))
     post console_descope_url
-    get console_crew_index_url
+    post console_crew_index_url, params: { crew: fields }
     assert_redirected_to console_integrations_path
     assert_empty @client.calls
-
-    delete logout_url
-    get console_crew_index_url
-    assert_redirected_to login_path
   end
 
-  test "renders empty state and unavailable service" do
+  test "disabled account is denied and empty state offers creation" do
     get console_crew_index_url
     assert_response :ok
-    assert_select "td", text: "No Crew bots yet."
-
-    @client.error = SlackCrewClient::Error.new("Crew service is unavailable")
-    get console_crew_index_url
-    assert_response :bad_gateway
-    assert_select "div", text: /Crew service is unavailable/
-  end
-
-  test "a disabled account cannot access Crew" do
+    assert_select "a", text: "Create your first bot"
     users(:acme_admin).update!(status: :disabled)
     get console_crew_index_url
     assert_redirected_to login_path
+  end
+
+  test "create automatically installs and provisions exactly the selected roles and behavior" do
+    post console_crew_index_url, params: { crew: fields }
+    assert_redirected_to edit_console_crew_path("alpha")
+    profile = CrewProfile.find_by!(crew_id: "alpha")
+    assert_equal "slack-crew-t123-a111", profile.principal.foreign_id
+    assert_equal [ roles(:acme_infra).id ], profile.principal.role_ids
+    assert_equal "Investigate carefully.", profile.system_prompt
+    assert_equal "reviewing-incidents", profile.skills.first["name"]
+    assert_equal({ "codex" => "model-a", "claude" => "model-b" }, profile.default_models)
+    assert_equal %w[crew_id description id name], @client.calls.first.last.keys.sort
+  end
+
+  test "editor preserves settings and can remove all skills and roles without granting defaults" do
+    post console_crew_index_url, params: { crew: fields }
+    @client.result["crew"] = [ @bot.merge("description" => "Helper") ]
+    get edit_console_crew_url("alpha")
+    assert_response :ok
+    assert_select "textarea[name='crew[system_prompt]']", text: "Investigate carefully."
+    assert_select "input[name='crew[role_oids][]'][checked]", count: 1
+    @client.calls.clear
+    patch console_crew_url("alpha"), params: { crew: fields.except(:id, :crew_id, :skills).merge(role_oids: [ "" ], lock_version: 0) }
+    assert_redirected_to edit_console_crew_path("alpha")
+    profile = CrewProfile.find_by!(crew_id: "alpha")
+    assert_empty profile.skills
+    assert_empty profile.principal.roles
+    assert_empty @client.calls, "Behavior and role edits must not require a valid Slack configuration token"
+  end
+
+  test "invalid skill and forged roles do not create a Slack app" do
+    post console_crew_index_url, params: { crew: fields.merge(skills: { "0" => { name: "../escape", description: "Bad", content: "Bad" } }) }
+    assert_response :unprocessable_entity
+    assert_empty @client.calls
+    assert_select "textarea[name='crew[system_prompt]']", text: "Investigate carefully."
+    post console_crew_index_url, params: { crew: fields.merge(role_oids: [ "role_invalid" ]) }
+    assert_response :not_found
     assert_empty @client.calls
   end
 
-  test "creation immediately redirects to a validated external install URL" do
-    @client.result["created"] = {
-      "install_url" => "https://slackbot.example/api/slack/crew/alpha/install?ticket=fresh"
-    }
-    post console_crew_index_url, params: { crew: { id: "alpha", name: "Alpha", crew_id: "engineer", description: "Helper" } }
-
-    assert_redirected_to "https://slackbot.example/api/slack/crew/alpha/install?ticket=fresh"
-    assert_equal "Alpha", @client.calls.last.last["name"]
+  test "stale configuration cannot overwrite a newer bot edit or mutate Slack" do
+    post console_crew_index_url, params: { crew: fields }
+    profile = CrewProfile.find_by!(crew_id: "alpha")
+    profile.update!(system_prompt: "Newer instructions")
+    @client.result["crew"] = [ @bot ]
+    @client.calls.clear
+    patch console_crew_url("alpha"), params: { crew: fields.merge(lock_version: 0) }
+    assert_redirected_to edit_console_crew_path("alpha")
+    assert_match(/changed since/, flash[:alert])
+    assert_equal "Newer instructions", profile.reload.system_prompt
+    assert_empty @client.calls
   end
 
-  test "rejects install redirects with the wrong origin path or missing ticket" do
-    [
-      "https://evil.example/api/slack/crew/alpha/install?ticket=x",
-      "https://slackbot.example/api/slack/crew/other/install?ticket=x",
-      "https://slackbot.example/api/slack/crew/alpha/install?return_url=https://evil.example",
-      "https://slackbot.example/api/slack/crew/alpha/install?ticket=x&return_url=https://evil.example"
-    ].each do |url|
-      @client.result["created"] = { "install_url" => url }
-      post console_crew_index_url, params: { crew: { id: "alpha", name: "Alpha", crew_id: "engineer" } }
-      assert_response :unprocessable_entity
-      assert_select "input[name='crew[name]'][value='Alpha']"
-    end
-  end
-
-  test "install action fetches a fresh URL and disables Turbo" do
-    @client.result["crew"] = [ { "id" => "alpha", "status" => "needs_install", "install_url" => "https://slackbot.example/api/slack/crew/alpha/install?ticket=new" } ]
-    post install_console_crew_url("alpha")
-    assert_redirected_to "https://slackbot.example/api/slack/crew/alpha/install?ticket=new"
-
-    get console_crew_index_url
-    assert_select "form[data-turbo='false'][action=?]", install_console_crew_path("alpha")
-  end
-
-  test "casts paused while allowing only manageable fields" do
-    patch console_crew_url("alpha"), params: { crew: { paused: "false", app_id: "forged", crew_id: "forged" } }
-    assert_redirected_to console_crew_index_path
-    assert_equal [ :update, "alpha", { "paused" => false } ], @client.calls.last
-  end
-
-  test "missing form fields render an error and an already installed duplicate returns to Crew" do
-    post console_crew_index_url, params: {}
-    assert_response :unprocessable_entity
-    @client.result["created"] = { "id" => "alpha", "status" => "active" }
-    post console_crew_index_url, params: { crew: { id: "alpha", name: "Alpha", crew_id: "engineer" } }
-    assert_redirected_to console_crew_index_path
-    assert_equal "Crew bot is already installed.", flash[:notice]
-  end
-
-  test "interrupted installation is not shown as active or offered pause and install controls" do
-    @client.result["crew"] = [ { "id" => "alpha", "name" => "Alpha", "status" => "installing", "app_id" => "A123" } ]
-    get console_crew_index_url
+  test "interrupted install exposes no blind retry while known pending app can install" do
+    @client.result["crew"] = [ @bot.merge("status" => "installing", "install_error" => "Installation outcome is unknown") ]
+    get edit_console_crew_url("alpha")
     assert_response :ok
-    assert_select "td", text: "installing"
-    assert_select "input[type=submit][value=Save][disabled]"
-    assert_select "input[value=Pause]", count: 0
+    assert_select "p", text: "Installation outcome is unknown"
+    assert_select "input[type=submit][value='Save changes'][disabled]"
     assert_select "form[action=?]", install_console_crew_path("alpha"), count: 0
+    @client.result["crew"] = [ @bot.merge("status" => "needs_install") ]
+    post install_console_crew_url("alpha")
+    assert_redirected_to edit_console_crew_path("alpha")
+    assert_equal [ :install, "alpha" ], @client.calls.last
   end
 
-  test "backend validation preserves creation fields" do
-    @client.error = SlackCrewClient::Error.new("Name is invalid", status: 422)
-    post console_crew_index_url, params: { crew: { id: "alpha", name: "Bad name", crew_id: "engineer", description: "Keep me" } }
-    assert_response :unprocessable_entity
-    assert_select "input[value='Bad name']"
-    assert_select "input[value='Keep me']"
+  test "replayed pending creation does not claim Slack installation succeeded" do
+    @client.result["created"] = @bot.merge("status" => "needs_install")
+    post console_crew_index_url, params: { crew: fields }
+    assert_redirected_to edit_console_crew_path("alpha")
+    assert_equal "Crew app exists; review its installation status.", flash[:notice]
   end
 
   private
+
+  def fields
+    { id: "alpha", name: "Alpha", crew_id: "engineer", description: "Helper", system_prompt: "Investigate carefully.",
+      default_models: { codex: "model-a", claude: "model-b" }, role_oids: [ roles(:acme_infra).oid ],
+      skills: { "0" => { name: "reviewing-incidents", description: "Reviews incidents when asked.", content: "Follow the runbook." } } }
+  end
 
   def login(user)
     post login_url, params: { email: user.email, password: "password123456" }

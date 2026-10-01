@@ -15,9 +15,7 @@ export type CrewRecord = {
   botToken?: string
   botUserId?: string
   teamId?: string
-  installTicket?: string
-  oauthState?: string
-  oauthExpiresAt?: number
+  installError?: string
 }
 
 export interface CrewStore {
@@ -27,9 +25,6 @@ export interface CrewStore {
   save(record: CrewRecord): Promise<void>
   /** Mutate the latest encrypted record while holding its database row lock. */
   mutate(selector: { id: string } | { appId: string }, update: (record: CrewRecord) => boolean | Promise<boolean>): Promise<CrewRecord | undefined>
-  beginInstall(id: string, ticket: string, state: string): Promise<CrewRecord | undefined>
-  /** Atomically claim an installation before exchanging its single-use code. */
-  claim(id: string, state: string): Promise<CrewRecord | undefined>
 }
 
 /** App credentials never enter Chat SDK state, API metadata, or tool responses. */
@@ -86,27 +81,6 @@ export class PgCrewStore implements CrewStore {
     const result = await this.pool.query('UPDATE slackbotv2_crew SET ciphertext = $2 WHERE id = $1',
       [record.id, this.encrypt(record)])
     if (result.rowCount !== 1) throw new Error('Crew record is missing')
-  }
-
-  async claim(id: string, state: string): Promise<CrewRecord | undefined> {
-    return this.mutate({ id }, record => {
-      if (record.status !== 'needs_install') return false
-      if (record.oauthState !== state || !record.oauthExpiresAt || record.oauthExpiresAt < Date.now()) return false
-      record.status = 'installing'
-      delete record.oauthState
-      delete record.oauthExpiresAt
-      return true
-    })
-  }
-
-  async beginInstall(id: string, ticket: string, state: string): Promise<CrewRecord | undefined> {
-    return this.mutate({ id }, record => {
-      if (record.status !== 'needs_install') return false
-      if (!ticket || record.installTicket !== ticket) return false
-      record.oauthState = state
-      record.oauthExpiresAt = Date.now() + 10 * 60_000
-      return true
-    })
   }
 
   async mutate(selector: { id: string } | { appId: string }, update: (record: CrewRecord) => boolean | Promise<boolean>): Promise<CrewRecord | undefined> {

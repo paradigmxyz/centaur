@@ -14,8 +14,9 @@ class SlackCrewClient
   def initialize(base_url: nil, token: nil, http: nil)
     @base_url = (base_url.presence || ConsoleEnv["SLACK_CREW_URL"].presence).to_s.delete_suffix("/")
     @token = token.presence || ConsoleEnv["SLACK_CREW_ADMIN_TOKEN"].presence
-    # Slack manifest operations have a 20-second deadline at the owning service.
-    @http = HttpClient.new(http: http, read_timeout: 30)
+    # Creation includes manifest creation, developer installation and auth.test,
+    # each bounded to 20 seconds by the owning service.
+    @http = HttpClient.new(http: http, read_timeout: 65)
   end
 
   def list
@@ -28,6 +29,10 @@ class SlackCrewClient
 
   def update(id, attributes)
     request(:post, "/api/slack/crew/#{escape(id)}/manage", attributes)
+  end
+
+  def install(id)
+    request(:post, "/api/slack/crew/#{escape(id)}/install", {})
   end
 
   def self_get(app_id)

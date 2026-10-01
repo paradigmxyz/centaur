@@ -1,0 +1,4 @@
+<% content_for :title, "Create bot · Crew" %>
+<%= link_to "← Crew", console_crew_index_path, class: "text-sm text-zinc-500 hover:text-zinc-200" %>
+<div class="mt-6"><%= render "console/page_header", title: "Create a Crew bot", subtitle: "Configure its purpose and access. We will create and install its Slack app automatically." %></div>
+<%= render "form", creating: true %>

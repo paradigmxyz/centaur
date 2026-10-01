@@ -40,3 +40,31 @@ def test_does_not_follow_redirects_or_return_backend_error_body():
     with pytest.raises(RuntimeError, match="HTTP 302") as error:
         client.me()
     assert "private-detail" not in str(error.value)
+
+
+def test_behavior_edit_preserves_other_harness_default_and_uses_revision():
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "lock_version": 7,
+                    "default_models": {"codex": "keep-this", "claude": "old"},
+                }
+            },
+        )
+
+    client = module.SlackCrewClient("http://console", httpx.MockTransport(respond))
+    client.edit(system_prompt="New prompt", skills=[], claude_model="new")
+    assert [request.method for request in calls] == ["GET", "PATCH"]
+    assert json.loads(calls[1].content) == {
+        "data": {
+            "system_prompt": "New prompt",
+            "skills": [],
+            "lock_version": 7,
+            "default_models": {"codex": "keep-this", "claude": "new"},
+        }
+    }

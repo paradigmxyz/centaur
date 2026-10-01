@@ -3,6 +3,11 @@ require "test_helper"
 class Api::V1::SandboxCrewControllerTest < ActionDispatch::IntegrationTest
   setup do
     @proxy = proxies(:acme_proxy)
+    @profile = CrewProfile.new(crew_id: "alpha")
+    @profile.provision!({ "id" => "alpha", "name" => "Alpha", "app_id" => "A111", "team_id" => "T123" }, user: users(:acme_admin))
+    @other = CrewProfile.new(crew_id: "beta", system_prompt: "Other bot instructions")
+    @other.provision!({ "id" => "beta", "name" => "Beta", "app_id" => "A222", "team_id" => "T123" }, user: users(:acme_admin))
+    @proxy.update!(principal: @profile.principal)
     @calls = []
     calls = @calls
     client = Object.new
@@ -15,7 +20,7 @@ class Api::V1::SandboxCrewControllerTest < ActionDispatch::IntegrationTest
     @db = CrewSession.lease_connection
     @db.execute("CREATE TEMPORARY TABLE crew_test_sessions (thread_key text PRIMARY KEY, sandbox_id text, iron_control_principal text)")
     insert_session("slack:T123:A111:C123:123.456", @proxy.name, @proxy.principal.oid)
-    insert_session("slack:T123:A222:C123:123.456", "other-sandbox", @proxy.principal.oid)
+    insert_session("slack:T123:A222:C123:123.456", "other-sandbox", @other.principal.oid)
   end
 
   teardown do
@@ -31,7 +36,7 @@ class Api::V1::SandboxCrewControllerTest < ActionDispatch::IntegrationTest
     assert_empty @calls
   end
 
-  test "two bots in the same channel principal can only edit their own app" do
+  test "two bots in the same channel can only edit their own app" do
     with_token do |headers|
       get "/api/v1/sandbox/crew/me", headers: headers
       assert_response :ok
@@ -39,17 +44,17 @@ class Api::V1::SandboxCrewControllerTest < ActionDispatch::IntegrationTest
       patch "/api/v1/sandbox/crew/me", params: { data: { name: "Renamed", description: "My description" } }, headers: headers, as: :json
       assert_response :ok
     end
-    @proxy.update!(name: "other-sandbox")
+    @proxy.update!(name: "other-sandbox", principal: @other.principal)
     with_token do |headers|
       get "/api/v1/sandbox/crew/me", headers: headers
       assert_response :ok
     end
-    assert_equal [ [ "A111" ], [ "A111", { "name" => "Renamed", "description" => "My description" } ], [ "A222" ] ], @calls
+    assert_equal [ [ "A111" ], [ "A111" ], [ "A111", { "name" => "Renamed", "description" => "My description" } ], [ "A222" ] ], @calls
   end
 
   test "rejects identity selectors and administrative fields without forwarding" do
     with_token do |headers|
-      %w[id app_id crew_id paused scopes token].each do |field|
+      %w[id app_id crew_id paused scopes token roles role_ids role_oids principal_id].each do |field|
         patch "/api/v1/sandbox/crew/me", params: { data: { name: "Other", field => "A222" } }, headers: headers, as: :json
         assert_response :bad_request
       end
@@ -57,6 +62,33 @@ class Api::V1::SandboxCrewControllerTest < ActionDispatch::IntegrationTest
       assert_response :bad_request
       patch "/api/v1/sandbox/crew/me", params: { data: { name: "Other" }, app_id: "A222" }, headers: headers, as: :json
       assert_response :bad_request
+    end
+    assert_empty @calls
+  end
+
+  test "self updates prompt skills and models with a revision but cannot change another profile" do
+    with_token do |headers|
+      fields = { system_prompt: "My revised prompt", skills: [ { name: "reviewing-code", description: "Reviews code when asked.", content: "Check boundaries." } ], default_models: { claude: "my-model" }, lock_version: 0 }
+      patch "/api/v1/sandbox/crew/me", params: { data: fields }, headers: headers, as: :json
+      assert_response :ok
+      assert_equal 1, response.parsed_body["data"]["lock_version"]
+      assert_equal "My revised prompt", @profile.reload.system_prompt
+      assert_equal "reviewing-code", @profile.skills.first["name"]
+      assert_equal "Other bot instructions", @other.reload.system_prompt
+      patch "/api/v1/sandbox/crew/me", params: { data: fields.merge(system_prompt: "Stale") }, headers: headers, as: :json
+      assert_response :conflict
+      assert_equal "My revised prompt", @profile.reload.system_prompt
+      patch "/api/v1/sandbox/crew/me", params: { data: { skills: [ { name: "../escape" } ], lock_version: 1 } }, headers: headers, as: :json
+      assert_response :unprocessable_entity
+      assert_equal "reviewing-code", @profile.reload.skills.first["name"]
+    end
+  end
+
+  test "a durable session cannot authorize a bot using another bot principal" do
+    @db.execute("UPDATE crew_test_sessions SET thread_key = 'slack:T123:A222:C123:999.456' WHERE thread_key LIKE '%A111:%'")
+    with_token do |headers|
+      get "/api/v1/sandbox/crew/me", headers: headers
+      assert_response :forbidden
     end
     assert_empty @calls
   end

@@ -21,7 +21,9 @@ export default class extends Controller {
 
   nextIndex() {
     if (this.counter === undefined) {
-      this.counter = this.containerTarget.querySelectorAll("[data-nested-fields-row]").length
+      // A removed row can leave gaps: counting remaining rows may reuse an
+      // existing index and silently overwrite another row on submission.
+      this.counter = Date.now()
     } else {
       this.counter += 1
     }

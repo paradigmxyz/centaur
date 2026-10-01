@@ -12,7 +12,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use centaur_iron_control::{IronControlError, Principal, SessionRegistrar};
+use centaur_iron_control::{CrewConfig, IronControlError, Principal, SessionRegistrar};
 use centaur_sandbox_core::{
     Mount, RepoCacheAccess, ResourceRequirements, SANDBOX_AGENT_HOME, SandboxBackend,
     SandboxCapabilities as BackendSandboxCapabilities, SandboxError, SandboxFile, SandboxId,
@@ -3037,6 +3037,18 @@ impl SessionRuntime {
                 .as_ref()
                 .is_none_or(|warm| warm == harness_type);
             let warm_persona_matches = persona_context.is_none();
+            let crew_config = if let Some(principal_id) = iron_control_principal {
+                let principal = self.iron_control.get_principal(principal_id).await?;
+                if principal.kind.as_deref() == Some("slack_crew") {
+                    Some(principal.crew.ok_or_else(|| SessionRuntimeError::BadRequest(
+                        "Crew principal has no runtime configuration".to_owned()
+                    ))?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             if !warm_harness_matches && self.warm_pool.is_some() {
                 record_sandbox_warm_pool_claim("harness_mismatch");
             }
@@ -3054,6 +3066,7 @@ impl SessionRuntime {
                         && warm_harness_matches
                         && warm_persona_matches
                         && desired_capabilities.is_default_enabled()
+                        && crew_config.is_none()
                 })
             {
                 match warm_pool
@@ -3136,6 +3149,9 @@ impl SessionRuntime {
             }
             apply_sandbox_boot_mode(&mut spec, &boot_mode);
             apply_sandbox_capabilities(&mut spec, desired_capabilities);
+            if let Some(crew) = crew_config.as_ref() {
+                apply_crew_config(&mut spec, crew)?;
+            }
             let create_started = Instant::now();
             let handle = self
                 .run_with_running_capacity(thread_key, execution_id, "cold_create", || async {
@@ -5867,6 +5883,92 @@ fn upsert_spec_env(spec: &mut SandboxSpec, name: &str, value: String) {
     }
 }
 
+const CREW_SKILL_DIR: &str = "/home/agent/crew-skills";
+
+fn apply_crew_config(spec: &mut SandboxSpec, crew: &CrewConfig) -> Result<(), SessionRuntimeError> {
+    if crew.system_prompt.len() > 65_536 || crew.skills.len() > 32 {
+        return Err(SessionRuntimeError::BadRequest(
+            "invalid Crew configuration bounds".to_owned(),
+        ));
+    }
+    if !crew.system_prompt.trim().is_empty() {
+        let prompt_path = format!("{SANDBOX_AGENT_HOME}/AGENTS_PERSONA.md");
+        if let Some(file) = spec
+            .files
+            .iter_mut()
+            .find(|file| file.target_path == prompt_path)
+        {
+            file.contents.push_str("\n\n---\n\n");
+            file.contents.push_str(&crew.system_prompt);
+        } else {
+            spec.files
+                .push(SandboxFile::new(prompt_path, crew.system_prompt.clone()));
+        }
+    }
+    for skill in &crew.skills {
+        let valid_name = !skill.name.is_empty()
+            && skill.name.len() <= 64
+            && skill
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            && !skill.name.starts_with('-')
+            && !skill.name.ends_with('-')
+            && !skill.name.contains("--")
+            && skill.name != "search";
+        if !valid_name
+            || skill.description.trim().is_empty()
+            || skill.description.len() > 1_024
+            || skill.content.trim().is_empty()
+            || skill.content.len() > 65_536
+        {
+            return Err(SessionRuntimeError::BadRequest(
+                "invalid Crew skill".to_owned(),
+            ));
+        }
+        let description = serde_json::to_string(&skill.description)
+            .map_err(|error| SessionRuntimeError::BadRequest(error.to_string()))?;
+        let document = format!(
+            "---\nname: {}\ndescription: {}\n---\n\n{}",
+            skill.name, description, skill.content
+        );
+        spec.files.push(SandboxFile::new(
+            format!("{CREW_SKILL_DIR}/{}/SKILL.md", skill.name),
+            document,
+        ));
+    }
+    if !crew.skills.is_empty() {
+        let existing = spec
+            .env
+            .iter()
+            .find(|env| env.name == CENTAUR_SKILL_DIRS_ENV)
+            .map(|env| env.value.trim())
+            .filter(|value| !value.is_empty());
+        let dirs = existing.map_or_else(
+            || CREW_SKILL_DIR.to_owned(),
+            |value| format!("{value}:{CREW_SKILL_DIR}"),
+        );
+        upsert_spec_env(spec, CENTAUR_SKILL_DIRS_ENV, dirs);
+    }
+    if !crew.default_models.codex.trim().is_empty() {
+        if crew.default_models.codex.len() > 200 {
+            return Err(SessionRuntimeError::BadRequest(
+                "invalid Crew Codex model".to_owned(),
+            ));
+        }
+        upsert_spec_env(spec, "CODEX_MODEL", crew.default_models.codex.clone());
+    }
+    if !crew.default_models.claude.trim().is_empty() {
+        if crew.default_models.claude.len() > 200 {
+            return Err(SessionRuntimeError::BadRequest(
+                "invalid Crew Claude model".to_owned(),
+            ));
+        }
+        upsert_spec_env(spec, "CLAUDE_MODEL", crew.default_models.claude.clone());
+    }
+    Ok(())
+}
+
 fn sandbox_capabilities_match(
     existing: Option<&SessionSandboxCapabilities>,
     desired: &SessionSandboxCapabilities,
@@ -7357,10 +7459,77 @@ pub enum SessionRuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use centaur_iron_control::{CrewDefaultModels, CrewSkill};
     use centaur_sandbox_core::MountKind;
     use centaur_session_core::SessionStatus;
     use serde_json::json;
     use time::OffsetDateTime;
+
+    #[test]
+    fn crew_config_materializes_prompt_skills_and_model_defaults() {
+        let mut spec = SandboxSpec::new("test")
+            .env(CENTAUR_SKILL_DIRS_ENV, "/standard/skills")
+            .env("CODEX_MODEL", "deployment-default")
+            .file(
+                format!("{SANDBOX_AGENT_HOME}/AGENTS_PERSONA.md"),
+                "persona prompt",
+            );
+        apply_crew_config(
+            &mut spec,
+            &CrewConfig {
+                system_prompt: "bot prompt".to_owned(),
+                skills: vec![CrewSkill {
+                    name: "triage".to_owned(),
+                    description: "Triage incidents".to_owned(),
+                    content: "Use the runbook.".to_owned(),
+                }],
+                default_models: CrewDefaultModels {
+                    codex: "codex-bot".to_owned(),
+                    claude: "claude-bot".to_owned(),
+                },
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            spec.files[0].contents,
+            "persona prompt\n\n---\n\nbot prompt"
+        );
+        assert_eq!(
+            spec.files[1].target_path,
+            "/home/agent/crew-skills/triage/SKILL.md"
+        );
+        assert_eq!(
+            spec.files[1].contents,
+            "---\nname: triage\ndescription: \"Triage incidents\"\n---\n\nUse the runbook."
+        );
+        assert_eq!(
+            env_value(&spec, CENTAUR_SKILL_DIRS_ENV),
+            Some("/standard/skills:/home/agent/crew-skills")
+        );
+        assert_eq!(env_value(&spec, "CODEX_MODEL"), Some("codex-bot"));
+        assert_eq!(env_value(&spec, "CLAUDE_MODEL"), Some("claude-bot"));
+    }
+
+    #[test]
+    fn crew_skill_names_are_path_safe() {
+        let mut spec = SandboxSpec::new("test");
+        let error = apply_crew_config(
+            &mut spec,
+            &CrewConfig {
+                system_prompt: String::new(),
+                skills: vec![CrewSkill {
+                    name: "../escape".to_owned(),
+                    description: String::new(),
+                    content: String::new(),
+                }],
+                default_models: CrewDefaultModels::default(),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, SessionRuntimeError::BadRequest(_)));
+        assert!(spec.files.is_empty());
+    }
 
     #[test]
     fn sandbox_repo_cache_label_controls_access() {
@@ -7535,8 +7704,10 @@ mod tests {
             id: "prn_test".to_owned(),
             foreign_id: Some("slack-channel-t-c".to_owned()),
             name: "Test".to_owned(),
+            kind: None,
             labels,
             sandbox_observability_enabled: true,
+            crew: None,
         }
     }
 
@@ -9112,8 +9283,10 @@ mod adoption_tests {
             id: id.to_owned(),
             foreign_id: Some("test".to_owned()),
             name: "Test".to_owned(),
+            kind: None,
             labels: BTreeMap::new(),
             sandbox_observability_enabled: true,
+            crew: None,
         }
     }
 

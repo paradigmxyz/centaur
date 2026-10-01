@@ -1,21 +1,19 @@
 # Crew: named Slackbots
 
-Crew gives an existing Centaur profile its own mentionable Slack app and DM.
-Creation uses `apps.manifest.create`; installation uses Slack OAuth v2. The
-service stores app credentials encrypted with AES-256-GCM in Postgres and
-rehydrates active installations and their render recovery on restart.
+Crew gives each bot its own Slack app, fixed base profile, instructions, skills,
+model defaults, and credential roles. Slackbot stores app credentials encrypted
+with AES-256-GCM in Postgres. Console owns behavior and access configuration.
 
 ## Enable
 
-Configure the service Secret (not plaintext Helm values):
+Configure the service Secret (never plaintext Helm values):
 
-- `SLACK_CONFIGURATION_TOKEN`: the existing workspace app configuration token,
-  with `app_configurations:write`. An ordinary `xoxb` bot token is insufficient.
-  Slack configuration access tokens expire; supply a current token through the
-  deployment's secret rotation mechanism. This feature does not refresh them.
-- `SLACK_CREW_ADMIN_TOKEN`: a separate, high-entropy management credential.
-- `SLACK_CREW_ENCRYPTION_KEY`: 32 random bytes encoded as 64 hex characters.
-  Keep it stable across restarts and replicas; changing it requires re-encryption.
+- `SLACK_CONFIGURATION_TOKEN`: a workspace app configuration **access** token
+  with `app_configurations:write`. Ordinary `xoxb` bot tokens are insufficient.
+  Access tokens expire after 12 hours; this service does not yet rotate them.
+- `SLACK_CREW_ADMIN_TOKEN`: a separate high-entropy management credential.
+- `SLACK_CREW_ENCRYPTION_KEY`: 32 random bytes as 64 hex characters. Keep this
+  stable; changing it requires re-encrypting the stored credentials.
 
 ```yaml
 slackbotv2:
@@ -25,98 +23,95 @@ slackbotv2:
     allowedProfiles: [eng]
 ```
 
-The service uses its existing Postgres connection and home workspace from
-`auth.test`. Only listed profile IDs can be bound. They must also exist in the
-API's profile registry; missing profiles fail closed before message execution.
-No new API key or app credentials are exposed to sandboxes.
+Profiles must also exist in the API profile registry; missing profiles fail
+closed. Helm wires the Console's Slackbot management URL and server-only admin
+token. Self-management also uses the Console's existing API session DB connection.
+The public ingress must forward `/api/slack/crew` and subpaths.
 
-## Console management and installation
+## Console management and automatic installation
 
-Open **Crew** in the sidebar as an active Console admin. Choose a permanent bot ID,
-display name, description and allowed profile, then **Create and install in
-Slack**. Creation immediately takes the browser through Slack installation;
-there is no CLI step or URL to copy. After consent, OAuth activates the bot
-automatically. Pending installations can be resumed from the same page.
+Open **Crew → Create bot** as a Console admin. Set identity, base profile,
+system prompt, custom skills, Codex/Claude default models, and secret roles.
+**Create and install bot** creates and installs the Slack app automatically.
 
-**Slack still requires workspace consent.** A configuration token cannot bypass
-OAuth. Consent-free child-app installation requires Slack's partner-only
-[`managed_apps:install`](https://docs.slack.dev/reference/scopes/managed_apps.install/)
-capability, not an ordinary developer configuration token. Workspace policy can
-also require admin approval. Invite the installed bot to channels or open its DM.
+Installation reuses the preview provisioner's mechanism:
+`apps.manifest.create` followed by configuration-token-authenticated
+`apps.developerInstall` with `app_id` and a JSON array of `bot_scopes`.
+The returned `api_access_tokens.bot` is verified with `auth.test` against the
+configured workspace. It does **not** require a browser OAuth consent flow or
+the partner-only managed-apps API. Workspace restrictions may still reject an
+installation. Invite an installed bot to a channel or open its DM.
 
-The Console can rename bots, change descriptions, and pause/resume new incoming
-work. Pausing does not cancel executions or terminal delivery already in flight.
-Profile bindings remain immutable. Interrupted `creating`/`installing` records
-are visible but cannot be edited or blindly retried.
+Each bot has a dedicated editor and a Console principal
+`slack-crew-<team lowercase>-<app lowercase>`. Admins explicitly attach existing
+credential roles to that principal. There are no implicit default roles; select
+the infrastructure/model-provider roles the bot needs. Role changes use the
+existing proxy sync/invalidation mechanism and do not grant access to another
+bot or the shared channel principal. Channel permissions can also be supplied
+by roles or configured on the bot principal.
 
-Helm wires `CENTAUR_CONSOLE_SLACK_CREW_URL`,
-`CENTAUR_CONSOLE_SLACK_CREW_PUBLIC_URL` and the server-only
-`CENTAUR_CONSOLE_SLACK_CREW_ADMIN_TOKEN` when Crew is enabled. Outside Helm,
-configure these explicitly. The Console also needs its existing API session DB
-connection for self-management. Neither the browser nor sandboxes receive the
-admin token. The public ingress must forward `/api/slack/crew` and subpaths.
-Management routes require the admin bearer; installation uses unguessable
-tickets, browser-bound OAuth state, expiry, and atomic replay checks.
+Custom prompts extend the fixed base profile. Custom skills become isolated
+`SKILL.md` files alongside standard skills; replacing a standard skill with the
+same name is intentional, but the reserved `search` skill cannot be replaced.
+Model IDs map to `CODEX_MODEL` (Codex/Nanocodex) and `CLAUDE_MODEL` (Claude Code).
+Explicit model overrides retain precedence. Configuration is applied when a
+sandbox is created: running conversations keep their settings; new threads and
+rebuilt sandboxes receive the latest configuration. Stale editor writes are rejected.
+
+Pause stops new incoming work, not an execution or delivery already in flight.
+The base profile and Slack identity remain immutable.
 
 ## Bot self-management
 
 ```bash
 slack-crew me --json
-slack-crew edit --name "Research" --description "Research and analysis" --json
+slack-crew edit --name "Research" --description "Research and analysis"
+slack-crew edit --prompt-file instructions.md --skills-file skills.json --codex-model MODEL_ID
 ```
 
-These commands call `GET/PATCH /api/v1/sandbox/crew/me` on the Console through
-iron-proxy. Its short-lived sandbox JWT identifies the proxy, sandbox and
-principal. The Console matches the current durable session's sandbox assignment
-and principal, then derives the app ID from its app-scoped thread key. Channel
-principal membership alone is not authority over other bots in that channel.
-Unassigned, non-Crew and ambiguous sessions fail closed. Bots can change only
-their own name and description, not other members, profiles, permissions or pause
-state. Names/descriptions use `apps.manifest.update` and need a current
-configuration access token; paused bots cannot self-edit.
+Skills JSON replaces the bot's custom skill list:
 
-The tool no longer declares or uses `SLACK_CREW_ADMIN_TOKEN`. Remove any grants
-of that token from sandbox principals/roles left over from the old operator CLI.
-Admin creation and fleet management belong in the Console.
+```json
+[{"name":"reviewing-incidents","description":"Reviews incidents. Use when investigating failures.","content":"Follow the runbook and cite evidence."}]
+```
 
-## Slack permissions
+Commands use `GET/PATCH /api/v1/sandbox/crew/me` through iron-proxy's short-lived
+sandbox JWT. Console verifies the unique current durable sandbox assignment,
+principal and app-scoped thread key, then matches the bot's configured principal.
+No bot selector or shared admin token is accepted. Bots can edit only their own
+name, description, prompt, skills and model defaults. They may read their own
+role names but **cannot grant/revoke roles**, change profile, pause bots, create
+bots, or manage another bot. Behavior edits use optimistic revisions.
+Paused, unassigned, non-Crew and ambiguous sessions fail closed.
 
-App provisioning requires [`app_configurations:write`](https://docs.slack.dev/reference/methods/apps.manifest.create/)
-on a **configuration token**. Each installed bot requests:
+Name/description updates use `apps.manifest.update` and require a current
+configuration token. Local prompt/skill/model edits do not call Slack manifest APIs.
+Remove any historical grants of `SLACK_CREW_ADMIN_TOKEN` from sandbox roles or
+principals; it belongs only to the Console-to-Slackbot management connection.
 
-| Scopes | Ingress use |
-| --- | --- |
-| `app_mentions:read`, `chat:write` | Mentions and replies |
-| `assistant:write` | Streaming and assistant status |
-| `channels:history`, `channels:read`, `groups:history`, `groups:read` | Context in conversations the bot belongs to |
-| `im:history`, `im:read`, `im:write`, `mpim:history`, `mpim:read` | DM and group-DM handling |
-| `users:read`, `users:read.email` | Existing requester identity and attribution |
-| `files:read` | Incoming attachments |
+## Permissions and recovery
 
-There are no admin, user-token, channel auto-join, icon impersonation, or
-app-deletion scopes. Slack's [`oauth.v2.access`](https://docs.slack.dev/reference/methods/oauth.v2.access/)
-exchanges an approved install code for the bot token. No automatic Slack
-mutation retries are performed.
+App scopes cover mentions/replies, assistant streaming, conversation history,
+DMs, user identity and incoming files. There are no workspace-admin, user-token,
+channel auto-join, icon-impersonation or app-deletion scopes.
 
-## Boundaries and recovery
+Each app has separate Chat SDK state and session keys:
+`slack:<team>:<app>:<channel>:<thread_ts>`. API resolves only the existing
+Console-provisioned bot principal, never a caller-supplied bot identity or a
+shared channel principal. Webhooks verify the app's own signing secret and
+replies use its own token. Existing requester credential rules still apply.
+Tool-originated uploads and scheduled deliveries retain the deployment Slack identity.
 
-Each app has separate Chat SDK state and durable session keys of the form
-`slack:<team>:<app>:<channel>:<thread_ts>`. The original channel/thread remains
-the delivery destination. The fixed profile overrides inline profile flags.
-Replies use that app's own token and webhooks verify that app's signing secret.
-Existing user/channel connector grants still apply: this does not introduce
-per-bot credential grants or permit prompts to elevate access. Tool-originated
-uploads and scheduled deliveries continue using the deployment's existing Slack
-proxy; only ingress-rendered conversational replies use the new bot identity.
+The permanent bot ID deduplicates app creation. A conflicting definition is
+rejected. Credentials are persisted before installation, and an `installing`
+claim is committed **before** contacting Slack. Explicit Slack rejection leaves
+a known app in `needs_install` so an admin can retry without creating another app.
+A crash, timeout, malformed success, or failed final persistence leaves an
+ambiguous `creating`/`installing` state that requires operator reconciliation;
+do not blindly retry or create under a new ID. Existing active install requests
+are idempotent. Back up both the Slackbot encrypted table and Console profiles,
+and retain the encryption key.
 
-`id` is the durable creation idempotency key. A repeated request with identical
-parameters returns the existing app. A different definition with the same ID
-is rejected. If a process dies after Slack created the app but before persisting
-credentials, the row stays `creating`; **do not create under another ID** without
-checking Slack's app dashboard. An interrupted OAuth exchange stays `installing`.
-These ambiguous states require operator reconciliation; no retry can safely
-recover a lost single-use response. Back up this table with the Chat SDK database
-and retain the encryption key in the deployment secret store.
-
-Model routing, per-member icons, routine editors, and self-service profile
-authoring are separate from this initial identity/installation capability.
+Deploy the Console migration, API and Slackbot changes together. Older Crew
+threads bound to shared channel principals cannot silently change credential
+identity: configure their bot in Console and start a new thread.

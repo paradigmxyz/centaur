@@ -34,15 +34,44 @@ class SlackCrewClient:
         """Read this bot's profile, without credentials or access to other bots."""
         return self._request("GET")
 
-    def edit(self, name: str | None = None, description: str | None = None) -> dict[str, Any]:
-        """Change only this bot's Slack display name or short description."""
+    def edit(
+        self,
+        name: str | None = None,
+        description: str | None = None,
+        *,
+        system_prompt: str | None = None,
+        skills: list[dict[str, str]] | None = None,
+        codex_model: str | None = None,
+        claude_model: str | None = None,
+    ) -> dict[str, Any]:
+        """Edit this bot's behavior; role grants and other bots are inaccessible."""
         fields = {
             key: value
-            for key, value in {"name": name, "description": description}.items()
+            for key, value in {
+                "name": name,
+                "description": description,
+                "system_prompt": system_prompt,
+                "skills": skills,
+            }.items()
             if value is not None
         }
+        if (
+            system_prompt is not None
+            or skills is not None
+            or codex_model is not None
+            or claude_model is not None
+        ):
+            current = self.me()
+            fields["lock_version"] = current["lock_version"]
+            if codex_model is not None or claude_model is not None:
+                models = dict(current["default_models"])
+                if codex_model is not None:
+                    models["codex"] = codex_model
+                if claude_model is not None:
+                    models["claude"] = claude_model
+                fields["default_models"] = models
         if not fields:
-            raise ValueError("Provide a name or description")
+            raise ValueError("Provide at least one field to edit")
         return self._request("PATCH", fields)
 
 

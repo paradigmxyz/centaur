@@ -191,3 +191,10 @@
     @apply min-w-[7rem] flex-1 bg-transparent text-sm text-zinc-50 placeholder-zinc-500 focus:outline-none;
   }
 }
+
+/* Component @apply colors do not inherit the layout's light-theme utility
+   remaps. Keep the Crew editor's labels readable on its white panels. */
+html[data-console-theme="light"] .crew-editor .form-section-heading,
+html[data-console-theme="light"] .crew-editor .form-label {
+  color: #303438;
+}
