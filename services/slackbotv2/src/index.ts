@@ -64,7 +64,7 @@ import {
   personaFallbackNotice,
   reasoningForModel,
   type SlackContextBlock
-} from './console-session-link'
+} from './response-context'
 import { resolveChannelDefault } from './channel-defaults'
 import {
   extractMessageOverrides,
@@ -75,7 +75,8 @@ import { createFlagMessageOverridesStrategy } from './message-overrides-strategy
 import {
   isAllowedSlackMessage,
   isAllowedSlackWebhookBody,
-  parseSlackWebhookPayload
+  parseSlackWebhookPayload,
+  slackStreamRecipientUserId
 } from './slack-events'
 import { isSlackStopCommand } from './stop-command'
 import {
@@ -1265,11 +1266,8 @@ async function syncThreadMessageToSession(
     })
   }
   const effectiveOverrides = resolveStickyThreadOverrides(state, stickyOverridesUpdate)
-  // Slack-only "Open chat in Console" link on the FIRST assistant message in
-  // a thread (the reply to the first message that starts an execution). The
-  // block is undefined when no Console base URL is configured. `thread.id`
-  // (`slack:CHANNEL:THREAD_TS`) is the exact value sent to the session API as
-  // `thread_key`, which the Console indexes by.
+  // The default response-metadata mode renders on the first assistant message
+  // in a thread (the reply to the first message that starts an execution).
   const isFirstAssistantMessage = shouldStartExecution && executedMessageIds.size === 0
   // Channel default: below a per-thread flag, above the deployment default, and
   // (unlike it) ridden on the input line to take effect. harness/model/provider
@@ -1287,6 +1285,22 @@ async function syncThreadMessageToSession(
     stickyOverrideRaw(state, stickyOverridesUpdate, 'provider') === null
       ? undefined
       : effectiveOverrides.provider ?? channelDefault?.provider
+  // A `null` sticky persona means the session was created without one; it is
+  // pinned, so a channel default added later must not apply.
+  const resolvedPersonaId =
+    stickyOverrideRaw(state, stickyOverridesUpdate, 'personaId') === null
+      ? undefined
+      : effectiveOverrides.personaId ?? channelDefault?.personaId
+  // Where the persona sent on session creation came from, for tracing. A pinned
+  // thread persona overrides any later flag (see preservePinnedPersona).
+  const personaSource =
+    resolvedPersonaId === undefined
+      ? undefined
+      : Object.prototype.hasOwnProperty.call(state, 'personaId')
+        ? 'thread'
+        : overrides.personaId
+          ? 'flag'
+          : 'channel'
   const effectiveHarnessType = resolvedHarnessType ?? input.options.defaultHarnessType ?? 'codex'
   // Without an explicit override or channel default the harness runs its
   // configured default (CLAUDE_MODEL/CODEX_MODEL, else the baked harness
@@ -1331,6 +1345,12 @@ async function syncThreadMessageToSession(
       persona_id: overrides.personaId,
       provider: overrides.provider,
       reasoning: overrides.reasoning
+    })
+  }
+  if (shouldStartExecution && personaSource) {
+    traceLog(input.options, 'slackbotv2_forward_persona_resolved', trace, {
+      persona_id: resolvedPersonaId,
+      persona_source: personaSource
     })
   }
   traceLog(input.options, 'slackbotv2_forward_message_serialized', trace, {
@@ -1409,7 +1429,7 @@ async function syncThreadMessageToSession(
     messages: messagesToAppend,
     model: shouldStartExecution ? resolvedModel : undefined,
     metadataModel: shouldStartExecution ? effectiveModel : undefined,
-    personaId: shouldStartExecution ? effectiveOverrides.personaId : undefined,
+    personaId: shouldStartExecution ? resolvedPersonaId : undefined,
     provider: shouldStartExecution ? resolvedProvider : undefined,
     reasoning: resolvedReasoning,
     restartOnHarnessConflict:
@@ -1576,6 +1596,7 @@ async function syncThreadMessageToSession(
           if (requestedPersonaId !== undefined && outcome.personaId !== requestedPersonaId) {
             traceLog(input.options, 'slackbotv2_session_persona_reconciled', trace, {
               requested_persona_id: requestedPersonaId,
+              requested_persona_source: personaSource,
               resolved_persona_id: outcome.personaId,
               unavailable_requested_persona_id: outcome.unavailableRequestedPersonaId
             })
@@ -1607,8 +1628,6 @@ async function syncThreadMessageToSession(
           })
         }
         responseContextBlock = buildSlackResponseContextBlock({
-          consoleBaseUrl: isFirstAssistantMessage ? input.options.consolePublicUrl : undefined,
-          threadKey: thread.id,
           harnessType,
           metadataEnabled: includeResponseMetadata,
           model,
@@ -2707,11 +2726,10 @@ async function renderExecutionStream(
     // author.
     const sent = await thread.adapter.stream!(thread.id, visibleStream, {
       recipientTeamId: message.teamId,
-      recipientUserId: message.author.userId,
+      recipientUserId: await slackStreamRecipientUserId(message.author, options, options.logger ?? noopLogger),
       ...(taskDisplayMode === 'none' ? {} : { taskDisplayMode }),
-      // stopBlocks are appended to the end of the finalized Slack message via
-      // chat.stopStream. The Console link is only included on the first assistant
-      // message; optional response metadata may be appended on every live response.
+      // stopBlocks append optional response metadata to the finalized Slack
+      // message via chat.stopStream.
       ...(responseContextBlock ? { stopBlocks: [responseContextBlock] } : {})
     }) ?? await thread.post(visibleStream)
     return { diverged: capture.diverged, messageId: sent?.id }
@@ -2760,7 +2778,7 @@ async function renderRecoveredExecutionStream(
       visibleStream,
       {
         recipientTeamId: message.teamId,
-        recipientUserId: message.author.userId,
+        recipientUserId: await slackStreamRecipientUserId(message.author, options, options.logger ?? noopLogger),
         ...(taskDisplayMode === 'none' ? {} : { taskDisplayMode })
       }
     ) ?? await thread.post(visibleStream)

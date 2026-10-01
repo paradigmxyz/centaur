@@ -261,6 +261,10 @@ spec:
 {{- end }}
             - name: RUN_MIGRATIONS
               value: {{ .Values.apiRs.runMigrations | quote }}
+{{- if not (hasKey .Values.apiRs.extraEnv "DATABASE_TEXT_SEARCH") }}
+            - name: DATABASE_TEXT_SEARCH
+              value: {{ ternary "paradedb" (default "postgres" .Values.externalDatabase.textSearch) .Values.postgres.enabled | quote }}
+{{- end }}
 {{- if not (hasKey .Values.apiRs.extraEnv "CENTAUR_SESSION_PRINCIPAL_ADMISSION") }}
             - name: CENTAUR_SESSION_PRINCIPAL_ADMISSION
               value: {{ .Values.apiRs.sessionPrincipalAdmission | quote }}
@@ -332,8 +336,6 @@ spec:
               value: {{ .Values.apiRs.sandboxWarmPoolReplenishIntervalSecs | quote }}
             - name: SESSION_SANDBOX_RUNNING_LIMIT
               value: {{ .Values.apiRs.sandboxRunningLimit | quote }}
-            - name: SESSION_SANDBOX_HOT_IDLE_GRACE_SECS
-              value: {{ .Values.apiRs.sandboxHotIdleGraceSecs | quote }}
             - name: SESSION_SANDBOX_MAX_LIFETIME_SECS
               value: {{ .Values.apiRs.sandboxMaxLifetimeSecs | quote }}
             - name: SESSION_SANDBOX_REAP_INTERVAL_SECS
@@ -424,6 +426,14 @@ spec:
               value: {{ .Values.ironProxy.image.pullPolicy | quote }}
             - name: KUBERNETES_IRON_PROXY_UPSTREAM_DENY_CIDRS
               value: {{ join "," .Values.ironProxy.upstreamDenyCidrs | quote }}
+{{- if and (not .Values.postgres.enabled) .Values.externalDatabase.cidrs }}
+            # Per-sandbox iron-proxies forward the tool-server sidecar's pool to
+            # the core database; allow them to reach the external database.
+            - name: KUBERNETES_IRON_PROXY_DATABASE_CIDRS
+              value: {{ join "," .Values.externalDatabase.cidrs | quote }}
+            - name: KUBERNETES_IRON_PROXY_DATABASE_PORT
+              value: {{ .Values.externalDatabase.port | quote }}
+{{- end }}
 {{- if and .Values.ironProxy.resources (not (hasKey .Values.apiRs.extraEnv "KUBERNETES_IRON_PROXY_RESOURCES")) }}
             - name: KUBERNETES_IRON_PROXY_RESOURCES
               value: {{ toJson .Values.ironProxy.resources | quote }}
@@ -508,14 +518,12 @@ spec:
             - name: SESSION_SANDBOX_EXTRA_ENV
               value: {{ $sandboxEnvList | toJson | quote }}
 {{- end }}
-            # console control plane: principals/roles/grants + per-sandbox
-            # proxy sync.
+            # console control plane: principals/roles/grants. Per-sandbox
+            # proxies sync their config from proxy-sync.
             - name: IRON_CONTROL_URL
               value: {{ include "centaur.consoleUrl" . | quote }}
-{{- if .Values.proxySync.enabled }}
             - name: IRON_CONTROL_PROXY_SYNC_URL
               value: {{ include "centaur.proxySyncUrl" . | quote }}
-{{- end }}
             - name: IRON_CONTROL_API_KEY
               valueFrom:
                 secretKeyRef:

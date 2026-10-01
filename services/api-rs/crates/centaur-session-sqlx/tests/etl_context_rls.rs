@@ -5,9 +5,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use centaur_session_sqlx::{TextSearchBackend, migrate};
 use sqlx::{Connection, Executor, PgConnection, Row, postgres::PgConnectOptions};
 
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 static RLS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Debug, PartialEq, Eq)]
@@ -109,21 +109,27 @@ async fn company_context_reader_preserves_scoped_search_behavior() -> Result<(),
 #[tokio::test]
 async fn company_context_reader_scores_multiterm_granola_keyword_results()
 -> Result<(), Box<dyn Error>> {
-    let Some(mut fixture) = RlsTestFixture::create().await? else {
-        return Ok(());
-    };
-    let result = assert_multiterm_granola_keyword_score(&mut fixture.conn).await;
-    fixture.finish(result).await
+    for backend in available_text_search_backends().await? {
+        let Some(mut fixture) = RlsTestFixture::create_with(backend).await? else {
+            return Ok(());
+        };
+        let result = assert_multiterm_granola_keyword_score(&mut fixture.conn, backend).await;
+        fixture.finish(result).await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]
 async fn company_context_reader_scopes_multiterm_granola_keyword_results()
 -> Result<(), Box<dyn Error>> {
-    let Some(mut fixture) = RlsTestFixture::create().await? else {
-        return Ok(());
-    };
-    let result = assert_multiterm_granola_keyword_scope(&mut fixture.conn).await;
-    fixture.finish(result).await
+    for backend in available_text_search_backends().await? {
+        let Some(mut fixture) = RlsTestFixture::create_with(backend).await? else {
+            return Ok(());
+        };
+        let result = assert_multiterm_granola_keyword_scope(&mut fixture.conn, backend).await;
+        fixture.finish(result).await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -328,18 +334,23 @@ async fn assert_company_context_reader_search_behavior(
 
 async fn assert_multiterm_granola_keyword_score(
     conn: &mut PgConnection,
+    backend: TextSearchBackend,
 ) -> Result<(), Box<dyn Error>> {
-    let rows = granola_keyword_search_rows(conn, "viewer@example.com").await?;
+    let rows = granola_keyword_search_rows(conn, backend, "viewer@example.com").await?;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].0, "granola:note:granola_note");
-    assert!(rows[0].1 > 0.0, "matching document must have a BM25 score");
+    assert!(
+        rows[0].1 > 0.0,
+        "matching document must have a {backend} keyword score"
+    );
     Ok(())
 }
 
 async fn assert_multiterm_granola_keyword_scope(
     conn: &mut PgConnection,
+    backend: TextSearchBackend,
 ) -> Result<(), Box<dyn Error>> {
-    let viewer_rows = granola_keyword_search_rows(conn, "viewer@example.com").await?;
+    let viewer_rows = granola_keyword_search_rows(conn, backend, "viewer@example.com").await?;
     assert_eq!(
         viewer_rows
             .iter()
@@ -348,7 +359,7 @@ async fn assert_multiterm_granola_keyword_scope(
         vec!["granola:note:granola_note"]
     );
 
-    let other_rows = granola_keyword_search_rows(conn, "other@example.com").await?;
+    let other_rows = granola_keyword_search_rows(conn, backend, "other@example.com").await?;
     assert_eq!(
         other_rows
             .iter()
@@ -384,6 +395,10 @@ struct RlsTestFixture {
 
 impl RlsTestFixture {
     async fn create() -> Result<Option<Self>, Box<dyn Error>> {
+        Self::create_with(TextSearchBackend::Postgres).await
+    }
+
+    async fn create_with(backend: TextSearchBackend) -> Result<Option<Self>, Box<dyn Error>> {
         let Some(database_url) = test_database_url() else {
             return Ok(None);
         };
@@ -399,7 +414,7 @@ impl RlsTestFixture {
         };
 
         let setup_result = async {
-            MIGRATOR.run(&mut conn).await?;
+            migrate(&mut conn, backend).await?;
             insert_fixture_rows(&mut conn).await?;
             Ok::<(), Box<dyn Error>>(())
         }
@@ -1542,8 +1557,74 @@ async fn company_context_docs(
     Ok(rows)
 }
 
+async fn available_text_search_backends() -> Result<Vec<TextSearchBackend>, Box<dyn Error>> {
+    let Some(database_url) = test_database_url() else {
+        return Ok(Vec::new());
+    };
+    let mut conn = PgConnection::connect(&database_url).await?;
+    let pg_search: bool = sqlx::query_scalar(
+        "select exists (select 1 from pg_available_extensions where name = 'pg_search')",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+    conn.close().await?;
+    Ok(TextSearchBackend::ALL
+        .into_iter()
+        .filter(|backend| pg_search || *backend != TextSearchBackend::Paradedb)
+        .collect())
+}
+
+/// Mirrors the company-context tool's multi-term keyword query per backend.
+fn granola_keyword_search_sql(backend: TextSearchBackend) -> &'static str {
+    match backend {
+        TextSearchBackend::Paradedb => {
+            r#"
+            select document_id, paradedb.score(document_id) as score
+            from granola_context_documents
+            where (
+                (title ||| $1::text::pdb.boost(8) or body ||| $1::text::pdb.boost(2))
+                or (title ||| $2::text::pdb.boost(4) or body ||| $2::text)
+                or (title ||| $3::text::pdb.boost(4) or body ||| $3::text)
+            )
+            and ($4::timestamptz is null or occurred_at >= $4)
+            and ($5::timestamptz is null or occurred_at < $5)
+            order by paradedb.score(document_id) desc
+            limit $6
+            "#
+        }
+        TextSearchBackend::Postgres => {
+            r#"
+            select
+                document_id,
+                (
+                    ts_rank(
+                        '{0.25, 0, 0, 1}',
+                        search_vector,
+                        replace(plainto_tsquery('english', $1)::text, ' & ', ' | ')::tsquery,
+                        1
+                    )
+                    + ts_rank(
+                        '{0.25, 0, 0, 1}',
+                        search_vector,
+                        phraseto_tsquery('english', $1),
+                        1
+                    )
+                )::real as score
+            from granola_context_documents
+            where search_vector
+                @@ replace(plainto_tsquery('english', $1)::text, ' & ', ' | ')::tsquery
+            and ($2::timestamptz is null or occurred_at >= $2)
+            and ($3::timestamptz is null or occurred_at < $3)
+            order by score desc
+            limit $4
+            "#
+        }
+    }
+}
+
 async fn granola_keyword_search_rows(
     conn: &mut PgConnection,
+    backend: TextSearchBackend,
     user_email: &str,
 ) -> Result<Vec<(String, f32)>, sqlx::Error> {
     let mut tx = conn.begin().await?;
@@ -1563,29 +1644,17 @@ async fn granola_keyword_search_rows(
         .midnight()
         .assume_utc();
 
-    let rows = sqlx::query_as(
-        r#"
-        select document_id, paradedb.score(document_id) as score
-        from granola_context_documents
-        where (
-            (title ||| $1::text::pdb.boost(8) or body ||| $1::text::pdb.boost(2))
-            or (title ||| $2::text::pdb.boost(4) or body ||| $2::text)
-            or (title ||| $3::text::pdb.boost(4) or body ||| $3::text)
-        )
-        and ($4::timestamptz is null or occurred_at >= $4)
-        and ($5::timestamptz is null or occurred_at < $5)
-        order by paradedb.score(document_id) desc
-        limit $6
-        "#,
-    )
-    .bind("project planning")
-    .bind("project")
-    .bind("planning")
-    .bind(occurred_after)
-    .bind(occurred_before)
-    .bind(10_i64)
-    .fetch_all(&mut *tx)
-    .await?;
+    let query = sqlx::query_as(granola_keyword_search_sql(backend)).bind("project planning");
+    let query = match backend {
+        TextSearchBackend::Paradedb => query.bind("project").bind("planning"),
+        TextSearchBackend::Postgres => query,
+    };
+    let rows = query
+        .bind(occurred_after)
+        .bind(occurred_before)
+        .bind(10_i64)
+        .fetch_all(&mut *tx)
+        .await?;
 
     tx.execute("reset role").await?;
     tx.rollback().await?;

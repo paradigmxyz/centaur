@@ -19,7 +19,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     [ root_url, console_principals_url, console_roles_url, console_secrets_url,
       console_credentials_url, console_oauth_apps_url ].each do |url|
       get url
-      assert_redirected_to console_threads_path
+      assert_redirected_to console_integrations_path
       assert_nil flash[:alert]
     end
   end
@@ -31,7 +31,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_no_difference -> { Role.count } do
       post console_roles_url, params: { role: { foreign_id: "sneaky" } }
     end
-    assert_redirected_to console_threads_path
+    assert_redirected_to console_integrations_path
   end
 
   test "secrets table combines kinds and links names to detail" do

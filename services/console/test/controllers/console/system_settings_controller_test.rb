@@ -14,7 +14,7 @@ module Console
     test "non-admin users cannot edit settings" do
       sign_in users(:member_user)
       get edit_console_system_settings_url
-      assert_redirected_to console_threads_path
+      assert_redirected_to console_integrations_path
     end
 
     test "admin can edit system settings" do

@@ -7,6 +7,9 @@ class Skill < ApplicationRecord
   MAX_DOCUMENT_BYTES = 64.kilobytes
   NAME_FORMAT = /\A[a-z0-9]+(?:-[a-z0-9]+)*\z/
   RESERVED_NAMES = %w[search].freeze
+  # Match any query term, like keyword search, instead of plainto_tsquery's
+  # all-terms default. Lexemes never contain spaces, so only operators change.
+  SEARCH_QUERY = "replace(plainto_tsquery('english', ?)::text, ' & ', ' | ')::tsquery"
 
   belongs_to :user
   has_many :skill_editors, dependent: :destroy
@@ -47,14 +50,10 @@ class Skill < ApplicationRecord
     normalized = query.to_s.strip
     return none if normalized.blank?
 
-    quoted = connection.quote(normalized)
-    where(<<~SQL.squish)
-      skills.name ||| #{quoted}::text::pdb.boost(8)
-      OR skills.description ||| #{quoted}::text::pdb.boost(4)
-      OR skills.content ||| #{quoted}
-    SQL
-      .order(Arel.sql("(lower(skills.name) = lower(#{quoted})) DESC"))
-      .order(Arel.sql("paradedb.score(skills.id) DESC"))
+    # search_vector weights name, description, and content as A, B, and C.
+    where("skills.search_vector @@ #{SEARCH_QUERY}", normalized)
+      .order(Arel.sql(sanitize_sql_array([ "lower(skills.name) = lower(?) DESC", normalized ])))
+      .order(Arel.sql(sanitize_sql_array([ "ts_rank(skills.search_vector, #{SEARCH_QUERY}) DESC", normalized ])))
       .order(updated_at: :desc, id: :asc)
   end
 

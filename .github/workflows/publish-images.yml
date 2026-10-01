@@ -51,13 +51,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [api-rs, proxy-sync, slackbotv2, linearbot, discordbot, githubbot, teamsbot, agent, iron-proxy, console]
+        service: [api-rs, company-context, proxy-sync, slackbotv2, linearbot, discordbot, githubbot, teamsbot, agent, iron-proxy, console]
         platform: ${{ github.event_name == 'push' && fromJSON('["linux/amd64", "linux/arm64"]') || fromJSON('["linux/amd64"]') }}
         include:
           - service: api-rs
             image: centaur-api-rs
             context: .
             dockerfile: services/api-rs/Dockerfile
+            target: ""
+          - service: company-context
+            image: centaur-company-context
+            context: .
+            dockerfile: services/company-context/Dockerfile
             target: ""
           - service: proxy-sync
             image: centaur-proxy-sync
@@ -179,6 +184,7 @@ jobs:
       matrix:
         include:
           - image: centaur-api-rs
+          - image: centaur-company-context
           - image: centaur-proxy-sync
           - image: centaur-slackbotv2
           - image: centaur-linearbot

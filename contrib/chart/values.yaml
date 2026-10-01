@@ -110,9 +110,6 @@ console:
   # Public URL users reach in a browser (e.g. https://console.example.com), used
   # as CENTAUR_CONSOLE_PUBLIC_URL. Set this when console is exposed behind
   # Tailscale/Ingress so MCP OAuth issuer metadata and JWT validation agree.
-  # When set and console.chat.enabled is true, the slackbotv2 deployment also
-  # links the first assistant message in a Slack thread to the Console session
-  # view. Leave empty to omit the link.
   publicUrl: ""
   # Additional exact Host headers accepted by Rails Host Authorization. Use for
   # service DNS names that differ from the chart's short in-cluster URL;
@@ -124,16 +121,6 @@ console:
   # Break-glass email/password login. Disable when console is reachable from
   # the public internet and SSO is configured.
   passwordLoginEnabled: true
-  # Console's browser-based chat UI is deprecated and will be removed in
-  # October. Disable it to hide chat navigation and reject its HTTP routes.
-  chat:
-    enabled: true
-  # When enabled, every authenticated Console user can browse conversations
-  # originating in public Slack channels. Private channels and DMs remain
-  # owner-only. Requires apiRs.etl.slack.enabled so channel privacy is synced;
-  # visibility fails closed without that catalog. Individual chats can still
-  # be shared by their owner from the Threads UI.
-  publicSlackThreadsEnabled: false
   # Optional SSO admission policy. When non-empty, only identities whose email
   # domain matches this list can sign in through Google, Slack, or Okta.
   ssoEmailDomains: []
@@ -228,34 +215,6 @@ console:
     nodeSelector: {}
     affinity: {}
     tolerations: []
-    resources: {}
-  # Prometheus SQL Exporter for Console database metrics, initially Solid Queue.
-  # This runs as one internal-only replica because every instance would report
-  # the same global database state. The exporter reads a dedicated, read-only DSN
-  # from secretManager.existingSecretName without writing the credential into
-  # its ConfigMap or command-line arguments.
-  sqlExporter:
-    # Enable after CONSOLE_SQLEXPORTER_DATABASE_URL has been added to the
-    # shared infra Secret and its PostgreSQL role has been granted SELECT on
-    # every table queried by a configured collector.
-    enabled: false
-    image:
-      repository: burningalchemist/sql_exporter
-      tag: 0.24.4
-      pullPolicy: IfNotPresent
-    port: 9399
-    # Key in secretManager.existingSecretName containing the complete database
-    # URL for a dedicated read-only PostgreSQL role.
-    databaseUrlSecretKey: CONSOLE_SQLEXPORTER_DATABASE_URL
-    # Used by NetworkPolicy when postgres.enabled=false and the queue database
-    # is externally managed.
-    databasePort: 5432
-    minInterval: 15s
-    scrapeTimeout: 5s
-    metrics:
-      scrapeAnnotations: true
-      path: /metrics
-      annotations: {}
     resources: {}
 
 # Values for the upstream 1Password Connect subchart
@@ -460,12 +419,10 @@ agentSandbox:
   controller:
     extensions: false
 
-# Rust proxy sync endpoint. When enabled, api-rs directs managed iron-proxy
-# instances here for POST /api/v1/proxy/sync while all operator/admin traffic
-# continues to use Console. The service reads Console's database directly.
-# This component is under active development and must not be used yet.
+# Rust proxy sync endpoint. api-rs directs managed iron-proxy instances here
+# for POST /api/v1/proxy/sync while all operator/admin traffic continues to use
+# Console. The service reads Console's database directly.
 proxySync:
-  enabled: false
   # Two replicas keep sync available during pod restarts and rolling updates.
   replicaCount: 2
   nodeSelector: {}
@@ -480,6 +437,46 @@ proxySync:
   metrics:
     # proxy-sync serves Prometheus text metrics at /metrics. This flag only
     # controls scrape annotations for Prometheus/VictoriaMetrics-style discovery.
+    scrapeAnnotations: true
+    path: /metrics
+    annotations: {}
+  resources: {}
+
+# Standalone company-context ingestion service. It indexes Google Docs and PDFs
+# from Google Drive and Granola meeting notes into its private system and data
+# schemas. Disabled while the corpus is validated alongside the legacy Python
+# workflows.
+experimentalCompanyContext:
+  enabled: false
+  replicaCount: 1
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  image:
+    repository: centaur-company-context
+    tag: latest
+    pullPolicy: Always
+  port: 8080
+  # Rails Console OAuth app whose live per-user Google broker credentials are
+  # synchronized. The embeddings API key comes from OPENAI_API_KEY in the
+  # shared Kubernetes Secret.
+  googleOauthAppSlug: google
+  # Rails Console OAuth app whose live per-user Granola MCP credentials are
+  # synchronized.
+  granolaOauthAppSlug: granola
+  scanIntervalSeconds: 300
+  granolaSyncIntervalSeconds: 1800
+  drivePageSize: 100
+  maxScanPages: 10
+  maxPdfBytes: 26214400
+  maxExtractedBytes: 52428800
+  extractionTimeoutSeconds: 120
+  chunkChars: 6000
+  workerConcurrency: 4
+  embeddingsModel: text-embedding-3-small
+  embeddingsDimensions: 1536
+  extraEnv: {}
+  metrics:
     scrapeAnnotations: true
     path: /metrics
     annotations: {}
@@ -513,9 +510,9 @@ apiRs:
   # Controls whether a missing automatically derived session principal may be
   # created. "preapproved" admits only principals already present in the
   # Console; missing requester principals are omitted rather than created.
-  # HTTP ingress families with unpredictable per-thread principals, including
-  # new Console chats, are incompatible with preapproved mode. Internal
-  # workflow/MCP sessions use separate principal-provisioning paths.
+  # HTTP ingress families with unpredictable per-thread principals are
+  # incompatible with preapproved mode. Internal workflow/MCP sessions use
+  # separate principal-provisioning paths.
   sessionPrincipalAdmission: automatic
   # Expose the experimental centaur MCP dispatcher (currently action=list).
   mcpV2Enabled: false
@@ -524,11 +521,10 @@ apiRs:
   sandboxReadyTimeoutSecs: 90
   sandboxWarmPoolSize: 3
   sandboxWarmPoolReplenishIntervalSecs: 5
-  # Capacity manager: when nonzero, api-rs keeps observed running-like
-  # sandboxes at or below this limit by discarding ready warm sandboxes first,
-  # then pausing least-recently-active idle session sandboxes. 0 disables.
+  # Best-effort admission gate: when nonzero, api-rs rejects sandbox creates
+  # and resumes at or above this observed running count, excluding ready warm
+  # sandboxes. Existing sandboxes are never evicted. 0 disables.
   sandboxRunningLimit: 0
-  sandboxHotIdleGraceSecs: 300
   # When true, api-rs upserts the shared iron-control infra role and its
   # backing secrets at startup and on tool-secret reconciliation intervals.
   # Set false when multiple Centaur instances share one console/1Password
@@ -701,18 +697,20 @@ slackbotv2:
   mcpPublicUrl: "http://localhost:3000"
   externalOrgAllowlist: ""
   triggerBotAllowlist: ""
-  # Per-channel default harness / model / provider / reasoning, keyed by Slack
-  # conversation id (the C…/G…/D… id). Each value is an object of optional
-  # harness / model / provider / reasoning fields, using the same vocabulary as
+  # Per-channel default persona / harness / model / provider / reasoning, keyed
+  # by Slack conversation id (the C…/G…/D… id). Each value is an object of
+  # optional persona / harness / model / provider / reasoning fields, using the same vocabulary as
   # the inline Slack flags (harness: claude|codex|nanocodex|amp, provider: bedrock|meta,
   # model accepts Claude aliases like opus). A model is only meaningful within a
   # harness, so name the harness alongside it. Applied when a message in that
   # channel carries no explicit/sticky per-thread flag, below such a flag and
   # above the deployment/baked harness default, and forwarded onto the harness
   # input line so it takes effect. reasoning only affects the codex harness.
+  # persona names a deployed persona and applies when a thread's session is
+  # created, like --persona.
   # Example:
   #   channelDefaults:
-  #     C0ENG: { harness: claude, model: opus, reasoning: high }
+  #     C0ENG: { persona: eng, harness: claude, model: opus, reasoning: high }
   #     C0TRIAGE: { reasoning: low }
   channelDefaults: {}
   # Message overrides strategy for Slack message text. "flags" keeps the legacy
@@ -847,6 +845,8 @@ teamsbot:
   extraEnv: {}
   resources: {}
 
+# Bundled PostgreSQL. Set enabled=false to use an external server such as RDS
+# or Cloud SQL, and configure externalDatabase.
 postgres:
   enabled: true
   # Scheduling for the PostgreSQL pod. When persistence is enabled, ensure the
@@ -883,6 +883,26 @@ postgres:
     sizeLimit: 1Gi
   resources: {}
 
+# External PostgreSQL, used when postgres.enabled=false. Database URLs come from
+# secretManager.existingSecretName; these settings scope NetworkPolicy egress.
+externalDatabase:
+  # Address ranges the database endpoint can resolve to. Control-plane pods and
+  # per-sandbox iron-proxies may reach only these ranges on port. NetworkPolicy
+  # cannot match hostnames: use the RDS DB subnet group's CIDRs (the endpoint IP
+  # moves on failover) or the Cloud SQL private IP as a /32. Required when
+  # networkPolicy.enabled=true; must be empty while postgres.enabled=true.
+  cidrs: []
+  #   - 10.0.32.0/20
+  port: 5432
+  # Keyword search backend for company context. "postgres" (used when empty)
+  # uses built-in full-text search and works on RDS and Cloud SQL; "paradedb"
+  # uses BM25 and requires the pg_search extension. Must be empty while
+  # postgres.enabled=true: the bundled Postgres always uses "paradedb". A
+  # database keeps the backend it was first migrated with, and migrations fail
+  # if this setting later disagrees. To change backends, migrate a fresh
+  # database and move the data into it; see the production deployment guide.
+  textSearch: ""
+
 ingress:
   enabled: false
   className: ""
@@ -899,10 +919,6 @@ networkPolicy:
   enabled: true
   ingressSourceNamespaces: []
   apiIngressSourceNamespaces: []
-  # Namespaces containing Prometheus-compatible collectors that may scrape
-  # internal metrics-only Services such as the Console queue SQL Exporter.
-  # Same-namespace collectors are always admitted.
-  metricsIngressSourceNamespaces: []
   ingressControllerNamespaces:
     - kube-system
   # Port the kubernetes.default ClusterIP forwards to for the API server. The

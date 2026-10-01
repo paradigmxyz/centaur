@@ -144,16 +144,20 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                 input,
                 client_user_message_id,
                 model,
-                // Provider selection and reasoning effort only apply to the codex
-                // harness; the emulated (claude/amp) app-server has no equivalent
-                // knob (its provider is fixed at thread start from session params).
+                // Provider selection only applies to the codex harness; the
+                // emulated (claude/amp) app-server fixes its provider at thread
+                // start from session params. Reasoning effort is applied by
+                // per turn by harnesses that support it.
                 provider: _,
-                reasoning: _,
+                reasoning,
                 trace_context,
             }) => {
                 if let Some(model) = model {
                     state.model = model;
                 }
+                state.reasoning_effort = reasoning
+                    .as_deref()
+                    .and_then(|reasoning| harness.reasoning_effort(reasoning));
                 let result = run_blocks_turn(
                     harness,
                     &mut state,
@@ -967,6 +971,13 @@ fn handle_request<H: HarnessServer, W: Write>(
                     thread_id: params.thread_id.clone(),
                 }
             })?;
+            let effort = match &params.effort {
+                Some(effort) => serde_json::to_value(effort)?.as_str().map(str::to_owned),
+                None => None,
+            };
+            state.reasoning_effort = effort
+                .as_deref()
+                .and_then(|effort| harness.reasoning_effort(effort));
             let turn_id = format!("turn-{}", Uuid::new_v4().simple());
             let mut normalizer = normalizer_for(harness, state, &turn_id);
             let response = TurnStartResponse {
@@ -1053,6 +1064,7 @@ fn resumed_thread_state<H: HarnessServer>(
             .clone()
             .unwrap_or_else(|| harness.default_model_provider().to_string()),
         service_tier: params.service_tier.clone().flatten(),
+        reasoning_effort: None,
         harness_session_id: Some(params.thread_id.clone()),
         completed_turns: Vec::new(),
         process: None,
@@ -1300,6 +1312,13 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
         // late `result` (and trailing rate-limit noise) behind, which would
         // otherwise read as this turn's instant terminal.
         while process.stdout.try_recv().is_ok() {}
+        if process.reasoning_effort != state.reasoning_effort {
+            let effort = state.reasoning_effort.as_deref();
+            process
+                .stdin
+                .write_all(&harness.stdin_for_reasoning_effort(effort)?)?;
+            process.reasoning_effort = state.reasoning_effort.clone();
+        }
         process.stdin.write_all(&harness.stdin_for_turn(input)?)?;
         process.stdin.flush()?;
     }
@@ -1500,6 +1519,7 @@ fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState
         child,
         stdin,
         stdout: stdout_rx,
+        reasoning_effort: None,
     });
     Ok(())
 }

@@ -1,0 +1,157 @@
+{{- $companyContext := .Values.experimentalCompanyContext }}
+{{- if $companyContext.enabled }}
+{{- $name := include "centaur.componentName" (dict "root" . "component" "company-context") }}
+{{- $secretEnv := include "centaur.secretEnvName" . }}
+{{- $prefix := .Values.secretManager.envPrefix }}
+{{- $console := include "centaur.consoleValues" . | fromYaml }}
+{{- $metricsAnnotations := dict -}}
+{{- if $companyContext.metrics.scrapeAnnotations -}}
+{{- $metricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" $companyContext.metrics.path "prometheus.io/port" (printf "%v" $companyContext.port) -}}
+{{- $metricsAnnotations = mergeOverwrite $metricsAnnotations ($companyContext.metrics.annotations | default dict) -}}
+{{- end -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "company-context") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "company-context") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $companyContext.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "company-context") | nindent 4 }}
+spec:
+  replicas: {{ $companyContext.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "company-context") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+{{- with $metricsAnnotations }}
+{{ toYaml . | nindent 8 }}
+{{- end }}
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "company-context") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+{{- include "centaur.podScheduling" (dict "values" $companyContext "indent" 6) }}
+      containers:
+        - name: company-context
+          image: {{ printf "%s:%s" $companyContext.image.repository $companyContext.image.tag | quote }}
+          imagePullPolicy: {{ $companyContext.image.pullPolicy }}
+          env:
+            - name: BIND_ADDR
+              value: {{ printf "0.0.0.0:%v" $companyContext.port | quote }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sDATABASE_URL" $prefix }}
+            - name: IRON_CONTROL_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_DATABASE_URL" $prefix }}
+            - name: IRON_CONTROL_DATABASE_NAME
+              value: {{ $console.database.name | quote }}
+            - name: IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY" $prefix }}
+            - name: IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT" $prefix }}
+            - name: COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG
+              value: {{ $companyContext.googleOauthAppSlug | quote }}
+            - name: COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG
+              value: {{ $companyContext.granolaOauthAppSlug | quote }}
+            - name: COMPANY_CONTEXT_GRANOLA_SYNC_INTERVAL_SECONDS
+              value: {{ $companyContext.granolaSyncIntervalSeconds | quote }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sOPENAI_API_KEY" $prefix }}
+            - name: COMPANY_CONTEXT_SCAN_INTERVAL_SECONDS
+              value: {{ $companyContext.scanIntervalSeconds | quote }}
+            - name: COMPANY_CONTEXT_DRIVE_PAGE_SIZE
+              value: {{ $companyContext.drivePageSize | quote }}
+            - name: COMPANY_CONTEXT_MAX_SCAN_PAGES
+              value: {{ $companyContext.maxScanPages | quote }}
+            - name: COMPANY_CONTEXT_MAX_PDF_BYTES
+              value: {{ $companyContext.maxPdfBytes | int64 | quote }}
+            - name: COMPANY_CONTEXT_MAX_EXTRACTED_BYTES
+              value: {{ $companyContext.maxExtractedBytes | int64 | quote }}
+            - name: COMPANY_CONTEXT_EXTRACTION_TIMEOUT_SECONDS
+              value: {{ $companyContext.extractionTimeoutSeconds | quote }}
+            - name: COMPANY_CONTEXT_CHUNK_CHARS
+              value: {{ $companyContext.chunkChars | quote }}
+            - name: COMPANY_CONTEXT_WORKER_CONCURRENCY
+              value: {{ $companyContext.workerConcurrency | quote }}
+            - name: COMPANY_CONTEXT_EMBEDDINGS_MODEL
+              value: {{ $companyContext.embeddingsModel | quote }}
+            - name: COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS
+              value: {{ $companyContext.embeddingsDimensions | quote }}
+            - name: RUST_LOG
+              value: info
+{{- range $name, $value := $companyContext.extraEnv }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+{{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $companyContext.port }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+{{ toYaml $companyContext.resources | nindent 12 }}
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "company-context") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "company-context") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: {{ $companyContext.port }}
+  egress:
+    {{- include "centaur.postgresEgress" . | nindent 4 }}
+    - ports:
+        - protocol: TCP
+          port: 443
+{{- end }}
+{{- end }}

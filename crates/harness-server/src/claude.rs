@@ -5,12 +5,16 @@ use std::time::Duration;
 
 use codex_app_server_protocol::UserInput;
 use serde_json::json;
+use uuid::Uuid;
 
 use crate::{
     HarnessKind, HarnessServer, NormalizedContent, NormalizedEvent, Result, ThreadState,
     anthropic::{AnthropicEventNormalizer, AnthropicStreamEvent},
     command_from_override, user_input_to_anthropic_content,
 };
+
+/// Effort levels Claude Code accepts for its `effortLevel` setting.
+const CLAUDE_EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
 /// Defers agent text until the owning message's fate is known, so agentMessage
 /// items can be emitted with an authoritative stop reason. Claude's per-block
@@ -260,6 +264,32 @@ impl HarnessServer for ClaudeCodeHarness {
             "message": {
                 "role": "user",
                 "content": user_input_to_anthropic_content(input),
+            },
+        });
+        let mut bytes = serde_json::to_vec(&payload)?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+
+    fn reasoning_effort(&self, requested: &str) -> Option<String> {
+        let effort = requested.trim().to_ascii_lowercase();
+        if CLAUDE_EFFORT_LEVELS.contains(&effort.as_str()) {
+            return Some(effort);
+        }
+        eprintln!("ignoring unsupported Claude Code effort level {requested:?}");
+        None
+    }
+
+    /// The Claude process outlives each turn, so effort is applied in-band
+    /// with an `apply_flag_settings` control request ahead of the turn's user
+    /// message. A `null` effortLevel restores the configured default.
+    fn stdin_for_reasoning_effort(&self, effort: Option<&str>) -> Result<Vec<u8>> {
+        let payload = json!({
+            "type": "control_request",
+            "request_id": format!("effort-{}", Uuid::new_v4().simple()),
+            "request": {
+                "subtype": "apply_flag_settings",
+                "settings": { "effortLevel": effort },
             },
         });
         let mut bytes = serde_json::to_vec(&payload)?;
@@ -558,5 +588,38 @@ mod tests {
         assert!(value.get("steer").is_none());
         assert_eq!(value["message"]["role"], "user");
         assert_eq!(value["message"]["content"][0]["text"], "new guidance");
+    }
+
+    #[test]
+    fn normalizes_claude_code_effort_levels() {
+        assert_eq!(
+            ClaudeCodeHarness.reasoning_effort(" High ").as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            ClaudeCodeHarness.reasoning_effort("max").as_deref(),
+            Some("max")
+        );
+        for effort in ["minimal", "none", "ultra"] {
+            assert_eq!(ClaudeCodeHarness.reasoning_effort(effort), None, "{effort}");
+        }
+    }
+
+    #[test]
+    fn effort_is_applied_with_a_flag_settings_control_request() {
+        for (effort, level) in [(Some("max"), json!("max")), (None, Value::Null)] {
+            let bytes = ClaudeCodeHarness
+                .stdin_for_reasoning_effort(effort)
+                .unwrap();
+            assert_eq!(bytes.last(), Some(&b'\n'));
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+
+            assert_eq!(value["type"], "control_request");
+            assert!(value["request_id"].as_str().unwrap().starts_with("effort-"));
+            assert_eq!(
+                value["request"],
+                json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": level}})
+            );
+        }
     }
 }

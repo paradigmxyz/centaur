@@ -252,8 +252,7 @@
         font-weight: 500;
       }
 
-      /* Keep stacked group tabs (Scheduled / Workflows / New chat / Chats) on the same
-         0.125rem rhythm as the nav rows above them. */
+      /* Keep stacked group tabs on the same 0.125rem rhythm as the nav rows above them. */
       .console-thread-group + .console-thread-group {
         margin-top: 0.125rem;
       }
@@ -280,423 +279,6 @@
       .console-thread-group-title-active {
         background: rgba(255, 255, 255, 0.07);
         color: #3ace79;
-      }
-
-      .console-thread-list {
-        display: grid;
-        gap: 0.3rem;
-        margin-top: 0.3rem;
-      }
-
-      .console-thread-link {
-        position: relative;
-        display: grid;
-        min-width: 0;
-        grid-template-columns: minmax(0, 1fr) auto;
-        align-items: center;
-        gap: 0.5rem;
-        border-radius: 0.875rem;
-        padding: 0.55rem 0.75rem 0.55rem 2.5rem;
-        color: #d4d4d8;
-        text-decoration: none;
-        transition: background 120ms ease, color 120ms ease;
-      }
-
-      /* An open thread: bright title plus a marker in the indent gutter — no
-         filled pill on thread rows. A single open thread gets a dot; once a
-         second pane opens, rows carry data-console-pane-index and the marker
-         becomes the pane number in grid order. */
-      .console-thread-link-open {
-        color: #f4f4f5;
-      }
-
-      .console-thread-link-open::before {
-        content: "";
-        position: absolute;
-        top: 50%;
-        left: 1.35rem;
-        height: 0.3rem;
-        width: 0.3rem;
-        transform: translateY(-50%);
-        border-radius: 999px;
-        background: #28c26a;
-      }
-
-      .console-thread-link-open[data-console-pane-index]::before {
-        content: attr(data-console-pane-index);
-        left: 1.05rem;
-        height: auto;
-        width: auto;
-        border-radius: 0;
-        background: none;
-        color: #3ace79;
-        font-size: 0.6875rem;
-        font-weight: 700;
-        line-height: 1;
-      }
-
-      .console-thread-link:hover {
-        background: rgba(255, 255, 255, 0.045);
-        color: #f4f4f5;
-      }
-
-      .console-thread-link-active {
-        background: rgba(255, 255, 255, 0.07);
-        color: #f4f4f5;
-      }
-
-      .console-thread-link-hidden {
-        display: none;
-      }
-
-      .console-thread-title {
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        font-size: 0.875rem;
-        font-weight: 500;
-      }
-
-      .console-thread-time {
-        color: #71717a;
-        font-size: 0.75rem;
-      }
-
-      .console-panel-close {
-        display: grid;
-        height: 1.75rem;
-        width: 1.75rem;
-        flex: 0 0 auto;
-        place-items: center;
-        border-radius: 0.5rem;
-        color: #71717a;
-        transition: background 120ms ease, color 120ms ease;
-      }
-
-      .console-panel-close:hover {
-        background: rgba(255, 255, 255, 0.08);
-        color: #f4f4f5;
-      }
-
-      .console-thread-share-wrap {
-        position: relative;
-        flex: 0 0 auto;
-      }
-
-      .console-thread-share-trigger {
-        display: grid;
-        height: 1.75rem;
-        width: 1.75rem;
-        cursor: pointer;
-        place-items: center;
-        border-radius: 0.5rem;
-        color: #71717a;
-        transition: background 120ms ease, color 120ms ease;
-      }
-
-      .console-thread-share-trigger:hover {
-        background: rgba(255, 255, 255, 0.08);
-        color: #f4f4f5;
-      }
-
-      .console-share-dialog {
-        width: min(28rem, calc(100vw - 2rem));
-        margin: auto;
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 0.875rem;
-        background: #101012;
-        color: #d4d4d8;
-        padding: 0;
-        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.58);
-      }
-
-      .console-share-dialog::backdrop {
-        background: rgba(0, 0, 0, 0.66);
-        backdrop-filter: blur(2px);
-      }
-
-      .console-share-dialog-copy {
-        padding: 1.5rem 1.5rem 1.25rem;
-      }
-
-      .console-share-dialog-copy h2 {
-        color: #f4f4f5;
-        font-size: 1rem;
-        font-weight: 600;
-      }
-
-      .console-share-dialog-copy > p:not(.console-share-dialog-error) {
-        margin-top: 0.75rem;
-        color: #a1a1aa;
-        font-size: 0.875rem;
-        line-height: 1.5;
-      }
-
-      .console-share-dialog-error {
-        margin-top: 0.75rem;
-        color: #fca5a5;
-        font-size: 0.75rem;
-      }
-
-      .console-share-dialog-actions {
-        display: flex;
-        justify-content: flex-end;
-        gap: 0.75rem;
-        border-top: 1px solid rgba(255, 255, 255, 0.08);
-        padding: 1rem 1.5rem;
-      }
-
-      .console-share-dialog-actions .btn-primary,
-      .console-share-dialog-actions .btn-secondary {
-        min-width: 6.5rem;
-        padding-top: 0.5rem;
-        padding-bottom: 0.5rem;
-        text-align: center;
-      }
-
-      .console-share-dialog-actions .btn-primary:disabled {
-        cursor: wait;
-        opacity: 0.6;
-      }
-
-      .console-thinking {
-        min-width: 0;
-        padding: 0.125rem 0;
-      }
-
-      .console-thinking-summary {
-        display: flex;
-        min-width: 0;
-        align-items: center;
-        gap: 0.4rem;
-        cursor: pointer;
-        list-style: none;
-        user-select: none;
-        color: #8b8b94;
-        font-size: 0.8125rem;
-        line-height: 1.35;
-        border-radius: 0.5rem;
-        padding: 0.2rem 0.5rem;
-        margin: -0.2rem -0.5rem;
-        transition: background 120ms ease, color 120ms ease;
-      }
-
-      .console-thinking-summary::-webkit-details-marker {
-        display: none;
-      }
-
-      .console-thinking-summary:focus,
-      .console-thinking-command-row:focus {
-        outline: none;
-      }
-
-      .console-thinking-summary:focus-visible,
-      .console-thinking-command-row:focus-visible {
-        outline: none;
-      }
-
-      .console-thinking-summary:hover {
-        background: rgba(255, 255, 255, 0.045);
-        color: #c4c4cc;
-      }
-
-      .console-thinking-chevron {
-        display: grid;
-        flex: 0 0 auto;
-        margin-left: 0.125rem;
-        place-items: center;
-        /* Optical centering: settle the arrow onto the lowercase x-band that
-           dominates the row text (geometric center reads slightly high). */
-        position: relative;
-        top: 1px;
-        transition: transform 120ms ease;
-      }
-
-      .console-thinking[open] .console-thinking-chevron {
-        transform: rotate(90deg);
-      }
-
-      .console-thinking-preview {
-        flex: 1 1 auto;
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        color: #6f7078;
-      }
-
-      .console-thinking-title {
-        flex: 0 0 auto;
-        color: #d4d4d8;
-        font-weight: 500;
-        white-space: nowrap;
-      }
-
-      .console-thinking-failed,
-      .console-command-status {
-        color: #f87171;
-      }
-
-      /* The comma hugs the group title: pull the label back across the flex
-         gap so it reads "Ran 2 commands, 1 failed". */
-      .console-thinking-failed {
-        flex: 0 0 auto;
-        margin-left: -0.4rem;
-        white-space: nowrap;
-      }
-
-      .console-thinking-failed::before {
-        content: ",";
-        color: #8b8b94;
-        margin-right: 0.35rem;
-      }
-
-      .console-thinking[open] .console-thinking-preview {
-        display: none;
-      }
-
-      .console-thinking-body {
-        margin-top: 0.35rem;
-        color: #8b8b94;
-      }
-
-      /* Roomy enough that adjacent rows' hover pills (which extend 0.2rem
-         beyond their row) don't touch. */
-      .console-thinking-command-list {
-        display: grid;
-        gap: 0.4rem;
-        margin-top: 0.55rem;
-      }
-
-      .console-thinking-command {
-        min-width: 0;
-      }
-
-      .console-thinking-command-row {
-        display: flex;
-        min-width: 0;
-        align-items: baseline;
-        gap: 0.45rem;
-        cursor: pointer;
-        list-style: none;
-        color: #a1a1aa;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-        font-size: 0.8125rem;
-        line-height: 1.45;
-        user-select: none;
-        border-radius: 0.5rem;
-        padding: 0.2rem 0.5rem;
-        margin: -0.2rem -0.5rem;
-        transition: background 120ms ease, color 120ms ease;
-      }
-
-      .console-thinking-command-row::-webkit-details-marker {
-        display: none;
-      }
-
-      .console-thinking-command-row:hover {
-        background: rgba(255, 255, 255, 0.045);
-        color: #d4d4d8;
-      }
-
-      .console-command-prompt {
-        flex: 0 0 auto;
-        color: #71717a;
-      }
-
-      .console-command-prompt--failed {
-        color: #fb7185;
-      }
-
-      .console-command-text {
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-
-      .console-command-status {
-        flex: 0 0 auto;
-        font-family: inherit;
-      }
-
-      .console-thinking-command-chevron {
-        display: grid;
-        flex: 0 0 auto;
-        margin-left: auto;
-        place-items: center;
-        color: #71717a;
-        /* Optical centering onto the lowercase x-band (baseline alignment
-           floats the icon ~2px high). */
-        position: relative;
-        top: 2px;
-        transition: transform 120ms ease;
-      }
-
-      .console-thinking-command[open] .console-thinking-command-chevron {
-        transform: rotate(90deg);
-      }
-
-      /* The box chrome hangs in the same 0.5rem gutter as the row hover
-         pills, so its inner text (and the $ prompt) sits on the same vertical
-         line as the command rows above it. */
-      .console-thinking-command-output {
-        margin: 0.45rem -0.5rem 0.6rem;
-        max-height: 18rem;
-        overflow: auto;
-        border: 1px solid rgba(255, 255, 255, 0.06);
-        border-radius: 0.5rem;
-        background: rgba(255, 255, 255, 0.045);
-        color: #a1a1aa;
-      }
-
-      .console-thinking-command-full {
-        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-      }
-
-      .console-thinking-command-output pre {
-        margin: 0;
-        padding: 0.6rem calc(0.5rem - 1px);
-        white-space: pre-wrap;
-        word-break: break-word;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-        font-size: 0.8125rem;
-        line-height: 1.45;
-      }
-
-      .console-thinking-command-full {
-        color: #d4d4d8;
-      }
-
-      .console-thinking-command-result {
-        color: #a1a1aa;
-      }
-
-      .console-thinking-command-empty {
-        padding: 0.6rem calc(0.5rem - 1px);
-        color: #71717a;
-        font-size: 0.75rem;
-      }
-
-      .console-thread-empty,
-      .console-thread-show-all {
-        display: block;
-        width: 100%;
-        cursor: pointer;
-        padding: 0.45rem 0.75rem 0.45rem 2.5rem;
-        color: #71717a;
-        font-size: 0.8125rem;
-        text-decoration: none;
-        text-align: left;
-      }
-
-      .console-thread-show-all:hover {
-        color: #a1a1aa;
-      }
-
-      .console-thread-show-all[hidden] {
-        display: none;
       }
 
       .console-sidebar-account {
@@ -827,59 +409,11 @@
         overflow-y: auto;
       }
 
-      .console-main-threads {
-        overflow: hidden;
-      }
-
       .console-main-page {
         width: 100%;
         max-width: 80rem;
         margin: 0 auto;
         padding: 1.35rem 2rem 2.5rem;
-      }
-
-      .console-main-thread-frame {
-        display: flex;
-        flex: 1;
-        min-height: 0;
-        overflow: hidden;
-        flex-direction: column;
-        padding: 1.35rem 2rem 0;
-      }
-
-      .console-thread-content {
-        width: 100%;
-        max-width: 52rem;
-        margin-left: auto;
-        margin-right: auto;
-      }
-
-      .console-thread-detail-header {
-        display: flex;
-        justify-content: center;
-        flex: 0 0 auto;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-      }
-
-      .console-thread-detail-header > .console-thread-content,
-      #thread-transcript-scroll > .console-thread-content {
-        flex: 0 0 auto;
-      }
-
-      /* Transcript scroll containers hold a single content child inside a
-         column-reverse flex, which makes the scroll origin the bottom: threads
-         open already scrolled to the newest message, with no post-render JS
-         jump and no reflow drift when webfonts land. */
-      .console-transcript-scroll {
-        display: flex;
-        flex-direction: column-reverse;
-      }
-
-      #thread-transcript-scroll {
-        align-items: center;
-        /* Reserve symmetric scrollbar gutters so the centered transcript
-           column lines up with the (non-scrolling) header above it. */
-        scrollbar-gutter: stable both-edges;
       }
 
       .console-markdown {
@@ -901,249 +435,6 @@
         overflow-wrap: anywhere;
         word-break: normal;
       }
-
-      .console-message-stack {
-        min-width: 0;
-      }
-
-      .console-message-images {
-        display: flex;
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 0.75rem;
-        max-width: 100%;
-      }
-
-      .console-message-image {
-        display: block;
-        width: auto;
-        height: auto;
-        max-width: 100%;
-        max-height: min(28rem, 60vh);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 0.75rem;
-        object-fit: contain;
-      }
-
-      .console-message-timestamp {
-        min-height: 1.25rem;
-        padding-top: 0.375rem;
-        color: #71717a;
-        font-size: 0.75rem;
-        line-height: 0.875rem;
-        opacity: 0;
-        transition: opacity 120ms ease;
-      }
-
-      .group:hover .console-message-timestamp,
-      .group:focus-within .console-message-timestamp {
-        opacity: 1;
-      }
-
-      /* Chat composer — the full-page New-chat card and the dock pinned under
-         open transcripts share one box; the dock only adds placement. No
-         separator rule: the rounded box already reads as the boundary, and a
-         full-bleed hairline over the narrower transcript column looks off. */
-      .console-composer-dock {
-        flex: 0 0 auto;
-        padding: 0.25rem 0 1rem;
-      }
-
-      .console-composer-dock--panel {
-        padding: 0.6rem 0.75rem 0.75rem;
-      }
-
-      .console-composer-box {
-        display: flex;
-        flex-direction: column;
-        gap: 0.4rem;
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 1.25rem;
-        background: rgba(255, 255, 255, 0.035);
-        padding: 0.75rem 0.875rem 0.625rem;
-        transition: border-color 120ms ease;
-      }
-
-      .console-composer-box:focus-within {
-        border-color: rgba(255, 255, 255, 0.22);
-      }
-
-      .console-composer-input {
-        width: 100%;
-        resize: none;
-        border: 0;
-        background: transparent;
-        color: #f4f4f5;
-        font-size: 0.875rem;
-        line-height: 1.5;
-        outline: none;
-      }
-
-      .console-composer-input::placeholder {
-        color: #71717a;
-      }
-
-      .console-composer-controls {
-        display: flex;
-        align-items: center;
-        gap: 0.75rem;
-        min-width: 0;
-      }
-
-      .console-composer-spacer {
-        flex: 1;
-      }
-
-      /* Model picker: a pill trigger opening a popover that reuses the
-         account-menu panel/item classes, so both dropdowns share one design. */
-      .console-composer-model {
-        position: relative;
-        min-width: 0;
-      }
-
-      .console-composer-model-trigger {
-        display: flex;
-        align-items: center;
-        gap: 0.4rem;
-        max-width: 16rem;
-        border-radius: 999px;
-        background: transparent;
-        padding: 0.3rem 0.75rem;
-        color: #a1a1aa;
-        font-size: 0.8125rem;
-        font-weight: 500;
-        transition: background 120ms ease, color 120ms ease;
-      }
-
-      .console-composer-model-trigger:hover,
-      .console-composer-model-trigger[aria-expanded="true"] {
-        background: rgba(255, 255, 255, 0.09);
-        color: #f4f4f5;
-      }
-
-      .console-composer-model-chevron {
-        display: grid;
-        place-items: center;
-        transform: rotate(90deg);
-        transition: transform 120ms ease;
-      }
-
-      .console-composer-model-trigger[aria-expanded="true"] .console-composer-model-chevron {
-        transform: rotate(-90deg);
-      }
-
-      /* The picker sits just left of the send button, so the popover hangs
-         from its right edge. It scrolls when the composer script caps its
-         height to keep it inside the viewport. */
-      .console-composer-model-menu {
-        top: calc(100% + 0.4rem);
-        right: 0;
-        bottom: auto;
-        left: auto;
-        width: 15rem;
-        overflow-y: auto;
-      }
-
-      /* Flipped by the composer script when the space below the pill can't
-         fit the menu (docked composers sit at the bottom of the window). */
-      .console-composer-model-menu--above {
-        top: auto;
-        bottom: calc(100% + 0.4rem);
-      }
-
-      /* Root rows of the picker menu: setting name left, current value and a
-         chevron on the right (codex-app style). */
-      .console-composer-menu-value {
-        margin-left: auto;
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        color: #71717a;
-        font-weight: 400;
-      }
-
-      .console-composer-menu-chevron {
-        display: grid;
-        flex: 0 0 auto;
-        place-items: center;
-        color: #71717a;
-      }
-
-      .console-composer-model-option-label {
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        flex: 1;
-        text-align: left;
-      }
-
-      .console-composer-model-check {
-        display: grid;
-        place-items: center;
-        color: #3ace79;
-      }
-
-      /* "Thinking…" placeholder while a turn is executing, painted both by
-         the server (_thinking_indicator) and the composer's optimistic JS. */
-      .console-thinking-pending {
-        color: #8b8b94;
-        font-size: 0.875rem;
-        line-height: 1.5;
-        animation: console-thinking-pulse 1.6s ease-in-out infinite;
-      }
-
-      @keyframes console-thinking-pulse {
-        0%, 100% { opacity: 0.45; }
-        50% { opacity: 1; }
-      }
-
-      .console-composer-send {
-        display: grid;
-        height: 2rem;
-        width: 2rem;
-        flex: 0 0 auto;
-        place-items: center;
-        border-radius: 999px;
-        background: #28c26a;
-        color: #0b0b0d;
-        transition: background 120ms ease;
-      }
-
-      .console-composer-send:hover {
-        background: #3ace79;
-      }
-
-      /* Full-page New-chat composer. Its resting state sits a bit above
-         vertical center (the claude.ai-style resting height) and matches the
-         transcript column width so it reads as an empty chat, not a separate
-         page. Once submitted, it fills the available transcript height and
-         bottom-aligns the optimistic turn like an opened conversation. */
-      .console-new-chat {
-        width: 100%;
-        max-width: 48rem;
-        margin-top: 28vh;
-        display: flex;
-        flex-direction: column;
-        gap: 1rem;
-      }
-
-      .console-new-chat--optimistic {
-        align-self: stretch;
-        max-width: 52rem;
-        margin-top: 0;
-        padding: 1.5rem 0;
-        justify-content: flex-end;
-      }
-
-      .console-new-chat-title {
-        color: #f4f4f5;
-        font-size: 1.25rem;
-        font-weight: 600;
-        text-align: center;
-      }
-
 
       .console-control-tabs {
         display: flex;
@@ -1216,8 +507,7 @@
       html[data-console-theme="light"] body,
       html[data-console-theme="light"] .console-shell,
       html[data-console-theme="light"] .console-main,
-      html[data-console-theme="light"] .console-main-page,
-      html[data-console-theme="light"] .console-main-thread-frame {
+      html[data-console-theme="light"] .console-main-page {
         background: #f6f6f2;
         color: #303438;
       }
@@ -1227,9 +517,9 @@
         background: #fbfbf8;
       }
 
-      /* Amber notice boxes (thread-DB unavailable, managed secret) keep their
-         translucent amber-on-dark look in dark mode, but that washes out on the
-         light background; match the solid descope-banner treatment instead. */
+      /* Amber notice boxes keep their translucent amber-on-dark look in dark
+         mode, but that washes out on the light background; match the solid
+         descope-banner treatment instead. */
       html[data-console-theme="light"] .console-amber-note {
         background: #f59e0b;
         border-color: #b45309;
@@ -1259,7 +549,6 @@
 
       html[data-console-theme="light"] .console-nav-link:hover,
       html[data-console-theme="light"] .console-thread-group-title:hover,
-      html[data-console-theme="light"] .console-thread-link:hover,
       html[data-console-theme="light"] .console-account-button:hover,
       html[data-console-theme="light"] .console-account-button[aria-expanded="true"],
       html[data-console-theme="light"] .console-account-menu-button:hover,
@@ -1269,118 +558,14 @@
       }
 
       html[data-console-theme="light"] .console-nav-link-active,
-      html[data-console-theme="light"] .console-thread-group-title-active,
-      html[data-console-theme="light"] .console-thread-link-active {
+      html[data-console-theme="light"] .console-thread-group-title-active {
         background: #e7eee8;
         color: #168f4a;
       }
 
-      html[data-console-theme="light"] .console-thread-link {
-        color: #303438;
-      }
-
-      html[data-console-theme="light"] .console-thread-link-open {
-        color: #24272b;
-      }
-
-      html[data-console-theme="light"] .console-thread-link-open::before {
-        background: #28a65d;
-      }
-
-      html[data-console-theme="light"] .console-thread-link-open[data-console-pane-index]::before {
-        background: none;
-        color: #168f4a;
-      }
-
-      html[data-console-theme="light"] .console-thread-time,
-      html[data-console-theme="light"] .console-thread-empty,
-      html[data-console-theme="light"] .console-thread-show-all,
       html[data-console-theme="light"] .console-account-email,
       html[data-console-theme="light"] .console-page-meta {
         color: #7a7f86;
-      }
-
-      html[data-console-theme="light"] .console-thread-show-all:hover {
-        color: #303438;
-      }
-
-      html[data-console-theme="light"] .console-panel-close {
-        color: #7a7f86;
-      }
-
-      html[data-console-theme="light"] .console-panel-close:hover {
-        background: #e8e9e3;
-        color: #24272b;
-      }
-
-      html[data-console-theme="light"] .console-thread-share-trigger {
-        color: #7a7f86;
-      }
-
-      html[data-console-theme="light"] .console-thread-share-trigger:hover {
-        background: #e8e9e3;
-        color: #24272b;
-      }
-
-      html[data-console-theme="light"] .console-share-dialog {
-        border-color: #d8d8d0;
-        background: #ffffff;
-        color: #565c63;
-        box-shadow: 0 24px 70px rgba(31, 36, 40, 0.2);
-      }
-
-      html[data-console-theme="light"] .console-share-dialog::backdrop {
-        background: rgba(36, 39, 43, 0.38);
-      }
-
-      html[data-console-theme="light"] .console-share-dialog-copy h2 {
-        color: #24272b;
-      }
-
-      html[data-console-theme="light"] .console-share-dialog-copy > p:not(.console-share-dialog-error) {
-        color: #6f757c;
-      }
-
-      html[data-console-theme="light"] .console-share-dialog-actions {
-        border-top-color: #e5e5de;
-      }
-
-      html[data-console-theme="light"] .console-share-dialog-error {
-        color: #b42318;
-      }
-
-      html[data-console-theme="light"] .console-thinking-summary {
-        color: #565c63;
-      }
-
-      html[data-console-theme="light"] .console-thinking-summary:hover,
-      html[data-console-theme="light"] .console-thinking-command-row:hover {
-        background: #e8e9e3;
-      }
-
-      html[data-console-theme="light"] .console-thinking-summary:hover {
-        color: #24272b;
-      }
-
-      html[data-console-theme="light"] .console-thinking-preview {
-        color: #8c9198;
-      }
-
-      html[data-console-theme="light"] .console-thinking-title {
-        color: #41454a;
-      }
-
-      html[data-console-theme="light"] .console-thinking-failed,
-      html[data-console-theme="light"] .console-command-status {
-        color: #cf3f3f;
-      }
-
-      html[data-console-theme="light"] .console-command-prompt {
-        color: #8c9198;
-      }
-
-      html[data-console-theme="light"] .console-command-prompt--failed {
-        color: #cf3f3f;
       }
 
       html[data-console-theme="light"] .console-markdown table th {
@@ -1389,42 +574,6 @@
 
       html[data-console-theme="light"] .console-markdown table td {
         border-bottom-color: #e5e5de;
-      }
-
-      html[data-console-theme="light"] .console-thinking-body {
-        color: #565c63;
-      }
-
-      html[data-console-theme="light"] .console-thinking-command-row {
-        color: #595f66;
-      }
-
-      html[data-console-theme="light"] .console-thinking-command-row:hover {
-        color: #303438;
-      }
-
-      html[data-console-theme="light"] .console-thinking-command-chevron {
-        color: #7a7f86;
-      }
-
-      html[data-console-theme="light"] .console-thinking-command-output {
-        border-color: #e8e8e2;
-        background: #ffffff;
-        color: #565c63;
-        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.38);
-      }
-
-      html[data-console-theme="light"] .console-thinking-command-full {
-        border-bottom-color: #ecece6;
-        color: #303438;
-      }
-
-      html[data-console-theme="light"] .console-thinking-command-result {
-        color: #565c63;
-      }
-
-      html[data-console-theme="light"] .console-thinking-command-empty {
-        color: #8c9198;
       }
 
       html[data-console-theme="light"] .console-user-avatar {
@@ -1451,10 +600,6 @@
       }
 
       html[data-console-theme="light"] .console-control-tabs {
-        border-bottom-color: #deded7;
-      }
-
-      html[data-console-theme="light"] .console-thread-detail-header {
         border-bottom-color: #deded7;
       }
 
@@ -1636,57 +781,6 @@
         color: #8c9198;
       }
 
-      /* Composer: plain-CSS component classes, so the utility-class remaps
-         above never reach them — they need their own light overrides. */
-      html[data-console-theme="light"] .console-composer-box {
-        border-color: rgba(15, 18, 20, 0.14);
-        background: #ffffff;
-      }
-
-      html[data-console-theme="light"] .console-composer-box:focus-within {
-        border-color: rgba(15, 18, 20, 0.3);
-      }
-
-      html[data-console-theme="light"] .console-composer-input {
-        color: #1c1f23;
-      }
-
-      html[data-console-theme="light"] .console-composer-input::placeholder {
-        color: #8c9198;
-      }
-
-      html[data-console-theme="light"] .console-composer-model-trigger {
-        background: transparent;
-        color: #565c63;
-      }
-
-      html[data-console-theme="light"] .console-composer-model-trigger:hover,
-      html[data-console-theme="light"] .console-composer-model-trigger[aria-expanded="true"] {
-        background: rgba(15, 18, 20, 0.1);
-        color: #1c1f23;
-      }
-
-      html[data-console-theme="light"] .console-composer-model-check {
-        color: #1f9d55;
-      }
-
-      html[data-console-theme="light"] .console-composer-menu-value,
-      html[data-console-theme="light"] .console-composer-menu-chevron {
-        color: #8c9198;
-      }
-
-      html[data-console-theme="light"] .console-thinking-pending {
-        color: #6f757c;
-      }
-
-      html[data-console-theme="light"] .console-composer-send {
-        color: #ffffff;
-      }
-
-      html[data-console-theme="light"] .console-new-chat-title {
-        color: #1c1f23;
-      }
-
       /* The mobile top bar (hamburger + brand) and the drawer scrim are hidden
          on desktop; the media query below turns them on for narrow viewports. */
       .console-mobile-bar {
@@ -1807,14 +901,10 @@
           padding: 1rem 1rem 1.5rem;
         }
 
-        .console-main-thread-frame {
-          padding: 0.85rem 0.85rem 0;
-        }
       }
     </style>
   </head>
 
-  <% threads_view = request.path.start_with?("/console/threads") %>
   <% scheduled_tasks_view = request.path.start_with?("/console/scheduled_tasks") %>
   <% workflows_view = request.path.start_with?("/console/workflows") %>
   <% skills_view = request.path.start_with?("/console/skills") %>
@@ -1895,56 +985,6 @@
               </a>
             </div>
           <% end %>
-
-          <% if console_chat_enabled? %>
-            <%# New chat rides the thread-link machinery with the "new" sentinel
-                key: plain click opens the full-page composer, Cmd/Ctrl-click
-                adds a composer pane to the split view. %>
-            <div class="console-thread-group">
-              <a href="<%= console_threads_path(thread: Console::ThreadsController::NEW_PANE_KEY) %>"
-                 class="console-thread-group-title"
-                 aria-label="New chat"
-                 title="New chat"
-                 data-console-thread-link
-                 data-console-new-chat>
-                <span class="console-nav-icon"><%= console_icon("plus", classes: "size-4") %></span>
-                <span class="console-nav-label">New chat</span>
-              </a>
-            </div>
-
-            <div class="console-thread-group">
-              <a href="<%= console_threads_path %>"
-                 class="console-thread-group-title <%= "console-thread-group-title-active" if threads_view %>"
-                 title="Chats">
-                <span class="console-nav-icon"><%= console_icon("message-square", classes: "size-4") %></span>
-                <span class="console-nav-label">Chats</span>
-              </a>
-              <%# The thread list is loaded lazily via a Turbo Frame so the
-                  unindexed cross-database sessions query never blocks the primary
-                  page render. See ApplicationController#init_console_sidebar_threads
-                  and Console::ThreadsController#sidebar.
-
-                  The current thread selection rides along on the frame src so the
-                  initial out-of-band render can surface and highlight the open
-                  thread(s). The wrapper div (not the frame itself — a permanent
-                  turbo-frame trips Turbo's frame lifecycle and can wedge the
-                  visit progress bar) is turbo-permanent: Turbo Drive carries the
-                  loaded list across page visits instead of refetching it, so
-                  thread navigation does not repaint the sidebar; the active
-                  highlight is re-synced client-side from the page URL. %>
-              <div id="console_sidebar_thread_list"
-                   class="console-thread-list"
-                   data-turbo-permanent>
-                <%= turbo_frame_tag "console_sidebar_threads",
-                                    src: console_sidebar_threads_path(
-                                      thread: (params[:thread].to_s.presence if threads_view)
-                                    ),
-                                    loading: :lazy do %>
-                  <div class="console-thread-empty">Loading chats…</div>
-                <% end %>
-              </div>
-            </div>
-          <% end %>
         </div>
 
         <% if current_user %>
@@ -2019,7 +1059,7 @@
         <% end %>
       </aside>
 
-      <main class="console-main <%= "console-main-threads" if threads_view %>">
+      <main class="console-main">
         <div class="console-mobile-bar">
           <button type="button"
                   id="console-mobile-nav-toggle"
@@ -2034,7 +1074,7 @@
             <%= image_tag "centaur-lockup-white.svg", alt: "Centaur", class: "glow", width: 497, height: 127 %>
           </a>
         </div>
-        <div class="<%= threads_view ? "console-main-thread-frame" : "console-main-page" %>">
+        <div class="console-main-page">
           <% if flash[:notice] %>
             <div class="mb-6 rounded border border-ink-600 bg-ink-850/60 px-4 py-3 text-sm text-zinc-400"><%= flash[:notice] %></div>
           <% end %>
@@ -2089,8 +1129,8 @@
           if (event.key === "Escape" && isOpen()) setOpen(false);
         });
 
-        // Only real navigations should dismiss the drawer. Links (section nav,
-        // thread rows, the brand) qualify; in-drawer buttons that open a menu
+        // Only real navigations should dismiss the drawer. Links (section nav
+        // and the brand) qualify; in-drawer buttons that open a menu
         // or reveal more rows (account menu, theme toggle, "show more") must
         // not, or they'd slam the drawer shut before doing anything. Form
         // buttons that submit (sign out, view as operator) trigger a full
@@ -2190,201 +1230,6 @@
         });
       })();
 
-      (() => {
-        // The thread list is loaded lazily into a Turbo Frame, so the show-more
-        // button does not exist on initial page load. Wire it up both now (in
-        // case the frame is already populated) and each time the frame loads.
-        const wireShowMore = () => {
-          const showMoreButton = document.querySelector("[data-console-thread-show-more]");
-          if (!showMoreButton || showMoreButton.dataset.consoleThreadShowMoreWired === "true") return;
-
-          const list = showMoreButton.closest(".console-thread-list");
-          if (!list) return;
-
-          const revealNextThreads = () => {
-            const pageSize = Number.parseInt(showMoreButton.dataset.pageSize || "5", 10);
-            const hiddenThreads = Array.from(list.querySelectorAll(".console-thread-link-hidden"));
-            hiddenThreads.slice(0, Number.isFinite(pageSize) ? pageSize : 5).forEach((link) => {
-              link.classList.remove("console-thread-link-hidden");
-            });
-
-            if (!list.querySelector(".console-thread-link-hidden")) {
-              showMoreButton.hidden = true;
-            }
-          };
-
-          if (!list.querySelector(".console-thread-link-hidden")) {
-            showMoreButton.hidden = true;
-          } else {
-            showMoreButton.addEventListener("click", revealNextThreads);
-          }
-          showMoreButton.dataset.consoleThreadShowMoreWired = "true";
-        };
-
-        wireShowMore();
-        document.addEventListener("turbo:frame-load", (event) => {
-          if (event.target && event.target.id === "console_sidebar_threads") wireShowMore();
-        });
-      })();
-
-      (() => {
-        // The sidebar thread list is turbo-permanent, so it is not re-rendered
-        // when navigating between threads. Re-derive the active highlight from
-        // the page URL after every Turbo visit and after the frame's initial
-        // lazy load, un-hiding an open thread that sits in the collapsed tail.
-        const THREADS_PATH = "<%= console_threads_path %>";
-
-        const syncSidebarActiveThreads = () => {
-          const url = new URL(window.location.href);
-          const openKeys = url.pathname.startsWith(THREADS_PATH)
-            ? (url.searchParams.get("thread") || "").split(",").filter(Boolean)
-            : [];
-
-          document.querySelectorAll("[data-console-thread-link]").forEach((link) => {
-            // The New chat tab participates in open/close clicks but is not a
-            // thread row: no open-dot or pane-number decoration.
-            if (link.dataset.consoleNewChat !== undefined) return;
-            const key = new URL(link.href, window.location.origin).searchParams.get("thread");
-            const paneIndex = openKeys.indexOf(key);
-            const open = paneIndex !== -1;
-            link.classList.toggle("console-thread-link-open", open);
-            if (open) {
-              // Dot for a single open thread; numbers once a second pane opens.
-              if (openKeys.length > 1) {
-                link.dataset.consolePaneIndex = String(paneIndex + 1);
-              } else {
-                delete link.dataset.consolePaneIndex;
-              }
-              link.classList.remove("console-thread-link-hidden");
-            } else {
-              delete link.dataset.consolePaneIndex;
-            }
-          });
-        };
-
-        // A chat the turbo-permanent list has never seen (just started from
-        // the composer, or older than the list window) appears immediately as
-        // an optimistic row, then the frame refetches so the server's row,
-        // title, and ordering replace it.
-        const SIDEBAR_THREADS_PATH = "<%= console_sidebar_threads_path %>";
-
-        const ensureActiveThreadRow = () => {
-          const url = new URL(window.location.href);
-          if (!url.pathname.startsWith(THREADS_PATH)) return;
-          const openKeys = (url.searchParams.get("thread") || "").split(",").filter(Boolean);
-          const primary = openKeys[0];
-          // "new" is the composer-pane sentinel, not a thread.
-          if (!primary || primary === "new") return;
-
-          const frame = document.getElementById("console_sidebar_threads");
-          if (!frame) return;
-          // Still on the lazy-load placeholder: the initial fetch carries the
-          // thread param and will include this chat on its own.
-          if (!frame.querySelector("[data-console-thread-link], .console-thread-empty")) return;
-
-          const known = Array.from(frame.querySelectorAll("[data-console-thread-link]")).some((link) =>
-            new URL(link.href, window.location.origin).searchParams.get("thread") === primary
-          );
-          if (known) return;
-
-          frame.querySelector(".console-thread-empty")?.remove();
-          const title = document.querySelector(".console-thread-detail-header h1")?.textContent?.trim() || primary;
-          const link = document.createElement("a");
-          link.href = `${THREADS_PATH}?thread=${encodeURIComponent(primary)}`;
-          link.className = "console-thread-link";
-          link.setAttribute("data-console-thread-link", "true");
-          link.title = title;
-          const titleSpan = document.createElement("span");
-          titleSpan.className = "console-thread-title";
-          titleSpan.textContent = title;
-          const timeSpan = document.createElement("span");
-          timeSpan.className = "console-thread-time";
-          timeSpan.textContent = "now";
-          link.append(titleSpan, timeSpan);
-          frame.prepend(link);
-          syncSidebarActiveThreads();
-
-          const src = new URL(SIDEBAR_THREADS_PATH, window.location.origin);
-          src.searchParams.set("thread", openKeys.join(","));
-          frame.setAttribute("src", src.toString());
-        };
-
-        document.addEventListener("turbo:load", () => {
-          syncSidebarActiveThreads();
-          ensureActiveThreadRow();
-        });
-        document.addEventListener("turbo:frame-load", (event) => {
-          if (event.target && event.target.id === "console_sidebar_threads") syncSidebarActiveThreads();
-        });
-      })();
-
-      (() => {
-        // Sidebar thread clicks against the split-view grid. The thread param
-        // carries up to PANEL_LIMIT comma-separated keys in grid order.
-        //   - Cmd/Ctrl-click on an already-open thread closes it
-        //   - plain click on an already-open thread is a no-op
-        //   - Cmd/Ctrl-click on a closed thread adds it as a pane
-        //   - plain click on a closed thread falls through to Turbo (replaces
-        //     the selection with that single thread)
-        // Capture phase so the close case wins over Turbo's own link handling;
-        // delegated on document because the list arrives via a lazy frame.
-        const THREADS_PATH = "<%= console_threads_path %>";
-        const PANEL_LIMIT = <%= Console::ThreadsController::PANEL_LIMIT %>;
-
-        document.addEventListener("click", (event) => {
-          const link = event.target.closest("[data-console-thread-link]");
-          if (!link) return;
-
-          const key = new URL(link.href, window.location.origin).searchParams.get("thread");
-          if (!key) return;
-
-          const current = new URL(window.location.href);
-          const openKeys = current.pathname.startsWith(THREADS_PATH)
-            ? (current.searchParams.get("thread") || "").split(",").filter(Boolean)
-            : [];
-          const isOpen = openKeys.includes(key);
-          const modified = event.metaKey || event.ctrlKey;
-
-          if (isOpen && !modified) {
-            event.preventDefault();
-            event.stopPropagation();
-            return;
-          }
-
-          let nextKeys;
-          if (isOpen) {
-            nextKeys = openKeys.filter((openKey) => openKey !== key);
-          } else if (modified) {
-            nextKeys = [...openKeys, key];
-            // Keep the primary thread and the newest panes when over the limit.
-            if (nextKeys.length > PANEL_LIMIT) {
-              nextKeys = [nextKeys[0], ...nextKeys.slice(-(PANEL_LIMIT - 1))];
-            }
-          } else {
-            return;
-          }
-
-          event.preventDefault();
-          event.stopPropagation();
-
-          const next = new URL(THREADS_PATH, window.location.origin);
-          if (nextKeys.length) {
-            next.searchParams.set("thread", nextKeys.join(","));
-          } else {
-            // Closing the last open thread lands on the empty state instead of
-            // bouncing straight back via the auto-select redirect.
-            next.searchParams.set("new", "1");
-          }
-
-          // Turbo visit keeps the turbo-permanent sidebar list mounted; a
-          // plain location.assign would full-load and repaint it.
-          if (window.Turbo) {
-            window.Turbo.visit(next.toString());
-          } else {
-            window.location.assign(next.toString());
-          }
-        }, true);
-      })();
     </script>
   </body>
 </html>
