@@ -4,7 +4,9 @@ import unittest
 from pathlib import Path
 
 SYSTEM_PROMPT = Path(__file__).with_name("SYSTEM_PROMPT.md")
-ENG_PERSONA_PROMPT = Path(__file__).parents[2] / "tools" / "personas" / "eng" / "PROMPT.md"
+OBSERVABILITY_SKILL = (
+    Path(__file__).parents[2] / ".agents" / "skills" / "centaur-observability" / "SKILL.md"
+)
 
 
 class SystemPromptTest(unittest.TestCase):
@@ -38,13 +40,13 @@ class SystemPromptTest(unittest.TestCase):
 
     def test_runtime_discovery_and_vlogs_examples_match_available_surfaces(self) -> None:
         prompt = SYSTEM_PROMPT.read_text()
-        eng_prompt = ENG_PERSONA_PROMPT.read_text()
+        skill = OBSERVABILITY_SKILL.read_text()
 
         self.assertNotIn("[Active deployment]", prompt)
         self.assertIn("$CENTAUR_HARNESS_TYPE", prompt)
         self.assertIn('centaur-tools call vmetrics query \'{"expr":"centaur_deployment_info"}\'', prompt)
-        self.assertIn("centaur-tools call vlogs thread_logs", eng_prompt)
-        self.assertIn("centaur-tools call vlogs thread_trace", eng_prompt)
+        self.assertIn("centaur-tools call vlogs thread_logs", skill)
+        self.assertIn("centaur-tools call vlogs thread_trace", skill)
 
     def test_model_harness_and_persona_switching_answer_guidance_is_present(self) -> None:
         prompt = SYSTEM_PROMPT.read_text()
