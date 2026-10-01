@@ -1723,7 +1723,18 @@ pub(crate) async fn run_task<T>(
             _ = heartbeat.tick() => ctx.heartbeat(None).await?,
         }
     };
-    result.map_err(|error| AbsurdError::TaskFailed(error.into_boxed_dyn_error()))
+    result.map_err(task_error)
+}
+
+/// Keeps Absurd's control flow, such as suspending for a durable sleep, intact
+/// through `anyhow` so a sleeping task is not recorded as failed.
+fn task_error(error: anyhow::Error) -> AbsurdError {
+    match error.downcast_ref::<AbsurdError>() {
+        Some(AbsurdError::Suspend) => AbsurdError::Suspend,
+        Some(AbsurdError::Cancelled) => AbsurdError::Cancelled,
+        Some(AbsurdError::FailedRun) => AbsurdError::FailedRun,
+        _ => AbsurdError::TaskFailed(error.into_boxed_dyn_error()),
+    }
 }
 
 #[cfg(test)]
@@ -1836,6 +1847,18 @@ mod tests {
             checkpoint_scope(7, Some("drive-a")),
             "shared_drive:drive-a:broker:7"
         );
+    }
+
+    #[test]
+    fn suspension_is_not_a_task_failure() {
+        let suspended = Err::<(), _>(AbsurdError::Suspend)
+            .context("wait for Slack rate limit")
+            .unwrap_err();
+        assert!(matches!(task_error(suspended), AbsurdError::Suspend));
+        assert!(matches!(
+            task_error(anyhow!("boom")),
+            AbsurdError::TaskFailed(_)
+        ));
     }
 
     #[test]
