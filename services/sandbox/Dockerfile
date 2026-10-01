@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM ubuntu:24.04 AS toolchain
+FROM ubuntu:24.10 AS toolchain
 
 ENV PYTHONDONTWRITEBYTECODE=1
 
