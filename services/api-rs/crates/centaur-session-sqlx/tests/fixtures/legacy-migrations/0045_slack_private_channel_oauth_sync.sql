@@ -20,6 +20,78 @@ alter table slack_dm_context_documents
 alter table slack_dm_conversation_context_documents
     rename to slack_private_conversation_context_documents;
 
+-- ParadeDB ties BM25 metadata to the indexed relation name, so rebuild these
+-- two indexes after the table rename instead of relying on the index OID alone.
+drop index if exists idx_slack_dm_context_documents_bm25;
+drop index if exists idx_slack_private_context_documents_bm25;
+create index idx_slack_private_context_documents_bm25
+    on slack_private_context_documents
+    using bm25 (
+        document_id,
+        title,
+        body,
+        home_team_id,
+        conversation_id,
+        conversation_type,
+        user_id,
+        bot_id,
+        message_type,
+        message_subtype,
+        occurred_at,
+        source_updated_at,
+        metadata
+    )
+    with (
+        key_field = 'document_id',
+        text_fields = '{
+            "document_id": {
+                "tokenizer": {"type": "keyword"}
+            },
+            "home_team_id": {
+                "tokenizer": {"type": "keyword"}
+            },
+            "conversation_id": {
+                "tokenizer": {"type": "keyword"}
+            },
+            "user_id": {
+                "tokenizer": {"type": "keyword"}
+            },
+            "bot_id": {
+                "tokenizer": {"type": "keyword"}
+            }
+        }'
+    );
+
+drop index if exists idx_slack_dm_conversation_context_documents_bm25;
+drop index if exists idx_slack_private_conversation_context_documents_bm25;
+create index idx_slack_private_conversation_context_documents_bm25
+    on slack_private_conversation_context_documents
+    using bm25 (
+        document_id,
+        title,
+        body,
+        home_team_id,
+        conversation_id,
+        conversation_type,
+        last_seen_at,
+        source_updated_at,
+        metadata
+    )
+    with (
+        key_field = 'document_id',
+        text_fields = '{
+            "document_id": {
+                "tokenizer": {"type": "keyword"}
+            },
+            "home_team_id": {
+                "tokenizer": {"type": "keyword"}
+            },
+            "conversation_id": {
+                "tokenizer": {"type": "keyword"}
+            }
+        }'
+    );
+
 -- PL/pgSQL function bodies retain relation names as source text. Recreate any
 -- existing projection function with the new table names so the triggers that
 -- moved with the tables continue to work after the rename.

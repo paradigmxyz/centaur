@@ -261,6 +261,10 @@ spec:
 {{- end }}
             - name: RUN_MIGRATIONS
               value: {{ .Values.apiRs.runMigrations | quote }}
+{{- if not (hasKey .Values.apiRs.extraEnv "DATABASE_TEXT_SEARCH") }}
+            - name: DATABASE_TEXT_SEARCH
+              value: {{ ternary "paradedb" (default "postgres" .Values.externalDatabase.textSearch) .Values.postgres.enabled | quote }}
+{{- end }}
 {{- if not (hasKey .Values.apiRs.extraEnv "CENTAUR_SESSION_PRINCIPAL_ADMISSION") }}
             - name: CENTAUR_SESSION_PRINCIPAL_ADMISSION
               value: {{ .Values.apiRs.sessionPrincipalAdmission | quote }}

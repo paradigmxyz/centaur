@@ -114,6 +114,7 @@ jobs:
 
           set_output migration_order \
             '^services/api-rs/crates/centaur-session-sqlx/migrations/' \
+            '^services/api-rs/crates/centaur-session-sqlx/search-migrations/' \
             '^services/console/db/migrate/' \
             '^\.github/scripts/check-migration-order\.sh$' \
             '^\.github/workflows/ci\.yml$'
@@ -124,17 +125,18 @@ jobs:
             '^crates/absurd-sdk/' \
             '^crates/active-record-encryption/' \
             '^services/company-context/' \
-            '^\.github/scripts/start-paradedb-postgres\.sh$' \
+            '^\.github/scripts/start-test-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
           set_output proxy_sync_checks \
             '^crates/active-record-encryption/' \
             '^services/proxy-sync/' \
             '^services/console/' \
-            '^\.github/scripts/start-paradedb-postgres\.sh$' \
+            '^\.github/scripts/start-test-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
           set_output rust_api \
             '^crates/absurd-sdk/' \
             '^services/api-rs/' \
+            '^\.github/scripts/start-test-postgres\.sh$' \
             '^services/workflow-python/' \
             '^workflows/' \
             '^\.github/workflows/ci\.yml$'
@@ -260,7 +262,7 @@ jobs:
 
       - name: Start Test Postgres
         working-directory: .
-        run: .github/scripts/start-paradedb-postgres.sh company-context-test-postgres 5432 postgres
+        run: .github/scripts/start-test-postgres.sh company-context-test-postgres 5432 postgres
 
       - name: Test
         env:
@@ -318,7 +320,7 @@ jobs:
 
       - name: Start parity database
         working-directory: .
-        run: .github/scripts/start-paradedb-postgres.sh proxy-sync-parity-postgres 5432 proxy_sync_parity_test
+        run: .github/scripts/start-test-postgres.sh proxy-sync-parity-postgres 5432 proxy_sync_parity_test
 
       - name: Install Console packages
         run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
@@ -350,7 +352,7 @@ jobs:
           persist-credentials: false
 
       - name: Start Test Postgres
-        run: .github/scripts/start-paradedb-postgres.sh centaur-api-test-postgres 5432 centaur
+        run: .github/scripts/start-test-postgres.sh centaur-api-test-postgres 5432 centaur
 
       - name: Install Console packages
         run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
@@ -492,6 +494,40 @@ jobs:
             kill "$(cat "$RUNNER_TEMP/iron-control.pid")" 2>/dev/null || true
           fi
           docker rm -f centaur-api-test-postgres || true
+
+  rust-api-postgres:
+    name: Rust API migrations on PostgreSQL
+    runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.rust_api == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Start Test Postgres
+        run: .github/scripts/start-test-postgres.sh centaur-api-plain-postgres 5432 postgres pgvector
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/api-rs
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Core migrations and the postgres text-search backend must not need
+      # ParadeDB. The rust-api job covers both backends on ParadeDB.
+      - name: Test SQLx migrations
+        working-directory: services/api-rs
+        env:
+          SESSION_SQLX_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: cargo test --locked -p centaur-session-sqlx
+
+      - name: Cleanup Test Postgres
+        if: ${{ always() }}
+        run: docker rm -f centaur-api-plain-postgres || true
 
   sandbox-e2e:
     name: Sandbox Kind e2e
@@ -778,6 +814,7 @@ jobs:
       - company-context-checks
       - proxy-sync-checks
       - rust-api
+      - rust-api-postgres
       - sandbox-e2e
       - sandbox-tests
       - workflow-python-tests
@@ -791,5 +828,5 @@ jobs:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
-          allowed-skips: migration-order, harness-server-checks, company-context-checks, proxy-sync-checks, rust-api, sandbox-e2e, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
+          allowed-skips: migration-order, harness-server-checks, company-context-checks, proxy-sync-checks, rust-api, rust-api-postgres, sandbox-e2e, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
           jobs: ${{ toJSON(needs) }}

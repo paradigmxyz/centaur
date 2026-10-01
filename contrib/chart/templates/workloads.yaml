@@ -5,6 +5,9 @@
 {{- if and .Values.postgres.enabled .Values.externalDatabase.cidrs }}
 {{- fail "externalDatabase.cidrs is set but postgres.enabled=true; set postgres.enabled=false to use the external database" }}
 {{- end }}
+{{- if and .Values.postgres.enabled .Values.externalDatabase.textSearch }}
+{{- fail "externalDatabase.textSearch is set but postgres.enabled=true; the bundled Postgres always uses paradedb" }}
+{{- end }}
 {{- if .Values.postgres.enabled }}
 apiVersion: apps/v1
 kind: StatefulSet

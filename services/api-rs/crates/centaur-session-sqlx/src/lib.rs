@@ -18,8 +18,9 @@ use thiserror::Error;
 use time::{Duration as TimeDuration, OffsetDateTime};
 use uuid::Uuid;
 
-// The API binary embeds these migrations at compile time.
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+mod migrations;
+
+pub use migrations::{TextSearchBackend, migrate, migration_list};
 
 pub const SESSION_EVENTS_CHANNEL: &str = "centaur_session_events";
 const DEFAULT_MAX_CONNECTIONS: u32 = 500;
@@ -97,9 +98,12 @@ impl PgSessionStore {
         &self.pool
     }
 
-    pub async fn run_migrations(&self) -> Result<(), SessionStoreError> {
-        MIGRATOR.run(&self.pool).await?;
-        Ok(())
+    pub async fn run_migrations(
+        &self,
+        text_search: TextSearchBackend,
+    ) -> Result<(), SessionStoreError> {
+        let mut conn = self.pool.acquire().await?;
+        migrate(&mut conn, text_search).await
     }
 
     pub async fn listen_session_events(&self) -> Result<SessionEventListener, SessionStoreError> {
@@ -1760,6 +1764,18 @@ pub enum SessionStoreError {
     Sqlx(#[from] sqlx::Error),
     #[error(transparent)]
     Migrate(#[from] sqlx::migrate::MigrateError),
+    #[error(
+        "database was migrated with the {applied} text search backend, but {configured} is configured"
+    )]
+    TextSearchBackendMismatch {
+        configured: TextSearchBackend,
+        applied: TextSearchBackend,
+    },
+    #[error(
+        "database has ParadeDB BM25 indexes ({}) from before text search backends were selectable; configure the paradedb text search backend",
+        indexes.join(", ")
+    )]
+    Bm25IndexesPresent { indexes: Vec<String> },
 }
 
 #[derive(Debug, FromRow)]
@@ -2096,7 +2112,10 @@ mod tests {
         let store = PgSessionStore::connect(&url)
             .await
             .expect("connect test db");
-        store.run_migrations().await.expect("run migrations");
+        store
+            .run_migrations(crate::TextSearchBackend::Postgres)
+            .await
+            .expect("run migrations");
         Some(store)
     }
 

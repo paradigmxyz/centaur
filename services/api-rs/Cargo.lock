@@ -1098,6 +1098,8 @@ name = "centaur-session-sqlx"
 version = "0.1.0"
 dependencies = [
  "centaur-session-core",
+ "futures-util",
+ "hex",
  "serde",
  "serde_json",
  "sqlx",

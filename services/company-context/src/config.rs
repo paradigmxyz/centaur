@@ -16,11 +16,15 @@ pub const DRIVE_CREDENTIALS_RECONCILE_TASK: &str = "drive.credentials.reconcile"
 pub const DOCUMENT_EXTRACT_TASK: &str = "drive.pdf.extract";
 pub const DOCUMENT_EMBED_TASK: &str = "drive.document.embed";
 pub const DOCUMENT_DELETE_TASK: &str = "drive.document.delete";
+pub const GRANOLA_CREDENTIALS_RECONCILE_TASK: &str = "granola.credentials.reconcile";
+pub const GRANOLA_SYNC_TASK: &str = "granola.user.sync";
+pub const GRANOLA_NOTES_FETCH_TASK: &str = "granola.notes.fetch";
+pub const GRANOLA_NOTE_EMBED_TASK: &str = "granola.note.embed";
 
 #[derive(Clone, Debug, Parser)]
 #[command(
     name = "centaur-company-context",
-    about = "Ingest company context from Google Drive"
+    about = "Ingest company context from Google Drive and Granola"
 )]
 pub struct Config {
     #[arg(long, env = "DATABASE_URL", value_parser = nonempty)]
@@ -52,6 +56,13 @@ pub struct Config {
     pub google_oauth_app_slug: String,
     #[arg(
         long,
+        env = "COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG",
+        default_value = "granola",
+        value_parser = nonempty
+    )]
+    pub granola_oauth_app_slug: String,
+    #[arg(
+        long,
         env = "OPENAI_API_KEY",
         value_parser = nonempty,
         hide_env_values = true
@@ -66,6 +77,13 @@ pub struct Config {
         value_parser = normalized_base_url
     )]
     pub google_api_base_url: String,
+    #[arg(
+        long,
+        env = "GRANOLA_MCP_URL",
+        default_value = "https://mcp.granola.ai/mcp",
+        value_parser = nonempty
+    )]
+    pub granola_mcp_url: String,
     #[arg(
         long,
         env = "OPENAI_BASE_URL",
@@ -94,6 +112,21 @@ pub struct Config {
         value_parser = positive_duration
     )]
     pub scan_interval: Duration,
+    #[arg(
+        long = "granola-sync-interval-seconds",
+        env = "COMPANY_CONTEXT_GRANOLA_SYNC_INTERVAL_SECONDS",
+        default_value = "1800",
+        value_parser = positive_duration
+    )]
+    pub granola_sync_interval: Duration,
+    /// Days of meetings listed for a Granola account without a checkpoint.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_GRANOLA_INITIAL_LOOKBACK_DAYS",
+        default_value = "365",
+        value_parser = positive_usize
+    )]
+    pub granola_initial_lookback_days: usize,
     #[arg(
         long = "drive-page-size",
         env = "COMPANY_CONTEXT_DRIVE_PAGE_SIZE",

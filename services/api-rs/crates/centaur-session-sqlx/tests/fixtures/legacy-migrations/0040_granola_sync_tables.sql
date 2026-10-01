@@ -1,3 +1,5 @@
+create extension if not exists pg_search;
+
 create table if not exists granola_sync_runs (
     run_id text primary key,
     workflow_run_id text,
@@ -91,6 +93,41 @@ create index if not exists idx_granola_context_documents_access_emails
 
 create index if not exists idx_granola_context_documents_metadata
     on granola_context_documents using gin (metadata);
+
+drop index if exists idx_granola_context_documents_bm25;
+
+create index idx_granola_context_documents_bm25
+    on granola_context_documents
+    using bm25 (
+        document_id,
+        note_id,
+        title,
+        body,
+        url,
+        owner_id,
+        owner_email,
+        owner_name,
+        occurred_at,
+        source_updated_at,
+        metadata
+    )
+    with (
+        key_field = 'document_id',
+        text_fields = '{
+            "document_id": {
+                "tokenizer": {"type": "keyword"}
+            },
+            "note_id": {
+                "tokenizer": {"type": "keyword"}
+            },
+            "owner_id": {
+                "tokenizer": {"type": "keyword"}
+            },
+            "owner_email": {
+                "tokenizer": {"type": "keyword"}
+            }
+        }'
+    );
 
 create table if not exists granola_sync_checkpoints (
     scope_id text primary key,

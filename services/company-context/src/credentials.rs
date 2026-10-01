@@ -18,6 +18,15 @@ pub struct ConsoleCredentials {
     pool: PgPool,
     encryption: Arc<ActiveRecordEncryption>,
     google_oauth_app_slug: String,
+    granola_oauth_app_slug: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct GranolaCredential {
+    pub id: i64,
+    pub access_token: String,
+    pub provider_email: String,
+    pub provider_subject: String,
 }
 
 #[derive(Clone, Debug)]
@@ -48,6 +57,7 @@ impl ConsoleCredentials {
                 &config.active_record_key_derivation_salt,
             )),
             google_oauth_app_slug: config.google_oauth_app_slug.clone(),
+            granola_oauth_app_slug: config.granola_oauth_app_slug.clone(),
         };
         credentials.google_credential_ids().await?;
         Ok(credentials)
@@ -157,6 +167,88 @@ impl ConsoleCredentials {
                 .try_get::<NaiveDateTime, _>("updated_at")?
                 .and_utc()
                 .to_rfc3339(),
+        })
+    }
+
+    pub async fn granola_credential_ids(&self) -> Result<Vec<i64>> {
+        sqlx::query_scalar(
+            r#"
+            SELECT credentials.id
+            FROM broker_credentials credentials
+            JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+            WHERE app.provider = 'granola'
+              AND app.slug = $1
+              AND app.enabled = TRUE
+              AND credentials.dead = FALSE
+              AND credentials.access_token IS NOT NULL
+              AND (
+                  credentials.expires_at IS NULL
+                  OR credentials.expires_at > NOW()
+              )
+            ORDER BY credentials.id
+            "#,
+        )
+        .bind(&self.granola_oauth_app_slug)
+        .fetch_all(&self.pool)
+        .await
+        .context("list Granola broker credentials from Rails Console")
+    }
+
+    pub async fn retained_granola_credential_ids(&self) -> Result<Vec<i64>> {
+        sqlx::query_scalar(
+            r#"
+            SELECT credentials.id
+            FROM broker_credentials credentials
+            JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+            WHERE app.provider = 'granola'
+              AND app.slug = $1
+              AND credentials.dead = FALSE
+            ORDER BY credentials.id
+            "#,
+        )
+        .bind(&self.granola_oauth_app_slug)
+        .fetch_all(&self.pool)
+        .await
+        .context("list retained Granola broker credentials from Rails Console")
+    }
+
+    pub async fn granola_credential(&self, credential_id: i64) -> Result<GranolaCredential> {
+        let row = sqlx::query(
+            r#"
+            SELECT credentials.access_token,
+                   credentials.expires_at,
+                   credentials.provider_email,
+                   credentials.provider_subject
+            FROM broker_credentials credentials
+            JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+            WHERE credentials.id = $1
+              AND app.provider = 'granola'
+              AND app.slug = $2
+              AND app.enabled = TRUE
+              AND credentials.dead = FALSE
+            "#,
+        )
+        .bind(credential_id)
+        .bind(&self.granola_oauth_app_slug)
+        .fetch_optional(&self.pool)
+        .await
+        .context("load Granola broker credential from Rails Console")?
+        .with_context(|| format!("Granola broker credential {credential_id} is not syncable"))?;
+
+        let expires_at: Option<NaiveDateTime> = row.try_get("expires_at")?;
+        if expires_at.is_some_and(|expires_at| expires_at <= Utc::now().naive_utc()) {
+            bail!("Granola broker credential {credential_id} is expired");
+        }
+        Ok(GranolaCredential {
+            id: credential_id,
+            access_token: self
+                .decrypt_required(row.try_get("access_token")?, "Granola broker access token")?,
+            provider_email: row
+                .try_get::<Option<String>, _>("provider_email")?
+                .unwrap_or_default(),
+            provider_subject: row
+                .try_get::<Option<String>, _>("provider_subject")?
+                .unwrap_or_default(),
         })
     }
 

@@ -20,6 +20,7 @@ Use these as the main extension points:
 | `console.nodeSelector`, `console.affinity`, `console.tolerations` | Controls scheduling for Console web pods, including dedicated tainted node pools. |
 | `console.worker.nodeSelector`, `console.worker.affinity`, `console.worker.tolerations` | Controls scheduling for Console background worker pods independently from the web pods. |
 | `postgres.nodeSelector`, `postgres.affinity`, `postgres.tolerations` | Controls scheduling for the bundled PostgreSQL pod. Ensure selected nodes can mount its persistent storage. |
+| `postgres.enabled`, `externalDatabase.*` | Replaces the bundled PostgreSQL with an external server such as RDS or Cloud SQL, scopes NetworkPolicy egress to it, and selects the company-context text-search backend. See [Use an External PostgreSQL](/deploying-in-production#use-an-external-postgresql). |
 | `slackbot.extraEnv` | Slackbot HTTP, Slack, feedback, and cross-org behavior. |
 | `sandbox.extraEnv` | Extra variables copied into every sandbox pod through `KUBERNETES_SANDBOX_EXTRA_ENV`. |
 | `overlays.sources` | Ordered repo-cache-backed overlay repos for tools, workflows, and skills; subdirs default to `tools`, `workflows`, and `.agents/skills`. |
@@ -284,6 +285,7 @@ Slack ETL workflows:
 | `SLACK_ETL_EXCLUDED_CHANNEL_PATTERNS` | `apiRs.etl.slack.excludedChannelPatterns`. | Comma-separated channel-name globs to skip. |
 | `SLACK_BACKFILL_ENABLED`, `SLACK_BACKFILL_CHANNEL_BATCH_LIMIT`, `SLACK_BACKFILL_CHANNEL_PAGES_PER_JOB` | `apiRs.etl.slack.backfill.*`. | Backfill enablement and batch sizing. |
 | `SLACK_RETENTION_ENABLED`, `SLACK_RETENTION_INTERVAL_MINUTES`, `SLACK_ETL_RETENTION_DAYS`, `SLACK_DM_RETENTION_DAYS` | `apiRs.etl.slack.retention.*`. | Slack retention enablement, cadence, and separate public ETL/DM TTLs. |
+| `DATABASE_TEXT_SEARCH` | `externalDatabase.textSearch`, default `postgres`; always `paradedb` with the bundled PostgreSQL, where setting `externalDatabase.textSearch` fails rendering. | Company-context keyword search backend installed by api-rs migrations: `postgres` (built-in full-text search) or `paradedb` (BM25, requires `pg_search`). Fixed per database once migrated. |
 | `COMPANY_CONTEXT_DOCUMENTS_ENABLED` | `apiRs.etl.companyContextDocuments.enabled`. | Enables company-context projection when any ETL is on. |
 | `COMPANY_CONTEXT_DOCUMENTS_MAX_WINDOW_SECONDS` | `apiRs.etl.companyContextDocuments.maxWindowSeconds`. | Maximum source `updated_at` window projected by one company-context documents run. |
 | `COMPANY_CONTEXT_EMBEDDINGS_ENABLED` | `apiRs.etl.companyContextEmbeddings.enabled`, default `false`. | Enables scheduled document embedding and hybrid company-context search in agent sandboxes. |
@@ -294,7 +296,8 @@ Slack ETL workflows:
 | `COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS` | `apiRs.etl.companyContextEmbeddings.dimensions`, default `1536`. | Vector width requested by document generation and hybrid queries. It must match the database column width. |
 
 The bundled PostgreSQL image provides pgvector. External PostgreSQL deployments
-must make the `vector` extension available before migrations run. The workflow
+must make the `vector` extension available before migrations run; see
+[Use an External PostgreSQL](/deploying-in-production#use-an-external-postgresql). The workflow
 uses the shared Python workflow-host database connection, OpenAI credential,
 and `OPENAI_BASE_URL`. No workflow-specific PostgreSQL role or DSN is required.
 The database migration creates the embedding column as `vector(1536)`. Before

@@ -10,9 +10,11 @@ use tracing::{error, info};
 
 use crate::{
     config::{
-        Config, DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK, SHARED_DRIVES_DISCOVER_TASK,
+        Config, DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK,
+        GRANOLA_CREDENTIALS_RECONCILE_TASK, GRANOLA_SYNC_TASK, SHARED_DRIVES_DISCOVER_TASK,
     },
     credentials::ConsoleCredentials,
+    granola_tasks::{GranolaReconcileParams, GranolaSyncParams},
     tasks::{DiscoverSharedDrivesParams, ReconcileCredentialsParams, ScanParams},
     telemetry,
 };
@@ -79,6 +81,63 @@ pub async fn run(config: Arc<Config>, client: Client, credentials: Arc<ConsoleCr
                     bucket,
                 },
                 format!("drive.shared_drives.discover:{credential_id}:{bucket}"),
+                credential_id,
+            )
+            .await;
+        }
+    }
+}
+
+pub async fn run_granola(
+    config: Arc<Config>,
+    client: Client,
+    credentials: Arc<ConsoleCredentials>,
+) {
+    let mut ticker = interval(config.granola_sync_interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let bucket = now / config.granola_sync_interval.as_secs().max(1);
+        match client
+            .spawn(
+                GRANOLA_CREDENTIALS_RECONCILE_TASK,
+                GranolaReconcileParams { bucket },
+                SpawnOptions {
+                    idempotency_key: Some(format!("granola.credentials.reconcile:{bucket}")),
+                    ..SpawnOptions::default()
+                },
+            )
+            .await
+        {
+            Ok(result) => {
+                telemetry::task_enqueued(GRANOLA_CREDENTIALS_RECONCILE_TASK, result.created);
+            }
+            Err(error) => {
+                metrics::counter!("company_context_scheduler_errors_total").increment(1);
+                error!(event = "company_context_granola_reconcile_enqueue_failed", error = %error);
+            }
+        }
+        let credential_ids = match credentials.granola_credential_ids().await {
+            Ok(ids) => ids,
+            Err(error) => {
+                metrics::counter!("company_context_scheduler_errors_total").increment(1);
+                error!(event = "company_context_granola_credentials_load_failed", error = %error);
+                continue;
+            }
+        };
+        for credential_id in credential_ids {
+            spawn_credential_task(
+                &client,
+                GRANOLA_SYNC_TASK,
+                GranolaSyncParams {
+                    credential_id,
+                    bucket,
+                },
+                format!("granola.user.sync:{credential_id}:{bucket}"),
                 credential_id,
             )
             .await;
