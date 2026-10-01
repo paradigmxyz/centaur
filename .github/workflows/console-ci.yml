@@ -63,11 +63,11 @@ jobs:
       - name: Scan for common Rails security vulnerabilities using static analysis
         run: |
           # --ensure-latest (added by bin/brakeman) fails on new upstream releases;
-          # keep PRs independent of that and enforce it only on main/merge queue.
-          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            bundle exec brakeman --no-pager
-          else
+          # enforce it only on pushes to main so PRs and the merge queue aren't blocked.
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
             bin/brakeman --no-pager
+          else
+            bundle exec brakeman --no-pager
           fi
 
   scan_js:
