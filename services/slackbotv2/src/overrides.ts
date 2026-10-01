@@ -123,6 +123,7 @@ const STRATEGY_MODEL_HARNESSES: Record<string, string> = {
   'gpt-5.6-terra': 'codex',
   'gpt-6-astra': 'codex',
   'gpt-6-sol': 'codex',
+  'gpt-6.1-sol': 'codex',
   'gpt-6-luna': 'codex'
 }
 
