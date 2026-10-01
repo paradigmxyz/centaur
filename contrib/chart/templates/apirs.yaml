@@ -442,6 +442,10 @@ spec:
               value: {{ include "centaur.trustedCaSecretName" . | quote }}
             - name: KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME
               value: {{ include "centaur.trustedCaKeySecretName" . | quote }}
+            - name: KUBERNETES_FIREWALL_CA_SECRET_KEY
+              value: {{ .Values.firewall.existingCaSecretKey | default "ca-cert.pem" | quote }}
+            - name: KUBERNETES_FIREWALL_CA_KEY_SECRET_KEY
+              value: {{ .Values.firewall.existingCaKeySecretKey | default "ca-key.pem" | quote }}
             - name: KUBERNETES_SECRET_ENV_NAME
               value: {{ include "centaur.secretEnvName" . | quote }}
 {{- if .Values.secrets.bootstrapSecretName }}
