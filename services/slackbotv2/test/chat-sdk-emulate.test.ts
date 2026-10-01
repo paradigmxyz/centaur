@@ -4468,7 +4468,7 @@ describe('slackbotv2', () => {
     expect(text).not.toContain('pnpm test')
   })
 
-  it('acknowledges Slack once recorded while a slow session execute shows status', async () => {
+  it('acknowledges Slack once saved while a slow session execute shows status', async () => {
     const logs: CapturedLog[] = []
     bot = createTestBot({ logger: captureLogger(logs) })
     codexApi.autoRespond = false
@@ -4513,7 +4513,6 @@ describe('slackbotv2', () => {
     ).toEqual(['Thinking...'])
     expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(false)
     expect(codexApi.eventRequests).toHaveLength(0)
-    await waitFor(() => hasLog(logs, 'slackbotv2_webhook_handoff_wait_started'))
     expect(logData(logs, 'slackbotv2_handoff_started')).toEqual(
       expect.objectContaining({
         assistant_status_requested: true,
@@ -4552,7 +4551,7 @@ describe('slackbotv2', () => {
         trigger: 'new_mention'
       })
     )
-    expect(logData(logs, 'slackbotv2_webhook_handoff_wait_started')).toEqual(
+    expect(logData(logs, 'slackbotv2_webhook_received')).toEqual(
       expect.objectContaining({
         slack_channel: CHANNEL_ID,
         slack_event_id: 'Ev-slackbotv2-slow-execute',
@@ -4560,8 +4559,7 @@ describe('slackbotv2', () => {
         slack_message_ts: mention.ts,
         slack_retry_num: '1',
         slack_retry_reason: 'http_timeout',
-        slack_thread_ts: parent.ts,
-        task_count: expect.any(Number)
+        slack_thread_ts: parent.ts
       })
     )
 

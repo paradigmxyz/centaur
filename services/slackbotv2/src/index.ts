@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { Buffer } from 'node:buffer'
-import { randomUUID } from 'node:crypto'
+import { createHmac, randomUUID } from 'node:crypto'
 import { Hono, type Context } from 'hono'
 import {
   Chat,
@@ -11,9 +11,9 @@ import {
   type Attachment,
   type Logger,
   type Message as ChatMessage,
-  type SerializedMessage,
   type StateAdapter,
-  type Thread
+  type Thread,
+  type WebhookOptions
 } from 'chat'
 import { createSlackAdapter } from '@chat-adapter/slack'
 import {
@@ -21,6 +21,7 @@ import {
   callSlackApi,
   fetchSlackThreadReplies
 } from '@chat-adapter/slack/api'
+import { verifySlackSignature } from '@chat-adapter/slack/webhook'
 import { createPostgresState } from '@chat-adapter/state-pg'
 import pg from 'pg'
 import {
@@ -148,6 +149,8 @@ const MAX_SLACK_MESSAGE_ATTACHMENTS = 20
 type SlackbotV2RequestContext = {
   waitUntil(promise: Promise<unknown>): void
   actionError?: unknown
+  /** Set while redelivering a Slack inbox entry left by a previous process. */
+  inboxReplay?: boolean
 }
 
 type StateConnectionStatus = {
@@ -340,7 +343,13 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   const stateConnectionStatus: StateConnectionStatus = { attempts: 0, connected: false }
   const stateConnected = ensureStateConnected(state, options, stateConnectionStatus)
   backgroundWaitUntil(stateConnected)
-  const inbox = createSlackInbox({ chat, options, state, stateConnected, steeringReactions })
+  const inbox = createSlackInbox({
+    chat,
+    deliver: (request, webhookOptions) => chat.webhooks.slack(request, webhookOptions),
+    options,
+    state,
+    stateConnected
+  })
 
   chat.onAction(async event => {
     const payload = slackBlockActionPayload(event)
@@ -457,9 +466,12 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
         threadId
       })
       lateSlackFiles.rememberFilelessMention(thread, directMessage)
-      await inbox.submit(thread, directMessage, {
+      await handleSlackMessageHandoff(thread, directMessage, {
         assistantStatusRequested: true,
         mode: 'execute',
+        options,
+        state,
+        steeringReactions,
         subscribe: true,
         trigger: 'direct_message'
       })
@@ -469,9 +481,12 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   chat.onNewMention(async (thread, message) => {
     if (!(await isAllowedSlackMessage(message, options, logger))) return
     lateSlackFiles.rememberFilelessMention(thread, message)
-    await inbox.submit(thread, message, {
+    await handleSlackMessageHandoff(thread, message, {
       assistantStatusRequested: true,
       mode: 'execute',
+      options,
+      state,
+      steeringReactions,
       subscribe: true,
       trigger: 'new_mention'
     })
@@ -484,9 +499,12 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     if (!slackRichTextMentionsUser(message.raw, options.botUserId)) return
     if (!(await isAllowedSlackMessage(message, options, logger))) return
     message.isMention = true
-    await inbox.submit(thread, message, {
+    await handleSlackMessageHandoff(thread, message, {
       assistantStatusRequested: true,
       mode: 'execute',
+      options,
+      state,
+      steeringReactions,
       subscribe: true,
       trigger: 'new_mention'
     })
@@ -505,9 +523,12 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       return
     }
     lateSlackFiles.rememberFilelessMention(thread, message)
-    await inbox.submit(thread, message, {
+    await handleSlackMessageHandoff(thread, message, {
       assistantStatusRequested: true,
       mode: 'execute',
+      options,
+      state,
+      steeringReactions,
       trigger: 'subscribed_message'
     })
   })
@@ -550,6 +571,19 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       const handoffTasks: Promise<unknown>[] = []
       const context: SlackbotV2RequestContext = {
         waitUntil: promise => waitUntil(c, promise)
+      }
+      if (shouldAwaitSlackHandoff(rawBody)) {
+        const accepted = await requestContext.run(context, () =>
+          inbox.accept(rawBody, c.req.raw.headers)
+        )
+        if (accepted) {
+          if (accepted.ok) {
+            const lateFileTask = lateSlackFiles.repairFromWebhook(rawBody)
+            if (lateFileTask) waitUntil(c, lateFileTask)
+          }
+          outcome = accepted.ok ? 'success' : 'error'
+          return accepted
+        }
       }
       const response = await requestContext.run(context, () => {
         return chat.webhooks.slack(c.req.raw, {
@@ -630,92 +664,43 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   return { app, chat }
 }
 
-type SlackHandoffRequest = {
-  assistantStatusRequested: boolean
-  mode: SlackbotV2MessageMode
-  subscribe?: boolean
-  trigger: string
-}
-
-type SlackInboxEntry = {
-  message: SerializedMessage
-  request: SlackHandoffRequest
-  threadId: string
-}
-
+type SlackInboxEntry = { body: string }
 type SlackInboxIndexEntry = { acceptedAtMs: number; key: string }
 
 /**
- * Durable inbox for accepted Slack messages. A message is written before its
- * webhook is acknowledged and deleted once its handoff finishes, so the
- * classifier and session API calls run after Slack's deadline without losing
- * the message if the process dies. Handoffs run one at a time per thread, in
- * arrival order. Slackbot v2 runs as a single replica, so the process that
- * starts next replays whatever the previous one left behind. In-process
- * handoff retries and late-file repair run outside the inbox.
+ * Durable inbox for Slack message events. The verified webhook body is saved
+ * before Slack is acknowledged, then delivered to the Chat SDK in background
+ * exactly as if Slack had just sent it, and deleted once the Chat SDK's
+ * handlers finish. Slackbot v2 runs as a single replica, so the process that
+ * starts next redelivers whatever the previous one left behind. In-process
+ * handoff retries and late-file repair are not covered.
  */
 function createSlackInbox(deps: {
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>
+  deliver: (request: Request, webhookOptions: WebhookOptions) => Promise<Response>
   options: SlackbotV2Options
   state: StateAdapter
   stateConnected: Promise<void>
-  steeringReactions: SteeringReactionController
 }) {
-  const { chat, options, state, steeringReactions } = deps
-  const threadTails = new Map<string, Promise<void>>()
+  const { chat, options, state } = deps
+  const startedAtMs = Date.now()
 
-  const runInThreadOrder = (threadId: string, task: () => Promise<void>): Promise<void> => {
-    const run = (threadTails.get(threadId) ?? Promise.resolve()).then(task)
-    const tail = run.catch(() => undefined)
-    threadTails.set(threadId, tail)
-    void tail.then(() => {
-      if (threadTails.get(threadId) === tail) threadTails.delete(threadId)
-    })
-    return run
-  }
-
-  // Entries this process accepted; replay must never run them a second time.
-  const ownKeys = new Set<string>()
-
-  const handoff = async (
-    key: string,
-    thread: Thread<SlackbotV2ThreadState>,
-    message: ChatMessage,
-    request: SlackHandoffRequest
-  ): Promise<void> => {
+  const deliver = async (key: string, body: string): Promise<void> => {
     try {
-      await handleSlackMessageHandoff(thread, message, {
-        ...request,
-        options,
-        state,
-        steeringReactions
+      const tasks: Promise<unknown>[] = []
+      const response = await deps.deliver(signedSlackRequest(body, options.signingSecret), {
+        waitUntil: task => {
+          tasks.push(task)
+        }
       })
+      if (!response.ok) {
+        throw new Error(`Slack inbox delivery failed with HTTP ${response.status}`)
+      }
+      await Promise.all(tasks)
     } finally {
-      // A leftover entry expires on its own.
+      // One delivery per entry; a leftover entry expires on its own.
       await state.delete(key).catch(() => undefined)
-      ownKeys.delete(key)
     }
-  }
-
-  const replayEntry = async (key: string): Promise<void> => {
-    const entry = await state.get<SlackInboxEntry>(key)
-    if (!entry) return
-    const message = rehydrateInboxMessage(entry.message, options)
-    const thread = chat.thread(entry.threadId)
-    const trace = createHandoffTrace(thread, message, entry.request.mode)
-    traceLog(options, 'slackbotv2_inbox_replay_queued', trace, { trigger: entry.request.trigger })
-    void runInThreadOrder(entry.threadId, async () => {
-      // The entry may have been handed off since the scan read it.
-      if (ownKeys.has(key) || !(await state.get(key))) return
-      traceLog(options, 'slackbotv2_inbox_replay_started', trace, {
-        trigger: entry.request.trigger
-      })
-      await clearAbandonedExecutionStart(thread, options, trace)
-      await handoff(key, thread, message, entry.request)
-      traceLog(options, 'slackbotv2_inbox_replay_complete', trace)
-    }).catch(error => {
-      traceWarn(options, 'slackbotv2_inbox_replay_failed', trace, { error: errorMessage(error) })
-    })
   }
 
   const scan = async (): Promise<void> => {
@@ -723,18 +708,43 @@ function createSlackInbox(deps: {
     const index = await state.getList<SlackInboxIndexEntry>(INBOX_INDEX_KEY)
     const keys = new Set(
       index
-        .filter(entry => Date.now() - entry.acceptedAtMs <= INBOX_MAX_AGE_MS)
-        .map(entry => entry.key)
+        // Entries accepted by this process are delivered by it already.
+        .filter(item => item.acceptedAtMs < startedAtMs)
+        .filter(item => Date.now() - item.acceptedAtMs <= INBOX_MAX_AGE_MS)
+        .map(item => item.key)
     )
+    const entries: Array<{ body: string; key: string }> = []
     for (const key of keys) {
-      if (ownKeys.has(key)) continue
       try {
-        await replayEntry(key)
+        const entry = await state.get<SlackInboxEntry>(key)
+        if (entry) entries.push({ body: entry.body, key })
       } catch (error) {
-        // One unreadable entry must not stop the rest of the replay.
         traceWarn(options, 'slackbotv2_inbox_replay_entry_failed', undefined, {
           error: errorMessage(error),
           inbox_key: key
+        })
+      }
+    }
+    // The Chat SDK already marked these messages as seen. Clear that first, for
+    // all entries at once: Slack sends a mention as both a message and an
+    // app_mention event, and the second must still dedupe against the first.
+    for (const entry of entries) {
+      const messageTs = slackWebhookMessageTs(entry.body)
+      if (messageTs) await state.delete(`dedupe:slack:${messageTs}`)
+    }
+    for (const entry of entries) {
+      const fields = { inbox_key: entry.key, ...slackWebhookLogFields(entry.body) }
+      traceLog(options, 'slackbotv2_inbox_replay_started', undefined, fields)
+      try {
+        await requestContext.run(
+          { inboxReplay: true, waitUntil: promise => void promise.catch(() => undefined) },
+          () => deliver(entry.key, entry.body)
+        )
+        traceLog(options, 'slackbotv2_inbox_replay_complete', undefined, fields)
+      } catch (error) {
+        traceWarn(options, 'slackbotv2_inbox_replay_failed', undefined, {
+          ...fields,
+          error: errorMessage(error)
         })
       }
     }
@@ -763,64 +773,79 @@ function createSlackInbox(deps: {
   if (options.replayInboxOnStart !== false) void replay()
 
   return {
-    async submit(
-      thread: Thread<SlackbotV2ThreadState>,
-      message: ChatMessage,
-      request: SlackHandoffRequest
-    ): Promise<void> {
-      const key = `slackbotv2:inbox:${thread.id}:${message.id}`
-      const entry: SlackInboxEntry = { message: message.toJSON(), request, threadId: thread.id }
-      ownKeys.add(key)
-      let durable = true
-      const written = (async () => {
-        await state.set(key, entry, INBOX_MAX_AGE_MS)
+    /**
+     * Saves a Slack message event and schedules its delivery. Returns the
+     * webhook response, or null when it could not be saved and the caller
+     * must deliver it synchronously instead.
+     */
+    async accept(body: string, headers: Headers): Promise<Response | null> {
+      try {
+        await verifySlackSignature(body, headers, { signingSecret: options.signingSecret })
+      } catch {
+        return new Response('Invalid signature', { status: 401 })
+      }
+      const eventId = stringValue(parseSlackWebhookPayload(body)?.event_id)
+      if (!eventId) return null
+      const key = `slackbotv2:inbox:${eventId}`
+      try {
+        await state.set<SlackInboxEntry>(key, { body }, INBOX_MAX_AGE_MS)
         await state.appendToList(
           INBOX_INDEX_KEY,
           { acceptedAtMs: Date.now(), key } satisfies SlackInboxIndexEntry,
           { maxLength: INBOX_INDEX_MAX_LENGTH }
         )
-      })().catch(error => {
-        durable = false
-        traceWarn(
-          options,
-          'slackbotv2_inbox_write_failed',
-          createHandoffTrace(thread, message, request.mode),
-          { error: errorMessage(error), trigger: request.trigger }
-        )
-      })
-      // Take the thread's slot before awaiting the write so arrival order holds.
-      // handleSlackMessageHandoff already logs its failures.
-      const run = runInThreadOrder(thread.id, async () => {
-        await written
-        await handoff(key, thread, message, request)
-      }).catch(() => undefined)
-      await written
-      // Without a durable entry, the webhook waits for the handoff as before.
-      if (durable) backgroundWaitUntil(run)
-      else await run
+      } catch (error) {
+        traceWarn(options, 'slackbotv2_inbox_write_failed', undefined, {
+          error: errorMessage(error),
+          ...slackWebhookLogFields(body)
+        })
+        await state.delete(key).catch(() => undefined)
+        return null
+      }
+      backgroundWaitUntil(
+        deliver(key, body).catch(error => {
+          traceWarn(options, 'slackbotv2_inbox_delivery_failed', undefined, {
+            error: errorMessage(error),
+            ...slackWebhookLogFields(body)
+          })
+        })
+      )
+      return new Response('ok', { status: 200 })
     }
   }
 }
 
-function rehydrateInboxMessage(
-  serialized: SerializedMessage,
-  options: SlackbotV2Options
-): ChatMessage {
-  const message = ChatSdkMessage.fromJSON(serialized)
-  message.attachments = message.attachments.map(attachment => {
-    const url = attachment.fetchMetadata?.url ?? attachment.url
-    return url ? { ...attachment, fetchData: () => fetchSlackFile(options, url) } : attachment
+/** A freshly signed copy of a verified Slack webhook body for redelivery. */
+function signedSlackRequest(body: string, signingSecret: string): Request {
+  const timestamp = Math.floor(Date.now() / 1000).toString()
+  const signature = createHmac('sha256', signingSecret)
+    .update(`v0:${timestamp}:${body}`)
+    .digest('hex')
+  return new Request('http://slackbotv2.internal/api/webhooks/slack', {
+    body,
+    headers: {
+      'content-type': 'application/json',
+      'x-slack-request-timestamp': timestamp,
+      'x-slack-signature': `v0=${signature}`
+    },
+    method: 'POST'
   })
-  return message
+}
+
+function slackWebhookMessageTs(body: string): string | undefined {
+  const payload = parseSlackWebhookPayload(body)
+  const event = payload && isJsonObject(payload.event) ? payload.event : undefined
+  return stringValue(event?.ts)
 }
 
 /**
- * A replayed message's previous process may have died after marking the
+ * A redelivered message's previous process may have died after marking the
  * thread active but before committing the execution. Without a render
  * obligation nothing would ever clear that mark, so clear it and let the
- * replay start the execution (execute is idempotent per message). This only
- * covers crashes during the inbox handoff itself: a crash during an in-process
- * retry, or a restart after the entry expired, can still leave the mark behind.
+ * redelivery start the execution (execute is idempotent per message). This
+ * only covers crashes during the inbox delivery itself: a crash during an
+ * in-process retry, or a restart after the entry expired, can still leave the
+ * mark behind.
  */
 async function clearAbandonedExecutionStart(
   thread: Thread<SlackbotV2ThreadState>,
@@ -836,10 +861,14 @@ async function clearAbandonedExecutionStart(
 async function handleSlackMessageHandoff(
   thread: Thread<SlackbotV2ThreadState>,
   message: ChatMessage,
-  input: SlackHandoffRequest & {
+  input: {
+    assistantStatusRequested: boolean
+    mode: SlackbotV2MessageMode
     options: SlackbotV2Options
     state: StateAdapter
     steeringReactions: SteeringReactionController
+    subscribe?: boolean
+    trigger: string
   }
 ): Promise<void> {
   const trace = createHandoffTrace(thread, message, input.mode)
@@ -851,6 +880,9 @@ async function handleSlackMessageHandoff(
   let initialAssistantStatusVisible = false
   let assistantStatus = Promise.resolve(false)
   try {
+    if (requestContext.getStore()?.inboxReplay) {
+      await clearAbandonedExecutionStart(thread, input.options, trace)
+    }
     if (await handleStopCommand(thread, message, input.options, input.trigger)) {
       return
     }
@@ -1362,8 +1394,8 @@ function finishSteeringReaction(
 }
 
 /**
- * Persists a Slack thread update into the session API. Runs from the Slack inbox after Slack was
- * acknowledged; SSE rendering continues in background after create/append/execute.
+ * Persists a Slack thread update into the session API. Message events reach it from the Slack inbox
+ * after Slack was acknowledged; SSE rendering continues in background after create/append/execute.
  */
 async function syncThreadMessageToSession(
   thread: Thread<SlackbotV2ThreadState>,
