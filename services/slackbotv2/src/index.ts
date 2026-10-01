@@ -25,6 +25,11 @@ import { verifySlackSignature } from '@chat-adapter/slack/webhook'
 import { createPostgresState } from '@chat-adapter/state-pg'
 import pg from 'pg'
 import {
+  createMemorySlackInboxStore,
+  createPostgresSlackInboxStore,
+  type SlackInboxStore
+} from './inbox'
+import {
   harnessToChatSdkStream,
   EMPTY_FINAL_ANSWER_TEXT,
   type CodexAppServerToChatStreamOptions,
@@ -170,8 +175,6 @@ const RENDER_RECOVERY_THREAD_TIMEOUT_MS = 2 * 60 * 1000
 const RENDER_RECOVERY_MAX_THREAD_FAILURES = 5
 const RENDER_RETRY_INITIAL_DELAY_MS = 250
 const RENDER_RETRY_MAX_DELAY_MS = 5_000
-const INBOX_INDEX_KEY = 'slackbotv2:inbox:index'
-const INBOX_INDEX_MAX_LENGTH = 2000
 // Do not answer a request the user has likely given up on.
 const INBOX_MAX_AGE_MS = 10 * 60 * 1000
 // Lets the pod being replaced in a rolling update finish or die first.
@@ -330,7 +333,9 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     userName,
     logger
   })
-  const state = options.state ?? createDefaultState(options, logger)
+  const { pool, state } = options.state
+    ? { pool: undefined, state: options.state }
+    : createDefaultState(options, logger)
   const chat = new Chat<{ slack: typeof slack }, SlackbotV2ThreadState>({
     userName,
     adapters: { slack },
@@ -348,7 +353,12 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     deliver: (request, webhookOptions) => chat.webhooks.slack(request, webhookOptions),
     options,
     state,
-    stateConnected
+    stateConnected,
+    store:
+      options.inboxStore ??
+      (pool
+        ? createPostgresSlackInboxStore(pool, options.stateKeyPrefix ?? 'centaur-slackbotv2')
+        : createMemorySlackInboxStore())
   })
 
   chat.onAction(async event => {
@@ -664,9 +674,6 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   return { app, chat }
 }
 
-type SlackInboxEntry = { body: string }
-type SlackInboxIndexEntry = { acceptedAtMs: number; key: string }
-
 /**
  * Durable inbox for Slack message events. The verified webhook body is saved
  * before Slack is acknowledged, then delivered to the Chat SDK in background
@@ -681,11 +688,12 @@ function createSlackInbox(deps: {
   options: SlackbotV2Options
   state: StateAdapter
   stateConnected: Promise<void>
+  store: SlackInboxStore
 }) {
-  const { chat, options, state } = deps
-  const startedAtMs = Date.now()
+  const { chat, options, state, store } = deps
+  const startedAt = new Date()
 
-  const deliver = async (key: string, body: string): Promise<void> => {
+  const deliver = async (eventId: string, body: string): Promise<void> => {
     try {
       const tasks: Promise<unknown>[] = []
       const response = await deps.deliver(signedSlackRequest(body, options.signingSecret), {
@@ -698,33 +706,15 @@ function createSlackInbox(deps: {
       }
       await Promise.all(tasks)
     } finally {
-      // One delivery per entry; a leftover entry expires on its own.
-      await state.delete(key).catch(() => undefined)
+      // One delivery per entry; a leftover row is dropped once it is too old.
+      await store.delete(eventId).catch(() => undefined)
     }
   }
 
   const scan = async (): Promise<void> => {
     await chat.initialize()
-    const index = await state.getList<SlackInboxIndexEntry>(INBOX_INDEX_KEY)
-    const keys = new Set(
-      index
-        // Entries accepted by this process are delivered by it already.
-        .filter(item => item.acceptedAtMs < startedAtMs)
-        .filter(item => Date.now() - item.acceptedAtMs <= INBOX_MAX_AGE_MS)
-        .map(item => item.key)
-    )
-    const entries: Array<{ body: string; key: string }> = []
-    for (const key of keys) {
-      try {
-        const entry = await state.get<SlackInboxEntry>(key)
-        if (entry) entries.push({ body: entry.body, key })
-      } catch (error) {
-        traceWarn(options, 'slackbotv2_inbox_replay_entry_failed', undefined, {
-          error: errorMessage(error),
-          inbox_key: key
-        })
-      }
-    }
+    // Entries accepted by this process are already being delivered by it.
+    const entries = await store.pending(new Date(Date.now() - INBOX_MAX_AGE_MS), startedAt)
     // The Chat SDK already marked these messages as seen. Clear that first, for
     // all entries at once: Slack sends a mention as both a message and an
     // app_mention event, and the second must still dedupe against the first.
@@ -733,12 +723,12 @@ function createSlackInbox(deps: {
       if (messageTs) await state.delete(`dedupe:slack:${messageTs}`)
     }
     for (const entry of entries) {
-      const fields = { inbox_key: entry.key, ...slackWebhookLogFields(entry.body) }
+      const fields = slackWebhookLogFields(entry.body)
       traceLog(options, 'slackbotv2_inbox_replay_started', undefined, fields)
       try {
         await requestContext.run(
           { inboxReplay: true, waitUntil: promise => void promise.catch(() => undefined) },
-          () => deliver(entry.key, entry.body)
+          () => deliver(entry.eventId, entry.body)
         )
         traceLog(options, 'slackbotv2_inbox_replay_complete', undefined, fields)
       } catch (error) {
@@ -763,7 +753,7 @@ function createSlackInbox(deps: {
           attempt: attempt + 1,
           error: errorMessage(error)
         })
-        // Every entry has expired by then; stop retrying.
+        // Every entry is too old to answer by then; stop retrying.
         if (Date.now() >= deadlineMs) return
         await sleep(renderRetryDelayMs(attempt))
       }
@@ -786,30 +776,27 @@ function createSlackInbox(deps: {
       }
       const eventId = stringValue(parseSlackWebhookPayload(body)?.event_id)
       if (!eventId) return null
-      const key = `slackbotv2:inbox:${eventId}`
+      let saved: boolean
       try {
-        await state.set<SlackInboxEntry>(key, { body }, INBOX_MAX_AGE_MS)
-        await state.appendToList(
-          INBOX_INDEX_KEY,
-          { acceptedAtMs: Date.now(), key } satisfies SlackInboxIndexEntry,
-          { maxLength: INBOX_INDEX_MAX_LENGTH }
-        )
+        saved = await store.save(eventId, body, new Date())
       } catch (error) {
         traceWarn(options, 'slackbotv2_inbox_write_failed', undefined, {
           error: errorMessage(error),
           ...slackWebhookLogFields(body)
         })
-        await state.delete(key).catch(() => undefined)
         return null
       }
-      backgroundWaitUntil(
-        deliver(key, body).catch(error => {
-          traceWarn(options, 'slackbotv2_inbox_delivery_failed', undefined, {
-            error: errorMessage(error),
-            ...slackWebhookLogFields(body)
+      // A Slack redelivery of an event already saved needs no second delivery.
+      if (saved) {
+        backgroundWaitUntil(
+          deliver(eventId, body).catch(error => {
+            traceWarn(options, 'slackbotv2_inbox_delivery_failed', undefined, {
+              error: errorMessage(error),
+              ...slackWebhookLogFields(body)
+            })
           })
-        })
-      )
+        )
+      }
       return new Response('ok', { status: 200 })
     }
   }
@@ -1238,7 +1225,10 @@ function recordFallback(outcome: string, startedAtMs: number): void {
   }
 }
 
-function createDefaultState(options: SlackbotV2Options, logger: Logger): StateAdapter {
+function createDefaultState(
+  options: SlackbotV2Options,
+  logger: Logger
+): { pool: pg.Pool; state: StateAdapter } {
   const stateLogger = logger.child('postgres-state')
   // Own the pool so we can attach an error handler. pg.Pool emits 'error' for
   // idle clients whose connection drops (Postgres restart, or a transient blip
@@ -1249,11 +1239,12 @@ function createDefaultState(options: SlackbotV2Options, logger: Logger): StateAd
   pool.on('error', error => {
     stateLogger.warn('postgres pool error', { error: errorMessage(error) })
   })
-  return createPostgresState({
+  const state = createPostgresState({
     client: pool,
     keyPrefix: options.stateKeyPrefix ?? 'centaur-slackbotv2',
     logger: stateLogger
   })
+  return { pool, state }
 }
 
 function healthResponse(c: Context, stateConnectionStatus: StateConnectionStatus): Response {

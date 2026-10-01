@@ -159,6 +159,7 @@ jobs:
             '^\.github/workflows/ci\.yml$'
           set_output slackbotv2_tests \
             '^services/slackbotv2/' \
+            '^\.github/scripts/start-test-postgres\.sh$' \
             '^package\.json$' \
             '^pnpm-lock\.yaml$' \
             '^pnpm-workspace\.yaml$' \
@@ -669,8 +670,13 @@ jobs:
       - name: Install Node dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Start Test Postgres
+        run: .github/scripts/start-test-postgres.sh slackbotv2-test-postgres 5432 postgres pgvector
+
       - name: Slackbot v2 tests
         working-directory: services/slackbotv2
+        env:
+          SLACKBOTV2_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: bun test test
 
   linearbot-tests:

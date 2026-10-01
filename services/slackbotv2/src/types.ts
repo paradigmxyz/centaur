@@ -3,6 +3,7 @@ import type { CodexAppServerToChatStreamOptions } from '@centaur/rendering'
 import type { Attachment, Chat, Logger, StateAdapter } from 'chat'
 import type { Hono } from 'hono'
 import type { ChannelDefaults } from './channel-defaults'
+import type { SlackInboxStore } from './inbox'
 import type { HarnessOverrides } from './overrides'
 import type { SlackDisplayTextSource } from './slack-display-text'
 
@@ -191,6 +192,11 @@ export type SlackbotV2Options = {
   inboxReplayDelayMs?: number
   /** Redeliver Slack inbox entries a previous process left behind. Defaults to true. */
   replayInboxOnStart?: boolean
+  /**
+   * Store for Slack webhook bodies awaiting delivery. Defaults to Postgres next
+   * to the default state, or to a process-local store when `state` is supplied.
+   */
+  inboxStore?: SlackInboxStore
   /** Milliseconds before an idle execution pauses its sandbox. Defaults to up to 3h. */
   idleTimeoutMs?: number
   logger?: Logger

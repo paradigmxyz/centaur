@@ -16,7 +16,7 @@ lifecycle, harness formatting, and durable execution state belong in `api-rs`.
 - Verify Slack signatures and policy gates before processing an event. Ignore
   bot/self events and unsupported event shapes without creating sessions.
 - For Slack message events, verify the signature, save the raw body to the
-  Slack inbox in Chat SDK state, and acknowledge. The saved body is then
+  Postgres inbox table (`src/inbox.ts`), and acknowledge. The saved body is then
   delivered to the Chat SDK as if Slack had just sent it, and deleted once its
   handlers finish; the next process start redelivers entries left by a crash.
   The inbox assumes a single replica and does not cover in-process handoff

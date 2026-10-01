@@ -26,6 +26,7 @@ import {
 import { clearRequesterIdentityCacheForTests } from '../src/session-api'
 import { slackbotMetrics } from '../src/metrics'
 import { createOpenAiMessageOverridesStrategy } from '../src/message-overrides-strategy'
+import { createMemorySlackInboxStore } from '../src/inbox'
 import claudeSettings from '../../../harness/claude/settings.json'
 
 const BOT_TOKEN = 'xoxb-slackbotv2-emulate'
@@ -4578,7 +4579,9 @@ describe('slackbotv2', () => {
   it('replays an inbox message whose process died before the execution was committed', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
+    const inboxStore = createMemorySlackInboxStore()
     bot = createTestBot({
+      inboxStore,
       // The first process dies mid-execute: its request never returns.
       fetch: async (input, init) =>
         String(input).endsWith('/execute') ? new Promise<Response>(() => {}) : fetch(input, init),
@@ -4608,7 +4611,12 @@ describe('slackbotv2', () => {
     expect(response.status).toBe(200)
     await waitFor(() => codexApi.appends.length === 1)
 
-    bot = createTestBot({ inboxReplayDelayMs: 0, replayInboxOnStart: true, state: sharedState })
+    bot = createTestBot({
+      inboxReplayDelayMs: 0,
+      inboxStore,
+      replayInboxOnStart: true,
+      state: sharedState
+    })
 
     await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 1.'), 3000)
     expect(codexApi.executes.map(execute => execute.body.idempotency_key)).toEqual([mention.ts])
