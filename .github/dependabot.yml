@@ -60,6 +60,11 @@ updates:
       prefix: chore
       include: scope
     open-pull-requests-limit: 5
+    ignore:
+      # Rails 8.1.4 is broken; see the exclusion in services/console/Gemfile.
+      - dependency-name: rails
+        versions:
+          - "8.1.4"
     groups:
       ruby-dependencies:
         patterns:
