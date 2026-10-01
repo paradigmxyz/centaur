@@ -30,7 +30,8 @@ const DEFAULT_DESCRIPTION = 'A member of your Centaur crew'
 export function crewManifest(name: string, base: string, id: string, description = DEFAULT_DESCRIPTION) {
   const events = `${base}/api/slack/crew/${id}/events`
   return {
-    display_information: { name, description },
+    // Slack permits an omitted description, but rejects an empty one.
+    display_information: { name, ...(description.trim() ? { description } : {}) },
     features: {
       bot_user: { display_name: name, always_online: true },
       app_home: { home_tab_enabled: false, messages_tab_enabled: true, messages_tab_read_only_enabled: false }

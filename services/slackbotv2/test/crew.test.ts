@@ -260,6 +260,26 @@ describe('Crew provisioning', () => {
     expect(f.botOptions).toHaveLength(2)
   })
 
+  test('omits blank optional descriptions in create and update manifests', async () => {
+    const f = fixture()
+    const headers = { Authorization: 'Bearer management-test', 'Content-Type': 'application/json' }
+    const created = await f.app.request('/api/slack/crew', { method: 'POST', headers,
+      body: JSON.stringify({ id: 'research', name: 'Research', crew_id: 'eng', description: '' }) })
+    expect(created.status).toBe(201)
+    const createManifest = JSON.parse((f.slackBodies['apps.manifest.create']![0] as URLSearchParams).get('manifest')!)
+    expect(createManifest.display_information).toEqual({ name: 'Research' })
+    for (const description of ['Useful description', '', '   ']) {
+      const updated = await f.app.request('/api/slack/crew/research/manage', { method: 'POST', headers,
+        body: JSON.stringify({ description }) })
+      expect(updated.status).toBe(200)
+      const manifest = JSON.parse((f.slackBodies['apps.manifest.update']!.at(-1) as URLSearchParams).get('manifest')!)
+      expect(manifest.display_information).toEqual(description === 'Useful description'
+        ? { name: 'Research', description: 'Useful description' } : { name: 'Research' })
+    }
+    expect(crewManifest('Research', 'https://bots.example.com', 'research').display_information)
+      .toEqual({ name: 'Research', description: 'A member of your Centaur crew' })
+  })
+
   test('manifest includes mentions and DMs, with no browser callback or administration scopes', () => {
     const manifest = crewManifest('Research', 'https://bots.example.com', 'research')
     expect('redirect_urls' in manifest.oauth_config).toBe(false)
