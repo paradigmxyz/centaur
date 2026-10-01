@@ -1,4 +1,4 @@
-"""Parallel Web Systems backend.
+"""Parallel Web Systems backend: retrieval only; synthesis lives in client.py.
 
 `search` and `deep_research` against:
 
@@ -16,26 +16,35 @@ import datetime as dt
 import json
 import time
 import uuid
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 from parallel import APIStatusError, APITimeoutError, AsyncParallel, AuthenticationError
 
+from ._common import (
+    TOOL_NAME,
+    TOOL_VERSION,
+    append_within_budget,
+    decode_jsonrpc_response,
+    render_sources_block,
+)
 from .models import (
-    DeepResearchIteration,
-    DeepResearchResponse,
-    ResponseMeta,
-    SearchResponse,
+    DeepResearchResult,
+    DeepResearchSpec,
+    RetrievalResult,
+    SearchRequestSpec,
     SourceDocument,
 )
 
 API_BASE_URL = "https://api.parallel.ai"
 MCP_URL = "https://search.parallel.ai/mcp"
 MCP_PROTOCOL_VERSION = "2025-06-18"
-MCP_CLIENT_NAME = "centaur-websearch"
-MCP_CLIENT_VERSION = "0.2.0"
 SNIPPET_CHAR_LIMIT = 7000
+
+EFFORT_TO_SEARCH_MODE: dict[str, str] = {"instant": "basic", "fast": "advanced", "deep": "advanced"}
+EFFORT_TO_PROCESSOR: dict[str, str] = {"medium": "ultra-fast", "high": "ultra"}
 
 # Per Parallel docs, Deep Research is "optimized within the `pro` and `ultra`
 # processor families" — other processors (lite/base/core/core2x) return a flat
@@ -86,27 +95,12 @@ def _estimate_task_cost_usd(processor: str) -> float | None:
 def _estimate_search_cost_usd(num_results: int) -> float:
     extra = max(0, num_results - SEARCH_INCLUDED_RESULTS)
     return round(SEARCH_PRICE_USD_PER_1000 / 1000 + extra * SEARCH_EXTRA_RESULT_USD, 6)
-DEFAULT_DEEP_RESEARCH_TIMEOUT_SECONDS = 1800.0
+
+
 _FREE_MCP_ATTRIBUTION = (
     "Search powered by the free Parallel Web Search MCP "
     "(https://parallel.ai). See https://parallel.ai/customer-terms."
 )
-
-
-def _append_within_budget(body: str, trailer: str, max_chars: int) -> str:
-    """Append `trailer` to `body`, keeping the total within `max_chars`.
-
-    The trailer (the canonical ## Sources block or attribution footer) is
-    always preserved intact — it carries citation integrity, so it is never
-    sliced. The body absorbs truncation to make room. In the degenerate case
-    where the trailer alone exceeds `max_chars`, the cap is exceeded rather
-    than corrupting the citation map (integrity beats the best-effort cap).
-    """
-    body = body.rstrip()
-    if len(body) + len(trailer) <= max_chars:
-        return body + trailer
-    body_budget = max(0, max_chars - len(trailer))
-    return body[:body_budget].rstrip() + trailer
 
 
 class ParallelBackend:
@@ -138,10 +132,6 @@ class ParallelBackend:
         self._rest_auth_failed = False
 
     @property
-    def has_api_key(self) -> bool:
-        return bool(self._api_key)
-
-    @property
     def search_mode(self) -> str:
         return "api" if self._api_key and not self._rest_auth_failed else "mcp"
 
@@ -155,63 +145,52 @@ class ParallelBackend:
             timeout=timeout_seconds,
         )
 
-    async def search(
-        self,
-        *,
-        search_queries: list[str],
-        objective: str | None = None,
-        num_results: int = 10,
-        timeout_seconds: float = 60.0,
-        synthesize: bool = True,
-        max_report_chars: int = 12000,
-        mode: str | None = None,
-        client_model: str | None = None,
-        max_chars_total: int | None = None,
-        include_domains: list[str] | None = None,
-        exclude_domains: list[str] | None = None,
-        max_age_hours: int | None = None,
-        session_id: str | None = None,
-        synthesis_pipeline: Any | None = None,
-        thread_context: list[str] | None = None,
-    ) -> dict:
-        started = time.perf_counter()
-        queries = [q.strip() for q in (search_queries or []) if q and q.strip()]
-        if not queries:
-            raise RuntimeError("search_queries must contain at least one non-empty query.")
-        cleaned_objective = (objective or "").strip() or None
-        # Reuse a stable session id when the caller doesn't supply one (free
-        # tier MCP needs it for rate-limit attribution; REST benefits from
-        # call correlation in Parallel's logs).
-        effective_session_id = session_id or self._default_session_id
+    async def search(self, request: SearchRequestSpec) -> RetrievalResult:
+        query = request.query.strip()
+        if not query:
+            raise RuntimeError("query cannot be empty.")
+        effective_session_id = request.session_id or self._default_session_id
         partial_failures: list[dict[str, str]] = []
+        mode = EFFORT_TO_SEARCH_MODE[request.effort] if request.effort else None
+        if request.effort == "deep":
+            partial_failures.append(
+                {
+                    "query": query,
+                    "error": "effort='deep' has no Parallel equivalent; ran Parallel mode='advanced'.",
+                }
+            )
 
-        display_query = cleaned_objective or "; ".join(queries)
-        use_rest = bool(self._api_key) and not self._rest_auth_failed
-        if use_rest:
+        if self._api_key and not self._rest_auth_failed:
             try:
                 sources, request_id, usage = await self._search_api(
-                    objective=cleaned_objective,
-                    search_queries=queries,
-                    timeout_seconds=timeout_seconds,
+                    objective=query,
+                    search_queries=[query],
+                    timeout_seconds=request.timeout_seconds,
                     mode=mode,
-                    client_model=client_model,
-                    max_chars_total=max_chars_total,
-                    num_results=num_results,
-                    include_domains=include_domains,
-                    exclude_domains=exclude_domains,
-                    max_age_hours=max_age_hours,
+                    client_model=request.client_model,
+                    max_chars_total=request.max_chars_total,
+                    num_results=request.num_results,
+                    include_domains=request.include_domains,
+                    exclude_domains=request.exclude_domains,
+                    max_age_hours=request.max_age_hours,
                     session_id=effective_session_id,
                 )
-                backend_label = "parallel:api"
+                return RetrievalResult(
+                    sources=sources,
+                    backend="parallel:api",
+                    request_ids=[request_id] if request_id else [],
+                    usage=usage,
+                    partial_failures=partial_failures,
+                    estimated_cost_usd=_estimate_search_cost_usd(request.num_results),
+                )
             except AuthenticationError:
                 # No granted inject secret (or an invalid configured value)
                 # left the SDK placeholder in x-api-key. Fall back to the
                 # anonymous MCP path and skip REST from now on.
                 self._rest_auth_failed = True
-                use_rest = False
                 partial_failures.append(
                     {
-                        "query": display_query,
+                        "query": query,
                         "error": (
                             "PARALLEL_API_KEY did not authenticate; fell back to the "
                             "free Search MCP. Configure a valid key to use the REST API."
@@ -219,178 +198,118 @@ class ParallelBackend:
                     }
                 )
 
-        if not use_rest:
-            ignored = []
-            if include_domains or exclude_domains or max_age_hours is not None:
-                ignored.append("include_domains/exclude_domains/max_age_hours")
-            if mode and mode != "basic":
-                ignored.append(f"mode={mode!r} (MCP forces basic)")
-            if max_chars_total is not None:
-                ignored.append("max_chars_total")
-            if num_results != 10:
-                ignored.append(
-                    f"num_results={num_results} (MCP serves a fixed default; client-side cap only)"
-                )
-            if ignored:
-                partial_failures.append(
-                    {
-                        "query": display_query,
-                        "error": (
-                            f"Free Search MCP does not honor: {', '.join(ignored)}. "
-                            "Set PARALLEL_API_KEY to use the Search REST API."
-                        ),
-                    }
-                )
-            sources, request_id, usage = await self._search_mcp(
-                objective=cleaned_objective,
-                search_queries=queries,
-                client_model=client_model,
-                timeout_seconds=timeout_seconds,
-                session_id=effective_session_id,
+        ignored = []
+        if request.include_domains or request.exclude_domains or request.max_age_hours is not None:
+            ignored.append("include_domains/exclude_domains/max_age_hours")
+        if mode and mode != "basic":
+            ignored.append(f"effort={request.effort!r} (MCP forces basic)")
+        if request.max_chars_total is not None:
+            ignored.append("max_chars_total")
+        if request.num_results != 10:
+            ignored.append(
+                f"num_results={request.num_results} (MCP serves a fixed default; client-side cap only)"
             )
-            backend_label = "parallel:mcp"
-
-        capped_sources = sources[: max(1, min(40, num_results))]
-        # On the free-MCP path we append an attribution footer; reserve its
-        # length up front so the synthesized report (including its trailing
-        # ## Sources section) is generated within the remaining budget and the
-        # footer never has to displace the citation map.
-        attribution = _FREE_MCP_ATTRIBUTION if backend_label == "parallel:mcp" else None
-        footer = f"\n\n---\n_{attribution}_\n" if attribution else ""
-        synthesis_budget = max(1, max_report_chars - len(footer))
-        answer_markdown: str | None = None
-        if synthesize and capped_sources:
-            if synthesis_pipeline is not None:
-                try:
-                    syn_result = await synthesis_pipeline.synthesize(
-                        question=display_query,
-                        sources=capped_sources,
-                        thread_context=thread_context,
-                        max_report_chars=synthesis_budget,
-                    )
-                    answer_markdown = syn_result["report"]
-                    if syn_result["validation_error"]:
-                        partial_failures.append(
-                            {
-                                "query": display_query,
-                                "error": f"synthesis failed: {syn_result['validation_error']}",
-                            }
-                        )
-                except Exception as exc:
-                    partial_failures.append(
-                        {"query": display_query, "error": f"synthesis failed: {exc}"}
-                    )
-            else:
-                partial_failures.append(
-                    {
-                        "query": display_query,
-                        "error": (
-                            "synthesize=true requested but ANTHROPIC_API_KEY is not set; "
-                            "returning raw excerpts. Set ANTHROPIC_API_KEY (or pass "
-                            "synthesize=false) to silence this notice."
-                        ),
-                    }
-                )
-
-        if footer and answer_markdown:
-            answer_markdown = f"{answer_markdown.rstrip()}{footer}"
-        estimated_cost_usd = (
-            _estimate_search_cost_usd(num_results) if backend_label == "parallel:api" else 0.0
+        if ignored:
+            partial_failures.append(
+                {
+                    "query": query,
+                    "error": (
+                        f"Free Search MCP does not honor: {', '.join(ignored)}. "
+                        "Set PARALLEL_API_KEY to use the Search REST API."
+                    ),
+                }
+            )
+        sources, request_id, usage = await self._search_mcp(
+            objective=query,
+            search_queries=[query],
+            client_model=request.client_model,
+            timeout_seconds=request.timeout_seconds,
+            session_id=effective_session_id,
         )
-        meta = ResponseMeta(
-            duration_ms=int((time.perf_counter() - started) * 1000),
+        return RetrievalResult(
+            sources=sources,
+            backend="parallel:mcp",
             request_ids=[request_id] if request_id else [],
-            partial_failures=partial_failures,
-            backend=backend_label,
             usage=usage,
-            attribution=attribution,
-            estimated_cost_usd=estimated_cost_usd,
+            partial_failures=partial_failures,
+            attribution=_FREE_MCP_ATTRIBUTION,
+            estimated_cost_usd=0.0,
         )
-        return SearchResponse(
-            query=display_query,
-            results=capped_sources,
-            answer_markdown=answer_markdown,
-            meta=meta,
-        ).model_dump()
 
     async def deep_research(
-        self,
-        *,
-        question: str,
-        progress: Any,
-        processor: str | None = None,
-        timeout_seconds: float | None = None,
-        max_report_chars: int,
-    ) -> dict:
+        self, request: DeepResearchSpec, progress: Callable[[str], None]
+    ) -> DeepResearchResult:
         if not self._api_key:
             raise RuntimeError(
                 "deep_research requires PARALLEL_API_KEY. The free Search MCP is "
                 "only available for `search`; set PARALLEL_API_KEY to enable deep "
                 "research via the Parallel Task API."
             )
-        normalized = question.strip()
-        if not normalized:
+        question = request.question.strip()
+        if not question:
             raise RuntimeError("question cannot be empty.")
-
-        effective_processor = (processor or self._default_processor).strip()
-        if effective_processor not in PROCESSOR_TIMEOUT_SECONDS:
+        if request.processor:
+            processor = request.processor.strip()
+        elif request.effort:
+            processor = EFFORT_TO_PROCESSOR[request.effort]
+        else:
+            processor = self._default_processor
+        if processor not in PROCESSOR_TIMEOUT_SECONDS:
             raise RuntimeError(
-                f"deep_research requires a pro/ultra processor (got {effective_processor!r}). "
+                f"deep_research requires a pro/ultra processor (got {processor!r}). "
                 f"Per Parallel docs, Deep Research is optimized within the pro and ultra "
                 f"families. Supported: {sorted(PROCESSOR_TIMEOUT_SECONDS)}."
             )
-        effective_timeout = timeout_seconds or PROCESSOR_TIMEOUT_SECONDS[effective_processor]
+        timeout_seconds = request.timeout_seconds or PROCESSOR_TIMEOUT_SECONDS[processor]
+        run_id, (sources, answer_markdown) = await self._run_task(
+            question=question,
+            processor=processor,
+            timeout_seconds=timeout_seconds,
+            progress=progress,
+            max_report_chars=request.max_report_chars,
+        )
+        if not answer_markdown:
+            raise RuntimeError(f"Parallel task run {run_id} returned no content.")
+        return DeepResearchResult(
+            sources=sources,
+            answer_markdown=answer_markdown,
+            backend=f"parallel:task:{processor}",
+            request_ids=[run_id],
+            estimated_cost_usd=_estimate_task_cost_usd(processor),
+        )
 
+    async def _run_task(
+        self,
+        *,
+        question: str,
+        processor: str,
+        timeout_seconds: float,
+        progress: Callable[[str], None],
+        max_report_chars: int = 50000,
+    ) -> tuple[str, tuple[list[SourceDocument], str]]:
         started = time.perf_counter()
-        progress(f"creating task ({effective_processor}, timeout={int(effective_timeout)}s)")
-        # Use auto schema (Parallel's default for pro/ultra processors), which
-        # returns a structured JSON report with per-field basis grounding. The
-        # canonical Deep Research example in the docs uses this — text mode
-        # gives looser, less reliably-cited output.
+        progress(f"creating task ({processor}, timeout={int(timeout_seconds)}s)")
         try:
-            client = self._sdk_client(timeout_seconds=effective_timeout)
+            client = self._sdk_client(timeout_seconds=timeout_seconds)
             async with client:
+                # Use auto schema (Parallel's default for pro/ultra processors), which
+                # returns a structured JSON report with per-field basis grounding. The
+                # canonical Deep Research example in the docs uses this — text mode
+                # gives looser, less reliably-cited output.
                 task = await client.task_run.create(
-                    input=normalized,
-                    processor=effective_processor,
+                    input=question,
+                    processor=processor,
                     enable_events=True,
                 )
                 run_id = task.run_id
                 progress(f"queued {run_id}")
-
                 await _stream_progress(client, run_id, progress)
-
                 result = await _await_task_result(
-                    client, run_id=run_id, deadline=started + effective_timeout
+                    client, run_id=run_id, deadline=started + timeout_seconds
                 )
         except AuthenticationError as exc:
             raise RuntimeError("deep_research requires a valid, granted PARALLEL_API_KEY.") from exc
-
-        sources, answer_markdown = _normalize_task_result(result, max_report_chars=max_report_chars)
-        if not answer_markdown:
-            raise RuntimeError(f"Parallel task run {run_id} returned no content.")
-
-        meta = ResponseMeta(
-            duration_ms=int((time.perf_counter() - started) * 1000),
-            request_ids=[run_id],
-            backend=f"parallel:task:{effective_processor}",
-            estimated_cost_usd=_estimate_task_cost_usd(effective_processor),
-        )
-        iterations = [
-            DeepResearchIteration(
-                iteration=1,
-                queries=[normalized],
-                results_count=len(sources),
-                continue_reason=f"parallel:{effective_processor}",
-            )
-        ]
-        return DeepResearchResponse(
-            question=normalized,
-            answer_markdown=answer_markdown,
-            sources=sources,
-            iterations=iterations,
-            meta=meta,
-        ).model_dump()
+        return run_id, _normalize_task_result(result, max_report_chars=max_report_chars)
 
     async def _search_api(
         self,
@@ -478,9 +397,10 @@ class ParallelBackend:
     ) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=timeout_seconds) as client:
             mcp_session_id = await self._mcp_initialize(client)
+            request_id = str(uuid.uuid4())
             envelope = {
                 "jsonrpc": "2.0",
-                "id": str(uuid.uuid4()),
+                "id": request_id,
                 "method": "tools/call",
                 "params": {"name": tool_name, "arguments": arguments},
             }
@@ -490,7 +410,7 @@ class ParallelBackend:
                 json=envelope,
             )
             response.raise_for_status()
-            envelope_out = _decode_mcp_envelope(response)
+            envelope_out = decode_jsonrpc_response(response, request_id)
         if "error" in envelope_out:
             raise RuntimeError(f"Parallel MCP error: {str(envelope_out['error'])[:500]}")
         result = envelope_out.get("result") or {}
@@ -521,14 +441,15 @@ class ParallelBackend:
         raise RuntimeError(f"Parallel MCP returned no parseable content: {str(result)[:500]}")
 
     async def _mcp_initialize(self, client: httpx.AsyncClient) -> str:
+        init_request_id = str(uuid.uuid4())
         init_envelope = {
             "jsonrpc": "2.0",
-            "id": str(uuid.uuid4()),
+            "id": init_request_id,
             "method": "initialize",
             "params": {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": {"name": MCP_CLIENT_NAME, "version": MCP_CLIENT_VERSION},
+                "clientInfo": {"name": TOOL_NAME, "version": TOOL_VERSION},
             },
         }
         init_response = await client.post(
@@ -538,7 +459,7 @@ class ParallelBackend:
         )
         init_response.raise_for_status()
         mcp_session_id = init_response.headers.get("mcp-session-id")
-        _ = _decode_mcp_envelope(init_response)
+        _ = decode_jsonrpc_response(init_response, init_request_id)
         notify = {"jsonrpc": "2.0", "method": "notifications/initialized"}
         ack = await client.post(
             self._mcp_url,
@@ -672,40 +593,6 @@ def _serialize_usage(usage: Any) -> list[dict[str, Any]]:
     return out
 
 
-def _decode_mcp_envelope(response: httpx.Response) -> dict[str, Any]:
-    content_type = response.headers.get("content-type", "")
-    text = response.text
-    if "text/event-stream" in content_type:
-        # SSE: events are delimited by blank lines. Within an event, each
-        # `data:` line contributes one line of the payload. The last event
-        # whose data is parseable JSON wins (intermediate events may be
-        # comments, retry directives, or progress notifications).
-        latest: dict[str, Any] | None = None
-        for event_block in text.split("\n\n"):
-            data_lines = [
-                line[len("data:") :].lstrip(" ")
-                for line in event_block.splitlines()
-                if line.startswith("data:")
-            ]
-            if not data_lines:
-                continue
-            payload_text = "\n".join(data_lines).strip()
-            if not payload_text:
-                continue
-            try:
-                parsed = json.loads(payload_text)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict):
-                latest = parsed
-        if latest is None:
-            raise RuntimeError("Parallel MCP returned an empty SSE stream.")
-        return latest
-    if not text.strip():
-        return {}
-    return json.loads(text)
-
-
 def _normalize_search_results(raw_results: Any) -> list[SourceDocument]:
     sources: list[SourceDocument] = []
     seen: set[str] = set()
@@ -800,9 +687,9 @@ def _normalize_task_result(
         return sources, ""
 
     if sources:
-        source_lines = [f"[{source.source_id}] {source.title} — {source.url}" for source in sources]
-        sources_block = "\n\n## Sources\n" + "\n".join(source_lines)
-        answer_markdown = _append_within_budget(answer_markdown, sources_block, max_report_chars)
+        answer_markdown = append_within_budget(
+            answer_markdown, render_sources_block(sources), max_report_chars
+        )
     else:
         answer_markdown = answer_markdown[:max_report_chars].rstrip()
     return sources, answer_markdown
