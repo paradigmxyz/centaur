@@ -160,6 +160,10 @@ through the normal broker jobs. Its wrapping secret injects the bearer token onl
 for `POST https://mercator.sh/mcp/auth`. Keep the broker polling/worker running for
 unattended credential renewal.
 
+The console displays the saved wallet identity and credential state without
+fetching balances or refreshing tokens on page load. Use **Manage wallet** to
+view balances and manage funds in Mercator.
+
 Reconnect requires the same wallet. Existing manually configured Mercator
 credentials are left untouched and require operator review before onboarding.
 Wallet connection and Slack MACH claiming are separate flows; Slack claiming is

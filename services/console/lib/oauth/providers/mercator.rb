@@ -35,7 +35,7 @@ module Oauth
         unless status["oauthAuthenticated"] == true && address.is_a?(String) && address.match?(/\A0x[0-9a-fA-F]{40}\z/)
           raise Broker::ExchangeError.new("Mercator wallet identity unavailable", stage: "oauth", code: "missing_wallet")
         end
-        { subject: address.downcase, name: address, labels: { "centaur-tool" => KEY } }
+        { subject: address.downcase, name: address, labels: credential_labels }
       end
     end
   end

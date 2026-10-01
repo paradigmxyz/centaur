@@ -158,15 +158,33 @@ class Console::MercatorControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to console_mercator_path
   end
 
-  test "status failure is not displayed as a zero balance" do
+  test "wallet page uses stored credentials without fetching balances or refreshing tokens" do
     finish_flow(start_flow)
-    client = Object.new
-    def client.status(*) = raise Broker::ExchangeError.new("unavailable", stage: "network")
-    Console::MercatorController.connection_client_factory = -> { client }
+    credential = Mercator::Connection.credential
+    credential.update!(expires_at: 1.minute.ago)
+    Console::MercatorController.connection_client_factory = -> { flunk "Wallet page must not contact Mercator" }
+    Mercator::Connection.stub(:credential, credential) do
+      credential.stub(:refresh!, -> { flunk "Wallet page must not refresh credentials" }) do
+        get console_mercator_path
+      end
+    end
+    assert_response :ok
+    assert_select "a[href='https://mercator.sh/account']", text: "Manage wallet ↗"
+    assert_select "a[href='https://explore.tempo.xyz/address/#{WALLET}']"
+    assert_select "span", text: "Connected"
+    assert_select "dl", count: 0
+    assert_no_match "Balance is currently unavailable", response.body
+    assert_no_match "synthetic-", response.body
+  end
+
+  test "wallet page shows reconnect for a dead credential" do
+    finish_flow(start_flow)
+    Mercator::Connection.credential.update!(dead: true)
     get console_mercator_path
     assert_response :ok
-    assert_match "Balance is currently unavailable", response.body
-    assert_no_match "synthetic-", response.body
+    assert_select "span", text: "Reconnect required"
+    assert_select "button", text: "Reconnect", count: 1
+    assert_select "a[href='https://mercator.sh/account']", text: "Manage wallet ↗"
   end
 
   test "refresh keeps the Mercator client binding and updates the proxy source" do

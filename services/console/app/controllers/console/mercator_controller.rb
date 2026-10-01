@@ -7,13 +7,6 @@ module Console
     def show
       @credential = Mercator::Connection.credential
       @manual_credentials = Mercator::Connection.manual_configuration?
-      return unless @credential && !@credential.dead?
-      @credential.refresh! if @credential.expires_at && @credential.expires_at <= Time.current
-      @status = connection_client_factory.call.status(@credential.access_token) unless @credential.dead?
-    rescue Broker::ExchangeError => error
-      @authorization_failed = [ 401, 403 ].include?(error.status)
-    rescue Broker::RefreshError
-      @authorization_failed = true
     end
 
     def connect

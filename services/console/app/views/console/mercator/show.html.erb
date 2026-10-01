@@ -4,23 +4,12 @@
 
 <div class="console-panel max-w-2xl space-y-6 p-6">
   <% if @credential %>
-    <% needs_reconnect = @authorization_failed || @credential.dead? || %w[expired revoked].include?(@status&.dig("account", "accessKey", "status")) %>
+    <% needs_reconnect = @credential.dead? %>
     <div class="flex items-center justify-between gap-4">
       <h2 class="text-base font-semibold text-zinc-100">Shared wallet</h2>
       <span class="text-sm <%= needs_reconnect ? "text-amber-300" : "text-emerald-300" %>"><%= needs_reconnect ? "Reconnect required" : "Connected" %></span>
     </div>
     <a href="https://explore.tempo.xyz/address/<%= ERB::Util.url_encode(@credential.provider_subject.to_s) %>" class="console-link inline-block font-mono text-sm" title="<%= @credential.provider_subject %>" target="_blank" rel="noopener noreferrer"><%= @credential.provider_subject.to_s.first(6) %>…<%= @credential.provider_subject.to_s.last(4) %> ↗</a>
-    <% tokens = @status&.dig("account", "tokens") %>
-    <% if tokens.present? %>
-      <dl class="space-y-2">
-        <% tokens.each do |token| %>
-          <div class="flex justify-between gap-4"><dt class="text-sm text-zinc-400"><%= token["symbol"] %></dt>
-            <dd class="text-sm text-zinc-100"><%= token.dig("balance", "status") == "available" ? token.dig("balance", "amount") : "Unavailable" %></dd></div>
-        <% end %>
-      </dl>
-    <% elsif !needs_reconnect %>
-      <p class="text-sm text-zinc-400">Balance is currently unavailable. Refresh to check again.</p>
-    <% end %>
     <div class="flex flex-wrap items-center gap-3">
       <%= link_to "Manage wallet ↗", "https://mercator.sh/account", class: "btn-secondary", target: "_blank", rel: "noopener noreferrer" %>
       <button type="button" class="btn-primary cursor-not-allowed opacity-50" disabled>Claim 100 MACH through Slack</button>
