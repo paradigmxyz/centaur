@@ -1,11 +1,11 @@
 /**
- * Per-channel default harness / model / provider / reasoning. Loaded from the
+ * Per-channel default persona / harness / model / provider / reasoning. Loaded from the
  * `SLACKBOTV2_CHANNEL_DEFAULTS` env var: JSON keyed by Slack conversation id,
  * each value an object normalized like the inline flags (see
  * `normalizeHarnessOverrides`):
  *
  *   SLACKBOTV2_CHANNEL_DEFAULTS='{
- *     "C0ENG":     {"harness": "claude", "model": "opus", "reasoning": "high"},
+ *     "C0ENG":     {"persona": "eng", "harness": "claude", "model": "opus", "reasoning": "high"},
  *     "C0TRIAGE":  {"reasoning": "low"},
  *     "C0BEDROCK": {"provider": "bedrock", "model": "gpt-5.2"}
  *   }'
@@ -13,11 +13,15 @@
  * Fields are independent. Precedence (in index.ts): per-thread override, then
  * channel default, then deployment default. Setting `harness` restarts a thread
  * onto it like `--claude`/`--codex`; `reasoning` affects Codex, Nanocodex, and Claude Code.
+ * `persona` applies only when a session is created, like `--persona`.
  */
 
 import { normalizeHarnessOverrides, type HarnessOverrides } from './overrides'
 
 export type ChannelDefaults = Record<string, HarnessOverrides>
+
+// Same id shape the `--persona` flag accepts.
+const PERSONA_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
 /**
  * Parses `SLACKBOTV2_CHANNEL_DEFAULTS` into a channel→overrides map (empty for
@@ -46,12 +50,26 @@ export function parseChannelDefaults(
     const key = channelId.trim()
     if (!key) continue
     if (!isPlainObject(rawEntry)) {
-      onError?.(`channel ${key}: expected an object of harness/model/provider/reasoning fields`)
+      onError?.(
+        `channel ${key}: expected an object of persona/harness/model/provider/reasoning fields`
+      )
       continue
     }
     const overrides = normalizeHarnessOverrides(rawEntry, message => onError?.(`channel ${key}: ${message}`))
-    if (!overrides.harnessType && !overrides.model && !overrides.provider && !overrides.reasoning) {
-      onError?.(`channel ${key}: no usable harness/model/provider/reasoning fields`)
+    const persona = typeof rawEntry.persona === 'string' ? rawEntry.persona.trim() : ''
+    if (PERSONA_ID_PATTERN.test(persona)) {
+      overrides.personaId = persona
+    } else if (rawEntry.persona !== undefined) {
+      onError?.(`channel ${key}: invalid persona id ${JSON.stringify(rawEntry.persona)}`)
+    }
+    if (
+      !overrides.personaId &&
+      !overrides.harnessType &&
+      !overrides.model &&
+      !overrides.provider &&
+      !overrides.reasoning
+    ) {
+      onError?.(`channel ${key}: no usable persona/harness/model/provider/reasoning fields`)
       continue
     }
     result[key] = overrides

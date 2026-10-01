@@ -1285,6 +1285,12 @@ async function syncThreadMessageToSession(
     stickyOverrideRaw(state, stickyOverridesUpdate, 'provider') === null
       ? undefined
       : effectiveOverrides.provider ?? channelDefault?.provider
+  // A `null` sticky persona means the session was created without one; it is
+  // pinned, so a channel default added later must not apply.
+  const resolvedPersonaId =
+    stickyOverrideRaw(state, stickyOverridesUpdate, 'personaId') === null
+      ? undefined
+      : effectiveOverrides.personaId ?? channelDefault?.personaId
   const effectiveHarnessType = resolvedHarnessType ?? input.options.defaultHarnessType ?? 'codex'
   // Without an explicit override or channel default the harness runs its
   // configured default (CLAUDE_MODEL/CODEX_MODEL, else the baked harness
@@ -1407,7 +1413,7 @@ async function syncThreadMessageToSession(
     messages: messagesToAppend,
     model: shouldStartExecution ? resolvedModel : undefined,
     metadataModel: shouldStartExecution ? effectiveModel : undefined,
-    personaId: shouldStartExecution ? effectiveOverrides.personaId : undefined,
+    personaId: shouldStartExecution ? resolvedPersonaId : undefined,
     provider: shouldStartExecution ? resolvedProvider : undefined,
     reasoning: resolvedReasoning,
     restartOnHarnessConflict:

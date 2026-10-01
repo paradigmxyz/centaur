@@ -149,7 +149,7 @@ export type SlackbotV2Options = {
   /** Include the Codex service tier in response metadata footers when they render. */
   responseServiceTierEnabled?: boolean
   /**
-   * Per-channel default harness/model/provider/reasoning, keyed by Slack
+   * Per-channel default persona/harness/model/provider/reasoning, keyed by Slack
    * conversation id (SLACKBOTV2_CHANNEL_DEFAULTS). See channel-defaults.ts.
    */
   channelDefaults?: ChannelDefaults

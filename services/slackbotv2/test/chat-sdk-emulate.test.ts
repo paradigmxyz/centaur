@@ -959,6 +959,45 @@ describe('slackbotv2', () => {
     expect(state).toEqual(expect.objectContaining({ personaId: 'old' }))
   })
 
+  it('applies a per-channel default persona below an explicit persona flag', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({
+      state: sharedState,
+      channelDefaults: { [CHANNEL_ID]: { personaId: 'invest' } }
+    })
+
+    const runThread = async (eventId: string, text: string) => {
+      const parent = await postUserMessage(`Context for ${eventId}.`)
+      const mention = await postUserMessage(`<@${BOT_USER_ID}> ${text}`, parent.ts)
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: eventId,
+          event: {
+            type: 'app_mention',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: mention.ts,
+            thread_ts: parent.ts,
+            text: `<@${BOT_USER_ID}> ${text}`
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+      expect(response.status).toBe(200)
+      await Promise.all(waits)
+    }
+
+    await runThread('Ev-slackbotv2-channel-persona-default', 'review this deal')
+    await runThread('Ev-slackbotv2-channel-persona-flag', '--persona=eng fix this bug')
+
+    expect(codexApi.creates.map(create => create.body.persona_id)).toEqual(['invest', 'eng'])
+  })
+
   it('reports a fallback for a stale sticky persona on a plain message', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
