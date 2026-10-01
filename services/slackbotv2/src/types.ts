@@ -189,6 +189,8 @@ export type SlackbotV2Options = {
   handoffRetryDelaysMs?: readonly number[]
   /** Startup delay before replaying Slack messages a previous process accepted. */
   inboxReplayDelayMs?: number
+  /** Replay Slack inbox entries a previous process left behind. Defaults to true. */
+  replayInboxOnStart?: boolean
   /** Milliseconds before an idle execution pauses its sandbox. Defaults to up to 3h. */
   idleTimeoutMs?: number
   logger?: Logger
