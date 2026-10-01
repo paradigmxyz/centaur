@@ -38,6 +38,12 @@ updates:
       prefix: chore
       include: scope
     open-pull-requests-limit: 5
+    ignore:
+      # Ubuntu LTS upgrades change apt repo codenames and system Python paths in
+      # the sandbox image, so they need a deliberate migration.
+      - dependency-name: ubuntu
+        update-types:
+          - version-update:semver-major
     groups:
       docker-base-images:
         patterns:
