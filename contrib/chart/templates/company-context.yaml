@@ -85,6 +85,14 @@ spec:
               value: {{ $companyContext.granolaOauthAppSlug | quote }}
             - name: COMPANY_CONTEXT_GRANOLA_SYNC_INTERVAL_SECONDS
               value: {{ $companyContext.granolaSyncIntervalSeconds | quote }}
+            - name: COMPANY_CONTEXT_SLACK_OAUTH_APP_SLUG
+              value: {{ $console.slackDmSync.oauthAppSlug | default "slack" | quote }}
+            - name: COMPANY_CONTEXT_SLACK_DISCOVERY_INTERVAL_SECONDS
+              value: {{ $companyContext.slackDiscoveryIntervalSeconds | quote }}
+            - name: COMPANY_CONTEXT_SLACK_RATE_LIMIT_SHARE
+              value: {{ $companyContext.slackRateLimitShare | quote }}
+            - name: COMPANY_CONTEXT_SLACK_WORKER_CONCURRENCY
+              value: {{ $companyContext.slackWorkerConcurrency | quote }}
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
