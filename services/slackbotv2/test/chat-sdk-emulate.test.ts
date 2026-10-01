@@ -4582,7 +4582,7 @@ describe('slackbotv2', () => {
     const inboxStore = createMemorySlackInboxStore()
     bot = createTestBot({
       inboxStore,
-      previousProcessExitMs: 50,
+      messageDedupeTtlMs: 25,
       // The first process dies mid-execute: its request never returns.
       fetch: async (input, init) =>
         String(input).endsWith('/execute') ? new Promise<Response>(() => {}) : fetch(input, init),
@@ -4613,7 +4613,7 @@ describe('slackbotv2', () => {
     await waitFor(() => codexApi.appends.length === 1)
 
     bot = createTestBot({
-      previousProcessExitMs: 50,
+      messageDedupeTtlMs: 25,
       inboxStore,
       replayInboxOnStart: true,
       state: sharedState
@@ -4622,6 +4622,50 @@ describe('slackbotv2', () => {
     await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 1.'), 3000)
     expect(codexApi.executes.map(execute => execute.body.idempotency_key)).toEqual([mention.ts])
     expect(codexApi.appends).toHaveLength(1)
+  })
+
+  it('drops a late Slack retry of a stop command it already handled', async () => {
+    let interrupts = 0
+    bot = createTestBot({
+      fetch: async (input, init) => {
+        if (!String(input).endsWith('/interrupt')) return fetch(input, init)
+        interrupts += 1
+        return Response.json({ execution_id: null, interrupted: false })
+      },
+      messageDedupeTtlMs: 25
+    })
+    const parent = await postUserMessage('Context before stopping.')
+    const stop = await postUserMessage(`<@${BOT_USER_ID}> stop`, parent.ts)
+    const deliver = async (retry?: { retry_num: string; retry_reason: string }) => {
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: 'Ev-slackbotv2-stop-retry',
+          event: {
+            type: 'app_mention',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: stop.ts,
+            thread_ts: parent.ts,
+            text: `<@${BOT_USER_ID}> stop`
+          },
+          ...retry
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+      expect(response.status).toBe(200)
+      await Promise.all(waits)
+    }
+
+    await deliver()
+    expect(interrupts).toBe(1)
+    // After the Chat SDK's duplicate window, only the retry marker can tell.
+    await sleep(50)
+    await deliver({ retry_num: '1', retry_reason: 'http_timeout' })
+    expect(interrupts).toBe(1)
   })
 
   it('does not wait for hung assistant status before creating Slack sessions', async () => {

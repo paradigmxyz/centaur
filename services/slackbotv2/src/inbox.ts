@@ -14,15 +14,18 @@ export type SlackInboxStore = {
 
 const TABLE = 'slackbotv2_inbox'
 
-export function createPostgresSlackInboxStore(pool: pg.Pool): SlackInboxStore {
+/** `namespace` keeps deployments that share a database apart. */
+export function createPostgresSlackInboxStore(pool: pg.Pool, namespace: string): SlackInboxStore {
   let schema: Promise<unknown> | undefined
   const query = async <T extends pg.QueryResultRow>(text: string, values: unknown[]) => {
     schema ??= pool
       .query(
         `CREATE TABLE IF NOT EXISTS ${TABLE} (
-          id text PRIMARY KEY,
+          namespace text NOT NULL,
+          id text NOT NULL,
           body text NOT NULL,
-          accepted_at timestamptz NOT NULL
+          accepted_at timestamptz NOT NULL,
+          PRIMARY KEY (namespace, id)
         )`
       )
       .catch(error => {
@@ -36,21 +39,25 @@ export function createPostgresSlackInboxStore(pool: pg.Pool): SlackInboxStore {
   return {
     async save(body, acceptedAt) {
       const id = randomUUID()
-      await query(`INSERT INTO ${TABLE} (id, body, accepted_at) VALUES ($1, $2, $3)`, [
-        id,
-        body,
-        acceptedAt
-      ])
+      await query(
+        `INSERT INTO ${TABLE} (namespace, id, body, accepted_at) VALUES ($1, $2, $3, $4)`,
+        [namespace, id, body, acceptedAt]
+      )
       return id
     },
     async delete(id) {
-      await query(`DELETE FROM ${TABLE} WHERE id = $1`, [id])
+      await query(`DELETE FROM ${TABLE} WHERE namespace = $1 AND id = $2`, [namespace, id])
     },
     async pending(since, before) {
-      await query(`DELETE FROM ${TABLE} WHERE accepted_at < $1`, [since])
+      await query(`DELETE FROM ${TABLE} WHERE namespace = $1 AND accepted_at < $2`, [
+        namespace,
+        since
+      ])
       const result = await query<{ body: string; id: string }>(
-        `SELECT id, body FROM ${TABLE} WHERE accepted_at < $1 ORDER BY accepted_at, id`,
-        [before]
+        `SELECT id, body FROM ${TABLE}
+         WHERE namespace = $1 AND accepted_at < $2
+         ORDER BY accepted_at, id`,
+        [namespace, before]
       )
       return result.rows
     }
@@ -87,8 +94,9 @@ export type SlackInbox = ReturnType<typeof createSlackInbox>
  * Holds verified Slack webhook requests for longer than Slack's 3-second
  * deadline and feeds them to the Chat SDK. A request is saved before Slack is
  * acknowledged and deleted once the Chat SDK's handlers finish; on startup,
- * requests a previous process left behind are fed again. It assumes a single
- * replica: only requests saved before this process started are replayed.
+ * requests a previous process left behind are fed again. It assumes one
+ * replica whose previous process has exited before it starts (a Recreate
+ * rollout), so every request saved before this process started is abandoned.
  */
 export function createSlackInbox(deps: {
   /** Feeds a request to the Chat SDK, e.g. `chat.webhooks.slack`. */
@@ -97,16 +105,19 @@ export function createSlackInbox(deps: {
   maxAgeMs: number
   replayDelayMs: number
   replayOnStart: boolean
+  /** A save slower than this falls back to the synchronous path. */
+  saveTimeoutMs: number
   signingSecret: string
   store: SlackInboxStore
 }) {
   const { logger, store } = deps
   const startedAt = new Date()
 
-  const deliver = async (id: string, body: string): Promise<void> => {
+  const deliver = async (id: string, body: string, retryHeaders?: Headers): Promise<void> => {
     try {
       const tasks: Promise<unknown>[] = []
-      const response = await deps.deliver(signedSlackRequest(body, deps.signingSecret), {
+      const request = signedSlackRequest(body, deps.signingSecret, retryHeaders)
+      const response = await deps.deliver(request, {
         waitUntil: task => {
           tasks.push(task)
         }
@@ -159,19 +170,31 @@ export function createSlackInbox(deps: {
     ): Promise<{ deliver?: () => Promise<void>; response: Response } | null> {
       try {
         await verifySlackSignature(body, headers, { signingSecret: deps.signingSecret })
-      } catch {
+      } catch (error) {
+        logger.warn('slackbotv2_inbox_signature_rejected', { error: errorMessage(error) })
         return { response: new Response('Invalid signature', { status: 401 }) }
       }
+      const saving = store.save(body, new Date())
       let id: string
       try {
-        id = await store.save(body, new Date())
+        id = await withTimeout(saving, deps.saveTimeoutMs)
       } catch (error) {
         logger.warn('slackbotv2_inbox_save_failed', { error: errorMessage(error) })
+        // The caller delivers synchronously; a late save must not be replayed.
+        void saving.then(lateId => store.delete(lateId)).catch(() => undefined)
         return null
+      }
+      // Keep Slack's retry marker on live delivery so the Slack adapter can drop
+      // a retry it already dispatched. Replay omits it: a replayed request must
+      // be fed again even if the previous process had dispatched it.
+      const retryHeaders = new Headers()
+      for (const name of ['x-slack-retry-num', 'x-slack-retry-reason']) {
+        const value = headers.get(name)
+        if (value) retryHeaders.set(name, value)
       }
       return {
         deliver: () =>
-          deliver(id, body).catch(error => {
+          deliver(id, body, retryHeaders).catch(error => {
             logger.warn('slackbotv2_inbox_delivery_failed', {
               error: errorMessage(error),
               inbox_id: id
@@ -184,20 +207,34 @@ export function createSlackInbox(deps: {
 }
 
 /** A freshly signed copy of a verified Slack webhook body. */
-function signedSlackRequest(body: string, signingSecret: string): Request {
+function signedSlackRequest(body: string, signingSecret: string, extraHeaders?: Headers): Request {
   const timestamp = Math.floor(Date.now() / 1000).toString()
   const signature = createHmac('sha256', signingSecret)
     .update(`v0:${timestamp}:${body}`)
     .digest('hex')
+  const headers = new Headers(extraHeaders)
+  headers.set('content-type', 'application/json')
+  headers.set('x-slack-request-timestamp', timestamp)
+  headers.set('x-slack-signature', `v0=${signature}`)
   return new Request('http://slackbotv2.internal/api/webhooks/slack', {
     body,
-    headers: {
-      'content-type': 'application/json',
-      'x-slack-request-timestamp': timestamp,
-      'x-slack-signature': `v0=${signature}`
-    },
+    headers,
     method: 'POST'
   })
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs)
+      })
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 async function sleep(ms: number): Promise<void> {

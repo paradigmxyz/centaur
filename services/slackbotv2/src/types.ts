@@ -189,11 +189,10 @@ export type SlackbotV2Options = {
    */
   handoffRetryDelaysMs?: readonly number[]
   /**
-   * How long a replaced process may keep running after this one starts. Its
-   * inbox requests are redelivered, and its unfinished thread marks treated as
-   * abandoned, only after this. Defaults to 60s.
+   * Chat SDK duplicate window for a Slack message. The inbox waits this long
+   * after startup before replaying a previous process's requests. Defaults to 10s.
    */
-  previousProcessExitMs?: number
+  messageDedupeTtlMs?: number
   /** Redeliver Slack inbox requests a previous process left behind. Defaults to true. */
   replayInboxOnStart?: boolean
   /**

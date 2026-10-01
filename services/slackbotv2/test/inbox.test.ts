@@ -23,7 +23,7 @@ const stores: Array<[string, (() => Promise<SlackInboxStore>) | undefined]> = [
     pool
       ? async () => {
           await pool.query('DROP TABLE IF EXISTS slackbotv2_inbox')
-          return createPostgresSlackInboxStore(pool)
+          return createPostgresSlackInboxStore(pool, 'test')
         }
       : undefined
   ]
@@ -53,6 +53,20 @@ for (const [name, create] of stores) {
   })
 }
 
+describe.skipIf(!pool)('postgres Slack inbox store namespaces', () => {
+  it('keeps deployments that share a database apart', async () => {
+    const at = new Date(Date.UTC(2030, 0, 1))
+    const ours = createPostgresSlackInboxStore(pool!, 'ours')
+    const theirs = createPostgresSlackInboxStore(pool!, 'theirs')
+    const id = await ours.save('ours', at)
+    await theirs.save('theirs', at)
+
+    expect(await ours.pending(new Date(0), new Date(at.getTime() + 1))).toEqual([
+      { body: 'ours', id }
+    ])
+  })
+})
+
 describe('Slack inbox', () => {
   const signingSecret = 'inbox-signing-secret'
   const signedHeaders = (body: string) => {
@@ -65,16 +79,18 @@ describe('Slack inbox', () => {
       'x-slack-signature': `v0=${signature}`
     })
   }
-  const createInbox = (store: SlackInboxStore, delivered: string[]) =>
+  const createInbox = (store: SlackInboxStore, delivered: string[], retries: string[] = []) =>
     createSlackInbox({
       deliver: async request => {
         delivered.push(await request.text())
+        retries.push(request.headers.get('x-slack-retry-num') ?? '')
         return new Response('ok')
       },
       logger: noopLogger,
       maxAgeMs: 60_000,
       replayDelayMs: 10,
       replayOnStart: true,
+      saveTimeoutMs: 50,
       signingSecret,
       store
     })
@@ -97,6 +113,34 @@ describe('Slack inbox', () => {
 
     await accepted?.deliver?.()
     expect(delivered).toEqual(['{"left":"behind"}', '{"still":"running"}'])
+    expect(await store.pending(new Date(0), new Date(Date.now() + 1000))).toEqual([])
+  })
+
+  it('keeps Slack retry headers on live delivery', async () => {
+    const delivered: string[] = []
+    const retries: string[] = []
+    const inbox = createInbox(createMemorySlackInboxStore(), delivered, retries)
+    const headers = signedHeaders('{}')
+    headers.set('x-slack-retry-num', '2')
+    await (await inbox.accept('{}', headers))?.deliver?.()
+    expect(retries).toEqual(['2'])
+  })
+
+  it('falls back to synchronous delivery when the save is slow, without leaving a row', async () => {
+    const store = createMemorySlackInboxStore()
+    let finishSave = () => {}
+    const slowStore: SlackInboxStore = {
+      ...store,
+      save: (body, acceptedAt) =>
+        new Promise(resolve => {
+          finishSave = () => resolve(store.save(body, acceptedAt))
+        })
+    }
+    const inbox = createInbox(slowStore, [])
+    expect(await inbox.accept('{}', signedHeaders('{}'))).toBeNull()
+
+    finishSave()
+    await Bun.sleep(5)
     expect(await store.pending(new Date(0), new Date(Date.now() + 1000))).toEqual([])
   })
 

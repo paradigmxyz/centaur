@@ -173,9 +173,10 @@ const RENDER_RETRY_INITIAL_DELAY_MS = 250
 const RENDER_RETRY_MAX_DELAY_MS = 5_000
 // Do not answer a request the user has likely given up on.
 const INBOX_MAX_AGE_MS = 10 * 60 * 1000
-// How long a replaced pod in a rolling update may keep running after this one
-// starts. Work it left unfinished is only treated as abandoned after this.
-const PREVIOUS_PROCESS_EXIT_MS = 60_000
+// Collapses Slack's message + app_mention pair for one mention. The inbox waits
+// this long before replaying, so the previous process's marks have expired.
+const MESSAGE_DEDUPE_TTL_MS = 10_000
+const INBOX_SAVE_TIMEOUT_MS = 1_500
 const ASSISTANT_STATUS_MAX_CHARS = 50
 const SLACK_TASK_DETAILS_MAX_CHARS = 256
 const SLACK_FALLBACK_TEXT_MAX_CHARS = 35_000
@@ -332,15 +333,12 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   })
   const state = options.state ?? createDefaultState(options, logger)
   const startedAtMs = Date.now()
-  const previousProcessExitMs = options.previousProcessExitMs ?? PREVIOUS_PROCESS_EXIT_MS
+  const messageDedupeTtlMs = options.messageDedupeTtlMs ?? MESSAGE_DEDUPE_TTL_MS
   const chat = new Chat<{ slack: typeof slack }, SlackbotV2ThreadState>({
     userName,
     adapters: { slack },
     state,
-    // Long enough to collapse Slack's message + app_mention pair for a mention,
-    // short enough to expire before the inbox replays a request a previous
-    // process had already started on.
-    dedupeTtlMs: previousProcessExitMs / 2,
+    dedupeTtlMs: messageDedupeTtlMs,
     onLockConflict: 'force',
     logger
   })
@@ -349,16 +347,13 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   const stateConnectionStatus: StateConnectionStatus = { attempts: 0, connected: false }
   const stateConnected = ensureStateConnected(state, options, stateConnectionStatus)
   backgroundWaitUntil(stateConnected)
-  // Thread marks older than this process are a previous process's; once that
-  // process must have exited, they are abandoned.
-  const abandonedMarkCutoffMs = () =>
-    Date.now() - startedAtMs >= previousProcessExitMs ? startedAtMs : undefined
   const inbox = createSlackInbox({
     deliver: (request, webhookOptions) => chat.webhooks.slack(request, webhookOptions),
     logger,
     maxAgeMs: INBOX_MAX_AGE_MS,
-    replayDelayMs: previousProcessExitMs,
+    replayDelayMs: messageDedupeTtlMs,
     replayOnStart: options.replayInboxOnStart !== false,
+    saveTimeoutMs: INBOX_SAVE_TIMEOUT_MS,
     signingSecret: options.signingSecret,
     store: options.inboxStore ?? createDefaultInboxStore(options, logger)
   })
@@ -484,7 +479,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
         options,
         state,
         steeringReactions,
-        abandonedMarkCutoffMs,
+        processStartedAtMs: startedAtMs,
         subscribe: true,
         trigger: 'direct_message'
       })
@@ -500,7 +495,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       options,
       state,
       steeringReactions,
-      abandonedMarkCutoffMs,
+      processStartedAtMs: startedAtMs,
       subscribe: true,
       trigger: 'new_mention'
     })
@@ -519,7 +514,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       options,
       state,
       steeringReactions,
-      abandonedMarkCutoffMs,
+      processStartedAtMs: startedAtMs,
       subscribe: true,
       trigger: 'new_mention'
     })
@@ -544,7 +539,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       options,
       state,
       steeringReactions,
-      abandonedMarkCutoffMs,
+      processStartedAtMs: startedAtMs,
       trigger: 'subscribed_message'
     })
   })
@@ -684,22 +679,22 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
 
 /**
  * A handoff marks the thread active before create/append/execute and only
- * records a render obligation once execute succeeds. A mark without an
- * obligation that a previous process left, after that process must have
- * exited, belongs to a handoff that died midway: nothing would ever clear it,
- * so clear it and let this message start the execution (execute is idempotent
- * per message).
+ * records a render obligation once execute succeeds. The previous process
+ * exits before this one starts (Recreate rollout), so a mark without an
+ * obligation from before this process started belongs to a handoff that died
+ * midway: nothing would ever clear it, so clear it and let this message start
+ * the execution (execute is idempotent per message).
  */
 async function clearAbandonedExecutionStart(
   thread: Thread<SlackbotV2ThreadState>,
   options: SlackbotV2Options,
   trace: SlackbotV2Trace,
-  cutoffMs: number | undefined
+  processStartedAtMs: number | undefined
 ): Promise<void> {
-  if (cutoffMs === undefined) return
+  if (processStartedAtMs === undefined) return
   const state = (await thread.state) ?? {}
   if (state.activeExecution !== true || state.renderObligation) return
-  if ((state.executionStartMarkedAtMs ?? 0) >= cutoffMs) return
+  if ((state.executionStartMarkedAtMs ?? 0) >= processStartedAtMs) return
   await thread.setState({ activeExecution: false })
   traceLog(options, 'slackbotv2_abandoned_execution_start_cleared', trace)
 }
@@ -708,7 +703,8 @@ async function handleSlackMessageHandoff(
   thread: Thread<SlackbotV2ThreadState>,
   message: ChatMessage,
   input: {
-    abandonedMarkCutoffMs?: () => number | undefined
+    /** Set by Chat SDK handlers so stale execution marks can be cleared. */
+    processStartedAtMs?: number
     assistantStatusRequested: boolean
     mode: SlackbotV2MessageMode
     options: SlackbotV2Options
@@ -731,7 +727,7 @@ async function handleSlackMessageHandoff(
       thread,
       input.options,
       trace,
-      input.abandonedMarkCutoffMs?.()
+      input.processStartedAtMs
     )
     if (await handleStopCommand(thread, message, input.options, input.trigger)) {
       return
@@ -1111,11 +1107,14 @@ function createDefaultInboxStore(options: SlackbotV2Options, logger: Logger) {
     logger.warn('slackbotv2_inbox_not_durable', { reason: 'no Postgres URL configured' })
     return createMemorySlackInboxStore()
   }
-  const pool = new pg.Pool({ connectionString: options.postgresUrl })
+  const pool = new pg.Pool({
+    connectionString: options.postgresUrl,
+    connectionTimeoutMillis: INBOX_SAVE_TIMEOUT_MS
+  })
   pool.on('error', error => {
     logger.warn('slackbotv2_inbox_postgres_pool_error', { error: errorMessage(error) })
   })
-  return createPostgresSlackInboxStore(pool)
+  return createPostgresSlackInboxStore(pool, options.stateKeyPrefix ?? 'centaur-slackbotv2')
 }
 
 function healthResponse(c: Context, stateConnectionStatus: StateConnectionStatus): Response {
