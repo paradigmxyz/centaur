@@ -48,5 +48,5 @@ A model must be one Centaur supports on Pi, as `provider/id` or a bare `id`:
   `gpt-5.5`, `gpt-5.5-pro`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`,
   `gpt-6-astra`, `gpt-6-luna`, `gpt-6-sol`
 
-Another model fails that turn instead of reaching Pi, and the thread keeps its
-previous model.
+Another model fails that turn instead of reaching Pi. Slack then clears the
+rejected model from the thread, so later turns run the previous model.

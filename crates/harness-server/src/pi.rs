@@ -288,7 +288,9 @@ fn check_model(model: &str) -> std::result::Result<(), String> {
         .take(5)
         .map(|(provider, id)| format!("{provider}/{id}"))
         .collect();
-    let mut message = format!("unsupported Pi model `{model}`; use a supported provider/id");
+    // "unsupported model" is one of the phrases Slack clears a thread's sticky
+    // model on, so a rejected model doesn't fail every later turn.
+    let mut message = format!("unsupported model `{model}` for Pi; use a supported provider/id");
     if !suggestions.is_empty() {
         message.push_str(&format!(", such as {}", suggestions.join(", ")));
     }
@@ -426,7 +428,7 @@ mod tests {
         assert_eq!(
             check_model("anthropic/sonnet-5"),
             Err(
-                "unsupported Pi model `anthropic/sonnet-5`; use a supported provider/id, \
+                "unsupported model `anthropic/sonnet-5` for Pi; use a supported provider/id, \
                  such as anthropic/claude-sonnet-5"
                     .to_string()
             )

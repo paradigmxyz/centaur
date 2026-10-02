@@ -200,12 +200,13 @@ fn pi_blocks_turns_render_tools_codemode_and_abort_and_respawn_on_model_change()
         );
     }
 
-    // An unsupported model fails its turn without reaching Pi; the next turn
-    // runs the last working model again.
+    // An unsupported model fails its turn without reaching Pi, with wording
+    // Slack recognizes to clear the thread's sticky model; the next turn runs
+    // the last working model again.
     assert_eq!(status(&unknown), "failed", "{unknown:#?}");
     assert_eq!(
         unknown.last().unwrap()["params"]["turn"]["error"]["message"],
-        "unsupported Pi model `openai/o3`; use a supported provider/id"
+        "unsupported model `openai/o3` for Pi; use a supported provider/id"
     );
 
     // Codemode's nested calls render as their own command items.
