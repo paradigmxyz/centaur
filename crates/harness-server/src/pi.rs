@@ -12,7 +12,6 @@
 //! Pi reads provider API keys from the environment, where the sandbox holds
 //! only iron-proxy placeholders that the proxy rewrites on the wire.
 
-use std::collections::HashMap;
 use std::env;
 use std::process::Command as ProcessCommand;
 
@@ -21,12 +20,13 @@ use serde_json::{Value, json};
 
 use crate::{
     HarnessKind, HarnessServer, NormalizedContent, NormalizedEvent, NormalizedTokenUsage,
-    NormalizedToolResult, Result, ThreadState, command_from_override,
-    user_input_to_anthropic_content,
+    NormalizedToolResult, Result, ThreadState, user_input_to_anthropic_content,
 };
 
-/// Pi's default tools plus codemode; `CENTAUR_PI_TOOLS` replaces the list.
-const DEFAULT_TOOLS: &str = "read,bash,edit,write,codemode";
+/// Pi's default tools plus codemode.
+const TOOLS: &str = "read,bash,edit,write,codemode";
+/// Thinking level for turns without a per-turn override.
+const DEFAULT_THINKING_LEVEL: &str = "medium";
 /// Models Centaur supports on Pi, matching the Claude and GPT models the chat
 /// ingresses offer. Each needs its provider's `api_key` credential.
 const MODELS: &[(&str, &str)] = &[
@@ -56,15 +56,14 @@ const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "x
 #[derive(Debug, Default)]
 pub struct PiHarness;
 
-/// Holds each assistant message's text until `message_end` reports how it
-/// ended. Only then is it known whether the text was commentary before a tool
-/// call or the final answer (downstream renderers treat unphased text as the
-/// answer), and whether the attempt failed, in which case Pi may retry and the
-/// partial text must not render at all.
+/// Renders each assistant message from `message_end`, ignoring the streamed
+/// deltas. Only then is it known whether the text was commentary before a
+/// tool call or the final answer (downstream renderers treat unphased text as
+/// the answer), and whether the attempt failed, in which case Pi may retry and
+/// the partial text must not render at all.
 #[derive(Debug, Default)]
 pub struct PiEventNormalizer {
     messages: u64,
-    text_chunks: HashMap<u64, Vec<String>>,
     error: Option<String>,
 }
 
@@ -74,20 +73,6 @@ impl PiEventNormalizer {
             Some("response") => self.response(&event),
             Some("message_start") if event["message"]["role"] == "assistant" => {
                 self.messages += 1;
-                self.text_chunks.clear();
-                Vec::new()
-            }
-            Some("message_update") => {
-                let update = &event["assistantMessageEvent"];
-                if update["type"] == "text_delta"
-                    && let (Some(index), Some(delta)) =
-                        (update["contentIndex"].as_u64(), update["delta"].as_str())
-                {
-                    self.text_chunks
-                        .entry(index)
-                        .or_default()
-                        .push(delta.to_string());
-                }
                 Vec::new()
             }
             Some("message_end") if event["message"]["role"] == "assistant" => {
@@ -181,24 +166,10 @@ impl PiEventNormalizer {
                     if text.is_empty() {
                         continue;
                     }
-                    // Replay the streamed chunks when they match the final text.
-                    let chunks = self
-                        .text_chunks
-                        .remove(&(index as u64))
-                        .filter(|chunks| chunks.concat() == text)
-                        .unwrap_or_else(|| vec![text.clone()]);
                     out.push(NormalizedEvent::AgentMessageStarted {
                         item_id: item_id.clone(),
                         stop_reason: stop_reason.clone(),
                     });
-                    out.extend(
-                        chunks
-                            .into_iter()
-                            .map(|delta| NormalizedEvent::AgentTextDelta {
-                                item_id: item_id.clone(),
-                                delta,
-                            }),
-                    );
                     content.push(NormalizedContent::AgentText { item_id, text });
                 }
                 Some("thinking") => content.push(NormalizedContent::ReasoningText {
@@ -263,42 +234,20 @@ fn session_id(state: &ThreadState) -> String {
     )
 }
 
-fn pi_bin() -> String {
-    env::var("CENTAUR_PI_BIN").unwrap_or_else(|_| "pi".to_string())
-}
-
-/// Accepts `provider/id` or a bare `id` from [`MODELS`], each optionally with
-/// Pi's `:<thinking>` suffix. Pi itself also fuzzy-matches, which would make a
-/// typo silently run some other model.
+/// Accepts `provider/id` or a bare `id` from [`MODELS`]. Pi itself also
+/// fuzzy-matches, which would make a typo silently run some other model.
 fn check_model(model: &str) -> std::result::Result<(), String> {
-    let name = model
-        .rsplit_once(':')
-        .filter(|(_, level)| THINKING_LEVELS.contains(level))
-        .map_or(model, |(name, _)| name);
     if MODELS
         .iter()
-        .any(|(provider, id)| name == *id || name == format!("{provider}/{id}"))
+        .any(|(provider, id)| model == *id || model == format!("{provider}/{id}"))
     {
         return Ok(());
     }
-    let needle = name.rsplit('/').next().unwrap_or(name).to_ascii_lowercase();
-    let suggestions: Vec<String> = MODELS
-        .iter()
-        .filter(|(_, id)| id.to_ascii_lowercase().contains(&needle))
-        .take(5)
-        .map(|(provider, id)| format!("{provider}/{id}"))
-        .collect();
     // "unsupported model" is one of the phrases Slack clears a thread's sticky
     // model on, so a rejected model doesn't fail every later turn.
-    let mut message = format!("unsupported model `{model}` for Pi; use a supported provider/id");
-    if !suggestions.is_empty() {
-        message.push_str(&format!(", such as {}", suggestions.join(", ")));
-    }
-    Err(message)
-}
-
-fn default_thinking_level() -> String {
-    env::var("CENTAUR_PI_THINKING").unwrap_or_else(|_| "medium".to_string())
+    Err(format!(
+        "unsupported model `{model}` for Pi; see the supported models in the Pi harness docs"
+    ))
 }
 
 fn command_line(command: Value) -> Result<Vec<u8>> {
@@ -337,11 +286,8 @@ impl HarnessServer for PiHarness {
     }
 
     fn command_for_turn(&self, state: &ThreadState) -> ProcessCommand {
-        if let Some(command) = command_from_override("CENTAUR_PI_APP_BRIDGE_COMMAND") {
-            return command;
-        }
-
-        let mut command = ProcessCommand::new(pi_bin());
+        let bin = env::var("CENTAUR_PI_BIN").unwrap_or_else(|_| "pi".to_string());
+        let mut command = ProcessCommand::new(bin);
         // `--approve` trusts the workspace's project resources, such as the
         // skills the sandbox installs under `.agents/skills`; RPC mode cannot
         // prompt for trust and would skip them.
@@ -351,9 +297,7 @@ impl HarnessServer for PiHarness {
             command.args(["--model", &state.model]);
         }
         // A resumed session keeps its last thinking level; start from the default.
-        command.args(["--thinking", &default_thinking_level()]);
-        let tools = env::var("CENTAUR_PI_TOOLS").unwrap_or_else(|_| DEFAULT_TOOLS.to_string());
-        command.args(["--tools", &tools]);
+        command.args(["--thinking", DEFAULT_THINKING_LEVEL, "--tools", TOOLS]);
         command.env("PI_TELEMETRY", "0");
         command.env("PI_SKIP_VERSION_CHECK", "1");
         command
@@ -386,7 +330,7 @@ impl HarnessServer for PiHarness {
     /// Pi clamps the level to the model. The level persists in the session, so
     /// a turn without an override restores the default explicitly.
     fn stdin_for_reasoning_effort(&self, effort: Option<&str>) -> Result<Vec<u8>> {
-        let level = effort.map_or_else(default_thinking_level, str::to_string);
+        let level = effort.unwrap_or(DEFAULT_THINKING_LEVEL);
         command_line(json!({"type": "set_thinking_level", "level": level}))
     }
 
@@ -415,22 +359,15 @@ mod tests {
         for model in [
             "anthropic/claude-sonnet-5",
             "claude-sonnet-5",
-            "openai/gpt-5.5:high",
+            "openai/gpt-5.5",
         ] {
             assert_eq!(check_model(model), Ok(()), "{model}");
         }
-        assert_eq!(
-            check_model("anthropic/sonnet-5"),
-            Err(
-                "unsupported model `anthropic/sonnet-5` for Pi; use a supported provider/id, \
-                 such as anthropic/claude-sonnet-5"
-                    .to_string()
-            )
-        );
         for model in [
-            "openai/gpt-5.5:ultra",
+            "anthropic/sonnet-5",
             "openai/claude-sonnet-5",
             "openai/o3",
+            "openai/gpt-5.5:high",
         ] {
             assert!(check_model(model).is_err(), "{model}");
         }

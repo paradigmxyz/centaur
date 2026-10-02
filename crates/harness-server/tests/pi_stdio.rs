@@ -110,11 +110,8 @@ fn pi_blocks_turns_render_tools_and_codemode_and_respawn_on_model_change_and_int
     let mut child = Command::new(env!("CARGO_BIN_EXE_harness-server"))
         .arg("pi")
         .env("CENTAUR_PI_BIN", fake_pi(&dir))
-        .env_remove("CENTAUR_PI_APP_BRIDGE_COMMAND")
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("CENTAUR_PI_MODEL")
-        .env_remove("CENTAUR_PI_THINKING")
-        .env_remove("CENTAUR_PI_TOOLS")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -199,7 +196,7 @@ fn pi_blocks_turns_render_tools_and_codemode_and_respawn_on_model_change_and_int
     assert_eq!(status(&unknown), "failed", "{unknown:#?}");
     assert_eq!(
         unknown.last().unwrap()["params"]["turn"]["error"]["message"],
-        "unsupported model `openai/o3` for Pi; use a supported provider/id"
+        "unsupported model `openai/o3` for Pi; see the supported models in the Pi harness docs"
     );
 
     // Codemode's nested calls render as their own command items.

@@ -13,7 +13,7 @@ workspace (`--approve`), so it loads the skills the sandbox installs, and runs
 with telemetry and version checks off.
 
 Pi's [codemode](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/codemode.md)
-tool is on by default, so the model can write a script that calls the other
+tool is on, so the model can write a script that calls the other
 tools, for example in parallel. Each call the script makes shows up as its own
 tool item.
 
@@ -32,12 +32,10 @@ has keys for. api-rs refuses to start with `pi` as the default harness when
 | Variable | Purpose |
 |---|---|
 | `CENTAUR_PI_MODEL` | Default model as `provider/id`, for example `anthropic/claude-opus-4-8` or `openai/gpt-5.5`. When unset, Pi picks a default from the providers it has keys for. |
-| `CENTAUR_PI_THINKING` | Default thinking level: `off`, `minimal`, `low`, `medium` (default), `high`, `xhigh`, or `max`. Pi clamps it to the model. |
-| `CENTAUR_PI_TOOLS` | Comma-separated tool list passed to `pi --tools`; defaults to `read,bash,edit,write,codemode`. Set `read,bash,edit,write` to turn codemode off. |
 
-Set these through `sandbox.extraEnv`. A per-thread `--model provider/id`
-overrides `CENTAUR_PI_MODEL`, and `-rsn <level>` sets the thinking level for one turn
-(`none` turns thinking off).
+Set it through `sandbox.extraEnv`. A per-thread `--model provider/id`
+overrides it. Turns run at the `medium` thinking level unless `-rsn <level>`
+sets one for that turn (`none` turns thinking off).
 
 A model must be one Centaur supports on Pi, as `provider/id` or a bare `id`:
 
