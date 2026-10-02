@@ -130,3 +130,47 @@ Rotating any of these keys makes previously encrypted data unreadable. Treat the
 `iron-control` exposes a JSON API under `/api/v1`. All resource endpoints authenticate with an API key sent as a bearer token (`Authorization: Bearer iak_...`); the one exception is `POST /api/v1/proxy/sync`, which `iron-proxy` instances call with a proxy bearer token.
 
 See [docs/API.md](docs/API.md) for the full reference: authentication, request/response conventions, pagination, error formats, the shared secret-source and request-rule shapes, and detailed payloads for every endpoint (static secrets, GCP auth secrets, OAuth token secrets, principals, roles, grants, API keys, proxies, and proxy sync).
+
+### Organization integrations
+
+`OrganizationIntegrations` is the registry for built-in, deployment-wide
+connections. It defines their admin cards, canonical OAuth app slugs, connection
+services, and routes. Registered providers are excluded from personal onboarding
+and automatic user credential reconciliation. Their consent flows require an
+admin and preserve the existing account identity on reconnect. Provider
+strategies own API-specific credential labels and request rules; role assignment
+continues to use the existing credential controls.
+
+### Shared Mercator connection
+
+Admins open **Integrations → Admin Integrations → Mercator** and choose
+**Connect**. Centaur registers its OAuth client with Mercator, then uses
+the existing browser-bound PKCE consent flow. Wallet creation and spending
+approval happen in Mercator/Tempo Wallet; Centaur never stores the wallet root
+key. Configure `CENTAUR_CONSOLE_PUBLIC_URL` to the stable public console origin
+before first connection so client registration and callbacks use the same URL.
+
+The connection is shared within one console deployment. Connecting creates no
+roles or grants. From **Connection settings → Agent access**, use the existing
+secret page to assign the credential to selected roles. Existing principal grants
+and role defaults remain unchanged on connection and reconnection.
+The encrypted broker credential refreshes
+through the normal broker jobs. Its wrapping secret injects the bearer token only
+for `POST https://mercator.sh/mcp/auth`. Keep the broker polling/worker running for
+unattended credential renewal.
+
+The console displays the saved wallet identity and credential state without
+fetching balances or refreshing tokens on page load. Use **Manage wallet** to
+view balances and manage funds in Mercator.
+
+Reconnect requires the same wallet. Existing manually configured Mercator
+credentials are left untouched and require operator review before onboarding.
+Wallet connection and Slack MACH claiming are separate flows. The claim button
+opens Mercator’s unlisted `/slack-claim` page with the connected wallet address.
+Mercator verifies Slack membership and enforces claim eligibility and campaign
+limits; Centaur never receives Slack tokens or issues MACH. Repeat claims are
+handled by Mercator. The console checks the connected wallet's Slack reservation
+and disables the claim button when one exists, matching Mercator's GitHub/X
+preflight (including pending or failed issuance). If status is unavailable, the
+link remains available and Mercator enforces eligibility. Real claims require the Mercator campaign and MACH issuance
+to be enabled.

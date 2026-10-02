@@ -10,7 +10,8 @@ class Console::IntegrationsController < ApplicationController
   layout "console"
 
   def index
-    @oauth_apps = OauthApp.where(enabled: true).order(:slug)
+    @organization_integrations = acting_admin? ? OrganizationIntegrations.all : []
+    @oauth_apps = OauthApp.personal.where(enabled: true).order(:slug)
     # The user's existing connections: credentials they minted while signed in
     # (created_by, recorded by the consent callback) plus any whose IdP-reported
     # email matches their console login -- the fallback for consents made

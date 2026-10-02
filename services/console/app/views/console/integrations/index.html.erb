@@ -2,7 +2,7 @@
 
 <%= render "console/page_header",
            title: "Integrations",
-           subtitle: "Connect your accounts so Centaur can act on your behalf." %>
+           subtitle: "Connect your personal accounts so Centaur can act on your behalf." %>
 
 <% if @oauth_apps.empty? %>
   <p class="empty-state">No integrations available yet.</p>
@@ -44,4 +44,21 @@
     <% end %>
   </div>
   <p class="mt-6 text-xs text-zinc-600">Connecting opens the provider's consent screen. Once you approve, Centaur stores and refreshes the credential automatically.</p>
+<% end %>
+
+<% if @organization_integrations.any? %>
+  <section aria-labelledby="organization-integrations" class="mt-8">
+    <header class="console-page-header">
+      <div class="console-page-heading">
+        <div class="console-page-title-copy">
+          <h2 id="organization-integrations" class="page-title">Admin Integrations</h2>
+          <div class="page-subtitle">Connections shared by your organization’s agents.</div>
+        </div>
+      </div>
+    </header>
+    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <%= render partial: "console/integrations/organization_integration",
+                 collection: @organization_integrations, as: :integration %>
+    </div>
+  </section>
 <% end %>

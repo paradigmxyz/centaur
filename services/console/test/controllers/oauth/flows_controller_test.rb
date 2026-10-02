@@ -39,6 +39,25 @@ module Oauth
       @identity_http_mocks.each(&:verify)
     end
 
+    test "organization authorization and canonical slug apply to any registered provider" do
+      definition = OrganizationIntegrations::Definition.new(provider: "google", slug: "google")
+      OrganizationIntegrations.stub(:all, [ definition ]) do
+        get oauth_start_path(slug: @app.slug)
+        assert_redirected_to console_integrations_path
+        get oauth_callback_path(slug: @app.slug), params: { code: "unused", state: "unused" }
+        assert_redirected_to console_integrations_path
+
+        sign_in(users(:acme_admin))
+        get oauth_start_path(slug: @app.slug)
+        assert_response :redirect
+        assert_match "accounts.google.com", response.location
+
+        @app.update!(slug: "other-google")
+        get oauth_start_path(slug: @app.slug)
+        assert_response :not_found
+      end
+    end
+
     def stub_exchange(status:, body:, expected: true, &assert_request)
       http = Minitest::Mock.new
       expect_http_call(http, status: status, body: body, &assert_request) if expected

@@ -17,6 +17,10 @@
 class OauthApp < ApplicationRecord
   oid_prefix "oap"
 
+  scope :personal, -> { where.not(provider: OrganizationIntegrations.providers) }
+
+  def organization_integration = OrganizationIntegrations.for_provider(provider)
+
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
   URL_SAFE_MESSAGE = "must contain only URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)"
 

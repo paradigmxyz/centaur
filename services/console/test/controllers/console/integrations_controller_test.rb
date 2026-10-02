@@ -1,6 +1,36 @@
 require "test_helper"
 
 class Console::IntegrationsControllerTest < ActionDispatch::IntegrationTest
+  test "organization cards and personal exclusions come from the registry" do
+    definition = OrganizationIntegrations::Definition.new(
+      provider: "google", slug: "google", name: "Shared Google", icon: "G",
+      description: "A shared connection", manage_route: :console_credentials_path,
+      connect_route: :connect_console_mercator_path
+    )
+    connection = Struct.new(:credential) do
+      def manual_configuration? = false
+    end.new
+
+    definition.stub(:connection, connection) do
+      OrganizationIntegrations.stub(:all, [ definition ]) do
+        post login_url, params: { email: users(:acme_admin).email, password: "password123456" }
+        get console_integrations_path
+        assert_response :ok
+        assert_select "#organization-integrations", text: "Admin Integrations"
+        assert_select "h3", text: "Shared Google"
+        assert_select "a[href*='/oauth/google/start']", count: 0
+
+        delete logout_url
+        post login_url, params: { email: users(:member_user).email, password: "password123456" }
+        get console_integrations_path
+        assert_response :ok
+        assert_select "#organization-integrations", count: 0
+        assert_select "a[href*='/oauth/google/start']", count: 0
+        assert_select "a[href*='/oauth/slack/start']", count: 1
+      end
+    end
+  end
+
   test "redirects to login when not signed in" do
     get console_integrations_url
     assert_redirected_to login_path
