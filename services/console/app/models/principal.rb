@@ -17,6 +17,7 @@ class Principal < ApplicationRecord
   has_many :sync_config_snapshots, class_name: "PrincipalSyncConfigSnapshot", dependent: :destroy
   has_many :mcp_oauth_authorization_codes, dependent: :destroy
   has_many :mcp_oauth_refresh_tokens, dependent: :destroy
+  has_one :crew_profile, dependent: :destroy
   belongs_to :created_by, class_name: "User"
   belongs_to :console_user, class_name: "User", optional: true
 
@@ -35,7 +36,7 @@ class Principal < ApplicationRecord
   SANDBOX_REPO_CACHE_VALUES = %w[none public all].freeze
   UNKNOWN_KIND = "unknown".freeze
   KINDS = %w[
-    unknown user console_user workflow slack_channel slack_dm discord_channel linear_issue
+    unknown user console_user workflow slack_channel slack_dm slack_crew discord_channel linear_issue
     github_user teams_user teams_conversation
   ].freeze
   SLACK_USER_ID_FORMAT = /\A(?:[UW][A-Z0-9]{8,}|USLACK)\z/
@@ -282,7 +283,7 @@ class Principal < ApplicationRecord
   end
 
   def roles_blank_for_defaulting?
-    association(:roles).target.empty? && !roles.exists?
+    kind != "slack_crew" && association(:roles).target.empty? && !roles.exists?
   end
 
   def assign_default_roles

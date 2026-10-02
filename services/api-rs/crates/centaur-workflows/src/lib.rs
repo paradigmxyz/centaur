@@ -1642,6 +1642,11 @@ fn split_slack_thread_key(thread_key: &str) -> Option<(&str, &str)> {
         ["slack", channel, thread_ts] if !channel.is_empty() && !thread_ts.is_empty() => {
             Some((channel, thread_ts))
         }
+        ["slack", _team, channel, thread_ts] | ["slack", _team, _, channel, thread_ts]
+            if !channel.is_empty() && !thread_ts.is_empty() =>
+        {
+            Some((channel, thread_ts))
+        }
         _ => None,
     }
 }
@@ -4660,6 +4665,18 @@ pub enum WorkflowRuntimeError {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn crew_thread_keys_preserve_slack_delivery_destination() {
+        for key in [
+            "slack:C123:1.2",
+            "slack:T123:C123:1.2",
+            "slack:T123:A123:C123:1.2",
+        ] {
+            assert_eq!(split_slack_thread_key(key), Some(("C123", "1.2")));
+        }
+        assert_eq!(split_slack_thread_key("slack:T123:A123:C123:"), None);
+    }
 
     async fn assert_structured_host_error_is_bounded(message_type: &str) {
         let stderr_task = tokio::spawn(async {

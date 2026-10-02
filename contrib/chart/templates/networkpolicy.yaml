@@ -360,6 +360,15 @@ spec:
     - Ingress
     - Egress
   ingress:
+{{- if .Values.slackbotv2.crew.enabled }}
+    - from:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 3001
+{{- end }}
     - from:
 {{- range $ingressSourceNamespaces }}
         - namespaceSelector:

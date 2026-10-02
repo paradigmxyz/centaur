@@ -81,6 +81,7 @@ module Api
           id: principal.oid,
           foreign_id: principal.foreign_id,
           name: principal.name,
+          **(principal.kind == "slack_crew" ? { kind: principal.kind, crew: principal.crew_profile&.runtime_configuration } : {}),
           labels: principal.labels_with_sandbox_capabilities,
           slack_channel_permissions: principal.slack_channel_permissions_payload,
           effective_slack_channel_permissions: principal.effective_slack_channel_permissions_payload,

@@ -1,0 +1,52 @@
+<%= form_with url: creating ? console_crew_index_path : console_crew_path(@bot["id"]), method: creating ? :post : :patch, scope: :crew, data: { turbo: false }, class: "crew-editor space-y-6 max-w-4xl" do |form| %>
+  <%= form.hidden_field :lock_version, value: @configuration.lock_version %>
+  <section class="form-section">
+    <h2 class="form-section-heading">Identity</h2>
+    <div class="grid gap-4 md:grid-cols-2">
+      <% if creating %>
+        <div><%= form.label :id, "Permanent ID", class: "form-label" %><%= form.text_field :id, value: @bot["id"], required: true, pattern: "[a-z][a-z0-9\\-]{1,47}", maxlength: 48, placeholder: "research", class: "form-input" %></div>
+      <% end %>
+      <div><%= form.label :name, "Display name", class: "form-label" %><%= form.text_field :name, value: @bot["name"], required: true, maxlength: 35, class: "form-input" %></div>
+      <div><%= form.label :description, "Short description", class: "form-label" %><%= form.text_field :description, value: @bot["description"], maxlength: 140, class: "form-input" %></div>
+    </div>
+    <% if creating %>
+      <p class="text-xs text-zinc-500 mt-4">You can set a profile picture after creating the bot.</p>
+    <% else %>
+      <div class="flex items-start gap-4 mt-5">
+        <% if @bot["icon_url"].present? %><%= image_tag @bot["icon_url"], alt: "#{@bot['name']} profile picture", width: 64, height: 64, referrerpolicy: "no-referrer", class: "w-16 h-16 shrink-0 rounded-lg object-cover" %><% end %>
+        <div class="flex-1 min-w-0">
+          <%= form.label :icon_url, "Profile picture URL", class: "form-label" %>
+          <%= form.url_field :icon_url, value: @bot["icon_url"], maxlength: 2048, placeholder: "https://example.com/bot.png", aria: { describedby: "crew-picture-help" }, class: "form-input" %>
+          <p id="crew-picture-help" class="text-xs text-zinc-500 mt-2">Public HTTPS image, 512×512 to 2000×2000 pixels. Saving updates the bot’s Slack app icon. Leave blank to keep the current picture.</p>
+        </div>
+      </div>
+    <% end %>
+  </section>
+  <section class="form-section">
+    <h2 class="form-section-heading">Behavior</h2>
+    <p class="text-sm text-zinc-500 mb-4">This is the bot’s complete Centaur system prompt. Edit or remove any section; no base profile or deployment prompt is added. An empty prompt stays empty. Provider and harness instructions still apply.</p>
+    <%= form.label :system_prompt, "System prompt", class: "form-label" %>
+    <%= form.text_area :system_prompt, value: @configuration.system_prompt, rows: 18, maxlength: 65536, placeholder: "Describe this bot’s purpose, working style, and constraints…", class: "form-input font-mono text-sm" %>
+    <p class="text-xs text-zinc-500 mt-3">New bots start with an editable Crew template. Saved prompts are independent of that template. Prompt, skills, and model changes apply to new or rebuilt sandboxes, not running conversations.</p>
+    <div class="grid gap-4 md:grid-cols-2 mt-5">
+      <% { "codex" => "Codex / Nanocodex", "claude" => "Claude Code" }.each do |key, label| %>
+        <div><%= label_tag "crew_default_models_#{key}", "#{label} default model", class: "form-label" %><%= text_field_tag "crew[default_models][#{key}]", @configuration.default_models[key], maxlength: 200, placeholder: "Use deployment default", class: "form-input" %></div>
+      <% end %>
+    </div>
+    <p class="text-xs text-zinc-500 mt-3">Use the exact model ID supported by your provider. Explicit per-thread model choices still take precedence.</p>
+  </section>
+  <section class="form-section" data-controller="nested-fields">
+    <div class="flex items-center justify-between gap-3 mb-3"><h2 class="form-section-heading mb-0">Custom skills</h2><button type="button" data-action="nested-fields#add" class="btn-secondary">Add skill</button></div>
+    <p class="text-sm text-zinc-500 mb-4">Private to this bot. Each skill becomes a SKILL.md in its sandbox, alongside the standard skills. The bot can edit its own skills.</p>
+    <div class="space-y-4" data-nested-fields-target="container"><% @configuration.skills.each_with_index do |skill, index| %><%= render "skill", skill: skill, index: index %><% end %></div>
+    <template data-nested-fields-target="template"><%= render "skill", skill: {}, index: "NEW_RECORD" %></template>
+  </section>
+  <section class="form-section">
+    <h2 class="form-section-heading">Secret access <span class="text-xs text-zinc-500 font-normal ml-2">Admin only</span></h2>
+    <p class="text-sm text-zinc-500 mb-4">Grant existing roles to this bot only. Other Crew members and the shared channel principal do not inherit them. Bots cannot change their roles. No roles are granted implicitly.</p>
+    <%= hidden_field_tag "crew[role_oids][]", "" %>
+    <div class="grid gap-3 md:grid-cols-2"><% @roles.each do |role| %><label class="flex items-center gap-3 border border-ink-600 rounded p-3 text-sm text-zinc-300"><%= check_box_tag "crew[role_oids][]", role.oid, @selected_role_oids.include?(role.oid), id: "crew_role_#{role.oid}" %><span><%= role.name %><span class="block text-xs text-zinc-500"><%= role.foreign_id %></span></span></label><% end %></div>
+    <% if @configuration.principal %><p class="text-xs mt-4"><%= link_to "Inspect effective access and channel permissions →", console_principal_path(@configuration.principal.oid), class: "text-zinc-400 hover:text-zinc-100" %></p><% end %>
+  </section>
+  <div class="flex flex-wrap items-center gap-3 pb-8"><%= form.submit creating ? "Create and install bot" : "Save changes", class: "btn-primary", disabled: !creating && !%w[active needs_install].include?(@bot["status"]) %><%= link_to "Cancel", console_crew_index_path, class: "btn-secondary" %></div>
+<% end %>

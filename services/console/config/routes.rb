@@ -121,6 +121,16 @@ Rails.application.routes.draw do
   get "console/integrations", to: "console/integrations#index", as: :console_integrations
   get "console/etls", to: "console/etls#index", as: :console_etls
   namespace :console do
+    resources :crew, only: %i[index new create edit update] do
+      post :install, on: :member
+      member do
+        get :memories
+        post :remember
+        delete :forget
+        get :history
+        post :restore
+      end
+    end
     post "etls/slack_archive_imports",
          to: "etls#create_slack_archive_import",
          as: :slack_archive_imports
@@ -263,6 +273,13 @@ Rails.application.routes.draw do
       # proxy injects a short-lived sandbox entitlement JWT scoped to these paths.
       namespace :sandbox do
         resource :permissions, only: :show
+        get "crew/me", to: "crew#show"
+        patch "crew/me", to: "crew#update"
+        get "crew/memories", to: "crew#memories"
+        put "crew/memories", to: "crew#remember"
+        delete "crew/memories", to: "crew#forget"
+        get "crew/history", to: "crew#history"
+        post "crew/restore", to: "crew#restore"
         resources :oauth_apps, only: :index
         resources :scheduled_tasks, only: %i[index show create update destroy] do
           post :run, on: :member

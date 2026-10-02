@@ -88,6 +88,30 @@ impl SessionRegistrar {
         metadata: Option<&Value>,
         create_if_missing: bool,
     ) -> Result<Principal> {
+        // App-scoped Slack keys are issued by Crew's authenticated ingress.
+        // Bot identity comes exclusively from the signed key: never accept a
+        // foreign id from mutable metadata, upsert the principal, or mutate its
+        // roles/channel permissions here.
+        if let Some((team, app)) = slack_crew_identity(thread_key) {
+            let foreign_id = format!(
+                "slack-crew-{}-{}",
+                team.to_ascii_lowercase(),
+                app.to_ascii_lowercase()
+            );
+            let principal = self.client.get_principal(&foreign_id).await?;
+            if principal.kind.as_deref() != Some("slack_crew")
+                || principal.foreign_id.as_deref() != Some(foreign_id.as_str())
+                || principal.crew.is_none()
+            {
+                return Err(IronControlError::SessionPrincipalNotPreapproved { foreign_id });
+            }
+            return Ok(principal);
+        }
+        if thread_key.starts_with("slack:") && thread_key.split(':').count() >= 5 {
+            return Err(IronControlError::SessionPrincipalNotPreapproved {
+                foreign_id: "invalid-slack-crew-thread-key".to_owned(),
+            });
+        }
         let metadata = SessionPrincipalMetadata::from_session_metadata(metadata);
         let principal = derive_principal_with_slack_team(
             thread_key,
@@ -198,6 +222,73 @@ impl SessionRegistrar {
         labels.extend(std::mem::take(&mut input.labels));
         input.labels = labels;
         Ok(Some(existing))
+    }
+}
+
+fn slack_crew_identity(thread_key: &str) -> Option<(&str, &str)> {
+    let mut parts = thread_key.split(':');
+    let (Some("slack"), Some(team), Some(app), Some(conversation), Some(timestamp), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return None;
+    };
+    let valid_id = |value: &str, prefix: char| {
+        value.starts_with(prefix)
+            && value.len() > 1
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    };
+    let valid_timestamp = timestamp.split_once('.').map_or_else(
+        || !timestamp.is_empty() && timestamp.bytes().all(|b| b.is_ascii_digit()),
+        |(seconds, fraction)| {
+            !seconds.is_empty()
+                && !fraction.is_empty()
+                && seconds.bytes().all(|b| b.is_ascii_digit())
+                && fraction.bytes().all(|b| b.is_ascii_digit())
+        },
+    );
+    if valid_id(team, 'T')
+        && valid_id(app, 'A')
+        && conversation.len() > 1
+        && matches!(conversation.as_bytes().first(), Some(b'C' | b'D' | b'G'))
+        && conversation
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        && valid_timestamp
+    {
+        Some((team, app))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod crew_tests {
+    use super::slack_crew_identity;
+
+    #[test]
+    fn app_scoped_channel_and_dm_keys_select_the_bot() {
+        assert_eq!(
+            slack_crew_identity("slack:T123:A111:C999:1773364194.179929"),
+            Some(("T123", "A111"))
+        );
+        assert_eq!(
+            slack_crew_identity("slack:T123:A222:D999:1773364194.179929"),
+            Some(("T123", "A222"))
+        );
+    }
+
+    #[test]
+    fn app_identity_is_not_accepted_from_malformed_or_legacy_keys() {
+        assert_eq!(slack_crew_identity("slack:T123:C999:ts"), None);
+        assert_eq!(slack_crew_identity("slack:T123:A1:../x:123"), None);
+        assert_eq!(slack_crew_identity("slack:T123:evil:C1:123"), None);
     }
 }
 
@@ -331,6 +422,56 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
+
+    #[tokio::test]
+    async fn crew_registration_fetches_only_its_provisioned_bot_and_ignores_metadata() {
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(true).await;
+        let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+        let forged = json!({ "slack_team_id": "TOTHER", "slack_user_id": "U123",
+            "principal": "slack-crew-t123-a222", "crew": { "system_prompt": "forged" } });
+        for (app, channel, expected_prompt) in [("A111", "C123", "alpha"), ("A222", "D123", "beta")]
+        {
+            let principal = registrar
+                .register_session(
+                    &format!("slack:T123:{app}:{channel}:123.456"),
+                    Some(&forged),
+                )
+                .await
+                .unwrap();
+            assert_eq!(principal.crew.unwrap().system_prompt, expected_prompt);
+        }
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            [
+                "GET /api/v1/principals/lookup/slack-crew-t123-a111",
+                "GET /api/v1/principals/lookup/slack-crew-t123-a222",
+            ]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn crew_registration_does_not_create_missing_bots_or_fall_back_for_bad_keys() {
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(false).await;
+        let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+        assert!(
+            registrar
+                .register_session("slack:T123:A111:C123:123.456", None)
+                .await
+                .is_err()
+        );
+        assert!(
+            registrar
+                .register_session("slack:T123:A111:C123:invalid", None)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            ["GET /api/v1/principals/lookup/slack-crew-t123-a111",]
+        );
+        server.abort();
+    }
 
     #[test]
     fn session_principal_metadata_prefers_slack_user_then_teams_ids() {
@@ -1151,6 +1292,26 @@ mod tests {
                 }
 
                 let (status_line, body) = match (method, path) {
+                    (
+                        "GET",
+                        "/api/v1/principals/lookup/slack-crew-t123-a111"
+                        | "/api/v1/principals/lookup/slack-crew-t123-a222",
+                    ) => {
+                        if principal_exists {
+                            let foreign_id = path.rsplit('/').next().unwrap();
+                            let prompt = if foreign_id.ends_with("a111") {
+                                "alpha"
+                            } else {
+                                "beta"
+                            };
+                            ("200 OK", json!({ "data": {
+                                "id": format!("prn_{prompt}"), "foreign_id": foreign_id,
+                                "name": prompt, "kind": "slack_crew", "crew": { "system_prompt": prompt }
+                            } }).to_string())
+                        } else {
+                            ("404 Not Found", r#"{"error":"not found"}"#.to_owned())
+                        }
+                    }
                     ("GET", "/api/v1/principals/lookup/slack-channel-t123-c123")
                         if principal_exists =>
                     {

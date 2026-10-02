@@ -2,6 +2,10 @@ import { createSlackbotV2, type SlackbotV2Options } from './index'
 import { parseChannelDefaults } from './channel-defaults'
 import { resolveSlackHomeTeamId } from './session-api'
 import { resolveSlackBotUserId } from './slack-user'
+import { Pool } from 'pg'
+import { Hono } from 'hono'
+import { createCrewManager } from './crew'
+import { PgCrewStore } from './crew-store'
 import {
   createFlagMessageOverridesStrategy,
   createOpenAiMessageOverridesStrategy
@@ -103,7 +107,23 @@ const options: SlackbotV2Options = {
 }
 options.slackHomeTeamId = await resolveSlackHomeTeamId(options)
 
-const { app } = createSlackbotV2(options)
+const primary = createSlackbotV2(options)
+const app = new Hono()
+if (booleanEnv('SLACK_CREW_ENABLED', false)) {
+  if (!options.postgresUrl) throw new Error('Crew requires a durable Postgres database')
+  const store = new PgCrewStore(new Pool({ connectionString: options.postgresUrl }), requiredEnv('SLACK_CREW_ENCRYPTION_KEY'))
+  await store.initialize()
+  const crew = createCrewManager({
+    publicUrl: requiredEnv('SLACK_CREW_PUBLIC_URL'),
+    adminToken: requiredEnv('SLACK_CREW_ADMIN_TOKEN'),
+    configurationToken: requiredEnv('SLACK_CONFIGURATION_TOKEN'),
+    teamId: options.slackHomeTeamId!,
+    store, botOptions: options
+  })
+  await crew.restore()
+  app.route('/', crew.app)
+}
+app.route('/', primary.app)
 const server = Bun.serve({
   port,
   fetch: app.fetch

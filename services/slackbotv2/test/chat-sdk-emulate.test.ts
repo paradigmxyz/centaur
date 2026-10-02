@@ -894,6 +894,7 @@ describe('slackbotv2', () => {
     expect(JSON.stringify(firstInput)).not.toContain('--persona=invest')
     expect(JSON.stringify(firstInput)).toContain('first pass')
     expect(JSON.stringify(secondInput)).toContain('continue without flags')
+    expect(JSON.stringify(firstInput)).not.toContain('slack-crew memory list')
 
     const state = await sharedState.get<Record<string, unknown>>(
       `thread-state:${threadKey(parent.ts)}`
@@ -905,6 +906,35 @@ describe('slackbotv2', () => {
         personaId: 'invest'
       })
     )
+  })
+
+  it('keeps two Crew apps independent and ignores channel personas and explicit flags', async () => {
+    const parent = await postUserMessage('Shared channel context.')
+    for (const appId of ['A111', 'A222']) {
+      const member = createTestBot({ botAppId: appId, crewBot: true, slackHomeTeamId: TEAM_ID,
+        channelDefaults: { [CHANNEL_ID]: { personaId: 'channel-persona' } } })
+      const message = await postUserMessage(`<@${BOT_USER_ID}> --persona=other help`, parent.ts)
+      const waits: Promise<unknown>[] = []
+      const response = await member.app.request('/api/webhooks/slack', signedSlackEvent({
+        event_id: `Ev-crew-${appId}`,
+        event: { type: 'app_mention', user: USER_ID, channel: CHANNEL_ID, team: TEAM_ID,
+          ts: message.ts, thread_ts: parent.ts, text: `<@${BOT_USER_ID}> --persona=other help` }
+      }), {}, waitUntilContext(waits))
+      expect(response.status).toBe(200)
+      await Promise.all(waits)
+      expect(await member.chat.getState().get(`thread-state:${threadKey(parent.ts)}`)).toMatchObject({ personaId: null })
+    }
+    expect(codexApi.creates.map(c => c.threadKey)).toEqual([
+      `slack:${TEAM_ID}:A111:${CHANNEL_ID}:${parent.ts}`,
+      `slack:${TEAM_ID}:A222:${CHANNEL_ID}:${parent.ts}`
+    ])
+    expect(codexApi.creates.map(c => c.body.persona_id)).toEqual([undefined, undefined])
+    expect(codexApi.executes).toHaveLength(2)
+    expect(new Set(codexApi.executes.map(e => e.threadKey)).size).toBe(2)
+    for (const execution of codexApi.executes) {
+      expect(JSON.stringify(execution.body)).toContain('slack-crew memory list')
+      expect(JSON.stringify(execution.body)).toContain('without an approval or evaluation gate')
+    }
   })
 
   it('pins sticky persona state without labeling a pinned mismatch as unavailable', async () => {

@@ -209,6 +209,21 @@ describe('Slack home team resolution', () => {
 })
 
 describe('Slack home team API metadata', () => {
+  test('Crew sessions ignore requested personas across every API call', async () => {
+    const { fetchFn, requests } = fakeApi({ createSession: [{ status: 200, body: { ok: true } }] })
+    const config = { ...options(fetchFn), botAppId: 'A123', crewBot: true, slackHomeTeamId: 'T123' }
+    await forwardToSessionApi(config, forwardInput(apiMessage('hello'), { personaId: 'legal' }))
+    await interruptSessionExecution(config, 'slack:C1:1700000000.000100', 'stop')
+    const key = 'slack:T123:A123:C1:1700000000.000100'
+    const sessionRequests = requests.filter(r => r.url.includes('/api/session/'))
+    expect(sessionRequests).toHaveLength(4)
+    expect(sessionRequests.every(r => decodeURIComponent(r.url).includes(key))).toBe(true)
+    expect(sessionRequests[0]?.body).not.toHaveProperty('persona_id')
+    expect(executeLine(requests).thread_key).toBe(key)
+    expect(JSON.stringify(executeLine(requests))).toContain('- session_context.slack.channel_id: C1')
+    expect(JSON.stringify(executeLine(requests))).toContain(`- thread_key: ${key}`)
+  })
+
   test('exposes the home team ID throughout durable session requests', async () => {
     const { fetchFn, requests } = fakeApi()
 

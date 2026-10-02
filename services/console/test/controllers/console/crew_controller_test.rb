@@ -1,0 +1,237 @@
+require "test_helper"
+
+class Console::CrewControllerTest < ActionDispatch::IntegrationTest
+  class FakeClient
+    attr_accessor :result, :error
+    attr_reader :calls
+    def initialize
+      @calls = []
+      @result = { "crew" => [] }
+    end
+    def list
+      raise error if error
+      result
+    end
+    def create(attributes)
+      calls << [ :create, attributes ]
+      raise error if error
+      result.fetch("created")
+    end
+    def update(id, attributes)
+      calls << [ :update, id, attributes ]
+      raise error if error
+      result["crew"].find { |bot| bot["id"] == id }.merge(attributes)
+    end
+    def install(id)
+      calls << [ :install, id ]
+      result.fetch("created")
+    end
+  end
+
+  setup do
+    @client = FakeClient.new
+    @bot = { "id" => "alpha", "name" => "Alpha", "status" => "active", "app_id" => "A111", "team_id" => "T123" }
+    @client.result["created"] = @bot
+    Console::CrewController.client_factory = -> { @client }
+    login(users(:acme_admin))
+  end
+
+  teardown do
+    Console::CrewController.client_factory = -> { SlackCrewClient.new }
+  end
+
+  test "requires active acting admin for configuration and secret roles" do
+    delete logout_url
+    get new_console_crew_url
+    assert_redirected_to login_path
+    login(users(:member_user))
+    post console_crew_index_url, params: { crew: fields }
+    assert_redirected_to console_integrations_path
+    delete logout_url
+    login(users(:acme_admin))
+    post console_descope_url
+    post console_crew_index_url, params: { crew: fields }
+    assert_redirected_to console_integrations_path
+    assert_empty @client.calls
+  end
+
+  test "disabled account is denied and empty state offers creation" do
+    get console_crew_index_url
+    assert_response :ok
+    assert_select "a", text: "Create your first bot"
+    users(:acme_admin).update!(status: :disabled)
+    get console_crew_index_url
+    assert_redirected_to login_path
+  end
+
+  test "new bot has an editable baseline and no required profile" do
+    get new_console_crew_url
+    assert_response :ok
+    assert_select "select[name='crew[crew_id]']", count: 0
+    assert_select "textarea[name='crew[system_prompt]']" do |elements|
+      assert_includes elements.first.text, "# Identity and purpose"
+      assert_includes elements.first.text, "# Self-management"
+    end
+    assert_select "input[type=submit][disabled]", count: 0
+  end
+
+  test "create automatically installs and provisions exactly the selected roles and behavior" do
+    post console_crew_index_url, params: { crew: fields }
+    assert_redirected_to edit_console_crew_path("alpha")
+    profile = CrewProfile.find_by!(crew_id: "alpha")
+    assert_equal "slack-crew-t123-a111", profile.principal.foreign_id
+    assert_equal [ roles(:acme_infra).id ], profile.principal.role_ids
+    assert_equal "Investigate carefully.", profile.system_prompt
+    assert_equal "reviewing-incidents", profile.skills.first["name"]
+    assert_equal({ "codex" => "model-a", "claude" => "model-b" }, profile.default_models)
+    assert_equal %w[description id name], @client.calls.first.last.keys.sort
+  end
+
+  test "empty prompt stays empty on create and edit rather than restoring the baseline" do
+    post console_crew_index_url, params: { crew: fields.merge(system_prompt: "") }
+    assert_redirected_to edit_console_crew_path("alpha")
+    assert_equal "", CrewProfile.find_by!(crew_id: "alpha").runtime_configuration[:system_prompt]
+    @client.result["crew"] = [ @bot ]
+    get edit_console_crew_url("alpha")
+    assert_response :ok
+    assert_select "textarea[name='crew[system_prompt]']", text: ""
+  end
+
+  test "editor preserves settings and can remove all skills and roles without granting defaults" do
+    post console_crew_index_url, params: { crew: fields }
+    @client.result["crew"] = [ @bot.merge("description" => "Helper") ]
+    get edit_console_crew_url("alpha")
+    assert_response :ok
+    assert_select "textarea[name='crew[system_prompt]']", text: "Investigate carefully."
+    assert_select "input[name='crew[role_oids][]'][checked]", count: 1
+    @client.calls.clear
+    patch console_crew_url("alpha"), params: { crew: fields.except(:id, :crew_id, :skills).merge(role_oids: [ "" ], lock_version: 0) }
+    assert_redirected_to edit_console_crew_path("alpha")
+    profile = CrewProfile.find_by!(crew_id: "alpha")
+    assert_empty profile.skills
+    assert_empty profile.principal.roles
+    assert_empty @client.calls, "Behavior and role edits must not require a valid Slack configuration token"
+  end
+
+  test "invalid skill and forged roles do not create a Slack app" do
+    post console_crew_index_url, params: { crew: fields.merge(skills: { "0" => { name: "../escape", description: "Bad", content: "Bad" } }) }
+    assert_response :unprocessable_entity
+    assert_empty @client.calls
+    assert_select "textarea[name='crew[system_prompt]']", text: "Investigate carefully."
+    post console_crew_index_url, params: { crew: fields.merge(role_oids: [ "role_invalid" ]) }
+    assert_response :not_found
+    assert_empty @client.calls
+  end
+
+  test "profile picture is editable after creation and blank or unchanged URLs do not call Slack" do
+    get new_console_crew_url
+    assert_select "input[name='crew[icon_url]']", count: 0
+    post console_crew_index_url, params: { crew: fields }
+    picture = "https://images.example.com/alpha.png"
+    @client.result["crew"] = [ @bot.merge("description" => "Helper", "icon_url" => picture) ]
+    get edit_console_crew_url("alpha")
+    assert_select "input[type=url][name='crew[icon_url]'][value=?]", picture
+    assert_select "img[src=?][alt='Alpha profile picture'][referrerpolicy='no-referrer']", picture
+    @client.calls.clear
+    [ "", picture ].each do |value|
+      version = CrewProfile.find_by!(crew_id: "alpha").lock_version
+      patch console_crew_url("alpha"), params: { crew: fields.merge(lock_version: version, icon_url: value) }
+      assert_redirected_to edit_console_crew_path("alpha")
+    end
+    assert_empty @client.calls
+    version = CrewProfile.find_by!(crew_id: "alpha").lock_version
+    replacement = "https://images.example.com/new.png"
+    patch console_crew_url("alpha"), params: { crew: fields.merge(lock_version: version, icon_url: " #{replacement} ") }
+    assert_redirected_to edit_console_crew_path("alpha")
+    assert_equal [ [ :update, "alpha", { "icon_url" => replacement } ] ], @client.calls
+  end
+
+  test "stale configuration cannot overwrite a newer bot edit or mutate Slack" do
+    post console_crew_index_url, params: { crew: fields }
+    profile = CrewProfile.find_by!(crew_id: "alpha")
+    profile.update!(system_prompt: "Newer instructions")
+    @client.result["crew"] = [ @bot ]
+    @client.calls.clear
+    patch console_crew_url("alpha"), params: { crew: fields.merge(lock_version: 0) }
+    assert_redirected_to edit_console_crew_path("alpha")
+    assert_match(/changed since/, flash[:alert])
+    assert_equal "Newer instructions", profile.reload.system_prompt
+    assert_empty @client.calls
+  end
+
+  test "interrupted install exposes no blind retry while known pending app can install" do
+    @client.result["crew"] = [ @bot.merge("status" => "installing", "install_error" => "Installation outcome is unknown") ]
+    get edit_console_crew_url("alpha")
+    assert_response :ok
+    assert_select "p", text: "Installation outcome is unknown"
+    assert_select "input[type=submit][value='Save changes'][disabled]"
+    assert_select "form[action=?]", install_console_crew_path("alpha"), count: 0
+    @client.result["crew"] = [ @bot.merge("status" => "needs_install") ]
+    post install_console_crew_url("alpha")
+    assert_redirected_to edit_console_crew_path("alpha")
+    assert_equal [ :install, "alpha" ], @client.calls.last
+  end
+
+  test "replayed pending creation does not claim Slack installation succeeded" do
+    @client.result["created"] = @bot.merge("status" => "needs_install")
+    post console_crew_index_url, params: { crew: fields }
+    assert_redirected_to edit_console_crew_path("alpha")
+    assert_equal "Crew app exists; review its installation status.", flash[:notice]
+  end
+
+  test "admin edits memory and restores behavior through console without an approval gate" do
+    post console_crew_index_url, params: { crew: fields }
+    @client.result["crew"] = [ @bot ]
+    profile = CrewProfile.find_by!(crew_id: "alpha")
+    get memories_console_crew_url("alpha")
+    assert_response :ok
+    assert_select "nav[aria-label='Crew member settings']"
+    post remember_console_crew_url("alpha"), params: { memory: { scope_key: "C123", key: "preferences", content: "Use tables", source: "Customer correction" } }
+    assert_redirected_to memories_console_crew_path("alpha")
+    memory = profile.memories.sole
+    post remember_console_crew_url("alpha"), params: { memory: { scope_key: "C123", key: "preferences", content: "Use bullets", lock_version: memory.lock_version } }
+    assert_redirected_to memories_console_crew_path("alpha")
+    assert_equal "Use bullets", memory.reload.content
+    get memories_console_crew_url("alpha")
+    assert_response :ok
+    assert_select "textarea", text: "Use bullets"
+    profile.update!(system_prompt: "Improved instructions")
+    get history_console_crew_url("alpha", version: 0)
+    assert_response :ok
+    assert_select "button", text: "Restore version 0"
+    post restore_console_crew_url("alpha"), params: { version: 0, lock_version: profile.lock_version }
+    assert_redirected_to history_console_crew_path("alpha")
+    assert_equal "Investigate carefully.", profile.reload.system_prompt
+    assert_equal [ roles(:acme_infra).id ], profile.principal.role_ids
+    delete forget_console_crew_url("alpha"), params: { memory: { scope_key: "C123", key: "preferences", lock_version: memory.lock_version } }
+    assert_redirected_to memories_console_crew_path("alpha")
+    assert_empty profile.memories
+    delete logout_url
+    login(users(:member_user))
+    post remember_console_crew_url("alpha"), params: { memory: { scope_key: "shared", key: "forged", content: "Not authorized" } }
+    assert_redirected_to console_integrations_path
+    assert_empty profile.memories
+  end
+
+  test "memory requires a configured profile and reports a Crew outage without a server error" do
+    @client.result["crew"] = [ @bot ]
+    post remember_console_crew_url("alpha"), params: { memory: { scope_key: "shared", key: "context", content: "Not yet installed" } }
+    assert_response :not_found
+    @client.error = SlackCrewClient::Error.new("Crew service is unavailable")
+    get memories_console_crew_url("alpha")
+    assert_redirected_to console_crew_index_path
+    assert_equal "Crew service is unavailable", flash[:alert]
+  end
+
+  private
+
+  def fields
+    { id: "alpha", name: "Alpha", description: "Helper", system_prompt: "Investigate carefully.",
+      default_models: { codex: "model-a", claude: "model-b" }, role_oids: [ roles(:acme_infra).oid ],
+      skills: { "0" => { name: "reviewing-incidents", description: "Reviews incidents when asked.", content: "Follow the runbook." } } }
+  end
+
+  def login(user)
+    post login_url, params: { email: user.email, password: "password123456" }
+  end
+end

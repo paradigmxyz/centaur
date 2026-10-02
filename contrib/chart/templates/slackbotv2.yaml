@@ -40,6 +40,12 @@ spec:
           env:
             - name: PORT
               value: "3001"
+            - name: SLACK_CREW_ENABLED
+              value: {{ .Values.slackbotv2.crew.enabled | quote }}
+{{- if .Values.slackbotv2.crew.enabled }}
+            - name: SLACK_CREW_PUBLIC_URL
+              value: {{ required "slackbotv2.crew.publicUrl is required" .Values.slackbotv2.crew.publicUrl | quote }}
+{{- end }}
             - name: CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
             # New threads without an explicit --claude/--amp/--codex/

@@ -1,0 +1,23 @@
+[project]
+name = "slack-crew"
+description = "Read and edit only your own Centaur Crew Slackbot"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["httpx>=0.27.0", "typer>=0.12.0"]
+
+[project.scripts]
+slack-crew = "centaur_tool_slack_crew.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_slack_crew"
+
+[tool.centaur]
+module = "client.py"
+secrets = []

@@ -491,7 +491,7 @@ export async function forwardToSessionApi(
       options,
       input.threadId,
       input.harnessType,
-      input.personaId,
+      options.crewBot ? undefined : input.personaId,
       sessionRequesterMessage(input),
       input.restartOnHarnessConflict,
       input.harnessAssignment
@@ -918,7 +918,7 @@ async function postCreateSession(
   }
   return fetchWithTimeout(
     fetchFn,
-    apiSessionUrl(options.apiUrl, threadId),
+    apiSessionUrl(options, threadId),
     {
       method: 'POST',
       headers: apiHeaders(options),
@@ -1388,7 +1388,7 @@ async function appendSessionMessages(
   }
   const response = await fetchWithTimeout(
     fetchFn,
-    apiSessionUrl(options.apiUrl, threadId, 'messages'),
+    apiSessionUrl(options, threadId, 'messages'),
     {
       method: 'POST',
       headers: apiHeaders(options),
@@ -1452,7 +1452,7 @@ async function executeSession(
   }
   const response = await fetchWithTimeout(
     fetchFn,
-    apiSessionUrl(options.apiUrl, threadId, 'execute'),
+    apiSessionUrl(options, threadId, 'execute'),
     {
       method: 'POST',
       headers: apiHeaders(options),
@@ -1473,7 +1473,7 @@ async function postInterruptSessionExecution(
   const fetchFn = options.fetch ?? fetch
   const response = await fetchWithTimeout(
     fetchFn,
-    apiSessionUrl(options.apiUrl, threadId, 'interrupt'),
+    apiSessionUrl(options, threadId, 'interrupt'),
     {
       method: 'POST',
       headers: apiHeaders(options),
@@ -1515,7 +1515,7 @@ async function streamSessionNotifications(
   onEventId: (eventId: number) => void
 ): Promise<AsyncIterable<SlackbotV2RendererSource>> {
   const fetchFn = options.fetch ?? fetch
-  const url = new URL(apiSessionUrl(options.apiUrl, threadId, 'events'))
+  const url = new URL(apiSessionUrl(options, threadId, 'events'))
   url.searchParams.set('after_event_id', String(afterEventId))
   if (executionId) url.searchParams.set('execution_id', executionId)
   const response = await fetchWithTimeout(
@@ -1533,13 +1533,22 @@ async function streamSessionNotifications(
   return parseSessionEventStream(response.body, onEventId)
 }
 
+export function sessionThreadKey(options: SlackbotV2Options, threadId: string): string {
+  if (!options.botAppId) return threadId
+  const destination = slackThreadDestination(threadId)
+  if (!destination || !options.slackHomeTeamId || !/^A[A-Z0-9]+$/.test(options.botAppId)) {
+    throw new Error('Dedicated Slack bots require a valid app, workspace, and thread')
+  }
+  return `slack:${options.slackHomeTeamId}:${options.botAppId}:${destination.channelId}:${destination.threadTs}`
+}
+
 function apiSessionUrl(
-  apiUrl: string,
+  options: SlackbotV2Options,
   threadId: string,
   suffix?: 'messages' | 'execute' | 'events' | 'interrupt'
 ): string {
-  const path = `/api/session/${encodeURIComponent(threadId)}${suffix ? `/${suffix}` : ''}`
-  return new URL(path, ensureTrailingSlash(apiUrl)).toString()
+  const path = `/api/session/${encodeURIComponent(sessionThreadKey(options, threadId))}${suffix ? `/${suffix}` : ''}`
+  return new URL(path, ensureTrailingSlash(options.apiUrl)).toString()
 }
 
 function ensureTrailingSlash(value: string): string {
@@ -1725,7 +1734,7 @@ function toCodexInputLineWithStaged(
 ): string {
   return JSON.stringify({
     type: 'user',
-    thread_key: threadId,
+    thread_key: sessionThreadKey(options, threadId),
     trace_metadata: sessionMetadata(options, message, { action: 'execute' }, requesterIdentity),
     ...(model ? { model } : {}),
     ...(provider ? { provider } : {}),
@@ -1733,7 +1742,7 @@ function toCodexInputLineWithStaged(
     message: {
       role: 'user',
       content: codexInputContent(
-        message,
+        { ...message, threadId: sessionThreadKey(options, message.threadId) },
         staged,
         requesterIdentity,
         contextMessages,
@@ -1913,6 +1922,9 @@ function slackThreadDestination(threadId: string): SlackThreadDestination | unde
   }
   if (parts.length === 4 && parts[1] && parts[2] && parts[3]) {
     return { teamId: parts[1], channelId: parts[2], threadTs: parts[3] }
+  }
+  if (parts.length === 5 && parts[1] && /^A[A-Z0-9]+$/.test(parts[2] ?? '') && parts[3] && parts[4]) {
+    return { teamId: parts[1], channelId: parts[3], threadTs: parts[4] }
   }
   return undefined
 }

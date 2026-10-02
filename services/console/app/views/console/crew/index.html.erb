@@ -1,0 +1,29 @@
+<% content_for :title, "Crew · Centaur Console" %>
+<div class="flex flex-wrap items-start justify-between gap-4 mb-8">
+  <%= render "console/page_header", title: "Crew", subtitle: "Your Slack bots. Their own instructions, skills, models, and access." %>
+  <%= link_to "Create bot", new_console_crew_path, class: "btn-primary" %>
+</div>
+<div class="grid gap-4 lg:grid-cols-2">
+  <% @crew.each do |bot| %>
+    <% configuration = @configurations[bot["id"]] %>
+    <article class="form-section flex flex-col gap-4">
+      <div class="flex items-start justify-between gap-4">
+        <div class="flex items-center gap-3 min-w-0">
+          <% if bot["icon_url"].present? %><%= image_tag bot["icon_url"], alt: "", width: 48, height: 48, referrerpolicy: "no-referrer", class: "w-12 h-12 shrink-0 rounded-lg object-cover" %><% end %>
+          <div><h2 class="text-lg text-zinc-100 font-semibold"><%= bot["name"] %></h2><p class="text-xs text-zinc-500 mt-1"><%= bot["id"] %></p></div>
+        </div>
+        <span class="text-xs rounded border border-ink-600 px-2 py-1 <%= bot['status'] == 'active' && !bot['paused'] ? 'text-emerald-400' : 'text-zinc-400' %>"><%= bot["paused"] ? "Paused" : bot["status"].to_s.humanize %></span>
+      </div>
+      <p class="text-sm text-zinc-400"><%= bot["description"].presence || "No description yet." %></p>
+      <div class="flex flex-wrap gap-2 text-xs text-zinc-400">
+        <span><%= pluralize(configuration&.skills&.size || 0, "custom skill") %></span><span>·</span>
+        <span><%= pluralize(configuration&.principal&.roles&.size || 0, "secret role") %></span>
+      </div>
+      <% if bot["install_error"].present? %><p class="text-sm text-amber-400"><%= bot["install_error"] %></p><% end %>
+      <div class="mt-auto pt-2"><%= link_to "Manage bot →", edit_console_crew_path(bot["id"]), class: "btn-secondary" %></div>
+    </article>
+  <% end %>
+</div>
+<% if @crew.empty? %>
+  <section class="form-section py-12 text-center"><h2 class="text-lg text-zinc-100 mb-2">Build your crew</h2><p class="text-sm text-zinc-500 mb-6">Create a bot, give it a purpose, and choose what it can access. Slack installation is automatic.</p><%= link_to "Create your first bot", new_console_crew_path, class: "btn-primary" %></section>
+<% end %>

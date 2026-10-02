@@ -1,0 +1,21 @@
+<% content_for :title, "#{@bot['name']} · History" %>
+<%= link_to "← Crew", console_crew_index_path, class: "text-sm text-zinc-500 hover:text-zinc-200" %>
+<div class="mt-6"><%= render "console/page_header", title: "#{@bot['name']} · History", subtitle: "Direct self-improvement, with a way back." %></div>
+<%= render "navigation" %>
+<div class="max-w-4xl space-y-6 pb-8">
+  <section class="form-section">
+    <h2 class="form-section-heading">Current version <%= @configuration.lock_version %></h2>
+    <p class="text-sm text-zinc-400">This member can update its own prompt, skills, and model defaults directly. No approval or evaluation gate. The last 20 prior versions are retained automatically.</p>
+    <p class="text-xs text-zinc-500 mt-3">Restoring changes behavior only, not identity, memories, or access grants. It creates an undo point for the current behavior. Changes apply to new or rebuilt sandboxes.</p>
+  </section>
+  <% if @revisions.empty? %><p class="text-sm text-zinc-500">No previous versions yet. History appears after the first behavior change.</p><% end %>
+  <% @revisions.each do |revision| %>
+    <section class="form-section flex flex-wrap items-center justify-between gap-4">
+      <div><%= link_to "Version #{revision.version}", history_console_crew_path(@bot["id"], version: revision.version), class: "text-sm font-medium text-zinc-200 underline" %><p class="text-xs text-zinc-500 mt-1">Before <%= revision.source == "self" ? "self-edit" : "operator/system edit" %> · <%= revision.created_at.utc.strftime("%Y-%m-%d %H:%M UTC") %></p></div>
+      <%= button_to "Restore version #{revision.version}", restore_console_crew_path(@bot["id"]), params: { version: revision.version, lock_version: @configuration.lock_version }, class: "btn-secondary", form: { data: { turbo: false } } %>
+    </section>
+  <% end %>
+  <% if @revision %>
+    <section class="form-section"><h2 class="form-section-heading">Version <%= @revision.version %> · Saved behavior</h2><pre class="text-xs text-zinc-300 whitespace-pre-wrap break-words max-h-96 overflow-auto"><%= JSON.pretty_generate(@revision.configuration) %></pre></section>
+  <% end %>
+</div>

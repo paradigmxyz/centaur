@@ -477,9 +477,39 @@ pub struct Principal {
     pub foreign_id: Option<String>,
     pub name: String,
     #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
     pub labels: BTreeMap<String, String>,
     #[serde(default = "default_true")]
     pub sandbox_observability_enabled: bool,
+    /// Per-bot sandbox configuration. Only Console-provisioned `slack_crew`
+    /// principals carry this field; older iron-control responses omit it.
+    #[serde(default)]
+    pub crew: Option<CrewConfig>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct CrewConfig {
+    pub system_prompt: String,
+    #[serde(default)]
+    pub skills: Vec<CrewSkill>,
+    #[serde(default)]
+    pub default_models: CrewDefaultModels,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct CrewDefaultModels {
+    #[serde(default)]
+    pub codex: String,
+    #[serde(default)]
+    pub claude: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct CrewSkill {
+    pub name: String,
+    pub description: String,
+    pub content: String,
 }
 
 /// Request body for creating/updating one Slack permission row on a principal.

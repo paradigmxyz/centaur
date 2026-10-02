@@ -59,6 +59,11 @@ my-tool --help
 
 ## Available Plugins
 
+- `slack-crew`: read and edit only the current Crew bot's identity, prompt,
+  custom skills and model defaults using its sandbox identity. Secret roles are
+  admin-only. Operators create/install/manage bots in Console;
+  see `services/slackbotv2/CREW.md`. No management token is granted to sandboxes.
+
 The open-source tool inventory lives in this `tools/` tree and changes over time. To see what ships in a running sandbox, use `centaur-tools list`; private deployments may mount additional overlay tool directories.
 
 - `centaur_investigator`: parse Centaur Slack thread references and enrich them

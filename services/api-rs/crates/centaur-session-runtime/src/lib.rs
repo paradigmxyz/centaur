@@ -12,7 +12,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use centaur_iron_control::{IronControlError, Principal, SessionRegistrar};
+use centaur_iron_control::{CrewConfig, IronControlError, Principal, SessionRegistrar};
 use centaur_sandbox_core::{
     Mount, RepoCacheAccess, ResourceRequirements, SANDBOX_AGENT_HOME, SandboxBackend,
     SandboxCapabilities as BackendSandboxCapabilities, SandboxError, SandboxFile, SandboxId,
@@ -1587,13 +1587,19 @@ impl SessionRuntime {
                 Err(SessionStoreError::NotFound { .. }) => None,
                 Err(error) => return Err(error.into()),
             };
-            let persona_resolution = match existing_persona_id {
-                Some(persona_id) => PersonaResolution {
+            let is_crew = registered_principal.kind.as_deref() == Some("slack_crew");
+            let persona_resolution = match (is_crew, existing_persona_id) {
+                (true, _) => PersonaResolution {
+                    context: None,
+                    persona_id: None,
+                    unavailable_requested_persona_id: None,
+                },
+                (false, Some(persona_id)) => PersonaResolution {
                     context: None,
                     persona_id,
                     unavailable_requested_persona_id: None,
                 },
-                None => resolve_persona_selection(
+                (false, None) => resolve_persona_selection(
                     self.personas.as_deref(),
                     persona_id,
                     &desired_capabilities,
@@ -1639,8 +1645,9 @@ impl SessionRuntime {
                     // Another first-create request may have won with a different resolution.
                     persona_resolution.persona_id == session.persona_id
                 });
-            if let Some(context) =
-                self.resolve_stored_persona(session.persona_id.as_deref(), &desired_capabilities)?
+            if !is_crew
+                && let Some(context) = self
+                    .resolve_stored_persona(session.persona_id.as_deref(), &desired_capabilities)?
             {
                 self.store
                     .append_event(
@@ -2830,7 +2837,25 @@ impl SessionRuntime {
         );
         let ensure_started = Instant::now();
         let result = async {
-            let persona_context = self.resolve_stored_persona(persona_id, desired_capabilities)?;
+            let crew_config = if let Some(principal_id) = iron_control_principal {
+                let principal = self.iron_control.get_principal(principal_id).await?;
+                if principal.kind.as_deref() == Some("slack_crew") {
+                    Some(principal.crew.ok_or_else(|| SessionRuntimeError::BadRequest(
+                        "Crew principal has no runtime configuration".to_owned()
+                    ))?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            // Legacy Crew sessions may still have a stored persona. Never resolve it:
+            // the bot's own prompt replaces both deployment and persona instructions.
+            let persona_context = if crew_config.is_some() {
+                None
+            } else {
+                self.resolve_stored_persona(persona_id, desired_capabilities)?
+            };
             if let Some(sandbox_id) = existing_sandbox_id {
                 let id = SandboxId::new(sandbox_id);
                 if !sandbox_capabilities_match(existing_sandbox_capabilities, desired_capabilities)
@@ -3054,6 +3079,7 @@ impl SessionRuntime {
                         && warm_harness_matches
                         && warm_persona_matches
                         && desired_capabilities.is_default_enabled()
+                        && crew_config.is_none()
                 })
             {
                 match warm_pool
@@ -3136,6 +3162,9 @@ impl SessionRuntime {
             }
             apply_sandbox_boot_mode(&mut spec, &boot_mode);
             apply_sandbox_capabilities(&mut spec, desired_capabilities);
+            if let Some(crew) = crew_config.as_ref() {
+                apply_crew_config(&mut spec, crew)?;
+            }
             let create_started = Instant::now();
             let handle = self
                 .run_with_running_capacity(thread_key, execution_id, "cold_create", || async {
@@ -5867,6 +5896,88 @@ fn upsert_spec_env(spec: &mut SandboxSpec, name: &str, value: String) {
     }
 }
 
+const CREW_SKILL_DIR: &str = "/home/agent/crew-skills";
+
+fn apply_crew_config(spec: &mut SandboxSpec, crew: &CrewConfig) -> Result<(), SessionRuntimeError> {
+    if crew.system_prompt.len() > 65_536 || crew.skills.len() > 32 {
+        return Err(SessionRuntimeError::BadRequest(
+            "invalid Crew configuration bounds".to_owned(),
+        ));
+    }
+    for skill in &crew.skills {
+        let valid_name = !skill.name.is_empty()
+            && skill.name.len() <= 64
+            && skill
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            && !skill.name.starts_with('-')
+            && !skill.name.ends_with('-')
+            && !skill.name.contains("--")
+            && skill.name != "search";
+        if !valid_name
+            || skill.description.trim().is_empty()
+            || skill.description.len() > 1_024
+            || skill.content.trim().is_empty()
+            || skill.content.len() > 65_536
+        {
+            return Err(SessionRuntimeError::BadRequest(
+                "invalid Crew skill".to_owned(),
+            ));
+        }
+        let description = serde_json::to_string(&skill.description)
+            .map_err(|error| SessionRuntimeError::BadRequest(error.to_string()))?;
+        let document = format!(
+            "---\nname: {}\ndescription: {}\n---\n\n{}",
+            skill.name, description, skill.content
+        );
+        spec.files.push(SandboxFile::new(
+            format!("{CREW_SKILL_DIR}/{}/SKILL.md", skill.name),
+            document,
+        ));
+    }
+    if !crew.skills.is_empty() {
+        let existing = spec
+            .env
+            .iter()
+            .find(|env| env.name == CENTAUR_SKILL_DIRS_ENV)
+            .map(|env| env.value.trim())
+            .filter(|value| !value.is_empty());
+        let dirs = existing.map_or_else(
+            || CREW_SKILL_DIR.to_owned(),
+            |value| format!("{value}:{CREW_SKILL_DIR}"),
+        );
+        upsert_spec_env(spec, CENTAUR_SKILL_DIRS_ENV, dirs);
+    }
+    if !crew.default_models.codex.trim().is_empty() {
+        if crew.default_models.codex.len() > 200 {
+            return Err(SessionRuntimeError::BadRequest(
+                "invalid Crew Codex model".to_owned(),
+            ));
+        }
+        upsert_spec_env(spec, "CODEX_MODEL", crew.default_models.codex.clone());
+    }
+    if !crew.default_models.claude.trim().is_empty() {
+        if crew.default_models.claude.len() > 200 {
+            return Err(SessionRuntimeError::BadRequest(
+                "invalid Crew Claude model".to_owned(),
+            ));
+        }
+        upsert_spec_env(spec, "CLAUDE_MODEL", crew.default_models.claude.clone());
+    }
+    let prompt_path = format!("{SANDBOX_AGENT_HOME}/AGENTS_CREW.md");
+    spec.files.retain(|file| {
+        file.target_path != prompt_path
+            && file.target_path != format!("{SANDBOX_AGENT_HOME}/AGENTS_PERSONA.md")
+    });
+    spec.env
+        .retain(|env| !matches!(env.name.as_str(), "AGENT_PERSONA" | "CENTAUR_PERSONA_ID"));
+    // Presence, not content, selects the full replacement in compose-system-prompt.
+    spec.files
+        .push(SandboxFile::new(prompt_path, crew.system_prompt.clone()));
+    Ok(())
+}
+
 fn sandbox_capabilities_match(
     existing: Option<&SessionSandboxCapabilities>,
     desired: &SessionSandboxCapabilities,
@@ -7357,10 +7468,99 @@ pub enum SessionRuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use centaur_iron_control::{CrewDefaultModels, CrewSkill};
     use centaur_sandbox_core::MountKind;
     use centaur_session_core::SessionStatus;
     use serde_json::json;
     use time::OffsetDateTime;
+
+    #[test]
+    fn crew_config_materializes_prompt_skills_and_model_defaults() {
+        let mut spec = SandboxSpec::new("test")
+            .env(CENTAUR_SKILL_DIRS_ENV, "/standard/skills")
+            .env("CODEX_MODEL", "deployment-default")
+            .env("AGENT_PERSONA", "old")
+            .env("CENTAUR_PERSONA_ID", "old")
+            .file(
+                format!("{SANDBOX_AGENT_HOME}/AGENTS_PERSONA.md"),
+                "persona prompt",
+            );
+        apply_crew_config(
+            &mut spec,
+            &CrewConfig {
+                system_prompt: "bot prompt".to_owned(),
+                skills: vec![CrewSkill {
+                    name: "triage".to_owned(),
+                    description: "Triage incidents".to_owned(),
+                    content: "Use the runbook.".to_owned(),
+                }],
+                default_models: CrewDefaultModels {
+                    codex: "codex-bot".to_owned(),
+                    claude: "claude-bot".to_owned(),
+                },
+            },
+        )
+        .unwrap();
+
+        assert_eq!(spec.files.len(), 2);
+        assert_eq!(spec.files[1].target_path, "/home/agent/AGENTS_CREW.md");
+        assert_eq!(spec.files[1].contents, "bot prompt");
+        assert_eq!(env_value(&spec, "AGENT_PERSONA"), None);
+        assert_eq!(env_value(&spec, "CENTAUR_PERSONA_ID"), None);
+        assert_eq!(
+            spec.files[0].target_path,
+            "/home/agent/crew-skills/triage/SKILL.md"
+        );
+        assert_eq!(
+            spec.files[0].contents,
+            "---\nname: triage\ndescription: \"Triage incidents\"\n---\n\nUse the runbook."
+        );
+        assert_eq!(
+            env_value(&spec, CENTAUR_SKILL_DIRS_ENV),
+            Some("/standard/skills:/home/agent/crew-skills")
+        );
+        assert_eq!(env_value(&spec, "CODEX_MODEL"), Some("codex-bot"));
+        assert_eq!(env_value(&spec, "CLAUDE_MODEL"), Some("claude-bot"));
+    }
+
+    #[test]
+    fn crew_empty_prompt_is_materialized_as_an_explicit_replacement() {
+        let mut spec = SandboxSpec::new("test")
+            .file("/home/agent/AGENTS_CREW.md", "old crew prompt")
+            .file("/home/agent/AGENTS_PERSONA.md", "old persona prompt");
+        apply_crew_config(
+            &mut spec,
+            &CrewConfig {
+                system_prompt: String::new(),
+                skills: vec![],
+                default_models: CrewDefaultModels::default(),
+            },
+        )
+        .unwrap();
+        assert_eq!(spec.files.len(), 1);
+        assert_eq!(spec.files[0].target_path, "/home/agent/AGENTS_CREW.md");
+        assert_eq!(spec.files[0].contents, "");
+    }
+
+    #[test]
+    fn crew_skill_names_are_path_safe() {
+        let mut spec = SandboxSpec::new("test");
+        let error = apply_crew_config(
+            &mut spec,
+            &CrewConfig {
+                system_prompt: String::new(),
+                skills: vec![CrewSkill {
+                    name: "../escape".to_owned(),
+                    description: String::new(),
+                    content: String::new(),
+                }],
+                default_models: CrewDefaultModels::default(),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, SessionRuntimeError::BadRequest(_)));
+        assert!(spec.files.is_empty());
+    }
 
     #[test]
     fn sandbox_repo_cache_label_controls_access() {
@@ -7535,8 +7735,10 @@ mod tests {
             id: "prn_test".to_owned(),
             foreign_id: Some("slack-channel-t-c".to_owned()),
             name: "Test".to_owned(),
+            kind: None,
             labels,
             sandbox_observability_enabled: true,
+            crew: None,
         }
     }
 
@@ -9049,6 +9251,43 @@ mod adoption_tests {
     #[derive(Clone, Copy)]
     struct AdmissionProbeRegistrar;
 
+    #[derive(Clone, Copy)]
+    struct CrewPrincipalRegistrar;
+
+    #[async_trait::async_trait]
+    impl SessionPrincipalRegistrar for CrewPrincipalRegistrar {
+        async fn register_session(
+            &self,
+            _thread_key: &str,
+            _metadata: Option<&Value>,
+            _create: bool,
+        ) -> Result<Principal, IronControlError> {
+            self.get_principal("prn_crew").await
+        }
+        async fn register_requester(
+            &self,
+            _thread_key: &str,
+            _metadata: Option<&Value>,
+            _create: bool,
+        ) -> Result<Option<Principal>, IronControlError> {
+            Ok(None)
+        }
+        async fn get_principal(&self, id: &str) -> Result<Principal, IronControlError> {
+            let mut principal = test_principal(id);
+            principal.kind = Some("slack_crew".to_owned());
+            principal
+                .labels
+                .insert(SANDBOX_REPO_CACHE_LABEL.to_owned(), "all".to_owned());
+            principal.crew = Some(
+                serde_json::from_value(json!({
+                    "system_prompt": "Crew only", "skills": [], "default_models": {}
+                }))
+                .unwrap(),
+            );
+            Ok(principal)
+        }
+    }
+
     #[async_trait::async_trait]
     impl SessionPrincipalRegistrar for AdmissionProbeRegistrar {
         async fn register_session(
@@ -9112,8 +9351,10 @@ mod adoption_tests {
             id: id.to_owned(),
             foreign_id: Some("test".to_owned()),
             name: "Test".to_owned(),
+            kind: None,
             labels: BTreeMap::new(),
             sandbox_observability_enabled: true,
+            crew: None,
         }
     }
 
@@ -9637,6 +9878,84 @@ mod adoption_tests {
         runtime_with(store, backend).with_personas(
             PersonaRegistry::new(definitions, None, vec!["/repo/tools".to_owned()]).unwrap(),
         )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn crew_ignores_requested_default_and_legacy_personas() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let mut runtime = runtime_with_personas(&store, backend.clone());
+        runtime.iron_control = Arc::new(CrewPrincipalRegistrar);
+        Arc::make_mut(runtime.personas.as_mut().unwrap()).default_persona_id =
+            Some("eng".to_owned());
+        for requested in [None, Some("old"), Some("not-deployed")] {
+            let thread_key =
+                ThreadKey::parse(format!("test:crew-persona-{}", uuid::Uuid::new_v4())).unwrap();
+            let outcome = runtime
+                .create_or_get_session(
+                    &thread_key,
+                    &HarnessType::Codex,
+                    requested,
+                    None,
+                    HarnessConflictPolicy::Reject,
+                )
+                .await
+                .unwrap();
+            assert_eq!(outcome.session.persona_id, None);
+            assert_eq!(outcome.unavailable_requested_persona_id, None);
+
+            // Simulate a pre-upgrade row whose profile is no longer deployed.
+            sqlx::query("UPDATE sessions SET persona_id = 'removed-persona' WHERE thread_key = $1")
+                .bind(thread_key.as_str())
+                .execute(store.pool())
+                .await
+                .unwrap();
+            runtime
+                .create_or_get_session(
+                    &thread_key,
+                    &HarnessType::Codex,
+                    requested,
+                    None,
+                    HarnessConflictPolicy::Reject,
+                )
+                .await
+                .unwrap();
+            runtime
+                .ensure_session_sandbox(EnsureSessionSandboxRequest {
+                    thread_key: &thread_key,
+                    harness_type: &HarnessType::Codex,
+                    persona_id: Some("removed-persona"),
+                    existing_sandbox_id: None,
+                    existing_sandbox_capabilities: None,
+                    iron_control_principal: Some("prn_crew"),
+                    requester_principal: None,
+                    proxy_labels: &BTreeMap::new(),
+                    desired_capabilities: &default_capabilities(),
+                    execution_id: "crew-test",
+                })
+                .await
+                .unwrap();
+            let spec = backend.created_specs().pop().unwrap();
+            assert!(spec.files.iter().any(
+                |f| f.target_path == "/home/agent/AGENTS_CREW.md" && f.contents == "Crew only"
+            ));
+            assert!(
+                !spec
+                    .files
+                    .iter()
+                    .any(|f| f.target_path.ends_with("AGENTS_PERSONA.md"))
+            );
+            assert!(
+                !events(&store, &thread_key)
+                    .await
+                    .iter()
+                    .any(|e| e.event_type == "session.persona_resolved")
+            );
+        }
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

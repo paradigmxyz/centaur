@@ -341,6 +341,9 @@ impl ThreadKey {
         let (channel_id, thread_ts) = match parts.as_slice() {
             ["slack", channel_id, thread_ts] => (*channel_id, *thread_ts),
             ["slack", _team_id, channel_id, thread_ts] => (*channel_id, *thread_ts),
+            ["slack", _team_id, app_id, channel_id, thread_ts] if app_id.starts_with('A') => {
+                (*channel_id, *thread_ts)
+            }
             [channel_id, thread_ts] if is_slack_conversation_id(channel_id) => {
                 (*channel_id, *thread_ts)
             }
@@ -571,6 +574,11 @@ mod tests {
             }
         );
         assert_eq!(dest.platform(), "slack");
+        let crew = ThreadKey::parse("slack:T999:A111:C123:123.456")
+            .unwrap()
+            .chat_destination()
+            .unwrap();
+        assert_eq!(crew, dest);
 
         // The team-id variant shifts the channel/ts one segment to the right.
         let team = ThreadKey::parse("slack:T999:C123:123.456")
