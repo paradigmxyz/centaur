@@ -175,7 +175,7 @@ struct ActivitySummaryArgs {
     #[arg(
         long = "session-activity-summary-model",
         env = "SESSION_ACTIVITY_SUMMARY_MODEL",
-        default_value = ""
+        default_value = "gpt-6-luna"
     )]
     model: String,
     #[arg(
@@ -199,11 +199,11 @@ struct ActivitySummaryArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     max_facts: u64,
-    /// Optional summary-turn reasoning override; empty inherits the source turn.
+    /// Summary-turn reasoning effort; defaults to low for short status updates.
     #[arg(
         long = "session-activity-summary-reasoning-effort",
         env = "SESSION_ACTIVITY_SUMMARY_REASONING_EFFORT",
-        default_value = ""
+        default_value = "low"
     )]
     reasoning_effort: String,
 }
@@ -248,8 +248,10 @@ impl ActivitySummaryArgs {
         Some(ActivitySummaryConfig {
             max_facts: usize::try_from(self.max_facts).unwrap_or(usize::MAX),
             min_interval: Duration::from_secs(self.min_interval_secs),
-            model: clean_optional_value(Some(self.model.as_str())),
-            reasoning_effort: clean_optional_value(Some(self.reasoning_effort.as_str())),
+            model: clean_optional_value(Some(self.model.as_str()))
+                .or_else(|| Some("gpt-6-luna".to_owned())),
+            reasoning_effort: clean_optional_value(Some(self.reasoning_effort.as_str()))
+                .or_else(|| Some("low".to_owned())),
             timeout: Duration::from_secs(self.timeout_secs),
         })
     }
@@ -2550,7 +2552,7 @@ mod tests {
     }
 
     #[test]
-    fn activity_summary_uses_the_session_without_a_separate_api_key() {
+    fn activity_summary_defaults_to_luna_without_a_separate_api_key() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::set(&[("OPENAI_API_KEY", "")]);
         let args = Args::try_parse_from([
@@ -2562,8 +2564,8 @@ mod tests {
         ])
         .unwrap();
         let config = args.activity_summary_config().unwrap();
-        assert!(config.model.is_none());
-        assert!(config.reasoning_effort.is_none());
+        assert_eq!(config.model.as_deref(), Some("gpt-6-luna"));
+        assert_eq!(config.reasoning_effort.as_deref(), Some("low"));
         assert_eq!(config.timeout, Duration::from_secs(60));
     }
 

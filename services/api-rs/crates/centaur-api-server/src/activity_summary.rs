@@ -3,8 +3,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use centaur_session_core::{MessageRole, Session, SessionEvent, ThreadKey, ThreadKeyError};
-use centaur_session_runtime::{ExecuteSessionInput, SESSION_OUTPUT_LINE_EVENT, SessionRuntime};
+use centaur_session_core::{
+    HarnessType, MessageRole, Session, SessionEvent, ThreadKey, ThreadKeyError,
+};
+use centaur_session_runtime::{SESSION_OUTPUT_LINE_EVENT, SessionRuntime};
 use centaur_session_sqlx::{PgSessionStore, SessionEventNotification, SessionStoreError};
 use centaur_workflows::{AgentTurnRequest, run_agent_session_turn};
 use serde_json::{Value, json};
@@ -169,10 +171,7 @@ impl ActivitySummaryWorker {
             return Ok(());
         }
         let session = self.store.get_session(&event.thread_key).await?;
-        let request = serde_json::from_value::<ExecuteSessionInput>(
-            self.store.execution_request(execution_id).await?,
-        )?;
-        let turn = summary_turn(&session, &request, &event, &prompt, &self.config)?;
+        let turn = summary_turn(&session, &event, &prompt, &self.config)?;
         let principal = turn
             .principal_foreign_id
             .clone()
@@ -261,7 +260,6 @@ impl ActivitySummaryWorker {
 
 fn summary_turn(
     session: &Session,
-    request: &ExecuteSessionInput,
     event: &SessionEvent,
     prompt: &str,
     config: &ActivitySummaryConfig,
@@ -270,30 +268,13 @@ fn summary_turn(
         .iron_control_principal
         .clone()
         .ok_or(ActivitySummaryError::MissingPrincipal)?;
-    let inputs = request
-        .input_lines
-        .iter()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .collect::<Vec<_>>();
-    let setting = |key: &str| {
-        inputs
-            .iter()
-            .rev()
-            .find_map(|input| string_at(input, &[key]))
-            .or_else(|| {
-                request
-                    .metadata
-                    .as_ref()
-                    .and_then(|metadata| string_at(metadata, &[key]))
-            })
-    };
     let id = format!(
         "{SUMMARY_THREAD_PREFIX}{}",
         event.execution_id.as_deref().unwrap_or_default()
     );
     Ok(AgentTurnRequest {
         thread_key: id.clone(),
-        harness_type: session.harness_type.clone(),
+        harness_type: HarnessType::Codex,
         persona_id: session.persona_id.clone(),
         principal_foreign_id: Some(principal),
         parts: vec![
@@ -309,12 +290,15 @@ fn summary_turn(
             .unwrap_or(u64::MAX)
             .saturating_mul(2),
         max_duration_ms: u64::try_from(config.timeout.as_millis()).unwrap_or(u64::MAX),
-        model: config.model.clone().or_else(|| setting("model")),
-        provider: setting("provider"),
+        model: config
+            .model
+            .clone()
+            .or_else(|| Some("gpt-6-luna".to_owned())),
+        provider: None,
         reasoning: config
             .reasoning_effort
             .clone()
-            .or_else(|| setting("reasoning")),
+            .or_else(|| Some("low".to_owned())),
     })
 }
 
@@ -957,8 +941,6 @@ pub(crate) enum ActivitySummaryError {
     Store(#[from] SessionStoreError),
     #[error("activity summary thread key error: {0}")]
     ThreadKey(#[from] ThreadKeyError),
-    #[error("activity summary execution request error: {0}")]
-    Json(#[from] serde_json::Error),
     #[error("activity summary requires the source session's credential principal")]
     MissingPrincipal,
 }
@@ -1133,13 +1115,13 @@ mod tests {
         ));
     }
 
-    fn summary_source(harness_type: HarnessType) -> Session {
+    fn summary_source() -> Session {
         Session {
             thread_key: ThreadKey::parse("test:source").unwrap(),
             title: None,
             sandbox_id: None,
             sandbox_capabilities: None,
-            harness_type,
+            harness_type: HarnessType::Codex,
             harness_thread_id: None,
             persona_id: Some("engineering".to_owned()),
             status: SessionStatus::Idle,
@@ -1162,65 +1144,40 @@ mod tests {
     }
 
     #[test]
-    fn summary_turn_inherits_the_source_harness_principal_and_model_settings() {
-        let request = ExecuteSessionInput {
-            idempotency_key: None,
-            metadata: Some(json!({"model": "recorded-model"})),
-            input_lines: vec![json!({"type": "user", "model": "source-model", "provider": "configured-provider", "reasoning": "high"}).to_string()],
-            idle_timeout_ms: None,
-            max_duration_ms: None,
-        };
-        for harness in [
-            HarnessType::Codex,
-            HarnessType::ClaudeCode,
-            HarnessType::Amp,
-        ] {
-            let session = summary_source(harness.clone());
-            let source = event(json!({}));
-            let turn =
-                summary_turn(&session, &request, &source, "facts", &summary_config()).unwrap();
-            assert_eq!(turn.harness_type, harness);
-            assert_eq!(turn.principal_foreign_id.as_deref(), Some("prn_source"));
-            assert_eq!(turn.persona_id, session.persona_id);
-            assert_eq!(turn.model.as_deref(), Some("source-model"));
-            assert_eq!(turn.provider.as_deref(), Some("configured-provider"));
-            assert_eq!(turn.reasoning.as_deref(), Some("high"));
-            assert_eq!(turn.thread_key, "activity-summary:exec-1");
-            assert_ne!(turn.thread_key, session.thread_key.as_str());
-            assert_eq!(turn.execution_idempotency_key, "activity-summary:exec-1:7");
-            assert_eq!(turn.max_duration_ms, 60_000);
-            assert_eq!(turn.idle_timeout_ms, 40_000);
-        }
+    fn summary_turn_uses_luna_with_source_principal_and_persona() {
+        let session = summary_source();
+        let source = event(json!({}));
+        let turn = summary_turn(&session, &source, "facts", &summary_config()).unwrap();
+        assert_eq!(turn.harness_type, HarnessType::Codex);
+        assert_eq!(turn.principal_foreign_id.as_deref(), Some("prn_source"));
+        assert_eq!(turn.persona_id, session.persona_id);
+        assert_eq!(turn.model.as_deref(), Some("gpt-6-luna"));
+        assert!(turn.provider.is_none());
+        assert_eq!(turn.reasoning.as_deref(), Some("low"));
+        assert_eq!(turn.thread_key, "activity-summary:exec-1");
+        assert_ne!(turn.thread_key, session.thread_key.as_str());
+        assert_eq!(turn.execution_idempotency_key, "activity-summary:exec-1:7");
+        assert_eq!(turn.max_duration_ms, 60_000);
+        assert_eq!(turn.idle_timeout_ms, 40_000);
     }
 
     #[test]
     fn summary_overrides_are_optional_and_never_select_another_principal() {
-        let mut request = ExecuteSessionInput {
-            idempotency_key: None,
-            metadata: Some(json!({"model": "recorded-model"})),
-            input_lines: vec![json!({"type": "user", "provider": "custom"}).to_string()],
-            idle_timeout_ms: None,
-            max_duration_ms: None,
-        };
-        let mut session = summary_source(HarnessType::Codex);
+        let mut session = summary_source();
         let source = event(json!({}));
         let mut config = summary_config();
-        let turn = summary_turn(&session, &request, &source, "facts", &config).unwrap();
-        assert_eq!(turn.model.as_deref(), Some("recorded-model"));
-        request.metadata = None;
-        let turn = summary_turn(&session, &request, &source, "facts", &config).unwrap();
-        assert!(turn.model.is_none());
-        assert!(turn.reasoning.is_none());
+        let turn = summary_turn(&session, &source, "facts", &config).unwrap();
+        assert_eq!(turn.model.as_deref(), Some("gpt-6-luna"));
         config.model = Some("summary-model".to_owned());
         config.reasoning_effort = Some("low".to_owned());
-        let turn = summary_turn(&session, &request, &source, "facts", &config).unwrap();
+        let turn = summary_turn(&session, &source, "facts", &config).unwrap();
         assert_eq!(turn.model.as_deref(), Some("summary-model"));
         assert_eq!(turn.reasoning.as_deref(), Some("low"));
-        assert_eq!(turn.provider.as_deref(), Some("custom"));
+        assert!(turn.provider.is_none());
         assert_eq!(turn.principal_foreign_id.as_deref(), Some("prn_source"));
         session.iron_control_principal = None;
         assert!(matches!(
-            summary_turn(&session, &request, &source, "facts", &config),
+            summary_turn(&session, &source, "facts", &config),
             Err(ActivitySummaryError::MissingPrincipal)
         ));
     }
