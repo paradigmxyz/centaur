@@ -5,10 +5,10 @@ harness alongside Codex, Claude Code, Amp, Nanocodex, and Hermes. Start a
 Slack, GitHub, or Linear thread with `--pi`, or set `pi` as a channel or
 deployment default.
 
-The sandbox keeps one `pi --mode rpc` process per thread. An interrupt sends
-Pi's `abort`, which stops the turn and keeps the process. Pi saves the session
-on disk under an id derived from the thread key, so a model switch or a sandbox
-restart with persistent state resumes the same conversation. Pi trusts the
+The sandbox keeps one `pi --mode rpc` process per thread. Pi saves the session
+on disk under an id derived from the thread key, so an interrupt (which stops
+the Pi process, as with Claude Code), a model switch, or a sandbox restart with
+persistent state resumes the same conversation. Pi trusts the
 workspace (`--approve`), so it loads the skills the sandbox installs, and runs
 with telemetry and version checks off.
 

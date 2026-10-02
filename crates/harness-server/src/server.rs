@@ -290,18 +290,6 @@ enum ActiveTurnRequest {
     BlocksInterrupt,
 }
 
-/// What an active-turn request did to the running turn.
-enum TurnRequestOutcome {
-    Continue,
-    /// The process was killed; the turn is over.
-    Killed,
-    /// The process was asked to abort; the turn ends on its terminal event.
-    Aborting,
-}
-
-/// How long an aborting turn may take to settle before its process is killed.
-const ABORT_GRACE: Duration = Duration::from_secs(10);
-
 fn drain_active_turn_requests(rx: &Receiver<ActiveTurnRequest>) {
     while rx.try_recv().is_ok() {}
 }
@@ -1118,18 +1106,10 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
     normalizer: &mut CodexTurnNormalizer,
     request: ActiveTurnRequest,
     stdout: &mut W,
-) -> Result<TurnRequestOutcome> {
-    let interrupt = |process: &mut HarnessChild| -> Result<TurnRequestOutcome> {
-        if let Some(abort) = harness.stdin_for_interrupt() {
-            process.stdin.write_all(&abort)?;
-            process.stdin.flush()?;
-            return Ok(TurnRequestOutcome::Aborting);
-        }
-        process.kill_and_wait()?;
-        Ok(TurnRequestOutcome::Killed)
-    };
+) -> Result<bool> {
     let ActiveTurnRequest::JsonRpc(request) = request else {
-        return interrupt(process);
+        process.kill_and_wait()?;
+        return Ok(true);
     };
 
     match request.method.as_str() {
@@ -1142,7 +1122,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                     -32600,
                     format!("unknown threadId {}", params.thread_id),
                 )?;
-                return Ok(TurnRequestOutcome::Continue);
+                return Ok(false);
             }
             if params.expected_turn_id != normalizer.turn_id() {
                 write_error(
@@ -1155,7 +1135,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                         normalizer.turn_id()
                     ),
                 )?;
-                return Ok(TurnRequestOutcome::Continue);
+                return Ok(false);
             }
             process
                 .stdin
@@ -1175,7 +1155,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
             {
                 write_value(stdout, &notification_to_wire_value(&notification)?)?;
             }
-            Ok(TurnRequestOutcome::Continue)
+            Ok(false)
         }
         "turn/interrupt" => {
             let params: TurnInterruptParams = request_params(request.params)?;
@@ -1186,7 +1166,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                     -32600,
                     format!("unknown threadId {}", params.thread_id),
                 )?;
-                return Ok(TurnRequestOutcome::Continue);
+                return Ok(false);
             }
             if params.turn_id != normalizer.turn_id() {
                 write_error(
@@ -1199,9 +1179,9 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                         normalizer.turn_id()
                     ),
                 )?;
-                return Ok(TurnRequestOutcome::Continue);
+                return Ok(false);
             }
-            let outcome = interrupt(process)?;
+            process.kill_and_wait()?;
             write_client_response(
                 stdout,
                 ClientResponse::TurnInterrupt {
@@ -1209,7 +1189,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                     response: TurnInterruptResponse {},
                 },
             )?;
-            Ok(outcome)
+            Ok(true)
         }
         _ => {
             write_error(
@@ -1218,7 +1198,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                 -32600,
                 format!("cannot handle {} while a turn is active", request.method),
             )?;
-            Ok(TurnRequestOutcome::Continue)
+            Ok(false)
         }
     }
 }
@@ -1268,6 +1248,7 @@ fn run_normalized_turn<H: HarnessServer, W: Write>(
         Ok(None) => telemetry.finish(TelemetryTurnStatus::Completed),
         Err(HarnessServerError::TurnInterrupted { .. }) => {
             telemetry.finish(TelemetryTurnStatus::Cancelled);
+            state.process = None;
             finish_turn_interrupted(state, normalizer, stdout)?;
         }
         Err(error) => {
@@ -1358,38 +1339,23 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
     let mut last_session_id = state.harness_session_id.clone();
     let mut event_normalizer = H::EventNormalizer::default();
     let mut completed_turn = None;
-    // Set once the harness was asked to abort: its terminal event then ends
-    // the turn as interrupted, or the process is killed at this deadline.
-    let mut abort_deadline: Option<Instant> = None;
     loop {
         while let Ok(request) = request_rx.try_recv() {
             let process = state
                 .process
                 .as_mut()
                 .ok_or(HarnessServerError::HarnessStdinUnavailable)?;
-            match handle_active_turn_request(harness, process, normalizer, request, stdout)? {
-                TurnRequestOutcome::Continue => {}
-                TurnRequestOutcome::Killed => {
-                    state.process = None;
-                    return Err(HarnessServerError::TurnInterrupted {
-                        kind: harness.kind(),
-                    });
-                }
-                TurnRequestOutcome::Aborting => {
-                    abort_deadline.get_or_insert_with(|| Instant::now() + ABORT_GRACE);
-                }
+            if handle_active_turn_request(harness, process, normalizer, request, stdout)? {
+                state.process = None;
+                return Err(HarnessServerError::TurnInterrupted {
+                    kind: harness.kind(),
+                });
             }
             // A steer re-opens the turn: the harness now owes a response whose
             // first token can take longer than the settle window, so the
             // pending fallback completion no longer applies. The response's
             // own terminal stop re-arms it.
             settle_deadline = None;
-        }
-        if abort_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            state.process = None;
-            return Err(HarnessServerError::TurnInterrupted {
-                kind: harness.kind(),
-            });
         }
 
         let mut terminal = false;
@@ -1448,12 +1414,6 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
                 // A clean exit while waiting out the settle window means the
                 // native result is never coming: the terminal stop already
                 // seen ends the turn.
-                if abort_deadline.is_some() {
-                    state.process = None;
-                    return Err(HarnessServerError::TurnInterrupted {
-                        kind: harness.kind(),
-                    });
-                }
                 if settle_deadline.is_some() && status.success() {
                     state.process = None;
                     terminal = true;
@@ -1465,11 +1425,6 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
                     });
                 }
             }
-        }
-        if terminal && abort_deadline.is_some() {
-            return Err(HarnessServerError::TurnInterrupted {
-                kind: harness.kind(),
-            });
         }
         if terminal {
             if let Some(notification) = normalizer.finish_turn(None)? {

@@ -21,9 +21,7 @@ const CODEMODE_TURN: &str = concat!(
 );
 
 /// Scripted `pi --mode rpc`: logs its argv, environment, and stdin, and
-/// replays a recorded turn for each prompt. A `slow` prompt waits for
-/// `abort`, which ends the run the way Pi does: an aborted message, then
-/// `agent_settled`, then the abort response.
+/// replays a recorded turn for each prompt. A `slow` prompt never finishes.
 fn fake_pi(dir: &Path) -> PathBuf {
     let script = format!(
         concat!(
@@ -36,11 +34,6 @@ fn fake_pi(dir: &Path) -> PathBuf {
             "*'\"type\":\"prompt\"'*) ",
             "printf '%s\\n' '{{\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{{\"disposition\":\"started\"}}}}'; ",
             "case \"$line\" in *codemode*) cat '{codemode}' ;; *slow*) ;; *) cat '{tool}' ;; esac ;; ",
-            "*'\"type\":\"abort\"'*) printf '%s\\n' ",
-            "'{{\"type\":\"message_start\",\"message\":{{\"role\":\"assistant\",\"content\":[]}}}}' ",
-            "'{{\"type\":\"message_end\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"partial\"}}],\"stopReason\":\"error\",\"errorMessage\":\"This operation was aborted\"}}}}' ",
-            "'{{\"type\":\"agent_settled\"}}' ",
-            "'{{\"type\":\"response\",\"command\":\"abort\",\"success\":true}}' ;; ",
             "*) printf '%s\\n' '{{\"type\":\"response\",\"command\":\"set_thinking_level\",\"success\":true}}' ;; ",
             "esac; done"
         ),
@@ -110,7 +103,7 @@ fn status(turn: &[Value]) -> &Value {
 }
 
 #[test]
-fn pi_blocks_turns_render_tools_codemode_and_abort_and_respawn_on_model_change() {
+fn pi_blocks_turns_render_tools_and_codemode_and_respawn_on_model_change_and_interrupt() {
     let dir: PathBuf = std::env::temp_dir().join(format!("pi-stdio-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -152,12 +145,12 @@ fn pi_blocks_turns_render_tools_codemode_and_abort_and_respawn_on_model_change()
     server.user("slow", json!({}));
     server.read_until("turn/started");
     server.send(json!({"type": "interrupt", "thread_key": "slack:C123:123.456"}));
-    let aborted = server.read_until("turn/completed");
-    let after_abort = server.turn("after abort", json!({}));
+    let interrupted = server.read_until("turn/completed");
+    let after_interrupt = server.turn("after interrupt", json!({}));
     drop(server);
     child.wait().unwrap();
 
-    for turn in [&first, &second, &after_abort] {
+    for turn in [&first, &second, &after_interrupt] {
         assert_eq!(status(turn), "completed", "{turn:#?}");
         // Text is only phased once its message ends: commentary before the
         // tool call, then the final answer.
@@ -234,18 +227,10 @@ fn pi_blocks_turns_render_tools_codemode_and_abort_and_respawn_on_model_change()
         "{completed:#?}"
     );
 
-    // Interrupt aborts in-band: the turn ends interrupted, the aborted
-    // attempt's partial text never renders, and the process keeps serving.
-    assert_eq!(status(&aborted), "interrupted", "{aborted:#?}");
-    assert!(
-        !aborted
-            .iter()
-            .any(|value| value.to_string().contains("partial")),
-        "{aborted:#?}"
-    );
+    assert_eq!(status(&interrupted), "interrupted", "{interrupted:#?}");
 
-    // A spawn per model, and a respawn after the failed turn; the session id
-    // is stable across them.
+    // A spawn per model, and a respawn after the failed turn and after the
+    // interrupt killed Pi; the session id is stable across them.
     let argv = std::fs::read_to_string(dir.join("argv")).unwrap();
     let argv: Vec<&str> = argv.lines().collect();
     assert_eq!(
@@ -257,12 +242,16 @@ fn pi_blocks_turns_render_tools_codemode_and_abort_and_respawn_on_model_change()
              --model openai/gpt-5.5 --thinking medium --tools read,bash,edit,write,codemode",
             "|0|1|--mode rpc --approve --session-id centaur-slack-C123-123.456 \
              --model openai/gpt-5.5 --thinking medium --tools read,bash,edit,write,codemode",
+            "|0|1|--mode rpc --approve --session-id centaur-slack-C123-123.456 \
+             --model openai/gpt-5.5 --thinking medium --tools read,bash,edit,write,codemode",
         ]
     );
     let stdin: Vec<Value> = std::fs::read_to_string(dir.join("stdin"))
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
+        // The interrupt can kill Pi before it logs the slow prompt.
+        .filter(|line: &Value| line["message"] != "slow")
         .collect();
     assert_eq!(
         stdin,
@@ -271,9 +260,7 @@ fn pi_blocks_turns_render_tools_codemode_and_abort_and_respawn_on_model_change()
             json!({"type": "prompt", "message": "run echo hi"}),
             json!({"type": "prompt", "message": "again"}),
             json!({"type": "prompt", "message": "use codemode"}),
-            json!({"type": "prompt", "message": "slow"}),
-            json!({"type": "abort"}),
-            json!({"type": "prompt", "message": "after abort"}),
+            json!({"type": "prompt", "message": "after interrupt"}),
         ]
     );
 

@@ -2,9 +2,9 @@
 //!
 //! One `pi` process serves the thread across turns. A turn is a `prompt`
 //! command and ends on `agent_settled`, after Pi's own retries, compaction,
-//! and queued steers. An interrupt sends `abort`, which settles the turn and
-//! keeps the process. Pi persists the session on disk under an id derived from
-//! the thread key, so a respawn (after a crash or model switch) resumes it.
+//! and queued steers. Pi persists the session on disk under an id derived from
+//! the thread key, so a respawn (after an interrupt, crash, or model switch)
+//! resumes it.
 //!
 //! Codemode is on by default: the model can write a script that calls the
 //! other tools, and each nested call renders as its own tool item.
@@ -388,12 +388,6 @@ impl HarnessServer for PiHarness {
     fn stdin_for_reasoning_effort(&self, effort: Option<&str>) -> Result<Vec<u8>> {
         let level = effort.map_or_else(default_thinking_level, str::to_string);
         command_line(json!({"type": "set_thinking_level", "level": level}))
-    }
-
-    /// `abort` settles the turn (ending with `agent_settled`) and keeps the
-    /// process, its session, and the tool processes' cleanup in Pi's hands.
-    fn stdin_for_interrupt(&self) -> Option<Vec<u8>> {
-        command_line(json!({"type": "abort"})).ok()
     }
 
     fn parse_stdout_line(&self, line: &str) -> Result<Self::Event> {

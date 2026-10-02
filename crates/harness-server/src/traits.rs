@@ -92,12 +92,6 @@ pub trait HarnessServer {
     fn stdin_for_reasoning_effort(&self, _effort: Option<&str>) -> Result<Vec<u8>> {
         Ok(Vec::new())
     }
-    /// Stdin that asks the running process to abort its turn. The turn then
-    /// ends on the harness's own terminal event and the process survives.
-    /// `None` (the default) kills the process instead.
-    fn stdin_for_interrupt(&self) -> Option<Vec<u8>> {
-        None
-    }
     fn parse_stdout_line(&self, line: &str) -> Result<Self::Event>;
     fn normalize_events(
         &self,
