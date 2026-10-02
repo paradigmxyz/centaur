@@ -11,12 +11,12 @@ from typing import Annotated, Any
 import typer
 
 app = typer.Typer(
-    name="vega-lite",
+    name="chart",
     help="Render declarative Vega-Lite JSON specifications to PNG or SVG.",
     epilog=(
         "Vega-Lite specification reference: https://vega.github.io/vega-lite/docs/\n\n"
         "Keep data inline, then run: "
-        "vega-lite render spec.json --output chart.png"
+        "chart render spec.json --output chart.png"
     ),
     no_args_is_help=True,
 )
@@ -97,14 +97,14 @@ def health() -> None:
         rendered = base64.b64decode(encoded)
         payload = {
             "ok": rendered.startswith(b"\x89PNG"),
-            "tool": "vega-lite",
+            "tool": "chart",
             "error": None,
             "details": {"png_bytes": len(rendered)},
         }
     except Exception as exc:
         payload = {
             "ok": False,
-            "tool": "vega-lite",
+            "tool": "chart",
             "error": str(exc),
             "details": {},
         }
