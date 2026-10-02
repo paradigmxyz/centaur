@@ -605,6 +605,467 @@ describe('slackbotv2', () => {
     expect(codexApi.workflowEvents).toHaveLength(1)
   })
 
+  it('keeps unmentioned channel messages silent when ambient handling is disabled', async () => {
+    const message = await postUserMessage('Please inspect this channel.')
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-ambient-disabled',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: message.ts,
+          text: 'Please inspect this channel.'
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    expect(codexApi.executes).toHaveLength(0)
+    await expect(bot.chat.getState().isSubscribed(threadKey(message.ts))).resolves.toBe(false)
+  })
+
+  it('tracks unmentioned messages only in explicitly allowed Slack channels', async () => {
+    const inputs: Array<Parameters<NonNullable<
+      Parameters<typeof createSlackbotV2>[0]['ambientTriggerStrategy']
+    >>[0]> = []
+    bot = createTestBot({
+      ambientTriggerAllowChannelIds: [CHANNEL_ID],
+      ambientTriggerMaxResponsesPerThread: 1,
+      ambientTriggerStrategy: async input => {
+        inputs.push(input)
+        return { probability: 0.98, respond: true }
+      }
+    })
+
+    const untrackedWaits: Promise<unknown>[] = []
+    const untrackedResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-ambient-untracked-channel',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: 'C_UNTRACKED',
+          team: TEAM_ID,
+          ts: '1700000005.000100',
+          text: 'Please inspect this untracked channel.'
+        }
+      }),
+      {},
+      waitUntilContext(untrackedWaits)
+    )
+    expect(untrackedResponse.status).toBe(200)
+    await Promise.all(untrackedWaits)
+
+    const tracked = await postUserMessage('Please inspect this tracked channel.')
+    const trackedWaits: Promise<unknown>[] = []
+    const trackedResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-ambient-tracked-channel',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: tracked.ts,
+          text: 'Please inspect this tracked channel.'
+        }
+      }),
+      {},
+      waitUntilContext(trackedWaits)
+    )
+    expect(trackedResponse.status).toBe(200)
+    await Promise.all(trackedWaits)
+
+    expect(inputs).toHaveLength(1)
+    expect(inputs[0]!.channelId).toBe(CHANNEL_ID)
+    expect(inputs[0]!.isThreadReply).toBe(false)
+    expect(inputs[0]!.messages.at(-1)).toEqual({
+      author: 'user',
+      current: true,
+      text: 'Please inspect this tracked channel.'
+    })
+    expect(codexApi.executes).toHaveLength(1)
+    await expect(bot.chat.getState().isSubscribed(threadKey(tracked.ts))).resolves.toBe(true)
+  })
+
+  it('tracks all public and private channels except denied channels and direct messages', async () => {
+    const inputs: Array<Parameters<NonNullable<
+      Parameters<typeof createSlackbotV2>[0]['ambientTriggerStrategy']
+    >>[0]> = []
+    bot = createTestBot({
+      ambientTriggerDenyChannelIds: ['C_DENIED'],
+      ambientTriggerStrategy: async input => {
+        inputs.push(input)
+        return { probability: 0.98, respond: true }
+      }
+    })
+
+    const allowed = await postUserMessage('Please inspect this channel.')
+    const allowedWaits: Promise<unknown>[] = []
+    const allowedResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-ambient-all-channels',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: allowed.ts,
+          text: 'Please inspect this channel.'
+        }
+      }),
+      {},
+      waitUntilContext(allowedWaits)
+    )
+    expect(allowedResponse.status).toBe(200)
+    await Promise.all(allowedWaits)
+
+    const deniedWaits: Promise<unknown>[] = []
+    const deniedResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-ambient-denied-channel',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: 'C_DENIED',
+          team: TEAM_ID,
+          ts: '1700000005.000200',
+          text: 'Please inspect this denied channel.'
+        }
+      }),
+      {},
+      waitUntilContext(deniedWaits)
+    )
+    expect(deniedResponse.status).toBe(200)
+    await Promise.all(deniedWaits)
+
+    const members = await slackBot.users.list({})
+    const testerId = members.members?.find(member => member.name === 'tester')?.id
+    const builderId = members.members?.find(member => member.name === 'builder')?.id
+    expect(testerId).toBeDefined()
+    expect(builderId).toBeDefined()
+    const directMessage = await slackBot.conversations.open({ users: testerId! })
+    const groupDirectMessage = await slackBot.conversations.open({
+      users: `${testerId},${builderId}`
+    })
+    for (const [eventId, channel, channelType] of [
+      ['Ev-ambient-direct-message', directMessage.channel!.id!, 'im'],
+      ['Ev-ambient-group-direct-message', groupDirectMessage.channel!.id!, 'mpim']
+    ] as const) {
+      const text = 'Please inspect this direct conversation.'
+      const posted = await slackBot.chat.postMessage({ channel, text })
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: eventId,
+          event: {
+            type: 'message',
+            user: USER_ID,
+            channel,
+            channel_type: channelType,
+            team: TEAM_ID,
+            ts: posted.ts,
+            text
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+      expect(response.status).toBe(200)
+      await Promise.all(waits)
+    }
+
+    expect(inputs).toHaveLength(1)
+  })
+
+  it('gates ambient thread replies with Jev and enforces the per-thread cap', async () => {
+    const inputs: Array<Parameters<NonNullable<
+      Parameters<typeof createSlackbotV2>[0]['ambientTriggerStrategy']
+    >>[0]> = []
+    const decisions = [false, true]
+    bot = createTestBot({
+      ambientTriggerAllowChannelIds: [CHANNEL_ID],
+      ambientTriggerStrategy: async input => {
+        inputs.push(input)
+        const respond = decisions.shift() ?? true
+        return { probability: respond ? 0.97 : 0.12, respond }
+      }
+    })
+    const parent = await postUserMessage('Can Centaur inspect the deploy?')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> start with the current state`, parent.ts)
+    const mentionWaits: Promise<unknown>[] = []
+    const mentionResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-ambient-initial-mention',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> start with the current state`
+        }
+      }),
+      {},
+      waitUntilContext(mentionWaits)
+    )
+    expect(mentionResponse.status).toBe(200)
+    await Promise.all(mentionWaits)
+
+    for (const [index, text] of [
+      'thanks, discussing this with the team',
+      'please continue and check the failed plan',
+      'also inspect the apply logs'
+    ].entries()) {
+      const followUp = await postUserMessage(text, parent.ts)
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: `Ev-ambient-follow-up-${index}`,
+          event: {
+            type: 'message',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: followUp.ts,
+            thread_ts: parent.ts,
+            text
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+      expect(response.status).toBe(200)
+      await Promise.all(waits)
+    }
+
+    expect(inputs).toHaveLength(2)
+    expect(inputs.map(input => input.channelId)).toEqual([CHANNEL_ID, CHANNEL_ID])
+    expect(inputs.map(input => input.isThreadReply)).toEqual([true, true])
+    expect(inputs[0]!.messages.some(message => message.author === 'centaur')).toBe(true)
+    expect(inputs[0]!.messages.at(-1)).toEqual({
+      author: 'user',
+      current: true,
+      text: 'thanks, discussing this with the team'
+    })
+    expect(inputs[1]!.messages.at(-1)).toEqual({
+      author: 'user',
+      current: true,
+      text: 'please continue and check the failed plan'
+    })
+    expect(codexApi.executes).toHaveLength(2)
+    expect(codexApi.executes[1]!.body.idempotency_key).toBeDefined()
+    expect(JSON.stringify(codexApi.executes[1]!.body.input_lines)).toContain(
+      'please continue and check the failed plan'
+    )
+  })
+
+  it('atomically caps concurrent ambient replies in one thread', async () => {
+    let decisionCount = 0
+    let releaseDecisions: (() => void) | undefined
+    let resolveBothStarted: (() => void) | undefined
+    const decisionsHeld = new Promise<void>(resolve => { releaseDecisions = resolve })
+    const bothStarted = new Promise<void>(resolve => { resolveBothStarted = resolve })
+    bot = createTestBot({
+      ambientTriggerAllowChannelIds: [CHANNEL_ID],
+      ambientTriggerMaxResponsesPerThread: 1,
+      ambientTriggerStrategy: async () => {
+        decisionCount += 1
+        if (decisionCount === 2) resolveBothStarted?.()
+        await decisionsHeld
+        return { probability: 0.99, respond: true }
+      }
+    })
+    const parent = await postUserMessage('Inspect concurrent deploy updates.')
+    await bot.chat.getState().subscribe(threadKey(parent.ts))
+    const followUps = await Promise.all([
+      postUserMessage('Check the first update.', parent.ts),
+      postUserMessage('Check the second update.', parent.ts)
+    ])
+
+    const requests = followUps.map((followUp, index) => {
+      const waits: Promise<unknown>[] = []
+      const response = bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: `Ev-ambient-concurrent-${index}`,
+          event: {
+            type: 'message',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: followUp.ts,
+            thread_ts: parent.ts,
+            text: index === 0 ? 'Check the first update.' : 'Check the second update.'
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+      return { response, waits }
+    })
+
+    await bothStarted
+    releaseDecisions?.()
+    const responses = await Promise.all(requests.map(async request => {
+      const response = await request.response
+      await Promise.all(request.waits)
+      return response
+    }))
+
+    expect(responses.map(response => response.status)).toEqual([200, 200])
+    expect(decisionCount).toBe(2)
+    expect(codexApi.executes).toHaveLength(1)
+  })
+
+  it('releases the ambient response slot when the handoff fails before a response exists', async () => {
+    bot = createTestBot({
+      ambientTriggerAllowChannelIds: [CHANNEL_ID],
+      ambientTriggerMaxResponsesPerThread: 1,
+      ambientTriggerStrategy: async () => ({ probability: 0.98, respond: true })
+    })
+    codexApi.queueCreateResponse({ ok: false, error: 'invalid session request' }, 400)
+
+    const parent = await postUserMessage('Can Centaur inspect the deploy?')
+    for (const [index, text] of [
+      'first follow-up, whose handoff fails',
+      'second follow-up after the failure'
+    ].entries()) {
+      const followUp = await postUserMessage(text, parent.ts)
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: `Ev-ambient-handoff-failure-${index}`,
+          event: {
+            type: 'message',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: followUp.ts,
+            thread_ts: parent.ts,
+            text
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+      expect(response.status).toBe(200)
+      await Promise.allSettled(waits)
+    }
+
+    expect(codexApi.executes).toHaveLength(1)
+    expect(JSON.stringify(codexApi.executes[0]!.body.input_lines)).toContain(
+      'second follow-up after the failure'
+    )
+  })
+
+  it('skips ambient decisions when the recent thread context is beyond the page limit', async () => {
+    let decisions = 0
+    bot = createTestBot({
+      ambientTriggerStrategy: async () => {
+        decisions += 1
+        return { probability: 0.99, respond: true }
+      }
+    })
+    const parent = await postUserMessage('Original request.')
+    slackApi.simulateLongThread(parent.ts)
+    const current = await postUserMessage('Please continue with the latest update.', parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-ambient-context-page-limit',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: current.ts,
+          thread_ts: parent.ts,
+          text: 'Please continue with the latest update.'
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(slackApi.longThreadPageCursors).toEqual(['', 'page-1', 'page-2'])
+
+    expect(decisions).toBe(0)
+    expect(codexApi.executes).toHaveLength(0)
+  }, 30_000)
+
+  it('keeps an ambient reply silent when the trigger strategy fails', async () => {
+    bot = createTestBot({
+      ambientTriggerAllowChannelIds: [CHANNEL_ID],
+      ambientTriggerMaxResponsesPerThread: 1,
+      ambientTriggerStrategy: async () => {
+        throw new Error('Jev unavailable')
+      }
+    })
+    const parent = await postUserMessage('Investigate the deploy.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> start`, parent.ts)
+    const mentionWaits: Promise<unknown>[] = []
+    await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-ambient-failure-initial-mention',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> start`
+        }
+      }),
+      {},
+      waitUntilContext(mentionWaits)
+    )
+    await Promise.all(mentionWaits)
+
+    const followUp = await postUserMessage('please continue', parent.ts)
+    const followUpWaits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-ambient-failure-follow-up',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: followUp.ts,
+          thread_ts: parent.ts,
+          text: 'please continue'
+        }
+      }),
+      {},
+      waitUntilContext(followUpWaits)
+    )
+    expect(response.status).toBe(200)
+    await Promise.all(followUpWaits)
+    expect(codexApi.executes).toHaveLength(1)
+  })
+
   it('collects ignored subscribed messages when the bot is next mentioned', async () => {
     const parent = await postUserMessage('The deploy context is above.')
     const firstMention = await postUserMessage(
@@ -6830,6 +7291,7 @@ type PatchedSlackApi = {
   addFileToMessage(channel: string, ts: string, file: Record<string, unknown>): void
   botInfoRequestCount(botId: string): number
   calls: StreamCall[]
+  longThreadPageCursors: string[]
   close(): Promise<void>
   failRepliesWithThreadNotFound(channel: string, ts: string): void
   failStreamAppendsAfter(count: number, error: string): void
@@ -6841,6 +7303,7 @@ type PatchedSlackApi = {
   respondToNextConversationsJoin(status: number, body: Record<string, unknown>): void
   respondToNextReaction(status: number, body: Record<string, unknown>): void
   setBotInfo(botId: string, bot: Record<string, unknown>): void
+  simulateLongThread(threadTs: string): void
   setFileInfo(fileId: string, file: Record<string, unknown>): void
   setUserProfile(userId: string, profile: Record<string, unknown>): void
   userProfileMethodRequestCount(userId: string, method: string): number
@@ -6900,6 +7363,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
   const userProfiles = new Map<string, Record<string, unknown>>()
   const userProfileRequests = new Map<string, number>()
   const threadNotFoundReplies = new Set<string>()
+  const longThread = { ts: '', pageCursors: [] as string[] }
   let assistantStatusGate: Promise<void> | null = null
   let releaseAssistantStatusGate: (() => void) | null = null
   let maxStreamStopChars: number | null = null
@@ -6929,6 +7393,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       fileInfo,
       fileInfoRequests,
       maxStreamStopChars,
+      longThread,
       stopFailure,
       port,
       reactionResponses,
@@ -6953,6 +7418,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       return botInfoRequests.get(botId) ?? 0
     },
     calls,
+    longThreadPageCursors: longThread.pageCursors,
     url: `http://127.0.0.1:${port}`,
     failRepliesWithThreadNotFound(channel: string, ts: string) {
       threadNotFoundReplies.add(slackReplyKey(channel, ts))
@@ -6995,12 +7461,17 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       streams.clear()
       userProfiles.clear()
       userProfileRequests.clear()
+      longThread.ts = ''
+      longThread.pageCursors.length = 0
     },
     respondToNextConversationsJoin(status: number, body: Record<string, unknown>) {
       conversationsJoinResponses.push({ body, status })
     },
     respondToNextReaction(status: number, body: Record<string, unknown>) {
       reactionResponses.push({ body, status })
+    },
+    simulateLongThread(threadTs: string) {
+      longThread.ts = threadTs
     },
     setBotInfo(botId: string, bot: Record<string, unknown>) {
       botInfo.set(botId, bot)
@@ -7033,6 +7504,7 @@ async function handlePatchedSlackRequest(
     conversationsJoinResponses: QueuedSlackApiResponse[]
     fileInfo: Map<string, Record<string, unknown>>
     fileInfoRequests: Map<string, number>
+    longThread: { ts: string; pageCursors: string[] }
     maxStreamStopChars: number | null
     stopFailure: { remaining: number }
     port: number
@@ -7245,6 +7717,21 @@ async function handlePatchedSlackRequest(
       )
     ) {
       await sendWebResponse(res, Response.json({ ok: false, error: 'thread_not_found' }))
+      return
+    }
+    if (input.longThread.ts === stringField(body.ts) && stringField(body.channel) === CHANNEL_ID) {
+      const cursor = stringField(body.cursor)
+      input.longThread.pageCursors.push(cursor)
+      const page = input.longThread.pageCursors.length - 1
+      await sendWebResponse(res, Response.json({
+        ok: true,
+        messages: Array.from({ length: 100 }, (_, index) => ({
+          ts: `${page * 100 + index + 1}.000000`,
+          text: `Old reply ${page * 100 + index + 1}`,
+          user: USER_ID
+        })),
+        response_metadata: { next_cursor: `page-${page + 1}` }
+      }))
       return
     }
     if (input.threadMessageFiles.size > 0) {

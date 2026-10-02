@@ -111,6 +111,28 @@ export type SlackbotV2InterruptSessionResponse = {
 
 export type SlackbotV2Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
+export type AmbientTriggerMessage = {
+  author: 'centaur' | 'bot' | 'user'
+  current: boolean
+  text: string
+}
+
+export type AmbientTriggerStrategyResult = {
+  model?: string
+  probability: number
+  respond: boolean
+  usage?: {
+    costUsd?: number
+    inputTokens?: number
+  }
+}
+
+export type AmbientTriggerStrategy = (input: {
+  channelId: string
+  isThreadReply: boolean
+  messages: readonly AmbientTriggerMessage[]
+}) => Promise<AmbientTriggerStrategyResult>
+
 export type SlackbotV2BlockActionPayload = {
   workflow_message?: JsonObject
   action_id: string
@@ -134,6 +156,14 @@ export type SlackbotV2Options = {
   apiUrl: string
   /** Enable Slack's Agent messaging experience. Must match the app manifest. */
   agentViewEnabled?: boolean
+  /** When empty, every public and private Slack channel may enter the ambient trigger gate. */
+  ambientTriggerAllowChannelIds?: readonly string[]
+  /** Slack channel IDs excluded from ambient handling, including when otherwise allowed. */
+  ambientTriggerDenyChannelIds?: readonly string[]
+  /** Per-thread cap for strategy-accepted non-mention messages. Defaults to one. */
+  ambientTriggerMaxResponsesPerThread?: number
+  /** Gate for executing non-mention messages in eligible Slack channels. */
+  ambientTriggerStrategy?: AmbientTriggerStrategy
   assistantStatus?: string
   /**
    * When enabled, session.activity_summary events update Slack's assistant
