@@ -5,10 +5,12 @@ harness alongside Codex, Claude Code, Amp, Nanocodex, and Hermes. Start a
 Slack, GitHub, or Linear thread with `--pi`, or set `pi` as a channel or
 deployment default.
 
-The sandbox keeps one `pi --mode rpc` process per thread. Pi saves the session
-on disk and the harness starts Pi with `--continue`, so an interrupt, a model
-switch, or a sandbox restart with persistent state resumes the same
-conversation.
+The sandbox keeps one `pi --mode rpc` process per thread. An interrupt sends
+Pi's `abort`, which stops the turn and keeps the process. Pi saves the session
+on disk under an id derived from the thread key, so a model switch or a sandbox
+restart with persistent state resumes the same conversation. Pi trusts the
+workspace (`--approve`), so it loads the skills the sandbox installs, and runs
+with telemetry and version checks off.
 
 Pi's [codemode](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/codemode.md)
 tool is on by default, so the model can write a script that calls the other
@@ -18,11 +20,12 @@ tool item.
 ## Credentials
 
 Pi supports API-key auth only. It reads `ANTHROPIC_API_KEY` and
-`OPENAI_API_KEY` from the sandbox environment, where they hold iron-proxy
-placeholders that the proxy replaces with the real keys. Anthropic follows
-`CLAUDE_CODE_AUTH_MODE` and OpenAI follows `CODEX_AUTH_MODE`; each must be
-`api_key` for Pi to use that provider. api-rs refuses to start with `pi` as the
-default harness when `CLAUDE_CODE_AUTH_MODE` is `access_token`.
+`OPENAI_API_KEY` from the sandbox environment, where api-rs sets iron-proxy
+placeholders that the proxy replaces with the real keys. The sandbox has the
+Anthropic placeholder only when `CLAUDE_CODE_AUTH_MODE` is `api_key`, and the
+OpenAI one only when `CODEX_AUTH_MODE` is `api_key`; Pi uses the providers it
+has keys for. api-rs refuses to start with `pi` as the default harness when
+`CLAUDE_CODE_AUTH_MODE` is `access_token`.
 
 ## Configuration
 

@@ -2,16 +2,17 @@
 //!
 //! One `pi` process serves the thread across turns. A turn is a `prompt`
 //! command and ends on `agent_settled`, after Pi's own retries, compaction,
-//! and queued steers. Pi persists the session on disk and the process starts
-//! with `--continue`, so a respawn (after an interrupt, crash, or model
-//! switch) resumes the same conversation.
+//! and queued steers. An interrupt sends `abort`, which settles the turn and
+//! keeps the process. Pi persists the session on disk under an id derived from
+//! the thread key, so a respawn (after a crash or model switch) resumes it.
 //!
 //! Codemode is on by default: the model can write a script that calls the
 //! other tools, and each nested call renders as its own tool item.
 //!
-//! Pi reads provider API keys from the environment. The sandbox holds only
-//! iron-proxy placeholders, which the proxy rewrites on the wire.
+//! Pi reads provider API keys from the environment, where the sandbox holds
+//! only iron-proxy placeholders that the proxy rewrites on the wire.
 
+use std::collections::HashMap;
 use std::env;
 use std::process::Command as ProcessCommand;
 
@@ -24,8 +25,6 @@ use crate::{
     user_input_to_anthropic_content,
 };
 
-/// Placeholder API keys iron-proxy replaces with the real credential.
-const PLACEHOLDER_API_KEYS: &[&str] = &["ANTHROPIC_API_KEY"];
 /// Pi's default tools plus codemode; `CENTAUR_PI_TOOLS` replaces the list.
 const DEFAULT_TOOLS: &str = "read,bash,edit,write,codemode";
 const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -33,9 +32,15 @@ const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "x
 #[derive(Debug, Default)]
 pub struct PiHarness;
 
+/// Holds each assistant message's text until `message_end` reports how it
+/// ended. Only then is it known whether the text was commentary before a tool
+/// call or the final answer (downstream renderers treat unphased text as the
+/// answer), and whether the attempt failed, in which case Pi may retry and the
+/// partial text must not render at all.
 #[derive(Debug, Default)]
 pub struct PiEventNormalizer {
     messages: u64,
+    text_chunks: HashMap<u64, Vec<String>>,
     error: Option<String>,
 }
 
@@ -45,9 +50,22 @@ impl PiEventNormalizer {
             Some("response") => self.response(&event),
             Some("message_start") if event["message"]["role"] == "assistant" => {
                 self.messages += 1;
+                self.text_chunks.clear();
                 Vec::new()
             }
-            Some("message_update") => self.message_update(&event["assistantMessageEvent"]),
+            Some("message_update") => {
+                let update = &event["assistantMessageEvent"];
+                if update["type"] == "text_delta"
+                    && let (Some(index), Some(delta)) =
+                        (update["contentIndex"].as_u64(), update["delta"].as_str())
+                {
+                    self.text_chunks
+                        .entry(index)
+                        .or_default()
+                        .push(delta.to_string());
+                }
+                Vec::new()
+            }
             Some("message_end") if event["message"]["role"] == "assistant" => {
                 self.assistant_message(&event["message"])
             }
@@ -91,86 +109,96 @@ impl PiEventNormalizer {
         Vec::new()
     }
 
-    fn message_update(&self, update: &Value) -> Vec<NormalizedEvent> {
-        let delta = update["delta"].as_str().unwrap_or_default().to_string();
-        let item_id = self.item_id(&update["contentIndex"]);
-        match update["type"].as_str() {
-            Some("text_delta") => vec![NormalizedEvent::AgentTextDelta { item_id, delta }],
-            Some("thinking_delta") => vec![NormalizedEvent::ReasoningTextDelta { item_id, delta }],
-            _ => Vec::new(),
-        }
-    }
-
     fn assistant_message(&mut self, message: &Value) -> Vec<NormalizedEvent> {
-        let stop_reason = message["stopReason"].as_str().unwrap_or_default();
-        // Pi retries some provider errors itself; only the last message's
-        // outcome reaches `agent_settled`.
-        self.error = matches!(stop_reason, "error" | "aborted").then(|| {
-            message["errorMessage"]
-                .as_str()
-                .unwrap_or(stop_reason)
-                .to_string()
-        });
+        let usage = &message["usage"];
+        let count = |key: &str| usage[key].as_i64();
+        let mut out = vec![NormalizedEvent::TokenUsage {
+            usage: NormalizedTokenUsage {
+                model: message["model"].as_str().map(str::to_string),
+                input_tokens: count("input"),
+                output_tokens: count("output"),
+                cache_creation_input_tokens: count("cacheWrite"),
+                cache_read_input_tokens: count("cacheRead"),
+                reasoning_output_tokens: count("reasoning"),
+                total_tokens: count("totalTokens"),
+            },
+        }];
 
-        let content = message["content"]
+        let stop_reason = message["stopReason"].as_str().unwrap_or_default();
+        // A failed attempt renders nothing: Pi may retry it, and only the last
+        // attempt's outcome reaches `agent_settled`.
+        if matches!(stop_reason, "error" | "aborted") {
+            self.error = Some(
+                message["errorMessage"]
+                    .as_str()
+                    .unwrap_or(stop_reason)
+                    .to_string(),
+            );
+            return out;
+        }
+        self.error = None;
+        let stop_reason = match stop_reason {
+            "toolUse" => Some("tool_use".to_string()),
+            "stop" => Some("end_turn".to_string()),
+            _ => None,
+        };
+
+        let mut content = Vec::new();
+        for (index, block) in message["content"]
             .as_array()
             .into_iter()
             .flatten()
             .enumerate()
-            .filter_map(|(index, block)| {
-                let item_id = self.item_id(&json!(index));
-                let text = || block["text"].as_str().unwrap_or_default().to_string();
-                match block["type"].as_str()? {
-                    "text" => Some(NormalizedContent::AgentText {
-                        item_id,
-                        text: text(),
-                    }),
-                    "thinking" => Some(NormalizedContent::ReasoningText {
-                        item_id,
-                        text: block["thinking"].as_str().unwrap_or_default().to_string(),
-                    }),
-                    "toolCall" => Some(NormalizedContent::ToolUse {
-                        raw_id: block["id"].as_str()?.to_string(),
-                        tool: block["name"].as_str()?.to_string(),
-                        arguments: block["arguments"].clone(),
-                    }),
-                    _ => None,
+        {
+            let item_id = format!("pi-msg-{}-{index}", self.messages);
+            match block["type"].as_str() {
+                Some("text") => {
+                    let text = block["text"].as_str().unwrap_or_default().to_string();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    // Replay the streamed chunks when they match the final text.
+                    let chunks = self
+                        .text_chunks
+                        .remove(&(index as u64))
+                        .filter(|chunks| chunks.concat() == text)
+                        .unwrap_or_else(|| vec![text.clone()]);
+                    out.push(NormalizedEvent::AgentMessageStarted {
+                        item_id: item_id.clone(),
+                        stop_reason: stop_reason.clone(),
+                    });
+                    out.extend(
+                        chunks
+                            .into_iter()
+                            .map(|delta| NormalizedEvent::AgentTextDelta {
+                                item_id: item_id.clone(),
+                                delta,
+                            }),
+                    );
+                    content.push(NormalizedContent::AgentText { item_id, text });
                 }
-            })
-            .collect();
-
-        let usage = &message["usage"];
-        let count = |key: &str| usage[key].as_i64();
-        vec![
-            NormalizedEvent::TokenUsage {
-                usage: NormalizedTokenUsage {
-                    model: message["model"].as_str().map(str::to_string),
-                    input_tokens: count("input"),
-                    output_tokens: count("output"),
-                    cache_creation_input_tokens: count("cacheWrite"),
-                    cache_read_input_tokens: count("cacheRead"),
-                    reasoning_output_tokens: count("reasoning"),
-                    total_tokens: count("totalTokens"),
-                },
-            },
-            NormalizedEvent::AssistantMessage {
-                partial: false,
-                stop_reason: match stop_reason {
-                    "toolUse" => Some("tool_use".to_string()),
-                    "stop" => Some("end_turn".to_string()),
-                    _ => None,
-                },
-                content,
-            },
-        ]
-    }
-
-    fn item_id(&self, content_index: &Value) -> String {
-        format!(
-            "pi-msg-{}-{}",
-            self.messages,
-            content_index.as_u64().unwrap_or(0)
-        )
+                Some("thinking") => content.push(NormalizedContent::ReasoningText {
+                    item_id,
+                    text: block["thinking"].as_str().unwrap_or_default().to_string(),
+                }),
+                Some("toolCall") => {
+                    if let (Some(id), Some(name)) = (block["id"].as_str(), block["name"].as_str()) {
+                        content.push(NormalizedContent::ToolUse {
+                            raw_id: id.to_string(),
+                            tool: name.to_string(),
+                            arguments: block["arguments"].clone(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        out.push(NormalizedEvent::AssistantMessage {
+            partial: false,
+            stop_reason,
+            content,
+        });
+        out
     }
 }
 
@@ -191,6 +219,24 @@ fn tool_result(event: &Value) -> NormalizedToolResult {
             .as_i64()
             .and_then(|code| i32::try_from(code).ok()),
     }
+}
+
+/// The Pi session for this thread: stable across respawns, unlike
+/// `--continue`, which would pick up whichever session in the workspace ran
+/// last. Pi session ids allow letters, digits, `.`, `_`, and `-`.
+fn session_id(state: &ThreadState) -> String {
+    let key = state.thread_key.as_deref().unwrap_or(&state.id);
+    let sanitized: String = key
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => c,
+            _ => '-',
+        })
+        .collect();
+    format!(
+        "centaur-{}",
+        sanitized.trim_end_matches(|c: char| !c.is_ascii_alphanumeric())
+    )
 }
 
 fn default_thinking_level() -> String {
@@ -239,7 +285,11 @@ impl HarnessServer for PiHarness {
 
         let bin = env::var("CENTAUR_PI_BIN").unwrap_or_else(|_| "pi".to_string());
         let mut command = ProcessCommand::new(bin);
-        command.args(["--mode", "rpc", "--continue"]);
+        // `--approve` trusts the workspace's project resources, such as the
+        // skills the sandbox installs under `.agents/skills`; RPC mode cannot
+        // prompt for trust and would skip them.
+        command.args(["--mode", "rpc", "--approve", "--session-id"]);
+        command.arg(session_id(state));
         if !state.model.is_empty() {
             command.args(["--model", &state.model]);
         }
@@ -247,11 +297,8 @@ impl HarnessServer for PiHarness {
         command.args(["--thinking", &default_thinking_level()]);
         let tools = env::var("CENTAUR_PI_TOOLS").unwrap_or_else(|_| DEFAULT_TOOLS.to_string());
         command.args(["--tools", &tools]);
-        for key in PLACEHOLDER_API_KEYS {
-            if env::var_os(key).is_none() {
-                command.env(key, key);
-            }
-        }
+        command.env("PI_TELEMETRY", "0");
+        command.env("PI_SKIP_VERSION_CHECK", "1");
         command
     }
 
@@ -280,6 +327,12 @@ impl HarnessServer for PiHarness {
     fn stdin_for_reasoning_effort(&self, effort: Option<&str>) -> Result<Vec<u8>> {
         let level = effort.map_or_else(default_thinking_level, str::to_string);
         command_line(json!({"type": "set_thinking_level", "level": level}))
+    }
+
+    /// `abort` settles the turn (ending with `agent_settled`) and keeps the
+    /// process, its session, and the tool processes' cleanup in Pi's hands.
+    fn stdin_for_interrupt(&self) -> Option<Vec<u8>> {
+        command_line(json!({"type": "abort"})).ok()
     }
 
     fn parse_stdout_line(&self, line: &str) -> Result<Self::Event> {

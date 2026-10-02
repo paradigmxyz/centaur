@@ -1,15 +1,16 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::process::{ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-/// Turns recorded from `pi --mode rpc` 1.0.0: one bash tool call, then text;
-/// and one codemode script running two bash calls in parallel, then text.
+/// Turns recorded from `pi --mode rpc` 1.0.0: commentary text and a bash call
+/// in one message, then a final answer; and one codemode script running two
+/// bash calls in parallel, then text.
 const TOOL_TURN: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/pi/tool_turn.jsonl"
@@ -19,19 +20,27 @@ const CODEMODE_TURN: &str = concat!(
     "/tests/fixtures/pi/codemode_turn.jsonl"
 );
 
-/// Scripted `pi --mode rpc`: logs its argv, API key, and stdin, acknowledges
-/// commands, and replays a recorded turn for each prompt.
+/// Scripted `pi --mode rpc`: logs its argv, environment, and stdin, and
+/// replays a recorded turn for each prompt. A `slow` prompt waits for
+/// `abort`, which ends the run the way Pi does: an aborted message, then
+/// `agent_settled`, then the abort response.
 fn fake_pi(dir: &Path) -> PathBuf {
     let script = format!(
         concat!(
             "#!/bin/sh\n",
-            "printf '%s %s\\n' \"$ANTHROPIC_API_KEY\" \"$*\" >> '{dir}/argv'; ",
+            "printf '%s|%s|%s|%s\\n' \"$ANTHROPIC_API_KEY\" \"$PI_TELEMETRY\" ",
+            "\"$PI_SKIP_VERSION_CHECK\" \"$*\" >> '{dir}/argv'; ",
             "while IFS= read -r line; do ",
             "printf '%s\\n' \"$line\" >> '{dir}/stdin'; ",
             "case \"$line\" in ",
             "*'\"type\":\"prompt\"'*) ",
             "printf '%s\\n' '{{\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{{\"disposition\":\"started\"}}}}'; ",
-            "case \"$line\" in *codemode*) cat '{codemode}' ;; *) cat '{tool}' ;; esac ;; ",
+            "case \"$line\" in *codemode*) cat '{codemode}' ;; *slow*) ;; *) cat '{tool}' ;; esac ;; ",
+            "*'\"type\":\"abort\"'*) printf '%s\\n' ",
+            "'{{\"type\":\"message_start\",\"message\":{{\"role\":\"assistant\",\"content\":[]}}}}' ",
+            "'{{\"type\":\"message_end\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"partial\"}}],\"stopReason\":\"error\",\"errorMessage\":\"This operation was aborted\"}}}}' ",
+            "'{{\"type\":\"agent_settled\"}}' ",
+            "'{{\"type\":\"response\",\"command\":\"abort\",\"success\":true}}' ;; ",
             "*) printf '%s\\n' '{{\"type\":\"response\",\"command\":\"set_thinking_level\",\"success\":true}}' ;; ",
             "esac; done"
         ),
@@ -45,24 +54,67 @@ fn fake_pi(dir: &Path) -> PathBuf {
     path
 }
 
-fn user_line(text: &str, extra: Value) -> Value {
-    let mut line = json!({
-        "type": "user",
-        "thread_key": "slack:C123:123.456",
-        "message": {"role": "user", "content": [{"type": "text", "text": text}]},
-    });
-    line.as_object_mut()
-        .unwrap()
-        .extend(extra.as_object().unwrap().clone());
-    line
+struct Server {
+    stdin: ChildStdin,
+    stdout: Receiver<Value>,
+}
+
+impl Server {
+    fn send(&mut self, line: Value) {
+        writeln!(self.stdin, "{line}").unwrap();
+    }
+
+    fn user(&mut self, text: &str, extra: Value) {
+        let mut line = json!({
+            "type": "user",
+            "thread_key": "slack:C123:123.456",
+            "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+        });
+        line.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        self.send(line);
+    }
+
+    /// Notifications up to and including the next one with `method`.
+    fn read_until(&mut self, method: &str) -> Vec<Value> {
+        let mut notifications = Vec::new();
+        loop {
+            let value = self
+                .stdout
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap_or_else(|_| panic!("no {method}: {notifications:#?}"));
+            let done = value["method"] == method;
+            notifications.push(value);
+            if done {
+                return notifications;
+            }
+        }
+    }
+
+    fn turn(&mut self, text: &str, extra: Value) -> Vec<Value> {
+        self.user(text, extra);
+        self.read_until("turn/completed")
+    }
+}
+
+fn items<'a>(turn: &'a [Value], method: &str) -> Vec<&'a Value> {
+    turn.iter()
+        .filter(|value| value["method"] == method)
+        .map(|value| &value["params"]["item"])
+        .collect()
+}
+
+fn status(turn: &[Value]) -> &Value {
+    &turn.last().unwrap()["params"]["turn"]["status"]
 }
 
 #[test]
-fn pi_blocks_turns_stream_tools_codemode_and_text_and_respawn_on_model_change() {
+fn pi_blocks_turns_render_tools_codemode_and_abort_and_respawn_on_model_change() {
     let dir: PathBuf = std::env::temp_dir().join(format!("pi-stdio-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
 
-    let mut server = Command::new(env!("CARGO_BIN_EXE_harness-server"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_harness-server"))
         .arg("pi")
         .env("CENTAUR_PI_BIN", fake_pi(&dir))
         .env_remove("CENTAUR_PI_APP_BRIDGE_COMMAND")
@@ -75,9 +127,8 @@ fn pi_blocks_turns_stream_tools_codemode_and_text_and_respawn_on_model_change() 
         .stderr(Stdio::inherit())
         .spawn()
         .unwrap();
-    let mut stdin = server.stdin.take().unwrap();
     let (tx, rx) = mpsc::channel();
-    let stdout = server.stdout.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else { break };
@@ -89,64 +140,69 @@ fn pi_blocks_turns_stream_tools_codemode_and_text_and_respawn_on_model_change() 
             }
         }
     });
-    let mut run_turn = |line: Value| -> Vec<Value> {
-        writeln!(stdin, "{line}").unwrap();
-        let mut notifications = Vec::new();
-        loop {
-            let value = rx
-                .recv_timeout(Duration::from_secs(10))
-                .expect("turn/completed");
-            let done = value["method"] == "turn/completed";
-            notifications.push(value);
-            if done {
-                return notifications;
-            }
-        }
+    let mut server = Server {
+        stdin: child.stdin.take().unwrap(),
+        stdout: rx,
     };
 
-    let first = run_turn(user_line("run echo hi", json!({"reasoning": "high"})));
-    let second = run_turn(user_line("again", json!({"model": "openai/gpt-5.5"})));
-    let codemode = run_turn(user_line("use codemode", json!({})));
-    drop(stdin);
-    server.wait().unwrap();
+    let first = server.turn("run echo hi", json!({"reasoning": "high"}));
+    let second = server.turn("again", json!({"model": "openai/gpt-5.5"}));
+    let codemode = server.turn("use codemode", json!({}));
+    server.user("slow", json!({}));
+    server.read_until("turn/started");
+    server.send(json!({"type": "interrupt", "thread_key": "slack:C123:123.456"}));
+    let aborted = server.read_until("turn/completed");
+    let after_abort = server.turn("after abort", json!({}));
+    drop(server);
+    child.wait().unwrap();
 
-    for turn in [&first, &second] {
-        let completed = turn.last().unwrap();
+    for turn in [&first, &second, &after_abort] {
+        assert_eq!(status(turn), "completed", "{turn:#?}");
+        // Text is only phased once its message ends: commentary before the
+        // tool call, then the final answer.
+        let started: Vec<(&Value, &Value)> = items(turn, "item/started")
+            .into_iter()
+            .filter(|item| item["type"] == "agentMessage")
+            .map(|item| (&item["id"], &item["phase"]))
+            .collect();
+        let completed: Vec<(&Value, &Value, &Value)> = items(turn, "item/completed")
+            .into_iter()
+            .filter(|item| item["type"] == "agentMessage")
+            .map(|item| (&item["id"], &item["text"], &item["phase"]))
+            .collect();
         assert_eq!(
-            completed["params"]["turn"]["status"], "completed",
+            completed
+                .iter()
+                .map(|(_, text, phase)| (*text, *phase))
+                .collect::<Vec<_>>(),
+            [
+                (&json!("Checking now."), &json!("commentary")),
+                (&json!("DONE"), &json!("final_answer")),
+            ],
             "{turn:#?}"
         );
-        let items: Vec<&Value> = turn
-            .iter()
-            .filter(|value| value["method"] == "item/completed")
-            .map(|value| &value["params"]["item"])
-            .collect();
-        assert!(
-            items.iter().any(|item| item["type"] == "commandExecution"
-                && item["command"] == "echo hi"
-                && item["aggregatedOutput"] == "hi\n"
-                && item["exitCode"] == 0),
-            "{items:#?}"
+        assert_eq!(
+            started,
+            completed
+                .iter()
+                .map(|(id, _, phase)| (*id, *phase))
+                .collect::<Vec<_>>()
         );
         assert!(
-            items
+            items(turn, "item/completed")
                 .iter()
-                .any(|item| item["type"] == "agentMessage" && item["text"] == "DONE"),
-            "{items:#?}"
+                .any(|item| item["type"] == "commandExecution"
+                    && item["command"] == "echo hi"
+                    && item["aggregatedOutput"] == "hi\n"
+                    && item["exitCode"] == 0),
+            "{turn:#?}"
         );
     }
 
     // Codemode's nested calls render as their own command items.
-    assert_eq!(
-        codemode.last().unwrap()["params"]["turn"]["status"],
-        "completed"
-    );
-    let items: Vec<&Value> = codemode
-        .iter()
-        .filter(|value| value["method"] == "item/completed")
-        .map(|value| &value["params"]["item"])
-        .collect();
-    let commands: Vec<(&Value, &Value)> = items
+    assert_eq!(status(&codemode), "completed");
+    let completed = items(&codemode, "item/completed");
+    let commands: Vec<(&Value, &Value)> = completed
         .iter()
         .filter(|item| item["type"] == "commandExecution")
         .map(|item| (&item["command"], &item["aggregatedOutput"]))
@@ -157,24 +213,37 @@ fn pi_blocks_turns_stream_tools_codemode_and_text_and_respawn_on_model_change() 
             (&json!("echo a"), &json!("a\n")),
             (&json!("echo b"), &json!("b\n"))
         ],
-        "{items:#?}"
+        "{completed:#?}"
     );
     assert!(
-        items.iter().any(|item| item["type"] == "dynamicToolCall"
-            && item["tool"] == "codemode"
-            && item["status"] == "completed"),
-        "{items:#?}"
+        completed
+            .iter()
+            .any(|item| item["type"] == "dynamicToolCall"
+                && item["tool"] == "codemode"
+                && item["status"] == "completed"),
+        "{completed:#?}"
     );
 
+    // Interrupt aborts in-band: the turn ends interrupted, the aborted
+    // attempt's partial text never renders, and the process keeps serving.
+    assert_eq!(status(&aborted), "interrupted", "{aborted:#?}");
+    assert!(
+        !aborted
+            .iter()
+            .any(|value| value.to_string().contains("partial")),
+        "{aborted:#?}"
+    );
+
+    // One spawn per model; the session id is stable across them.
     let argv = std::fs::read_to_string(dir.join("argv")).unwrap();
     let argv: Vec<&str> = argv.lines().collect();
     assert_eq!(
         argv,
         [
-            "ANTHROPIC_API_KEY --mode rpc --continue --thinking medium \
-             --tools read,bash,edit,write,codemode",
-            "ANTHROPIC_API_KEY --mode rpc --continue --model openai/gpt-5.5 --thinking medium \
-             --tools read,bash,edit,write,codemode",
+            "|0|1|--mode rpc --approve --session-id centaur-slack-C123-123.456 \
+             --thinking medium --tools read,bash,edit,write,codemode",
+            "|0|1|--mode rpc --approve --session-id centaur-slack-C123-123.456 \
+             --model openai/gpt-5.5 --thinking medium --tools read,bash,edit,write,codemode",
         ]
     );
     let stdin: Vec<Value> = std::fs::read_to_string(dir.join("stdin"))
@@ -189,6 +258,9 @@ fn pi_blocks_turns_stream_tools_codemode_and_text_and_respawn_on_model_change() 
             json!({"type": "prompt", "message": "run echo hi"}),
             json!({"type": "prompt", "message": "again"}),
             json!({"type": "prompt", "message": "use codemode"}),
+            json!({"type": "prompt", "message": "slow"}),
+            json!({"type": "abort"}),
+            json!({"type": "prompt", "message": "after abort"}),
         ]
     );
 
