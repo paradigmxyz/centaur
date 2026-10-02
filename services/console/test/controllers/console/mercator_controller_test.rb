@@ -172,6 +172,7 @@ class Console::MercatorControllerTest < ActionDispatch::IntegrationTest
     assert_select "a[href='https://mercator.sh/account']", text: "Manage wallet ↗"
     assert_select "a[href='https://explore.tempo.xyz/address/#{WALLET}']"
     assert_select "span", text: "Connected"
+    assert_select "a[href='https://mercator.sh/slack-claim?wallet=#{WALLET}']", text: "Claim 100 MACH through Slack"
     assert_select "dl", count: 0
     assert_no_match "Balance is currently unavailable", response.body
     assert_no_match "synthetic-", response.body
@@ -183,6 +184,7 @@ class Console::MercatorControllerTest < ActionDispatch::IntegrationTest
     get console_mercator_path
     assert_response :ok
     assert_select "span", text: "Reconnect required"
+    assert_select "a", text: "Claim 100 MACH through Slack", count: 0
     assert_select "button", text: "Reconnect", count: 1
     assert_select "a[href='https://mercator.sh/account']", text: "Manage wallet ↗"
   end

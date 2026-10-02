@@ -166,5 +166,9 @@ view balances and manage funds in Mercator.
 
 Reconnect requires the same wallet. Existing manually configured Mercator
 credentials are left untouched and require operator review before onboarding.
-Wallet connection and Slack MACH claiming are separate flows; Slack claiming is
-not implemented by this console connection.
+Wallet connection and Slack MACH claiming are separate flows. The claim button
+opens Mercator’s unlisted `/slack-claim` page with the connected wallet address.
+Mercator verifies Slack membership and enforces claim eligibility and campaign
+limits; Centaur never receives Slack tokens or issues MACH. Repeat claims are
+handled by Mercator. Real claims require the Mercator campaign and MACH issuance
+to be enabled.
