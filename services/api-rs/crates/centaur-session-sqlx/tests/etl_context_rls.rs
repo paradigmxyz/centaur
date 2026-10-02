@@ -1869,6 +1869,7 @@ fn public_visible_rows() -> VisibleRows {
         slack_users: vec![
             "U_ALPHA".to_owned(),
             "U_BETA".to_owned(),
+            "U_OTHER".to_owned(),
             "U_PRIVATE".to_owned(),
         ],
         slack_messages: vec![
