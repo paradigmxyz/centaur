@@ -38,7 +38,7 @@ class Mercator::ConnectionClientTest < ActiveSupport::TestCase
     wallet = "0x#{'12' * 20}"
     [ [ wallet, true, true ], [ wallet.upcase, true, true ], [ wallet, false, false ], [ "other", true, false ] ].each do |address, claimed, expected|
       client = Mercator::ConnectionClient.new(http: HttpClient.new(http: ->(**request) {
-        assert_equal "https://mercator.sh/v1/claims/slack/config", request[:url]
+        assert_equal "https://mercator.sh/v1/claims/config?provider=slack", request[:url]
         assert_equal "Bearer synthetic", request[:headers]["Authorization"]
         HttpClient::Response.new(status: 200, body: { wallet_address: address, claimed: claimed }.to_json)
       }))
