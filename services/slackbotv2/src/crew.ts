@@ -58,11 +58,22 @@ function matches(a: string, b: string): boolean {
   return timingSafeEqual(Buffer.from(digest(a)), Buffer.from(digest(b)))
 }
 
+function validIconUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > 2048) return false
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && !url.username && !url.password
+  } catch {
+    return false
+  }
+}
+
 function publicRecord(record: CrewRecord) {
   return {
     id: record.id, name: record.name, description: record.description ?? DEFAULT_DESCRIPTION,
     paused: record.paused ?? false, status: record.status,
     app_id: record.appId, bot_user_id: record.botUserId, team_id: record.teamId,
+    ...(record.iconUrl ? { icon_url: record.iconUrl } : {}),
     ...(record.installError ? { install_error: record.installError } : {})
   }
 }
@@ -188,13 +199,16 @@ export function createCrewManager(config: CrewConfig) {
 
   async function manage(c: Context, selector: { id: string } | { appId: string }, byApp: boolean) {
     const input = await c.req.json().catch(() => null)
-    const allowed = byApp ? ['name', 'description'] : ['name', 'description', 'paused']
+    const allowed = byApp ? ['name', 'description', 'icon_url'] : ['name', 'description', 'icon_url', 'paused']
     if (!input || typeof input !== 'object' || Array.isArray(input)
         || Object.keys(input).some(key => !allowed.includes(key)) || Object.keys(input).length === 0
         || (input.name !== undefined && (typeof input.name !== 'string' || !input.name.trim() || input.name.length > 35))
         || (input.description !== undefined && (typeof input.description !== 'string' || input.description.length > 140))
         || (input.paused !== undefined && typeof input.paused !== 'boolean')) {
       return c.json({ error: 'Invalid Crew management fields.' }, 400)
+    }
+    if (input.icon_url !== undefined && !validIconUrl(input.icon_url)) {
+      return c.json({ error: 'Profile picture must be a public HTTPS image URL of at most 2048 characters, without embedded credentials.' }, 400)
     }
     let blocked = false
     const updated = await config.store.mutate(selector, async record => {
@@ -210,6 +224,11 @@ export function createCrewManager(config: CrewConfig) {
           app_id: record.appId,
           manifest: JSON.stringify(crewManifest(name, base, record.id, description))
         }, config.configurationToken)
+      }
+      if (input.icon_url !== undefined && input.icon_url !== record.iconUrl) {
+        // Slack fetches the public image; never fetch caller-supplied URLs here.
+        await slack('apps.icon.set', { app_id: record.appId, url: input.icon_url }, config.configurationToken)
+        record.iconUrl = input.icon_url
       }
       record.name = name
       record.description = description

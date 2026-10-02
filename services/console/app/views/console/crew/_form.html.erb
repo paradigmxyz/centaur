@@ -9,6 +9,18 @@
       <div><%= form.label :name, "Display name", class: "form-label" %><%= form.text_field :name, value: @bot["name"], required: true, maxlength: 35, class: "form-input" %></div>
       <div><%= form.label :description, "Short description", class: "form-label" %><%= form.text_field :description, value: @bot["description"], maxlength: 140, class: "form-input" %></div>
     </div>
+    <% if creating %>
+      <p class="text-xs text-zinc-500 mt-4">You can set a profile picture after creating the bot.</p>
+    <% else %>
+      <div class="flex items-start gap-4 mt-5">
+        <% if @bot["icon_url"].present? %><%= image_tag @bot["icon_url"], alt: "#{@bot['name']} profile picture", width: 64, height: 64, referrerpolicy: "no-referrer", class: "w-16 h-16 shrink-0 rounded-lg object-cover" %><% end %>
+        <div class="flex-1 min-w-0">
+          <%= form.label :icon_url, "Profile picture URL", class: "form-label" %>
+          <%= form.url_field :icon_url, value: @bot["icon_url"], maxlength: 2048, placeholder: "https://example.com/bot.png", aria: { describedby: "crew-picture-help" }, class: "form-input" %>
+          <p id="crew-picture-help" class="text-xs text-zinc-500 mt-2">Public HTTPS image, 512×512 to 2000×2000 pixels. Saving updates the bot’s Slack app icon. Leave blank to keep the current picture.</p>
+        </div>
+      </div>
+    <% end %>
   </section>
   <section class="form-section">
     <h2 class="form-section-heading">Behavior</h2>

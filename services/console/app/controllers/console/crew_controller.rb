@@ -65,6 +65,8 @@ class Console::CrewController < ApplicationController
       @configuration.validate!
       @configuration.provision!(@bot, user: current_user, roles: selected_roles)
       identity = identity_params.except(:id).to_h.reject { |key, value| @bot[key] == value }
+      icon_url = params.require(:crew).permit(:icon_url)[:icon_url].to_s.strip
+      identity["icon_url"] = icon_url if icon_url.present? && icon_url != @bot["icon_url"]
       @bot = client.update(params[:id], identity) if identity.any?
     end
     redirect_to edit_console_crew_path(params[:id]), notice: "Crew saved. Behavior changes apply when a sandbox is next created or rebuilt."

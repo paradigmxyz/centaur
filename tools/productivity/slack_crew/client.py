@@ -39,6 +39,7 @@ class SlackCrewClient:
         name: str | None = None,
         description: str | None = None,
         *,
+        icon_url: str | None = None,
         system_prompt: str | None = None,
         skills: list[dict[str, str]] | None = None,
         codex_model: str | None = None,
@@ -50,6 +51,7 @@ class SlackCrewClient:
             for key, value in {
                 "name": name,
                 "description": description,
+                "icon_url": icon_url,
                 "system_prompt": system_prompt,
                 "skills": skills,
             }.items()

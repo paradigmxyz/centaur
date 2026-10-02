@@ -26,7 +26,7 @@ class MemoryStore implements CrewStore {
   }
 }
 
-function fixture(overrides: { failCreate?: boolean; team?: string; appId?: string; rejectInstall?: boolean; invalidInstall?: boolean; onInstall?: () => Promise<void> } = {}) {
+function fixture(overrides: { failCreate?: boolean; team?: string; appId?: string; rejectInstall?: boolean; invalidInstall?: boolean; iconError?: string; onInstall?: () => Promise<void> } = {}) {
   const store = new MemoryStore()
   const calls: string[] = []
   const slackBodies: Record<string, (URLSearchParams | Record<string, unknown>)[]> = {}
@@ -50,6 +50,10 @@ function fixture(overrides: { failCreate?: boolean; team?: string; appId?: strin
         } })
       }
       if (method === 'apps.manifest.update') return Response.json({ ok: true })
+      if (method === 'apps.icon.set') {
+        expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer configuration-test')
+        return Response.json(overrides.iconError ? { ok: false, error: overrides.iconError } : { ok: true })
+      }
       if (method === 'apps.developerInstall') {
         expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer configuration-test')
         const body = JSON.parse(init?.body as string)
@@ -138,6 +142,64 @@ describe('Crew provisioning', () => {
       'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Bound app' }) })
     expect(response.status).toBe(200)
     expect(await response.json()).toMatchObject({ id: 'research', app_id: 'A123', name: 'Bound app', paused: false })
+  })
+
+  for (const path of ['/api/slack/crew/research/manage', '/api/slack/crew/by-app/A123/manage']) {
+    test(`sets and remembers only the selected app icon through ${path}`, async () => {
+      const f = fixture()
+      await install(f)
+      await f.store.save({ id: 'other', name: 'Other', appId: 'AOTHER', status: 'active', iconUrl: 'https://images.example.com/other.png' })
+      const icon_url = 'https://images.example.com/research.png'
+      const request = { method: 'POST', headers: { Authorization: 'Bearer management-test',
+        'Content-Type': 'application/json' }, body: JSON.stringify({ icon_url }) }
+      const response = await f.app.request(path, request)
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({ app_id: 'A123', icon_url })
+      expect(Object.fromEntries(f.slackBodies['apps.icon.set']![0] as URLSearchParams))
+        .toEqual({ app_id: 'A123', url: icon_url })
+      expect((await f.store.get('research'))?.iconUrl).toBe(icon_url)
+      expect((await f.store.get('other'))?.iconUrl).toBe('https://images.example.com/other.png')
+      expect((await f.app.request(path, request)).status).toBe(200)
+      expect(f.calls).toEqual(['apps.manifest.create', 'apps.developerInstall', 'auth.test', 'apps.icon.set'])
+      const restarted = createCrewManager(f.config)
+      const list = await (await restarted.app.request('/api/slack/crew', { headers: request.headers })).json()
+      expect(list.crew.find((record: { id: string }) => record.id === 'research').icon_url).toBe(icon_url)
+    })
+  }
+
+  test('rejects invalid picture URLs before Slack and retains the previous icon on Slack rejection', async () => {
+    const f = fixture({ iconError: 'invalid_icon_size' })
+    await install(f)
+    const previous = 'https://images.example.com/previous.png'
+    await f.store.save({ ...(await f.store.get('research'))!, iconUrl: previous })
+    const path = '/api/slack/crew/research/manage'
+    const headers = { Authorization: 'Bearer management-test', 'Content-Type': 'application/json' }
+    for (const icon_url of ['', null, {}, 'not a URL', 'http://images.example.com/bot.png',
+      'https://user:password@images.example.com/bot.png', 'data:image/png;base64,abc', `https://example.com/${'x'.repeat(2048)}`]) {
+      expect((await f.app.request(path, { method: 'POST', headers, body: JSON.stringify({ icon_url }) })).status).toBe(400)
+    }
+    expect(f.calls).toHaveLength(3)
+    const response = await f.app.request(path, { method: 'POST', headers,
+      body: JSON.stringify({ icon_url: 'https://images.example.com/too-small.png' }) })
+    expect(response.status).toBe(502)
+    expect(await response.json()).toEqual({ error: 'Slack apps.icon.set: invalid_icon_size' })
+    expect((await f.store.get('research'))?.iconUrl).toBe(previous)
+    expect(f.slackBodies['apps.icon.set']).toHaveLength(1)
+  })
+
+  test('picture updates retain authentication and active self-management gates', async () => {
+    const f = fixture()
+    await install(f)
+    const path = '/api/slack/crew/by-app/A123/manage'
+    const request = { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ icon_url: 'https://images.example.com/bot.png' }) }
+    expect((await f.app.request(path, request)).status).toBe(401)
+    for (const state of [{ paused: true }, { paused: false, status: 'needs_install' as const }]) {
+      await f.store.save({ ...(await f.store.get('research'))!, ...state })
+      expect((await f.app.request(path, { ...request,
+        headers: { ...request.headers, Authorization: 'Bearer management-test' } })).status).toBe(409)
+    }
+    expect(f.calls).toHaveLength(3)
   })
 
   test('durably deduplicates creation, checks conflicting definitions, and redacts credentials', async () => {

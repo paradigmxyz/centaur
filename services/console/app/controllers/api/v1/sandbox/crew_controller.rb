@@ -28,7 +28,7 @@ module Api
           body = request.request_parameters
           fields = body["data"]
           unless body.keys == [ "data" ] && fields.is_a?(Hash) && fields.any? &&
-              (fields.keys - %w[name description system_prompt skills default_models lock_version]).empty? && request.query_parameters.empty?
+              (fields.keys - %w[name description icon_url system_prompt skills default_models lock_version]).empty? && request.query_parameters.empty?
             return render_error(status: :bad_request, message: "Only your own identity, prompt, skills and model defaults may be changed; roles are admin-only")
           end
 
@@ -41,7 +41,7 @@ module Api
               end
               @profile.update!(configuration)
             end
-            identity = fields.slice("name", "description")
+            identity = fields.slice("name", "description", "icon_url")
             record = client.self_update(@app_id, identity) if identity.any?
           end
           response.headers["Cache-Control"] = "no-store"

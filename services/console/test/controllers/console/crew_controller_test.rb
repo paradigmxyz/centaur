@@ -123,6 +123,29 @@ class Console::CrewControllerTest < ActionDispatch::IntegrationTest
     assert_empty @client.calls
   end
 
+  test "profile picture is editable after creation and blank or unchanged URLs do not call Slack" do
+    get new_console_crew_url
+    assert_select "input[name='crew[icon_url]']", count: 0
+    post console_crew_index_url, params: { crew: fields }
+    picture = "https://images.example.com/alpha.png"
+    @client.result["crew"] = [ @bot.merge("description" => "Helper", "icon_url" => picture) ]
+    get edit_console_crew_url("alpha")
+    assert_select "input[type=url][name='crew[icon_url]'][value=?]", picture
+    assert_select "img[src=?][alt='Alpha profile picture'][referrerpolicy='no-referrer']", picture
+    @client.calls.clear
+    [ "", picture ].each do |value|
+      version = CrewProfile.find_by!(crew_id: "alpha").lock_version
+      patch console_crew_url("alpha"), params: { crew: fields.merge(lock_version: version, icon_url: value) }
+      assert_redirected_to edit_console_crew_path("alpha")
+    end
+    assert_empty @client.calls
+    version = CrewProfile.find_by!(crew_id: "alpha").lock_version
+    replacement = "https://images.example.com/new.png"
+    patch console_crew_url("alpha"), params: { crew: fields.merge(lock_version: version, icon_url: " #{replacement} ") }
+    assert_redirected_to edit_console_crew_path("alpha")
+    assert_equal [ [ :update, "alpha", { "icon_url" => replacement } ] ], @client.calls
+  end
+
   test "stale configuration cannot overwrite a newer bot edit or mutate Slack" do
     post console_crew_index_url, params: { crew: fields }
     profile = CrewProfile.find_by!(crew_id: "alpha")

@@ -66,6 +66,21 @@ class Api::V1::SandboxCrewControllerTest < ActionDispatch::IntegrationTest
     assert_empty @calls
   end
 
+  test "picture updates target only the sandbox app and cannot supply another app selector" do
+    picture = "https://images.example.com/alpha.png"
+    with_token do |headers|
+      patch "/api/v1/sandbox/crew/me", params: { data: { icon_url: picture } }, headers: headers, as: :json
+      assert_response :ok
+      assert_equal picture, response.parsed_body["data"]["icon_url"]
+      assert_equal [ [ "A111" ], [ "A111", { "icon_url" => picture } ] ], @calls
+      @calls.clear
+      patch "/api/v1/sandbox/crew/me", params: { data: { icon_url: picture, app_id: "A222" } }, headers: headers, as: :json
+      assert_response :bad_request
+      assert_empty @calls
+      assert_equal "Other bot instructions", @other.reload.system_prompt
+    end
+  end
+
   test "self updates prompt skills and models with a revision but cannot change another profile" do
     with_token do |headers|
       fields = { system_prompt: "My revised prompt", skills: [ { name: "reviewing-code", description: "Reviews code when asked.", content: "Check boundaries." } ], default_models: { claude: "my-model" }, lock_version: 0 }

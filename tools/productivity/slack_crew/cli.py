@@ -29,8 +29,15 @@ def me(
 def edit(
     name: str | None = typer.Option(None, "--name"),
     description: str | None = typer.Option(None, "--description"),
-    prompt_file: Annotated[Path | None, typer.Option("--prompt-file", exists=True, dir_okay=False)] = None,
-    skills_file: Annotated[Path | None, typer.Option("--skills-file", exists=True, dir_okay=False)] = None,
+    icon_url: str | None = typer.Option(
+        None, "--icon-url", help="Public HTTPS profile picture, 512 to 2000 pixels per side."
+    ),
+    prompt_file: Annotated[
+        Path | None, typer.Option("--prompt-file", exists=True, dir_okay=False)
+    ] = None,
+    skills_file: Annotated[
+        Path | None, typer.Option("--skills-file", exists=True, dir_okay=False)
+    ] = None,
     codex_model: str | None = typer.Option(None, "--codex-model"),
     claude_model: str | None = typer.Option(None, "--claude-model"),
     json_output: bool = typer.Option(False, "--json"),
@@ -42,7 +49,15 @@ def edit(
     """
     if all(
         value is None
-        for value in (name, description, prompt_file, skills_file, codex_model, claude_model)
+        for value in (
+            name,
+            description,
+            icon_url,
+            prompt_file,
+            skills_file,
+            codex_model,
+            claude_model,
+        )
     ):
         raise typer.BadParameter("Provide at least one field to edit")
     skills = None
@@ -57,6 +72,7 @@ def edit(
         SlackCrewClient().edit(
             name,
             description,
+            icon_url=icon_url,
             system_prompt=prompt_file.read_text() if prompt_file else None,
             skills=skills,
             codex_model=codex_model,

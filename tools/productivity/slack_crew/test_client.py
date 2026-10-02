@@ -42,6 +42,23 @@ def test_does_not_follow_redirects_or_return_backend_error_body():
     assert "private-detail" not in str(error.value)
 
 
+def test_picture_edit_uses_only_self_endpoint_without_profile_revision():
+    calls = []
+    picture = "https://images.example.com/research.png"
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(200, json={"data": {"icon_url": picture}})
+
+    client = module.SlackCrewClient("http://console", httpx.MockTransport(respond))
+    assert client.edit(icon_url=picture) == {"icon_url": picture}
+    assert len(calls) == 1
+    assert calls[0].method == "PATCH"
+    assert calls[0].url.path == "/api/v1/sandbox/crew/me"
+    assert json.loads(calls[0].content) == {"data": {"icon_url": picture}}
+    assert "authorization" not in calls[0].headers
+
+
 def test_behavior_edit_preserves_other_harness_default_and_uses_revision():
     calls = []
 
