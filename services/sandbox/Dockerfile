@@ -158,6 +158,9 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     && codex --version | grep -F "${CODEX_VERSION}" \
     && pi --version | grep -Fx "${PI_CODING_AGENT_VERSION}" \
     && pnpm --version | grep -F "${PNPM_VERSION}"
+# Keep every pi run, the harness's and the agent's own, from phoning home.
+ENV PI_TELEMETRY=0 \
+    PI_SKIP_VERSION_CHECK=1
 
 # ── Hermes Agent (own venv; exposes `hermes` + the tui_gateway module) ───────
 # The hermes harness drives `python -m tui_gateway.entry` (see

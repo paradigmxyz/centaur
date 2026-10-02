@@ -298,8 +298,6 @@ impl HarnessServer for PiHarness {
         }
         // A resumed session keeps its last thinking level; start from the default.
         command.args(["--thinking", DEFAULT_THINKING_LEVEL, "--tools", TOOLS]);
-        command.env("PI_TELEMETRY", "0");
-        command.env("PI_SKIP_VERSION_CHECK", "1");
         command
     }
 

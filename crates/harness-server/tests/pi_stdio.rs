@@ -26,8 +26,7 @@ fn fake_pi(dir: &Path) -> PathBuf {
     let script = format!(
         concat!(
             "#!/bin/sh\n",
-            "printf '%s|%s|%s|%s\\n' \"$ANTHROPIC_API_KEY\" \"$PI_TELEMETRY\" ",
-            "\"$PI_SKIP_VERSION_CHECK\" \"$*\" >> '{dir}/argv'; ",
+            "printf '%s|%s\\n' \"$ANTHROPIC_API_KEY\" \"$*\" >> '{dir}/argv'; ",
             "while IFS= read -r line; do ",
             "printf '%s\\n' \"$line\" >> '{dir}/stdin'; ",
             "case \"$line\" in ",
@@ -233,13 +232,13 @@ fn pi_blocks_turns_render_tools_and_codemode_and_respawn_on_model_change_and_int
     assert_eq!(
         argv,
         [
-            "|0|1|--mode rpc --approve --session-id centaur-slack-C123-123.456 \
+            "|--mode rpc --approve --session-id centaur-slack-C123-123.456 \
              --thinking medium --tools read,bash,edit,write,codemode",
-            "|0|1|--mode rpc --approve --session-id centaur-slack-C123-123.456 \
+            "|--mode rpc --approve --session-id centaur-slack-C123-123.456 \
              --model openai/gpt-5.5 --thinking medium --tools read,bash,edit,write,codemode",
-            "|0|1|--mode rpc --approve --session-id centaur-slack-C123-123.456 \
+            "|--mode rpc --approve --session-id centaur-slack-C123-123.456 \
              --model openai/gpt-5.5 --thinking medium --tools read,bash,edit,write,codemode",
-            "|0|1|--mode rpc --approve --session-id centaur-slack-C123-123.456 \
+            "|--mode rpc --approve --session-id centaur-slack-C123-123.456 \
              --model openai/gpt-5.5 --thinking medium --tools read,bash,edit,write,codemode",
         ]
     );
