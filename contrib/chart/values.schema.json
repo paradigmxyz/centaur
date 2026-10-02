@@ -267,6 +267,9 @@
           "additionalProperties": { "type": "string" }
         },
         "syncIntervalSeconds": { "type": "integer" },
+        "gitCommandTimeoutSeconds": { "type": "integer", "minimum": 1 },
+        "gitShutdownGraceSeconds": { "type": "integer", "minimum": 1 },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1 },
         "image": {
           "type": "object",
           "properties": {

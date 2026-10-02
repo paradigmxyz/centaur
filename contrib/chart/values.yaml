@@ -388,6 +388,12 @@ repoCache:
   #   visibility: public
   repositoryRefs: {}
   syncIntervalSeconds: 30
+  # Per-command Git deadline; increase for large repositories or slow storage.
+  gitCommandTimeoutSeconds: 300
+  # Time to stop a Git process group before forcing it to exit. Keep below the
+  # pod termination grace period so the process can release the cache writer lock.
+  gitShutdownGraceSeconds: 20
+  terminationGracePeriodSeconds: 30
   image:
     repository: ""
     tag: ""

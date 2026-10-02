@@ -3,19 +3,45 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import fcntl
 import glob
 import os
-from pathlib import Path
 import shlex
 import shutil
+import signal
+import stat
 import subprocess
 import sys
+import threading
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 REPOSITORY_VISIBILITIES = {"private", "public"}
 PUBLIC_REPOSITORY_VISIBILITY = "public"
 PRIVATE_REPOSITORY_VISIBILITY = "private"
+GIT_LOCK_NAMES = ("index.lock", "config.lock", "packed-refs.lock", "shallow.lock")
+
+
+class ShutdownRequested(Exception):
+    pass
+
+
+class GitCommandTimeout(Exception):
+    pass
+
+
+def _positive_seconds(name: str, default: float) -> float:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return default
+    try:
+        seconds = float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive number") from exc
+    if not 0 < seconds < float("inf"):
+        raise ValueError(f"{name} must be a positive finite number")
+    return seconds
 
 
 def _split_words(value: str) -> list[str]:
@@ -77,6 +103,8 @@ class RepoCacheSync:
         repository_visibilities: dict[str, str],
         sync_interval_seconds: float,
         github_token_file: Path,
+        git_command_timeout_seconds: float = 300.0,
+        git_shutdown_grace_seconds: float = 20.0,
     ) -> None:
         self.cache_dir = cache_dir
         self.repositories = repositories
@@ -84,6 +112,9 @@ class RepoCacheSync:
         self.repository_visibilities = repository_visibilities
         self.sync_interval_seconds = sync_interval_seconds
         self.github_token_file = github_token_file
+        self.git_command_timeout_seconds = git_command_timeout_seconds
+        self.git_shutdown_grace_seconds = git_shutdown_grace_seconds
+        self.shutdown_requested = threading.Event()
         self.git_env: dict[str, str] | None = None
         self.ready_file = self.cache_dir / ".repo-cache-ready"
 
@@ -112,7 +143,11 @@ class RepoCacheSync:
             self.legacy_repository_path(repo),
             self.alternate_repository_target(repo),
         ]:
-            if candidate == target or candidate.is_symlink() or not (candidate / ".git").is_dir():
+            if (
+                candidate == target
+                or candidate.is_symlink()
+                or not (candidate / ".git").is_dir()
+            ):
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             _remove_path(target)
@@ -159,7 +194,16 @@ class RepoCacheSync:
             github_token_file=Path(
                 os.environ.get("GITHUB_TOKEN_FILE", "/github-token/token")
             ),
+            git_command_timeout_seconds=_positive_seconds(
+                "GIT_COMMAND_TIMEOUT_SECONDS", 300.0
+            ),
+            git_shutdown_grace_seconds=_positive_seconds(
+                "GIT_SHUTDOWN_GRACE_SECONDS", 20.0
+            ),
         )
+
+    def request_shutdown(self, _signum: int, _frame: object) -> None:
+        self.shutdown_requested.set()
 
     def _git_env(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -191,21 +235,73 @@ class RepoCacheSync:
         )
 
     def _run_git(self, args: list[str], label: str) -> subprocess.CompletedProcess[str]:
+        if self.shutdown_requested.is_set():
+            raise ShutdownRequested()
         if self.git_env is None:
             self.git_env = self._git_env()
-        try:
-            return subprocess.run(
-                ["git", *args],
-                check=True,
-                text=True,
-                env=self.git_env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr.strip()
+        process = subprocess.Popen(
+            ["git", *args],
+            text=True,
+            env=self.git_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + self.git_command_timeout_seconds
+        while True:
+            if self.shutdown_requested.is_set() or time.monotonic() >= deadline:
+                self._stop_git(process)
+                if self.shutdown_requested.is_set():
+                    raise ShutdownRequested()
+                raise GitCommandTimeout(
+                    f"{label} timed out after {self.git_command_timeout_seconds:g}s"
+                )
+            try:
+                stdout, stderr = process.communicate(
+                    timeout=min(0.25, max(0.001, deadline - time.monotonic()))
+                )
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        if self.shutdown_requested.is_set():
+            raise ShutdownRequested()
+        if process.returncode != 0:
+            stderr = stderr.strip()
             detail = f": {stderr}" if stderr else ""
-            raise RuntimeError(f"{label} failed{detail}") from exc
+            raise RuntimeError(f"{label} failed{detail}")
+        return subprocess.CompletedProcess(
+            process.args, process.returncode, stdout, stderr
+        )
+
+    def _stop_git(self, process: subprocess.Popen[str]) -> None:
+        # Git may spawn helpers that retain pipes and lock files after the parent exits.
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.communicate(timeout=self.git_shutdown_grace_seconds)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+
+    def recover_stale_git_locks(self, target: Path) -> None:
+        git_dir = target / ".git"
+        if not git_dir.is_dir() or git_dir.is_symlink():
+            return
+        for name in GIT_LOCK_NAMES:
+            lock = git_dir / name
+            try:
+                mode = lock.lstat().st_mode
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(mode):
+                raise RuntimeError(f"Refusing to remove non-regular Git lock: {lock}")
+            lock.unlink()
+            print(f"Recovered stale Git lock: {lock}", file=sys.stderr, flush=True)
 
     def _git_output(self, repo_path: Path, *args: str) -> str | None:
         try:
@@ -304,6 +400,7 @@ class RepoCacheSync:
         tmp = target.with_name(f"{target.name}.tmp")
         target.parent.mkdir(parents=True, exist_ok=True)
         self.migrate_existing_checkout(repo, target)
+        self.recover_stale_git_locks(target)
 
         if self._git_ok(target, "rev-parse", "--git-dir"):
             print(f"Updating {repo}", flush=True)
@@ -398,12 +495,18 @@ class RepoCacheSync:
     def sync_once(self) -> bool:
         sync_ok = True
         for repo in self.repositories:
+            if self.shutdown_requested.is_set():
+                _remove_path(self.ready_file)
+                raise ShutdownRequested()
             try:
                 self.sync_repo(repo)
+            except ShutdownRequested:
+                _remove_path(self.ready_file)
+                raise
             except Exception as exc:
                 print(f"Failed to sync {repo}: {exc}", file=sys.stderr, flush=True)
                 sync_ok = False
-        if sync_ok:
+        if sync_ok and not self.shutdown_requested.is_set():
             self.write_ready()
         else:
             _remove_path(self.ready_file)
@@ -411,22 +514,41 @@ class RepoCacheSync:
 
     def run_forever(self) -> int:
         os.umask(0o022)
-        self.configure_git()
         if not self.repositories:
             print(
                 "No repositories configured for repo-cache", file=sys.stderr, flush=True
             )
             return 0
-        while True:
-            self.sync_once()
-            time.sleep(self.sync_interval_seconds)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        with (self.cache_dir / ".repo-cache-sync.lock").open("a+") as writer_lock:
+            try:
+                fcntl.flock(writer_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print("Repo-cache writer already active", file=sys.stderr, flush=True)
+                return 1
+            # A previous process's marker cannot prove this process completed a sync.
+            _remove_path(self.ready_file)
+            try:
+                self.configure_git()
+                while not self.shutdown_requested.is_set():
+                    self.sync_once()
+                    self.shutdown_requested.wait(self.sync_interval_seconds)
+            except ShutdownRequested:
+                pass
+            finally:
+                _remove_path(self.ready_file)
+        return 0
 
 
 def main() -> int:
     sync = RepoCacheSync.from_env()
     if "--check-ready" in sys.argv[1:]:
         return sync.check_ready()
-    return sync.run_forever()
+    previous_handler = signal.signal(signal.SIGTERM, sync.request_shutdown)
+    try:
+        return sync.run_forever()
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
 
 
 if __name__ == "__main__":
