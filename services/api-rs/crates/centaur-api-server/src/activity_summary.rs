@@ -1,11 +1,15 @@
 use std::{
     collections::{HashMap, VecDeque},
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
 use centaur_session_core::{MessageRole, SessionEvent, ThreadKey, ThreadKeyError};
 use centaur_session_runtime::SESSION_OUTPUT_LINE_EVENT;
 use centaur_session_sqlx::{PgSessionStore, SessionEventNotification, SessionStoreError};
+use clap::ValueEnum;
+use eventsource_stream::Eventsource;
+use futures_util::StreamExt;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -36,6 +40,9 @@ event IDs, and no speculation.";
 pub(crate) struct ActivitySummaryConfig {
     pub(crate) base_url: String,
     pub(crate) api_key: String,
+    pub(crate) provider: ActivitySummaryProvider,
+    pub(crate) proxy_url: Option<String>,
+    pub(crate) proxy_ca_cert: Option<PathBuf>,
     pub(crate) max_facts: usize,
     pub(crate) max_output_tokens: u16,
     pub(crate) min_interval: Duration,
@@ -67,6 +74,7 @@ impl ActivitySummaryWorker {
 
     pub(crate) async fn run(mut self) {
         info!(
+            provider = ?self.config.provider,
             model = %self.config.model,
             min_interval_ms = self.config.min_interval.as_millis(),
             "session activity summary worker started"
@@ -159,9 +167,16 @@ impl ActivitySummaryWorker {
         };
 
         let summary = match self.client.summarize(&prompt).await {
-            Ok(summary) => summary,
+            Ok(Some(summary)) => summary,
+            Ok(None) => return Ok(()),
             Err(error) => {
-                warn!(%error, "failed to generate session activity summary");
+                warn!(
+                    %error,
+                    provider = ?self.config.provider,
+                    disabled = self.client.backoff.disabled,
+                    retry_after_secs = self.client.backoff.retry_at.map(|at| at.saturating_duration_since(Instant::now()).as_secs()),
+                    "failed to generate session activity summary"
+                );
                 return Ok(());
             }
         };
@@ -187,6 +202,7 @@ impl ActivitySummaryWorker {
                 json!({
                     "execution_id": execution_id,
                     "model": self.config.model.as_str(),
+                    "provider": self.config.provider.to_possible_value().map(|value| value.get_name().to_owned()),
                     "source_event_id": event.event_id,
                     "summary": summary,
                 }),
@@ -860,15 +876,43 @@ struct ActivitySummaryClient {
     model: String,
     reasoning_effort: Option<String>,
     responses_url: String,
+    provider: ActivitySummaryProvider,
+    backoff: SummaryBackoff,
 }
 
 impl ActivitySummaryClient {
     fn new(config: &ActivitySummaryConfig) -> Result<Self, ActivitySummaryError> {
-        let client = reqwest::Client::builder()
+        let mut client = reqwest::Client::builder()
             .timeout(config.timeout)
+            // Do not inherit a chat/sandbox proxy or follow redirects with credentials.
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none());
+        if let Some(url) = &config.proxy_url {
+            client = client
+                .proxy(reqwest::Proxy::all(url).map_err(|_| ActivitySummaryError::Configuration)?);
+            if let Some(path) = &config.proxy_ca_cert {
+                let pem = std::fs::read(path).map_err(|_| ActivitySummaryError::Configuration)?;
+                let cert = reqwest::Certificate::from_pem(&pem)
+                    .map_err(|_| ActivitySummaryError::Configuration)?;
+                client = client.add_root_certificate(cert);
+            }
+        }
+        let client = client
             .build()
-            .map_err(ActivitySummaryError::Http)?;
-        let responses_url = format!("{}/responses", config.base_url);
+            .map_err(|_| ActivitySummaryError::Configuration)?;
+        let endpoint = match config.provider {
+            ActivitySummaryProvider::Openai | ActivitySummaryProvider::Codex => "responses",
+            ActivitySummaryProvider::Anthropic | ActivitySummaryProvider::Claude => "messages",
+        };
+        let responses_url = format!("{}/{endpoint}", config.base_url.trim_end_matches('/'));
+        let url =
+            reqwest::Url::parse(&responses_url).map_err(|_| ActivitySummaryError::Configuration)?;
+        if !matches!(url.scheme(), "http" | "https")
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Err(ActivitySummaryError::Configuration);
+        }
         Ok(Self {
             api_key: config.api_key.clone(),
             client,
@@ -876,6 +920,8 @@ impl ActivitySummaryClient {
             model: config.model.clone(),
             reasoning_effort: config.reasoning_effort.clone(),
             responses_url,
+            provider: config.provider,
+            backoff: SummaryBackoff::default(),
         })
     }
 
@@ -885,6 +931,25 @@ impl ActivitySummaryClient {
     /// depending on the server's default; `None` omits it for servers that
     /// reject the field.
     fn request_body(&self, prompt: &str) -> Value {
+        if matches!(
+            self.provider,
+            ActivitySummaryProvider::Anthropic | ActivitySummaryProvider::Claude
+        ) {
+            let system = if self.provider == ActivitySummaryProvider::Claude {
+                json!([
+                    {"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."},
+                    {"type": "text", "text": SYSTEM_PROMPT},
+                ])
+            } else {
+                json!(SYSTEM_PROMPT)
+            };
+            return json!({
+                "model": self.model,
+                "system": system,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": self.max_output_tokens,
+            });
+        }
         let mut body = json!({
             "model": self.model.as_str(),
             "instructions": SYSTEM_PROMPT,
@@ -892,6 +957,16 @@ impl ActivitySummaryClient {
             "max_output_tokens": self.max_output_tokens,
             "store": false,
         });
+        if self.provider == ActivitySummaryProvider::Codex {
+            // The subscription endpoint requires SSE and structured input and
+            // rejects the public API's max_output_tokens parameter.
+            body.as_object_mut()
+                .expect("object")
+                .remove("max_output_tokens");
+            body["stream"] = json!(true);
+            body["input"] =
+                json!([{"role": "user", "content": [{"type": "input_text", "text": prompt}]}]);
+        }
         if let Some(effort) = &self.reasoning_effort
             && let Some(object) = body.as_object_mut()
         {
@@ -900,25 +975,115 @@ impl ActivitySummaryClient {
         body
     }
 
-    async fn summarize(&self, prompt: &str) -> Result<String, ActivitySummaryError> {
-        let response = self
+    async fn summarize(&mut self, prompt: &str) -> Result<Option<String>, ActivitySummaryError> {
+        if !self.backoff.ready(Instant::now()) {
+            return Ok(None);
+        }
+        match self.request_summary(prompt).await {
+            Ok(summary) => {
+                self.backoff = SummaryBackoff::default();
+                Ok(Some(summary))
+            }
+            Err(error) => {
+                self.backoff.record_failure(&error, Instant::now());
+                Err(error)
+            }
+        }
+    }
+
+    async fn request_summary(&self, prompt: &str) -> Result<String, ActivitySummaryError> {
+        let mut request = self
             .client
             .post(&self.responses_url)
-            .bearer_auth(&self.api_key)
-            .json(&self.request_body(prompt))
-            .send()
-            .await?;
+            .json(&self.request_body(prompt));
+        request = match self.provider {
+            ActivitySummaryProvider::Openai => request.bearer_auth(&self.api_key),
+            ActivitySummaryProvider::Codex => request.header("accept", "text/event-stream"),
+            ActivitySummaryProvider::Anthropic => request
+                .header("anthropic-version", "2023-06-01")
+                .header("x-api-key", &self.api_key),
+            ActivitySummaryProvider::Claude => request
+                .header("anthropic-version", "2023-06-01")
+                .header("anthropic-beta", "claude-code-20250219,oauth-2025-04-20")
+                // Match the subscription protocol used by the sandbox's pinned CLI.
+                .header("user-agent", "claude-cli/2.1.281")
+                .header("accept", "application/json")
+                .header("x-app", "cli"),
+        };
+        let response = request.send().await?;
         let status = response.status();
-        let body = response.text().await?;
         if !status.is_success() {
-            return Err(ActivitySummaryError::OpenAiStatus {
-                body: redact_openai_error_body(&body),
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(|seconds| Duration::from_secs(seconds.min(86400)));
+            let body = response.json::<Value>().await.unwrap_or(Value::Null);
+            return Err(ActivitySummaryError::ProviderStatus {
                 status,
+                quota_exhausted: quota_exhausted(&body),
+                retry_after,
             });
         }
+        if self.provider == ActivitySummaryProvider::Codex {
+            let mut stream = response.bytes_stream().eventsource();
+            let mut text = String::new();
+            while let Some(event) = stream.next().await {
+                let event = event.map_err(|_| ActivitySummaryError::Stream)?;
+                if event.data == "[DONE]" {
+                    break;
+                }
+                let value = serde_json::from_str::<Value>(&event.data)?;
+                match value.get("type").and_then(Value::as_str) {
+                    Some("response.output_text.delta") => {
+                        if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                            text.push_str(delta);
+                        }
+                    }
+                    Some("response.completed") => {
+                        return value
+                            .get("response")
+                            .and_then(extract_response_text)
+                            .or_else(|| (!text.is_empty()).then_some(text))
+                            .ok_or(ActivitySummaryError::MissingOutputText);
+                    }
+                    Some("response.incomplete") => return Err(ActivitySummaryError::Incomplete),
+                    Some("error" | "response.failed") => {
+                        let quota_exhausted =
+                            quota_exhausted(value.get("response").unwrap_or(&value));
+                        return Err(ActivitySummaryError::ProviderStatus {
+                            status: if quota_exhausted {
+                                StatusCode::TOO_MANY_REQUESTS
+                            } else {
+                                StatusCode::BAD_GATEWAY
+                            },
+                            quota_exhausted,
+                            retry_after: None,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            return Err(ActivitySummaryError::Stream);
+        }
+        let body = response.text().await?;
         let value = serde_json::from_str::<Value>(&body)?;
-        if let Some(reason) = string_at(&value, &["incomplete_details", "reason"]) {
-            return Err(ActivitySummaryError::Incomplete { reason });
+        if value
+            .get("incomplete_details")
+            .is_some_and(|details| !details.is_null())
+        {
+            return Err(ActivitySummaryError::Incomplete);
+        }
+        if matches!(
+            self.provider,
+            ActivitySummaryProvider::Anthropic | ActivitySummaryProvider::Claude
+        ) {
+            if value.get("stop_reason").and_then(Value::as_str) == Some("max_tokens") {
+                return Err(ActivitySummaryError::Incomplete);
+            }
+            return extract_response_text(&json!({"output": [value]}))
+                .ok_or(ActivitySummaryError::MissingOutputText);
         }
         extract_response_text(&value).ok_or(ActivitySummaryError::MissingOutputText)
     }
@@ -943,33 +1108,22 @@ fn extract_response_text(value: &Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
-fn redact_openai_error_body(body: &str) -> String {
-    let body = one_line(body, 300);
-    let marker = "Incorrect API key provided:";
-    let Some(marker_index) = body.find(marker) else {
-        return body;
-    };
-    let value_start = marker_index + marker.len();
-    let value_end = body[value_start..]
-        .find('.')
-        .map(|offset| value_start + offset)
-        .unwrap_or(body.len());
-    format!(
-        "{} [redacted]{}",
-        body[..value_start].trim_end(),
-        &body[value_end..]
-    )
-}
-
 #[derive(Debug, Error)]
 pub(crate) enum ActivitySummaryError {
-    #[error("activity summary HTTP error: {0}")]
+    // Neither upstream bodies nor URLs belong in logs: either may echo credentials.
+    #[error("activity summary HTTP transport failed")]
     Http(#[from] reqwest::Error),
-    #[error("activity summary OpenAI request failed with {status}: {body}")]
-    OpenAiStatus { status: StatusCode, body: String },
-    #[error("activity summary OpenAI response incomplete: {reason}")]
-    Incomplete { reason: String },
-    #[error("activity summary OpenAI response did not include output text")]
+    #[error(
+        "activity summary provider returned {status} (quota exhausted: {quota_exhausted}); requests suspended or backed off"
+    )]
+    ProviderStatus {
+        status: StatusCode,
+        quota_exhausted: bool,
+        retry_after: Option<Duration>,
+    },
+    #[error("activity summary response incomplete")]
+    Incomplete,
+    #[error("activity summary response did not include output text")]
     MissingOutputText,
     #[error("activity summary JSON error: {0}")]
     Json(#[from] serde_json::Error),
@@ -977,10 +1131,98 @@ pub(crate) enum ActivitySummaryError {
     Store(#[from] SessionStoreError),
     #[error("activity summary thread key error: {0}")]
     ThreadKey(#[from] ThreadKeyError),
+    #[error("invalid activity summary endpoint, proxy, or CA configuration")]
+    Configuration,
+    #[error("activity summary stream ended without a completed response")]
+    Stream,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum ActivitySummaryProvider {
+    Openai,
+    Codex,
+    Anthropic,
+    Claude,
+}
+
+impl ActivitySummaryProvider {
+    pub(crate) fn is_subscription(self) -> bool {
+        matches!(self, Self::Codex | Self::Claude)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum ActivitySummaryBackend {
+    Direct,
+    IronProxy,
+}
+
+/// One circuit for the configured backend, shared across every execution in this worker.
+#[derive(Clone, Default)]
+struct SummaryBackoff {
+    failures: u32,
+    retry_at: Option<Instant>,
+    disabled: bool,
+}
+
+impl SummaryBackoff {
+    fn ready(&self, now: Instant) -> bool {
+        !self.disabled && self.retry_at.is_none_or(|retry_at| now >= retry_at)
+    }
+
+    fn record_failure(&mut self, error: &ActivitySummaryError, now: Instant) {
+        self.failures = self.failures.saturating_add(1);
+        let mut delay = Duration::from_secs(30 * (1 << self.failures.saturating_sub(1).min(5)));
+        if let ActivitySummaryError::ProviderStatus {
+            status,
+            quota_exhausted,
+            retry_after,
+        } = error
+        {
+            // Auth and invalid endpoint/model errors need an operator change.
+            self.disabled = status.is_client_error()
+                && !matches!(
+                    *status,
+                    StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+                )
+                && !quota_exhausted;
+            if *quota_exhausted {
+                delay = delay.max(Duration::from_secs(900));
+            }
+            if let Some(retry_after) = retry_after {
+                delay = delay.max(*retry_after);
+            }
+        }
+        self.retry_at = Some(now + delay);
+    }
+}
+
+fn quota_exhausted(value: &Value) -> bool {
+    [
+        value.pointer("/error/code"),
+        value.pointer("/error/type"),
+        value.get("code"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .any(|code| {
+        matches!(
+            code,
+            "insufficient_quota" | "credit_balance_exhausted" | "usage_limit_reached"
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use axum::{
+        Router,
+        body::Bytes,
+        http::{HeaderMap, Uri},
+        response::IntoResponse,
+        routing::post,
+    };
     use centaur_session_core::ThreadKey;
     use time::OffsetDateTime;
 
@@ -1117,13 +1359,16 @@ mod tests {
     }
 
     #[test]
-    fn redacts_openai_invalid_key_errors() {
-        let redacted = redact_openai_error_body(
-            r#"{"error":{"message":"Incorrect API key provided: sk-svc-secret. You can find your API key at https://platform.openai.com/account/api-keys."}}"#,
+    fn provider_errors_never_include_upstream_bodies() {
+        let error = ActivitySummaryError::ProviderStatus {
+            status: StatusCode::UNAUTHORIZED,
+            quota_exhausted: false,
+            retry_after: None,
+        };
+        assert_eq!(
+            error.to_string(),
+            "activity summary provider returned 401 Unauthorized (quota exhausted: false); requests suspended or backed off"
         );
-
-        assert!(redacted.contains("Incorrect API key provided: [redacted]"));
-        assert!(!redacted.contains("sk-svc-secret"));
     }
 
     #[test]
@@ -1197,6 +1442,9 @@ mod tests {
         ActivitySummaryClient::new(&ActivitySummaryConfig {
             base_url: "http://localhost/v1".to_owned(),
             api_key: "key".to_owned(),
+            provider: ActivitySummaryProvider::Openai,
+            proxy_url: None,
+            proxy_ca_cert: None,
             max_facts: 10,
             max_output_tokens: 128,
             min_interval: Duration::from_secs(1),
@@ -1220,5 +1468,268 @@ mod tests {
     fn summary_request_omits_the_effort_when_unset() {
         let body = client_with_effort(None).request_body("prompt");
         assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn backoff_recovers_and_honors_quota_retry_after() {
+        let now = Instant::now();
+        let mut backoff = SummaryBackoff::default();
+        for seconds in [30, 60, 120, 240, 480, 960, 960] {
+            backoff.record_failure(&ActivitySummaryError::Stream, now);
+            assert!(!backoff.ready(now + Duration::from_secs(seconds - 1)));
+            assert!(backoff.ready(now + Duration::from_secs(seconds)));
+        }
+        backoff = SummaryBackoff::default();
+        backoff.record_failure(
+            &ActivitySummaryError::ProviderStatus {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                quota_exhausted: true,
+                retry_after: Some(Duration::from_secs(1800)),
+            },
+            now,
+        );
+        assert!(!backoff.ready(now + Duration::from_secs(1799)));
+        assert!(backoff.ready(now + Duration::from_secs(1800)));
+    }
+
+    #[test]
+    fn invalid_credentials_disable_until_restart() {
+        let now = Instant::now();
+        let mut backoff = SummaryBackoff::default();
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+        ] {
+            backoff.record_failure(
+                &ActivitySummaryError::ProviderStatus {
+                    status,
+                    quota_exhausted: false,
+                    retry_after: None,
+                },
+                now,
+            );
+            assert!(!backoff.ready(now + Duration::from_secs(86400)));
+        }
+    }
+
+    async fn mock_provider(
+        status: StatusCode,
+        body: String,
+    ) -> (
+        String,
+        tokio::sync::mpsc::UnboundedReceiver<(Uri, HeaderMap, Value)>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let app =
+            Router::new().fallback(post(move |uri: Uri, headers: HeaderMap, bytes: Bytes| {
+                let tx = tx.clone();
+                let body = body.clone();
+                async move {
+                    tx.send((uri, headers, serde_json::from_slice(&bytes).unwrap()))
+                        .unwrap();
+                    (
+                        status,
+                        [
+                            ("retry-after", "1800"),
+                            ("content-type", "text/event-stream"),
+                        ],
+                        body,
+                    )
+                        .into_response()
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (url, rx, server)
+    }
+
+    #[tokio::test]
+    async fn direct_openai_and_anthropic_use_the_selected_protocol_and_key() {
+        for provider in [
+            ActivitySummaryProvider::Openai,
+            ActivitySummaryProvider::Anthropic,
+        ] {
+            let response = match provider {
+                ActivitySummaryProvider::Openai => {
+                    json!({"output_text": "I'm tracing vault deposits"})
+                }
+                _ => {
+                    json!({"content": [{"type": "text", "text": "I'm tracing vault deposits"}], "stop_reason": "end_turn"})
+                }
+            };
+            let (url, mut requests, server) =
+                mock_provider(StatusCode::OK, response.to_string()).await;
+            let mut client = client_with_effort(Some("low"));
+            client.provider = provider;
+            client.responses_url = format!(
+                "{url}/v1/{}",
+                if provider == ActivitySummaryProvider::Openai {
+                    "responses"
+                } else {
+                    "messages"
+                }
+            );
+            assert_eq!(
+                client.summarize("vault facts").await.unwrap().as_deref(),
+                Some("I'm tracing vault deposits")
+            );
+            let (uri, headers, body) = requests.recv().await.unwrap();
+            if provider == ActivitySummaryProvider::Openai {
+                assert_eq!(uri.path(), "/v1/responses");
+                assert_eq!(headers["authorization"], "Bearer key");
+                assert_eq!(body["input"], "vault facts");
+            } else {
+                assert_eq!(uri.path(), "/v1/messages");
+                assert_eq!(headers["x-api-key"], "key");
+                assert_eq!(headers["anthropic-version"], "2023-06-01");
+                assert_eq!(body["messages"][0]["content"], "vault facts");
+                assert_eq!(body["max_tokens"], 128);
+                assert!(body.get("reasoning").is_none());
+            }
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn subscription_calls_reach_the_explicit_proxy_without_api_credentials() {
+        for provider in [
+            ActivitySummaryProvider::Codex,
+            ActivitySummaryProvider::Claude,
+        ] {
+            let response = if provider == ActivitySummaryProvider::Codex {
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"uncommitted\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"I'm tracing vault deposits\"}]}]}}\n\n".to_owned()
+            } else {
+                json!({"content": [{"type": "text", "text": "I'm tracing vault deposits"}], "stop_reason": "end_turn"}).to_string()
+            };
+            let (url, mut requests, server) = mock_provider(StatusCode::OK, response).await;
+            let mut client = ActivitySummaryClient::new(&ActivitySummaryConfig {
+                base_url: "http://provider.invalid/v1".to_owned(),
+                api_key: "must-not-be-sent".to_owned(),
+                provider,
+                proxy_url: Some(url),
+                proxy_ca_cert: None,
+                max_facts: 10,
+                max_output_tokens: 128,
+                min_interval: Duration::from_secs(1),
+                model: "subscription-model".to_owned(),
+                reasoning_effort: Some("low".to_owned()),
+                timeout: Duration::from_secs(5),
+            })
+            .unwrap();
+            assert_eq!(
+                client.summarize("vault facts").await.unwrap().as_deref(),
+                Some("I'm tracing vault deposits")
+            );
+            let (uri, headers, body) = requests.recv().await.unwrap();
+            assert_eq!(uri.host(), Some("provider.invalid"));
+            assert!(headers.get("authorization").is_none());
+            assert!(headers.get("x-api-key").is_none());
+            assert_eq!(body["model"], "subscription-model");
+            if provider == ActivitySummaryProvider::Codex {
+                assert_eq!(uri.path(), "/v1/responses");
+                assert_eq!(body["stream"], true);
+                assert_eq!(body["input"][0]["content"][0]["text"], "vault facts");
+                assert!(body.get("max_output_tokens").is_none());
+            } else {
+                assert_eq!(uri.path(), "/v1/messages");
+                assert_eq!(
+                    headers["anthropic-beta"],
+                    "claude-code-20250219,oauth-2025-04-20"
+                );
+                assert_eq!(headers["user-agent"], "claude-cli/2.1.281");
+                assert_eq!(body["system"][1]["text"], SYSTEM_PROMPT);
+            }
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn exhausted_quota_suppresses_calls_across_prompts_then_recovers() {
+        let (url, mut requests, server) = mock_provider(StatusCode::TOO_MANY_REQUESTS, json!({"error": {"code": "credit_balance_exhausted", "message": "secret must not be logged"}}).to_string()).await;
+        let mut client = client_with_effort(None);
+        client.responses_url = url;
+        let error = client.summarize("execution one").await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "activity summary provider returned 429 Too Many Requests (quota exhausted: true); requests suspended or backed off"
+        );
+        requests.recv().await.unwrap();
+        assert_eq!(client.summarize("execution two").await.unwrap(), None);
+        assert!(requests.try_recv().is_err());
+        server.abort();
+
+        let (url, mut requests, server) = mock_provider(
+            StatusCode::OK,
+            json!({"output_text": "I'm tracing vault deposits"}).to_string(),
+        )
+        .await;
+        client.responses_url = url;
+        client.backoff.retry_at = Some(Instant::now());
+        assert!(client.summarize("execution three").await.unwrap().is_some());
+        requests.recv().await.unwrap();
+        assert_eq!(client.backoff.failures, 0);
+        assert!(client.backoff.retry_at.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn codex_rejects_truncated_streams_without_publishing_partial_text() {
+        let (url, _requests, server) = mock_provider(
+            StatusCode::OK,
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n".to_owned(),
+        )
+        .await;
+        let mut client = client_with_effort(None);
+        client.provider = ActivitySummaryProvider::Codex;
+        client.responses_url = url;
+        assert!(matches!(
+            client.summarize("facts").await,
+            Err(ActivitySummaryError::Stream)
+        ));
+        assert!(!client.backoff.ready(Instant::now()));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn codex_accepts_completed_deltas_and_backs_off_on_streamed_quota_errors() {
+        for (body, expected) in [
+            (
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"I'm tracing vault deposits\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\"}}\n\n",
+                Some("I'm tracing vault deposits"),
+            ),
+            (
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"usage_limit_reached\"}}}\n\n",
+                None,
+            ),
+        ] {
+            let (url, _requests, server) = mock_provider(StatusCode::OK, body.to_owned()).await;
+            let mut client = client_with_effort(None);
+            client.provider = ActivitySummaryProvider::Codex;
+            client.responses_url = url;
+            let result = client.summarize("facts").await;
+            if let Some(expected) = expected {
+                assert_eq!(result.unwrap().as_deref(), Some(expected));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(ActivitySummaryError::ProviderStatus {
+                        quota_exhausted: true,
+                        ..
+                    })
+                ));
+                assert!(
+                    !client
+                        .backoff
+                        .ready(Instant::now() + Duration::from_secs(899))
+                );
+            }
+            server.abort();
+        }
     }
 }

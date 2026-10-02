@@ -39,7 +39,10 @@ use centaur_workflows::{WorkflowHostSandboxRuntime, WorkflowPrincipalRegistrar};
 use clap::{Args as ClapArgs, Parser, ValueEnum};
 use tracing::{info, warn};
 
-use crate::{ServerError, activity_summary::ActivitySummaryConfig};
+use crate::{
+    ServerError,
+    activity_summary::{ActivitySummaryBackend, ActivitySummaryConfig, ActivitySummaryProvider},
+};
 
 const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
 const GITHUB_TOKEN_ENV: &str = "GITHUB_TOKEN";
@@ -159,7 +162,7 @@ pub(crate) struct IronControlRuntime {
 
 #[derive(Debug, ClapArgs)]
 struct ActivitySummaryArgs {
-    /// Enable API-side model summaries of durable Codex App Server activity.
+    /// Enable API-side model summaries of durable session activity.
     #[arg(
         long = "session-activity-summary-enabled",
         env = "SESSION_ACTIVITY_SUMMARY_ENABLED",
@@ -170,7 +173,7 @@ struct ActivitySummaryArgs {
     #[arg(
         long = "session-activity-summary-model",
         env = "SESSION_ACTIVITY_SUMMARY_MODEL",
-        default_value = "gpt-5.4-nano"
+        default_value = ""
     )]
     model: String,
     /// Deprecated activity-summary-specific endpoint. `OPENAI_BASE_URL` takes
@@ -219,6 +222,49 @@ struct ActivitySummaryArgs {
         default_value = "low"
     )]
     reasoning_effort: String,
+    /// Protocol used by the independently configured summary model.
+    #[arg(
+        long = "session-activity-summary-provider",
+        env = "SESSION_ACTIVITY_SUMMARY_PROVIDER",
+        default_value = "openai",
+        value_enum
+    )]
+    provider: ActivitySummaryProvider,
+    /// Direct API credentials, or credentials injected by a configured iron-proxy.
+    #[arg(
+        long = "session-activity-summary-backend",
+        id = "activity_summary_backend",
+        env = "SESSION_ACTIVITY_SUMMARY_BACKEND",
+        default_value = "direct",
+        value_enum
+    )]
+    backend: ActivitySummaryBackend,
+    /// Overrides the provider's default endpoint, independently of chat inference.
+    #[arg(
+        long = "session-activity-summary-base-url",
+        id = "activity_summary_base_url",
+        env = "SESSION_ACTIVITY_SUMMARY_BASE_URL"
+    )]
+    base_url: Option<String>,
+    /// Name of the environment variable containing the direct key (or proxy placeholder).
+    #[arg(
+        long = "session-activity-summary-api-key-env",
+        env = "SESSION_ACTIVITY_SUMMARY_API_KEY_ENV"
+    )]
+    api_key_env: Option<String>,
+    /// Required for iron-proxy. Must point to a proxy granted the selected credential.
+    #[arg(
+        long = "session-activity-summary-proxy-url",
+        id = "activity_summary_proxy_url",
+        env = "SESSION_ACTIVITY_SUMMARY_PROXY_URL"
+    )]
+    proxy_url: Option<String>,
+    /// PEM CA certificate used by the configured proxy; TLS verification stays enabled.
+    #[arg(
+        long = "session-activity-summary-proxy-ca-cert",
+        env = "SESSION_ACTIVITY_SUMMARY_PROXY_CA_CERT"
+    )]
+    proxy_ca_cert: Option<PathBuf>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -258,23 +304,73 @@ impl ActivitySummaryArgs {
         if !self.enabled {
             return None;
         }
-        let Some(api_key) = clean_optional_value(env::var("OPENAI_API_KEY").ok().as_deref()) else {
+        let key_env = non_empty(self.api_key_env.as_deref()).unwrap_or(match self.provider {
+            ActivitySummaryProvider::Openai | ActivitySummaryProvider::Codex => "OPENAI_API_KEY",
+            ActivitySummaryProvider::Anthropic | ActivitySummaryProvider::Claude => {
+                "ANTHROPIC_API_KEY"
+            }
+        });
+        let proxy_url = clean_optional_value(self.proxy_url.as_deref());
+        if self.backend == ActivitySummaryBackend::IronProxy && proxy_url.is_none() {
             warn!(
-                "session activity summaries are enabled but no OpenAI credential is configured; \
-                 set OPENAI_API_KEY in the api-rs environment"
+                "activity summaries disabled: iron-proxy backend requires SESSION_ACTIVITY_SUMMARY_PROXY_URL"
             );
             return None;
+        }
+        let api_key = match self.backend {
+            ActivitySummaryBackend::Direct => {
+                if self.provider.is_subscription() {
+                    warn!(
+                        "activity summaries disabled: subscription providers require the iron-proxy backend"
+                    );
+                    return None;
+                }
+                let Some(key) = clean_optional_value(env::var(key_env).ok().as_deref()) else {
+                    warn!(
+                        key_env,
+                        "activity summaries disabled: selected API key is not configured"
+                    );
+                    return None;
+                };
+                key
+            }
+            // Never read or copy a real provider key into a brokered request.
+            ActivitySummaryBackend::IronProxy => key_env.to_owned(),
         };
-        let base_url = clean_optional_value(env::var("OPENAI_BASE_URL").ok().as_deref())
-            .map(|value| value.trim_end_matches('/').to_owned())
-            .unwrap_or_else(|| self.openai_base_url.trim_end_matches('/').to_owned());
+        let base_url = clean_optional_value(self.base_url.as_deref()).unwrap_or_else(|| match self
+            .provider
+        {
+            ActivitySummaryProvider::Openai => {
+                clean_optional_value(env::var("OPENAI_BASE_URL").ok().as_deref())
+                    .unwrap_or_else(|| self.openai_base_url.clone())
+            }
+            ActivitySummaryProvider::Codex => "https://chatgpt.com/backend-api/codex".to_owned(),
+            ActivitySummaryProvider::Anthropic | ActivitySummaryProvider::Claude => {
+                "https://api.anthropic.com/v1".to_owned()
+            }
+        });
+        let model =
+            clean_optional_value(Some(&self.model)).unwrap_or_else(|| match self.provider {
+                ActivitySummaryProvider::Openai => "gpt-5.4-nano".to_owned(),
+                ActivitySummaryProvider::Codex => "gpt-5.4".to_owned(),
+                ActivitySummaryProvider::Anthropic | ActivitySummaryProvider::Claude => {
+                    "claude-haiku-4-5".to_owned()
+                }
+            });
         Some(ActivitySummaryConfig {
-            base_url,
+            base_url: base_url.trim_end_matches('/').to_owned(),
             api_key,
+            provider: self.provider,
+            proxy_url: (self.backend == ActivitySummaryBackend::IronProxy)
+                .then_some(proxy_url)
+                .flatten(),
+            proxy_ca_cert: (self.backend == ActivitySummaryBackend::IronProxy)
+                .then(|| self.proxy_ca_cert.clone())
+                .flatten(),
             max_facts: usize::try_from(self.max_facts).unwrap_or(usize::MAX),
             max_output_tokens: u16::try_from(self.max_output_tokens).unwrap_or(u16::MAX),
             min_interval: Duration::from_secs(self.min_interval_secs),
-            model: self.model.clone(),
+            model,
             reasoning_effort: clean_optional_value(Some(self.reasoning_effort.as_str())),
             timeout: Duration::from_secs(self.timeout_secs),
         })
@@ -2550,6 +2646,128 @@ mod tests {
 
         let config = args.activity_summary_config().unwrap();
         assert_eq!(config.api_key, "sk-mounted");
+    }
+
+    #[test]
+    fn activity_summary_subscription_configuration_needs_no_openai_key() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("OPENAI_API_KEY", ""),
+            ("OPENAI_BASE_URL", "https://unrelated.example/v1"),
+        ]);
+        for (provider, base_url, model) in [
+            ("codex", "https://chatgpt.com/backend-api/codex", "gpt-5.4"),
+            ("claude", "https://api.anthropic.com/v1", "claude-haiku-4-5"),
+        ] {
+            let args = Args::try_parse_from([
+                "centaur-api-server",
+                "--database-url",
+                "postgres://localhost/test",
+                "--session-activity-summary-enabled",
+                "true",
+                "--session-activity-summary-provider",
+                provider,
+                "--session-activity-summary-backend",
+                "iron-proxy",
+                "--session-activity-summary-proxy-url",
+                "http://summary-proxy:8080",
+            ])
+            .unwrap();
+            let config = args.activity_summary_config().unwrap();
+            assert_eq!(config.base_url, base_url);
+            assert_eq!(config.model, model);
+            assert_eq!(
+                config.proxy_url.as_deref(),
+                Some("http://summary-proxy:8080")
+            );
+        }
+    }
+
+    #[test]
+    fn activity_summary_missing_backend_credentials_disable_only_summaries() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("OPENAI_API_KEY", ""),
+            ("SESSION_ACTIVITY_SUMMARY_PROXY_URL", ""),
+        ]);
+        for (provider, backend) in [
+            ("openai", "direct"),
+            ("codex", "direct"),
+            ("claude", "direct"),
+            ("codex", "iron-proxy"),
+        ] {
+            let args = Args::try_parse_from([
+                "centaur-api-server",
+                "--database-url",
+                "postgres://localhost/test",
+                "--session-activity-summary-enabled",
+                "true",
+                "--session-activity-summary-provider",
+                provider,
+                "--session-activity-summary-backend",
+                backend,
+            ])
+            .unwrap();
+            assert!(args.activity_summary_config().is_none());
+        }
+    }
+
+    #[test]
+    fn activity_summary_endpoint_key_and_model_are_independent_of_chat() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("OPENAI_API_KEY", "chat-key"),
+            ("OPENAI_BASE_URL", "https://chat.example/v1"),
+            ("SUMMARY_TEST_KEY", "summary-key"),
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://localhost/test",
+            "--session-activity-summary-enabled",
+            "true",
+            "--session-activity-summary-base-url",
+            "https://summary.example/v1/",
+            "--session-activity-summary-api-key-env",
+            "SUMMARY_TEST_KEY",
+            "--session-activity-summary-model",
+            "summary-model",
+        ])
+        .unwrap();
+        let config = args.activity_summary_config().unwrap();
+        assert_eq!(config.base_url, "https://summary.example/v1");
+        assert_eq!(config.api_key, "summary-key");
+        assert_eq!(config.model, "summary-model");
+        assert!(config.proxy_url.is_none());
+    }
+
+    #[test]
+    fn activity_summary_proxy_uses_placeholders_even_when_real_api_keys_are_mounted() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("OPENAI_API_KEY", "real-key"),
+            ("ANTHROPIC_API_KEY", "real-key"),
+        ]);
+        for (provider, placeholder) in [
+            ("openai", "OPENAI_API_KEY"),
+            ("anthropic", "ANTHROPIC_API_KEY"),
+        ] {
+            let args = Args::try_parse_from([
+                "centaur-api-server",
+                "--database-url",
+                "postgres://localhost/test",
+                "--session-activity-summary-enabled",
+                "true",
+                "--session-activity-summary-provider",
+                provider,
+                "--session-activity-summary-backend",
+                "iron-proxy",
+                "--session-activity-summary-proxy-url",
+                "http://summary-proxy:8080",
+            ])
+            .unwrap();
+            assert_eq!(args.activity_summary_config().unwrap().api_key, placeholder);
+        }
     }
 
     #[test]

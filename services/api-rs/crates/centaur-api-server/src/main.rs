@@ -74,8 +74,14 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         store.run_migrations().await?;
     }
     if let Some(config) = args.activity_summary_config() {
-        let worker = activity_summary::ActivitySummaryWorker::new(store.clone(), config)?;
-        tokio::spawn(worker.run());
+        match activity_summary::ActivitySummaryWorker::new(store.clone(), config) {
+            Ok(worker) => {
+                tokio::spawn(worker.run());
+            }
+            Err(error) => {
+                tracing::warn!(%error, "activity summaries disabled; API startup continues")
+            }
+        }
     }
     let pool = store.pool().clone();
     let sandbox_runtime = args.sandbox_runtime().await?;

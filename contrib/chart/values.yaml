@@ -642,7 +642,18 @@ apiRs:
   sandboxIdleCleanupBackstopSecs: 21600 # 6 hours
   activitySummary:
     enabled: false
-    model: gpt-5.4-nano
+    # openai (Responses API), codex (subscription), anthropic (API key), or
+    # claude (subscription). Subscription providers require iron-proxy.
+    provider: openai
+    backend: direct # direct or iron-proxy
+    # Empty selects gpt-5.4-nano, gpt-5.4, or claude-haiku-4-5 by provider.
+    model: ""
+    baseUrl: "" # Independent endpoint override; includes /v1 or /backend-api/codex.
+    apiKeyEnv: "" # Direct key env name / proxy placeholder; provider-specific default.
+    # Existing, dedicated proxy with the selected credential grant. The chart
+    # does not provision a proxy or borrow a session's principal.
+    proxyUrl: ""
+    proxyCaSecretName: "" # Optional existing Secret containing ca.crt.
     # Deprecated compatibility fallback. Prefer OPENAI_BASE_URL in apiRs.extraEnv.
     openaiBaseUrl: https://api.openai.com/v1
     minIntervalSecs: 20

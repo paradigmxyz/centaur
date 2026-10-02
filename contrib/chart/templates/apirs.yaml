@@ -43,6 +43,7 @@
 {{- end -}}
 {{- $toolsUseRepoCache := and .Values.repoCache.enabled (gt (len $toolSources) 0) -}}
 {{- $useOverlayRepoCache := and .Values.repoCache.enabled (gt (len $overlaySources) 0) -}}
+{{- $summaryProxyCa := and .Values.apiRs.activitySummary.enabled (eq (.Values.apiRs.activitySummary.backend | default "direct") "iron-proxy") .Values.apiRs.activitySummary.proxyCaSecretName -}}
 {{- $toolDirs := list "/app/tools" -}}
 {{- $workflowDirs := "/app/workflows" -}}
 {{- if $toolsUseRepoCache -}}
@@ -351,8 +352,22 @@ spec:
             - name: SESSION_ACTIVITY_SUMMARY_ENABLED
               value: {{ .Values.apiRs.activitySummary.enabled | quote }}
 {{- if .Values.apiRs.activitySummary.enabled }}
+            - name: SESSION_ACTIVITY_SUMMARY_PROVIDER
+              value: {{ .Values.apiRs.activitySummary.provider | default "openai" | quote }}
+            - name: SESSION_ACTIVITY_SUMMARY_BACKEND
+              value: {{ .Values.apiRs.activitySummary.backend | default "direct" | quote }}
+            - name: SESSION_ACTIVITY_SUMMARY_BASE_URL
+              value: {{ .Values.apiRs.activitySummary.baseUrl | default "" | quote }}
+            - name: SESSION_ACTIVITY_SUMMARY_API_KEY_ENV
+              value: {{ .Values.apiRs.activitySummary.apiKeyEnv | default "" | quote }}
+            - name: SESSION_ACTIVITY_SUMMARY_PROXY_URL
+              value: {{ .Values.apiRs.activitySummary.proxyUrl | default "" | quote }}
+{{- if $summaryProxyCa }}
+            - name: SESSION_ACTIVITY_SUMMARY_PROXY_CA_CERT
+              value: /etc/activity-summary-proxy/ca.crt
+{{- end }}
             - name: SESSION_ACTIVITY_SUMMARY_MODEL
-              value: {{ .Values.apiRs.activitySummary.model | quote }}
+              value: {{ .Values.apiRs.activitySummary.model | default "" | quote }}
             - name: SESSION_ACTIVITY_SUMMARY_OPENAI_BASE_URL
               value: {{ .Values.apiRs.activitySummary.openaiBaseUrl | quote }}
             - name: SESSION_ACTIVITY_SUMMARY_MIN_INTERVAL_SECS
@@ -613,14 +628,30 @@ spec:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:
 {{ toYaml .Values.apiRs.resources | nindent 12 }}
-{{- if $useOverlayRepoCache }}
+{{- if or $useOverlayRepoCache $summaryProxyCa }}
           volumeMounts:
+{{- if $summaryProxyCa }}
+            - name: activity-summary-proxy-ca
+              mountPath: /etc/activity-summary-proxy
+              readOnly: true
+{{- end }}
+{{- if $useOverlayRepoCache }}
             - name: repo-cache
               mountPath: {{ .Values.repoCache.hostPath | quote }}
               readOnly: true
 {{- end }}
-{{- if $useOverlayRepoCache }}
+{{- end }}
+{{- if or $useOverlayRepoCache $summaryProxyCa }}
       volumes:
+{{- if $summaryProxyCa }}
+        - name: activity-summary-proxy-ca
+          secret:
+            secretName: {{ .Values.apiRs.activitySummary.proxyCaSecretName | quote }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+{{- end }}
+{{- if $useOverlayRepoCache }}
         - name: repo-cache
 {{- if $repoCacheUsePvc }}
           persistentVolumeClaim:
@@ -630,6 +661,7 @@ spec:
           hostPath:
             path: {{ .Values.repoCache.hostPath | quote }}
             type: DirectoryOrCreate
+{{- end }}
 {{- end }}
 {{- end }}
 ---
