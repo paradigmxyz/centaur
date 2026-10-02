@@ -39,7 +39,7 @@ pub struct HarnessChild {
     pub child: Child,
     pub stdin: ChildStdin,
     pub stdout: Receiver<io::Result<String>>,
-    /// Model the process was started with; a different turn model respawns it.
+    /// Model the process was started with.
     pub model: String,
     /// Reasoning effort last applied in-band; a fresh process runs its default.
     pub reasoning_effort: Option<String>,
@@ -72,6 +72,12 @@ pub trait HarnessServer {
     fn default_model(&self) -> String;
     fn default_model_provider(&self) -> &'static str;
     fn command_for_turn(&self, state: &ThreadState) -> ProcessCommand;
+    /// Whether a turn whose model differs from the running process's restarts
+    /// the process with the new model. Off by default: the process keeps the
+    /// model it started with.
+    fn restart_on_model_change(&self) -> bool {
+        false
+    }
     /// Checks a non-empty model before a process starts with it, returning a
     /// user-facing reason when the harness cannot run it. Accepts all models
     /// by default.

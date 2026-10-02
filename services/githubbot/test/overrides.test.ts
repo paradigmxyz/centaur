@@ -34,7 +34,6 @@ describe("extractMessageOverrides", () => {
     expect(extractMessageOverrides("--nanocodex review this").harnessType).toBe(
       "nanocodex",
     );
-    expect(extractMessageOverrides("--pi review this").harnessType).toBe("pi");
   });
 
   test("parses harness flag anywhere in the message", () => {

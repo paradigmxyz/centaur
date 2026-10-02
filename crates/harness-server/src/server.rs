@@ -1472,7 +1472,7 @@ pub(crate) fn usage_span_input_value(input: &[UserInput]) -> Option<String> {
 
 fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState) -> Result<()> {
     if let Some(process) = state.process.as_mut()
-        && process.model == state.model
+        && (process.model == state.model || !harness.restart_on_model_change())
         && process.child.try_wait()?.is_none()
     {
         return Ok(());

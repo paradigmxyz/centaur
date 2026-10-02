@@ -303,6 +303,11 @@ impl HarnessServer for PiHarness {
         command
     }
 
+    /// `--model` only applies at startup; the session resumes in the new process.
+    fn restart_on_model_change(&self) -> bool {
+        true
+    }
+
     fn validate_model(&self, model: &str) -> std::result::Result<(), String> {
         check_model(model)
     }
