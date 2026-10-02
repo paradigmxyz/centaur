@@ -28,7 +28,7 @@ async fn run_assertions(conn: &mut PgConnection, schema: &str) -> Result<(), Box
     set_search_path(conn, schema).await?;
     create_roles(conn).await?;
     create_slack_identity_helpers(conn).await?;
-    execute_migration(conn, &granola_sync_without_bm25()).await?;
+    execute_migration(conn, GRANOLA_SYNC_SQL).await?;
     sqlx::raw_sql(
         r#"
         insert into granola_sync_notes (
@@ -329,19 +329,4 @@ async fn grant_schema_usage(conn: &mut PgConnection, schema: &str) -> Result<(),
 async fn execute_migration(conn: &mut PgConnection, sql: &str) -> Result<(), sqlx::Error> {
     sqlx::raw_sql(sql).execute(&mut *conn).await?;
     Ok(())
-}
-
-fn granola_sync_without_bm25() -> String {
-    let sql = GRANOLA_SYNC_SQL.replace(
-        "create extension if not exists pg_search;",
-        "-- search extension unavailable in this test database",
-    );
-    let (before_bm25, rest) = sql
-        .split_once("drop index if exists idx_granola_context_documents_bm25;")
-        .expect("Granola migration should contain BM25 index block");
-    let (_, after_bm25) = rest
-        .split_once("create table if not exists granola_sync_checkpoints")
-        .expect("Granola migration should create sync checkpoints after the BM25 index");
-
-    format!("{before_bm25}create table if not exists granola_sync_checkpoints{after_bm25}")
 }

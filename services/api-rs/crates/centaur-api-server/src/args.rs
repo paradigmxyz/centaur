@@ -4,6 +4,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     process::Command,
+    str::FromStr,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -35,6 +36,7 @@ use centaur_session_runtime::{
     PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode, SessionEventRetentionConfig,
     SessionPrincipalAdmission, SessionSandboxCleanupConfig,
 };
+use centaur_session_sqlx::TextSearchBackend;
 use centaur_workflows::{WorkflowHostSandboxRuntime, WorkflowPrincipalRegistrar};
 use clap::{Args as ClapArgs, Parser, ValueEnum};
 use tracing::{info, warn};
@@ -57,7 +59,10 @@ const SANDBOX_OTLP_PASSTHROUGH_ENV_KEYS: [&str; 4] = [
 ];
 
 #[derive(Debug, Parser)]
-#[command(about = "Run the Centaur API Rust session control plane")]
+#[command(
+    about = "Run the Centaur API Rust session control plane",
+    after_help = "Run `centaur-api-server migrate --help` to apply database migrations without starting the server."
+)]
 pub(crate) struct Args {
     #[command(flatten)]
     pub(crate) server: ServerArgs,
@@ -493,11 +498,15 @@ impl IronControlArgs {
         })
     }
 
-    /// Required backend sync settings (admin client + control-plane URL).
+    /// Required backend sync settings (admin client + proxy-sync URL).
     fn settings(&self) -> Result<IronControlSettings, ServerError> {
         let client = self.required_client()?;
         let admin_url = non_empty(self.url.as_deref()).expect("required client validates URL");
-        let control_url = non_empty(self.proxy_sync_url.as_deref()).unwrap_or(admin_url);
+        let control_url = non_empty(self.proxy_sync_url.as_deref()).ok_or_else(|| {
+            ServerError::UnsupportedConfig(
+                "proxy-sync is required: set IRON_CONTROL_PROXY_SYNC_URL".to_owned(),
+            )
+        })?;
         Ok(IronControlSettings {
             client,
             console_url: admin_url.to_owned(),
@@ -510,6 +519,37 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
+// `centaur-api-server migrate` is parsed before, and independently of, the
+// server arguments, so it needs none of the server's configuration and reads
+// nothing from the environment.
+#[derive(Debug, Parser)]
+#[command(
+    bin_name = "centaur-api-server migrate",
+    about = "Apply database migrations and exit without starting the server"
+)]
+pub(crate) struct MigrateArgs {
+    /// Postgres URL of the database to migrate. Leave the password out and
+    /// supply it through PGPASSWORD or a passfile (~/.pgpass) to keep it out of
+    /// the process list.
+    #[arg(long)]
+    pub(crate) database_url: String,
+    /// Keyword search backend to install: `paradedb` (requires the pg_search
+    /// extension) or `postgres` (built-in full-text search). It must match the
+    /// backend the database was first migrated with.
+    #[arg(long, value_parser = TextSearchBackend::from_str)]
+    pub(crate) text_search: TextSearchBackend,
+}
+
+impl MigrateArgs {
+    /// Parse `migrate` arguments when the command line starts with `migrate`.
+    pub(crate) fn from_command_line() -> Option<Self> {
+        if env::args_os().nth(1)? != "migrate" {
+            return None;
+        }
+        Some(Self::parse_from(env::args_os().skip(1)))
+    }
+}
+
 #[derive(Debug, ClapArgs)]
 pub(crate) struct ServerArgs {
     #[arg(long, env = "DATABASE_URL")]
@@ -518,6 +558,16 @@ pub(crate) struct ServerArgs {
     pub(crate) bind_addr: SocketAddr,
     #[arg(long, env = "RUN_MIGRATIONS", default_value_t = false)]
     pub(crate) run_migrations: bool,
+    /// Keyword search backend that migrations install: `paradedb` (requires
+    /// the pg_search extension) or `postgres` (built-in full-text search). A
+    /// database keeps the backend it was first migrated with.
+    #[arg(
+        long,
+        env = "DATABASE_TEXT_SEARCH",
+        default_value = "paradedb",
+        value_parser = TextSearchBackend::from_str
+    )]
+    pub(crate) text_search: TextSearchBackend,
     /// How long shutdown waits for in-flight executions to finish before
     /// releasing their stdout-owner leases for adoption by a peer. Keep
     /// below the pod's terminationGracePeriodSeconds (35s in the chart) so
@@ -625,22 +675,16 @@ struct SandboxArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     warm_pool_replenish_interval_secs: u64,
-    /// Hard cap on observed running-like sandboxes. 0 disables capacity
-    /// admission.
+    /// Best-effort admission limit for sandboxes observed as running,
+    /// excluding ready warm sandboxes. The
+    /// limit rejects new creates and resumes but never evicts existing work.
+    /// 0 disables capacity admission.
     #[arg(
         long = "session-sandbox-running-limit",
         env = "SESSION_SANDBOX_RUNNING_LIMIT",
         default_value_t = 0
     )]
     sandbox_running_limit: usize,
-    /// Do not evict assigned idle sandboxes that were active within this
-    /// window. Warm sandboxes can still be discarded first.
-    #[arg(
-        long = "session-sandbox-hot-idle-grace-secs",
-        env = "SESSION_SANDBOX_HOT_IDLE_GRACE_SECS",
-        default_value_t = 300
-    )]
-    sandbox_hot_idle_grace_secs: u64,
     /// Stop any sandbox older than this regardless of status; sessions replace
     /// reaped sandboxes on their next message. 0 disables the max-lifetime
     /// sweep.
@@ -1459,9 +1503,8 @@ impl SandboxArgs {
     }
 
     fn sandbox_capacity_config(&self) -> Option<SandboxCapacityConfig> {
-        (self.sandbox_running_limit > 0).then(|| SandboxCapacityConfig {
+        (self.sandbox_running_limit > 0).then_some(SandboxCapacityConfig {
             max_running: self.sandbox_running_limit,
-            hot_idle_grace: Duration::from_secs(self.sandbox_hot_idle_grace_secs),
         })
     }
 
@@ -1832,6 +1875,20 @@ struct IronProxyArgs {
         value_delimiter = ','
     )]
     upstream_deny_cidrs: Vec<String>,
+    /// Address ranges of an external core database. Per-sandbox iron-proxy
+    /// NetworkPolicies allow egress to them on the database port.
+    #[arg(
+        long = "kubernetes-iron-proxy-database-cidrs",
+        env = "KUBERNETES_IRON_PROXY_DATABASE_CIDRS",
+        value_delimiter = ','
+    )]
+    database_cidrs: Vec<String>,
+    #[arg(
+        long = "kubernetes-iron-proxy-database-port",
+        env = "KUBERNETES_IRON_PROXY_DATABASE_PORT",
+        default_value_t = 5432
+    )]
+    database_port: u16,
     /// Per-sandbox iron-proxy container resources as a JSON Kubernetes
     /// `ResourceRequirements` object.
     #[arg(
@@ -1877,6 +1934,16 @@ impl IronProxyArgs {
             .filter_map(|cidr| non_empty(Some(cidr.as_str())))
             .map(ToOwned::to_owned)
             .collect();
+        config.database_cidrs = self
+            .database_cidrs
+            .iter()
+            .filter_map(|cidr| non_empty(Some(cidr.as_str())))
+            .map(|cidr| {
+                validate_cidr(cidr, "KUBERNETES_IRON_PROXY_DATABASE_CIDRS")?;
+                Ok(cidr.to_owned())
+            })
+            .collect::<Result<_, ServerError>>()?;
+        config.database_port = self.database_port;
         self.source.apply_to_config(&mut config);
         config.fragments = harness_fragments;
         config.env_from_secret_names = self.env_from_secret_names();
@@ -1938,6 +2005,28 @@ impl IronProxyArgs {
             names.insert(secret_name.to_owned());
         }
         names.into_iter().collect()
+    }
+}
+
+/// Reject malformed CIDRs at startup; otherwise every per-sandbox proxy
+/// NetworkPolicy would fail Kubernetes validation at claim time.
+fn validate_cidr(cidr: &str, env_name: &str) -> Result<(), ServerError> {
+    let valid = cidr.split_once('/').is_some_and(|(address, prefix)| {
+        let max_prefix = match address.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(_)) => 32,
+            Ok(std::net::IpAddr::V6(_)) => 128,
+            Err(_) => return false,
+        };
+        prefix
+            .parse::<u8>()
+            .is_ok_and(|prefix| prefix <= max_prefix)
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(ServerError::UnsupportedConfig(format!(
+            "{env_name} entry {cidr:?} is not a CIDR such as 10.0.0.0/16"
+        )))
     }
 }
 
@@ -2297,6 +2386,40 @@ mod tests {
     }
 
     #[test]
+    fn migrate_takes_its_database_and_backend_only_from_flags() {
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let _env = EnvGuard::set(&[
+            ("DATABASE_URL", "postgres://env.example/centaur"),
+            ("DATABASE_TEXT_SEARCH", "postgres"),
+        ]);
+
+        let args = MigrateArgs::try_parse_from([
+            "migrate",
+            "--database-url",
+            "postgres://flag.example/centaur",
+            "--text-search",
+            "paradedb",
+        ])
+        .expect("migrate flags parse");
+        assert_eq!(args.database_url, "postgres://flag.example/centaur");
+        assert_eq!(args.text_search, TextSearchBackend::Paradedb);
+
+        for missing in [
+            vec!["migrate", "--text-search", "postgres"],
+            vec![
+                "migrate",
+                "--database-url",
+                "postgres://flag.example/centaur",
+            ],
+        ] {
+            assert!(
+                MigrateArgs::try_parse_from(&missing).is_err(),
+                "{missing:?} must fail without falling back to the environment"
+            );
+        }
+    }
+
+    #[test]
     fn iron_control_registration_retry_policy_is_transient_only() {
         let status_error = |status| {
             RegisterError::Control(IronControlError::Status {
@@ -2596,6 +2719,8 @@ mod tests {
             "42",
             "--iron-control-url",
             "http://console.local",
+            "--iron-control-proxy-sync-url",
+            "http://proxy-sync.local:8080",
             "--iron-control-api-key",
             "iak_test",
         ])
@@ -2613,7 +2738,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_sync_url_override_preserves_console_url_and_egress_selector() {
+    fn proxy_sync_url_is_separate_from_console_url_and_egress_selector() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -2640,6 +2765,25 @@ mod tests {
     }
 
     #[test]
+    fn agent_sandboxes_require_proxy_sync_url() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--iron-control-url",
+            "http://console.local:3000",
+            "--iron-control-api-key",
+            "iak_test",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            args.sandbox.iron_control.settings(),
+            Err(ServerError::UnsupportedConfig(message)) if message.contains("IRON_CONTROL_PROXY_SYNC_URL")
+        ));
+    }
+
+    #[test]
     fn tools_config_read_from_flags() {
         let args = Args::try_parse_from([
             "centaur-api-server",
@@ -2649,6 +2793,8 @@ mod tests {
             "agent-k8s",
             "--iron-control-url",
             "http://console.local",
+            "--iron-control-proxy-sync-url",
+            "http://proxy-sync.local:8080",
             "--iron-control-api-key",
             "iak_test",
             "--kubernetes-tools-repo",
@@ -2692,6 +2838,8 @@ mod tests {
             "agent-k8s",
             "--iron-control-url",
             "http://console.local",
+            "--iron-control-proxy-sync-url",
+            "http://proxy-sync.local:8080",
             "--iron-control-api-key",
             "iak_test",
             "--kubernetes-tools-repo",
@@ -3318,6 +3466,40 @@ mod tests {
     }
 
     #[test]
+    fn iron_proxy_database_cidrs_are_parsed_and_validated() {
+        let parse = |cidrs: &str| {
+            Args::try_parse_from([
+                "centaur-api-server",
+                "--database-url",
+                "postgres://postgres:postgres@localhost/centaur",
+                "--kubernetes-firewall-ca-secret-name",
+                "centaur-firewall-ca",
+                "--kubernetes-firewall-ca-key-secret-name",
+                "centaur-firewall-ca-key",
+                "--kubernetes-iron-proxy-database-cidrs",
+                cidrs,
+                "--kubernetes-iron-proxy-database-port",
+                "6432",
+            ])
+            .unwrap()
+            .sandbox
+            .iron_proxy
+            .to_config()
+        };
+
+        let config = parse("10.0.32.0/20,fd00:1::/64").unwrap();
+        assert_eq!(
+            config.database_cidrs,
+            vec!["10.0.32.0/20".to_owned(), "fd00:1::/64".to_owned()]
+        );
+        assert_eq!(config.database_port, 6432);
+
+        for invalid in ["db.example.com", "10.0.32.0", "10.0.32.0/33"] {
+            assert!(parse(invalid).is_err(), "{invalid} must be rejected");
+        }
+    }
+
+    #[test]
     fn iron_proxy_upstream_deny_cidrs_are_parsed() {
         let args = Args::try_parse_from([
             "centaur-api-server",
@@ -3418,6 +3600,8 @@ mod tests {
             r#"{"requests":{"cpu":"50m"}}"#,
             "--iron-control-url",
             "http://console.local",
+            "--iron-control-proxy-sync-url",
+            "http://proxy-sync.local:8080",
             "--iron-control-api-key",
             "iak_test",
         ])
@@ -3479,6 +3663,8 @@ mod tests {
             "",
             "--iron-control-url",
             "http://console.local",
+            "--iron-control-proxy-sync-url",
+            "http://proxy-sync.local:8080",
             "--iron-control-api-key",
             "iak_test",
         ])

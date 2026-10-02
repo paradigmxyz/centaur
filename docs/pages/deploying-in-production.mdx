@@ -59,7 +59,7 @@ Minimum keys:
 
 | Secret | Required for | Notes |
 |--------|--------------|-------|
-| `DATABASE_URL` | API | Postgres connection string. Make sure the password is URL-encoded. |
+| `DATABASE_URL` | API | Postgres connection string. Make sure the password is URL-encoded. For a managed server, see [Use an External PostgreSQL](#use-an-external-postgresql). |
 | `POSTGRES_PASSWORD` | Bundled Postgres | Password used when the chart manages Postgres. |
 | `IRON_MANAGEMENT_API_KEY` | [iron-proxy](https://docs.iron.sh) management API | Generate with `openssl rand -hex 32`. |
 | `SLACK_BOT_TOKEN` | Slackbot/API | Bot User OAuth Token from the Slack app. |
@@ -105,7 +105,6 @@ Store one secret per enabled harness credential:
 | Codex with a custom provider | `codex` | `--provider <id>` | Provider `apiKeyEnv` | Provider `baseUrl` host |
 | Amp | `amp` | `--amp` | `AMP_API_KEY` | `ampcode.com` |
 | Claude Code | `claude-code` | `--claude` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
-| pi-mono | `pi-mono` | `--pi` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
 
 `sandbox.harnessEngine` and the selectors above apply when a session is created.
 A session records its harness and keeps it for the life of the thread, so
@@ -446,6 +445,111 @@ sandbox:
 
 Malformed selector/toleration JSON fails api-rs startup. Empty values keep
 default scheduling.
+
+### Use an External PostgreSQL
+
+By default the chart runs a bundled PostgreSQL built on ParadeDB. To use a
+managed server such as Amazon RDS, Aurora PostgreSQL, or Cloud SQL instead,
+prepare the server, point the database secrets at it, and disable the bundled
+Postgres.
+
+The server needs:
+
+- PostgreSQL 16, the version the bundled server and CI use.
+- The `vector` extension, pgvector 0.5.0 or newer, for embedding search.
+  `uuid-ossp` is also required. `pg_cron` is optional.
+- A migrating user that can create extensions and roles. Migrations create
+  cluster-wide roles such as `centaur_readonly` and
+  `centaur_company_context_reader`. That is the `DATABASE_URL` user when api-rs
+  migrates at startup, or the user passed to `centaur-api-server migrate` below.
+  The Console also creates its databases with the `DATABASE_URL` user. The RDS
+  master user and the Cloud SQL `postgres` user can do all of this. With a less
+  privileged user, have an administrator create the `vector` and `uuid-ossp`
+  extensions and the Console databases listed below first.
+- Enough connections. api-rs opens up to 500 connections under load, and the
+  bundled server allows 500.
+
+The deployment uses these databases on the server:
+
+| Database | Used by | Connection |
+| --- | --- | --- |
+| Any name, for example `centaur` | api-rs, Slackbot, and ETL workflows | `DATABASE_URL`, including the database name. |
+| `iron_control_production`, plus `_cache`, `_queue`, and `_cable` variants | Console | `IRON_CONTROL_DATABASE_URL` without a database name; the Console selects each database itself. The Console init container creates missing databases with the `DATABASE_URL` credentials. |
+
+Managed servers usually require TLS, so add `sslmode=require` to both URLs.
+`POSTGRES_PASSWORD` is not needed. Tools that declare `pg_dsn` secrets connect
+through iron-proxy with a DSN from your secret source; point those at the
+external server too. For `company_context`, that secret is
+`CENTAUR_POSTGRES_DSN`.
+
+Then set the chart values:
+
+```yaml
+postgres:
+  enabled: false
+
+externalDatabase:
+  # Address ranges the database endpoint resolves to, for NetworkPolicy egress.
+  cidrs:
+    - 10.0.32.0/20
+  port: 5432
+  textSearch: postgres
+```
+
+`externalDatabase.cidrs` is required when `networkPolicy.enabled` is true,
+because NetworkPolicy cannot match hostnames. Use the RDS DB subnet group's
+CIDRs, since the endpoint address moves on failover, or the Cloud SQL private IP
+as a `/32`. Control-plane pods and per-sandbox iron-proxies may reach only these
+ranges on `port`; see [Security](/security).
+
+`externalDatabase.textSearch` selects how company-context keyword search is
+indexed. Set it only with `postgres.enabled: false`; the bundled Postgres always
+uses `paradedb`.
+
+- `postgres` (the default when unset) uses PostgreSQL's built-in full-text search and works on
+  any server above.
+- `paradedb` uses ParadeDB BM25 indexes and requires the `pg_search` extension,
+  which RDS and Cloud SQL do not offer. Use it only for a self-managed ParadeDB
+  server.
+
+api-rs migrates its database at startup while `apiRs.runMigrations` is true. To
+migrate the external database on its own, for example with an administrator
+account before a rollout, run the `migrate` subcommand from the api-rs image.
+It takes only flags and applies the same migrations and checks as startup:
+
+```bash
+PGPASSWORD='<password>' centaur-api-server migrate \
+  --database-url 'postgresql://<user>@<host>:5432/<database>?sslmode=require' \
+  --text-search postgres
+```
+
+Leave the password out of the URL so it stays out of the process list; the
+subcommand also reads a passfile (`~/.pgpass`). Rerunning it is a no-op. When
+migrations run this way, set `apiRs.runMigrations: false` so api-rs starts with
+a user that does not need to create roles or extensions.
+
+A database keeps the backend it was first migrated with; there is no in-place
+switch. Migrations, at startup or through `centaur-api-server migrate`, fail if
+the configured backend later disagrees.
+
+To change backends, including moving from the bundled Postgres (`paradedb`) to
+RDS or Cloud SQL (`postgres`), migrate a fresh database and move the data into
+it:
+
+1. Create an empty api-rs database on the new server and migrate it with
+   `centaur-api-server migrate --text-search postgres`.
+2. Stop the components that write to the old database.
+3. Copy the data only, not the schema, into the new database. Leave out
+   `_sqlx_migrations`: the new database already records its own migrations,
+   including its text-search backend. `search_vector` is a generated column,
+   so each row's value is computed as it is inserted. The tables have foreign
+   keys and triggers that maintain derived company-context rows, so plan the
+   copy order or disable triggers while copying.
+4. Point `DATABASE_URL` and the other database secrets at the new server,
+   update the chart values above, and deploy.
+
+The Console databases have no text-search backend and move with an ordinary
+dump and restore.
 
 ## 7. Verify the Deployment
 

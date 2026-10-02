@@ -81,6 +81,10 @@ spec:
                   key: {{ printf "%sIRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT" $prefix }}
             - name: COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG
               value: {{ $companyContext.googleOauthAppSlug | quote }}
+            - name: COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG
+              value: {{ $companyContext.granolaOauthAppSlug | quote }}
+            - name: COMPANY_CONTEXT_GRANOLA_SYNC_INTERVAL_SECONDS
+              value: {{ $companyContext.granolaSyncIntervalSeconds | quote }}
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -145,19 +149,7 @@ spec:
         - protocol: TCP
           port: {{ $companyContext.port }}
   egress:
-{{- if .Values.postgres.enabled }}
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: 5432
-{{- else }}
-    - ports:
-        - protocol: TCP
-          port: 5432
-{{- end }}
+    {{- include "centaur.postgresEgress" . | nindent 4 }}
     - ports:
         - protocol: TCP
           port: 443

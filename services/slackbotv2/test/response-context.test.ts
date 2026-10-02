@@ -94,8 +94,26 @@ describe('reasoningForModel', () => {
     expect(reasoningForModel('codex', 'gpt-5.3', 'high')).toBeUndefined()
   })
 
-  test('rejects Codex efforts for the currently selected non-Codex model', () => {
-    expect(reasoningForModel('claudecode', 'claude-opus-4-8', 'high')).toBeUndefined()
+  test('forwards Claude Code effort levels and rejects Codex-only efforts', () => {
+    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+      expect(reasoningForModel('claudecode', 'claude-opus-5-5', effort)).toBe(effort)
+    }
+    expect(reasoningForModel('claudecode', undefined, 'HIGH')).toBe('high')
+    for (const effort of ['none', 'minimal', 'ultra']) {
+      expect(reasoningForModel('claudecode', 'claude-opus-5-5', effort)).toBeUndefined()
+    }
+  })
+
+  test('rejects Claude efforts the selected model does not support', () => {
+    expect(reasoningForModel('claudecode', 'claude-haiku-4-5', 'max')).toBeUndefined()
+    expect(reasoningForModel('claudecode', 'claude-haiku-4-5-20251001', 'low')).toBeUndefined()
+    expect(reasoningForModel('claudecode', 'claude-sonnet-4-6', 'xhigh')).toBeUndefined()
+    expect(reasoningForModel('claudecode', 'claude-sonnet-4-6', 'max')).toBe('max')
+    expect(reasoningForModel('claudecode', 'claude-opus-4-5', 'max')).toBeUndefined()
+    expect(reasoningForModel('claudecode', 'claude-opus-4-5', 'high')).toBe('high')
+  })
+
+  test('rejects efforts for harnesses without an effort control', () => {
     expect(reasoningForModel('amp', 'fast', 'low')).toBeUndefined()
   })
 })
@@ -152,7 +170,9 @@ describe('defaultReasoningForHarness', () => {
   test('reports the effort the selected harness actually runs', () => {
     expect(effectiveReasoningForHarness('codex', 'xhigh')).toBe('xhigh')
     expect(effectiveReasoningForHarness('nanocodex', 'minimal')).toBe('low')
-    expect(effectiveReasoningForHarness('claudecode', 'high')).toBeUndefined()
+    expect(effectiveReasoningForHarness('claudecode', 'high')).toBe('high')
+    expect(effectiveReasoningForHarness('claudecode', undefined)).toBeUndefined()
+    expect(effectiveReasoningForHarness('amp', 'high')).toBeUndefined()
   })
 })
 

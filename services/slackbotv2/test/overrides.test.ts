@@ -692,6 +692,48 @@ describe('messageOverridesForText strategy invocation', () => {
     expect(requestCount).toBe(0)
   })
 
+  test('only calls the OpenAI strategy for messages with a selector term', async () => {
+    const requestedInputs: unknown[] = []
+    const strategy = createOpenAiMessageOverridesStrategy({
+      apiKey: 'test-key',
+      fetch: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        requestedInputs.push(JSON.parse(String(init?.body)).input)
+        return Response.json({
+          output: [
+            {
+              content: [
+                { text: JSON.stringify({ harness: null, model: null, provider: null, reasoning: null }) }
+              ]
+            }
+          ]
+        })
+      }) as unknown as typeof fetch,
+      model: 'gpt-5.4-nano'
+    })
+
+    for (const text of [
+      'please solve the terraform example',
+      'can you summarize this thread?'
+    ]) {
+      await expect(strategy({ text })).resolves.toEqual({ overrides: {} })
+    }
+    for (const text of [
+      'use Opus-4.7 for this',
+      'try gpt5',
+      'think harder about it',
+      'which models are available?'
+    ]) {
+      await strategy({ text })
+    }
+
+    expect(requestedInputs).toEqual([
+      'use Opus-4.7 for this',
+      'try gpt5',
+      'think harder about it',
+      'which models are available?'
+    ])
+  })
+
   test('keeps persona selection deterministic when the OpenAI strategy fails', async () => {
     const strategy = createOpenAiMessageOverridesStrategy({
       apiKey: 'test-key',

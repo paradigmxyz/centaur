@@ -23,6 +23,9 @@ pub struct ThreadState {
     pub model: String,
     pub model_provider: String,
     pub service_tier: Option<String>,
+    /// Reasoning effort for the current turn, normalized by the harness;
+    /// `None` runs the harness's configured default.
+    pub reasoning_effort: Option<String>,
     pub harness_session_id: Option<String>,
     pub completed_turns: Vec<Turn>,
     pub process: Option<HarnessChild>,
@@ -33,6 +36,8 @@ pub struct HarnessChild {
     pub child: Child,
     pub stdin: ChildStdin,
     pub stdout: Receiver<io::Result<String>>,
+    /// Reasoning effort last applied in-band; a fresh process runs its default.
+    pub reasoning_effort: Option<String>,
 }
 
 impl Drop for HarnessChild {
@@ -66,6 +71,16 @@ pub trait HarnessServer {
     fn stdin_for_steer(&self, input: &[UserInput]) -> Result<Vec<u8>> {
         self.stdin_for_turn(input)
     }
+    /// Normalizes a requested reasoning effort to a level this harness applies
+    /// per turn, or `None` to run its configured default. No control by default.
+    fn reasoning_effort(&self, _requested: &str) -> Option<String> {
+        None
+    }
+    /// Stdin that switches the running process to `effort` before a turn's
+    /// input; `None` restores the configured default.
+    fn stdin_for_reasoning_effort(&self, _effort: Option<&str>) -> Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
     fn parse_stdout_line(&self, line: &str) -> Result<Self::Event>;
     fn normalize_events(
         &self,
@@ -97,6 +112,7 @@ pub trait HarnessServer {
             model,
             model_provider,
             service_tier: params.service_tier.clone().flatten(),
+            reasoning_effort: None,
             harness_session_id: None,
             completed_turns: Vec::new(),
             process: None,

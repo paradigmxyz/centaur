@@ -207,15 +207,7 @@ spec:
     - Egress
   # No ingress rules: the worker serves no traffic, so all inbound is denied.
   egress:
-{{- if .Values.postgres.enabled }}
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: 5432
-{{- end }}
+    {{- include "centaur.postgresEgress" . | nindent 4 }}
 {{- if .Values.apiRs.enabled }}
     - to:
         - podSelector:

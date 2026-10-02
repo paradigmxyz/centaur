@@ -959,6 +959,131 @@ describe('slackbotv2', () => {
     expect(state).toEqual(expect.objectContaining({ personaId: 'old' }))
   })
 
+  it('applies a per-channel default persona below an explicit persona flag', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({
+      state: sharedState,
+      channelDefaults: { [CHANNEL_ID]: { personaId: 'invest' } }
+    })
+
+    const runThread = async (eventId: string, text: string) => {
+      const parent = await postUserMessage(`Context for ${eventId}.`)
+      const mention = await postUserMessage(`<@${BOT_USER_ID}> ${text}`, parent.ts)
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: eventId,
+          event: {
+            type: 'app_mention',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: mention.ts,
+            thread_ts: parent.ts,
+            text: `<@${BOT_USER_ID}> ${text}`
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+      expect(response.status).toBe(200)
+      await Promise.all(waits)
+    }
+
+    await runThread('Ev-slackbotv2-channel-persona-default', 'review this deal')
+    await runThread('Ev-slackbotv2-channel-persona-flag', '--persona=eng fix this bug')
+
+    expect(codexApi.creates.map(create => create.body.persona_id)).toEqual(['invest', 'eng'])
+  })
+
+  it('pins a channel default persona to the thread even after the channel default changes', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    const logs: CapturedLog[] = []
+    const channelDefaults: Record<string, { personaId: string }> = {
+      [CHANNEL_ID]: { personaId: 'invest' }
+    }
+    bot = createTestBot({ state: sharedState, channelDefaults, logger: captureLogger(logs) })
+
+    const parent = await postUserMessage('Channel persona pin context.')
+    const runMention = async (eventId: string, text: string) => {
+      const mention = await postUserMessage(`<@${BOT_USER_ID}> ${text}`, parent.ts)
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: eventId,
+          event: {
+            type: 'app_mention',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: mention.ts,
+            thread_ts: parent.ts,
+            text: `<@${BOT_USER_ID}> ${text}`
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+      expect(response.status).toBe(200)
+      await Promise.all(waits)
+    }
+
+    await runMention('Ev-slackbotv2-channel-persona-pin-1', 'first pass')
+    channelDefaults[CHANNEL_ID] = { personaId: 'eng' }
+    await runMention('Ev-slackbotv2-channel-persona-pin-2', 'second pass')
+
+    expect(codexApi.creates.map(create => create.body.persona_id)).toEqual(['invest', 'invest'])
+    const state = await sharedState.get<Record<string, unknown>>(
+      `thread-state:${threadKey(parent.ts)}`
+    )
+    expect(state).toEqual(expect.objectContaining({ personaId: 'invest' }))
+    expect(
+      logs
+        .filter(log => log.event === 'slackbotv2_forward_persona_resolved')
+        .map(log => (log.data as Record<string, unknown>).persona_source)
+    ).toEqual(['channel', 'thread'])
+  })
+
+  it('does not apply a channel default persona to a thread pinned without one', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({
+      state: sharedState,
+      channelDefaults: { [CHANNEL_ID]: { personaId: 'invest' } }
+    })
+
+    const parent = await postUserMessage('No-persona thread context.')
+    await sharedState.set(`thread-state:${threadKey(parent.ts)}`, { personaId: null })
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> keep going`, parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-channel-persona-null-pin',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> keep going`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    expect(codexApi.creates).toHaveLength(1)
+    expect(codexApi.creates[0]!.body.persona_id).toBeUndefined()
+  })
+
   it('reports a fallback for a stale sticky persona on a plain message', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
@@ -1138,13 +1263,13 @@ describe('slackbotv2', () => {
     )
     await sendMention(
       nanocodexRoot.ts,
-      'continue without another flag',
+      'keep thinking without another flag',
       'Ev-slackbotv2-nanocodex-sticky'
     )
 
     const defaultRoot = await sendMention(
       undefined,
-      'use the configured default',
+      'use the configured default model',
       'Ev-slackbotv2-default-after-nanocodex'
     )
 
@@ -1173,9 +1298,9 @@ describe('slackbotv2', () => {
     const defaultInput = JSON.parse(
       codexApi.executes[2]!.body.input_lines.at(-1)!
     ) as Record<string, unknown>
-    // The same inferred effort is incompatible with the currently selected
-    // Claude model and is therefore dropped.
-    expect(defaultInput.reasoning).toBeUndefined()
+    // The default Claude model also supports Max, so the inferred effort is
+    // forwarded; the harness applies it to this turn only.
+    expect(defaultInput.reasoning).toBe('max')
 
     const nanocodexState = await sharedState.get<Record<string, unknown>>(
       `thread-state:${threadKey(nanocodexRoot.ts)}`
@@ -1428,9 +1553,9 @@ describe('slackbotv2', () => {
     await sharedState.connect()
     bot = createTestBot({
       state: sharedState,
-      // The channel pins Claude and also carries an incompatible Codex effort.
+      // The channel pins Claude and also carries a Codex-only effort.
       channelDefaults: {
-        [CHANNEL_ID]: { harnessType: 'claudecode', model: 'claude-opus-4-8', reasoning: 'high' }
+        [CHANNEL_ID]: { harnessType: 'claudecode', model: 'claude-opus-4-8', reasoning: 'minimal' }
       }
     })
 

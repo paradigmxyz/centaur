@@ -10,10 +10,9 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_09_24_155807) do
+ActiveRecord::Schema[8.1].define(version: 2026_09_29_224308) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
-  enable_extension "pg_search"
 
   create_table "api_keys", force: :cascade do |t|
     t.datetime "created_at", null: false
@@ -448,11 +447,13 @@ ActiveRecord::Schema[8.1].define(version: 2026_09_24_155807) do
     t.text "description", null: false
     t.integer "lock_version", default: 0, null: false
     t.string "name", null: false
+    t.virtual "search_vector", type: :tsvector, as: "((setweight(to_tsvector('english'::regconfig, (name)::text), 'A'::\"char\") || setweight(to_tsvector('english'::regconfig, description), 'B'::\"char\")) || setweight(to_tsvector('english'::regconfig, content), 'C'::\"char\"))", stored: true
     t.datetime "shared_at"
     t.datetime "updated_at", null: false
     t.bigint "user_id", null: false
     t.string "visibility", default: "shared", null: false
     t.index ["name"], name: "index_active_skills_on_name", unique: true, where: "(archived_at IS NULL)"
+    t.index ["search_vector"], name: "index_skills_on_search_vector", using: :gin
     t.index ["user_id"], name: "index_skills_on_user_id"
     t.index ["visibility", "updated_at"], name: "index_active_skills_for_catalog", where: "(archived_at IS NULL)"
   end
@@ -628,6 +629,4 @@ ActiveRecord::Schema[8.1].define(version: 2026_09_24_155807) do
   add_foreign_key "thread_shares", "users", column: "created_by_id"
   add_foreign_key "user_identities", "users"
   add_foreign_key "users", "users", column: "approved_by_id"
-
-  add_bm25_index :skills, fields: { id: {}, name: {}, description: {}, content: {} }, key_field: :id, name: "index_skills_on_search_document"
 end

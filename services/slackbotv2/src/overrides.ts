@@ -9,7 +9,7 @@ import { escapeRegExp } from './utils'
  *   --provider <name>                            codex via a configured provider
  *   --persona <id> (or --persona=<id>)           pick the persona independently
  *   --model <name> (or --model=<name>)           pick the model within that harness
- *   -rsn <effort> (or -rsn=<effort>)             per-turn reasoning effort (codex/nanocodex)
+ *   -rsn <effort> (or -rsn=<effort>)             per-turn reasoning effort (codex/nanocodex/claude-code)
  *   --fable | --opus | --sonnet | --haiku        model shortcuts (imply claude-code)
  *
  * Flags are stripped from the text before it reaches the agent. The harness
@@ -136,10 +136,10 @@ const PROVIDER_FLAG_PATTERN = valueFlagPattern(
   '--provider',
   String.raw`[A-Za-z][A-Za-z0-9_-]*`
 )
-const PERSONA_FLAG_PATTERN = valueFlagPattern(
-  '--persona',
-  String.raw`[A-Za-z0-9][A-Za-z0-9._-]*`
-)
+const PERSONA_ID_SOURCE = String.raw`[A-Za-z0-9][A-Za-z0-9._-]*`
+const PERSONA_FLAG_PATTERN = valueFlagPattern('--persona', PERSONA_ID_SOURCE)
+/** Matches a whole persona id, in the shape `--persona` accepts. */
+export const PERSONA_ID_PATTERN = new RegExp(`^${PERSONA_ID_SOURCE}$`)
 
 // Single dash by design: a short per-turn knob (`-rsn high`).
 const REASONING_FLAG_PATTERN = valueFlagPattern('-rsn', String.raw`[A-Za-z-]+`)

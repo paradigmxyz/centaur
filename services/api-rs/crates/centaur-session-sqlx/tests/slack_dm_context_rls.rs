@@ -60,8 +60,8 @@ async fn run_rls_assertions(conn: &mut PgConnection, schema: &str) -> Result<(),
     create_roles(conn).await?;
     execute_migration(conn, SLACK_SYNC_SQL).await?;
     execute_migration(conn, SLACK_DM_SYNC_SQL).await?;
-    execute_slack_dm_context_documents_migration(conn).await?;
-    execute_slack_dm_conversation_context_documents_migration(conn).await?;
+    execute_migration(conn, SLACK_DM_CONTEXT_DOCUMENTS_SQL).await?;
+    execute_migration(conn, SLACK_DM_CONVERSATION_CONTEXT_DOCUMENTS_SQL).await?;
     execute_migration(conn, READONLY_DM_RLS_SQL).await?;
     grant_schema_usage(conn, schema).await?;
 
@@ -264,102 +264,6 @@ async fn grant_schema_usage(conn: &mut PgConnection, schema: &str) -> Result<(),
 async fn execute_migration(conn: &mut PgConnection, sql: &str) -> Result<(), sqlx::Error> {
     sqlx::raw_sql(sql).execute(&mut *conn).await?;
     Ok(())
-}
-
-async fn execute_slack_dm_context_documents_migration(
-    conn: &mut PgConnection,
-) -> Result<(), sqlx::Error> {
-    if pg_search_available(conn).await? {
-        return execute_migration(conn, SLACK_DM_CONTEXT_DOCUMENTS_SQL).await;
-    }
-
-    let sql = slack_dm_context_documents_without_bm25();
-    execute_migration(conn, &sql).await
-}
-
-async fn execute_slack_dm_conversation_context_documents_migration(
-    conn: &mut PgConnection,
-) -> Result<(), sqlx::Error> {
-    if pg_search_available(conn).await? {
-        return execute_migration(conn, SLACK_DM_CONVERSATION_CONTEXT_DOCUMENTS_SQL).await;
-    }
-
-    let sql = slack_dm_conversation_context_documents_without_bm25();
-    execute_migration(conn, &sql).await
-}
-
-async fn pg_search_available(conn: &mut PgConnection) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
-        "select exists (select 1 from pg_available_extensions where name = 'pg_search')",
-    )
-    .fetch_one(&mut *conn)
-    .await
-}
-
-fn slack_dm_context_documents_without_bm25() -> String {
-    let sql = SLACK_DM_CONTEXT_DOCUMENTS_SQL.replace(
-        "create extension if not exists pg_search;",
-        "-- search extension unavailable in this test database",
-    );
-    let (before_bm25, rest) = sql
-        .split_once("drop index if exists idx_slack_dm_context_documents_bm25;")
-        .expect("Slack DM context migration should contain BM25 index block");
-    let (_, after_bm25) = rest
-        .split_once("create or replace function centaur_refresh_slack_dm_context_document(")
-        .expect("Slack DM context migration should define projection refresh function");
-
-    format!(
-        "{before_bm25}create or replace function centaur_refresh_slack_dm_context_document({after_bm25}"
-    )
-}
-
-fn slack_dm_conversation_context_documents_without_bm25() -> String {
-    let sql = SLACK_DM_CONVERSATION_CONTEXT_DOCUMENTS_SQL.replace(
-        "create extension if not exists pg_search;",
-        "-- search extension unavailable in this test database",
-    );
-    let (before_bm25, rest) = sql
-        .split_once("drop index if exists idx_slack_dm_conversation_context_documents_bm25;")
-        .expect("Slack DM conversation context migration should contain BM25 index block");
-    let (_, after_bm25) = rest
-        .split_once(
-            "create or replace function centaur_refresh_slack_dm_conversation_context_document(",
-        )
-        .expect("Slack DM conversation context migration should define refresh function");
-
-    format!(
-        "{before_bm25}create or replace function \
-         centaur_refresh_slack_dm_conversation_context_document({after_bm25}"
-    )
-}
-
-#[test]
-fn slack_dm_context_documents_test_migration_omits_bm25_when_extension_is_unavailable() {
-    let sql = slack_dm_context_documents_without_bm25();
-    let conversation_sql = slack_dm_conversation_context_documents_without_bm25();
-
-    assert!(!sql.contains("create extension if not exists pg_search"));
-    assert!(!sql.contains("using bm25"));
-    assert!(!sql.contains("key_field = 'document_id'"));
-    assert!(sql.contains("create table if not exists slack_dm_context_documents"));
-    assert!(sql.contains("create or replace function centaur_refresh_slack_dm_context_document("));
-    assert!(sql.contains("create policy centaur_slack_dm_context_documents_reader_select"));
-
-    assert!(!conversation_sql.contains("create extension if not exists pg_search"));
-    assert!(!conversation_sql.contains("using bm25"));
-    assert!(!conversation_sql.contains("key_field = 'document_id'"));
-    assert!(
-        conversation_sql
-            .contains("create table if not exists slack_dm_conversation_context_documents")
-    );
-    assert!(conversation_sql.contains(
-        "create or replace function centaur_refresh_slack_dm_conversation_context_document("
-    ));
-    assert!(
-        conversation_sql.contains(
-            "create policy centaur_slack_dm_conversation_context_documents_reader_select"
-        )
-    );
 }
 
 #[test]
