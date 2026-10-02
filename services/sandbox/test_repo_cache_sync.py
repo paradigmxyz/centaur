@@ -3,13 +3,129 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import repo_cache_sync
 
 
 class RepoCacheSyncTest(unittest.TestCase):
+    def make_sync(self, root: Path, **kwargs: float) -> repo_cache_sync.RepoCacheSync:
+        return repo_cache_sync.RepoCacheSync(
+            cache_dir=root / "cache",
+            repositories=["acme/centaur"],
+            repository_refs={},
+            repository_visibilities={},
+            sync_interval_seconds=30,
+            github_token_file=root / "missing-token",
+            **kwargs,
+        )
+
+    def test_from_env_rejects_invalid_git_timeouts(self) -> None:
+        for name, value in (
+            ("GIT_COMMAND_TIMEOUT_SECONDS", "0"),
+            ("GIT_COMMAND_TIMEOUT_SECONDS", "nan"),
+            ("GIT_SHUTDOWN_GRACE_SECONDS", "bad"),
+        ):
+            with (
+                self.subTest(name=name, value=value),
+                mock.patch.dict(os.environ, {name: value}),
+                self.assertRaisesRegex(ValueError, name),
+            ):
+                repo_cache_sync.RepoCacheSync.from_env()
+
+    def test_git_timeout_stops_child_and_reports_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_git = root / "git"
+            fake_git.write_text("#!/bin/sh\ntrap '' TERM\nexec sleep 60\n")
+            fake_git.chmod(0o755)
+            sync = self.make_sync(
+                root, git_command_timeout_seconds=0.2, git_shutdown_grace_seconds=0.2
+            )
+            sync.git_env = {**os.environ, "PATH": f"{root}:{os.environ['PATH']}"}
+
+            with self.assertRaisesRegex(
+                repo_cache_sync.GitCommandTimeout, "fetch acme/centaur timed out"
+            ):
+                sync._run_git(["fetch"], "fetch acme/centaur")
+
+    def test_shutdown_stops_running_git(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_git = root / "git"
+            fake_git.write_text(
+                '#!/bin/sh\ntouch "$REPO_CACHE_TEST_STARTED"\nexec sleep 60\n'
+            )
+            fake_git.chmod(0o755)
+            started = root / "started"
+            sync = self.make_sync(root, git_command_timeout_seconds=10)
+            sync.git_env = {
+                **os.environ,
+                "PATH": f"{root}:{os.environ['PATH']}",
+                "REPO_CACHE_TEST_STARTED": str(started),
+            }
+
+            def stop_after_start() -> None:
+                while not started.exists():
+                    repo_cache_sync.time.sleep(0.01)
+                sync.request_shutdown(15, None)
+
+            stopper = threading.Thread(target=stop_after_start, daemon=True)
+            stopper.start()
+            try:
+                with self.assertRaises(repo_cache_sync.ShutdownRequested):
+                    sync._run_git(["fetch"], "fetch")
+            finally:
+                stopper.join(timeout=2)
+            self.assertFalse(stopper.is_alive())
+
+    def test_recovers_only_regular_git_locks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "cache" / "private" / "acme" / "centaur"
+            git_dir = target / ".git"
+            git_dir.mkdir(parents=True)
+            stale = git_dir / "index.lock"
+            stale.write_text("stale")
+            sync = self.make_sync(root)
+            sync.recover_stale_git_locks(target)
+            self.assertFalse(stale.exists())
+
+            stale.symlink_to(root / "do-not-delete")
+            with self.assertRaisesRegex(RuntimeError, "non-regular Git lock"):
+                sync.recover_stale_git_locks(target)
+
+    def test_second_writer_does_not_remove_readiness(self) -> None:
+        import fcntl
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sync = self.make_sync(root)
+            sync.cache_dir.mkdir()
+            sync.ready_file.write_text("existing")
+            with (sync.cache_dir / ".repo-cache-sync.lock").open("a+") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertEqual(sync.run_forever(), 1)
+            self.assertEqual(sync.ready_file.read_text(), "existing")
+
+    def test_interrupted_sync_removes_readiness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sync = self.make_sync(root)
+            sync.ready_file.parent.mkdir()
+            sync.ready_file.write_text("previous")
+            with (
+                mock.patch.object(
+                    sync, "sync_repo", side_effect=repo_cache_sync.ShutdownRequested
+                ),
+                self.assertRaises(repo_cache_sync.ShutdownRequested),
+            ):
+                sync.sync_once()
+            self.assertFalse(sync.ready_file.exists())
+
     def test_repository_refs_parse_nonempty_entries(self) -> None:
         self.assertEqual(
             repo_cache_sync._repository_refs("acme/one=main bad acme/two=abc123"),
@@ -38,6 +154,8 @@ class RepoCacheSyncTest(unittest.TestCase):
                     "REPOSITORIES": "acme/public acme/private",
                     "REPOSITORY_VISIBILITIES": "acme/public=public acme/private=bogus",
                     "SYNC_INTERVAL_SECONDS": "10",
+                    "GIT_COMMAND_TIMEOUT_SECONDS": "420",
+                    "GIT_SHUTDOWN_GRACE_SECONDS": "25",
                 }
             )
 
@@ -47,6 +165,8 @@ class RepoCacheSyncTest(unittest.TestCase):
                 sync.repository_visibilities,
                 {"acme/public": "public", "acme/private": "private"},
             )
+            self.assertEqual(sync.git_command_timeout_seconds, 420)
+            self.assertEqual(sync.git_shutdown_grace_seconds, 25)
         finally:
             os.environ.clear()
             os.environ.update(old_env)
