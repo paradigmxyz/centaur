@@ -372,15 +372,23 @@ pub struct CreateOrGetSessionOutcome {
     pub unavailable_requested_persona_id: Option<String>,
 }
 
-/// Outcome of [`SessionRuntime::drain`]: the sandboxes that were stopped and
-/// any that failed to stop (with the backend error text).
+/// Outcome of [`SessionRuntime::drain`]. Each observed non-terminal sandbox
+/// appears in exactly one of `stopped`, `busy`, or `failed`.
 #[derive(Debug, Default)]
 pub struct DrainReport {
     pub stopped: Vec<String>,
+    /// Sandboxes that could not be checked or stopped, with the error text.
     pub failed: Vec<DrainFailure>,
     /// Sandboxes left running because they were active or could not be proven
     /// idle. Only populated when the drain is not forced.
     pub busy: Vec<String>,
+}
+
+impl DrainReport {
+    /// Every sandbox this drain observed was stopped; later starts aren't covered.
+    pub fn is_complete(&self) -> bool {
+        self.busy.is_empty() && self.failed.is_empty()
+    }
 }
 
 #[derive(Debug)]
@@ -1872,23 +1880,33 @@ impl SessionRuntime {
                 continue;
             }
             let id = sandbox.id.as_str().to_owned();
-            if !force && !self.store.sandbox_is_idle_for_drain(&id).await? {
-                report.busy.push(id);
-                continue;
+            if !force {
+                match self.store.sandbox_is_idle_for_drain(&id).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        report.busy.push(id);
+                        continue;
+                    }
+                    Err(error) => {
+                        warn!(sandbox_id = %id, %error, "drain failed to check sandbox idleness");
+                        report.failed.push(DrainFailure {
+                            sandbox_id: id,
+                            error: error.to_string(),
+                        });
+                        continue;
+                    }
+                }
             }
             match self.sandbox_runtime.manager.stop(&sandbox.id).await {
                 Ok(()) => {
                     self.sandbox_pipes.remove(&id);
+                    // Best-effort: warm claims mark rows for missing sandboxes failed.
                     if let Err(error) = self
                         .store
                         .mark_warm_sandbox_failed(&id, "sandbox drained")
                         .await
                     {
                         warn!(sandbox_id = %id, %error, "drain failed to clear warm sandbox row");
-                        report.failed.push(DrainFailure {
-                            sandbox_id: id.clone(),
-                            error: error.to_string(),
-                        });
                     }
                     report.stopped.push(id);
                 }
@@ -11407,6 +11425,32 @@ mod adoption_tests {
         assert_eq!(backend.stopped().len(), 2);
         assert!(!backend.stopped().contains(&"sbx-provisioning".to_owned()));
         reset_test_store(&store).await;
+    }
+
+    #[tokio::test]
+    async fn drain_records_store_errors_per_sandbox_without_aborting() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(200))
+            .connect_lazy("postgres://postgres:postgres@127.0.0.1:1/centaur_test")
+            .expect("create lazy pool");
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        for sandbox_id in ["sbx-a", "sbx-b"] {
+            backend.set_observed_status(sandbox_id, SandboxStatus::Running);
+        }
+        let runtime = runtime_with(&PgSessionStore::new(pool), backend.clone());
+
+        // Idle checks fail, so both stay running and are reported as failed.
+        let report = runtime.drain(false).await.expect("drain");
+        assert_eq!(report.failed.len(), 2);
+        assert!(report.stopped.is_empty() && report.busy.is_empty());
+        assert!(!report.is_complete());
+        assert!(backend.stopped().is_empty());
+
+        // Forced stops succeed; the failed warm-row cleanup doesn't count against them.
+        let report = runtime.drain(true).await.expect("forced drain");
+        assert_eq!(report.stopped.len(), 2);
+        assert!(report.failed.is_empty());
+        assert!(report.is_complete());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

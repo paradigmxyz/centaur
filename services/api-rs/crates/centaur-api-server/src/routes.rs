@@ -29,8 +29,8 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose};
 use centaur_session_core::{ChatDestination, ThreadKey};
 use centaur_session_runtime::{
-    ExecuteSessionInput, HarnessConflictPolicy, SandboxRuntime, SessionPrincipalRegistrar,
-    SessionRuntime,
+    DrainReport, ExecuteSessionInput, HarnessConflictPolicy, SandboxRuntime,
+    SessionPrincipalRegistrar, SessionRuntime,
 };
 use centaur_session_sqlx::PgSessionStore;
 use centaur_telemetry::{
@@ -849,19 +849,24 @@ async fn drain_sandboxes(
     Query(query): Query<DrainQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let report = state.runtime()?.drain(query.force).await?;
+    Ok(Json(drain_response(&report)))
+}
+
+fn drain_response(report: &DrainReport) -> Value {
     let failed = report
         .failed
         .iter()
         .map(|failure| json!({ "sandbox_id": failure.sandbox_id, "error": failure.error }))
         .collect::<Vec<_>>();
-    Ok(Json(json!({
+    json!({
         "ok": report.failed.is_empty(),
+        "complete": report.is_complete(),
         "stopped_count": report.stopped.len(),
         "stopped": report.stopped,
         "busy_count": report.busy.len(),
         "busy": report.busy,
         "failed": failed,
-    })))
+    })
 }
 
 async fn stream_events(
@@ -4742,5 +4747,44 @@ mod webhook_tests {
         )
         .unwrap_err();
         assert!(matches!(error, ApiError::Internal(_)));
+    }
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use centaur_session_runtime::DrainFailure;
+
+    use super::*;
+
+    #[test]
+    fn drain_is_complete_only_when_nothing_was_left_running() {
+        let drained = DrainReport {
+            stopped: vec!["sbx-idle".to_owned()],
+            ..DrainReport::default()
+        };
+        let response = drain_response(&drained);
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["complete"], true);
+
+        let busy = DrainReport {
+            stopped: vec!["sbx-idle".to_owned()],
+            busy: vec!["sbx-busy".to_owned()],
+            ..DrainReport::default()
+        };
+        let response = drain_response(&busy);
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["complete"], false);
+        assert_eq!(response["busy"], json!(["sbx-busy"]));
+
+        let failed = DrainReport {
+            failed: vec![DrainFailure {
+                sandbox_id: "sbx-stuck".to_owned(),
+                error: "stop timed out".to_owned(),
+            }],
+            ..DrainReport::default()
+        };
+        let response = drain_response(&failed);
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["complete"], false);
     }
 }
