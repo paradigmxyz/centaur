@@ -39,6 +39,14 @@ Set these through `sandbox.extraEnv`. A per-thread `--model provider/id`
 overrides `CENTAUR_PI_MODEL`, and `-rsn <level>` sets the thinking level for one turn
 (`none` turns thinking off).
 
-A model must be a `provider/id` or bare `id` that `pi --list-models` shows in
-the sandbox. An unknown model fails that turn with suggestions instead of
-reaching Pi, and the thread keeps its previous model.
+A model must be one Centaur supports on Pi, as `provider/id` or a bare `id`:
+
+- `anthropic/`: `claude-fable-5`, `claude-haiku-4-5`, `claude-opus-4-7`,
+  `claude-opus-4-8`, `claude-opus-5`, `claude-opus-5-5`, `claude-sonnet-4-6`,
+  `claude-sonnet-5`
+- `openai/`: `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.4-pro`,
+  `gpt-5.5`, `gpt-5.5-pro`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`,
+  `gpt-6-astra`, `gpt-6-luna`, `gpt-6-sol`
+
+Another model fails that turn instead of reaching Pi, and the thread keeps its
+previous model.

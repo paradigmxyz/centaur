@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 use std::env;
 use std::process::Command as ProcessCommand;
-use std::sync::OnceLock;
 
 use codex_app_server_protocol::UserInput;
 use serde_json::{Value, json};
@@ -28,6 +27,30 @@ use crate::{
 
 /// Pi's default tools plus codemode; `CENTAUR_PI_TOOLS` replaces the list.
 const DEFAULT_TOOLS: &str = "read,bash,edit,write,codemode";
+/// Models Centaur supports on Pi, matching the Claude and GPT models the chat
+/// ingresses offer. Each needs its provider's `api_key` credential.
+const MODELS: &[(&str, &str)] = &[
+    ("anthropic", "claude-fable-5"),
+    ("anthropic", "claude-haiku-4-5"),
+    ("anthropic", "claude-opus-4-7"),
+    ("anthropic", "claude-opus-4-8"),
+    ("anthropic", "claude-opus-5"),
+    ("anthropic", "claude-opus-5-5"),
+    ("anthropic", "claude-sonnet-4-6"),
+    ("anthropic", "claude-sonnet-5"),
+    ("openai", "gpt-5.4"),
+    ("openai", "gpt-5.4-mini"),
+    ("openai", "gpt-5.4-nano"),
+    ("openai", "gpt-5.4-pro"),
+    ("openai", "gpt-5.5"),
+    ("openai", "gpt-5.5-pro"),
+    ("openai", "gpt-5.6-luna"),
+    ("openai", "gpt-5.6-sol"),
+    ("openai", "gpt-5.6-terra"),
+    ("openai", "gpt-6-astra"),
+    ("openai", "gpt-6-luna"),
+    ("openai", "gpt-6-sol"),
+];
 const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 #[derive(Debug, Default)]
@@ -244,66 +267,28 @@ fn pi_bin() -> String {
     env::var("CENTAUR_PI_BIN").unwrap_or_else(|_| "pi".to_string())
 }
 
-/// `(provider, id)` for every model Pi can run here, from `pi --list-models`
-/// (which lists only providers with credentials). `None` when Pi can't list
-/// them; validation is then left to Pi's own startup.
-fn model_catalog() -> Option<&'static [(String, String)]> {
-    static CATALOG: OnceLock<Option<Vec<(String, String)>>> = OnceLock::new();
-    CATALOG
-        .get_or_init(|| {
-            let output = ProcessCommand::new(pi_bin())
-                .arg("--list-models")
-                .env("PI_TELEMETRY", "0")
-                .env("PI_SKIP_VERSION_CHECK", "1")
-                .output();
-            match output {
-                Ok(output) if output.status.success() => {
-                    Some(parse_model_list(&String::from_utf8_lossy(&output.stdout)))
-                }
-                result => {
-                    eprintln!("pi --list-models failed, not validating models: {result:?}");
-                    None
-                }
-            }
-        })
-        .as_deref()
-}
-
-/// Parses `pi --list-models`: a header row, then `provider  model  ...` rows.
-fn parse_model_list(output: &str) -> Vec<(String, String)> {
-    output
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let mut columns = line.split_whitespace();
-            Some((columns.next()?.to_string(), columns.next()?.to_string()))
-        })
-        .collect()
-}
-
-/// Accepts `provider/id` or a bare `id` from the catalog, each optionally with
+/// Accepts `provider/id` or a bare `id` from [`MODELS`], each optionally with
 /// Pi's `:<thinking>` suffix. Pi itself also fuzzy-matches, which would make a
 /// typo silently run some other model.
-fn check_model(model: &str, catalog: &[(String, String)]) -> std::result::Result<(), String> {
+fn check_model(model: &str) -> std::result::Result<(), String> {
     let name = model
         .rsplit_once(':')
         .filter(|(_, level)| THINKING_LEVELS.contains(level))
         .map_or(model, |(name, _)| name);
-    if catalog
+    if MODELS
         .iter()
-        .any(|(provider, id)| name == id || name == format!("{provider}/{id}"))
+        .any(|(provider, id)| name == *id || name == format!("{provider}/{id}"))
     {
         return Ok(());
     }
     let needle = name.rsplit('/').next().unwrap_or(name).to_ascii_lowercase();
-    let suggestions: Vec<String> = catalog
+    let suggestions: Vec<String> = MODELS
         .iter()
         .filter(|(_, id)| id.to_ascii_lowercase().contains(&needle))
         .take(5)
         .map(|(provider, id)| format!("{provider}/{id}"))
         .collect();
-    let mut message =
-        format!("unknown Pi model `{model}`; use a provider/id from `pi --list-models`");
+    let mut message = format!("unsupported Pi model `{model}`; use a supported provider/id");
     if !suggestions.is_empty() {
         message.push_str(&format!(", such as {}", suggestions.join(", ")));
     }
@@ -373,10 +358,7 @@ impl HarnessServer for PiHarness {
     }
 
     fn validate_model(&self, model: &str) -> std::result::Result<(), String> {
-        if env::var_os("CENTAUR_PI_APP_BRIDGE_COMMAND").is_some() {
-            return Ok(());
-        }
-        model_catalog().map_or(Ok(()), |catalog| check_model(model, catalog))
+        check_model(model)
     }
 
     fn stdin_for_turn(&self, input: &[UserInput]) -> Result<Vec<u8>> {
@@ -429,37 +411,33 @@ impl HarnessServer for PiHarness {
 mod tests {
     use serde_json::json;
 
-    use super::{PiEventNormalizer, check_model, parse_model_list};
+    use super::{PiEventNormalizer, check_model};
     use crate::NormalizedEvent;
 
     #[test]
-    fn model_names_must_match_the_pi_catalog() {
-        // Shape of `pi --list-models` 1.0.0 output.
-        let catalog = parse_model_list(concat!(
-            "provider   model                       context  max-out  thinking  images\n",
-            "anthropic  claude-sonnet-5             1M       128K     yes       yes   \n",
-            "anthropic  claude-sonnet-5-5           1M       128K     yes       yes   \n",
-            "openai     gpt-5.5                     1M       128K     yes       yes   \n",
-        ));
-
+    fn only_supported_models_are_accepted() {
         for model in [
             "anthropic/claude-sonnet-5",
             "claude-sonnet-5",
             "openai/gpt-5.5:high",
         ] {
-            assert_eq!(check_model(model, &catalog), Ok(()), "{model}");
+            assert_eq!(check_model(model), Ok(()), "{model}");
         }
         assert_eq!(
-            check_model("anthropic/sonnet-5", &catalog),
+            check_model("anthropic/sonnet-5"),
             Err(
-                "unknown Pi model `anthropic/sonnet-5`; use a provider/id from \
-                 `pi --list-models`, such as anthropic/claude-sonnet-5, \
-                 anthropic/claude-sonnet-5-5"
+                "unsupported Pi model `anthropic/sonnet-5`; use a supported provider/id, \
+                 such as anthropic/claude-sonnet-5"
                     .to_string()
             )
         );
-        assert!(check_model("openai/gpt-5.5:ultra", &catalog).is_err());
-        assert!(check_model("bogus/nope", &catalog).is_err());
+        for model in [
+            "openai/gpt-5.5:ultra",
+            "openai/claude-sonnet-5",
+            "openai/o3",
+        ] {
+            assert!(check_model(model).is_err(), "{model}");
+        }
     }
 
     #[test]
