@@ -15,7 +15,8 @@ const HARNESS_DISPLAY_NAMES: Record<string, string> = {
   amp: 'Amp',
   claudecode: 'Claude Code',
   codex: 'Codex',
-  nanocodex: 'Nanocodex'
+  nanocodex: 'Nanocodex',
+  pi: 'Pi'
 }
 
 const REASONING_DISPLAY_NAMES: Record<string, string> = {
@@ -52,6 +53,9 @@ const GPT_6_ASTRA_REASONING_EFFORTS = new Set([
 ])
 // Claude Code `effortLevel` values; applied per turn by the harness server.
 const CLAUDE_CODE_REASONING_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
+// Pi thinking levels (`none` runs with thinking off); applied per turn by the
+// harness server. Pi clamps a level to what the selected model supports.
+const PI_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 // Older Claude models Claude Code limits to fewer effort levels (none for
 // models without effort support); newer models support every level.
 const NO_REASONING_EFFORTS: ReadonlySet<string> = new Set()
@@ -191,9 +195,9 @@ export function effectiveReasoningForHarness(
   configured?: Record<string, string>
 ): string | undefined {
   const key = harnessType?.trim().toLowerCase()
-  // Claude Code's default effort depends on the model, so only a requested
-  // (already model-validated) effort is known.
-  if (key === 'claudecode') return requested?.trim().toLowerCase() || undefined
+  // Claude Code's and Pi's default efforts depend on the model, so only a
+  // requested (already model-validated) effort is known.
+  if (key === 'claudecode' || key === 'pi') return requested?.trim().toLowerCase() || undefined
   if (key !== 'codex' && key !== 'nanocodex') return undefined
   const reasoning = requested?.trim().toLowerCase() || defaultReasoningForHarness(key, configured)
   // Nanocodex has no distinct Minimal level; its adapter maps Minimal to Low.
@@ -216,6 +220,7 @@ export function reasoningForModel(
       )?.[1] ?? CLAUDE_CODE_REASONING_EFFORTS
     return effort && supported.has(effort) ? effort : undefined
   }
+  if (harness === 'pi') return effort && PI_REASONING_EFFORTS.has(effort) ? effort : undefined
   if (!selectedModel || !effort) return undefined
   if (harness !== 'codex' && harness !== 'nanocodex') return undefined
   // Nanocodex maps its compatibility-only Minimal value to Low before it

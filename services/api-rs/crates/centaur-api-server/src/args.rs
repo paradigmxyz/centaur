@@ -1954,6 +1954,8 @@ impl IronProxyArgs {
         let harness_fragments = self.harness.fragments()?;
         let mut config =
             IronProxyConfig::new(self.image.clone(), ca_cert_secret_name, ca_key_secret_name);
+        config.ca_cert_secret_key = self.ca.cert_secret_key.clone();
+        config.ca_key_secret_key = self.ca.key_secret_key.clone();
         config.image_pull_policy = self.image_pull_policy.clone();
         config.resources = resource_requirements(
             self.resources_json.as_deref(),
@@ -2084,10 +2086,22 @@ struct IronProxyCaArgs {
     )]
     cert_secret_name: Option<String>,
     #[arg(
+        long = "kubernetes-firewall-ca-secret-key",
+        env = "KUBERNETES_FIREWALL_CA_SECRET_KEY",
+        default_value = "ca-cert.pem"
+    )]
+    cert_secret_key: String,
+    #[arg(
         long = "kubernetes-firewall-ca-key-secret-name",
         env = "KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME"
     )]
     key_secret_name: Option<String>,
+    #[arg(
+        long = "kubernetes-firewall-ca-key-secret-key",
+        env = "KUBERNETES_FIREWALL_CA_KEY_SECRET_KEY",
+        default_value = "ca-key.pem"
+    )]
+    key_secret_key: String,
 }
 
 impl IronProxyCaArgs {
@@ -2197,6 +2211,13 @@ impl IronProxyHarnessArgs {
     fn fragment(&self) -> Result<ProxyFragment, ServerError> {
         let engine = harness_fragment_engine_name(&self.engine);
         let auth_mode = self.resolved_auth_mode();
+        // Pi reads placeholder API keys from the environment; it has no
+        // subscription (access_token) credential path.
+        if self.engine == HarnessType::Pi && auth_mode.replace('-', "_") != "api_key" {
+            return Err(ServerError::UnsupportedConfig(format!(
+                "the pi harness supports only api_key auth, not {auth_mode}"
+            )));
+        }
         harness_auth_fragment(engine, &auth_mode)?.ok_or_else(|| {
             ServerError::UnsupportedConfig(format!(
                 "no harness auth fragment for engine {engine} auth-mode {auth_mode}"
@@ -2286,6 +2307,8 @@ fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
         HarnessType::ClaudeCode => "claude-code",
         HarnessType::Nanocodex => "codex",
         HarnessType::Hermes => "hermes",
+        // Pi defaults to Anthropic when its key is present.
+        HarnessType::Pi => "claude-code",
     }
 }
 
@@ -2301,7 +2324,7 @@ fn merge_fragment(target: &mut ProxyFragment, source: ProxyFragment) {
 fn harness_auth_mode_env(engine: &HarnessType) -> Option<String> {
     match engine {
         HarnessType::Codex | HarnessType::Nanocodex => env::var("CODEX_AUTH_MODE").ok(),
-        HarnessType::ClaudeCode => env::var("CLAUDE_CODE_AUTH_MODE").ok(),
+        HarnessType::ClaudeCode | HarnessType::Pi => env::var("CLAUDE_CODE_AUTH_MODE").ok(),
         HarnessType::Amp => None,
         // Hermes resolves providers through its own credential store /
         // iron-proxy placeholder injection; no dedicated auth-mode env.
@@ -3608,6 +3631,41 @@ mod tests {
     }
 
     #[test]
+    fn firewall_ca_secret_keys_default_and_override() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec![
+                "centaur-api-server",
+                "--database-url",
+                "postgres://postgres:postgres@localhost/centaur",
+                "--kubernetes-firewall-ca-secret-name",
+                "combined",
+                "--kubernetes-firewall-ca-key-secret-name",
+                "combined",
+            ];
+            argv.extend_from_slice(extra);
+            Args::try_parse_from(argv)
+                .unwrap()
+                .sandbox
+                .iron_proxy
+                .to_config()
+                .unwrap()
+        };
+
+        let config = parse(&[]);
+        assert_eq!(config.ca_cert_secret_key, "ca-cert.pem");
+        assert_eq!(config.ca_key_secret_key, "ca-key.pem");
+
+        let config = parse(&[
+            "--kubernetes-firewall-ca-secret-key",
+            "CA_CERT_PEM",
+            "--kubernetes-firewall-ca-key-secret-key",
+            "CA_KEY_PEM",
+        ]);
+        assert_eq!(config.ca_cert_secret_key, "CA_CERT_PEM");
+        assert_eq!(config.ca_key_secret_key, "CA_KEY_PEM");
+    }
+
+    #[test]
     fn iron_proxy_upstream_deny_cidrs_are_parsed() {
         let args = Args::try_parse_from([
             "centaur-api-server",
@@ -3847,6 +3905,28 @@ mod tests {
             harness_auth_mode_env(&HarnessType::Nanocodex).as_deref(),
             Some("access_token")
         );
+    }
+
+    #[test]
+    fn pi_uses_anthropic_api_key_placeholder_and_rejects_access_token() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[("CLAUDE_CODE_AUTH_MODE", "api_key")]);
+        let pi = |auth_mode: Option<&str>| IronProxyHarnessArgs {
+            engine: HarnessType::Pi,
+            auth_mode: auth_mode.map(str::to_owned),
+        };
+
+        let fragment = pi(None).fragment().unwrap();
+        let replaced: Vec<_> = fragment
+            .transforms
+            .iter()
+            .flat_map(|transform| &transform.config.secrets)
+            .filter_map(|secret| secret.replace.as_ref()?.proxy_value.as_deref())
+            .collect();
+        assert_eq!(replaced, ["ANTHROPIC_API_KEY"]);
+
+        let error = pi(Some("access_token")).fragment().unwrap_err();
+        assert!(error.to_string().contains("only api_key"), "{error}");
     }
 
     #[test]

@@ -50,10 +50,11 @@ if [ -n "${TOOL_DIRS:-}" ]; then
 fi
 
 if [ -d "$STATE_DIR" ] && [ -w "$STATE_DIR" ]; then
-    mkdir -p "$STATE_DIR/workspace" "$STATE_DIR/uploads" "$STATE_DIR/branches" "$STATE_DIR/codex" "$STATE_DIR/claude"
-    rm -rf "$HOME_DIR/.codex" "$HOME_DIR/.claude" "$HOME_DIR/uploads" "$HOME_DIR/branches"
+    mkdir -p "$STATE_DIR/workspace" "$STATE_DIR/uploads" "$STATE_DIR/branches" "$STATE_DIR/codex" "$STATE_DIR/claude" "$STATE_DIR/pi"
+    rm -rf "$HOME_DIR/.codex" "$HOME_DIR/.claude" "$HOME_DIR/.pi" "$HOME_DIR/uploads" "$HOME_DIR/branches"
     ln -s "$STATE_DIR/codex" "$HOME_DIR/.codex"
     ln -s "$STATE_DIR/claude" "$HOME_DIR/.claude"
+    ln -s "$STATE_DIR/pi" "$HOME_DIR/.pi"
     ln -s "$STATE_DIR/uploads" "$HOME_DIR/uploads"
     ln -s "$STATE_DIR/branches" "$HOME_DIR/branches"
     export CENTAUR_PERSISTENT_STATE=1
@@ -371,17 +372,6 @@ case "$CLAUDE_CODE_AUTH_MODE" in
         exit 1
         ;;
 esac
-
-# ── Pi-mono settings ─────────────────────────────────────────────────────────
-mkdir -p "$HOME_DIR/.pi/agent/extensions"
-cat > "$HOME_DIR/.pi/agent/settings.json" <<EOF
-{
-  "provider": "anthropic",
-  "model": "claude-sonnet-4-20250514",
-  "thinkingLevel": "medium",
-  "autoCompaction": true
-}
-EOF
 
 # ── Per-session workspace clone (no shared worktree metadata) ────────────────
 if [ "${CENTAUR_PERSISTENT_STATE:-0}" = "1" ]; then

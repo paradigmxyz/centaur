@@ -113,6 +113,13 @@ describe('reasoningForModel', () => {
     expect(reasoningForModel('claudecode', 'claude-opus-4-5', 'high')).toBe('high')
   })
 
+  test('forwards Pi thinking levels for any model and rejects Codex-only efforts', () => {
+    for (const effort of ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
+      expect(reasoningForModel('pi', undefined, effort)).toBe(effort)
+    }
+    expect(reasoningForModel('pi', 'openai/gpt-5.5', 'ultra')).toBeUndefined()
+  })
+
   test('rejects efforts for harnesses without an effort control', () => {
     expect(reasoningForModel('amp', 'fast', 'low')).toBeUndefined()
   })

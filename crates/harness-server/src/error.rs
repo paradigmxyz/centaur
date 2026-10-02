@@ -57,6 +57,8 @@ pub enum HarnessServerError {
     HermesExited { status: ExitStatus },
     #[error("{kind:?} did not continue the turn after its background work finished")]
     BackgroundFollowUpStalled { kind: HarnessKind },
+    #[error("{message}")]
+    UnknownModel { message: String },
     #[error("{kind:?} turn interrupted")]
     TurnInterrupted { kind: HarnessKind },
     #[error("failed to spawn {bin} app-server: {source}")]
