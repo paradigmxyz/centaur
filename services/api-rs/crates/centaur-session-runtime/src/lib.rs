@@ -1167,16 +1167,34 @@ impl SessionRuntime {
             .unwrap_or(HarnessType::Codex);
         let metadata =
             tool_host_session_metadata(principal_id, console_user_email, console_user_name);
-        let session = self
+        let session = match self
             .store
             .create_or_get_session_merging_metadata(
                 thread_key,
                 &harness,
                 None,
-                metadata,
+                metadata.clone(),
                 BTreeMap::new(),
             )
-            .await?;
+            .await
+        {
+            Ok(session) => session,
+            // Tool host sandboxes run centaur-tool-host, not a harness, so a
+            // session created under an earlier default harness stays usable.
+            Err(SessionStoreError::HarnessConflict { .. }) => {
+                let existing = self.store.get_session(thread_key).await?;
+                self.store
+                    .create_or_get_session_merging_metadata(
+                        thread_key,
+                        &existing.harness_type,
+                        None,
+                        metadata,
+                        BTreeMap::new(),
+                    )
+                    .await?
+            }
+            Err(error) => return Err(error.into()),
+        };
         if session.iron_control_principal.as_deref() != Some(principal_id) {
             self.store
                 .set_iron_control_principal(thread_key, Some(principal_id))
@@ -9623,6 +9641,46 @@ mod adoption_tests {
             SandboxRuntime::backend(backend, SandboxSpec::new("mock")),
             TestSessionPrincipalRegistrar,
         )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tool_host_session_survives_default_harness_change() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let principal_id = format!("prn_{}", uuid::Uuid::new_v4().simple());
+        let thread_key = tool_host_thread_key(&principal_id).unwrap();
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let mut runtime = runtime_with(&store, backend);
+        runtime.sandbox_runtime.warm_harness = Some(HarnessType::Codex);
+        runtime
+            .create_or_get_tool_host_session(&thread_key, &principal_id, None, None)
+            .await
+            .expect("create tool host session under codex");
+
+        runtime.sandbox_runtime.warm_harness = Some(HarnessType::ClaudeCode);
+        runtime
+            .create_or_get_tool_host_session(
+                &thread_key,
+                &principal_id,
+                Some("test@example.com"),
+                None,
+            )
+            .await
+            .expect("reuse tool host session after default harness change");
+
+        let session = store.get_session(&thread_key).await.unwrap();
+        assert_eq!(session.harness_type, HarnessType::Codex);
+        assert_eq!(
+            session.iron_control_principal.as_deref(),
+            Some(principal_id.as_str())
+        );
+        assert_eq!(
+            session_metadata(&store, &thread_key).await["console_user_email"],
+            "test@example.com"
+        );
+        reset_test_store(&store).await;
     }
 
     fn runtime_with_personas(store: &PgSessionStore, backend: Arc<MockBackend>) -> SessionRuntime {
