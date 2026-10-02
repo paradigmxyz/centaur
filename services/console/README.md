@@ -170,5 +170,8 @@ Wallet connection and Slack MACH claiming are separate flows. The claim button
 opens Mercator’s unlisted `/slack-claim` page with the connected wallet address.
 Mercator verifies Slack membership and enforces claim eligibility and campaign
 limits; Centaur never receives Slack tokens or issues MACH. Repeat claims are
-handled by Mercator. Real claims require the Mercator campaign and MACH issuance
+handled by Mercator. The console checks the connected wallet's Slack reservation
+and disables the claim button when one exists, matching Mercator's GitHub/X
+preflight (including pending or failed issuance). If status is unavailable, the
+link remains available and Mercator enforces eligibility. Real claims require the Mercator campaign and MACH issuance
 to be enabled.

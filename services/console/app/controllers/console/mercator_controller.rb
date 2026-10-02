@@ -8,6 +8,7 @@ module Console
       @credential = Mercator::Connection.credential
       @manual_configuration = Mercator::Connection.manual_configuration? unless @credential
       if @credential && !@credential.dead?
+        @claimed = connection_client_factory.call.slack_claimed?(@credential.access_token, wallet: @credential.provider_subject)
         @claim_url = "https://mercator.sh/slack-claim?#{URI.encode_www_form(wallet: @credential.provider_subject)}"
       end
     end

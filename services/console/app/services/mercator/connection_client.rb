@@ -40,6 +40,15 @@ module Mercator
       raise Broker::ExchangeError.new("Mercator status unavailable", stage: "network")
     end
 
+    def slack_claimed?(access_token, wallet:)
+      body = checked_json(@http.get("#{ORIGIN}/v1/claims/slack/config",
+        headers: { "Authorization" => "Bearer #{access_token}" }))
+      body["wallet_address"].to_s.casecmp?(wallet) && body["claimed"] == true
+    rescue StandardError
+      # Status is optional UI information; Mercator still enforces claim uniqueness.
+      false
+    end
+
     private
 
     def checked_json(response)

@@ -19,6 +19,10 @@ class Console::MercatorControllerTest < ActionDispatch::IntegrationTest
         }.to_json)
       })
     }
+    @claim_client = Struct.new(:result) do
+      def slack_claimed?(*, **) = result
+    end.new(false)
+    Console::MercatorController.connection_client_factory = -> { @claim_client }
     @wallet = WALLET
     Oauth::FlowsController.identity_http_client_factory = -> {
       HttpClient.new(http: ->(**request) {
@@ -162,7 +166,6 @@ class Console::MercatorControllerTest < ActionDispatch::IntegrationTest
     finish_flow(start_flow)
     credential = Mercator::Connection.credential
     credential.update!(expires_at: 1.minute.ago)
-    Console::MercatorController.connection_client_factory = -> { flunk "Wallet page must not contact Mercator" }
     Mercator::Connection.stub(:credential, credential) do
       credential.stub(:refresh!, -> { flunk "Wallet page must not refresh credentials" }) do
         get console_mercator_path
@@ -176,6 +179,15 @@ class Console::MercatorControllerTest < ActionDispatch::IntegrationTest
     assert_select "dl", count: 0
     assert_no_match "Balance is currently unavailable", response.body
     assert_no_match "synthetic-", response.body
+  end
+
+  test "wallet page disables Slack claiming for an existing reservation" do
+    finish_flow(start_flow)
+    @claim_client.result = true
+    get console_mercator_path
+    assert_response :ok
+    assert_select "button[disabled]", text: "MACH already claimed"
+    assert_select "a", text: "Claim 100 MACH through Slack", count: 0
   end
 
   test "wallet page shows reconnect for a dead credential" do

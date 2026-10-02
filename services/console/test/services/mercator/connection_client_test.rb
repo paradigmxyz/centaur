@@ -34,4 +34,24 @@ class Mercator::ConnectionClientTest < ActiveSupport::TestCase
       assert_raises(Broker::ExchangeError) { client.status("synthetic") }
     end
   end
+  test "Slack status only disables claims for the matching wallet reservation" do
+    wallet = "0x#{'12' * 20}"
+    [ [ wallet, true, true ], [ wallet.upcase, true, true ], [ wallet, false, false ], [ "other", true, false ] ].each do |address, claimed, expected|
+      client = Mercator::ConnectionClient.new(http: HttpClient.new(http: ->(**request) {
+        assert_equal "https://mercator.sh/v1/claims/slack/config", request[:url]
+        assert_equal "Bearer synthetic", request[:headers]["Authorization"]
+        HttpClient::Response.new(status: 200, body: { wallet_address: address, claimed: claimed }.to_json)
+      }))
+      assert_equal expected, client.slack_claimed?("synthetic", wallet: wallet)
+    end
+  end
+
+  test "unavailable Slack status keeps the claim link available" do
+    [ [ 401, "unauthorized" ], [ 503, "unavailable" ], [ 200, "not json" ] ].each do |status, body|
+      client = Mercator::ConnectionClient.new(http: HttpClient.new(http: ->(**) {
+        HttpClient::Response.new(status: status, body: body)
+      }))
+      assert_not client.slack_claimed?("synthetic", wallet: "0x#{'12' * 20}")
+    end
+  end
 end
