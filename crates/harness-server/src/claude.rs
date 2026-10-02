@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
@@ -8,8 +9,9 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    HarnessKind, HarnessServer, NormalizedContent, NormalizedEvent, Result, ThreadState,
-    anthropic::{AnthropicEventNormalizer, AnthropicStreamEvent},
+    HarnessKind, HarnessServer, NormalizedContent, NormalizedEvent, NormalizedToolResult, Result,
+    ThreadState,
+    anthropic::{AnthropicEventNormalizer, AnthropicRawStreamEvent, AnthropicStreamEvent},
     command_from_override, user_input_to_anthropic_content,
 };
 
@@ -26,10 +28,25 @@ const CLAUDE_EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"]
 /// commentary (`tool_use`) or the final answer (`end_turn`). Flushing replays the
 /// original delta chunks after an `AgentMessageStarted` carrying the stop reason,
 /// so the item starts with the right phase and native chunking is preserved.
+///
+/// Background subagents (Agent tool with `run_in_background`) outlive the
+/// message that launched them: Claude Code emits that turn's `result`, then
+/// runs a follow-up turn on its own once a subagent's `task_notification`
+/// lands. While main-chain agents are running — or a notification has not
+/// yet been answered by a new main-chain message — the turn is held open:
+/// terminal text flushes as commentary and the interim `result` is swallowed,
+/// so the follow-up's answer is delivered by this turn instead of being
+/// drained as stale output before the next one. Each background agent is
+/// surfaced as a tool item that starts on `task_started` and completes with
+/// the agent's summary on `task_notification`.
 #[derive(Debug, Default)]
 pub struct ClaudeEventNormalizer {
     inner: AnthropicEventNormalizer,
     pending: Vec<PendingAgentMessage>,
+    /// Main-chain background agents by task id, `true` while still running.
+    /// Kept after completion because a resumed agent notifies again.
+    background_agents: HashMap<String, bool>,
+    awaiting_follow_up: bool,
 }
 
 #[derive(Debug)]
@@ -51,8 +68,9 @@ impl ClaudeEventNormalizer {
     pub fn normalize(&mut self, event: AnthropicStreamEvent) -> Vec<NormalizedEvent> {
         let token_usage = event.token_usage();
         let message_stop_reason = event.message_stop_reason().map(str::to_string);
-        let normalized = self.inner.normalize(event);
         let mut out = Vec::new();
+        self.track_background_agents(&event, &mut out);
+        let normalized = self.inner.normalize(event);
         if let Some(usage) = token_usage {
             out.push(NormalizedEvent::TokenUsage { usage });
         }
@@ -73,6 +91,9 @@ impl ClaudeEventNormalizer {
             NormalizedEvent::ToolResults(results) => {
                 self.flush_pending(Some("tool_use".to_string()), &mut out);
                 out.push(NormalizedEvent::ToolResults(results));
+            }
+            NormalizedEvent::Result { error: None } if self.holding_turn() => {
+                self.flush_pending(Some("tool_use".to_string()), &mut out);
             }
             event @ NormalizedEvent::Result { .. } => {
                 self.flush_pending(Some("end_turn".to_string()), &mut out);
@@ -159,8 +180,81 @@ impl ClaudeEventNormalizer {
     }
 
     fn flush_pending(&mut self, stop_reason: Option<String>, out: &mut Vec<NormalizedEvent>) {
+        // A message that ends the model's turn while background agents still
+        // owe a follow-up is commentary, not the final answer; flushing it as
+        // `end_turn` would also arm the terminal-stop fallback.
+        let stop_reason = match stop_reason {
+            Some(reason) if reason != "tool_use" && self.holding_turn() => {
+                Some("tool_use".to_string())
+            }
+            reason => reason,
+        };
         flush_messages(std::mem::take(&mut self.pending), stop_reason, out);
     }
+
+    fn holding_turn(&self) -> bool {
+        self.awaiting_follow_up || self.background_agents.values().any(|running| *running)
+    }
+
+    fn track_background_agents(
+        &mut self,
+        event: &AnthropicStreamEvent,
+        out: &mut Vec<NormalizedEvent>,
+    ) {
+        let (subtype, task) = match event {
+            AnthropicStreamEvent::System { subtype, task, .. } => (subtype.as_deref(), task),
+            // The model is answering with every delivered notification in
+            // context, whether mid-turn or in Claude Code's follow-up turn.
+            AnthropicStreamEvent::StreamEvent {
+                event: AnthropicRawStreamEvent::MessageStart { .. },
+                ..
+            } => {
+                self.awaiting_follow_up = false;
+                return;
+            }
+            _ => return,
+        };
+        match subtype {
+            Some("task_started") if task.is_backgrounded && task.is_main_chain_agent() => {
+                let Some(task_id) = &task.task_id else { return };
+                self.background_agents.insert(task_id.clone(), true);
+                out.push(NormalizedEvent::AssistantMessage {
+                    partial: false,
+                    stop_reason: None,
+                    content: vec![NormalizedContent::ToolUse {
+                        raw_id: background_agent_item_id(task_id),
+                        tool: BACKGROUND_AGENT_TOOL.to_string(),
+                        arguments: json!({
+                            "description": task.description,
+                            "subagent_type": task.subagent_type,
+                        }),
+                    }],
+                });
+            }
+            Some("task_notification") => {
+                // Notifications carry no task type; match the launch by id.
+                let Some(task_id) = &task.task_id else { return };
+                let Some(running) = self.background_agents.get_mut(task_id) else {
+                    return;
+                };
+                *running = false;
+                self.awaiting_follow_up = true;
+                out.push(NormalizedEvent::ToolResults(vec![NormalizedToolResult {
+                    tool_use_id: background_agent_item_id(task_id),
+                    content: task.summary.clone().unwrap_or_default(),
+                    is_error: task.status.as_deref() != Some("completed"),
+                    exit_code: None,
+                }]));
+            }
+            _ => {}
+        }
+    }
+}
+
+const BACKGROUND_AGENT_TOOL: &str = "BackgroundAgent";
+
+fn background_agent_item_id(task_id: &str) -> String {
+    format!("background-agent-{task_id}")
 }
 
 fn flush_messages(
@@ -572,6 +666,167 @@ mod tests {
             agent_texts(&events),
             vec![(Some("end_turn".to_string()), "hello".to_string())]
         );
+    }
+
+    /// Replays the shape Claude Code 2.1 emits for a background subagent: the
+    /// launching turn ends with its own `result`, then the CLI runs a
+    /// follow-up turn once the agent's `task_notification` lands.
+    #[test]
+    fn background_agent_holds_turn_open_until_follow_up_result() {
+        let harness = ClaudeCodeHarness;
+        let mut normalizer = ClaudeEventNormalizer::default();
+        let mut feed = |event: Value| {
+            harness
+                .normalize_events(&mut normalizer, serde_json::from_value(event).unwrap())
+                .unwrap()
+        };
+        let msg = |id: &str, text: &str| {
+            [
+                json!({"type": "stream_event", "event": {"type": "message_start", "message": {"id": id, "content": []}}}),
+                json!({"type": "assistant", "message": {"id": id, "content": [{"type": "text", "text": text}]}}),
+                json!({"type": "stream_event", "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn"}}}),
+            ]
+        };
+
+        feed(
+            json!({"type": "assistant", "message": {"id": "msg_1", "content": [{"type": "tool_use", "id": "toolu_agent", "name": "Agent", "input": {"run_in_background": true}}]}}),
+        );
+        feed(
+            json!({"type": "system", "subtype": "background_tasks_changed", "tasks": [{"task_id": "a1", "task_type": "local_agent"}]}),
+        );
+        let started = feed(
+            json!({"type": "system", "subtype": "task_started", "task_id": "a1", "tool_use_id": "toolu_agent", "description": "Research prices", "subagent_type": "general-purpose", "is_backgrounded": true, "task_type": "local_agent"}),
+        );
+        assert!(matches!(
+            started.as_slice(),
+            [NormalizedEvent::AssistantMessage { content, .. }]
+                if matches!(content.as_slice(), [NormalizedContent::ToolUse { raw_id, tool, .. }]
+                    if raw_id == "background-agent-a1" && tool == "BackgroundAgent")
+        ));
+        feed(
+            json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_agent", "content": "Async agent launched successfully."}]}}),
+        );
+
+        // The launching turn's closing text is commentary and its result is
+        // swallowed, so neither settles the turn.
+        let mut events = Vec::new();
+        for event in msg("msg_2", "Started research.") {
+            events.extend(feed(event));
+        }
+        events.extend(feed(
+            json!({"type": "result", "subtype": "success", "result": "Started research."}),
+        ));
+        assert_eq!(
+            agent_texts(&events),
+            vec![(
+                Some("tool_use".to_string()),
+                "Started research.".to_string()
+            )]
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.is_terminal() || event.is_terminal_assistant_stop())
+        );
+
+        // Sidechain chatter and subagent-owned tasks stay invisible.
+        assert!(feed(json!({"type": "assistant", "parent_tool_use_id": "toolu_agent", "message": {"id": "msg_side", "stop_reason": "end_turn", "content": [{"type": "text", "text": "PONG"}]}})).is_empty());
+        assert!(feed(json!({"type": "system", "subtype": "task_notification", "task_id": "b1", "owned_by_subagent": true, "task_type": "local_bash", "status": "completed"})).is_empty());
+
+        feed(json!({"type": "system", "subtype": "background_tasks_changed", "tasks": []}));
+        let notified = feed(
+            json!({"type": "system", "subtype": "task_notification", "task_id": "a1", "tool_use_id": "toolu_agent", "status": "completed", "summary": "Prices are up 4%."}),
+        );
+        assert!(matches!(
+            notified.as_slice(),
+            [NormalizedEvent::ToolResults(results)]
+                if results[0].tool_use_id == "background-agent-a1"
+                    && results[0].content == "Prices are up 4%."
+                    && !results[0].is_error
+        ));
+
+        // Claude Code's follow-up turn carries the real answer and terminates.
+        feed(json!({"type": "system", "subtype": "init", "session_id": "s1"}));
+        let mut events = Vec::new();
+        for event in msg("msg_3", "Prices are up 4%.") {
+            events.extend(feed(event));
+        }
+        assert_eq!(
+            agent_texts(&events),
+            vec![(
+                Some("end_turn".to_string()),
+                "Prices are up 4%.".to_string()
+            )]
+        );
+        let done =
+            feed(json!({"type": "result", "subtype": "success", "result": "Prices are up 4%."}));
+        assert!(done.iter().any(NormalizedEvent::is_terminal));
+    }
+
+    #[test]
+    fn background_agent_finishing_before_final_message_still_waits_for_follow_up() {
+        let mut normalizer = ClaudeEventNormalizer::default();
+        normalize(
+            &mut normalizer,
+            json!({"type": "system", "subtype": "task_started", "task_id": "a1", "is_backgrounded": true, "task_type": "local_agent"}),
+        );
+        normalize(
+            &mut normalizer,
+            json!({"type": "stream_event", "event": {"type": "message_start", "message": {"id": "msg_1", "content": []}}}),
+        );
+        // The notification lands while the final message is generating, so
+        // the model has not seen it yet: the CLI will run a follow-up turn.
+        normalize(
+            &mut normalizer,
+            json!({"type": "system", "subtype": "task_notification", "task_id": "a1", "status": "completed"}),
+        );
+        normalize(
+            &mut normalizer,
+            json!({"type": "assistant", "message": {"id": "msg_1", "content": [{"type": "text", "text": "waiting"}]}}),
+        );
+        let events = normalize(
+            &mut normalizer,
+            json!({"type": "result", "subtype": "success", "result": "waiting"}),
+        );
+        assert!(!events.iter().any(NormalizedEvent::is_terminal));
+
+        normalize(
+            &mut normalizer,
+            json!({"type": "stream_event", "event": {"type": "message_start", "message": {"id": "msg_2", "content": []}}}),
+        );
+        let events = normalize(
+            &mut normalizer,
+            json!({"type": "result", "subtype": "success", "result": "done"}),
+        );
+        assert!(events.iter().any(NormalizedEvent::is_terminal));
+    }
+
+    #[test]
+    fn background_shell_tasks_do_not_hold_the_turn() {
+        let mut normalizer = ClaudeEventNormalizer::default();
+        normalize(
+            &mut normalizer,
+            json!({"type": "system", "subtype": "task_started", "task_id": "b1", "is_backgrounded": true, "task_type": "local_bash"}),
+        );
+        let events = normalize(
+            &mut normalizer,
+            json!({"type": "result", "subtype": "success", "result": "server started"}),
+        );
+        assert!(events.iter().any(NormalizedEvent::is_terminal));
+    }
+
+    #[test]
+    fn failed_result_ends_turn_even_with_background_agents_running() {
+        let mut normalizer = ClaudeEventNormalizer::default();
+        normalize(
+            &mut normalizer,
+            json!({"type": "system", "subtype": "task_started", "task_id": "a1", "is_backgrounded": true, "task_type": "local_agent"}),
+        );
+        let events = normalize(
+            &mut normalizer,
+            json!({"type": "result", "subtype": "error_during_execution", "is_error": true}),
+        );
+        assert!(events.iter().any(NormalizedEvent::is_terminal));
     }
 
     #[test]

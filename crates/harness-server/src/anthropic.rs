@@ -14,6 +14,8 @@ pub enum AnthropicStreamEvent {
     System {
         subtype: Option<String>,
         session_id: Option<String>,
+        #[serde(flatten)]
+        task: AnthropicSystemTask,
     },
     Assistant {
         #[serde(default)]
@@ -103,6 +105,37 @@ impl AnthropicStreamEvent {
             Self::Result { usage, .. } => token_usage_from_value(usage.as_ref(), None),
             _ => None,
         }
+    }
+}
+
+/// Background-task fields Claude Code puts on `system` lifecycle events
+/// (`task_started`, `task_notification`, ...).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AnthropicSystemTask {
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub task_type: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub subagent_type: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub is_backgrounded: bool,
+    #[serde(default)]
+    pub owned_by_subagent: bool,
+}
+
+impl AnthropicSystemTask {
+    /// Background subagents (Agent tool with `run_in_background`) launched by
+    /// the main chain. Their completion makes Claude Code run a follow-up
+    /// turn on its own after the turn that launched them has already ended.
+    pub fn is_main_chain_agent(&self) -> bool {
+        self.task_type.as_deref() == Some("local_agent") && !self.owned_by_subagent
     }
 }
 
@@ -237,6 +270,7 @@ impl AnthropicEventNormalizer {
             AnthropicStreamEvent::System {
                 subtype,
                 session_id,
+                ..
             } => {
                 if subtype.as_deref() == Some("init") {
                     NormalizedEvent::SessionStarted { session_id }
