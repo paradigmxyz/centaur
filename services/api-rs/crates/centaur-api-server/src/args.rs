@@ -1954,6 +1954,8 @@ impl IronProxyArgs {
         let harness_fragments = self.harness.fragments()?;
         let mut config =
             IronProxyConfig::new(self.image.clone(), ca_cert_secret_name, ca_key_secret_name);
+        config.ca_cert_secret_key = self.ca.cert_secret_key.clone();
+        config.ca_key_secret_key = self.ca.key_secret_key.clone();
         config.image_pull_policy = self.image_pull_policy.clone();
         config.resources = resource_requirements(
             self.resources_json.as_deref(),
@@ -2084,10 +2086,22 @@ struct IronProxyCaArgs {
     )]
     cert_secret_name: Option<String>,
     #[arg(
+        long = "kubernetes-firewall-ca-secret-key",
+        env = "KUBERNETES_FIREWALL_CA_SECRET_KEY",
+        default_value = "ca-cert.pem"
+    )]
+    cert_secret_key: String,
+    #[arg(
         long = "kubernetes-firewall-ca-key-secret-name",
         env = "KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME"
     )]
     key_secret_name: Option<String>,
+    #[arg(
+        long = "kubernetes-firewall-ca-key-secret-key",
+        env = "KUBERNETES_FIREWALL_CA_KEY_SECRET_KEY",
+        default_value = "ca-key.pem"
+    )]
+    key_secret_key: String,
 }
 
 impl IronProxyCaArgs {
@@ -3605,6 +3619,41 @@ mod tests {
         for invalid in ["db.example.com", "10.0.32.0", "10.0.32.0/33"] {
             assert!(parse(invalid).is_err(), "{invalid} must be rejected");
         }
+    }
+
+    #[test]
+    fn firewall_ca_secret_keys_default_and_override() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec![
+                "centaur-api-server",
+                "--database-url",
+                "postgres://postgres:postgres@localhost/centaur",
+                "--kubernetes-firewall-ca-secret-name",
+                "combined",
+                "--kubernetes-firewall-ca-key-secret-name",
+                "combined",
+            ];
+            argv.extend_from_slice(extra);
+            Args::try_parse_from(argv)
+                .unwrap()
+                .sandbox
+                .iron_proxy
+                .to_config()
+                .unwrap()
+        };
+
+        let config = parse(&[]);
+        assert_eq!(config.ca_cert_secret_key, "ca-cert.pem");
+        assert_eq!(config.ca_key_secret_key, "ca-key.pem");
+
+        let config = parse(&[
+            "--kubernetes-firewall-ca-secret-key",
+            "CA_CERT_PEM",
+            "--kubernetes-firewall-ca-key-secret-key",
+            "CA_KEY_PEM",
+        ]);
+        assert_eq!(config.ca_cert_secret_key, "CA_CERT_PEM");
+        assert_eq!(config.ca_key_secret_key, "CA_KEY_PEM");
     }
 
     #[test]

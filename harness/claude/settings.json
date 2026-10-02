@@ -1,6 +1,13 @@
 {
   "model": "claude-opus-5-5",
   "alwaysThinkingEnabled": true,
+  "pluginConfigs": {
+    "agents-md@builtin": {
+      "options": {
+        "instructionFiles": "claude-md"
+      }
+    }
+  },
   "permissions": {
     "defaultMode": "bypassPermissions",
     "additionalDirectories": [

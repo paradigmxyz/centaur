@@ -603,7 +603,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
           return new globalThis.Response('Workflow action could not be recorded. Please retry.', { status: 503 })
         }
       }
-      const lateFileTask = lateSlackFiles.repairFromWebhook(rawBody)
+      const lateFileTask = response.ok ? lateSlackFiles.repairFromWebhook(rawBody) : null
       if (lateFileTask) waitUntil(c, lateFileTask)
       outcome = response.ok ? 'success' : 'error'
       return new globalThis.Response(await response.text(), {

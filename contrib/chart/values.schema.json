@@ -108,7 +108,9 @@
       "type": "object",
       "properties": {
         "existingCaSecretName": { "type": "string" },
+        "existingCaSecretKey": { "type": "string", "minLength": 1 },
         "existingCaKeySecretName": { "type": "string" },
+        "existingCaKeySecretKey": { "type": "string", "minLength": 1 },
         "ca": {
           "type": "object",
           "properties": {

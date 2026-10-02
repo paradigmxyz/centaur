@@ -9,8 +9,12 @@ secretManager:
   existingSecretName: centaur-infra-env
 
 firewall:
+  # Name fields select Kubernetes Secrets (they may be the same Secret); Key
+  # fields select the PEM entries inside them.
   existingCaSecretName: centaur-firewall-ca
+  existingCaSecretKey: ca-cert.pem
   existingCaKeySecretName: centaur-firewall-ca-key
+  existingCaKeySecretKey: ca-key.pem
   ca:
     certPem: ""
     keyPem: ""
