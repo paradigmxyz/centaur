@@ -2197,6 +2197,13 @@ impl IronProxyHarnessArgs {
     fn fragment(&self) -> Result<ProxyFragment, ServerError> {
         let engine = harness_fragment_engine_name(&self.engine);
         let auth_mode = self.resolved_auth_mode();
+        // Pi reads placeholder API keys from the environment; it has no
+        // subscription (access_token) credential path.
+        if self.engine == HarnessType::Pi && auth_mode.replace('-', "_") != "api_key" {
+            return Err(ServerError::UnsupportedConfig(format!(
+                "the pi harness supports only api_key auth, not {auth_mode}"
+            )));
+        }
         harness_auth_fragment(engine, &auth_mode)?.ok_or_else(|| {
             ServerError::UnsupportedConfig(format!(
                 "no harness auth fragment for engine {engine} auth-mode {auth_mode}"
@@ -2286,6 +2293,8 @@ fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
         HarnessType::ClaudeCode => "claude-code",
         HarnessType::Nanocodex => "codex",
         HarnessType::Hermes => "hermes",
+        // Pi defaults to Anthropic when its key is present.
+        HarnessType::Pi => "claude-code",
     }
 }
 
@@ -2301,7 +2310,7 @@ fn merge_fragment(target: &mut ProxyFragment, source: ProxyFragment) {
 fn harness_auth_mode_env(engine: &HarnessType) -> Option<String> {
     match engine {
         HarnessType::Codex | HarnessType::Nanocodex => env::var("CODEX_AUTH_MODE").ok(),
-        HarnessType::ClaudeCode => env::var("CLAUDE_CODE_AUTH_MODE").ok(),
+        HarnessType::ClaudeCode | HarnessType::Pi => env::var("CLAUDE_CODE_AUTH_MODE").ok(),
         HarnessType::Amp => None,
         // Hermes resolves providers through its own credential store /
         // iron-proxy placeholder injection; no dedicated auth-mode env.
@@ -3847,6 +3856,28 @@ mod tests {
             harness_auth_mode_env(&HarnessType::Nanocodex).as_deref(),
             Some("access_token")
         );
+    }
+
+    #[test]
+    fn pi_uses_anthropic_api_key_placeholder_and_rejects_access_token() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[("CLAUDE_CODE_AUTH_MODE", "api_key")]);
+        let pi = |auth_mode: Option<&str>| IronProxyHarnessArgs {
+            engine: HarnessType::Pi,
+            auth_mode: auth_mode.map(str::to_owned),
+        };
+
+        let fragment = pi(None).fragment().unwrap();
+        let replaced: Vec<_> = fragment
+            .transforms
+            .iter()
+            .flat_map(|transform| &transform.config.secrets)
+            .filter_map(|secret| secret.replace.as_ref()?.proxy_value.as_deref())
+            .collect();
+        assert_eq!(replaced, ["ANTHROPIC_API_KEY"]);
+
+        let error = pi(Some("access_token")).fragment().unwrap_err();
+        assert!(error.to_string().contains("only api_key"), "{error}");
     }
 
     #[test]
