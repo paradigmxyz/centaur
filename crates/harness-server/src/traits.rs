@@ -99,6 +99,11 @@ pub trait HarnessServer {
     fn terminal_assistant_stop_settle(&self) -> Option<Duration> {
         None
     }
+    /// Whether the harness still owes this turn output from background work
+    /// after its own turn ended. Nothing outstanding by default.
+    fn turn_hold(&self, _normalizer: &Self::EventNormalizer) -> TurnHold {
+        TurnHold::Released
+    }
 
     fn thread_state(&self, params: &ThreadStartParams, cwd: PathBuf) -> ThreadState {
         let model = params.model.clone().unwrap_or_else(|| self.default_model());
@@ -119,6 +124,18 @@ pub trait HarnessServer {
             thread_started_sent: false,
         }
     }
+}
+
+/// Background work a harness keeps a turn open for past its native result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnHold {
+    /// Nothing outstanding: the turn ends on its native terminal event.
+    Released,
+    /// Background work is still live; its output belongs to this turn.
+    Waiting,
+    /// Background work has finished but its follow-up has not started. If the
+    /// stream stays quiet this long, the follow-up is not coming.
+    Idle(Duration),
 }
 
 #[derive(Debug, Clone)]

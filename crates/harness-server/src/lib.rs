@@ -20,7 +20,7 @@ pub use nanocodex::run_nanocodex_blocks_server;
 pub use server::{run_blocks_server, run_harness_server, run_validate_jsonrpc, server_for};
 pub use traits::{
     AppServerNormalizer, AppServerRuntime, HarnessKind, HarnessServer, NormalizedContent,
-    NormalizedEvent, NormalizedTokenUsage, NormalizedToolResult, ThreadState,
+    NormalizedEvent, NormalizedTokenUsage, NormalizedToolResult, ThreadState, TurnHold,
 };
 pub use turn::{BridgeConfig, CodexTurnNormalizer};
 pub use validation::run_validate_agent_deltas;

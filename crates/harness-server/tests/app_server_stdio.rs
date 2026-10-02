@@ -199,6 +199,79 @@ fn fake_claude_trailing_result_settles_the_turn_and_does_not_poison_the_next() {
 }
 
 #[test]
+fn fake_claude_background_agent_follow_up_completes_the_turn() {
+    // Claude Code ends the launching turn with its own `result`, then runs a
+    // follow-up turn once the background agent notifies (here after 3s, longer
+    // than the settle window). The follow-up's answer belongs to this turn.
+    let fake_claude = concat!(
+        "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}'; ",
+        "IFS= read -r _; ",
+        "printf '%s\\n' ",
+        "'{\"type\":\"system\",\"subtype\":\"task_started\",\"task_id\":\"a1\",\"description\":\"Research\",\"is_backgrounded\":true,\"task_type\":\"local_agent\"}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"content\":[]}}}' ",
+        "'{\"type\":\"assistant\",\"message\":{\"id\":\"msg_1\",\"content\":[{\"type\":\"text\",\"text\":\"Started research.\"}]}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}}' ",
+        "'{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"Started research.\"}'; ",
+        "sleep 3; printf '%s\\n' ",
+        "'{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"a1\",\"status\":\"completed\",\"summary\":\"found it\"}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"id\":\"msg_2\",\"content\":[]}}}' ",
+        "'{\"type\":\"assistant\",\"message\":{\"id\":\"msg_2\",\"content\":[{\"type\":\"text\",\"text\":\"The answer.\"}]}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}}' ",
+        "'{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"The answer.\"}'; ",
+        "sleep 60"
+    );
+
+    let run = run_bridge_turn(BridgeTurnConfig {
+        harness: Harness::ClaudeCode,
+        command_override: Some(fake_claude.to_string()),
+        prompt: "research".to_string(),
+        timeout: Duration::from_secs(15),
+    });
+
+    assert_completed_turn(&run.turn);
+    assert_eq!(run.turn.text_from_deltas, "Started research.The answer.");
+    assert_codex_v2_turn(&run.turn);
+}
+
+#[test]
+fn fake_claude_turn_ending_with_live_background_agent_does_not_poison_the_next() {
+    // An error result ends the turn while a background agent still runs. Its
+    // later follow-up must not be read as the next turn's answer: the process
+    // is stopped and the next turn resumes in a fresh one.
+    let marker = temp_path("fake-claude-respawned");
+    let fake_claude = format!(
+        concat!(
+            "printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}}'; ",
+            "IFS= read -r _; ",
+            "if [ -e {marker} ]; then printf '%s\\n' ",
+            "'{{\"type\":\"assistant\",\"is_partial\":false,\"message\":{{\"id\":\"msg_3\",\"content\":[{{\"type\":\"text\",\"text\":\"second answer\"}}]}}}}' ",
+            "'{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"second answer\"}}'; sleep 60; fi; ",
+            "touch {marker}; printf '%s\\n' ",
+            "'{{\"type\":\"system\",\"subtype\":\"task_started\",\"task_id\":\"a1\",\"is_backgrounded\":true,\"task_type\":\"local_agent\"}}' ",
+            "'{{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true}}'; ",
+            "sleep 1; printf '%s\\n' ",
+            "'{{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"a1\",\"status\":\"completed\"}}' ",
+            "'{{\"type\":\"assistant\",\"is_partial\":false,\"message\":{{\"id\":\"msg_2\",\"content\":[{{\"type\":\"text\",\"text\":\"stale follow-up\"}}]}}}}' ",
+            "'{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"stale follow-up\"}}'; ",
+            "sleep 60"
+        ),
+        marker = shell_quote(&marker),
+    );
+
+    let run = run_bridge_two_turns(BridgeTwoTurnConfig {
+        harness: Harness::ClaudeCode,
+        command_override: Some(fake_claude),
+        first_prompt: "first".to_string(),
+        second_prompt: "second".to_string(),
+        timeout: Duration::from_secs(10),
+    });
+    let _ = std::fs::remove_file(&marker);
+
+    assert_completed_turn(&run.turns[1]);
+    assert_eq!(run.turns[1].text_from_deltas, "second answer");
+}
+
+#[test]
 fn fake_claude_subagent_sidechain_stop_does_not_complete_the_turn() {
     // A Task subagent's sidechain messages end with their own end_turn while
     // the parent turn keeps running (here: 3s of quiet before the main chain
