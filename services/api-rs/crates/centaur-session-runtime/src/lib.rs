@@ -1160,41 +1160,29 @@ impl SessionRuntime {
         console_user_email: Option<&str>,
         console_user_name: Option<&str>,
     ) -> Result<(), SessionRuntimeError> {
-        let harness = self
-            .sandbox_runtime
-            .warm_harness
-            .clone()
-            .unwrap_or(HarnessType::Codex);
+        // Tool host sandboxes run centaur-tool-host, not a harness, so keep the
+        // stored harness; the default only fills the column for new sessions.
+        let harness = match self.store.get_session(thread_key).await {
+            Ok(session) => session.harness_type,
+            Err(SessionStoreError::NotFound { .. }) => self
+                .sandbox_runtime
+                .warm_harness
+                .clone()
+                .unwrap_or(HarnessType::Codex),
+            Err(error) => return Err(error.into()),
+        };
         let metadata =
             tool_host_session_metadata(principal_id, console_user_email, console_user_name);
-        let session = match self
+        let session = self
             .store
             .create_or_get_session_merging_metadata(
                 thread_key,
                 &harness,
                 None,
-                metadata.clone(),
+                metadata,
                 BTreeMap::new(),
             )
-            .await
-        {
-            Ok(session) => session,
-            // Tool host sandboxes run centaur-tool-host, not a harness, so a
-            // session created under an earlier default harness stays usable.
-            Err(SessionStoreError::HarnessConflict { .. }) => {
-                let existing = self.store.get_session(thread_key).await?;
-                self.store
-                    .create_or_get_session_merging_metadata(
-                        thread_key,
-                        &existing.harness_type,
-                        None,
-                        metadata,
-                        BTreeMap::new(),
-                    )
-                    .await?
-            }
-            Err(error) => return Err(error.into()),
-        };
+            .await?;
         if session.iron_control_principal.as_deref() != Some(principal_id) {
             self.store
                 .set_iron_control_principal(thread_key, Some(principal_id))
