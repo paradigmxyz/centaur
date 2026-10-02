@@ -354,17 +354,13 @@ spec:
               value: {{ .Values.apiRs.activitySummary.enabled | quote }}
 {{- if .Values.apiRs.activitySummary.enabled }}
             - name: SESSION_ACTIVITY_SUMMARY_MODEL
-              value: {{ .Values.apiRs.activitySummary.model | quote }}
-            - name: SESSION_ACTIVITY_SUMMARY_OPENAI_BASE_URL
-              value: {{ .Values.apiRs.activitySummary.openaiBaseUrl | quote }}
+              value: {{ .Values.apiRs.activitySummary.model | default "" | quote }}
             - name: SESSION_ACTIVITY_SUMMARY_MIN_INTERVAL_SECS
               value: {{ .Values.apiRs.activitySummary.minIntervalSecs | quote }}
             - name: SESSION_ACTIVITY_SUMMARY_TIMEOUT_SECS
               value: {{ .Values.apiRs.activitySummary.timeoutSecs | quote }}
             - name: SESSION_ACTIVITY_SUMMARY_MAX_FACTS
               value: {{ .Values.apiRs.activitySummary.maxFacts | quote }}
-            - name: SESSION_ACTIVITY_SUMMARY_MAX_OUTPUT_TOKENS
-              value: {{ .Values.apiRs.activitySummary.maxOutputTokens | quote }}
             - name: SESSION_ACTIVITY_SUMMARY_REASONING_EFFORT
               value: {{ .Values.apiRs.activitySummary.reasoningEffort | default "" | quote }}
 {{- end }}

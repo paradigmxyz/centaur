@@ -620,18 +620,12 @@ apiRs:
   sandboxIdleCleanupBackstopSecs: 21600 # 6 hours
   activitySummary:
     enabled: false
-    model: gpt-5.4-nano
-    # Deprecated compatibility fallback. Prefer OPENAI_BASE_URL in apiRs.extraEnv.
-    openaiBaseUrl: https://api.openai.com/v1
+    # Use the ordinary agent runner with the fast Luna model and source credentials.
+    model: "gpt-6-luna"
     minIntervalSecs: 20
-    timeoutSecs: 5
+    timeoutSecs: 60
     maxFacts: 12
-    maxOutputTokens: 128
-    # Reasoning effort for the summary call. The output budget above is small,
-    # so a server that resolves an absent effort to its highest level spends
-    # the whole budget reasoning and returns no message. Empty omits the
-    # parameter, for a server that rejects it outright.
-    reasoningEffort: low
+    reasoningEffort: "low"
   metrics:
     # The Rust API always serves Prometheus text metrics at /metrics. This flag
     # only controls scrape annotations for Prometheus/VictoriaMetrics-style

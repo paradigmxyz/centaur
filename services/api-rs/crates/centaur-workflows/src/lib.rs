@@ -522,12 +522,12 @@ struct WorkflowResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct AgentTurnResult {
+pub struct AgentTurnResult {
     thread_key: String,
     execution_id: String,
     status: String,
     output_lines: Vec<String>,
-    result_text: String,
+    pub result_text: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -4360,29 +4360,29 @@ fn slack_post_result_from_response(channel: &str, response: Value) -> SlackPostR
     }
 }
 
-struct AgentTurnRequest {
-    thread_key: String,
-    harness_type: HarnessType,
-    persona_id: Option<String>,
-    principal_foreign_id: Option<String>,
-    parts: Vec<Value>,
-    client_message_id: String,
-    session_metadata: Value,
-    message_metadata: Value,
-    execution_metadata: Value,
-    execution_idempotency_key: String,
-    workflow_owned_thread: bool,
-    idle_timeout_ms: u64,
-    max_duration_ms: u64,
+pub struct AgentTurnRequest {
+    pub thread_key: String,
+    pub harness_type: HarnessType,
+    pub persona_id: Option<String>,
+    pub principal_foreign_id: Option<String>,
+    pub parts: Vec<Value>,
+    pub client_message_id: String,
+    pub session_metadata: Value,
+    pub message_metadata: Value,
+    pub execution_metadata: Value,
+    pub execution_idempotency_key: String,
+    pub workflow_owned_thread: bool,
+    pub idle_timeout_ms: u64,
+    pub max_duration_ms: u64,
     // Optional per-turn model / provider / reasoning-effort overrides. When set
     // they ride the execute input line exactly like the slackbot's per-turn
     // `--model` / `--bedrock` / `-rsn` flags do (see slackbotv2's
     // `toCodexInputLineWithStaged`), so the harness applies them to this turn;
     // when `None` the deployment/baked harness default stands. `provider` and
     // `reasoning` only affect the codex harness (claude/amp ignore them).
-    model: Option<String>,
-    provider: Option<String>,
-    reasoning: Option<String>,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub reasoning: Option<String>,
 }
 
 /// Builds the single `type: "user"` execute input line for a workflow agent
@@ -4412,7 +4412,8 @@ fn agent_turn_input_line(
     serde_json::to_string(&Value::Object(line))
 }
 
-async fn run_agent_session_turn(
+/// Run an internal agent turn through the ordinary session and harness lifecycle.
+pub async fn run_agent_session_turn(
     session_runtime: SessionRuntime,
     turn: AgentTurnRequest,
 ) -> Result<AgentTurnResult, WorkflowRuntimeError> {
