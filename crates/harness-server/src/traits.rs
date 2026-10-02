@@ -28,6 +28,8 @@ pub struct ThreadState {
     /// `None` runs the harness's configured default.
     pub reasoning_effort: Option<String>,
     pub harness_session_id: Option<String>,
+    /// Centaur thread key from the blocks input, when known.
+    pub thread_key: Option<String>,
     pub completed_turns: Vec<Turn>,
     pub process: Option<HarnessChild>,
     pub thread_started_sent: bool,
@@ -84,6 +86,12 @@ pub trait HarnessServer {
     fn stdin_for_reasoning_effort(&self, _effort: Option<&str>) -> Result<Vec<u8>> {
         Ok(Vec::new())
     }
+    /// Stdin that asks the running process to abort its turn. The turn then
+    /// ends on the harness's own terminal event and the process survives.
+    /// `None` (the default) kills the process instead.
+    fn stdin_for_interrupt(&self) -> Option<Vec<u8>> {
+        None
+    }
     fn parse_stdout_line(&self, line: &str) -> Result<Self::Event>;
     fn normalize_events(
         &self,
@@ -117,6 +125,7 @@ pub trait HarnessServer {
             service_tier: params.service_tier.clone().flatten(),
             reasoning_effort: None,
             harness_session_id: None,
+            thread_key: None,
             completed_turns: Vec::new(),
             process: None,
             thread_started_sent: false,
