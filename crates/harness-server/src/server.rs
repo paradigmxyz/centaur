@@ -1516,12 +1516,23 @@ pub(crate) fn usage_span_input_value(input: &[UserInput]) -> Option<String> {
 }
 
 fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState) -> Result<()> {
-    if let Some(process) = state.process.as_mut() {
-        if process.model == state.model && process.child.try_wait()?.is_none() {
-            return Ok(());
-        }
-        state.process = None;
+    if let Some(process) = state.process.as_mut()
+        && process.model == state.model
+        && process.child.try_wait()?.is_none()
+    {
+        return Ok(());
     }
+    if !state.model.is_empty()
+        && let Err(message) = harness.validate_model(&state.model)
+    {
+        // Fail this turn, and let later turns run the last working model.
+        state.model = state
+            .process
+            .as_ref()
+            .map_or_else(|| harness.default_model(), |process| process.model.clone());
+        return Err(HarnessServerError::UnknownModel { message });
+    }
+    state.process = None;
 
     let mut command = harness.command_for_turn(state);
     let mut child = command

@@ -38,3 +38,7 @@ has keys for. api-rs refuses to start with `pi` as the default harness when
 Set these through `sandbox.extraEnv`. A per-thread `--model provider/id`
 overrides `CENTAUR_PI_MODEL`, and `-rsn <level>` sets the thinking level for one turn
 (`none` turns thinking off).
+
+A model must be a `provider/id` or bare `id` that `pi --list-models` shows in
+the sandbox. An unknown model fails that turn with suggestions instead of
+reaching Pi, and the thread keeps its previous model.

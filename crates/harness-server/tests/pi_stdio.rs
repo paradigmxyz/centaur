@@ -20,14 +20,17 @@ const CODEMODE_TURN: &str = concat!(
     "/tests/fixtures/pi/codemode_turn.jsonl"
 );
 
-/// Scripted `pi --mode rpc`: logs its argv, environment, and stdin, and
-/// replays a recorded turn for each prompt. A `slow` prompt waits for
+/// Scripted `pi`: lists two models for `--list-models`; in RPC mode, logs its
+/// argv, environment, and stdin, and replays a recorded turn for each prompt. A `slow` prompt waits for
 /// `abort`, which ends the run the way Pi does: an aborted message, then
 /// `agent_settled`, then the abort response.
 fn fake_pi(dir: &Path) -> PathBuf {
     let script = format!(
         concat!(
             "#!/bin/sh\n",
+            "if [ \"$1\" = --list-models ]; then printf '%s\\n' ",
+            "'provider   model      context' 'anthropic  claude-x   1M' 'openai     gpt-5.5    1M'; ",
+            "exit 0; fi; ",
             "printf '%s|%s|%s|%s\\n' \"$ANTHROPIC_API_KEY\" \"$PI_TELEMETRY\" ",
             "\"$PI_SKIP_VERSION_CHECK\" \"$*\" >> '{dir}/argv'; ",
             "while IFS= read -r line; do ",
@@ -147,6 +150,7 @@ fn pi_blocks_turns_render_tools_codemode_and_abort_and_respawn_on_model_change()
 
     let first = server.turn("run echo hi", json!({"reasoning": "high"}));
     let second = server.turn("again", json!({"model": "openai/gpt-5.5"}));
+    let unknown = server.turn("bad model", json!({"model": "openai/gpt-5"}));
     let codemode = server.turn("use codemode", json!({}));
     server.user("slow", json!({}));
     server.read_until("turn/started");
@@ -199,6 +203,15 @@ fn pi_blocks_turns_render_tools_codemode_and_abort_and_respawn_on_model_change()
         );
     }
 
+    // An unknown model fails its turn without reaching Pi; the next turn runs
+    // the last working model again.
+    assert_eq!(status(&unknown), "failed", "{unknown:#?}");
+    assert_eq!(
+        unknown.last().unwrap()["params"]["turn"]["error"]["message"],
+        "unknown Pi model `openai/gpt-5`; use a provider/id from `pi --list-models`, \
+         such as openai/gpt-5.5"
+    );
+
     // Codemode's nested calls render as their own command items.
     assert_eq!(status(&codemode), "completed");
     let completed = items(&codemode, "item/completed");
@@ -234,7 +247,8 @@ fn pi_blocks_turns_render_tools_codemode_and_abort_and_respawn_on_model_change()
         "{aborted:#?}"
     );
 
-    // One spawn per model; the session id is stable across them.
+    // A spawn per model, and a respawn after the failed turn; the session id
+    // is stable across them.
     let argv = std::fs::read_to_string(dir.join("argv")).unwrap();
     let argv: Vec<&str> = argv.lines().collect();
     assert_eq!(
@@ -242,6 +256,8 @@ fn pi_blocks_turns_render_tools_codemode_and_abort_and_respawn_on_model_change()
         [
             "|0|1|--mode rpc --approve --session-id centaur-slack-C123-123.456 \
              --thinking medium --tools read,bash,edit,write,codemode",
+            "|0|1|--mode rpc --approve --session-id centaur-slack-C123-123.456 \
+             --model openai/gpt-5.5 --thinking medium --tools read,bash,edit,write,codemode",
             "|0|1|--mode rpc --approve --session-id centaur-slack-C123-123.456 \
              --model openai/gpt-5.5 --thinking medium --tools read,bash,edit,write,codemode",
         ]

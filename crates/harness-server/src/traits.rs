@@ -72,6 +72,12 @@ pub trait HarnessServer {
     fn default_model(&self) -> String;
     fn default_model_provider(&self) -> &'static str;
     fn command_for_turn(&self, state: &ThreadState) -> ProcessCommand;
+    /// Checks a non-empty model before a process starts with it, returning a
+    /// user-facing reason when the harness cannot run it. Accepts all models
+    /// by default.
+    fn validate_model(&self, _model: &str) -> std::result::Result<(), String> {
+        Ok(())
+    }
     fn stdin_for_turn(&self, input: &[UserInput]) -> Result<Vec<u8>>;
     fn stdin_for_steer(&self, input: &[UserInput]) -> Result<Vec<u8>> {
         self.stdin_for_turn(input)

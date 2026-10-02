@@ -55,6 +55,8 @@ pub enum HarnessServerError {
     },
     #[error("Hermes exited with status {status}")]
     HermesExited { status: ExitStatus },
+    #[error("{message}")]
+    UnknownModel { message: String },
     #[error("{kind:?} turn interrupted")]
     TurnInterrupted { kind: HarnessKind },
     #[error("failed to spawn {bin} app-server: {source}")]

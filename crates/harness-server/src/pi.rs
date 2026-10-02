@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::process::Command as ProcessCommand;
+use std::sync::OnceLock;
 
 use codex_app_server_protocol::UserInput;
 use serde_json::{Value, json};
@@ -239,6 +240,76 @@ fn session_id(state: &ThreadState) -> String {
     )
 }
 
+fn pi_bin() -> String {
+    env::var("CENTAUR_PI_BIN").unwrap_or_else(|_| "pi".to_string())
+}
+
+/// `(provider, id)` for every model Pi can run here, from `pi --list-models`
+/// (which lists only providers with credentials). `None` when Pi can't list
+/// them; validation is then left to Pi's own startup.
+fn model_catalog() -> Option<&'static [(String, String)]> {
+    static CATALOG: OnceLock<Option<Vec<(String, String)>>> = OnceLock::new();
+    CATALOG
+        .get_or_init(|| {
+            let output = ProcessCommand::new(pi_bin())
+                .arg("--list-models")
+                .env("PI_TELEMETRY", "0")
+                .env("PI_SKIP_VERSION_CHECK", "1")
+                .output();
+            match output {
+                Ok(output) if output.status.success() => {
+                    Some(parse_model_list(&String::from_utf8_lossy(&output.stdout)))
+                }
+                result => {
+                    eprintln!("pi --list-models failed, not validating models: {result:?}");
+                    None
+                }
+            }
+        })
+        .as_deref()
+}
+
+/// Parses `pi --list-models`: a header row, then `provider  model  ...` rows.
+fn parse_model_list(output: &str) -> Vec<(String, String)> {
+    output
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let mut columns = line.split_whitespace();
+            Some((columns.next()?.to_string(), columns.next()?.to_string()))
+        })
+        .collect()
+}
+
+/// Accepts `provider/id` or a bare `id` from the catalog, each optionally with
+/// Pi's `:<thinking>` suffix. Pi itself also fuzzy-matches, which would make a
+/// typo silently run some other model.
+fn check_model(model: &str, catalog: &[(String, String)]) -> std::result::Result<(), String> {
+    let name = model
+        .rsplit_once(':')
+        .filter(|(_, level)| THINKING_LEVELS.contains(level))
+        .map_or(model, |(name, _)| name);
+    if catalog
+        .iter()
+        .any(|(provider, id)| name == id || name == format!("{provider}/{id}"))
+    {
+        return Ok(());
+    }
+    let needle = name.rsplit('/').next().unwrap_or(name).to_ascii_lowercase();
+    let suggestions: Vec<String> = catalog
+        .iter()
+        .filter(|(_, id)| id.to_ascii_lowercase().contains(&needle))
+        .take(5)
+        .map(|(provider, id)| format!("{provider}/{id}"))
+        .collect();
+    let mut message =
+        format!("unknown Pi model `{model}`; use a provider/id from `pi --list-models`");
+    if !suggestions.is_empty() {
+        message.push_str(&format!(", such as {}", suggestions.join(", ")));
+    }
+    Err(message)
+}
+
 fn default_thinking_level() -> String {
     env::var("CENTAUR_PI_THINKING").unwrap_or_else(|_| "medium".to_string())
 }
@@ -283,8 +354,7 @@ impl HarnessServer for PiHarness {
             return command;
         }
 
-        let bin = env::var("CENTAUR_PI_BIN").unwrap_or_else(|_| "pi".to_string());
-        let mut command = ProcessCommand::new(bin);
+        let mut command = ProcessCommand::new(pi_bin());
         // `--approve` trusts the workspace's project resources, such as the
         // skills the sandbox installs under `.agents/skills`; RPC mode cannot
         // prompt for trust and would skip them.
@@ -300,6 +370,13 @@ impl HarnessServer for PiHarness {
         command.env("PI_TELEMETRY", "0");
         command.env("PI_SKIP_VERSION_CHECK", "1");
         command
+    }
+
+    fn validate_model(&self, model: &str) -> std::result::Result<(), String> {
+        if env::var_os("CENTAUR_PI_APP_BRIDGE_COMMAND").is_some() {
+            return Ok(());
+        }
+        model_catalog().map_or(Ok(()), |catalog| check_model(model, catalog))
     }
 
     fn stdin_for_turn(&self, input: &[UserInput]) -> Result<Vec<u8>> {
@@ -352,8 +429,38 @@ impl HarnessServer for PiHarness {
 mod tests {
     use serde_json::json;
 
-    use super::PiEventNormalizer;
+    use super::{PiEventNormalizer, check_model, parse_model_list};
     use crate::NormalizedEvent;
+
+    #[test]
+    fn model_names_must_match_the_pi_catalog() {
+        // Shape of `pi --list-models` 1.0.0 output.
+        let catalog = parse_model_list(concat!(
+            "provider   model                       context  max-out  thinking  images\n",
+            "anthropic  claude-sonnet-5             1M       128K     yes       yes   \n",
+            "anthropic  claude-sonnet-5-5           1M       128K     yes       yes   \n",
+            "openai     gpt-5.5                     1M       128K     yes       yes   \n",
+        ));
+
+        for model in [
+            "anthropic/claude-sonnet-5",
+            "claude-sonnet-5",
+            "openai/gpt-5.5:high",
+        ] {
+            assert_eq!(check_model(model, &catalog), Ok(()), "{model}");
+        }
+        assert_eq!(
+            check_model("anthropic/sonnet-5", &catalog),
+            Err(
+                "unknown Pi model `anthropic/sonnet-5`; use a provider/id from \
+                 `pi --list-models`, such as anthropic/claude-sonnet-5, \
+                 anthropic/claude-sonnet-5-5"
+                    .to_string()
+            )
+        );
+        assert!(check_model("openai/gpt-5.5:ultra", &catalog).is_err());
+        assert!(check_model("bogus/nope", &catalog).is_err());
+    }
 
     #[test]
     fn retried_provider_error_does_not_fail_the_settled_turn() {
