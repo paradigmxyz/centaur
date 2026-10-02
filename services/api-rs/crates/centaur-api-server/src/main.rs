@@ -73,22 +73,11 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     if args.server.run_migrations {
         store.run_migrations().await?;
     }
-    if let Some(config) = args.activity_summary_config() {
-        match activity_summary::ActivitySummaryWorker::new(store.clone(), config) {
-            Ok(worker) => {
-                tokio::spawn(worker.run());
-            }
-            Err(error) => {
-                tracing::warn!(%error, "activity summaries disabled; API startup continues")
-            }
-        }
-    }
     let pool = store.pool().clone();
     let sandbox_runtime = args.sandbox_runtime().await?;
     let iron_control = args.iron_control_runtime().await?;
     let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime, iron_control.registrar)
-        .with_session_principal_admission(args.session_principal_admission())
-        .with_openai_session_title_generator_from_env();
+        .with_session_principal_admission(args.session_principal_admission());
     runtime = runtime.with_personas(args.persona_registry()?);
     let sandbox_capacity_config = args.sandbox_capacity_config();
     if let Some(config) = sandbox_capacity_config {
@@ -102,6 +91,13 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     if let Some(config) = args.session_event_retention_config() {
         runtime = runtime.with_session_event_retention(config);
     }
+    if let Some(config) = args.activity_summary_config() {
+        // Summary sessions do not need their own generated titles.
+        let worker =
+            activity_summary::ActivitySummaryWorker::new(store.clone(), runtime.clone(), config);
+        tokio::spawn(worker.run());
+    }
+    runtime = runtime.with_openai_session_title_generator_from_env();
     let workflow_host_sandbox = args
         .workflow_host_sandbox_runtime(&iron_control.workflow_host_principal)
         .await?;

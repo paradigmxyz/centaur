@@ -403,19 +403,6 @@
         "sandboxOrphanSweepGraceSecs": { "type": "integer", "minimum": 1 },
         "workflowHostSandbox": { "type": "boolean" },
         "workflowHostResources": { "type": "object" },
-        "activitySummary": {
-          "type": "object",
-          "properties": {
-            "enabled": { "type": "boolean" },
-            "provider": { "type": "string", "enum": ["openai", "codex", "anthropic", "claude"] },
-            "backend": { "type": "string", "enum": ["direct", "iron-proxy"] },
-            "model": { "type": "string" },
-            "baseUrl": { "type": "string" },
-            "apiKeyEnv": { "type": "string" },
-            "proxyUrl": { "type": "string" },
-            "proxyCaSecretName": { "type": "string" }
-          }
-        },
         "etl": {
           "type": "object",
           "properties": {
