@@ -6,6 +6,9 @@
 //! with `--continue`, so a respawn (after an interrupt, crash, or model
 //! switch) resumes the same conversation.
 //!
+//! Codemode is on by default: the model can write a script that calls the
+//! other tools, and each nested call renders as its own tool item.
+//!
 //! Pi reads provider API keys from the environment. The sandbox holds only
 //! iron-proxy placeholders, which the proxy rewrites on the wire.
 
@@ -23,6 +26,8 @@ use crate::{
 
 /// Placeholder API keys iron-proxy replaces with the real credential.
 const PLACEHOLDER_API_KEYS: &[&str] = &["ANTHROPIC_API_KEY"];
+/// Pi's default tools plus codemode; `CENTAUR_PI_TOOLS` replaces the list.
+const DEFAULT_TOOLS: &str = "read,bash,edit,write,codemode";
 const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 #[derive(Debug, Default)]
@@ -45,6 +50,18 @@ impl PiEventNormalizer {
             Some("message_update") => self.message_update(&event["assistantMessageEvent"]),
             Some("message_end") if event["message"]["role"] == "assistant" => {
                 self.assistant_message(&event["message"])
+            }
+            // Codemode's nested calls never appear in an assistant message.
+            Some("tool_execution_start") if event["parentToolCallId"].is_string() => {
+                vec![NormalizedEvent::AssistantMessage {
+                    partial: false,
+                    stop_reason: None,
+                    content: vec![NormalizedContent::ToolUse {
+                        raw_id: event["toolCallId"].as_str().unwrap_or_default().to_string(),
+                        tool: event["toolName"].as_str().unwrap_or_default().to_string(),
+                        arguments: event["args"].clone(),
+                    }],
+                }]
             }
             Some("tool_execution_end") => {
                 vec![NormalizedEvent::ToolResults(vec![tool_result(&event)])]
@@ -177,7 +194,7 @@ fn tool_result(event: &Value) -> NormalizedToolResult {
 }
 
 fn default_thinking_level() -> String {
-    env::var("PI_THINKING").unwrap_or_else(|_| "medium".to_string())
+    env::var("CENTAUR_PI_THINKING").unwrap_or_else(|_| "medium".to_string())
 }
 
 fn command_line(command: Value) -> Result<Vec<u8>> {
@@ -208,7 +225,7 @@ impl HarnessServer for PiHarness {
 
     /// `provider/id`. Empty lets Pi choose from the providers it has keys for.
     fn default_model(&self) -> String {
-        env::var("PI_MODEL").unwrap_or_default()
+        env::var("CENTAUR_PI_MODEL").unwrap_or_default()
     }
 
     fn default_model_provider(&self) -> &'static str {
@@ -220,7 +237,7 @@ impl HarnessServer for PiHarness {
             return command;
         }
 
-        let bin = env::var("PI_BIN").unwrap_or_else(|_| "pi".to_string());
+        let bin = env::var("CENTAUR_PI_BIN").unwrap_or_else(|_| "pi".to_string());
         let mut command = ProcessCommand::new(bin);
         command.args(["--mode", "rpc", "--continue"]);
         if !state.model.is_empty() {
@@ -228,6 +245,8 @@ impl HarnessServer for PiHarness {
         }
         // A resumed session keeps its last thinking level; start from the default.
         command.args(["--thinking", &default_thinking_level()]);
+        let tools = env::var("CENTAUR_PI_TOOLS").unwrap_or_else(|_| DEFAULT_TOOLS.to_string());
+        command.args(["--tools", &tools]);
         for key in PLACEHOLDER_API_KEYS {
             if env::var_os(key).is_none() {
                 command.env(key, key);

@@ -8,14 +8,19 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-/// A turn recorded from `pi --mode rpc` 1.0.0: one bash tool call, then text.
+/// Turns recorded from `pi --mode rpc` 1.0.0: one bash tool call, then text;
+/// and one codemode script running two bash calls in parallel, then text.
 const TOOL_TURN: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/pi/tool_turn.jsonl"
 );
+const CODEMODE_TURN: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/pi/codemode_turn.jsonl"
+);
 
 /// Scripted `pi --mode rpc`: logs its argv, API key, and stdin, acknowledges
-/// commands, and replays the recorded turn for each prompt.
+/// commands, and replays a recorded turn for each prompt.
 fn fake_pi(dir: &Path) -> PathBuf {
     let script = format!(
         concat!(
@@ -26,12 +31,13 @@ fn fake_pi(dir: &Path) -> PathBuf {
             "case \"$line\" in ",
             "*'\"type\":\"prompt\"'*) ",
             "printf '%s\\n' '{{\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{{\"disposition\":\"started\"}}}}'; ",
-            "cat '{fixture}' ;; ",
+            "case \"$line\" in *codemode*) cat '{codemode}' ;; *) cat '{tool}' ;; esac ;; ",
             "*) printf '%s\\n' '{{\"type\":\"response\",\"command\":\"set_thinking_level\",\"success\":true}}' ;; ",
             "esac; done"
         ),
         dir = dir.display(),
-        fixture = TOOL_TURN,
+        tool = TOOL_TURN,
+        codemode = CODEMODE_TURN,
     );
     let path = dir.join("pi");
     std::fs::write(&path, script).unwrap();
@@ -52,17 +58,18 @@ fn user_line(text: &str, extra: Value) -> Value {
 }
 
 #[test]
-fn pi_blocks_turns_stream_tools_and_text_and_respawn_on_model_change() {
+fn pi_blocks_turns_stream_tools_codemode_and_text_and_respawn_on_model_change() {
     let dir: PathBuf = std::env::temp_dir().join(format!("pi-stdio-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
 
     let mut server = Command::new(env!("CARGO_BIN_EXE_harness-server"))
         .arg("pi")
-        .env("PI_BIN", fake_pi(&dir))
+        .env("CENTAUR_PI_BIN", fake_pi(&dir))
         .env_remove("CENTAUR_PI_APP_BRIDGE_COMMAND")
         .env_remove("ANTHROPIC_API_KEY")
-        .env_remove("PI_MODEL")
-        .env_remove("PI_THINKING")
+        .env_remove("CENTAUR_PI_MODEL")
+        .env_remove("CENTAUR_PI_THINKING")
+        .env_remove("CENTAUR_PI_TOOLS")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -99,6 +106,7 @@ fn pi_blocks_turns_stream_tools_and_text_and_respawn_on_model_change() {
 
     let first = run_turn(user_line("run echo hi", json!({"reasoning": "high"})));
     let second = run_turn(user_line("again", json!({"model": "openai/gpt-5.5"})));
+    let codemode = run_turn(user_line("use codemode", json!({})));
     drop(stdin);
     server.wait().unwrap();
 
@@ -128,13 +136,45 @@ fn pi_blocks_turns_stream_tools_and_text_and_respawn_on_model_change() {
         );
     }
 
+    // Codemode's nested calls render as their own command items.
+    assert_eq!(
+        codemode.last().unwrap()["params"]["turn"]["status"],
+        "completed"
+    );
+    let items: Vec<&Value> = codemode
+        .iter()
+        .filter(|value| value["method"] == "item/completed")
+        .map(|value| &value["params"]["item"])
+        .collect();
+    let commands: Vec<(&Value, &Value)> = items
+        .iter()
+        .filter(|item| item["type"] == "commandExecution")
+        .map(|item| (&item["command"], &item["aggregatedOutput"]))
+        .collect();
+    assert_eq!(
+        commands,
+        [
+            (&json!("echo a"), &json!("a\n")),
+            (&json!("echo b"), &json!("b\n"))
+        ],
+        "{items:#?}"
+    );
+    assert!(
+        items.iter().any(|item| item["type"] == "dynamicToolCall"
+            && item["tool"] == "codemode"
+            && item["status"] == "completed"),
+        "{items:#?}"
+    );
+
     let argv = std::fs::read_to_string(dir.join("argv")).unwrap();
     let argv: Vec<&str> = argv.lines().collect();
     assert_eq!(
         argv,
         [
-            "ANTHROPIC_API_KEY --mode rpc --continue --thinking medium",
-            "ANTHROPIC_API_KEY --mode rpc --continue --model openai/gpt-5.5 --thinking medium",
+            "ANTHROPIC_API_KEY --mode rpc --continue --thinking medium \
+             --tools read,bash,edit,write,codemode",
+            "ANTHROPIC_API_KEY --mode rpc --continue --model openai/gpt-5.5 --thinking medium \
+             --tools read,bash,edit,write,codemode",
         ]
     );
     let stdin: Vec<Value> = std::fs::read_to_string(dir.join("stdin"))
@@ -148,6 +188,7 @@ fn pi_blocks_turns_stream_tools_and_text_and_respawn_on_model_change() {
             json!({"type": "set_thinking_level", "level": "high"}),
             json!({"type": "prompt", "message": "run echo hi"}),
             json!({"type": "prompt", "message": "again"}),
+            json!({"type": "prompt", "message": "use codemode"}),
         ]
     );
 
