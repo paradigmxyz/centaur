@@ -7,7 +7,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Path, Query},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, HeaderValue, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -155,6 +155,7 @@ struct SlackChannelMembersQuery {
 
 #[derive(Debug, Deserialize)]
 struct SlackFileProxyClaims {
+    sub: String,
     slack: SlackProxyClaims,
 }
 
@@ -603,6 +604,7 @@ fn paginate_slack_channels(
 }
 
 async fn get_slack_channel_history(
+    State(state): State<AppState>,
     headers: HeaderMap,
     Path(channel_id): Path<String>,
     Query(query): Query<SlackChannelHistoryQuery>,
@@ -610,6 +612,17 @@ async fn get_slack_channel_history(
     let claims = authorize_slack_file_proxy(&headers)?;
     validate_slack_channel_id(&channel_id)?;
     validate_slack_channel_history_query(&query)?;
+
+    if let Some(value) = crew_history(
+        &state,
+        &claims,
+        "conversations.history",
+        slack_channel_history_form(&channel_id, &query),
+    )
+    .await?
+    {
+        return Ok(Json(value));
+    }
 
     let config = slack_proxy_config()?;
     let client = http_client();
@@ -649,6 +662,7 @@ async fn get_slack_channel_members(
 }
 
 async fn get_slack_thread_replies(
+    State(state): State<AppState>,
     headers: HeaderMap,
     Path((channel_id, thread_ts)): Path<(String, String)>,
     Query(query): Query<SlackChannelHistoryQuery>,
@@ -657,6 +671,17 @@ async fn get_slack_thread_replies(
     validate_slack_channel_id(&channel_id)?;
     validate_slack_thread_ts(&thread_ts)?;
     validate_slack_channel_history_query(&query)?;
+
+    if let Some(value) = crew_history(
+        &state,
+        &claims,
+        "conversations.replies",
+        slack_thread_replies_form(&channel_id, &thread_ts, &query),
+    )
+    .await?
+    {
+        return Ok(Json(value));
+    }
 
     let config = slack_proxy_config()?;
     let client = http_client();
@@ -670,6 +695,85 @@ async fn get_slack_thread_replies(
     .await?;
     let value = slack_thread_replies(client, config, &channel_id, &thread_ts, &query).await?;
     Ok(Json(value))
+}
+
+async fn crew_history(
+    state: &AppState,
+    claims: &SlackFileProxyClaims,
+    method: &str,
+    form: Vec<(&str, String)>,
+) -> Result<Option<Value>, ApiError> {
+    let Some(control) = &state.iron_control else {
+        return Ok(None);
+    };
+    // Resolve the signed subject at the source of truth. Never accept a caller's
+    // app selector or fall back to the shared bot after a Crew lookup/read fails.
+    let principal = control
+        .get_principal(&claims.sub)
+        .await
+        .map_err(|_| ApiError::ServiceUnavailable("Slack principal lookup failed".to_owned()))?;
+    if principal.kind.as_deref() != Some("slack_crew") {
+        return Ok(None);
+    }
+    let identity = principal
+        .foreign_id
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| ApiError::Forbidden("Crew principal has no Slack identity".to_owned()))?;
+    let url = non_empty_env("SLACK_CREW_URL")
+        .ok_or_else(|| ApiError::ServiceUnavailable("Crew history is not configured".to_owned()))?;
+    let token = non_empty_env("SLACK_CREW_ADMIN_TOKEN")
+        .ok_or_else(|| ApiError::ServiceUnavailable("Crew history is not configured".to_owned()))?;
+    let parameters: BTreeMap<_, _> = form.into_iter().collect();
+    let explicitly_allowed = parameters
+        .get("channel")
+        .is_some_and(|channel| claims.slack.history_channels.contains(channel));
+    let response = http_client()
+        .post(format!(
+            "{}/api/slack/crew/by-principal/{}/history",
+            url.trim_end_matches('/'),
+            urlencoding::encode(&identity)
+        ))
+        .bearer_auth(token)
+        .json(&json!({
+            "method": method,
+            "parameters": parameters,
+            "explicitly_allowed": explicitly_allowed,
+        }))
+        .send()
+        .await
+        .map_err(|_| ApiError::ServiceUnavailable("Crew history is unavailable".to_owned()))?;
+    if response.status() == reqwest::StatusCode::FORBIDDEN {
+        return Err(ApiError::Forbidden(
+            SlackChannelPermission::History
+                .forbidden_message()
+                .to_owned(),
+        ));
+    }
+    let status = response.status();
+    let value: Value = response
+        .json()
+        .await
+        .map_err(|_| ApiError::ServiceUnavailable("Invalid Crew history response".to_owned()))?;
+    if !status.is_success() {
+        // Preserve actionable Slack errors without reflecting arbitrary service
+        // responses or transport details into the sandbox.
+        if let Some(code) = value
+            .get("error")
+            .and_then(Value::as_str)
+            .and_then(|error| error.strip_prefix(&format!("Slack {method}: ")))
+            .filter(|code| {
+                !code.is_empty() && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+            })
+        {
+            return Err(ApiError::BadRequest(format!(
+                "Slack {method} failed: {code}"
+            )));
+        }
+        return Err(ApiError::ServiceUnavailable(
+            "Crew history request failed".to_owned(),
+        ));
+    }
+    Ok(Some(value))
 }
 
 fn upstream_body_is_unexpected_html(
@@ -1723,12 +1827,132 @@ mod tests {
 
     fn test_claims() -> SlackFileProxyClaims {
         SlackFileProxyClaims {
+            sub: "prn_test".to_owned(),
             slack: SlackProxyClaims {
                 upload_channels: vec![],
                 download_channels: vec![],
                 history_channels: vec![],
             },
         }
+    }
+
+    #[tokio::test]
+    async fn crew_history_binds_identity_and_history_grants_without_shared_bot_fallback() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let read_requests = requests.clone();
+        let app = Router::new()
+            .route(
+                "/api/v1/principals/{id}",
+                get(|Path(id): Path<String>, headers: HeaderMap| async move {
+                    assert_eq!(headers[header::AUTHORIZATION], "Bearer control-test");
+                    if id == "prn_missing" {
+                        return (axum::http::StatusCode::NOT_FOUND, Json(json!({})))
+                            .into_response();
+                    }
+                    Json(json!({"data": {
+                        "id": id, "name": "Test",
+                        "kind": if id == "prn_legacy" { "slack_channel" } else { "slack_crew" },
+                        "foreign_id": "slack-crew-t123-a456"
+                    }}))
+                    .into_response()
+                }),
+            )
+            .route(
+                "/api/slack/crew/by-principal/slack-crew-t123-a456/history",
+                post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                    let requests = read_requests.clone();
+                    async move {
+                        let request = requests.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!(headers[header::AUTHORIZATION], "Bearer crew-test");
+                        assert_eq!(body["method"], "conversations.replies");
+                        assert_eq!(
+                            body["parameters"],
+                            json!({
+                                "channel": "C123456789", "ts": "1700000000.000001", "limit": "3"
+                            })
+                        );
+                        if request == 2 {
+                            return (
+                                axum::http::StatusCode::BAD_GATEWAY,
+                                Json(
+                                    json!({"error": "Slack conversations.replies: not_in_channel"}),
+                                ),
+                            )
+                                .into_response();
+                        }
+                        if body["explicitly_allowed"] == true {
+                            Json(json!({"ok": true, "messages": [{"text": "Crew only"}]}))
+                                .into_response()
+                        } else {
+                            axum::http::StatusCode::FORBIDDEN.into_response()
+                        }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        // These environment names are used only by this test in the test process.
+        unsafe {
+            std::env::set_var("SLACK_CREW_URL", &url);
+            std::env::set_var("SLACK_CREW_ADMIN_TOKEN", "crew-test");
+        }
+        let state =
+            AppState::unready(crate::auth::ApiAuthConfig::testing("test")).with_iron_control(
+                centaur_iron_control::IronControlClient::new(&url, "control-test"),
+            );
+        let form = vec![
+            ("channel", "C123456789".to_owned()),
+            ("ts", "1700000000.000001".to_owned()),
+            ("limit", "3".to_owned()),
+        ];
+        let mut claims = test_claims();
+        claims.slack.upload_channels.push("C123456789".to_owned());
+        claims.slack.history_channels.push("C987654321".to_owned());
+        assert!(matches!(
+            crew_history(&state, &claims, "conversations.replies", form.clone()).await,
+            Err(ApiError::Forbidden(_))
+        ));
+        claims.slack.history_channels.push("C123456789".to_owned());
+        let result = crew_history(&state, &claims, "conversations.replies", form.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result,
+            json!({"ok": true, "messages": [{"text": "Crew only"}]})
+        );
+        let error = crew_history(&state, &claims, "conversations.replies", form.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ApiError::BadRequest(ref message) if message == "Slack conversations.replies failed: not_in_channel")
+        );
+        claims.sub = "prn_legacy".to_owned();
+        assert!(
+            crew_history(&state, &claims, "conversations.replies", form.clone())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        claims.sub = "prn_missing".to_owned();
+        assert!(matches!(
+            crew_history(&state, &claims, "conversations.replies", form.clone()).await,
+            Err(ApiError::ServiceUnavailable(_))
+        ));
+        claims.sub = "prn_test".to_owned();
+        unsafe {
+            std::env::remove_var("SLACK_CREW_ADMIN_TOKEN");
+        }
+        assert!(matches!(
+            crew_history(&state, &claims, "conversations.replies", form).await,
+            Err(ApiError::ServiceUnavailable(_))
+        ));
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        unsafe {
+            std::env::remove_var("SLACK_CREW_URL");
+        }
+        server.abort();
     }
 
     fn test_channel_item(id: &str, name: &str, can_read_history: bool) -> SlackChannelItem {
@@ -1780,6 +2004,7 @@ mod tests {
     #[test]
     fn extracts_deduped_channel_ids_from_all_slack_claims() {
         let claims = SlackFileProxyClaims {
+            sub: "prn_test".to_owned(),
             slack: SlackProxyClaims {
                 upload_channels: vec!["C123456789".to_owned()],
                 download_channels: vec!["G123456789".to_owned(), "C123456789".to_owned()],
@@ -1800,6 +2025,7 @@ mod tests {
     #[test]
     fn channel_item_enriches_slack_metadata_with_permissions() {
         let claims = SlackFileProxyClaims {
+            sub: "prn_test".to_owned(),
             slack: SlackProxyClaims {
                 upload_channels: vec!["C123456789".to_owned()],
                 download_channels: vec![],
@@ -1937,6 +2163,7 @@ mod tests {
             max_upload_bytes: 1,
         };
         let mut claims = SlackFileProxyClaims {
+            sub: "prn_test".to_owned(),
             slack: SlackProxyClaims {
                 upload_channels: vec![],
                 download_channels: vec![],

@@ -73,6 +73,7 @@ pub struct AppState {
     initialized: Arc<RwLock<Option<AppRuntimeState>>>,
     metrics: PrometheusHandle,
     auth: ApiAuthConfig,
+    pub(crate) iron_control: Option<centaur_iron_control::IronControlClient>,
 }
 
 #[derive(Clone)]
@@ -89,7 +90,13 @@ impl AppState {
             initialized: Arc::new(RwLock::new(None)),
             metrics: prometheus_handle().expect("failed to initialize Prometheus metrics recorder"),
             auth,
+            iron_control: None,
         }
+    }
+
+    pub fn with_iron_control(mut self, client: centaur_iron_control::IronControlClient) -> Self {
+        self.iron_control = Some(client);
+        self
     }
 
     pub fn ready(

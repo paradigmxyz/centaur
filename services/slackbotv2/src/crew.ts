@@ -154,6 +154,38 @@ export function createCrewManager(config: CrewConfig) {
   app.use('/api/slack/crew/:id/install', requireAdmin)
   app.use('/api/slack/crew/:id/manage', requireAdmin)
   app.use('/api/slack/crew/by-app/:appId/manage', requireAdmin)
+  app.use('/api/slack/crew/by-principal/:principal/history', requireAdmin)
+  app.post('/api/slack/crew/by-principal/:principal/history', async c => {
+    // api-rs resolves the signed JWT subject to this Console-owned identity.
+    // Credentials stay here, and the request cannot select an arbitrary Slack API.
+    const record = (await config.store.list()).find(candidate => candidate.appId
+      && candidate.teamId === config.teamId
+      && `slack-crew-${candidate.teamId.toLowerCase()}-${candidate.appId.toLowerCase()}` === c.req.param('principal'))
+    if (!record || record.status !== 'active' || record.paused || !record.botToken) {
+      return c.json({ error: 'Crew app not found or unavailable.' }, 404)
+    }
+    const input = await c.req.json().catch(() => null)
+    const parameters = input?.parameters
+    const allowed = new Set(['channel', 'cursor', 'latest', 'oldest', 'inclusive', 'include_all_metadata', 'limit', 'ts'])
+    if (!input || !['conversations.history', 'conversations.replies'].includes(input.method)
+        || typeof input.explicitly_allowed !== 'boolean'
+        || !parameters || typeof parameters !== 'object' || Array.isArray(parameters)
+        || Object.entries(parameters).some(([key, value]) => !allowed.has(key) || typeof value !== 'string')
+        || !/^[CDG][A-Z0-9]{8,}$/.test(parameters.channel ?? '')
+        || (input.method === 'conversations.replies' && !/^\d+\.\d+$/.test(parameters.ts ?? ''))
+        || (parameters.limit !== undefined && (!/^\d+$/.test(parameters.limit)
+          || Number(parameters.limit) < 1 || Number(parameters.limit) > 999))) {
+      return c.json({ error: 'Invalid Crew history request.' }, 400)
+    }
+    if (!input.explicitly_allowed) {
+      const info = await slack('conversations.info', { channel: parameters.channel }, record.botToken)
+      if (info.channel?.id !== parameters.channel || info.channel?.is_private !== false
+          || info.channel?.is_member !== true) {
+        return c.json({ error: 'Not authorized to read history from this Slack channel.' }, 403)
+      }
+    }
+    return c.json(await slack(input.method, parameters, record.botToken))
+  })
   app.get('/api/slack/crew', async c => c.json({ crew: (await config.store.list()).map(publicRecord) }))
   app.post('/api/slack/crew', async c => {
     const input = await c.req.json().catch(() => null)

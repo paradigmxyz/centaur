@@ -251,6 +251,15 @@ spec:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sSLACK_BOT_TOKEN" .Values.secretManager.envPrefix }}
                   optional: true
+{{- if and .Values.slackbotv2.enabled .Values.slackbotv2.crew.enabled }}
+            - name: SLACK_CREW_URL
+              value: {{ printf "http://%s:3001" (include "centaur.componentName" (dict "root" . "component" "slackbotv2")) | quote }}
+            - name: SLACK_CREW_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sSLACK_CREW_ADMIN_TOKEN" .Values.secretManager.envPrefix }}
+{{- end }}
 {{- if $mcpPublicUrl }}
             - name: CENTAUR_MCP_PUBLIC_URL
               value: {{ $mcpPublicUrl | quote }}

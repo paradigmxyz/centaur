@@ -87,6 +87,10 @@ impl Args {
         self.sandbox.runtime().await
     }
 
+    pub(crate) fn iron_control_client(&self) -> Result<IronControlClient, ServerError> {
+        self.sandbox.iron_control.required_client()
+    }
+
     pub(crate) async fn iron_control_runtime(&self) -> Result<IronControlRuntime, ServerError> {
         self.sandbox.iron_control_runtime().await
     }

@@ -334,6 +334,16 @@ spec:
       ports:
         - protocol: TCP
           port: {{ $console.service.httpPort }}
+{{- if and .Values.slackbotv2.enabled .Values.slackbotv2.crew.enabled }}
+    # Crew history reads use the selected bot's credentials inside slackbotv2.
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 3001
+{{- end }}
     - ports:
         - protocol: TCP
           port: 443
@@ -365,6 +375,9 @@ spec:
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
       ports:
         - protocol: TCP
           port: 3001

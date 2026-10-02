@@ -356,3 +356,77 @@ describe('Crew provisioning', () => {
     expect(CREW_BOT_SCOPES.some(scope => scope.startsWith('admin:'))).toBe(false)
   })
 })
+
+describe('Crew history', () => {
+  test('uses only the selected active bot and accepts only authenticated read operations', async () => {
+    const f = fixture()
+    await install(f)
+    f.store.records.set('other', { ...f.store.records.get('research')!, id: 'other', appId: 'A456', botToken: 'other-test' })
+    const calls: string[] = []
+    const { app } = createCrewManager({ ...f.config, fetch: (async (url, init) => {
+      expect((init!.headers as Record<string, string>).Authorization).toBe('Bearer installed-test')
+      const method = String(url).split('/').pop()!
+      calls.push(method)
+      const form = new URLSearchParams(init!.body as string)
+      expect(form.get('channel')).toBe('C123456789')
+      expect(form.get('cursor')).toBe('next-page')
+      expect(form.get('limit')).toBe('3')
+      if (method === 'conversations.replies') expect(form.get('ts')).toBe('1700000000.000001')
+      return Response.json({ ok: true, messages: [{ ts: '1700000000.000001', text: 'Crew result' }] })
+    }) as typeof fetch })
+    const path = '/api/slack/crew/by-principal/slack-crew-t123-a123/history'
+    const input = { method: 'conversations.replies', explicitly_allowed: true,
+      parameters: { channel: 'C123456789', ts: '1700000000.000001', limit: '3', cursor: 'next-page' } }
+    const request = (body = input, token = 'management-test', target = path) => app.request(target, {
+      method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    })
+    expect((await request(input, 'wrong')).status).toBe(401)
+    expect((await request(input, 'management-test', path.replace('t123', 't999'))).status).toBe(404)
+    expect((await request({ ...input, method: 'chat.postMessage' })).status).toBe(400)
+    expect((await request({ ...input, parameters: { ...input.parameters, token: 'other-test' } } as typeof input)).status).toBe(400)
+    expect(calls).toEqual([])
+    for (const method of ['conversations.history', 'conversations.replies']) {
+      const response = await request({ ...input, method })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({ ok: true, messages: [{ ts: '1700000000.000001', text: 'Crew result' }] })
+    }
+    expect(calls).toEqual(['conversations.history', 'conversations.replies'])
+    f.store.records.get('research')!.paused = true
+    expect((await request()).status).toBe(404)
+    f.store.records.get('research')!.paused = false
+    f.store.records.get('research')!.status = 'needs_install'
+    expect((await request()).status).toBe(404)
+    expect(calls).toHaveLength(2)
+  })
+
+  test('ungranted channels require public membership of this bot, while explicit grants remain scoped', async () => {
+    const f = fixture()
+    await install(f)
+    let reads = 0
+    let channel: Record<string, unknown> = { id: 'C123456789', is_private: false, is_member: true }
+    const { app } = createCrewManager({ ...f.config, fetch: (async (url, init) => {
+      expect((init!.headers as Record<string, string>).Authorization).toBe('Bearer installed-test')
+      if (String(url).endsWith('/conversations.info')) return Response.json({ ok: true, channel })
+      reads++
+      return Response.json({ ok: true, messages: [] })
+    }) as typeof fetch })
+    const request = (explicitly_allowed = false) => app.request('/api/slack/crew/by-principal/slack-crew-t123-a123/history', {
+      method: 'POST', headers: { Authorization: 'Bearer management-test', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ method: 'conversations.history', explicitly_allowed, parameters: { channel: 'C123456789' } })
+    })
+    expect((await request()).status).toBe(200)
+    for (const inaccessible of [
+      { id: 'C123456789', is_private: true, is_member: true },
+      { id: 'C123456789', is_private: false, is_member: false },
+      { id: 'C123456789', is_member: true },
+      { id: 'C987654321', is_private: false, is_member: true }
+    ]) {
+      channel = inaccessible
+      expect((await request()).status).toBe(403)
+    }
+    expect(reads).toBe(1)
+    channel = { id: 'C123456789', is_private: true, is_member: true }
+    expect((await request(true)).status).toBe(200)
+    expect(reads).toBe(2)
+  })
+})
