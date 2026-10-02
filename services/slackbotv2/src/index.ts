@@ -1568,6 +1568,9 @@ async function syncThreadMessageToSession(
       throw error
     }
     finishSteeringReaction(input, trace)
+    if (input.mode === 'execute' && state.activeExecution === true && messagesToAppend.length > 0) {
+      backgroundWaitUntil(restoreLiveAssistantStatus(thread, input.options, trace))
+    }
     traceLog(input.options, 'slackbotv2_forward_complete', trace)
     recordForward(input.mode, 'complete', traceStartedAtMs)
     if (input.retryAttempt) slackbotMetrics.handoffRetries.inc({ outcome: 'succeeded' })
@@ -2695,6 +2698,7 @@ async function renderExecutionStream(
   }
   const titleStartedAtMs = nowMs()
   await setAssistantTitle(thread, titleFromMessage(promptText, options.userName), options, trace)
+  rememberLiveAssistantStatus(thread, options.assistantStatus ?? 'Thinking...')
   if (!assistantStatusVisible) {
     await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...', options, trace)
   }
@@ -2734,7 +2738,7 @@ async function renderExecutionStream(
     }) ?? await thread.post(visibleStream)
     return { diverged: capture.diverged, messageId: sent?.id }
   } finally {
-    await setAssistantStatus(thread, '', options, trace)
+    await clearLiveAssistantStatus(thread, options, trace)
   }
 }
 
@@ -2752,6 +2756,7 @@ async function renderRecoveredExecutionStream(
   }
   const titleStartedAtMs = nowMs()
   await setAssistantTitle(thread, titleFromMessage(promptText, options.userName), options, trace)
+  rememberLiveAssistantStatus(thread, options.assistantStatus ?? 'Thinking...')
   await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...', options, trace)
   traceLog(options, 'slackbotv2_render_slack_metadata_set', trace, {
     phase_ms: elapsedMs(titleStartedAtMs)
@@ -2784,7 +2789,7 @@ async function renderRecoveredExecutionStream(
     ) ?? await thread.post(visibleStream)
     return { diverged: capture.diverged, messageId: sent?.id }
   } finally {
-    await setAssistantStatus(thread, '', options, trace)
+    await clearLiveAssistantStatus(thread, options, trace)
   }
 }
 
@@ -2804,6 +2809,7 @@ async function renderPlainTextExecutionStream(
     options,
     trace
   )
+  rememberLiveAssistantStatus(thread, options.assistantStatus ?? 'Thinking...')
   if (!assistantStatusVisible) {
     await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...', options, trace)
   }
@@ -2833,7 +2839,7 @@ async function renderPlainTextExecutionStream(
     })
     await thread.post(text)
   } finally {
-    await setAssistantStatus(thread, '', options, trace)
+    await clearLiveAssistantStatus(thread, options, trace)
   }
 }
 
@@ -3683,6 +3689,7 @@ function rendererOptions(
         await setAssistantTitle(thread, event.title, options)
       }
       if (event.type === 'renderer.status' && options.activitySummaryStatusEnabled) {
+        rememberLiveAssistantStatus(thread, event.status)
         await setAssistantStatus(thread, event.status, options, trace)
       }
     }
@@ -3734,6 +3741,40 @@ async function setInitialAssistantStatus(
     visible
   })
   return visible
+}
+
+/**
+ * Status last shown by each in-process live render, keyed by thread id. Slack
+ * clears a thread's assistant status when a new message is posted to it, so a
+ * mentioned follow-up that steers the active execution restores this status
+ * instead of leaving the running turn without one until its next update.
+ */
+const liveAssistantStatuses = new Map<string, string>()
+
+function rememberLiveAssistantStatus(thread: Thread, status: string): void {
+  liveAssistantStatuses.set(thread.id, status)
+}
+
+async function clearLiveAssistantStatus(
+  thread: Thread,
+  options: SlackbotV2Options,
+  trace?: SlackbotV2Trace
+): Promise<void> {
+  liveAssistantStatuses.delete(thread.id)
+  await setAssistantStatus(thread, '', options, trace)
+}
+
+async function restoreLiveAssistantStatus(
+  thread: Thread,
+  options: SlackbotV2Options,
+  trace?: SlackbotV2Trace
+): Promise<void> {
+  const status = liveAssistantStatuses.get(thread.id)
+  if (!status) return
+  await setAssistantStatus(thread, status, options, trace)
+  // The render may have finished while the restore was in flight; do not
+  // leave its status behind.
+  if (!liveAssistantStatuses.has(thread.id)) await setAssistantStatus(thread, '', options, trace)
 }
 
 async function setAssistantStatus(
