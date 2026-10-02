@@ -342,9 +342,9 @@ sandbox:
   # matters for containers started outside api-rs.
   harnessEngine: codex
   # Copied into every sandbox pod. CLAUDE_MODEL / CODEX_MODEL set here are also
-  # mirrored into slackbotv2 and the Console; CODEX_MODEL_REASONING_EFFORT is
-  # mirrored into slackbotv2. This keeps Slack's model/thinking footer aligned
-  # with the policy the sandbox actually runs.
+  # mirrored into slackbotv2 and the Console; CODEX_MODEL_REASONING_EFFORT and
+  # CENTAUR_PI_MODEL are mirrored into slackbotv2. This keeps Slack's
+  # model/thinking footer aligned with the policy the sandbox actually runs.
   extraEnv: {}
   telemetry:
     # Include user prompts, assistant responses, and bounded shell commands on
