@@ -15,6 +15,7 @@ pub enum HarnessKind {
     Codex,
     ClaudeCode,
     Amp,
+    Pi,
 }
 
 pub struct ThreadState {
@@ -36,6 +37,8 @@ pub struct HarnessChild {
     pub child: Child,
     pub stdin: ChildStdin,
     pub stdout: Receiver<io::Result<String>>,
+    /// Model the process was started with; a different turn model respawns it.
+    pub model: String,
     /// Reasoning effort last applied in-band; a fresh process runs its default.
     pub reasoning_effort: Option<String>,
 }

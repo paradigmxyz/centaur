@@ -7,6 +7,7 @@ pub mod hermes;
 mod nanocodex;
 mod nanocodex_subagents;
 mod otel;
+pub mod pi;
 mod server;
 mod traits;
 mod turn;
