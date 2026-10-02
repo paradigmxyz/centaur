@@ -26,7 +26,7 @@
         <%= link_to "Agent access", console_secret_path("static", @credential.static_secret.oid, anchor: "roles"), class: "btn-secondary" if @credential.static_secret %>
       </div>
     </details>
-  <% elsif @manual_credentials %>
+  <% elsif @manual_configuration %>
     <h2 class="text-base font-semibold text-zinc-100">Existing Mercator configuration</h2>
     <p class="text-sm text-zinc-400">A manually configured credential already exists. Review it before creating a shared connection so your existing wallet and agent access are preserved.</p>
     <%= link_to "Review credentials", console_credentials_path, class: "btn-secondary" %>

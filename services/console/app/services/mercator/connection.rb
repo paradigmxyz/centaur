@@ -12,13 +12,9 @@ module Mercator
       app&.broker_credentials&.first
     end
 
-    def self.manual_credentials
-      BrokerCredential.where(token_endpoint: Oauth::Providers::Mercator.new.token_endpoint)
-        .where.not(id: app&.broker_credentials&.select(:id) || [])
-    end
-
     def self.manual_configuration?
-      return true if manual_credentials.exists?
+      return true if BrokerCredential.where(token_endpoint: Oauth::Providers::Mercator.new.token_endpoint)
+        .where.not(id: app&.broker_credentials&.select(:id) || []).exists?
       StaticSecret.joins(:rules).where(request_rules: { host: "mercator.sh" })
         .where.not(id: credential&.static_secret&.id || []).exists?
     end

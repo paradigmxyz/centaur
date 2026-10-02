@@ -6,7 +6,7 @@ module Console
 
     def show
       @credential = Mercator::Connection.credential
-      @manual_credentials = Mercator::Connection.manual_configuration?
+      @manual_configuration = Mercator::Connection.manual_configuration? unless @credential
       if @credential && !@credential.dead?
         @claim_url = "https://mercator.sh/slack-claim?#{URI.encode_www_form(wallet: @credential.provider_subject)}"
       end
