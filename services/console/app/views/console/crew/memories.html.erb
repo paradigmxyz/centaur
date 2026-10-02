@@ -1,0 +1,22 @@
+<% content_for :title, "#{@bot['name']} · Memory" %>
+<%= link_to "← Crew", console_crew_index_path, class: "text-sm text-zinc-500 hover:text-zinc-200" %>
+<div class="mt-6"><%= render "console/page_header", title: "#{@bot['name']} · Memory", subtitle: "Persistent knowledge, scoped to this member and its conversations." %></div>
+<%= render "navigation" %>
+<div class="max-w-4xl space-y-6 pb-8">
+  <section class="form-section">
+    <h2 class="form-section-heading">What this member remembers <span class="text-xs text-zinc-500 font-normal"><%= @memories.size %> / 100</span></h2>
+    <p class="text-sm text-zinc-400">Conversation memories survive new threads and sandbox rebuilds, but stay within that Slack channel or DM. <strong>Shared</strong> memories are available in every conversation with this bot: use them only for non-sensitive preferences and general lessons.</p>
+    <p class="text-xs text-zinc-500 mt-3">Expired memories are excluded from normal recall. Forgetting removes stored memory, not copies already read into an ongoing conversation. Each entry holds up to 4 KiB; never store credentials.</p>
+  </section>
+  <% if @memories.empty? %><p class="text-sm text-zinc-500">No memories yet. This member can remember useful context as it works, or you can add an entry below.</p><% end %>
+  <% @memories.each do |memory| %>
+    <details class="form-section">
+      <summary class="cursor-pointer text-sm font-medium text-zinc-200 break-words"><%= memory.key %> <span class="text-xs text-zinc-500 font-normal">· <%= memory.scope_key == "shared" ? "Shared across this bot’s conversations" : memory.scope_key %><%= " · Expired" if memory.expires_at && memory.expires_at <= Time.current %></span></summary>
+      <div class="mt-5"><%= render "memory", memory: memory %></div>
+    </details>
+  <% end %>
+  <section class="form-section">
+    <h2 class="form-section-heading">Add memory</h2>
+    <%= render "memory", memory: CrewMemory.new %>
+  </section>
+</div>

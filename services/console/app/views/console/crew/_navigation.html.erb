@@ -1,0 +1,5 @@
+<nav aria-label="Crew member settings" class="flex flex-wrap gap-2 mb-6">
+  <% { "Profile" => edit_console_crew_path(@bot["id"]), "Memory" => memories_console_crew_path(@bot["id"]), "History" => history_console_crew_path(@bot["id"]) }.each do |label, path| %>
+    <%= link_to label, path, class: current_page?(path) ? "btn-primary" : "btn-secondary", aria: { current: current_page?(path) ? "page" : nil } %>
+  <% end %>
+</nav>

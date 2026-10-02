@@ -141,6 +141,100 @@ class Api::V1::SandboxCrewControllerTest < ActionDispatch::IntegrationTest
     assert_empty @calls
   end
 
+  test "memory is isolated by bot and conversation, with explicit sharing and expiry" do
+    @profile.memories.create!(scope_key: "C999", key: "private", content: "Other customer")
+    @other.memories.create!(scope_key: "shared", key: "other-bot", content: "Other bot knowledge")
+    @profile.memories.create!(scope_key: "C123", key: "expired", content: "Out of date", expires_at: 1.second.ago)
+    with_token do |headers|
+      put "/api/v1/sandbox/crew/memories", params: { data: { key: "customer", content: "Current customer" } }, headers: headers, as: :json
+      assert_response :ok
+      assert_equal "slack:T123:A111:C123:123.456", response.parsed_body["data"]["source"]
+      put "/api/v1/sandbox/crew/memories", params: { data: { key: "style", content: "Prefer short summaries", scope: "shared" } }, headers: headers, as: :json
+      assert_response :ok
+      get "/api/v1/sandbox/crew/memories", headers: headers
+      assert_response :ok
+      assert_equal %w[customer style], response.parsed_body["data"]["memories"].map { |m| m["key"] }.sort
+      assert_equal "no-store", response.headers["Cache-Control"]
+      get "/api/v1/sandbox/crew/memories?q=SUMMARY", headers: headers
+      assert_empty response.parsed_body["data"]["memories"]
+      get "/api/v1/sandbox/crew/memories?q=SUMMARIES", headers: headers
+      assert_equal [ "style" ], response.parsed_body["data"]["memories"].map { |m| m["key"] }
+      # A new thread in the same channel recalls the memory; a new channel cannot.
+      @db.execute("UPDATE crew_test_sessions SET thread_key = 'slack:T123:A111:C123:999.001' WHERE thread_key LIKE '%A111:%'")
+      get "/api/v1/sandbox/crew/memories", headers: headers
+      assert_equal 2, response.parsed_body["data"]["memories"].size
+      @db.execute("UPDATE crew_test_sessions SET thread_key = 'slack:T123:A111:D456:999.002' WHERE thread_key LIKE '%A111:%'")
+      get "/api/v1/sandbox/crew/memories", headers: headers
+      assert_equal [ "style" ], response.parsed_body["data"]["memories"].map { |m| m["key"] }
+      delete "/api/v1/sandbox/crew/memories", params: { data: { key: "customer", lock_version: 0 } }, headers: headers, as: :json
+      assert_response :not_found
+      put "/api/v1/sandbox/crew/memories", params: { data: { key: "private", content: "Overwrite", scope: "C999" } }, headers: headers, as: :json
+      assert_response :bad_request
+      get "/api/v1/sandbox/crew/memories?app_id=A222", headers: headers
+      assert_response :bad_request
+    end
+    assert_equal "Other customer", @profile.memories.find_by!(scope_key: "C999").content
+  end
+
+  test "memory updates and deletes reject stale versions and invalid expiry" do
+    with_token do |headers|
+      fields = { key: "preference", content: "Original" }
+      put "/api/v1/sandbox/crew/memories", params: { data: fields }, headers: headers, as: :json
+      assert_response :ok
+      put "/api/v1/sandbox/crew/memories", params: { data: fields.merge(content: "New", lock_version: 0) }, headers: headers, as: :json
+      assert_response :ok
+      put "/api/v1/sandbox/crew/memories", params: { data: fields.merge(lock_version: 0) }, headers: headers, as: :json
+      assert_response :conflict
+      delete "/api/v1/sandbox/crew/memories", params: { data: { key: "preference", lock_version: 0 } }, headers: headers, as: :json
+      assert_response :conflict
+      put "/api/v1/sandbox/crew/memories", params: { data: fields.merge(lock_version: 1, expires_at: "not-a-date") }, headers: headers, as: :json
+      assert_response :unprocessable_entity
+      assert_equal "New", @profile.memories.sole.content
+      delete "/api/v1/sandbox/crew/memories", params: { data: { key: "preference", lock_version: 1 } }, headers: headers, as: :json
+      assert_response :ok
+      put "/api/v1/sandbox/crew/memories", params: { data: fields.merge(lock_version: 1) }, headers: headers, as: :json
+      assert_response :conflict
+    end
+    assert_empty @profile.memories
+  end
+
+  test "self improvement records history and restores only owned behavior without approval" do
+    @other.update!(system_prompt: "Another bot's new prompt")
+    with_token do |headers|
+      patch "/api/v1/sandbox/crew/me", params: { data: { system_prompt: "Learned lesson", lock_version: 0 } }, headers: headers, as: :json
+      assert_response :ok
+      get "/api/v1/sandbox/crew/history?version=0", headers: headers
+      assert_response :ok
+      assert_equal "", response.parsed_body["data"]["configuration"]["system_prompt"]
+      assert_equal "self", response.parsed_body["data"]["revisions"].sole["source"]
+      post "/api/v1/sandbox/crew/restore", params: { data: { version: 0, lock_version: 1, app_id: "A222" } }, headers: headers, as: :json
+      assert_response :bad_request
+      post "/api/v1/sandbox/crew/restore", params: { data: { version: 0, lock_version: 1 } }, headers: headers, as: :json
+      assert_response :ok
+      assert_equal "", @profile.reload.system_prompt
+      assert_equal "Learned lesson", @profile.revisions.find_by!(version: 1).configuration["system_prompt"]
+      post "/api/v1/sandbox/crew/restore", params: { data: { version: 1, lock_version: 1 } }, headers: headers, as: :json
+      assert_response :conflict
+    end
+    assert_equal "Another bot's new prompt", @other.reload.system_prompt
+    assert_empty @profile.principal.roles
+  end
+
+  test "paused apps and released sandboxes cannot read memory or history" do
+    client = Object.new
+    client.define_singleton_method(:self_get) { |_| raise SlackCrewClient::Error.new("Unavailable", status: 404) }
+    Api::V1::Sandbox::CrewController.client_factory = -> { client }
+    with_token do |headers|
+      get "/api/v1/sandbox/crew/memories", headers: headers
+      assert_response :not_found
+      get "/api/v1/sandbox/crew/history", headers: headers
+      assert_response :not_found
+      @db.execute("UPDATE crew_test_sessions SET sandbox_id = NULL")
+      get "/api/v1/sandbox/crew/memories", headers: headers
+      assert_response :forbidden
+    end
+  end
+
   private
 
   def insert_session(key, sandbox, principal)

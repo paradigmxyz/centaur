@@ -9,6 +9,10 @@ import typer
 from .client import SlackCrewClient
 
 app = typer.Typer(help="Read and edit your own Crew bot. Operators manage the crew in Console.")
+memory = typer.Typer(
+    help="Persistent memory. Defaults to this Slack conversation; --shared is visible across your conversations."
+)
+app.add_typer(memory, name="memory")
 
 
 def output(data: dict, markdown: bool) -> None:
@@ -23,6 +27,54 @@ def me(
 ) -> None:
     """Read your own Crew profile."""
     output(SlackCrewClient().me(), markdown)
+
+
+@memory.command("list")
+def memory_list(
+    query: str = typer.Option("", "--query"),
+    include_expired: bool = typer.Option(False, "--include-expired"),
+) -> None:
+    """Recall relevant memories. Expired entries are hidden unless requested."""
+    output(SlackCrewClient().memories(query, include_expired), False)
+
+
+@memory.command("remember")
+def memory_remember(
+    key: str,
+    content: str,
+    shared: bool = typer.Option(
+        False, "--shared", help="Only for non-sensitive preferences and general lessons."
+    ),
+    source: str | None = typer.Option(None, "--source"),
+    expires_at: str | None = typer.Option(
+        None, "--expires-at", help="ISO timestamp; empty string clears expiry."
+    ),
+) -> None:
+    """Create or update a memory (4 KiB). Do not store credentials or copy private facts to shared scope."""
+    output(
+        SlackCrewClient().remember(
+            key, content, shared=shared, source=source, expires_at=expires_at
+        ),
+        False,
+    )
+
+
+@memory.command("forget")
+def memory_forget(key: str, shared: bool = typer.Option(False, "--shared")) -> None:
+    """Delete stored memory. Copies already in a conversation are not erased."""
+    output(SlackCrewClient().forget(key, shared=shared), False)
+
+
+@app.command()
+def history(version: int | None = typer.Option(None, "--version", min=0)) -> None:
+    """List the last 20 saved behavior versions, or inspect one version."""
+    output(SlackCrewClient().history(version), False)
+
+
+@app.command()
+def restore(version: Annotated[int, typer.Argument(min=0)]) -> None:
+    """Restore your prompt, skills and models directly. Roles and memories stay unchanged."""
+    output(SlackCrewClient().restore(version), False)
 
 
 @app.command()

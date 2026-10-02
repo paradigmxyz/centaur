@@ -21,6 +21,7 @@
 - [Grants](#grants)
 - [API keys](#api-keys)
 - [Skills](#skills)
+- [Crew memory and self-improvement](#crew-memory-and-self-improvement)
 - [Proxies](#proxies)
 - [Proxy sync](#proxy-sync)
 
@@ -1483,6 +1484,24 @@ These endpoints use the existing sandbox entitlement JWT injected by `iron-proxy
 | `DELETE` | `/api/v1/sandbox/skills/:id/editors` | Remove an editor from an owned skill OID using an exact email or `usr_...` OID in `data.user`. |
 
 Editor responses include each editor's OID, email, name, and account status, plus the skill's current `lock_version`. The editor list follows skill visibility: every principal that can read a shared skill can also read its editor list, while a private skill's list remains visible only to its owner and editors. Adding an editor is idempotent. Catalog responses include the skill ID and a checksum over the generated document. Read responses set `Cache-Control: no-store`.
+
+## Crew memory and self-improvement
+
+Crew endpoints use the proxy-injected sandbox entitlement JWT, never an operator API key. The current durable sandbox assignment determines the bot and Slack conversation. Paused bots, released or ambiguous sandbox assignments, and attempts to select another bot are rejected. Successful responses use a `data` envelope and `Cache-Control: no-store`.
+
+| Method | Path | Notes |
+| ------ | ---- | ----- |
+| `GET` | `/api/v1/sandbox/crew/me` | Own identity, prompt, skills, model defaults, roles (read-only), and `lock_version`. |
+| `PATCH` | `/api/v1/sandbox/crew/me` | Update own behavior or identity. Behavior updates require the current `data.lock_version`; roles cannot be changed. |
+| `GET` | `/api/v1/sandbox/crew/memories` | Own current-conversation and explicitly shared memories. Optional `q` text search and `include_expired=true`. |
+| `PUT` | `/api/v1/sandbox/crew/memories` | Remember `data.key`, `content`, optional `source`, `expires_at`, and `scope` (`conversation`, the default, or `shared`). Existing entries require their `lock_version`; omit it for creation. |
+| `DELETE` | `/api/v1/sandbox/crew/memories` | Forget `data.key` in `data.scope`, with the entry's current `lock_version`. |
+| `GET` | `/api/v1/sandbox/crew/history` | Last 20 prior behavior versions. Optional `version` returns that version's configuration. |
+| `POST` | `/api/v1/sandbox/crew/restore` | Restore `data.version`, guarded by the profile's current `data.lock_version`. Records an undo point; never restores roles, identity, or memories. |
+
+Memory keys are 1–64 lowercase letters/digits/hyphens, starting with a letter or digit. A bot can keep 100 memories, each up to 4 KiB, with a source up to 1024 bytes and optional expiry. Conversation scope means the Slack channel or DM, not a single thread, and survives sandbox rebuilds. Shared scope is visible in every conversation with that member; never put customer-private facts or credentials there. Expired entries are hidden from normal recall. Forgetting cannot erase copies already read into an ongoing conversation. Stale writes return `409`.
+
+Agents use `slack-crew memory list`, `memory remember KEY CONTENT`, `memory forget KEY`, `history`, and `restore VERSION`. `--shared` explicitly selects shared memory; the default is always the authenticated conversation. Console admins can inspect and edit all scopes on the member's **Memory** page and restore behavior on **History**. Self-improvement is direct, without approval or evaluation gates. Prompt, skills, and model changes take effect in new or rebuilt sandboxes; memory reads see committed changes immediately.
 
 ## Proxies
 

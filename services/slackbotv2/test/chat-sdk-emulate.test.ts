@@ -894,6 +894,7 @@ describe('slackbotv2', () => {
     expect(JSON.stringify(firstInput)).not.toContain('--persona=invest')
     expect(JSON.stringify(firstInput)).toContain('first pass')
     expect(JSON.stringify(secondInput)).toContain('continue without flags')
+    expect(JSON.stringify(firstInput)).not.toContain('slack-crew memory list')
 
     const state = await sharedState.get<Record<string, unknown>>(
       `thread-state:${threadKey(parent.ts)}`
@@ -930,6 +931,10 @@ describe('slackbotv2', () => {
     expect(codexApi.creates.map(c => c.body.persona_id)).toEqual([undefined, undefined])
     expect(codexApi.executes).toHaveLength(2)
     expect(new Set(codexApi.executes.map(e => e.threadKey)).size).toBe(2)
+    for (const execution of codexApi.executes) {
+      expect(JSON.stringify(execution.body)).toContain('slack-crew memory list')
+      expect(JSON.stringify(execution.body)).toContain('without an approval or evaluation gate')
+    }
   })
 
   it('pins sticky persona state without labeling a pinned mismatch as unavailable', async () => {

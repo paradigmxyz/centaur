@@ -85,3 +85,40 @@ def test_behavior_edit_preserves_other_harness_default_and_uses_revision():
             "default_models": {"codex": "keep-this", "claude": "new"},
         }
     }
+
+
+def test_memory_selects_correct_scope_version_and_includes_expired_for_editing():
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "memories": [
+                        {"key": "style", "scope": "shared", "lock_version": 11},
+                        {"key": "style", "scope": "conversation", "lock_version": 3},
+                    ]
+                }
+            },
+        )
+
+    client = module.SlackCrewClient("http://console", httpx.MockTransport(respond))
+    client.remember("style", "Private preference")
+    assert calls[0].url.params["include_expired"] == "true"
+    assert json.loads(calls[1].content)["data"] == {
+        "key": "style",
+        "scope": "conversation",
+        "content": "Private preference",
+        "lock_version": 3,
+    }
+    client.forget("style", shared=True)
+    assert calls[-1].method == "DELETE"
+    assert json.loads(calls[-1].content)["data"] == {
+        "key": "style",
+        "scope": "shared",
+        "lock_version": 11,
+    }
+    assert all(request.url.path == "/api/v1/sandbox/crew/memories" for request in calls)
+    assert all("authorization" not in request.headers for request in calls)

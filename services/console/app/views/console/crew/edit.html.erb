@@ -9,4 +9,5 @@
   <% else %><p class="text-sm text-amber-400">Setup was interrupted. Reconcile the Slack app before retrying.</p><% end %>
 </div>
 <% if @bot["install_error"].present? %><p class="mb-6 text-sm text-amber-400"><%= @bot["install_error"] %></p><% end %>
+<% if @configuration.persisted? %><%= render "navigation" %><% end %>
 <%= render "form", creating: false %>

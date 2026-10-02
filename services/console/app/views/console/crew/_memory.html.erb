@@ -1,0 +1,16 @@
+<%= form_with url: remember_console_crew_path(@bot["id"]), scope: :memory, data: { turbo: false }, class: "space-y-4", namespace: "memory_#{memory.id || 'new'}" do |form| %>
+  <% if memory.persisted? %><%= form.hidden_field :lock_version, value: memory.lock_version %><% end %>
+  <div class="grid gap-4 md:grid-cols-2">
+    <div><%= form.label :key, "Key", class: "form-label" %><%= form.text_field :key, value: memory.key, required: true, readonly: memory.persisted?, pattern: "[a-z0-9][a-z0-9-]{0,63}", maxlength: 64, placeholder: "preferred-format", class: "form-input" %></div>
+    <div><%= form.label :scope_key, "Scope", class: "form-label" %><%= form.text_field :scope_key, value: memory.scope_key, required: true, readonly: memory.persisted?, placeholder: "Slack conversation ID, or shared", class: "form-input" %></div>
+  </div>
+  <div><%= form.label :content, "Memory", class: "form-label" %><%= form.text_area :content, value: memory.content, required: true, maxlength: 4096, rows: 4, class: "form-input" %></div>
+  <div class="grid gap-4 md:grid-cols-2">
+    <div><%= form.label :source, "Source", class: "form-label" %><%= form.text_field :source, value: memory.source, maxlength: 1024, placeholder: "Source link or context", class: "form-input" %></div>
+    <div><%= form.label :expires_at, "Expires at (UTC, optional)", class: "form-label" %><%= form.datetime_local_field :expires_at, value: memory.expires_at&.utc&.strftime("%Y-%m-%dT%H:%M"), class: "form-input" %></div>
+  </div>
+  <%= form.submit memory.persisted? ? "Save memory" : "Add memory", class: "btn-primary" %>
+<% end %>
+<% if memory.persisted? %>
+  <%= button_to "Forget memory", forget_console_crew_path(@bot["id"]), method: :delete, params: { memory: { key: memory.key, scope_key: memory.scope_key, lock_version: memory.lock_version } }, class: "btn-secondary mt-3", form: { data: { turbo: false } } %>
+<% end %>

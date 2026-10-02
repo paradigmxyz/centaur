@@ -3,6 +3,10 @@ class Console::CrewController < ApplicationController
   before_action :require_admin
   class_attribute :client_factory, default: -> { SlackCrewClient.new }
 
+  rescue_from SlackCrewClient::Error do |error|
+    redirect_to console_crew_index_path, alert: error.message
+  end
+
   def index
     load_crew
     @configurations = CrewProfile.includes(principal: :roles).index_by(&:crew_id)
@@ -61,6 +65,7 @@ class Console::CrewController < ApplicationController
       if @configuration.persisted? && fields["lock_version"].to_s != @configuration.lock_version.to_s
         raise ActiveRecord::StaleObjectError.new(@configuration, "update")
       end
+      @configuration.revision_source = "console:#{current_user.oid}"
       @configuration.assign_attributes(fields)
       @configuration.validate!
       @configuration.provision!(@bot, user: current_user, roles: selected_roles)
@@ -87,6 +92,46 @@ class Console::CrewController < ApplicationController
     redirect_to edit_console_crew_path(params[:id]), notice: "Crew bot installed in Slack."
   rescue SlackCrewClient::Error, ActiveRecord::RecordInvalid => e
     redirect_to edit_console_crew_path(params[:id]), alert: e.message
+  end
+
+  def memories
+    load_bot
+    @memories = @configuration.memories.order(updated_at: :desc, id: :desc)
+  end
+
+  def remember
+    load_bot
+    raise ActiveRecord::RecordNotFound, "Install and configure this bot first" unless @configuration.persisted?
+    fields = params.require(:memory).permit(:scope_key, :key, :content, :source, :expires_at, :lock_version).to_h
+    @configuration.remember!(scope_key: fields["scope_key"], key: fields["key"], attributes: fields,
+      expected_version: fields["lock_version"])
+    redirect_to memories_console_crew_path(params[:id]), notice: "Memory saved. It is available immediately to this bot in its selected scope."
+  rescue ActiveRecord::RecordInvalid, ActiveRecord::StaleObjectError => e
+    redirect_to memories_console_crew_path(params[:id]), alert: e.is_a?(ActiveRecord::StaleObjectError) ? "Memory changed; review the latest version before saving." : e.message
+  end
+
+  def forget
+    load_bot
+    fields = params.require(:memory).permit(:scope_key, :key, :lock_version)
+    @configuration.forget!(scope_key: fields[:scope_key], key: fields[:key], expected_version: fields[:lock_version])
+    redirect_to memories_console_crew_path(params[:id]), notice: "Memory forgotten. Existing conversations may still contain previously read copies."
+  rescue ActiveRecord::StaleObjectError
+    redirect_to memories_console_crew_path(params[:id]), alert: "Memory changed; review the latest version before deleting."
+  end
+
+  def history
+    load_bot
+    @revisions = @configuration.revisions.order(version: :desc)
+    @revision = @revisions.find_by!(version: params[:version]) if params[:version].present?
+  end
+
+  def restore
+    load_bot
+    @configuration.revision_source = "console:#{current_user.oid}"
+    @configuration.restore!(params.require(:version), expected_version: params[:lock_version])
+    redirect_to history_console_crew_path(params[:id]), notice: "Behavior restored. Applies to new or rebuilt sandboxes; access grants and memories are unchanged."
+  rescue ActiveRecord::StaleObjectError
+    redirect_to history_console_crew_path(params[:id]), alert: "Behavior changed; review the latest version before restoring."
   end
 
   private

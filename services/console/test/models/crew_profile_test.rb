@@ -44,6 +44,21 @@ class CrewProfileTest < ActiveSupport::TestCase
     assert profile.valid?
   end
 
+  test "history retains 20 undo points and restoring cannot change roles or memories" do
+    profile = provision("alpha", "A111", [ roles(:acme_infra) ])
+    memory = profile.memories.create!(scope_key: "C123", key: "context", content: "Keep this")
+    22.times { |i| profile.update!(system_prompt: "Lesson #{i}") }
+    assert_equal (2..21).to_a, profile.revisions.order(:version).pluck(:version)
+    assert_equal "Lesson 1", profile.revisions.find_by!(version: 2).configuration["system_prompt"]
+    profile.restore!(2, expected_version: profile.lock_version)
+    assert_equal "Lesson 1", profile.system_prompt
+    assert_equal "Lesson 21", profile.revisions.find_by!(version: 22).configuration["system_prompt"]
+    assert_equal [ roles(:acme_infra).id ], profile.principal.role_ids
+    assert_equal "Keep this", memory.reload.content
+    assert_raises(ActiveRecord::RecordInvalid) { profile.update!(skills: [ { "name" => "../bad" } ]) }
+    assert_equal 20, profile.revisions.count
+  end
+
   private
 
   def record(id, app)

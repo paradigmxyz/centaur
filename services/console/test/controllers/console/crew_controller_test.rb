@@ -179,6 +179,50 @@ class Console::CrewControllerTest < ActionDispatch::IntegrationTest
     assert_equal "Crew app exists; review its installation status.", flash[:notice]
   end
 
+  test "admin edits memory and restores behavior through console without an approval gate" do
+    post console_crew_index_url, params: { crew: fields }
+    @client.result["crew"] = [ @bot ]
+    profile = CrewProfile.find_by!(crew_id: "alpha")
+    get memories_console_crew_url("alpha")
+    assert_response :ok
+    assert_select "nav[aria-label='Crew member settings']"
+    post remember_console_crew_url("alpha"), params: { memory: { scope_key: "C123", key: "preferences", content: "Use tables", source: "Customer correction" } }
+    assert_redirected_to memories_console_crew_path("alpha")
+    memory = profile.memories.sole
+    post remember_console_crew_url("alpha"), params: { memory: { scope_key: "C123", key: "preferences", content: "Use bullets", lock_version: memory.lock_version } }
+    assert_redirected_to memories_console_crew_path("alpha")
+    assert_equal "Use bullets", memory.reload.content
+    get memories_console_crew_url("alpha")
+    assert_response :ok
+    assert_select "textarea", text: "Use bullets"
+    profile.update!(system_prompt: "Improved instructions")
+    get history_console_crew_url("alpha", version: 0)
+    assert_response :ok
+    assert_select "button", text: "Restore version 0"
+    post restore_console_crew_url("alpha"), params: { version: 0, lock_version: profile.lock_version }
+    assert_redirected_to history_console_crew_path("alpha")
+    assert_equal "Investigate carefully.", profile.reload.system_prompt
+    assert_equal [ roles(:acme_infra).id ], profile.principal.role_ids
+    delete forget_console_crew_url("alpha"), params: { memory: { scope_key: "C123", key: "preferences", lock_version: memory.lock_version } }
+    assert_redirected_to memories_console_crew_path("alpha")
+    assert_empty profile.memories
+    delete logout_url
+    login(users(:member_user))
+    post remember_console_crew_url("alpha"), params: { memory: { scope_key: "shared", key: "forged", content: "Not authorized" } }
+    assert_redirected_to console_integrations_path
+    assert_empty profile.memories
+  end
+
+  test "memory requires a configured profile and reports a Crew outage without a server error" do
+    @client.result["crew"] = [ @bot ]
+    post remember_console_crew_url("alpha"), params: { memory: { scope_key: "shared", key: "context", content: "Not yet installed" } }
+    assert_response :not_found
+    @client.error = SlackCrewClient::Error.new("Crew service is unavailable")
+    get memories_console_crew_url("alpha")
+    assert_redirected_to console_crew_index_path
+    assert_equal "Crew service is unavailable", flash[:alert]
+  end
+
   private
 
   def fields

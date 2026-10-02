@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_10_01_153943) do
+ActiveRecord::Schema[8.1].define(version: 2026_10_02_172250) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -82,6 +82,20 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_01_153943) do
     t.index ["oauth_app_id"], name: "index_broker_credentials_on_oauth_app_id"
   end
 
+  create_table "crew_memories", force: :cascade do |t|
+    t.text "content", null: false
+    t.datetime "created_at", null: false
+    t.bigint "crew_profile_id", null: false
+    t.datetime "expires_at"
+    t.string "key", null: false
+    t.integer "lock_version", default: 0, null: false
+    t.string "scope_key", null: false
+    t.string "source", default: "", null: false
+    t.datetime "updated_at", null: false
+    t.index ["crew_profile_id", "scope_key", "key"], name: "index_crew_memories_on_crew_profile_id_and_scope_key_and_key", unique: true
+    t.index ["crew_profile_id"], name: "index_crew_memories_on_crew_profile_id"
+  end
+
   create_table "crew_profiles", force: :cascade do |t|
     t.string "app_id", null: false
     t.datetime "created_at", null: false
@@ -96,6 +110,17 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_01_153943) do
     t.index ["app_id"], name: "index_crew_profiles_on_app_id", unique: true
     t.index ["crew_id"], name: "index_crew_profiles_on_crew_id", unique: true
     t.index ["principal_id"], name: "index_crew_profiles_on_principal_id", unique: true
+  end
+
+  create_table "crew_revisions", force: :cascade do |t|
+    t.jsonb "configuration", null: false
+    t.datetime "created_at", null: false
+    t.bigint "crew_profile_id", null: false
+    t.string "source", null: false
+    t.datetime "updated_at", null: false
+    t.integer "version", null: false
+    t.index ["crew_profile_id", "version"], name: "index_crew_revisions_on_crew_profile_id_and_version", unique: true
+    t.index ["crew_profile_id"], name: "index_crew_revisions_on_crew_profile_id"
   end
 
   create_table "gcp_auth_secrets", force: :cascade do |t|
@@ -590,7 +615,9 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_01_153943) do
   add_foreign_key "aws_auth_secrets", "users", column: "created_by_id"
   add_foreign_key "broker_credentials", "oauth_apps"
   add_foreign_key "broker_credentials", "users", column: "created_by_id"
+  add_foreign_key "crew_memories", "crew_profiles"
   add_foreign_key "crew_profiles", "principals"
+  add_foreign_key "crew_revisions", "crew_profiles"
   add_foreign_key "gcp_auth_secrets", "users", column: "created_by_id"
   add_foreign_key "gcp_id_token_secrets", "users", column: "created_by_id"
   add_foreign_key "grants", "aws_auth_secrets"
