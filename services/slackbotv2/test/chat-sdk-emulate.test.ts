@@ -1966,6 +1966,56 @@ describe('slackbotv2', () => {
     )
   })
 
+  it('skips late-file repair when the webhook is not accepted', async () => {
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> a file may follow`)
+    const mentionWaits: Promise<unknown>[] = []
+    await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-late-file-skip-mention',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> a file may follow`
+        }
+      }),
+      {},
+      waitUntilContext(mentionWaits)
+    )
+    await Promise.all(mentionWaits)
+
+    const fileEvent = signedSlackEvent({
+      event_id: 'Ev-slackbotv2-late-file-skip',
+      event: {
+        type: 'message',
+        user: USER_ID,
+        channel: CHANNEL_ID,
+        team: TEAM_ID,
+        ts: incrementSlackTs(mention.ts, 2),
+        text: '',
+        files: [{ id: 'F-late-skip', file_access: 'check_file_info' }]
+      }
+    })
+    const skipWaits: Promise<unknown>[] = []
+    const skipResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      {
+        ...fileEvent,
+        headers: { ...(fileEvent.headers as Record<string, string>), 'x-slack-signature': 'v0=0' }
+      },
+      {},
+      waitUntilContext(skipWaits)
+    )
+    await Promise.all(skipWaits)
+
+    expect(skipResponse.status).toBe(401)
+    expect(slackApi.fileInfoRequestCount('F-late-skip')).toBe(0)
+    expect(codexApi.executes).toHaveLength(1)
+  })
+
   it('ignores unmatched and duplicate delayed file-only messages', async () => {
     const mention = await postUserMessage(`<@${BOT_USER_ID}> maybe an image follows`)
     const mentionWaits: Promise<unknown>[] = []
