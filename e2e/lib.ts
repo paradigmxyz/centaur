@@ -1,128 +1,206 @@
-// Helpers for e2e scenarios. Tests act through the same doors a user and an
-// operator have: the (fake) Slack API for input and visible output, the
-// durable session tables for what the control plane recorded, and the
-// scripted model server for what the harness actually asked the provider.
+// The vocabulary e2e scenarios are written in. Tests act through the same
+// doors a user and an operator have: Slack for input and visible output, the
+// durable session tables for what the control plane recorded, and the scripted
+// model server for what the harness actually asked its provider.
+//
+//   const thread = await slack.mention('--codex hi', model.says('Hello.'))
+//   const turn = await thread.nextTurn()
+//   expect(turn.reply).toBe('Hello.')
 import { randomUUID } from 'node:crypto'
 import { BOT, CHANNEL, USER_TOKEN } from './fixture'
 
-export type SlackMessage = { ts: string; text?: string; bot_id?: string; streaming?: boolean }
+/** A scripted model answer, matched by a token placed in the user's message. */
+export type Script = { token: string; text: string }
+
 export type Execution = { execution_id: string; status: string; error: string | null }
+
+/** A provider request as the model server received it, normalized across providers. */
 export type ModelRequest = {
   provider: 'openai' | 'anthropic'
-  match?: string
   model?: string
-  /** The credential header as the provider received it. */
+  /** The credential header as the provider received it, after iron-proxy. */
   credential?: string
+  /** Earlier assistant turns the harness sent back as conversation history. */
+  assistantTurns: string[]
   body: any
 }
+
+export type Turn = {
+  /** Text of the turn's one Slack reply. */
+  reply: string
+  execution: Execution
+  /** The provider request answered by this turn's script, if it had one. */
+  request?: ModelRequest
+}
+
+type SlackMessage = { ts: string; text?: string; bot_id?: string; streaming?: boolean }
 
 const slackUrl = required('E2E_SLACK_URL')
 const modelUrl = required('E2E_MODEL_URL')
 const namespace = process.env.E2E_NAMESPACE ?? 'centaur'
 const release = process.env.E2E_RELEASE ?? 'centaur'
 
-/**
- * The provider keys iron-proxy holds, as each harness's provider receives
- * them. Sandboxes only ever hold placeholders.
- */
+/** Provider keys iron-proxy holds, as each harness's provider receives them. */
 export const providerCredentials: Record<string, string> = {
   codex: `Bearer ${required('E2E_OPENAI_KEY')}`,
   claudecode: required('E2E_ANTHROPIC_KEY')
 }
 export const turnTimeoutMs = Number(process.env.E2E_TURN_TIMEOUT_MS ?? 300_000)
+/** How long a finished execution may take to show up in Slack. */
+const renderTimeoutMs = 60_000
 
 export const model = {
-  /**
-   * Scripts the model's answer to a user message containing the returned
-   * token. Put the token in the Slack message the turn answers.
-   */
-  async reply(text: string): Promise<string> {
-    const match = `e2e-${randomUUID().slice(0, 8)}`
-    const response = await fetch(`${modelUrl}/_e2e/replies`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ match, text })
-    })
-    if (!response.ok) throw new Error(`model reply registration failed: ${response.status}`)
-    return match
-  },
-  /** Provider requests the harness made for a token's turn, oldest first. */
-  async requests(match: string): Promise<ModelRequest[]> {
-    const response = await fetch(`${modelUrl}/_e2e/requests?match=${encodeURIComponent(match)}`)
-    return (await response.json()) as ModelRequest[]
+  /** Scripts the model's answer to the message this is attached to. */
+  says(text: string): Script {
+    return { token: `e2e-${randomUUID().slice(0, 8)}`, text }
   }
 }
 
-/** Posts a user message that mentions the bot; returns its ts. */
-export async function mention(text: string, threadTs?: string): Promise<string> {
-  const posted = await slack<{ ts: string }>('chat.postMessage', {
+export const slack = {
+  /** Starts a thread with a channel message that mentions the bot. */
+  async mention(text: string, script?: Script): Promise<Thread> {
+    const ts = await postMention(text, script)
+    return new Thread(ts, script)
+  }
+}
+
+export class Thread {
+  /** The user message that triggered each turn, and that turn's script token. */
+  private readonly triggers: string[]
+  private readonly scripts: Array<string | undefined>
+  private turnsSeen = 0
+
+  constructor(readonly ts: string, script?: Script) {
+    this.triggers = [ts]
+    this.scripts = [script?.token]
+  }
+
+  get key(): string {
+    return `slack:${CHANNEL.id}:${this.ts}`
+  }
+
+  /** Follows up in the thread with a message that mentions the bot. */
+  async mention(text: string, script?: Script): Promise<void> {
+    this.triggers.push(await postMention(text, script, this.ts))
+    this.scripts.push(script?.token)
+  }
+
+  /**
+   * Waits for the next turn: its execution reaches a terminal state and its
+   * Slack reply finishes streaming. A turn must produce exactly one reply.
+   */
+  async nextTurn(): Promise<Turn> {
+    const index = this.turnsSeen++
+    const trigger = this.triggers[index]
+    if (!trigger) throw new Error(`turn ${index + 1} was never triggered in ${this.key}`)
+
+    const execution = await poll(`execution ${index + 1} of ${this.key}`, turnTimeoutMs, async () => {
+      const executions = await this.executions()
+      const execution = executions[index]
+      return execution && isTerminal(execution.status) ? execution : undefined
+    })
+    const replies = await poll(`reply to turn ${index + 1} of ${this.key}`, renderTimeoutMs, async () => {
+      const replies = await this.repliesTo(index)
+      return replies.length > 0 && replies.every(reply => !reply.streaming) ? replies : undefined
+    })
+    if (replies.length !== 1) {
+      throw new Error(`turn ${index + 1} of ${this.key} produced ${replies.length} replies: ${JSON.stringify(replies)}`)
+    }
+    const token = this.scripts[index]
+    return {
+      reply: replies[0]!.text ?? '',
+      execution,
+      request: token ? (await modelRequests(token))[0] : undefined
+    }
+  }
+
+  /** Sandboxes that served this thread, in the order they became ready. */
+  async sandboxes(): Promise<Array<{ id: string; harness: string }>> {
+    return sql<{ id: string; harness: string }>(
+      `select id, harness from (
+         select distinct on (payload->>'sandbox_id') payload->>'sandbox_id' as id,
+           payload->>'harness_type' as harness, event_id
+         from session_events where thread_key = ${literal(this.key)} and event_type = 'session.sandbox_ready'
+         order by payload->>'sandbox_id', event_id
+       ) ready order by event_id`
+    )
+  }
+
+  private async executions(): Promise<Execution[]> {
+    return sql<Execution>(
+      `select execution_id, status, error from session_executions
+       where thread_key = ${literal(this.key)} order by created_at`
+    )
+  }
+
+  /** Bot messages posted after a turn's trigger and before the next user message. */
+  private async repliesTo(index: number): Promise<SlackMessage[]> {
+    const { messages } = await slackApi<{ messages: SlackMessage[] }>('conversations.replies', {
+      channel: CHANNEL.id,
+      ts: this.ts
+    })
+    const after = messages.filter(message => message.ts > this.triggers[index]!)
+    const nextUser = after.find(message => message.bot_id !== BOT.id)
+    return after.filter(message => message.bot_id === BOT.id && (!nextUser || message.ts < nextUser.ts))
+  }
+}
+
+async function postMention(text: string, script: Script | undefined, threadTs?: string): Promise<string> {
+  if (script) await registerScript(script)
+  const posted = await slackApi<{ ts: string }>('chat.postMessage', {
     channel: CHANNEL.id,
-    text: `<@${BOT.userId}> ${text}`,
+    text: `<@${BOT.userId}> ${text}${script ? ` ${script.token}` : ''}`,
     ...(threadTs ? { thread_ts: threadTs } : {})
   })
   return posted.ts
 }
 
-export function threadKey(rootTs: string): string {
-  return `slack:${CHANNEL.id}:${rootTs}`
-}
-
-export async function botReplies(rootTs: string): Promise<SlackMessage[]> {
-  const thread = await slack<{ messages: SlackMessage[] }>('conversations.replies', {
-    channel: CHANNEL.id,
-    ts: rootTs
+async function registerScript(script: Script): Promise<void> {
+  const response = await fetch(`${modelUrl}/_e2e/replies`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ match: script.token, text: script.text })
   })
-  return thread.messages.filter(message => message.bot_id === BOT.id)
+  if (!response.ok) throw new Error(`registering the model script failed: ${response.status}`)
 }
 
-/** Waits for a finished (no longer streaming) bot reply in the thread that matches. */
-export async function waitForReply(
-  rootTs: string,
-  matches: (text: string) => boolean,
-  timeoutMs = 60_000
-): Promise<SlackMessage> {
-  let replies: SlackMessage[] = []
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    replies = await botReplies(rootTs)
-    const reply = replies.find(message => !message.streaming && matches(message.text ?? ''))
-    if (reply) return reply
-    await Bun.sleep(1_000)
-  }
-  throw new Error(`no matching reply in ${threadKey(rootTs)}; bot replies: ${JSON.stringify(replies)}`)
-}
-
-/** Waits until the thread has `count` executions and all are terminal. */
-export async function waitForExecutions(rootTs: string, count: number): Promise<Execution[]> {
-  let executions: Execution[] = []
-  const deadline = Date.now() + turnTimeoutMs
-  while (Date.now() < deadline) {
-    executions = await sql<Execution>(
-      `select execution_id, status, error from session_executions
-       where thread_key = ${literal(threadKey(rootTs))} order by created_at`
-    )
-    if (executions.length >= count && executions.every(execution => isTerminal(execution.status))) {
-      return executions
+async function modelRequests(token: string): Promise<ModelRequest[]> {
+  const response = await fetch(`${modelUrl}/_e2e/requests?match=${encodeURIComponent(token)}`)
+  const recorded = (await response.json()) as Array<Omit<ModelRequest, 'assistantTurns'>>
+  return recorded.map(request => {
+    const history: Array<{ role?: string; content?: unknown }> =
+      request.body.input ?? request.body.messages ?? []
+    return {
+      ...request,
+      assistantTurns: history
+        .filter(item => item.role === 'assistant')
+        .map(item => contentText(item.content))
     }
-    await Bun.sleep(2_000)
-  }
-  throw new Error(`executions for ${threadKey(rootTs)} did not finish: ${JSON.stringify(executions)}`)
+  })
+}
+
+function contentText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content.map(part => (typeof part?.text === 'string' ? part.text : '')).join('')
 }
 
 function isTerminal(status: string): boolean {
   return ['completed', 'failed', 'cancelled'].includes(status)
 }
 
-/** Durable session events for the thread, oldest first. */
-export async function sessionEvents(rootTs: string, eventType?: string): Promise<any[]> {
-  const rows = await sql<{ payload: unknown }>(
-    `select payload from session_events where thread_key = ${literal(threadKey(rootTs))}
-     ${eventType ? `and event_type = ${literal(eventType)}` : ''} order by event_id`
-  )
-  return rows.map(row => row.payload)
+/** Polls until `check` returns a value, or fails with what it last saw. */
+async function poll<T>(what: string, timeoutMs: number, check: () => Promise<T | undefined>): Promise<T> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const value = await check()
+    if (value !== undefined) return value
+    await Bun.sleep(1_000)
+  }
+  throw new Error(`timed out after ${timeoutMs / 1000}s waiting for ${what}`)
 }
 
-export async function sql<T>(query: string): Promise<T[]> {
+async function sql<T>(query: string): Promise<T[]> {
   const out = await kubectl([
     'exec', `${release}-centaur-postgres-0`, '--', 'sh', '-c',
     'psql -v ON_ERROR_STOP=1 -At -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$0"',
@@ -146,7 +224,7 @@ function literal(value: string): string {
   return `'${value.replaceAll("'", "''")}'`
 }
 
-async function slack<T>(method: string, body: Record<string, string>): Promise<T> {
+async function slackApi<T>(method: string, body: Record<string, string>): Promise<T> {
   const response = await fetch(`${slackUrl}/api/${method}`, {
     method: 'POST',
     headers: { authorization: `Bearer ${USER_TOKEN}`, 'content-type': 'application/json' },
