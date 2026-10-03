@@ -126,6 +126,13 @@ const options: GithubbotOptions = {
   idleTimeoutMs: optionalNumberEnv("SESSION_IDLE_TIMEOUT_MS"),
   maxDurationMs: optionalNumberEnv("SESSION_MAX_DURATION_MS"),
   postgresUrl,
+  reasoningEffort: {
+    assignment: optionalEnv("GITHUBBOT_EFFORT_ASSIGNMENT"),
+    "ci-fix": optionalEnv("GITHUBBOT_EFFORT_CI_FIX"),
+    comment: optionalEnv("GITHUBBOT_EFFORT_COMMENT"),
+    management: optionalEnv("GITHUBBOT_EFFORT_MANAGEMENT"),
+    review: optionalEnv("GITHUBBOT_EFFORT_REVIEW"),
+  },
   reviewPrompt,
   issuePrompt,
   managementPrompt,

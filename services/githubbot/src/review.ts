@@ -2,6 +2,7 @@ import type { GitHubAdapter } from "@chat-adapter/github";
 import type { StateAdapter } from "chat";
 import { backgroundWaitUntil } from "./context";
 import { reactWorkingOnSubject, settleSubjectReaction } from "./reactions";
+import { reasoningEffortFor } from "./reasoning-effort";
 import { DEFAULT_REVIEW_PROMPT } from "./review-prompt";
 import { runTurnStream, turnOutputChars } from "./turn";
 import type {
@@ -169,6 +170,9 @@ export function handleReviewRequest(
       }),
       messages: [],
       model: undefined,
+      // Autonomous turn: no message to carry a -rsn flag, so the effort comes
+      // from the configured per-turn-type policy.
+      reasoning: reasoningEffortFor(options.reasoningEffort, "review"),
       onEventId: (eventId) => {
         lastEventId = Math.max(lastEventId, eventId);
         forwardInput.afterEventId = lastEventId;
