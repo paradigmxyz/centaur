@@ -569,6 +569,7 @@ def test_get_channel_history_proxy_calls_centaur_api(
         body = json.dumps(
             {
                 "ok": True,
+                "channel": "C123456789",
                 "messages": [{"type": "message", "ts": "1700000000.000001"}],
                 "has_more": False,
             }
@@ -590,6 +591,7 @@ def test_get_channel_history_proxy_calls_centaur_api(
     )
 
     assert result["ok"] is True
+    assert result["channel"] == "C123456789"
     assert request_info["authorization"] == "Bearer test-jwt"
     parsed = urllib.parse.urlparse(request_info["url"])
     assert parsed.scheme == "http"
@@ -783,6 +785,7 @@ def test_get_thread_replies_proxy_calls_centaur_api(
         body = json.dumps(
             {
                 "ok": True,
+                "channel": "C123456789",
                 "messages": [{"type": "message", "ts": "1700000000.000001"}],
                 "has_more": False,
             }
@@ -804,6 +807,7 @@ def test_get_thread_replies_proxy_calls_centaur_api(
     )
 
     assert result["ok"] is True
+    assert result["channel"] == "C123456789"
     assert request_info["authorization"] == "Bearer test-jwt"
     parsed = urllib.parse.urlparse(request_info["url"])
     assert parsed.scheme == "http"
