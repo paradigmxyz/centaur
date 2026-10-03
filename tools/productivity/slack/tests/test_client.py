@@ -2,6 +2,8 @@ import base64
 import datetime as dt
 import email.message
 import json
+from pathlib import Path
+import tomllib
 
 import pytest
 import slack.client as slack_client
@@ -1730,6 +1732,21 @@ def test_fetch_slack_file_returns_file_metadata_and_bytes(
     assert filename == "report.pdf"
     assert mime_type == "application/pdf"
     assert body == b"%PDF-1.4 report"
+
+
+def test_search_token_declaration_covers_slack_api_host() -> None:
+    # search.* API calls go to https://slack.com/api/..., so the optional
+    # search token's inject rule must be scoped to slack.com too, not just
+    # files.slack.com, or the placeholder reaches Slack and it answers
+    # invalid_auth (issue #1579).
+    manifest = tomllib.loads(
+        Path(slack_client.__file__).with_name("pyproject.toml").read_text()
+    )
+    optional = manifest["tool"]["centaur"]["optional_secrets"]
+    search = next(secret for secret in optional if secret["name"] == "SLACK_SEARCH_TOKEN")
+
+    assert search["mode"] == "inject"
+    assert search["hosts"] == ["slack.com", "files.slack.com"]
 
 
 def test_get_file_info_direct_uses_user_token_client() -> None:
