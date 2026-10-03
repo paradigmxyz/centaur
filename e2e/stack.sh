@@ -33,7 +33,14 @@ export KUBECONFIG
 KUBECONFIG="$(mktemp)"
 WORK="$(mktemp -d)"
 FORWARDS=()
-trap 'kill ${FORWARDS[@]+"${FORWARDS[@]}"} 2> /dev/null; rm -rf "$KUBECONFIG" "$WORK"' EXIT
+
+cleanup() {
+  if [[ "${#FORWARDS[@]}" -gt 0 ]]; then
+    kill "${FORWARDS[@]}" 2> /dev/null || true
+  fi
+  rm -rf "$KUBECONFIG" "$WORK"
+}
+trap cleanup EXIT
 
 use_cluster() {
   kind get kubeconfig --name "$CLUSTER" > "$KUBECONFIG"
@@ -141,7 +148,8 @@ run_tests() {
   forward E2E_SLACK_URL "$SLACK_NAMESPACE" svc/fake-slack 443
   forward E2E_MODEL_URL "$MODEL_NAMESPACE" svc/model-server 8080
   export E2E_SLACK_URL E2E_MODEL_URL
-  export E2E_NAMESPACE="$NAMESPACE" E2E_RELEASE="$RELEASE" E2E_OPENAI_KEY="$OPENAI_TEST_KEY"
+  export E2E_NAMESPACE="$NAMESPACE" E2E_RELEASE="$RELEASE"
+  export E2E_OPENAI_KEY="$OPENAI_TEST_KEY" E2E_ANTHROPIC_KEY="$ANTHROPIC_TEST_KEY"
   if ! bun test ./e2e "$@"; then
     kubectl get pods -A -o wide
     kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-slackbotv2" --tail=100 || true

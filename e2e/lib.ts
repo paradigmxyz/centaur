@@ -8,11 +8,11 @@ import { BOT, CHANNEL, USER_TOKEN } from './fixture'
 export type SlackMessage = { ts: string; text?: string; bot_id?: string; streaming?: boolean }
 export type Execution = { execution_id: string; status: string; error: string | null }
 export type ModelRequest = {
-  provider: string
+  provider: 'openai' | 'anthropic'
   match?: string
   model?: string
-  reasoning?: unknown
-  authorization?: string
+  /** The credential header as the provider received it. */
+  credential?: string
   body: any
 }
 
@@ -21,8 +21,14 @@ const modelUrl = required('E2E_MODEL_URL')
 const namespace = process.env.E2E_NAMESPACE ?? 'centaur'
 const release = process.env.E2E_RELEASE ?? 'centaur'
 
-/** The key iron-proxy holds for OpenAI; the sandbox only ever has a placeholder. */
-export const openaiKey = process.env.E2E_OPENAI_KEY ?? 'sk-e2e-openai-test-key'
+/**
+ * The provider keys iron-proxy holds, as each harness's provider receives
+ * them. Sandboxes only ever hold placeholders.
+ */
+export const providerCredentials: Record<string, string> = {
+  codex: `Bearer ${required('E2E_OPENAI_KEY')}`,
+  claudecode: required('E2E_ANTHROPIC_KEY')
+}
 export const turnTimeoutMs = Number(process.env.E2E_TURN_TIMEOUT_MS ?? 300_000)
 
 export const model = {
