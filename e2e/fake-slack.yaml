@@ -50,9 +50,11 @@ metadata:
   labels:
     app: fake-slack
 spec:
+  type: NodePort
   selector:
     app: fake-slack
   ports:
     - name: http
       port: 443
       targetPort: http
+      nodePort: 30443 # reached by the test runner via e2e/kind.yaml

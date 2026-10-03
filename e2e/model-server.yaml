@@ -63,9 +63,24 @@ spec:
     - name: https
       port: 443
       targetPort: https
+---
+# The control API, reached by the test runner through e2e/kind.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-server-control
+  namespace: centaur-e2e-model
+  labels:
+    app: model-server
+spec:
+  type: NodePort
+  selector:
+    app: model-server
+  ports:
     - name: control
       port: 8080
       targetPort: control
+      nodePort: 30080
 ---
 # Per-sandbox iron-proxies may only dial public addresses. This additive policy
 # is the one exception the e2e stack needs: the in-cluster model server.

@@ -8,7 +8,8 @@
 # The stack is the chart's Slack path (Postgres, console, proxy-sync, api-rs,
 # slackbotv2, sandboxes, per-sandbox iron-proxies) plus two fakes for the
 # outside world: Slack, and the model providers, which CoreDNS resolves to an
-# in-cluster scripted model server.
+# in-cluster scripted model server. The test runner reaches the fakes and
+# Postgres on localhost through NodePorts mapped by e2e/kind.yaml.
 #
 # Images are built from the working tree and loaded into kind by default. Set
 # CENTAUR_E2E_IMAGE_TAG (e.g. main or sha-abc1234) to pull published images.
@@ -32,15 +33,7 @@ IMAGES=(api-rs:apiRs proxy-sync:proxySync iron-proxy:ironProxy slackbotv2:slackb
 export KUBECONFIG
 KUBECONFIG="$(mktemp)"
 WORK="$(mktemp -d)"
-FORWARDS=()
-
-cleanup() {
-  if [[ "${#FORWARDS[@]}" -gt 0 ]]; then
-    kill "${FORWARDS[@]}" 2> /dev/null || true
-  fi
-  rm -rf "$KUBECONFIG" "$WORK"
-}
-trap cleanup EXIT
+trap 'rm -rf "$KUBECONFIG" "$WORK"' EXIT
 
 use_cluster() {
   kind get kubeconfig --name "$CLUSTER" > "$KUBECONFIG"
@@ -53,9 +46,19 @@ apply_stdin() {
 up() {
   if kind get clusters | grep -qx "$CLUSTER"; then
     use_cluster
+    if ! docker port "${CLUSTER}-control-plane" | grep -q '^30443/tcp'; then
+      echo "cluster $CLUSTER predates e2e/kind.yaml; run e2e/stack.sh down first" >&2
+      exit 1
+    fi
   else
-    kind create cluster --name "$CLUSTER" --kubeconfig "$KUBECONFIG" --wait 120s
+    kind create cluster --name "$CLUSTER" --config e2e/kind.yaml --kubeconfig "$KUBECONFIG" --wait 120s
   fi
+
+  # Pods inherit the host's DNS search domains, so every external lookup first
+  # tries names like api.openai.com.<host-domain> through the host's resolver,
+  # which is slow under load. resolv.conf is bind-mounted, so write in place.
+  docker exec "${CLUSTER}-control-plane" sh -c \
+    "grep -v '^search ' /etc/resolv.conf > /tmp/resolv.conf && cat /tmp/resolv.conf > /etc/resolv.conf"
 
   kubectl -n kube-system create configmap coredns --from-file=Corefile=e2e/Corefile \
     --dry-run=client -o yaml | apply_stdin
@@ -105,6 +108,7 @@ up() {
   helm upgrade --install "$RELEASE" contrib/chart -n "$NAMESPACE" \
     -f contrib/chart/values.dev.yaml -f e2e/values.yaml \
     ${image_args[@]+"${image_args[@]}"} --wait --timeout 20m
+  kubectl apply -f e2e/postgres-access.yaml > /dev/null
 }
 
 deploy_model_server() {
@@ -145,12 +149,15 @@ deploy_fake_slack() {
 
 run_tests() {
   use_cluster
-  forward E2E_SLACK_URL "$SLACK_NAMESPACE" svc/fake-slack 443
-  forward E2E_MODEL_URL "$MODEL_NAMESPACE" svc/model-server 8080
-  export E2E_SLACK_URL E2E_MODEL_URL
-  export E2E_NAMESPACE="$NAMESPACE" E2E_RELEASE="$RELEASE"
+  remove_sandboxes
+  local password
+  password="$(kubectl -n "$NAMESPACE" get secret centaur-infra-env -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)"
+  export E2E_SLACK_URL=http://127.0.0.1:30443
+  export E2E_MODEL_URL=http://127.0.0.1:30080
+  export E2E_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:30432/ai_v2"
   export E2E_OPENAI_KEY="$OPENAI_TEST_KEY" E2E_ANTHROPIC_KEY="$ANTHROPIC_TEST_KEY"
-  if ! bun test ./e2e "$@"; then
+  # A wider burst of cold sandboxes overloads the single kind node.
+  if ! bun test --max-concurrency=4 ./e2e "$@"; then
     kubectl get pods -A -o wide
     kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-slackbotv2" --tail=100 || true
     kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-api-rs" --tail=-1 \
@@ -161,21 +168,12 @@ run_tests() {
   fi
 }
 
-# Port-forwards to a free local port and stores the base URL in variable $1.
-forward() {
-  local var="$1" namespace="$2" target="$3" port="$4" out="$WORK/forward-${3//\//-}" local_port="" _
-  kubectl -n "$namespace" port-forward "$target" ":$port" > "$out" 2>&1 &
-  FORWARDS+=("$!")
-  for _ in {1..30}; do
-    local_port="$(sed -n 's/^Forwarding from 127.0.0.1:\([0-9]*\) .*/\1/p' "$out")"
-    if [[ -n "$local_port" ]] && curl -fsS "http://127.0.0.1:$local_port/healthz" > /dev/null 2>&1; then
-      printf -v "$var" 'http://127.0.0.1:%s' "$local_port"
-      return 0
-    fi
-    sleep 1
-  done
-  echo "port-forward to $namespace/$target failed: $(cat "$out")" >&2
-  return 1
+# Earlier runs leave a sandbox and iron-proxy per thread (they idle for hours).
+# Remove them so each run starts on an unloaded node.
+remove_sandboxes() {
+  kubectl -n "$NAMESPACE" delete sandboxes.agents.x-k8s.io --all --wait=false > /dev/null
+  kubectl -n "$NAMESPACE" delete pods,services,networkpolicies,configmaps,secrets \
+    -l centaur.ai/managed-by=api-rs --wait=false > /dev/null
 }
 
 case "${1:-}" in

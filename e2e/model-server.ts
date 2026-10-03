@@ -17,11 +17,19 @@ type Recorded = {
   model?: string
   /** The credential header as it arrived, after iron-proxy's substitution. */
   credential?: string
+  /**
+   * The whole conversation the model was asked to continue. Codex's WebSocket
+   * transport sends only new input plus previous_response_id, so earlier
+   * turns are rebuilt from the responses this server returned.
+   */
+  conversation: unknown[]
   body: unknown
 }
 
 const replies: Reply[] = []
 const requests: Recorded[] = []
+/** OpenAI response id -> the conversation including that response's answer. */
+const responses = new Map<string, unknown[]>()
 
 Bun.serve({
   port: 8080,
@@ -40,28 +48,45 @@ Bun.serve({
   }
 })
 
-Bun.serve({
+Bun.serve<{ credential: string | null }>({
   port: 8443,
   tls: { cert: Bun.file('/tls/tls.crt'), key: Bun.file('/tls/tls.key') },
-  async fetch(request) {
+  async fetch(request, server) {
     const url = new URL(request.url)
-    // Codex prefers a WebSocket transport and falls back to HTTPS when the
-    // upgrade is refused; only the HTTPS transport is modeled so far.
-    if (request.headers.get('upgrade')) return new Response('websocket unsupported', { status: 426 })
+    // Codex's preferred transport: one WebSocket per session, carrying
+    // response.create requests and the same events the HTTP stream would.
+    if (url.pathname === '/v1/responses' && request.headers.get('upgrade')?.toLowerCase() === 'websocket') {
+      if (server.upgrade(request, { data: { credential: request.headers.get('authorization') } })) return
+      return new Response('websocket upgrade failed', { status: 400 })
+    }
     if (request.method === 'POST' && url.pathname === '/v1/responses') {
-      return openaiResponse(url.pathname, request.headers, await request.json())
+      const body = await request.json()
+      return sse(openaiEvents(url.pathname, request.headers.get('authorization'), body))
     }
     if (request.method === 'POST' && url.pathname === '/v1/messages') {
       return anthropicMessage(url.pathname, request.headers, await request.json())
     }
     log('model_server_unmodeled_request', { host: request.headers.get('host'), path: url.pathname })
     return Response.json({ error: { message: 'not modeled by the e2e model server' } }, { status: 404 })
+  },
+  websocket: {
+    message(socket, raw) {
+      const { type, ...body } = JSON.parse(String(raw))
+      if (type !== 'response.create') {
+        log('model_server_unmodeled_websocket_message', { type })
+        return
+      }
+      for (const event of openaiEvents('/v1/responses', socket.data.credential, body)) {
+        socket.send(JSON.stringify(event))
+      }
+    }
   }
 })
 log('model_server_started', {})
 
-function openaiResponse(path: string, headers: Headers, body: any): Response {
-  const reply = record('openai', path, headers.get('authorization'), body, lastUserText(body.input, 'type'))
+function openaiEvents(path: string, credential: string | null, body: any): Array<{ type: string }> {
+  const conversation = [...(responses.get(body.previous_response_id) ?? []), ...(body.input ?? [])]
+  const reply = record('openai', path, credential, body, conversation)
   const text = reply?.text ?? 'ok'
   const responseId = `resp_${randomUUID()}`
   const itemId = `msg_${randomUUID()}`
@@ -86,11 +111,12 @@ function openaiResponse(path: string, headers: Headers, body: any): Response {
     { type: 'response.output_item.done', output_index: 0, item: message('completed', [part]) },
     { type: 'response.completed', response: response('completed', [message('completed', [part])]) }
   ]
-  return sse(events.map((event, sequence) => ({ ...event, sequence_number: sequence })))
+  responses.set(responseId, [...conversation, message('completed', [part])])
+  return events.map((event, sequence) => ({ ...event, sequence_number: sequence }))
 }
 
 function anthropicMessage(path: string, headers: Headers, body: any): Response {
-  const reply = record('anthropic', path, headers.get('x-api-key'), body, lastUserText(body.messages, 'role'))
+  const reply = record('anthropic', path, headers.get('x-api-key'), body, body.messages ?? [])
   const text = reply?.text ?? 'ok'
   const message = {
     id: `msg_${randomUUID()}`, type: 'message', role: 'assistant', model: body.model,
@@ -115,9 +141,9 @@ function record(
   path: string,
   credential: string | null,
   body: any,
-  userText: string
+  conversation: unknown[]
 ): Reply | undefined {
-  const reply = findReply(userText)
+  const reply = findReply(lastUserText(conversation))
   requests.push({
     at: new Date().toISOString(),
     provider,
@@ -125,6 +151,7 @@ function record(
     match: reply?.match,
     model: body.model,
     credential: credential ?? undefined,
+    conversation,
     body
   })
   return reply
@@ -135,15 +162,9 @@ function sse(events: Array<{ type: string; [field: string]: unknown }>): Respons
   return new Response(stream, { headers: { 'content-type': 'text/event-stream' } })
 }
 
-/**
- * Text of the newest user message: the turn the harness is asking about.
- * OpenAI input items are tagged by `type`, Anthropic messages only by `role`.
- */
-function lastUserText(items: unknown, kind: 'type' | 'role'): string {
-  if (!Array.isArray(items)) return ''
-  const user = items
-    .filter(item => item?.role === 'user' && (kind === 'role' || item.type === 'message'))
-    .at(-1)
+/** Text of the newest user message: the turn the harness is asking about. */
+function lastUserText(conversation: unknown[]): string {
+  const user = conversation.filter((item: any) => item?.role === 'user').at(-1) as any
   if (typeof user?.content === 'string') return user.content
   if (!Array.isArray(user?.content)) return ''
   return user.content.map((part: any) => (typeof part?.text === 'string' ? part.text : '')).join('\n')

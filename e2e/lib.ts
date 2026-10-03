@@ -7,6 +7,7 @@
 //   const turn = await thread.nextTurn()
 //   expect(turn.reply).toBe('Hello.')
 import { randomUUID } from 'node:crypto'
+import { SQL } from 'bun'
 import { BOT, CHANNEL, USER_TOKEN } from './fixture'
 
 /** A scripted model answer, matched by a token placed in the user's message. */
@@ -20,15 +21,27 @@ export type ModelRequest = {
   model?: string
   /** The credential header as the provider received it, after iron-proxy. */
   credential?: string
-  /** Earlier assistant turns the harness sent back as conversation history. */
+  /** Reasoning effort the harness asked for. */
+  effort?: string
+  /**
+   * What the user wrote this turn: the last content block of the newest user
+   * message. Earlier blocks carry session context and, after a harness
+   * switch, the re-fed thread transcript.
+   */
+  userText: string
+  /** Earlier assistant turns in the conversation the model was asked to continue. */
   assistantTurns: string[]
   body: any
 }
+
+/** The sandbox that ran a turn, and how the control plane obtained it. */
+export type Sandbox = { id: string; harness: string; source: string }
 
 export type Turn = {
   /** Text of the turn's one Slack reply. */
   reply: string
   execution: Execution
+  sandbox: Sandbox
   /** The provider request answered by this turn's script, if it had one. */
   request?: ModelRequest
 }
@@ -37,8 +50,7 @@ type SlackMessage = { ts: string; text?: string; bot_id?: string; streaming?: bo
 
 const slackUrl = required('E2E_SLACK_URL')
 const modelUrl = required('E2E_MODEL_URL')
-const namespace = process.env.E2E_NAMESPACE ?? 'centaur'
-const release = process.env.E2E_RELEASE ?? 'centaur'
+const db = new SQL(required('E2E_DATABASE_URL'))
 
 /** Provider keys iron-proxy holds, as each harness's provider receives them. */
 export const providerCredentials: Record<string, string> = {
@@ -106,31 +118,38 @@ export class Thread {
     if (replies.length !== 1) {
       throw new Error(`turn ${index + 1} of ${this.key} produced ${replies.length} replies: ${JSON.stringify(replies)}`)
     }
+    const [sandbox]: Sandbox[] = await db`
+      select payload->>'sandbox_id' as id, payload->>'harness_type' as harness,
+        payload->>'sandbox_ready_source' as source
+      from session_events
+      where execution_id = ${execution.execution_id} and event_type = 'session.sandbox_ready'
+      order by event_id desc limit 1`
+    if (!sandbox) throw new Error(`turn ${index + 1} of ${this.key} recorded no ready sandbox`)
     const token = this.scripts[index]
     return {
       reply: replies[0]!.text ?? '',
       execution,
+      sandbox,
       request: token ? (await modelRequests(token))[0] : undefined
     }
   }
 
   /** Sandboxes that served this thread, in the order they became ready. */
   async sandboxes(): Promise<Array<{ id: string; harness: string }>> {
-    return sql<{ id: string; harness: string }>(
-      `select id, harness from (
-         select distinct on (payload->>'sandbox_id') payload->>'sandbox_id' as id,
-           payload->>'harness_type' as harness, event_id
-         from session_events where thread_key = ${literal(this.key)} and event_type = 'session.sandbox_ready'
-         order by payload->>'sandbox_id', event_id
-       ) ready order by event_id`
-    )
+    return db`
+      select id, harness from (
+        select distinct on (payload->>'sandbox_id') payload->>'sandbox_id' as id,
+          payload->>'harness_type' as harness, event_id
+        from session_events
+        where thread_key = ${this.key} and event_type = 'session.sandbox_ready'
+        order by payload->>'sandbox_id', event_id
+      ) ready order by event_id`
   }
 
   private async executions(): Promise<Execution[]> {
-    return sql<Execution>(
-      `select execution_id, status, error from session_executions
-       where thread_key = ${literal(this.key)} order by created_at`
-    )
+    return db`
+      select execution_id, status, error from session_executions
+      where thread_key = ${this.key} order by created_at`
   }
 
   /** Bot messages posted after a turn's trigger and before the next user message. */
@@ -166,17 +185,25 @@ async function registerScript(script: Script): Promise<void> {
 
 async function modelRequests(token: string): Promise<ModelRequest[]> {
   const response = await fetch(`${modelUrl}/_e2e/requests?match=${encodeURIComponent(token)}`)
-  const recorded = (await response.json()) as Array<Omit<ModelRequest, 'assistantTurns'>>
-  return recorded.map(request => {
-    const history: Array<{ role?: string; content?: unknown }> =
-      request.body.input ?? request.body.messages ?? []
+  const recorded = (await response.json()) as Array<
+    Pick<ModelRequest, 'provider' | 'model' | 'credential' | 'body'> & { conversation: unknown[] }
+  >
+  return recorded.map(({ conversation, ...request }) => {
+    const body = request.body
+    const history = conversation as Array<{ role?: string; content?: unknown }>
     return {
       ...request,
+      effort: body.reasoning?.effort ?? body.output_config?.effort,
+      userText: lastBlockText(history.filter(item => item.role === 'user').at(-1)?.content),
       assistantTurns: history
         .filter(item => item.role === 'assistant')
         .map(item => contentText(item.content))
     }
   })
+}
+
+function lastBlockText(content: unknown): string {
+  return Array.isArray(content) ? contentText(content.slice(-1)) : contentText(content)
 }
 
 function contentText(content: unknown): string {
@@ -198,30 +225,6 @@ async function poll<T>(what: string, timeoutMs: number, check: () => Promise<T |
     await Bun.sleep(1_000)
   }
   throw new Error(`timed out after ${timeoutMs / 1000}s waiting for ${what}`)
-}
-
-async function sql<T>(query: string): Promise<T[]> {
-  const out = await kubectl([
-    'exec', `${release}-centaur-postgres-0`, '--', 'sh', '-c',
-    'psql -v ON_ERROR_STOP=1 -At -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$0"',
-    `select coalesce(json_agg(t), '[]') from (${query}) t`
-  ])
-  return JSON.parse(out) as T[]
-}
-
-async function kubectl(args: string[]): Promise<string> {
-  const proc = Bun.spawn(['kubectl', '-n', namespace, ...args], { stdout: 'pipe', stderr: 'pipe' })
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited
-  ])
-  if (code !== 0) throw new Error(`kubectl ${args.slice(0, 3).join(' ')} failed: ${stderr.trim()}`)
-  return stdout.trim()
-}
-
-function literal(value: string): string {
-  return `'${value.replaceAll("'", "''")}'`
 }
 
 async function slackApi<T>(method: string, body: Record<string, string>): Promise<T> {
