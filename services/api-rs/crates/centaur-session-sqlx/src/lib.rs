@@ -672,31 +672,11 @@ impl PgSessionStore {
         owner_id: &str,
         lease: Duration,
     ) -> Result<bool, SessionStoreError> {
-        let lease_expires_at = stdout_lease_expires_at(lease);
-        let result = sqlx::query(
-            r#"
-            update session_executions
-            set stdout_owner_id = $2,
-                stdout_owner_lease_expires_at = $3,
-                updated_at = now()
-            where execution_id = $1
-              and status in ($4, $5)
-              and (
-                stdout_owner_id is null
-                or stdout_owner_id = $2
-                or stdout_owner_lease_expires_at < now()
-              )
-            "#,
-        )
-        .bind(execution_id)
-        .bind(owner_id)
-        .bind(lease_expires_at)
-        .bind(ExecutionStatus::Queued.as_ref())
-        .bind(ExecutionStatus::Running.as_ref())
-        .execute(&self.pool)
-        .await?;
-
-        Ok(result.rows_affected() > 0)
+        // `or stdout_owner_id = $2` lets a live owner silently renew its own
+        // claim; the expired-claim variant omits that arm so a new owner can
+        // only take the execution once the previous lease lapsed.
+        Self::claim_stdout_owner_with_renew_owned(execution_id, owner_id, lease, true, &self.pool)
+            .await
     }
 
     pub async fn claim_expired_stdout_owner(
@@ -704,6 +684,17 @@ impl PgSessionStore {
         execution_id: &str,
         owner_id: &str,
         lease: Duration,
+    ) -> Result<bool, SessionStoreError> {
+        Self::claim_stdout_owner_with_renew_owned(execution_id, owner_id, lease, false, &self.pool)
+            .await
+    }
+
+    async fn claim_stdout_owner_with_renew_owned(
+        execution_id: &str,
+        owner_id: &str,
+        lease: Duration,
+        renew_owned: bool,
+        pool: &sqlx::PgPool,
     ) -> Result<bool, SessionStoreError> {
         let lease_expires_at = stdout_lease_expires_at(lease);
         let result = sqlx::query(
@@ -716,6 +707,7 @@ impl PgSessionStore {
               and status in ($4, $5)
               and (
                 stdout_owner_id is null
+                or ($6 and stdout_owner_id = $2)
                 or stdout_owner_lease_expires_at < now()
               )
             "#,
@@ -725,7 +717,8 @@ impl PgSessionStore {
         .bind(lease_expires_at)
         .bind(ExecutionStatus::Queued.as_ref())
         .bind(ExecutionStatus::Running.as_ref())
-        .execute(&self.pool)
+        .bind(renew_owned)
+        .execute(pool)
         .await?;
 
         Ok(result.rows_affected() > 0)
