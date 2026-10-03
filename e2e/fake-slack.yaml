@@ -1,7 +1,7 @@
 # Fake Slack for the e2e stack. It lives outside the release namespace so it
 # reaches slackbotv2 the way Slack does: as an allowed ingress source, while
-# slackbotv2 calls it through its ordinary port-443 Slack egress. The recipe
-# in the root Justfile creates the fake-slack ConfigMap and Secret.
+# slackbotv2 calls it through its ordinary port-443 Slack egress. e2e/stack.sh
+# creates the fake-slack ConfigMap and Secret.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

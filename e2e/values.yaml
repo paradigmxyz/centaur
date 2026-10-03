@@ -1,10 +1,15 @@
-# Overrides layered on values.dev.yaml for the end-to-end stack: the real
-# control plane, proxy, sandboxes, and slackbotv2, minus optional services and
-# anything that needs credentials beyond model API keys.
+# Overrides layered on values.dev.yaml for the e2e stack: the real control
+# plane, proxy, sandboxes, and slackbotv2, minus optional services and anything
+# that needs real credentials.
 
-# Model keys come from centaur-infra-env instead of 1Password.
+# Model keys are fixed test keys in centaur-infra-env instead of 1Password.
 ironProxy:
   secretSource: env
+
+# With the env source, iron-proxy pods (and only they) also load this Secret.
+# e2e/stack.sh puts SSL_CERT_FILE in it so they trust the model server's cert.
+secrets:
+  bootstrapSecretName: centaur-e2e-iron-proxy-env
 
 # Sandboxes run the tools baked into the image; nothing is cloned from GitHub.
 toolServer:
@@ -12,7 +17,7 @@ toolServer:
 repoCache:
   enabled: false
 
-# Both Slack clients talk to the fake Slack deployed by `just e2e-up`.
+# Both Slack clients talk to the fake Slack.
 apiRs:
   extraEnv:
     SLACK_API_URL: http://fake-slack.centaur-e2e-slack.svc.cluster.local:443/api
