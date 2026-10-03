@@ -20,8 +20,9 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | quote }}
 app.kubernetes.io/name: {{ include "agent-sandbox.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
-{{- if .Values.image.tag }}
-app.kubernetes.io/version: {{ .Values.image.tag | quote }}
+{{- $version := index (splitList "@" .Values.image.tag) 0 }}
+{{- if $version }}
+app.kubernetes.io/version: {{ $version | quote }}
 {{- end }}
 {{- end }}
 
