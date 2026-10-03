@@ -20,6 +20,54 @@ class SecretSourceTest < ActiveSupport::TestCase
     assert s.valid?
   end
 
+  test "vault_kv source is valid with mount and path" do
+    s = new_source(source_type: "vault_kv", config: { "mount" => "secret", "path" => "prod/key" })
+    assert s.valid?
+  end
+
+  test "vault_kv source requires both mount and path" do
+    %w[mount path].each do |missing|
+      config = { "mount" => "secret", "path" => "prod/key" }.except(missing)
+      s = new_source(source_type: "vault_kv", config: config)
+      assert_not s.valid?
+      assert s.errors[:config].any? { |m| m.include?(missing) },
+                             "expected a config error naming #{missing}, got: #{s.errors[:config].inspect}"
+    end
+  end
+
+  test "vault_kv source accepts kv_version" do
+    s = new_source(source_type: "vault_kv", config: { "mount" => "secret", "path" => "prod/key", "kv_version" => 1 })
+    assert s.valid?
+  end
+
+  test "vault_kv source accepts an absent or null kv_version" do
+    [ {}, { "kv_version" => nil } ].each do |extra|
+      s = new_source(source_type: "vault_kv", config: { "mount" => "secret", "path" => "prod/key" }.merge(extra))
+      assert s.valid?, "expected #{extra.inspect} to be valid, got: #{s.errors.full_messages.inspect}"
+    end
+  end
+
+  test "vault_kv source rejects a kv_version iron-proxy cannot decode" do
+    [ "1", 1.0, 3, true ].each do |bad|
+      s = new_source(source_type: "vault_kv", config: { "mount" => "secret", "path" => "prod/key", "kv_version" => bad })
+      assert_not s.valid?, "expected #{bad.inspect} to be rejected"
+      assert s.errors[:config].any? { |m| m.include?("kv_version") },
+                             "expected a config error naming kv_version for #{bad.inspect}, got: #{s.errors[:config].inspect}"
+    end
+  end
+
+  test "vault_kv source rejects keys iron-proxy does not read" do
+    s = new_source(source_type: "vault_kv", config: { "mount" => "secret", "path" => "prod/key", "failure_ttl" => "30s" })
+    assert_not s.valid?
+    assert s.errors[:config].any? { |m| m.include?("failure_ttl") }
+  end
+
+  test "vault_kv proxy source carries mount and path through untyped" do
+    s = new_source(source_type: "vault_kv", config: { "mount" => "secret", "path" => "prod/key", "json_key" => "credential" })
+    assert_equal({ "mount" => "secret", "path" => "prod/key", "json_key" => "credential", "type" => "vault_kv" },
+                 s.to_proxy_source)
+  end
+
   test "1password source is valid with secret_ref" do
     s = new_source(source_type: "1password", config: { "secret_ref" => "op://v/i/f" })
     assert s.valid?

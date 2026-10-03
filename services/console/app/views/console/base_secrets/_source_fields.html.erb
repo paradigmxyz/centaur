@@ -3,7 +3,8 @@
   create); `heading` defaults to "Source". `bare` (default false) drops the
   form-section card wrapper so the fields sit inside another section, as the
   gcp_auth keyfile credentials do. A control_plane source edits an inline value;
-  every other backend edits a single reference mapped to its primary config key.
+  every other backend edits a single reference mapped to its primary config key,
+  plus a region (AWS) or mount (Vault) input where the backend needs one.
   The source-fields Stimulus controller reveals the right inputs per backend.
 %>
 <%
@@ -14,22 +15,26 @@
   cfg = src&.config.is_a?(Hash) ? src.config : {}
   reference = cfg[SecretKinds::SOURCE_REF_KEYS[type]]
   region = cfg["region"]
+  mount = cfg["mount"]
   json_key = cfg["json_key"]
   inline_secret = src&.source_type == "control_plane" ? src.secret : nil
 
   type_labels = {
     "env" => "Env Var", "aws_sm" => "AWS Secrets Manager", "aws_ssm" => "AWS SSM Parameter Store",
+    "vault_kv" => "HashiCorp Vault (KV)",
     "1password" => "1Password", "1password_connect" => "1Password Connect",
     "control_plane" => "Inline Value", "token_broker" => "Token Broker"
   }
   ref_labels = {
     "env" => "Environment variable", "aws_sm" => "Secret ID", "aws_ssm" => "Parameter name",
+    "vault_kv" => "Secret path",
     "1password" => "Secret reference", "1password_connect" => "Secret reference", "token_broker" => "Credential ID"
   }
   is_inline = type == "control_plane"
   is_aws = %w[aws_sm aws_ssm].include?(type)
+  is_mounted = SecretSource::MOUNT_SOURCE_TYPES.include?(type)
 %>
-<%= content_tag(bare ? :div : :section, data: { controller: "source-fields" }, class: bare ? "space-y-4" : "form-section") do %>
+<%= content_tag(bare ? :div : :section, data: { controller: "source-fields", source_fields_mount_types_value: SecretSource::MOUNT_SOURCE_TYPES.to_json }, class: bare ? "space-y-4" : "form-section") do %>
   <%= content_tag(bare ? :h3 : :h2, heading, class: "form-section-heading#{' mb-0' if bare}") %>
   <% source_errors = (src ? src.errors.full_messages : []) + secret.errors[:dsn_source] %>
   <% if source_errors.any? %>
@@ -58,6 +63,12 @@
     <div data-source-fields-target="region" <%= "hidden" unless is_aws %>>
       <label class="form-label">Region</label>
       <%= text_field_tag "source[region]", region, class: "form-input", placeholder: "us-west-2" %>
+    </div>
+
+    <div data-source-fields-target="mount" <%= "hidden" unless is_mounted %>>
+      <label class="form-label">Mount</label>
+      <%= text_field_tag "source[mount]", mount, class: "form-input", placeholder: "secret" %>
+      <p class="form-hint">KV mount holding the secret. The whole KV entry is resolved, so set a JSON key below to pick one field.</p>
     </div>
 
     <div>

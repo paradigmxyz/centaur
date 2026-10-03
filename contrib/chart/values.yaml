@@ -41,6 +41,10 @@ ironProxy:
     - "127.0.0.0/8"
     - "::1/128"
     - "10.42.0.0/16"
+  # How a tool secret declared only by placeholder (no Console record) resolves.
+  # One of env, onepassword, or onepassword-connect. Per-secret backends
+  # (aws_sm, aws_ssm, vault_kv, ...) are chosen on each secret in the Console
+  # and are independent of this value; see docs/pages/secrets/.
   secretSource: onepassword
   secretTtl: 10m
   # Requests/limits for each per-sandbox iron-proxy pod (k8s resources map).

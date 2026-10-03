@@ -25,8 +25,10 @@ module SecretKinds
   # The config key that carries a source's human-meaningful reference, per
   # source_type. control_plane keeps its value inline (and redacted), so it has no
   # reference key. Used by the console detail view and the source form fields.
+  # vault_kv reads a whole KV entry, so it has a second required config key
+  # (`mount`) alongside the reference; see SecretSource::MOUNT_SOURCE_TYPES.
   SOURCE_REF_KEYS = {
-    "env" => "var", "aws_sm" => "secret_id", "aws_ssm" => "name",
+    "env" => "var", "aws_sm" => "secret_id", "aws_ssm" => "name", "vault_kv" => "path",
     "1password" => "secret_ref", "1password_connect" => "secret_ref",
     "token_broker" => "credential_id"
   }.freeze

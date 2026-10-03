@@ -90,6 +90,7 @@ module Console
         config[ref_key] = sp[:reference].strip if sp[:reference].present?
       end
       config["region"] = sp[:region].strip if sp[:region].present? && %w[aws_sm aws_ssm].include?(type)
+      config["mount"] = sp[:mount].strip if sp[:mount].present? && SecretSource::MOUNT_SOURCE_TYPES.include?(type)
       config["json_key"] = sp[:json_key].strip if sp[:json_key].present?
       attrs[:config] = config
 

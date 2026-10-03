@@ -14,6 +14,13 @@ class RailsParityTest < ActionDispatch::IntegrationTest
       token = "iprx_#{'a' * 64}"
       body = compare(token)
       assert_operator body.fetch("secrets").length, :>=, 102
+      # Guard that the vault_kv source really reaches the payload: the
+      # has_one :source association is not autosaved, so a silently dropped
+      # source would otherwise leave this comparing nothing.
+      vault = body.fetch("secrets").filter_map { |s| s["source"] }.select { |s| s["type"] == "vault_kv" }
+      assert_equal 1, vault.length, "expected exactly one vault_kv source in the synced payload"
+      assert_equal({ "mount" => "secret", "path" => "parity/3", "json_key" => "credential",
+                     "ttl" => "10m", "type" => "vault_kv" }, vault.first)
       assert_equal %w[aws_auth gcp_auth gcp_id_token hmac_sign oauth_token], body.fetch("transforms").map { |t| t.fetch("name") }.sort
       assert_not_empty body.fetch("postgres")
       compare(token, { config_hash: body.fetch("config_hash") })
@@ -73,6 +80,12 @@ class RailsParityTest < ActionDispatch::IntegrationTest
       )
       if i.even?
         secret.build_source(source_type: "control_plane", secret: "parity-value-#{i}")
+      elsif i == 3
+        # A per-secret backend the proxy resolves itself, to pin that the Rust
+        # reimplementation forwards a vault_kv config unchanged.
+        secret.build_source(source_type: "vault_kv", config: {
+          "mount" => "secret", "path" => "parity/#{i}", "json_key" => "credential", "ttl" => "10m"
+        })
       else
         secret.build_source(source_type: "env", config: { "var" => "PARITY_#{i}" })
       end

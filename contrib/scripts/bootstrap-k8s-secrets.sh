@@ -20,6 +20,14 @@ onepassword-connect in the Helm values):
                                creates Secret centaur-onepassword-connect-credentials
   OP_CONNECT_TOKEN             Connect API token; added to centaur-infra-env
 
+Optional HashiCorp Vault KV secret source (per-secret vault_kv sources created
+in the Console). iron-proxy reads the standard VAULT_* variables; every key in
+centaur-infra-env is projected into each iron-proxy pod, so unlisted VAULT_*
+keys can be added to that Secret directly.
+  VAULT_ADDR                   Vault server address, e.g. https://vault.example.com:8200
+  VAULT_TOKEN                  token the proxy presents to Vault
+  VAULT_NAMESPACE              Vault Enterprise namespace (omit on OSS)
+
 Optional repo-cache GitHub token:
   GITHUB_TOKEN                 added to centaur-infra-env when present; the
                                repo-cache DaemonSet reads it (repoCache.githubToken
@@ -199,6 +207,20 @@ if secret_exists centaur-infra-env; then
   patch_data=()
   if [[ -n "${OP_CONNECT_TOKEN:-}" ]]; then
     patch_data+=("\"OP_CONNECT_TOKEN\":\"$(printf '%s' "$OP_CONNECT_TOKEN" | base64 | tr -d '\n')\"")
+  fi
+  # HashiCorp Vault KV secret source. iron-proxy reads the standard VAULT_*
+  # variables, and every key in centaur-infra-env is projected into each
+  # iron-proxy pod via envFrom, so any VAULT_* key added here reaches the
+  # resolver. These three cover the common cases and are overwritten on each
+  # run so the token rotates.
+  if [[ -n "${VAULT_ADDR:-}" ]]; then
+    patch_data+=("\"VAULT_ADDR\":\"$(printf '%s' "$VAULT_ADDR" | base64 | tr -d '\n')\"")
+  fi
+  if [[ -n "${VAULT_TOKEN:-}" ]]; then
+    patch_data+=("\"VAULT_TOKEN\":\"$(printf '%s' "$VAULT_TOKEN" | base64 | tr -d '\n')\"")
+  fi
+  if [[ -n "${VAULT_NAMESPACE:-}" ]]; then
+    patch_data+=("\"VAULT_NAMESPACE\":\"$(printf '%s' "$VAULT_NAMESPACE" | base64 | tr -d '\n')\"")
   fi
   # GITHUB_TOKEN for the repo-cache DaemonSet. Set whenever present so it can be
   # rotated; harmless when repoCache is disabled.
