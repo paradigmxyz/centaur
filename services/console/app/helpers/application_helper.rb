@@ -51,6 +51,7 @@ module ApplicationHelper
     when "amp" then "Amp"
     when "nanocodex" then "Nanocodex"
     when "pi" then "Pi"
+    when "omp" then "OMP"
     when "" then nil
     else harness_type.to_s.tr("_-", " ").squish.split.map(&:capitalize).join(" ")
     end

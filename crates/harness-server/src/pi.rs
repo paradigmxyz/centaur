@@ -51,7 +51,8 @@ const MODELS: &[(&str, &str)] = &[
     ("openai", "gpt-6-luna"),
     ("openai", "gpt-6-sol"),
 ];
-const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+pub(crate) const THINKING_LEVELS: &[&str] =
+    &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 #[derive(Debug, Default)]
 pub struct PiHarness;
@@ -119,18 +120,8 @@ impl PiEventNormalizer {
     }
 
     fn assistant_message(&mut self, message: &Value) -> Vec<NormalizedEvent> {
-        let usage = &message["usage"];
-        let count = |key: &str| usage[key].as_i64();
         let mut out = vec![NormalizedEvent::TokenUsage {
-            usage: NormalizedTokenUsage {
-                model: message["model"].as_str().map(str::to_string),
-                input_tokens: count("input"),
-                output_tokens: count("output"),
-                cache_creation_input_tokens: count("cacheWrite"),
-                cache_read_input_tokens: count("cacheRead"),
-                reasoning_output_tokens: count("reasoning"),
-                total_tokens: count("totalTokens"),
-            },
+            usage: token_usage(message),
         }];
 
         let stop_reason = message["stopReason"].as_str().unwrap_or_default();
@@ -197,7 +188,21 @@ impl PiEventNormalizer {
     }
 }
 
-fn tool_result(event: &Value) -> NormalizedToolResult {
+pub(crate) fn token_usage(message: &Value) -> NormalizedTokenUsage {
+    let usage = &message["usage"];
+    let count = |key: &str| usage[key].as_i64();
+    NormalizedTokenUsage {
+        model: message["model"].as_str().map(str::to_string),
+        input_tokens: count("input"),
+        output_tokens: count("output"),
+        cache_creation_input_tokens: count("cacheWrite"),
+        cache_read_input_tokens: count("cacheRead"),
+        reasoning_output_tokens: count("reasoning"),
+        total_tokens: count("totalTokens"),
+    }
+}
+
+pub(crate) fn tool_result(event: &Value) -> NormalizedToolResult {
     let result = &event["result"];
     let content = result["content"]
         .as_array()
@@ -219,7 +224,7 @@ fn tool_result(event: &Value) -> NormalizedToolResult {
 /// The Pi session for this thread: stable across respawns, unlike
 /// `--continue`, which would pick up whichever session in the workspace ran
 /// last. Pi session ids allow letters, digits, `.`, `_`, and `-`.
-fn session_id(state: &ThreadState) -> String {
+pub(crate) fn session_id(state: &ThreadState) -> String {
     let key = state.thread_key.as_deref().unwrap_or(&state.id);
     let sanitized: String = key
         .chars()
@@ -250,18 +255,27 @@ fn check_model(model: &str) -> std::result::Result<(), String> {
     ))
 }
 
-fn command_line(command: Value) -> Result<Vec<u8>> {
+pub(crate) fn command_line(command: Value) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec(&command)?;
     bytes.push(b'\n');
     Ok(bytes)
 }
 
-fn message_text(input: &[UserInput]) -> String {
+pub(crate) fn message_text(input: &[UserInput]) -> String {
     user_input_to_anthropic_content(input)
         .iter()
         .filter_map(|block| block["text"].as_str())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+pub(crate) fn thinking_level(requested: &str) -> Option<&'static str> {
+    let level = requested.trim().to_ascii_lowercase();
+    let level = if level == "none" { "off" } else { &level };
+    THINKING_LEVELS
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == level)
 }
 
 impl HarnessServer for PiHarness {
@@ -319,12 +333,8 @@ impl HarnessServer for PiHarness {
     }
 
     fn reasoning_effort(&self, requested: &str) -> Option<String> {
-        let level = match requested.trim().to_ascii_lowercase().as_str() {
-            "none" => "off".to_string(),
-            level => level.to_string(),
-        };
-        if THINKING_LEVELS.contains(&level.as_str()) {
-            return Some(level);
+        if let Some(level) = thinking_level(requested) {
+            return Some(level.to_string());
         }
         eprintln!("ignoring unsupported Pi thinking level {requested:?}");
         None

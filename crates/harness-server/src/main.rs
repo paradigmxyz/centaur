@@ -28,6 +28,8 @@ enum CliCommand {
     Hermes,
     /// Drive Pi's long-lived RPC mode.
     Pi(HarnessCommand),
+    /// Drive OMP's long-lived RPC mode with native session continuation.
+    Omp(HarnessCommand),
     ValidateJsonrpc,
     ValidateAgentDeltas,
 }
@@ -63,6 +65,7 @@ fn run() -> Result<()> {
         CliCommand::Pi(command) => run_mode(HarnessKind::Pi, command.mode),
         CliCommand::Nanocodex => run_nanocodex_blocks_server(),
         CliCommand::Hermes => run_hermes_blocks_server(),
+        CliCommand::Omp(command) => run_mode(HarnessKind::Omp, command.mode),
         CliCommand::ValidateJsonrpc => run_validate_jsonrpc(),
         CliCommand::ValidateAgentDeltas => run_validate_agent_deltas(),
     }

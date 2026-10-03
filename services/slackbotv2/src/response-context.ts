@@ -16,7 +16,8 @@ const HARNESS_DISPLAY_NAMES: Record<string, string> = {
   claudecode: 'Claude Code',
   codex: 'Codex',
   nanocodex: 'Nanocodex',
-  pi: 'Pi'
+  pi: 'Pi',
+  omp: 'OMP'
 }
 
 const REASONING_DISPLAY_NAMES: Record<string, string> = {
@@ -55,6 +56,7 @@ const GPT_6_ASTRA_REASONING_EFFORTS = new Set([
 const CLAUDE_CODE_REASONING_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
 // Pi thinking levels (`none` runs with thinking off); applied per turn by the
 // harness server. Pi clamps a level to what the selected model supports.
+// OMP uses the same levels.
 const PI_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 // Older Claude models Claude Code limits to fewer effort levels (none for
 // models without effort support); newer models support every level.
@@ -102,8 +104,9 @@ const CODEX_CONFIG = codexConfig as {
 // Deployers who override the sandbox model via CLAUDE_MODEL / CODEX_MODEL
 // (sandbox.extraEnv) get the same values mirrored into slackbotv2 by the chart
 // and passed here through SlackbotV2Options.harnessDefaultModels, which takes
-// precedence. Pi's default comes only from CENTAUR_PI_MODEL. Amp has no fixed
-// default model (deep/fast modes), so it is intentionally absent.
+// precedence. Pi and OMP defaults come only from CENTAUR_PI_MODEL and
+// CENTAUR_OMP_MODEL. Amp has no fixed default model (deep/fast modes), so it is
+// intentionally absent.
 const BAKED_DEFAULT_MODELS: Record<string, string | undefined> = {
   claudecode: typeof claudeSettings.model === 'string' ? claudeSettings.model : undefined,
   codex: typeof CODEX_CONFIG.model === 'string' ? CODEX_CONFIG.model : undefined,
@@ -142,7 +145,7 @@ function titleCase(value: string): string {
 }
 
 /**
- * Maps a harness wire value (codex | claudecode | amp) to a human display name.
+ * Maps a harness wire value (codex | claudecode | amp | omp) to a human display name.
  * Unknown harnesses fall back to a title-cased form of the raw value. Returns
  * undefined when no harness is provided.
  */
@@ -195,9 +198,11 @@ export function effectiveReasoningForHarness(
   configured?: Record<string, string>
 ): string | undefined {
   const key = harnessType?.trim().toLowerCase()
-  // Claude Code's and Pi's default efforts depend on the model, so only a
-  // requested (already model-validated) effort is known.
-  if (key === 'claudecode' || key === 'pi') return requested?.trim().toLowerCase() || undefined
+  // Claude Code, Pi, and OMP defaults depend on the model or harness, so only
+  // a requested (already validated) effort is known.
+  if (key === 'claudecode' || key === 'pi' || key === 'omp') {
+    return requested?.trim().toLowerCase() || undefined
+  }
   if (key !== 'codex' && key !== 'nanocodex') return undefined
   const reasoning = requested?.trim().toLowerCase() || defaultReasoningForHarness(key, configured)
   // Nanocodex has no distinct Minimal level; its adapter maps Minimal to Low.
@@ -220,7 +225,9 @@ export function reasoningForModel(
       )?.[1] ?? CLAUDE_CODE_REASONING_EFFORTS
     return effort && supported.has(effort) ? effort : undefined
   }
-  if (harness === 'pi') return effort && PI_REASONING_EFFORTS.has(effort) ? effort : undefined
+  if (harness === 'pi' || harness === 'omp') {
+    return effort && PI_REASONING_EFFORTS.has(effort) ? effort : undefined
+  }
   if (!selectedModel || !effort) return undefined
   if (harness !== 'codex' && harness !== 'nanocodex') return undefined
   // Nanocodex maps its compatibility-only Minimal value to Low before it

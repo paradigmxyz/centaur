@@ -16,6 +16,7 @@ pub enum HarnessKind {
     ClaudeCode,
     Amp,
     Pi,
+    Omp,
 }
 
 pub struct ThreadState {
@@ -72,6 +73,10 @@ pub trait HarnessServer {
     fn default_model(&self) -> String;
     fn default_model_provider(&self) -> &'static str;
     fn command_for_turn(&self, state: &ThreadState) -> ProcessCommand;
+    /// Initializes a freshly spawned process. No startup I/O by default.
+    fn on_process_start(&self, _state: &ThreadState, _process: &mut HarnessChild) -> Result<()> {
+        Ok(())
+    }
     /// Whether a turn whose model differs from the running process's restarts
     /// the process with the new model. Off by default: the process keeps the
     /// model it started with.

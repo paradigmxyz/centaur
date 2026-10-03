@@ -34,6 +34,7 @@ describe("extractMessageOverrides", () => {
     expect(extractMessageOverrides("--nanocodex review this").harnessType).toBe(
       "nanocodex",
     );
+    expect(extractMessageOverrides("--omp review this").harnessType).toBe("omp");
   });
 
   test("parses harness flag anywhere in the message", () => {

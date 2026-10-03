@@ -1,0 +1,44 @@
+# Using the OMP Harness
+
+Centaur can run [oh-my-pi](https://github.com/can1357/oh-my-pi) (OMP) as a
+session harness alongside Codex, Claude Code, Amp, Nanocodex, Hermes, and Pi.
+Start a Slack, GitHub, or Linear thread with `--omp`, or set `omp` as a Slack
+channel default.
+
+The sandbox keeps one `omp --mode rpc --no-ui` process per thread. Assistant
+text renders when complete, with commentary distinguished from the final
+answer and thinking shown as it happens. A turn ends on `prompt_result`; if
+background work is still pending, it stays open through that work's follow-up,
+until `session_settled`. Each tool call shows up as its own tool item.
+
+OMP saves the session on disk in a directory derived from the thread key, so
+an interrupt (which stops the OMP process, as with Claude Code), a model switch,
+or a sandbox restart with persistent state resumes the same conversation.
+JSON-RPC `turn/steer` sends an update to the running turn; blocks input received
+during a turn queues as the next turn, as with Pi.
+
+## Credentials
+
+OMP supports API-key auth only. It reads `ANTHROPIC_API_KEY` and
+`OPENAI_API_KEY` from the sandbox environment, where api-rs sets iron-proxy
+placeholders that the proxy replaces with the real keys. The sandbox has the
+Anthropic placeholder only when `CLAUDE_CODE_AUTH_MODE` is `api_key`, and the
+OpenAI one only when `CODEX_AUTH_MODE` is `api_key`. api-rs refuses to start with
+`omp` as the default harness when `CLAUDE_CODE_AUTH_MODE` is `access_token`.
+
+## Configuration
+
+| Variable | Purpose |
+|---|---|
+| `CENTAUR_OMP_MODEL` | Default model as `provider/modelId`, for example `anthropic/claude-opus-4-8` or `openai/gpt-5.5`. When unset, OMP chooses or restores its model. |
+| `CENTAUR_OMP_BIN` | OMP executable (default: `omp` on `PATH`). |
+| `CENTAUR_OMP_SESSION_ROOT` | Session root (default: `~/.omp/centaur-sessions`). |
+
+Set these through `sandbox.extraEnv`. Slack mirrors `CENTAUR_OMP_MODEL` for its
+model display. A per-thread `--model provider/modelId` overrides the default.
+OMP resolves the provider/model pair; there is no static model allowlist. A
+rejected model fails that turn, and later turns use the last working model.
+
+Turns run at the `high` thinking level unless `-rsn <level>` sets one for that
+turn (`none` turns thinking off). OMP clamps the level to the model's capabilities.
+A turn without an override restores `high`, including after a session resumes.

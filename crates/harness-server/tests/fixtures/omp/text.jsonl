@@ -1,0 +1,7 @@
+{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"Run the text mock scenario."}],"attribution":"user","timestamp":1790996523607},"messageId":"msg-1"}
+{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0},"message":{"role":"assistant"},"messageId":"msg-2"}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello from the loopback mock."},"message":{"role":"assistant"},"messageId":"msg-2"}
+{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Hello from the loopback mock."},"message":{"role":"assistant"},"messageId":"msg-2"}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Hello from the loopback mock."}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":8,"output":12,"cacheRead":0,"cacheWrite":0,"totalTokens":20,"cost":{"input":0.000024,"output":0.00018,"cacheRead":0,"cacheWrite":0,"total":0.00020400000000000003}},"stopReason":"stop","timestamp":1790996523642,"responseId":"msg_mock_1","duration":3.663666999999805,"ttft":3.4529590000001917,"completedAt":1790996523646},"messageId":"msg-2"}
+{"type":"prompt_result","id":"prompt-1","agentInvoked":true,"status":"completed","sessionSettled":true}
+{"type":"session_settled"}

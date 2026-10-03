@@ -30,6 +30,7 @@ use uuid::Uuid;
 use crate::amp::AmpHarness;
 use crate::claude::ClaudeCodeHarness;
 use crate::codex::CodexHarnessServer;
+use crate::omp::OmpHarness;
 use crate::otel::{TraceContext, TurnStatus as TelemetryTurnStatus, TurnTelemetry};
 use crate::pi::PiHarness;
 use crate::traits::{
@@ -47,6 +48,7 @@ pub fn server_for(kind: HarnessKind) -> Box<dyn AppServerRuntime> {
         HarnessKind::ClaudeCode => Box::new(AppServerNormalizer::new(ClaudeCodeHarness)),
         HarnessKind::Amp => Box::new(AppServerNormalizer::new(AmpHarness)),
         HarnessKind::Pi => Box::new(AppServerNormalizer::new(PiHarness)),
+        HarnessKind::Omp => Box::new(AppServerNormalizer::new(OmpHarness)),
     }
 }
 
@@ -60,6 +62,7 @@ pub fn run_blocks_server(kind: HarnessKind) -> Result<()> {
         HarnessKind::ClaudeCode => run_blocks_app_server(&ClaudeCodeHarness),
         HarnessKind::Amp => run_blocks_app_server(&AmpHarness),
         HarnessKind::Pi => run_blocks_app_server(&PiHarness),
+        HarnessKind::Omp => run_blocks_app_server(&OmpHarness),
     }
 }
 
@@ -1497,14 +1500,12 @@ fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState
     {
         return Ok(());
     }
+    let previous_model = state.process.as_ref().map(|process| process.model.clone());
     if !state.model.is_empty()
         && let Err(message) = harness.validate_model(&state.model)
     {
         // Fail this turn, and let later turns run the last working model.
-        state.model = state
-            .process
-            .as_ref()
-            .map_or_else(|| harness.default_model(), |process| process.model.clone());
+        state.model = previous_model.unwrap_or_else(|| harness.default_model());
         return Err(HarnessServerError::UnknownModel { message });
     }
     state.process = None;
@@ -1553,13 +1554,20 @@ fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState
         }
     });
 
-    state.process = Some(HarnessChild {
+    let mut process = HarnessChild {
         child,
         stdin,
         stdout: stdout_rx,
         model: state.model.clone(),
         reasoning_effort: None,
-    });
+    };
+    if let Err(error) = harness.on_process_start(state, &mut process) {
+        if matches!(error, HarnessServerError::UnknownModel { .. }) {
+            state.model = previous_model.unwrap_or_else(|| harness.default_model());
+        }
+        return Err(error);
+    }
+    state.process = Some(process);
     Ok(())
 }
 
