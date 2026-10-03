@@ -7,13 +7,16 @@ import { model, providerCredentials, slack, turnTimeoutMs } from './lib'
 
 for (const harness of ['codex', 'claudecode']) {
   test.concurrent(`${harness} answers and remembers a Slack thread`, async () => {
-    const thread = await slack.mention(`--${harness} Start the thread.`, model.says('First answer.'))
-    const first = await thread.nextTurn()
-    expect(first.reply).toBe('First answer.')
+    const firstAnswer = model.says('First answer.')
+    const secondAnswer = model.says('Second answer.')
 
-    await thread.mention('Follow up.', model.says('Second answer.'))
+    const thread = await slack.mention(`--${harness} Start the thread.`, firstAnswer)
+    const first = await thread.nextTurn()
+    expect(first.reply).toBe(firstAnswer.text)
+
+    await thread.mention('Follow up.', secondAnswer)
     const second = await thread.nextTurn()
-    expect(second.reply).toBe('Second answer.')
+    expect(second.reply).toBe(secondAnswer.text)
 
     for (const turn of [first, second]) {
       expect(turn.execution.status).toBe('completed')
@@ -21,7 +24,7 @@ for (const harness of ['codex', 'claudecode']) {
     }
     // slackbotv2 quotes earlier Slack messages into each turn, so only an
     // assistant turn in the request proves the harness kept its own session.
-    expect(second.request?.assistantTurns).toContain('First answer.')
+    expect(second.request?.assistantTurns).toContain(firstAnswer.text)
     expect((await thread.sandboxes()).map(sandbox => sandbox.harness)).toEqual([harness])
   }, 2 * turnTimeoutMs)
 }
