@@ -634,7 +634,7 @@ impl CodexJsonRpcChild {
                 }
                 return Ok(value.get("result").cloned().unwrap_or(Value::Null));
             }
-            if notification_method(&value).is_some() && !is_dropped_notification(&value) {
+            if is_forwarded_notification(&value) {
                 write_value(stdout, &value)?;
             }
         }
@@ -697,7 +697,7 @@ impl CodexJsonRpcChild {
                 }
                 continue;
             }
-            if notification_method(&value).is_none() {
+            if !is_forwarded_notification(&value) {
                 continue;
             }
             let terminal = is_terminal_notification(&value, thread_id, turn_id);
@@ -956,6 +956,14 @@ fn is_dropped_notification(value: &Value) -> bool {
     notification_method(value) == Some("account/rateLimits/updated")
 }
 
+/// Notifications the blocks client consumes: JSON-RPC notifications minus the
+/// dropped set. Both read loops (waiting-on-request and mid-turn) forward
+/// through this single predicate so a notification cannot be classified
+/// differently depending on when it arrives.
+fn is_forwarded_notification(value: &Value) -> bool {
+    notification_method(value).is_some() && !is_dropped_notification(value)
+}
+
 fn is_server_request(value: &Value) -> bool {
     value.get("id").is_some() && value.get("method").is_some()
 }
@@ -1211,6 +1219,21 @@ mod tests {
             "method": "some/future/codexMethod",
             "params": {}
         })));
+    }
+
+    #[test]
+    fn forwards_notifications_identically_in_both_read_loops() {
+        // The waiting-on-request loop and the mid-turn loop must classify a
+        // notification the same way: dropped set filtered, everything else
+        // (including unrecognized future methods) forwarded, non-notifications
+        // never reaching the forward path at all.
+        assert!(is_forwarded_notification(&turn_started()));
+        assert!(is_forwarded_notification(&json!({
+            "method": "some/future/codexMethod",
+            "params": {}
+        })));
+        assert!(!is_forwarded_notification(&rate_limits_updated()));
+        assert!(!is_forwarded_notification(&json!({ "result": {} })));
     }
 
     #[test]
