@@ -25,7 +25,9 @@ const eventsUrl = requiredEnv('SLACK_EVENTS_URL')
 
 const messages: Message[] = []
 let lastTs = 0
-let eventCount = 0
+// Slack retries an event three times (immediately, then after 1 and 5
+// minutes); these delays are compressed to fit a turn's timeout.
+const EVENT_RETRY_DELAYS_MS = [1_000, 5_000, 30_000]
 
 Bun.serve({
   port,
@@ -152,7 +154,9 @@ async function deliverMention(message: Message): Promise<void> {
     token: 'unused',
     team_id: TEAM.id,
     api_app_id: BOT.appId,
-    event_id: `EvE2E${++eventCount}`,
+    // Unique across fake-slack restarts: slackbotv2 remembers delivered event
+    // IDs in Postgres and drops a retry whose ID it has already seen.
+    event_id: `EvE2E${message.ts.replace('.', '')}`,
     event_time: eventTime,
     authorizations: [{ team_id: TEAM.id, user_id: BOT.userId, is_bot: true }],
     event: {
@@ -166,20 +170,35 @@ async function deliverMention(message: Message): Promise<void> {
       ...(message.thread_ts ? { thread_ts: message.thread_ts } : {})
     }
   })
-  const signature = createHmac('sha256', signingSecret).update(`v0:${eventTime}:${body}`).digest('hex')
-  try {
-    const response = await fetch(eventsUrl, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-slack-request-timestamp': String(eventTime),
-        'x-slack-signature': `v0=${signature}`
-      },
-      body
-    })
-    log('fake_slack_event_delivered', { ts: message.ts, status: response.status })
-  } catch (error) {
-    log('fake_slack_event_failed', { ts: message.ts, error: String(error) })
+  // Like Slack, retry an undelivered event (no connection or no 2xx) with the
+  // same event_id, so a slackbotv2 restart delays a turn instead of losing it.
+  for (let attempt = 0; ; attempt++) {
+    const timestamp = Math.floor(Date.now() / 1000)
+    const signature = createHmac('sha256', signingSecret).update(`v0:${timestamp}:${body}`).digest('hex')
+    let failure: string
+    try {
+      const response = await fetch(eventsUrl, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-slack-request-timestamp': String(timestamp),
+          'x-slack-signature': `v0=${signature}`,
+          ...(attempt > 0 ? { 'x-slack-retry-num': String(attempt), 'x-slack-retry-reason': 'http_error' } : {})
+        },
+        body
+      })
+      if (response.ok) {
+        log('fake_slack_event_delivered', { ts: message.ts, status: response.status, attempt })
+        return
+      }
+      failure = `status ${response.status}`
+    } catch (error) {
+      failure = String(error)
+    }
+    const delayMs = EVENT_RETRY_DELAYS_MS[attempt]
+    log('fake_slack_event_failed', { ts: message.ts, error: failure, attempt, retrying: delayMs !== undefined })
+    if (delayMs === undefined) return
+    await Bun.sleep(delayMs)
   }
 }
 

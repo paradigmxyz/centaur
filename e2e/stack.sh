@@ -185,6 +185,9 @@ dump_logs() {
   kubectl get pods -A -o wide || true
   kubectl get events -A --sort-by=.lastTimestamp | tail -50 || true
   kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-slackbotv2" --tail=100 || true
+  # A container that restarted took its logs with it; show how it ended.
+  kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-slackbotv2" --previous --tail=50 2> /dev/null || true
+  kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-api-rs" --previous --tail=50 2> /dev/null || true
   kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-api-rs" --tail=-1 \
     | grep -E '"level":"(WARN|ERROR)"' | tail -50 || true
   kubectl -n "$MODEL_NAMESPACE" logs deploy/model-server --tail=100 || true
