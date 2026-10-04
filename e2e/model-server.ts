@@ -8,7 +8,7 @@
 // Test control:     HTTP on 8080 (port-forwarded to the test runner).
 import { randomUUID } from 'node:crypto'
 
-type Reply = { match: string; text: string }
+type Reply = { match: string; text: string; delayMs?: number }
 type Recorded = {
   at: string
   provider: 'openai' | 'anthropic'
@@ -60,8 +60,9 @@ Bun.serve<{ credential: string | null }>({
       return new Response('websocket upgrade failed', { status: 400 })
     }
     if (request.method === 'POST' && url.pathname === '/v1/responses') {
-      const body = await request.json()
-      return sse(openaiEvents(url.pathname, request.headers.get('authorization'), body))
+      const { events, delayMs } = openaiEvents(url.pathname, request.headers.get('authorization'), await request.json())
+      await Bun.sleep(delayMs)
+      return sse(events)
     }
     if (request.method === 'POST' && url.pathname === '/v1/messages') {
       return anthropicMessage(url.pathname, request.headers, await request.json())
@@ -70,21 +71,26 @@ Bun.serve<{ credential: string | null }>({
     return Response.json({ error: { message: 'not modeled by the e2e model server' } }, { status: 404 })
   },
   websocket: {
-    message(socket, raw) {
+    async message(socket, raw) {
       const { type, ...body } = JSON.parse(String(raw))
       if (type !== 'response.create') {
         log('model_server_unmodeled_websocket_message', { type })
         return
       }
-      for (const event of openaiEvents('/v1/responses', socket.data.credential, body)) {
-        socket.send(JSON.stringify(event))
-      }
+      const { events, delayMs } = openaiEvents('/v1/responses', socket.data.credential, body)
+      await Bun.sleep(delayMs)
+      for (const event of events) socket.send(JSON.stringify(event))
     }
   }
 })
 log('model_server_started', {})
 
-function openaiEvents(path: string, credential: string | null, body: any): Array<{ type: string }> {
+/** A scripted answer as OpenAI events, and how long to wait before sending them. */
+function openaiEvents(
+  path: string,
+  credential: string | null,
+  body: any
+): { events: Array<{ type: string }>; delayMs: number } {
   const conversation = [...(responses.get(body.previous_response_id) ?? []), ...(body.input ?? [])]
   const reply = record('openai', path, credential, body, conversation)
   const text = reply?.text ?? 'ok'
@@ -112,12 +118,16 @@ function openaiEvents(path: string, credential: string | null, body: any): Array
     { type: 'response.completed', response: response('completed', [message('completed', [part])]) }
   ]
   responses.set(responseId, [...conversation, message('completed', [part])])
-  return events.map((event, sequence) => ({ ...event, sequence_number: sequence }))
+  return {
+    events: events.map((event, sequence) => ({ ...event, sequence_number: sequence })),
+    delayMs: reply?.delayMs ?? 0
+  }
 }
 
-function anthropicMessage(path: string, headers: Headers, body: any): Response {
+async function anthropicMessage(path: string, headers: Headers, body: any): Promise<Response> {
   const reply = record('anthropic', path, headers.get('x-api-key'), body, body.messages ?? [])
   const text = reply?.text ?? 'ok'
+  await Bun.sleep(reply?.delayMs ?? 0)
   const message = {
     id: `msg_${randomUUID()}`, type: 'message', role: 'assistant', model: body.model,
     content: [] as unknown[], stop_reason: null as string | null, stop_sequence: null,

@@ -11,7 +11,7 @@ import { SQL } from 'bun'
 import { BOT, CHANNEL, USER_TOKEN } from './fixture'
 
 /** A scripted model answer, matched by a token placed in the user's message. */
-export type Script = { token: string; text: string }
+export type Script = { token: string; text: string; delayMs?: number }
 
 export type Execution = { execution_id: string; status: string; error: string | null }
 
@@ -62,9 +62,12 @@ export const turnTimeoutMs = Number(process.env.E2E_TURN_TIMEOUT_MS ?? 300_000)
 const renderTimeoutMs = 60_000
 
 export const model = {
-  /** Scripts the model's answer to the message this is attached to. */
-  says(text: string): Script {
-    return { token: `e2e-${randomUUID().slice(0, 8)}`, text }
+  /**
+   * Scripts the model's answer to the message this is attached to. `delayMs`
+   * holds the answer back, keeping the turn in flight.
+   */
+  says(text: string, options: { delayMs?: number } = {}): Script {
+    return { token: `e2e-${randomUUID().slice(0, 8)}`, text, ...options }
   }
 }
 
@@ -178,7 +181,7 @@ async function registerScript(script: Script): Promise<void> {
   const response = await fetch(`${modelUrl}/_e2e/replies`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ match: script.token, text: script.text })
+    body: JSON.stringify({ match: script.token, text: script.text, delayMs: script.delayMs })
   })
   if (!response.ok) throw new Error(`registering the model script failed: ${response.status}`)
 }
