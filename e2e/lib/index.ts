@@ -11,6 +11,9 @@ import { randomUUID } from 'node:crypto'
 import { SQL } from 'bun'
 import { BOT, CHANNEL, USER_TOKEN } from '../fakes/slack-fixture'
 
+export { CHANNEL, DEFAULTS_CHANNEL } from '../fakes/slack-fixture'
+export type Channel = { id: string; name: string }
+
 /** A scripted model answer, matched by a token placed in the user's message. */
 export type Script = { token: string; text: string; delayMs?: number }
 
@@ -32,6 +35,8 @@ export type ModelRequest = {
   userText: string
   /** Earlier assistant turns in the conversation the model was asked to continue. */
   assistantTurns: string[]
+  /** Everything the model was given, as text: system instructions and the whole conversation. */
+  prompt: string
   body: any
 }
 
@@ -41,13 +46,21 @@ export type Sandbox = { id: string; harness: string; source: string }
 export type Turn = {
   /** Text of the turn's one Slack reply. */
   reply: string
+  /** Text of the reply's context line: response metadata and notices. */
+  context: string
   execution: Execution
   sandbox: Sandbox
   /** The provider request answered by this turn's script, if it had one. */
   request?: ModelRequest
 }
 
-type SlackMessage = { ts: string; text?: string; bot_id?: string; streaming?: boolean }
+type SlackMessage = {
+  ts: string
+  text?: string
+  bot_id?: string
+  streaming?: boolean
+  blocks?: Array<{ type?: string; elements?: Array<{ text?: string }> }>
+}
 
 const slackUrl = required('E2E_SLACK_URL')
 const modelUrl = required('E2E_MODEL_URL')
@@ -144,9 +157,9 @@ export const cluster = {
 
 export const slack = {
   /** Starts a thread with a channel message that mentions the bot. */
-  async mention(text: string, script?: Script): Promise<Thread> {
-    const ts = await postMention(text, script)
-    return new Thread(ts, script)
+  async mention(text: string, script?: Script, channel: Channel = CHANNEL): Promise<Thread> {
+    const ts = await postMention(channel, text, script)
+    return new Thread(channel, ts, script)
   }
 }
 
@@ -156,18 +169,18 @@ export class Thread {
   private readonly scripts: Array<string | undefined>
   private turnsSeen = 0
 
-  constructor(readonly ts: string, script?: Script) {
+  constructor(readonly channel: Channel, readonly ts: string, script?: Script) {
     this.triggers = [ts]
     this.scripts = [script?.token]
   }
 
   get key(): string {
-    return `slack:${CHANNEL.id}:${this.ts}`
+    return `slack:${this.channel.id}:${this.ts}`
   }
 
   /** Follows up in the thread with a message that mentions the bot. */
   async mention(text: string, script?: Script): Promise<void> {
-    this.triggers.push(await postMention(text, script, this.ts))
+    this.triggers.push(await postMention(this.channel, text, script, this.ts))
     this.scripts.push(script?.token)
   }
 
@@ -202,6 +215,11 @@ export class Thread {
     const token = this.scripts[index]
     return {
       reply: replies[0]!.text ?? '',
+      context: (replies[0]!.blocks ?? [])
+        .filter(block => block.type === 'context')
+        .flatMap(block => block.elements ?? [])
+        .map(element => element.text ?? '')
+        .join(' '),
       execution,
       sandbox,
       request: token ? (await modelRequests(token))[0] : undefined
@@ -229,7 +247,7 @@ export class Thread {
   /** Bot messages posted after a turn's trigger and before the next user message. */
   private async repliesTo(index: number): Promise<SlackMessage[]> {
     const { messages } = await slackApi<{ messages: SlackMessage[] }>('conversations.replies', {
-      channel: CHANNEL.id,
+      channel: this.channel.id,
       ts: this.ts
     })
     const after = messages.filter(message => message.ts > this.triggers[index]!)
@@ -238,10 +256,15 @@ export class Thread {
   }
 }
 
-async function postMention(text: string, script: Script | undefined, threadTs?: string): Promise<string> {
+async function postMention(
+  channel: Channel,
+  text: string,
+  script: Script | undefined,
+  threadTs?: string
+): Promise<string> {
   if (script) await registerScript(script)
   const posted = await slackApi<{ ts: string }>('chat.postMessage', {
-    channel: CHANNEL.id,
+    channel: channel.id,
     text: `<@${BOT.userId}> ${text}${script ? ` ${script.token}` : ''}`,
     ...(threadTs ? { thread_ts: threadTs } : {})
   })
@@ -271,7 +294,11 @@ async function modelRequests(token: string): Promise<ModelRequest[]> {
       userText: lastBlockText(history.filter(item => item.role === 'user').at(-1)?.content),
       assistantTurns: history
         .filter(item => item.role === 'assistant')
-        .map(item => contentText(item.content))
+        .map(item => contentText(item.content)),
+      // OpenAI carries system text in `instructions`, Anthropic in `system`.
+      prompt: [body.instructions, body.system, ...history.map(item => item.content)]
+        .map(contentText)
+        .join('\n')
     }
   })
 }

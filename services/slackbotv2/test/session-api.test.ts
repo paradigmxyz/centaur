@@ -617,68 +617,6 @@ describe('Slack attachment serialization', () => {
 })
 
 describe('forwardToSessionApi overrides', () => {
-  test('creates session with default codex harness', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
-    const create = requests.find(request => request.url.endsWith('.000100'))
-    expect((create?.body as { harness_type?: string }).harness_type).toBe('codex')
-  })
-
-  test('creates session with parsed harness override', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('review this'), { harnessType: 'claudecode' })
-    )
-    const create = requests.find(request => request.url.endsWith('.000100'))
-    expect((create?.body as { harness_type?: string }).harness_type).toBe('claudecode')
-  })
-
-  test('creates session with persona independent from harness override', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('review this'), {
-        harnessType: 'claudecode',
-        personaId: 'invest'
-      })
-    )
-    const create = requests.find(request => request.url.endsWith('.000100'))
-    expect(create?.body).toEqual(
-      expect.objectContaining({
-        harness_type: 'claudecode',
-        on_harness_conflict: 'restart',
-        persona_id: 'invest'
-      })
-    )
-  })
-
-  test('includes model override on the execute input line', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('review this'), {
-        harnessType: 'claudecode',
-        model: 'claude-sonnet-4-6'
-      })
-    )
-    const execute = requests.find(request => request.url.endsWith('/execute'))
-    const inputLines = (execute?.body as { input_lines: string[] }).input_lines
-    expect(inputLines).toHaveLength(1)
-    const line = JSON.parse(inputLines[0]!)
-    expect(line.model).toBe('claude-sonnet-4-6')
-    expect(lineContent(line).some(part => textPartIncludes(part, '# Requester Context'))).toBe(true)
-    expect(line.message.content.at(-1)).toEqual({ type: 'text', text: 'review this' })
-  })
-
-  test('omits model field when no override is set', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
-    const execute = requests.find(request => request.url.endsWith('/execute'))
-    const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
-    expect('model' in line).toBe(false)
-  })
-
   test('includes provider override on the execute input line', async () => {
     const { fetchFn, requests } = fakeApi()
     await forwardToSessionApi(
@@ -700,25 +638,6 @@ describe('forwardToSessionApi overrides', () => {
     const execute = requests.find(request => request.url.endsWith('/execute'))
     const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
     expect('provider' in line).toBe(false)
-  })
-
-  test('includes reasoning override on the execute input line', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('audit this'), { reasoning: 'high' })
-    )
-    const execute = requests.find(request => request.url.endsWith('/execute'))
-    const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
-    expect(line.reasoning).toBe('high')
-  })
-
-  test('omits reasoning field when no override is set', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
-    const execute = requests.find(request => request.url.endsWith('/execute'))
-    const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
-    expect('reasoning' in line).toBe(false)
   })
 
   test('includes default idle timeout on execute requests', async () => {
@@ -816,23 +735,6 @@ describe('forwardToSessionApi overrides', () => {
 })
 
 describe('forwardToSessionApi harness restart', () => {
-  test('explicit harness override requests restart on conflict', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('switch me'), { harnessType: 'codex' })
-    )
-    const create = requests.find(request => request.url.endsWith('.000100'))
-    expect((create?.body as { on_harness_conflict?: string }).on_harness_conflict).toBe('restart')
-  })
-
-  test('default create does not request restart', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
-    const create = requests.find(request => request.url.endsWith('.000100'))
-    expect('on_harness_conflict' in (create?.body as object)).toBe(false)
-  })
-
   test('records a Slack-owned harness assignment on session creation and execution', async () => {
     const { fetchFn, requests } = fakeApi({
       createSession: [

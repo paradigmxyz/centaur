@@ -33,6 +33,10 @@ proxySync:
 slackbotv2:
   extraEnv:
     SLACK_API_URL: http://fake-slack.centaur-e2e-slack.svc.cluster.local:443/api/
+  # DEFAULTS_CHANNEL in e2e/fakes/slack-fixture.ts; e2e/tests/selection.test.ts
+  # expects these defaults.
+  channelDefaults:
+    CE2E00002: { persona: eng, harness: claude, model: sonnet, reasoning: high }
 
 networkPolicy:
   ingressSourceNamespaces:

@@ -4,10 +4,11 @@
 // delivered to slackbotv2 as a signed app_mention event, the way Slack would.
 // No dependencies, so it runs from a ConfigMap on the stock Bun image.
 import { createHmac } from 'node:crypto'
-import { BOT, CHANNEL, TEAM, USER, USER_TOKEN } from './slack-fixture'
+import { BOT, CHANNELS, TEAM, USER, USER_TOKEN } from './slack-fixture'
 
 type Message = {
   type: 'message'
+  channel: string
   ts: string
   text: string
   user: string
@@ -60,33 +61,38 @@ function handle(method: string, actor: 'bot' | 'user', body: Record<string, unkn
       return str(body.bot) === BOT.id
         ? { ok: true, bot: { id: BOT.id, name: BOT.name, user_id: BOT.userId, app_id: BOT.appId, deleted: false } }
         : { ok: false, error: 'bot_not_found' }
-    case 'conversations.info':
-      return channel === CHANNEL.id
-        ? { ok: true, channel: { id: CHANNEL.id, name: CHANNEL.name, is_channel: true, is_member: true, is_private: false, is_im: false } }
+    case 'conversations.info': {
+      const known = CHANNELS.find(c => c.id === channel)
+      return known
+        ? { ok: true, channel: { ...known, is_channel: true, is_member: true, is_private: false, is_im: false } }
         : { ok: false, error: 'channel_not_found' }
+    }
     case 'users.conversations':
     case 'conversations.list':
       return {
         ok: true,
-        channels: [{ id: CHANNEL.id, name: CHANNEL.name, is_channel: true, is_member: true, is_private: false }],
+        channels: CHANNELS.map(c => ({ ...c, is_channel: true, is_member: true, is_private: false })),
         response_metadata: { next_cursor: '' }
       }
     case 'conversations.history':
       return {
         ok: true,
         has_more: false,
-        messages: messages.filter(m => !m.thread_ts || m.thread_ts === m.ts).reverse().map(withReplies)
+        messages: messages
+          .filter(m => m.channel === channel && (!m.thread_ts || m.thread_ts === m.ts))
+          .reverse()
+          .map(withReplies)
       }
     case 'conversations.replies': {
-      const root = messages.find(m => m.ts === str(body.ts))
-      if (channel !== CHANNEL.id || !root) return { ok: false, error: 'thread_not_found' }
+      const root = messages.find(m => m.channel === channel && m.ts === str(body.ts))
+      if (!root) return { ok: false, error: 'thread_not_found' }
       const thread = messages.filter(m => m === root || m.thread_ts === root.ts)
       return { ok: true, has_more: false, messages: thread.map(withReplies) }
     }
     case 'chat.postMessage':
     case 'chat.startStream': {
-      if (channel !== CHANNEL.id) return { ok: false, error: 'channel_not_found' }
-      const message = post(actor, {
+      if (!CHANNELS.some(c => c.id === channel)) return { ok: false, error: 'channel_not_found' }
+      const message = post(actor, channel, {
         text: str(body.markdown_text) || str(body.text) || chunksText(body.chunks),
         thread_ts: str(body.thread_ts) || undefined,
         blocks: Array.isArray(body.blocks) ? body.blocks : undefined,
@@ -122,9 +128,14 @@ function handle(method: string, actor: 'bot' | 'user', body: Record<string, unkn
   }
 }
 
-function post(actor: 'bot' | 'user', fields: Omit<Message, 'type' | 'ts' | 'user'>): Message {
+function post(
+  actor: 'bot' | 'user',
+  channel: string,
+  fields: Omit<Message, 'type' | 'channel' | 'ts' | 'user'>
+): Message {
   const message: Message = {
     type: 'message',
+    channel,
     ts: nextTs(),
     user: actor === 'bot' ? BOT.userId : USER.id,
     ...(actor === 'bot' ? { bot_id: BOT.id } : {}),
@@ -148,7 +159,7 @@ async function deliverMention(message: Message): Promise<void> {
       type: 'app_mention',
       user: message.user,
       team: TEAM.id,
-      channel: CHANNEL.id,
+      channel: message.channel,
       text: message.text,
       ts: message.ts,
       event_ts: message.ts,
