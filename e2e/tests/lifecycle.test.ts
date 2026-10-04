@@ -55,6 +55,12 @@ test('a harness switch removes the old sandbox and its proxy', async () => {
   const second = model.says('Second answer.')
   const thread = await slack.mention('--codex Start the thread.', first)
   const before = await thread.nextTurn()
+  // Guard against a vacuous pass: the lookup must see what the sandbox owns.
+  const owned = await cluster.sandboxResources(before.sandbox.id)
+  expect(owned).toContain(`pod/${before.sandbox.id}`)
+  expect(owned).toContainEqual(expect.stringMatching(new RegExp(`^pod/${before.sandbox.id}-proxy-`)))
+  expect(owned).toContain(`service/${before.sandbox.id}-proxy`)
+  expect(owned.filter(name => name.startsWith('networkpolicy'))).toHaveLength(2)
 
   await thread.mention('--claude Switch.', second)
   const after = await thread.nextTurn()
