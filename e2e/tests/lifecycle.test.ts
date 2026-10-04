@@ -12,7 +12,8 @@ test('a paused thread resumes in the same sandbox on its next turn', async () =>
   const before = await thread.nextTurn()
 
   expect(await api.pause(thread)).toBe(true)
-  await eventually('the paused sandbox to release its pod', 60_000, async () =>
+  // Sandbox pods exit on SIGTERM, so a pause frees the pod within seconds.
+  await eventually('the paused sandbox to release its pod', 15_000, async () =>
     (await cluster.sandboxResources(before.sandbox.id)).some(name => name === `pod/${before.sandbox.id}`)
       ? undefined
       : true
@@ -66,7 +67,7 @@ test('a harness switch removes the old sandbox and its proxy', async () => {
   const after = await thread.nextTurn()
   expect(after.reply).toBe(second.text)
   expect(after.sandbox.id).not.toBe(before.sandbox.id)
-  await eventually('the old sandbox to be cleaned up', 120_000, async () => {
+  await eventually('the old sandbox to be cleaned up', 15_000, async () => {
     const left = await cluster.sandboxResources(before.sandbox.id)
     return left.length === 0 ? true : undefined
   })

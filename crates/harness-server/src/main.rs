@@ -45,6 +45,7 @@ enum ServerMode {
 }
 
 fn main() {
+    exit_on_sigterm();
     if let Err(error) = run() {
         eprintln!("harness-server: {error:#}");
         std::process::exit(1);
@@ -73,4 +74,28 @@ fn run_mode(kind: HarnessKind, mode: ServerMode) -> Result<()> {
         ServerMode::Blocks => run_blocks_server(kind),
         ServerMode::Jsonrpc => run_harness_server(kind),
     }
+}
+
+/// harness-server is PID 1 in the sandbox, and the kernel ignores SIGTERM for
+/// PID 1 unless it installs a handler. Without one, stopping a sandbox waits
+/// out the pod's whole termination grace period before SIGKILL. Exit on
+/// SIGTERM instead; the container runtime then stops the harness with it.
+fn exit_on_sigterm() {
+    std::thread::spawn(|| {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+        else {
+            return;
+        };
+        runtime.block_on(async {
+            let Ok(mut terminate) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            else {
+                return;
+            };
+            terminate.recv().await;
+            std::process::exit(143);
+        });
+    });
 }
