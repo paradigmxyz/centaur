@@ -106,6 +106,8 @@ up() {
   if helm status "$RELEASE" -n "$NAMESPACE" -o json 2> /dev/null | grep -q '"status":"pending-'; then
     helm uninstall "$RELEASE" -n "$NAMESPACE" --wait > /dev/null
   fi
+  # The chart's 1Password Connect dependency resolves only from a registered repo.
+  helm repo add onepassword https://1password.github.io/connect-helm-charts --force-update > /dev/null
   helm dependency build contrib/chart > /dev/null
   helm upgrade --install "$RELEASE" contrib/chart -n "$NAMESPACE" \
     -f contrib/chart/values.dev.yaml -f e2e/infra/values.yaml \
