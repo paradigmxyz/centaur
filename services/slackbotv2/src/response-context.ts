@@ -242,14 +242,19 @@ export function reasoningForModel(
 const CLAUDE_MODEL_ID = /^claude-([a-z]+)((?:-\d{1,2})*)((?:-[a-z]+)*)(?:-\d{8})?$/i
 // Named GPT models: version then codename (gpt-5.6-sol, gpt-6-astra).
 const NAMED_GPT_MODEL_ID = /^gpt-(\d+(?:\.\d+)?)-(sol|luna|terra|astra)$/i
+// Other GPT models: version then optional variant words (gpt-5.2, gpt-5.4-pro).
+const GPT_MODEL_ID = /^gpt-(\d+(?:\.\d+)?)((?:-[a-z]+)*)$/i
 
 /**
  * Formats a model ID for the footer as its product name: claude-opus-5-5 ->
- * "Opus 5.5", gpt-5.6-sol -> "Sol 5.6". Other models are uppercased (GPT-5.2).
+ * "Opus 5.5", gpt-5.6-sol -> "Sol 5.6", gpt-5.2 -> "GPT 5.2". Unrecognized
+ * models are uppercased.
  */
 export function modelDisplayName(model: string): string {
-  const gpt = NAMED_GPT_MODEL_ID.exec(model)
-  if (gpt) return `${titleCase(gpt[2] ?? '')} ${gpt[1]}`
+  const namedGpt = NAMED_GPT_MODEL_ID.exec(model)
+  if (namedGpt) return `${titleCase(namedGpt[2] ?? '')} ${namedGpt[1]}`
+  const gpt = GPT_MODEL_ID.exec(model)
+  if (gpt) return ['GPT', gpt[1], titleCase(gpt[2] ?? '')].filter(Boolean).join(' ')
   const claude = CLAUDE_MODEL_ID.exec(model)
   if (!claude) return model.toUpperCase()
   const [, family = '', version = '', variant = ''] = claude
