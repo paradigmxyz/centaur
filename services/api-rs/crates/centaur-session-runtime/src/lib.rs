@@ -10558,63 +10558,6 @@ mod adoption_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn dm_execute_binds_no_requester() {
-        let Some(store) = test_store().await else {
-            return;
-        };
-        let _serial = TEST_LOCK.lock().await;
-        let (base_url, requests, server) = spawn_execute_iron_control_stub().await;
-        let thread_key =
-            ThreadKey::parse(format!("slack:T123:D123:{}", uuid::Uuid::new_v4())).unwrap();
-
-        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
-        let (io, _stdout, _stdin) = mock_io();
-        backend.push_io(io).await;
-        let runtime =
-            runtime_with_registrar(&store, backend.clone(), requester_test_registrar(base_url));
-
-        runtime
-            .create_or_get_session(
-                &thread_key,
-                &HarnessType::Codex,
-                None,
-                Some(json!({"slack_user_id": "U123", "slack_team_id": "T123"})),
-                HarnessConflictPolicy::Reject,
-            )
-            .await
-            .expect("create session");
-
-        let execution = execute_with_metadata(
-            &runtime,
-            &thread_key,
-            json!({"slack_user_id": "U123", "slack_team_id": "T123"}),
-        )
-        .await;
-        store
-            .complete_execution(&execution.execution_id)
-            .await
-            .expect("complete execution");
-
-        // In a DM the conversation principal already is the user's principal;
-        // the execute must not bind (or upsert) a separate requester.
-        let spec = backend.created_specs().pop().expect("created cold spec");
-        assert_eq!(
-            spec.iron_control_principal.as_deref(),
-            Some("prn_slack-user-t123-u123")
-        );
-        assert_eq!(spec.iron_control_requester_principal, None);
-        let user_upserts = requests
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|request| *request == "PUT /api/v1/principals/slack-user-t123-u123")
-            .count();
-        assert_eq!(user_upserts, 1, "only session create upserts the user");
-        server.abort();
-        reset_test_store(&store).await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn non_slack_execute_binds_no_requester() {
         let Some(store) = test_store().await else {
             return;

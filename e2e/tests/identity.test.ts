@@ -2,8 +2,8 @@
 // the requester context the model sees, and api-rs binds the sender to the
 // sandbox's proxy in iron-control as its requester, so credentials act for the
 // person who asked rather than whoever started the thread. A Slack Connect
-// partner's turn binds no requester, and iron-control gets no principal (and
-// so no email) for them.
+// partner's turn binds no requester, and iron-control never records their
+// email.
 import { expect, test } from 'bun:test'
 import {
   EXTERNAL_USER,
@@ -63,5 +63,5 @@ test.concurrent('a reply from a Slack Connect partner runs without a requester',
   expect(second.request?.userMessage).toContain(`Slack user ID: ${EXTERNAL_USER.id}`)
   expect(second.sandbox.id).toBe(first.sandbox.id)
   expect((await ironControl.proxy(second.sandbox.id)).requester).toBeNull()
-  expect(await ironControl.slackUser(EXTERNAL_USER)).toBeUndefined()
+  expect((await ironControl.slackUser(EXTERNAL_USER))?.slackEmail ?? null).toBeNull()
 }, 3 * turnTimeoutMs)

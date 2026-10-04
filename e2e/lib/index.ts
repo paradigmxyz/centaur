@@ -14,6 +14,7 @@ import { BOT, CHANNEL, USER, type SlackUser } from '../fakes/slack-fixture'
 export {
   CHANNEL,
   DEFAULTS_CHANNEL,
+  EXTERNAL_TEAM,
   EXTERNAL_USER,
   TEAM,
   USER,
@@ -22,8 +23,11 @@ export {
 } from '../fakes/slack-fixture'
 export type Channel = { id: string; name: string }
 
+/** A provider error, as Anthropic's HTTP error or OpenAI's failed response carries it. */
+export type ProviderError = { status: number; type: string; code?: string; message: string }
+
 /** A scripted model answer, matched by a token placed in the user's message. */
-export type Script = { token: string; text: string; delayMs?: number }
+export type Script = { token: string; text: string; delayMs?: number; error?: ProviderError }
 
 export type Execution = { execution_id: string; status: string; error: string | null }
 
@@ -64,12 +68,15 @@ export type Turn = {
   request?: ModelRequest
 }
 
-type SlackMessage = {
+export type SlackMessage = {
   ts: string
   text?: string
+  user?: string
   bot_id?: string
+  thread_ts?: string
   streaming?: boolean
-  blocks?: Array<{ type?: string; elements?: Array<{ text?: string }> }>
+  blocks?: Array<{ type?: string; elements?: Array<{ text?: string; action_id?: string; value?: string }> }>
+  reactions?: Array<{ name: string; users: string[] }>
 }
 
 const slackUrl = required('E2E_SLACK_URL')
@@ -97,6 +104,10 @@ export const model = {
    */
   says(text: string, options: { delayMs?: number } = {}): Script {
     return { token: `e2e-${randomUUID().slice(0, 8)}`, text, ...options }
+  },
+  /** Scripts the provider to fail the request instead of answering it. */
+  fails(error: ProviderError): Script {
+    return { token: `e2e-${randomUUID().slice(0, 8)}`, text: '', error }
   },
   /** Registers a script for a prompt the test sends some other way than Slack. */
   async register(script: Script): Promise<void> {
@@ -166,14 +177,80 @@ export const cluster = {
   }
 }
 
-type MentionOptions = { channel?: Channel; as?: SlackUser }
+type MentionOptions = {
+  channel?: Channel
+  as?: SlackUser
+  /** Mentions the bot in an existing thread instead of starting one. */
+  threadTs?: string
+}
 
 export const slack = {
   /** Starts a thread with a channel message that mentions the bot, by USER unless `as` says otherwise. */
   async mention(text: string, script?: Script, options: MentionOptions = {}): Promise<Thread> {
     const channel = options.channel ?? CHANNEL
-    const ts = await postMention(channel, options.as ?? USER, text, script)
-    return new Thread(channel, ts, script)
+    const ts = await postMention(channel, options.as ?? USER, text, script, options.threadTs)
+    return new Thread(channel, options.threadTs ?? ts, script, { trigger: ts })
+  },
+  /** Posts a message that does not mention the bot, starting a thread or replying in one. */
+  async post(text: string, options: { channel?: Channel; as?: SlackUser; threadTs?: string } = {}): Promise<string> {
+    const posted = await slackApi<{ ts: string }>(options.as ?? USER, 'chat.postMessage', {
+      channel: (options.channel ?? CHANNEL).id,
+      text,
+      ...(options.threadTs ? { thread_ts: options.threadTs } : {})
+    })
+    return posted.ts
+  },
+  /** Opens the user's DM with the bot and sends it a message; a DM needs no mention. */
+  async dm(text: string, script?: Script, options: { as?: SlackUser } = {}): Promise<Thread> {
+    const user = options.as ?? USER
+    const { channel } = await slackApi<{ channel: { id: string } }>(user, 'conversations.open', { users: user.id })
+    const dm = { id: channel.id, name: `dm-${user.name}` }
+    const ts = await postMention(dm, user, text, script, undefined, { dm: true })
+    return new Thread(dm, ts, script, { dm: true })
+  },
+  /** A message as Slack holds it, with its reactions. */
+  async message(channel: Channel, ts: string): Promise<SlackMessage> {
+    const { message } = await slackApi<{ message: SlackMessage }>(USER, 'reactions.get', { channel: channel.id, timestamp: ts })
+    return message
+  },
+  /** Ephemeral messages a user was shown, oldest first. */
+  async ephemeral(user: SlackUser): Promise<Array<{ channel: string; text: string }>> {
+    const response = await fetch(`${slackUrl}/_e2e/ephemeral?user=${encodeURIComponent(user.id)}`)
+    return response.json()
+  },
+  /**
+   * Clicks a block element on a message, as `as` (USER by default). `value`
+   * forges the element's value; `actionTs` repeats an earlier click's delivery.
+   */
+  async click(
+    channel: Channel,
+    ts: string,
+    actionId: string,
+    options: { as?: SlackUser; value?: string; actionTs?: string } = {}
+  ): Promise<{ status: number; actionTs: string }> {
+    const response = await fetch(`${slackUrl}/_e2e/actions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        user: (options.as ?? USER).id,
+        channel: channel.id,
+        message_ts: ts,
+        action_id: actionId,
+        value: options.value,
+        action_ts: options.actionTs
+      })
+    })
+    const result = (await response.json()) as { ok: boolean; error?: string; status: number; action_ts: string }
+    if (!result.ok) throw new Error(`clicking ${actionId} failed: ${result.error}`)
+    return { status: result.status, actionTs: result.action_ts }
+  }
+}
+
+export const workflows = {
+  /** The payload of the latest workflow event with this name, if one was emitted. */
+  async event(name: string): Promise<unknown> {
+    const [row] = await db`select payload from absurd.e_centaur_workflows where event_name = ${name}`
+    return row?.payload
   }
 }
 
@@ -220,25 +297,62 @@ export const ironControl = {
   }
 }
 
+/**
+ * A conversation with the bot: a channel thread, or a DM, which slackbotv2
+ * runs as one conversation-wide session.
+ */
 export class Thread {
   /** The user message that triggered each turn, and that turn's script token. */
   private readonly triggers: string[]
   private readonly scripts: Array<string | undefined>
+  private readonly dm: boolean
   private turnsSeen = 0
 
-  constructor(readonly channel: Channel, readonly ts: string, script?: Script) {
-    this.triggers = [ts]
+  constructor(
+    readonly channel: Channel,
+    readonly ts: string,
+    script?: Script,
+    options: { dm?: boolean; trigger?: string } = {}
+  ) {
+    this.triggers = [options.trigger ?? ts]
     this.scripts = [script?.token]
+    this.dm = options.dm ?? false
   }
 
   get key(): string {
-    return `slack:${this.channel.id}:${this.ts}`
+    return this.dm ? `slack:${this.channel.id}:` : `slack:${this.channel.id}:${this.ts}`
   }
 
-  /** Follows up in the thread with a message that mentions the bot, by USER unless `as` says otherwise. */
+  /** Follows up with a message that mentions the bot (in a DM, any message), by USER unless `as` says otherwise. */
   async mention(text: string, script?: Script, options: { as?: SlackUser } = {}): Promise<void> {
-    this.triggers.push(await postMention(this.channel, options.as ?? USER, text, script, this.ts))
+    this.triggers.push(await this.send(text, script, options.as))
     this.scripts.push(script?.token)
+  }
+
+  /**
+   * Mentions the bot while a turn is running. The running turn takes the
+   * message (as steering, or a stop), so it starts no turn of its own.
+   */
+  async interject(text: string, script?: Script, options: { as?: SlackUser } = {}): Promise<string> {
+    return this.send(text, script, options.as)
+  }
+
+  /** Posts a reply that does not mention the bot. */
+  async post(text: string, options: { as?: SlackUser } = {}): Promise<string> {
+    return slack.post(text, { channel: this.channel, as: options.as, threadTs: this.dm ? undefined : this.ts })
+  }
+
+  /** Waits until the latest turn's model request is in flight, held by its script's delay. */
+  async inFlight(): Promise<void> {
+    const token = this.scripts.at(-1)
+    if (!token) throw new Error(`the latest turn of ${this.key} has no script to wait on`)
+    await eventually(`the model request of ${this.key}'s latest turn`, turnTimeoutMs, async () =>
+      (await modelRequests(token)).length > 0 ? true : undefined
+    )
+  }
+
+  private async send(text: string, script: Script | undefined, as: SlackUser = USER): Promise<string> {
+    return postMention(this.channel, as, text, script, this.dm ? undefined : this.ts, { dm: this.dm })
   }
 
   /**
@@ -301,15 +415,19 @@ export class Thread {
       where thread_key = ${this.key} order by created_at`
   }
 
-  /** Bot messages posted after a turn's trigger and before the next user message. */
+  /** Bot messages posted after a turn's trigger and before the next turn's trigger. */
   private async repliesTo(index: number): Promise<SlackMessage[]> {
-    const { messages } = await slackApi<{ messages: SlackMessage[] }>(USER, 'conversations.replies', {
-      channel: this.channel.id,
-      ts: this.ts
-    })
-    const after = messages.filter(message => message.ts > this.triggers[index]!)
-    const nextUser = after.find(message => message.bot_id !== BOT.id)
-    return after.filter(message => message.bot_id === BOT.id && (!nextUser || message.ts < nextUser.ts))
+    const { messages } = this.dm
+      ? await slackApi<{ messages: SlackMessage[] }>(USER, 'conversations.history', { channel: this.channel.id })
+      : await slackApi<{ messages: SlackMessage[] }>(USER, 'conversations.replies', {
+        channel: this.channel.id,
+        ts: this.ts
+      })
+    messages.sort((a, b) => (a.ts < b.ts ? -1 : 1))
+    const next = this.triggers[index + 1]
+    return messages.filter(message =>
+      message.bot_id === BOT.id && message.ts > this.triggers[index]! && (!next || message.ts < next)
+    )
   }
 }
 
@@ -318,12 +436,13 @@ async function postMention(
   user: SlackUser,
   text: string,
   script: Script | undefined,
-  threadTs?: string
+  threadTs?: string,
+  options: { dm?: boolean } = {}
 ): Promise<string> {
   if (script) await registerScript(script)
   const posted = await slackApi<{ ts: string }>(user, 'chat.postMessage', {
     channel: channel.id,
-    text: `<@${BOT.userId}> ${text}${script ? ` ${script.token}` : ''}`,
+    text: `${options.dm ? '' : `<@${BOT.userId}> `}${text}${script ? ` ${script.token}` : ''}`,
     ...(threadTs ? { thread_ts: threadTs } : {})
   })
   return posted.ts
@@ -333,7 +452,7 @@ async function registerScript(script: Script): Promise<void> {
   const response = await fetch(`${modelUrl}/_e2e/replies`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ match: script.token, text: script.text, delayMs: script.delayMs })
+    body: JSON.stringify({ match: script.token, text: script.text, delayMs: script.delayMs, error: script.error })
   })
   if (!response.ok) throw new Error(`registering the model script failed: ${response.status}`)
 }

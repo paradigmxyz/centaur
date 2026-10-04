@@ -8,7 +8,9 @@
 // Test control:     HTTP on 8080 (port-forwarded to the test runner).
 import { randomUUID } from 'node:crypto'
 
-type Reply = { match: string; text: string; delayMs?: number }
+/** A provider error to answer with instead of text: an HTTP error from Anthropic, a failed response from OpenAI. */
+type ProviderError = { status: number; type: string; code?: string; message: string }
+type Reply = { match: string; text: string; delayMs?: number; error?: ProviderError }
 type Recorded = {
   at: string
   provider: 'openai' | 'anthropic'
@@ -107,6 +109,16 @@ function openaiEvents(
       output_tokens: 0, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 0
     }
   })
+  if (reply?.error) {
+    const { code, message: errorMessage, type } = reply.error
+    return {
+      events: [
+        { type: 'response.created', response: response('in_progress', []) },
+        { type: 'response.failed', response: { ...response('failed', []), error: { code: code ?? type, message: errorMessage } } }
+      ].map((event, sequence) => ({ ...event, sequence_number: sequence })),
+      delayMs: reply.delayMs ?? 0
+    }
+  }
   const events = [
     { type: 'response.created', response: response('in_progress', []) },
     { type: 'response.output_item.added', output_index: 0, item: message('in_progress', []) },
@@ -128,6 +140,10 @@ async function anthropicMessage(path: string, headers: Headers, body: any): Prom
   const reply = record('anthropic', path, headers.get('x-api-key'), body, body.messages ?? [])
   const text = reply?.text ?? 'ok'
   await Bun.sleep(reply?.delayMs ?? 0)
+  if (reply?.error) {
+    const { message: errorMessage, status, type } = reply.error
+    return Response.json({ type: 'error', error: { type, message: errorMessage } }, { status })
+  }
   const message = {
     id: `msg_${randomUUID()}`, type: 'message', role: 'assistant', model: body.model,
     content: [] as unknown[], stop_reason: null as string | null, stop_sequence: null,

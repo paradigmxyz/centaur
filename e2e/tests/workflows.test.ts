@@ -1,11 +1,22 @@
 // Durable workflows on the real control plane: discovery of workflow files,
-// run idempotency and identity, cancellation when a workflow disappears, and
-// the Python host's durable context methods, including an agent turn on a
-// real harness. Workflow files are written into the api-rs pod's workflow
+// run idempotency and identity, cancellation when a workflow disappears, the
+// Python host's durable context methods, including an agent turn on a real
+// harness, and Slack buttons a workflow posts, clicked in Slack. Workflow files are written into the api-rs pod's workflow
 // directory, which is what WORKFLOW_DIRS points at on this stack.
 import { randomUUID } from 'node:crypto'
 import { expect, test } from 'bun:test'
-import { api, cluster, eventually, model, providerCredentials } from '../lib'
+import {
+  CHANNEL,
+  USER,
+  USER_B,
+  api,
+  cluster,
+  eventually,
+  model,
+  providerCredentials,
+  slack,
+  workflows
+} from '../lib'
 
 const WORKFLOW_DIR = '/app/workflows'
 
@@ -219,3 +230,88 @@ async def handler(params, ctx):
   const childRun = await waitForRun(output.child.run_id, 'completed')
   expect(childRun.result.output.received).toEqual({ from_parent: true })
 }, 400_000)
+
+/** A workflow that posts what its input asks for to Slack and returns the posted message. */
+function slackPoster(name: string, post: string): string {
+  return `
+WORKFLOW_NAME = "${name}"
+SCHEDULE = {"schedule_id": "${name}", "interval_seconds": 3600, "enabled": False, "input": {}}
+
+
+async def handler(params, ctx):
+${post}
+`
+}
+
+async function runsOf(name: string): Promise<any[]> {
+  const { runs } = await api.ok('GET', `/api/workflows/runs?workflow_name=${name}`)
+  return runs
+}
+
+test('a workflow button click starts its target once, for the person who clicked', async () => {
+  const target = uniqueName('target')
+  const asker = uniqueName('asker')
+  await addWorkflow(target, slackPoster(target, '    return params'))
+  await addWorkflow(asker, slackPoster(asker, `    return await ctx.slack_buttons(
+        "ask", channel=params["channel"], text="Ship release-42?", workflow="${target}",
+        input={"release": "release-42"}, buttons={"approve": "Approve"},
+    )`))
+  const asked = await startRun(asker, { channel: CHANNEL.id })
+  const posted = (await waitForRun(asked.run_id, 'completed')).result.output
+  const message = await slack.message(CHANNEL, posted.ts)
+  const approve = message.blocks
+    ?.flatMap(block => block.elements ?? [])
+    .find(element => element.action_id?.endsWith(':approve'))?.action_id
+  if (!approve) throw new Error(`the posted message has no approve button: ${JSON.stringify(message)}`)
+
+  const click = await slack.click(CHANNEL, posted.ts, approve, { as: USER_B })
+  expect(click.status).toBe(200)
+  const started = await eventually(`a ${target} run`, 30_000, async () => (await runsOf(target))[0])
+  const run = await waitForRun(started.run_id, 'completed')
+  expect(run.result.output).toMatchObject({
+    release: 'release-42',
+    click: { action: 'approve', user_id: USER_B.id, channel_id: CHANNEL.id, message_ts: posted.ts }
+  })
+
+  // slackbotv2 acknowledges a click only after api-rs accepts it, so once a
+  // redelivery is acknowledged, any run it would start already exists.
+  expect((await slack.click(CHANNEL, posted.ts, approve, { as: USER_B, actionTs: click.actionTs })).status).toBe(200)
+  expect(await runsOf(target)).toHaveLength(1)
+
+  // A click carrying a value the workflow did not sign is refused, and the
+  // clicker is told so.
+  expect((await slack.click(CHANNEL, posted.ts, approve, { value: 'v1.forged.signature' })).status).toBe(200)
+  await eventually('the refusal to reach the clicker', 30_000, async () =>
+    (await slack.ephemeral(USER)).some(ephemeral => ephemeral.text === 'This request is no longer available.')
+      ? true
+      : undefined
+  )
+  expect(await runsOf(target)).toHaveLength(1)
+}, 120_000)
+
+test('other Slack block actions reach workflows as events, without their response URL', async () => {
+  const poster = uniqueName('poster')
+  const actionId = `e2e.${randomUUID()}`
+  await addWorkflow(poster, slackPoster(poster, `    return await ctx.post_to_slack(params["channel"], "Pick one", blocks=[
+        {"type": "actions", "block_id": "e2e-pick", "elements": [
+            {"type": "button", "action_id": "${actionId}", "value": "picked",
+             "text": {"type": "plain_text", "text": "Pick"}}
+        ]}
+    ])`))
+  const asked = await startRun(poster, { channel: CHANNEL.id })
+  const posted = (await waitForRun(asked.run_id, 'completed')).result.output
+
+  expect((await slack.click(CHANNEL, posted.ts, actionId, { as: USER_B })).status).toBe(200)
+  const event = await eventually('the block action event', 30_000, () =>
+    workflows.event(`slack.block_action.${actionId}`)
+  )
+  expect(event).toMatchObject({
+    action_id: actionId,
+    value: 'picked',
+    user_id: USER_B.id,
+    channel_id: CHANNEL.id,
+    message_ts: posted.ts
+  })
+  expect(JSON.stringify(event)).not.toContain('response_url')
+  expect(JSON.stringify(event)).not.toContain('e2e-response-token')
+}, 120_000)

@@ -1,7 +1,7 @@
 // Sandbox lifecycle through real Kubernetes, seen from a Slack thread: pause
-// and resume, a sandbox killed between turns, an api-rs restart, and cleanup
-// after a harness switch. These disrupt shared components, so they run one at
-// a time rather than alongside other scenarios.
+// and resume, a sandbox killed between turns, an api-rs restart, a slackbotv2
+// restart mid-turn, and cleanup after a harness switch. These disrupt shared
+// components, so they run one at a time rather than alongside other scenarios.
 import { expect, test } from 'bun:test'
 import { api, cluster, eventually, model, slack, turnTimeoutMs } from '../lib'
 
@@ -49,6 +49,16 @@ test('a thread carries on in the same sandbox after an api-rs restart', async ()
   expect(after.reply).toBe(second.text)
   expect(after.sandbox.id).toBe(before.sandbox.id)
   expect(after.request?.assistantTurns).toContain(first.text)
+}, 3 * turnTimeoutMs)
+
+test('a turn answers once after slackbotv2 restarts during it', async () => {
+  const answer = model.says('Answered across the restart.', { delayMs: 20_000 })
+  const thread = await slack.mention('--codex Start a slow answer.', answer)
+  await thread.inFlight()
+
+  await cluster.restart('slackbotv2')
+  const turn = await thread.nextTurn()
+  expect(turn.reply).toBe(answer.text)
 }, 3 * turnTimeoutMs)
 
 test('a harness switch removes the old sandbox and its proxy', async () => {
