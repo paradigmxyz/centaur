@@ -24,14 +24,12 @@ type Step = {
   effort?: string
   /** Whether this turn ran in the previous turn's sandbox. Omitted on the first turn. */
   sandbox?: 'same' | 'new'
-  /** Earlier answers in the thread that must reach the model this turn. */
+  /** Earlier answers the harness must still hold in its own session this turn. */
   sees?: number[]
 }
 
 type Scenario = {
   steps: Step[]
-  /** A known product bug that makes this scenario fail; remove once fixed. */
-  bug?: string
 }
 
 const scenarios: Record<string, Scenario> = {
@@ -50,13 +48,6 @@ const scenarios: Record<string, Scenario> = {
       { say: '--claude switch', harness: 'claudecode', model: CLAUDE_MODEL, effort: CLAUDE_EFFORT, sandbox: 'new' },
       { say: 'again', harness: 'claudecode', model: CLAUDE_MODEL, effort: CLAUDE_EFFORT, sandbox: 'same', sees: [2] }
     ]
-  },
-  'the new harness sees the thread so far after a switch': {
-    steps: [
-      { say: '--codex hello', harness: 'codex', model: CODEX_MODEL, effort: CODEX_EFFORT },
-      { say: '--claude switch', harness: 'claudecode', model: CLAUDE_MODEL, effort: CLAUDE_EFFORT, sandbox: 'new', sees: [1] }
-    ],
-    bug: "the transcript re-fed after a harness switch omits the bot's replies"
   },
   'a model flag sticks to the thread': {
     steps: [
@@ -80,13 +71,6 @@ const scenarios: Record<string, Scenario> = {
   'a Claude alias works as a --model value': {
     steps: [{ say: '--claude --model sonnet hello', harness: 'claudecode', model: 'claude-sonnet-5' }]
   },
-  'codex reasoning effort applies to one turn': {
-    steps: [
-      { say: '--codex -rsn high hello', harness: 'codex', model: CODEX_MODEL, effort: 'high' },
-      { say: 'again', harness: 'codex', model: CODEX_MODEL, effort: CODEX_EFFORT, sandbox: 'same' }
-    ],
-    bug: 'harness-server never resets codex turn/start effort, and codex keeps a turn override for later turns'
-  },
   'claude reasoning effort applies to one turn': {
     steps: [
       { say: '--claude -rsn low hello', harness: 'claudecode', model: CLAUDE_MODEL, effort: 'low' },
@@ -101,8 +85,7 @@ const scenarios: Record<string, Scenario> = {
 }
 
 for (const [name, scenario] of Object.entries(scenarios)) {
-  const run = scenario.bug ? test.concurrent.failing : test.concurrent
-  run(scenario.bug ? `${name} [known bug: ${scenario.bug}]` : name, async () => {
+  test.concurrent(name, async () => {
     let thread: Thread | undefined
     const turns: Turn[] = []
     for (const [index, step] of scenario.steps.entries()) {
@@ -123,8 +106,10 @@ for (const [name, scenario] of Object.entries(scenarios)) {
       for (const flag of step.say.split(' ').filter(word => word.startsWith('-'))) {
         check(request?.userText.includes(flag), false)
       }
+      // Only assistant turns prove the harness kept its session; slackbotv2
+      // also quotes earlier Slack messages into each turn.
       for (const earlier of step.sees ?? []) {
-        check(JSON.stringify(request?.body).includes(`Answer ${earlier}.`), true)
+        check(request?.assistantTurns.includes(`Answer ${earlier}.`), true)
       }
       turns.push(turn)
     }

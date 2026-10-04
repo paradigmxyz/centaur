@@ -3,6 +3,7 @@
 #
 #   e2e/stack.sh up            create/update the cluster and deploy everything
 #   e2e/stack.sh test [files]  run the e2e scenarios (or the given files)
+#   e2e/stack.sh logs          print pods, events, and component logs
 #   e2e/stack.sh down          delete the cluster
 #
 # The stack is the chart's Slack path (Postgres, console, proxy-sync, api-rs,
@@ -66,7 +67,7 @@ up() {
     --dry-run=client -o yaml | apply_stdin
   kubectl -n kube-system rollout restart deploy/coredns > /dev/null
 
-  local image_args=() entry service key
+  local image_args=() entry service key tag
   for entry in "${IMAGES[@]}"; do
     service="${entry%%:*}" key="${entry#*:}"
     if [[ -n "${CENTAUR_E2E_IMAGE_TAG:-}" ]]; then
@@ -81,7 +82,15 @@ up() {
       fi
     else
       just build-one "$service"
-      kind load docker-image --name "$CLUSTER" "centaur-${service}:latest"
+      # Tag by content so a rebuilt image changes the release values and Helm
+      # rolls exactly the pods whose image changed.
+      tag="e2e-$(docker image inspect -f '{{.Id}}' "centaur-${service}:latest" | cut -c8-19)"
+      docker tag "centaur-${service}:latest" "centaur-${service}:${tag}"
+      kind load docker-image --name "$CLUSTER" "centaur-${service}:${tag}"
+      image_args+=(
+        --set "${key}.image.repository=centaur-${service}"
+        --set "${key}.image.tag=${tag}"
+      )
     fi
   done
 
@@ -166,14 +175,20 @@ run_tests() {
   local targets=("$@")
   [[ "${#targets[@]}" -gt 0 ]] || targets=(./e2e/tests)
   if ! bun test --max-concurrency=4 "${targets[@]}"; then
-    kubectl get pods -A -o wide
-    kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-slackbotv2" --tail=100 || true
-    kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-api-rs" --tail=-1 \
-      | grep -E '"level":"(WARN|ERROR)"' | tail -50 || true
-    kubectl -n "$MODEL_NAMESPACE" logs deploy/model-server --tail=100 || true
-    kubectl -n "$SLACK_NAMESPACE" logs deploy/fake-slack --tail=100 || true
+    dump_logs
     return 1
   fi
+}
+
+# Prints what is needed to debug a failed deploy or test run.
+dump_logs() {
+  kubectl get pods -A -o wide || true
+  kubectl get events -A --sort-by=.lastTimestamp | tail -50 || true
+  kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-slackbotv2" --tail=100 || true
+  kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-api-rs" --tail=-1 \
+    | grep -E '"level":"(WARN|ERROR)"' | tail -50 || true
+  kubectl -n "$MODEL_NAMESPACE" logs deploy/model-server --tail=100 || true
+  kubectl -n "$SLACK_NAMESPACE" logs deploy/fake-slack --tail=100 || true
 }
 
 # Earlier runs leave a sandbox and iron-proxy per thread (they idle for hours).
@@ -187,6 +202,7 @@ remove_sandboxes() {
 case "${1:-}" in
   up) up ;;
   test) shift; run_tests "$@" ;;
+  logs) use_cluster; dump_logs ;;
   down) kind delete cluster --name "$CLUSTER" ;;
-  *) echo "usage: $0 up|test|down" >&2; exit 2 ;;
+  *) echo "usage: $0 up|test|logs|down" >&2; exit 2 ;;
 esac

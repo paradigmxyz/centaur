@@ -278,6 +278,10 @@ jobs:
       - name: Run e2e scenarios
         run: e2e/stack.sh test
 
+      - name: Dump diagnostics
+        if: ${{ failure() }}
+        run: e2e/stack.sh logs
+
   notify-centaur-paradigm:
     name: Notify Paradigm Overlay
     needs: merge
