@@ -20,7 +20,7 @@ const LAMINAR_METADATA_PREFIX: &str = "lmnr.association.properties.metadata.";
 const MAX_SPAN_IO_BYTES: usize = 60 * 1024;
 const MAX_TOOL_COMMAND_BYTES: usize = 8 * 1024;
 const TRUNCATION_SUFFIX: &str = "…[truncated]";
-/// Transcript capture is opt-in: LLM prompt/response text and shell commands
+/// Transcript capture is opt-in: LLM text, tool arguments/results, and shell commands
 /// are only exported when this env var is set to a truthy value.
 const TRANSCRIPT_CAPTURE_ENV: &str = "CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS";
 
@@ -107,6 +107,7 @@ pub(crate) struct TurnTelemetry {
 
 struct ActiveTool {
     span: SdkSpan,
+    input: String,
 }
 
 #[derive(Clone, Debug)]
@@ -267,7 +268,8 @@ impl TurnTelemetry {
                     && let Some(labels) = tool_labels_from_item(item, &self.centaur_tool_names)
                 {
                     let command = tool_command_details(item, self.capture_transcripts);
-                    self.start_tool(id, labels, command);
+                    self.start_tool(id.clone(), labels, command);
+                    self.capture_tool_arguments(&id, item);
                 }
             }
             Some("item/completed" | "item.completed") => {
@@ -291,7 +293,7 @@ impl TurnTelemetry {
             TurnStatus::Completed | TurnStatus::Failed => "failed",
         };
         for (_id, mut tool) in std::mem::take(&mut self.tools) {
-            finish_tool_span(&mut tool.span, dangling_status);
+            finish_tool_span(&mut tool, dangling_status, None);
         }
         self.finish_usage_span(status);
     }
@@ -314,7 +316,7 @@ impl TurnTelemetry {
             return;
         };
         if let Some(mut previous) = self.tools.remove(&id) {
-            finish_tool_span(&mut previous.span, "failed");
+            finish_tool_span(&mut previous, "failed", None);
         }
         let mut span_input = json!({
             "kind": labels.kind,
@@ -340,12 +342,26 @@ impl TurnTelemetry {
                 span_input["cwd"] = Value::String(value);
             }
         }
-        attributes.push(KeyValue::new("lmnr.span.input", span_input.to_string()));
         let span = SpanBuilder::from_name(tool_span_name(self.harness, &labels))
             .with_kind(SpanKind::Internal)
             .with_attributes(attributes)
             .start_with_context(tracer, parent);
-        self.tools.insert(id, ActiveTool { span });
+        self.tools.insert(
+            id,
+            ActiveTool {
+                span,
+                input: span_input.to_string(),
+            },
+        );
+    }
+
+    fn capture_tool_arguments(&mut self, id: &str, item: &Value) {
+        if self.capture_transcripts
+            && let Some(arguments) = item.get("arguments")
+            && let Some(tool) = self.tools.get_mut(id)
+        {
+            tool.input = bounded_span_value(&arguments.to_string());
+        }
     }
 
     fn observe_completed_output(&mut self, item: &Value) {
@@ -364,8 +380,24 @@ impl TurnTelemetry {
             return;
         };
         let status = completed_tool_status(item);
+        let result = if self.capture_transcripts {
+            [
+                "aggregatedOutput",
+                "aggregated_output",
+                "result",
+                "contentItems",
+                "content_items",
+                "error",
+            ]
+            .into_iter()
+            .filter_map(|key| item.get(key))
+            .find(|value| !value.is_null())
+        } else {
+            None
+        };
+        self.capture_tool_arguments(&id, item);
         if let Some(mut tool) = self.tools.remove(&id) {
-            finish_tool_span(&mut tool.span, status);
+            finish_tool_span(&mut tool, status, result);
             return;
         }
         let Some(labels) = tool_labels_from_item(item, &self.centaur_tool_names) else {
@@ -373,8 +405,9 @@ impl TurnTelemetry {
         };
         let command = tool_command_details(item, self.capture_transcripts);
         self.start_tool(id.clone(), labels, command);
+        self.capture_tool_arguments(&id, item);
         if let Some(mut tool) = self.tools.remove(&id) {
-            finish_tool_span(&mut tool.span, status);
+            finish_tool_span(&mut tool, status, result);
         }
     }
 
@@ -578,11 +611,20 @@ fn otel_environment() -> String {
         .unwrap_or_else(|| "dev".to_string())
 }
 
-fn finish_tool_span(span: &mut SdkSpan, status: &str) {
+fn finish_tool_span(tool: &mut ActiveTool, status: &str, result: Option<&Value>) {
+    let span = &mut tool.span;
+    span.set_attribute(KeyValue::new("lmnr.span.input", tool.input.clone()));
     span.set_attribute(KeyValue::new("tool.status", status.to_owned()));
+    let mut output = json!({ "status": status });
+    if let Some(result) = result {
+        output["result"] = match result {
+            Value::String(text) => json!(bounded_span_value(text)),
+            value => json!(bounded_span_value(&value.to_string())),
+        };
+    }
     span.set_attribute(KeyValue::new(
         "lmnr.span.output",
-        json!({ "status": status }).to_string(),
+        bounded_span_value(&output.to_string()),
     ));
     span.set_status(if status == "completed" {
         Status::Ok
@@ -1565,6 +1607,80 @@ mod tests {
         let input = attribute(tool, "lmnr.span.input").expect("tool input");
         assert!(input.contains("private-query"));
         assert!(input.contains("\"cwd\":\"src\""));
+    }
+
+    #[test]
+    fn tool_content_capture_is_opt_in_for_completed_only_items() {
+        for capture in [false, true] {
+            let (exporter, provider, tracer) = test_telemetry();
+            let mut turn = test_turn_with_transcript_capture(tracer, capture);
+            turn.centaur_tool_names.clear();
+            for (id, item) in [
+                (
+                    "command",
+                    json!({"type": "commandExecution", "command": "printf fixture", "aggregatedOutput": "fixture output", "exitCode": 0}),
+                ),
+                (
+                    "mcp",
+                    json!({"type": "mcpToolCall", "tool": "search", "server": "fixture", "arguments": {"query": "fixture query"}, "result": {"content": [{"text": "fixture result"}]}, "status": "completed"}),
+                ),
+                (
+                    "dynamic",
+                    json!({"type": "dynamicToolCall", "tool": "search", "arguments": {"query": "fixture query"}, "contentItems": [{"text": "fixture result"}], "status": "completed"}),
+                ),
+            ] {
+                let mut item = item;
+                item["id"] = json!(id);
+                turn.observe_wire_value(
+                    &json!({"method": "item/completed", "params": {"item": item}}),
+                );
+            }
+            provider.force_flush().expect("flush");
+            let spans = exporter.get_finished_spans().expect("spans");
+            assert_eq!(spans.len(), 3);
+            for span in spans {
+                let output = attribute(&span, "lmnr.span.output").expect("tool output");
+                assert_eq!(
+                    output.contains("fixture output") || output.contains("fixture result"),
+                    capture
+                );
+                if span.name != "codex.tool.command_execution" {
+                    assert_eq!(
+                        attribute(&span, "lmnr.span.input")
+                            .unwrap()
+                            .contains("fixture query"),
+                        capture
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn captured_tool_results_are_bounded_and_preserve_status() {
+        let (exporter, provider, tracer) = test_telemetry();
+        let mut turn = test_turn_with_transcript_capture(tracer, true);
+        for method in ["item/started", "item/completed"] {
+            turn.observe_wire_value(&json!({
+                "method": method,
+                "params": {"item": {
+                    "id": "tool-1", "type": "mcpToolCall", "tool": "search",
+                    "arguments": {"query": "fixture query"}, "result": null,
+                    "error": "é".repeat(MAX_SPAN_IO_BYTES), "status": "failed"
+                }}
+            }));
+        }
+        provider.force_flush().expect("flush");
+        let spans = exporter.get_finished_spans().expect("spans");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(
+            attribute(&spans[0], "tool.status").as_deref(),
+            Some("failed")
+        );
+        let output = attribute(&spans[0], "lmnr.span.output").expect("tool output");
+        assert!(output.contains("é"));
+        assert!(output.ends_with(TRUNCATION_SUFFIX));
+        assert!(output.len() <= MAX_SPAN_IO_BYTES);
     }
 
     #[test]
