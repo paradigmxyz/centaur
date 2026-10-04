@@ -133,7 +133,7 @@ def test_default_database_url_uses_company_context_dsn_env(monkeypatch):
 
     client = CompanyContextClient()
 
-    assert client._require_database_url() == "postgresql://scoped"
+    assert client._require_database_url() == "postgresql://scoped/ai_v2"
 
 
 def test_default_database_url_uses_tool_context_secret(monkeypatch):
@@ -148,7 +148,7 @@ def test_default_database_url_uses_tool_context_secret(monkeypatch):
     try:
         client = CompanyContextClient()
 
-        assert client._require_database_url() == "postgresql://context-scoped"
+        assert client._require_database_url() == "postgresql://context-scoped/ai_v2"
     finally:
         reset_tool_context(token)
 
@@ -164,24 +164,6 @@ def test_default_database_url_does_not_fall_back_to_raw_database_url(monkeypatch
             client._require_database_url()
     finally:
         reset_tool_context(token)
-
-
-def test_postgres_database_name_defaults_to_ai_v2(monkeypatch):
-    monkeypatch.delenv("COMPANY_CONTEXT_POSTGRES_DATABASE", raising=False)
-
-    assert company_context_client._postgres_database_name() == "ai_v2"
-
-
-def test_postgres_database_name_can_be_overridden(monkeypatch):
-    monkeypatch.setenv("COMPANY_CONTEXT_POSTGRES_DATABASE", "centaur")
-
-    assert company_context_client._postgres_database_name() == "centaur"
-
-
-def test_postgres_database_name_uses_default_for_blank_override(monkeypatch):
-    monkeypatch.setenv("COMPANY_CONTEXT_POSTGRES_DATABASE", " ")
-
-    assert company_context_client._postgres_database_name() == "ai_v2"
 
 
 @pytest.mark.parametrize("sql", ["", "   "])

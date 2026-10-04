@@ -13,11 +13,14 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlparse, urlunparse
 
 import asyncpg
 
-from centaur_sdk.tool_sdk import secret
+from centaur_sdk.tool_sdk import (
+    COMPANY_CONTEXT_DSN_ENV,
+    company_context_database_url,
+    secret,
+)
 
 DEFAULT_SEARCH_LIMIT = 10
 MAX_SEARCH_LIMIT = 50
@@ -53,9 +56,6 @@ GRANOLA_SOURCE_TYPE = "granola_note"
 DOCS_SOURCE = "docs"
 LEGACY_GOOGLE_DRIVE_SOURCE = "google_drive"
 GOOGLE_DOCS_SOURCE_TYPE = "google_doc"
-COMPANY_CONTEXT_DSN_ENV = "CENTAUR_POSTGRES_DSN"
-COMPANY_CONTEXT_DATABASE_ENV = "COMPANY_CONTEXT_POSTGRES_DATABASE"
-DEFAULT_POSTGRES_DATABASE = "ai_v2"
 COMPANY_CONTEXT_LOOKUP_METRICS_ENABLED_ENV = "COMPANY_CONTEXT_LOOKUP_METRICS_ENABLED"
 VICTORIAMETRICS_PUSH_ENABLED_ENV = "VICTORIAMETRICS_PUSH_ENABLED"
 VICTORIAMETRICS_URL_ENV = "VICTORIAMETRICS_URL"
@@ -114,28 +114,6 @@ _STOP_WORDS = {
 def _clamp(value: int, *, minimum: int, maximum: int) -> int:
     """Clamp integer tool inputs to predictable output bounds."""
     return max(minimum, min(int(value), maximum))
-
-
-def _scoped_database_url() -> str:
-    value = os.getenv(COMPANY_CONTEXT_DSN_ENV)  # noqa: TID251
-    if value is None:
-        value = secret(COMPANY_CONTEXT_DSN_ENV, default="")
-    value = value.strip()
-    if value == COMPANY_CONTEXT_DSN_ENV:
-        return ""
-    return value
-
-
-def _database_url_with_name(value: str, database: str) -> str:
-    parsed = urlparse(value)
-    if parsed.scheme and parsed.netloc and parsed.path in ("", "/"):
-        return urlunparse(parsed._replace(path=f"/{database}"))
-    return value
-
-
-def _postgres_database_name() -> str:
-    value = os.getenv(COMPANY_CONTEXT_DATABASE_ENV, DEFAULT_POSTGRES_DATABASE)  # noqa: TID251
-    return value.strip() or DEFAULT_POSTGRES_DATABASE
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -661,7 +639,7 @@ class CompanyContextClient:
         *,
         embeddings_client: Any | None = None,
     ) -> None:
-        self._database_url = (database_url or _scoped_database_url()).strip()
+        self._database_url = company_context_database_url(database_url or None)
         self._embeddings_client = embeddings_client
 
     def _require_database_url(self) -> str:
@@ -671,7 +649,7 @@ class CompanyContextClient:
 
     async def _connect(self) -> asyncpg.Connection:
         return await asyncpg.connect(
-            _database_url_with_name(self._require_database_url(), _postgres_database_name()),
+            self._require_database_url(),
             command_timeout=30,
         )
 
