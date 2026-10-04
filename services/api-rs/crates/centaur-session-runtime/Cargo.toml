@@ -29,7 +29,7 @@ uuid.workspace = true
 [dev-dependencies]
 sqlx.workspace = true
 time.workspace = true
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread", "sync", "time"] }
 uuid.workspace = true
 
 [lints]

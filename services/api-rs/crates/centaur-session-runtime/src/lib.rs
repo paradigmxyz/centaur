@@ -62,10 +62,6 @@ pub const SESSION_OUTPUT_LINE_EVENT: &str = "session.output.line";
 pub const SESSION_FIRST_TOKEN_EVENT: &str = "session.first_token";
 
 const EVENT_STREAM_SAFETY_POLL_INTERVAL: Duration = Duration::from_secs(30);
-/// Backoff while waiting out a lost database connection, e.g. an event stream
-/// that keeps its position and resumes instead of ending with an error.
-const DATABASE_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
-const DATABASE_RETRY_MAX_DELAY: Duration = Duration::from_secs(10);
 const STEERING_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const STEERING_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
 const SESSION_PIPE_MAX_REATTACH_ATTEMPTS: u32 = 3;
@@ -73,7 +69,6 @@ const SESSION_PIPE_REATTACH_DELAY: Duration = Duration::from_millis(500);
 const SESSION_PIPE_CREATED_REATTACH_TIMEOUT: Duration = Duration::from_secs(15);
 const STDOUT_OWNER_LEASE: Duration = Duration::from_secs(45);
 const STDOUT_OWNER_RENEW_INTERVAL: Duration = Duration::from_secs(10);
-const STDOUT_OWNER_RELEASE_AFTER_PUMP_FAILURE_WINDOW: Duration = Duration::from_secs(30);
 const EXECUTION_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const EXECUTION_HANDOFF_DB_TIMEOUT: Duration = Duration::from_secs(5);
 /// A running execution can briefly have no sandbox while it moves through
@@ -691,7 +686,6 @@ struct EventStreamState {
     pending: VecDeque<SessionEvent>,
     listener: SessionEventListener,
     safety_tick: Interval,
-    retry_delay: Duration,
     done: bool,
     emitted_count: u64,
     span: Span,
@@ -4430,7 +4424,6 @@ fn session_event_stream(
                 tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
                 tick
             },
-            retry_delay: DATABASE_RETRY_INITIAL_DELAY,
             done: false,
             emitted_count: 0,
             span,
@@ -4478,42 +4471,27 @@ fn session_event_stream(
                         )
                         .await
                     {
-                        Ok(events) if events.is_empty() => {
-                            state.retry_delay = DATABASE_RETRY_INITIAL_DELAY;
-                            loop {
-                                tokio::select! {
-                                    notification = state.listener.recv() => {
-                                        match notification {
-                                            Ok(notification)
-                                                if notification.thread_key == state.thread_key.as_str()
-                                                    && notification.event_id > state.after_event_id =>
-                                            {
-                                                break;
-                                            }
-                                            Ok(_) => {}
-                                            // The listener reconnects on its next recv; the
-                                            // re-poll covers notifications missed meanwhile.
-                                            Err(error) if error.is_transient() => {
-                                                wait_out_event_stream_store_error(&mut state, &error).await;
-                                                break;
-                                            }
-                                            Err(error) => {
-                                                state.done = true;
-                                                return Some((Err(SessionRuntimeError::Store(error)), state));
-                                            }
+                        Ok(events) if events.is_empty() => loop {
+                            tokio::select! {
+                                notification = state.listener.recv() => {
+                                    match notification {
+                                        Ok(notification)
+                                            if notification.thread_key == state.thread_key.as_str()
+                                                && notification.event_id > state.after_event_id =>
+                                        {
+                                            break;
+                                        }
+                                        Ok(_) => {}
+                                        Err(error) => {
+                                            state.done = true;
+                                            return Some((Err(SessionRuntimeError::Store(error)), state));
                                         }
                                     }
-                                    _ = state.safety_tick.tick() => break,
                                 }
+                                _ = state.safety_tick.tick() => break,
                             }
                         }
-                        Ok(events) => {
-                            state.retry_delay = DATABASE_RETRY_INITIAL_DELAY;
-                            state.pending = events.into();
-                        }
-                        Err(error) if error.is_transient() => {
-                            wait_out_event_stream_store_error(&mut state, &error).await;
-                        }
+                        Ok(events) => state.pending = events.into(),
                         Err(error) => {
                             state.done = true;
                             return Some((Err(SessionRuntimeError::Store(error)), state));
@@ -4524,23 +4502,6 @@ fn session_event_stream(
             .instrument(span)
         },
     )
-}
-
-async fn wait_out_event_stream_store_error(
-    state: &mut EventStreamState,
-    error: &SessionStoreError,
-) {
-    warn!(
-        component = COMPONENT_SESSION_RUNTIME,
-        event = "session_events_stream_retrying",
-        thread_key = %state.thread_key,
-        after_event_id = state.after_event_id,
-        retry_in_ms = state.retry_delay.as_millis() as u64,
-        %error,
-        "session event stream lost the database; retrying"
-    );
-    sleep(state.retry_delay).await;
-    state.retry_delay = (state.retry_delay * 2).min(DATABASE_RETRY_MAX_DELAY);
 }
 
 /// Terminal event types for a single execution: once one of these is emitted
@@ -4631,7 +4592,6 @@ fn spawn_stdout_pump_loop(state: StdoutPumpLoop) {
         } = state;
         let mut reattach_attempts = 0_u32;
         let mut last_reattach_detail = "stdout reattach attempts exhausted".to_owned();
-        let mut pump_failed = false;
 
         'pump: loop {
             let result =
@@ -4663,7 +4623,6 @@ fn spawn_stdout_pump_loop(state: StdoutPumpLoop) {
                             }),
                         )
                         .await;
-                    pump_failed = true;
                     break;
                 }
             };
@@ -4778,84 +4737,7 @@ fn spawn_stdout_pump_loop(state: StdoutPumpLoop) {
         }
 
         remove_pipe_if_current(&ctx.sandbox_pipes, &sandbox_id, &pipe);
-        if pump_failed {
-            release_stdout_owner_after_pump_failure(&ctx, &thread_key).await;
-        }
     });
-}
-
-/// A pump that dies on a store error leaves the thread's active execution with
-/// no reader, while this process's renewer keeps its stdout-owner lease alive,
-/// so the adoption scan would skip the execution indefinitely. Release the
-/// lease so the scan re-attaches or recovers the turn. Retries stop well
-/// before the lease would lapse: past that, a database outage also stops the
-/// renewer, and a late release could undo a fresh adoption by this process.
-async fn release_stdout_owner_after_pump_failure(ctx: &RuntimeContext, thread_key: &ThreadKey) {
-    let deadline = Instant::now() + STDOUT_OWNER_RELEASE_AFTER_PUMP_FAILURE_WINDOW;
-    let mut delay = DATABASE_RETRY_INITIAL_DELAY;
-    loop {
-        // Bound each attempt too: waiting on the pool alone can outlast the window.
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let Ok(result) = timeout(remaining, async {
-            let Some(execution) = ctx.store.active_execution_for_thread(thread_key).await? else {
-                return Ok(None);
-            };
-            let released = ctx
-                .store
-                .release_stdout_owner(&execution.execution_id, &ctx.stdout_owner_id)
-                .await?;
-            Ok::<_, SessionStoreError>(released.then_some(execution.execution_id))
-        })
-        .await
-        else {
-            warn!(
-                component = COMPONENT_SESSION_RUNTIME,
-                event = "session_stdout_owner_release_failed",
-                thread_key = %thread_key,
-                "timed out releasing stdout-owner lease after the stdout pump failed"
-            );
-            return;
-        };
-        match result {
-            Ok(Some(execution_id)) => {
-                info!(
-                    component = COMPONENT_SESSION_RUNTIME,
-                    event = "session_stdout_owner_released_after_pump_failure",
-                    thread_key = %thread_key,
-                    execution_id,
-                    "released stdout-owner lease after the stdout pump failed"
-                );
-                let _ = ctx
-                    .store
-                    .append_event(
-                        thread_key,
-                        Some(&execution_id),
-                        "session.stdout_owner_released",
-                        json!({
-                            "execution_id": execution_id,
-                            "reason": "stdout_pump_failed",
-                        }),
-                    )
-                    .await;
-                return;
-            }
-            Ok(None) => return,
-            Err(error) if error.is_transient() && Instant::now() + delay < deadline => {
-                sleep(delay).await;
-                delay = (delay * 2).min(DATABASE_RETRY_MAX_DELAY);
-            }
-            Err(error) => {
-                warn!(
-                    component = COMPONENT_SESSION_RUNTIME,
-                    event = "session_stdout_owner_release_failed",
-                    thread_key = %thread_key,
-                    %error,
-                    "failed to release stdout-owner lease after the stdout pump failed"
-                );
-                return;
-            }
-        }
-    }
 }
 
 async fn reattach_session_pipe(
@@ -10276,196 +10158,6 @@ mod adoption_tests {
                 .is_err(),
             "unscoped stream should stay open after a terminal event"
         );
-        reset_test_store(&store).await;
-    }
-
-    /// A TCP proxy to the test database that can be cut, as a network
-    /// partition or failover looks to api-rs: live connections drop and new
-    /// ones are refused until it heals.
-    struct DatabasePartition {
-        port: u16,
-        upstream: (String, u16),
-        accept: std::sync::Mutex<tokio::task::AbortHandle>,
-        connections: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
-    }
-
-    impl DatabasePartition {
-        /// Starts a proxy to the test database and returns it with a store
-        /// whose every connection goes through it.
-        async fn start() -> (Self, PgSessionStore) {
-            let options: sqlx::postgres::PgConnectOptions =
-                std::env::var("SESSION_RUNTIME_TEST_DATABASE_URL")
-                    .unwrap()
-                    .parse()
-                    .unwrap();
-            let upstream = (options.get_host().to_owned(), options.get_port());
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let port = listener.local_addr().unwrap().port();
-            let connections = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let accept = Self::accept(listener, upstream.clone(), connections.clone());
-            let store = PgSessionStore::new(
-                sqlx::postgres::PgPoolOptions::new()
-                    .acquire_timeout(Duration::from_millis(500))
-                    .connect_with(options.host("127.0.0.1").port(port))
-                    .await
-                    .expect("connect through partition proxy"),
-            );
-            let partition = Self {
-                port,
-                upstream,
-                accept: std::sync::Mutex::new(accept),
-                connections,
-            };
-            (partition, store)
-        }
-
-        fn accept(
-            listener: tokio::net::TcpListener,
-            upstream: (String, u16),
-            connections: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
-        ) -> tokio::task::AbortHandle {
-            tokio::spawn(async move {
-                while let Ok((mut client, _)) = listener.accept().await {
-                    let upstream = upstream.clone();
-                    let task = tokio::spawn(async move {
-                        if let Ok(mut server) = tokio::net::TcpStream::connect(upstream).await {
-                            let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
-                        }
-                    });
-                    connections.lock().unwrap().push(task.abort_handle());
-                }
-            })
-            .abort_handle()
-        }
-
-        /// Stops listening, so connects are refused, and drops live connections.
-        fn cut(&self) {
-            self.accept.lock().unwrap().abort();
-            for connection in self.connections.lock().unwrap().drain(..) {
-                connection.abort();
-            }
-        }
-
-        async fn heal(&self) {
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", self.port))
-                .await
-                .unwrap();
-            *self.accept.lock().unwrap() =
-                Self::accept(listener, self.upstream.clone(), self.connections.clone());
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn event_stream_resumes_after_losing_the_database() {
-        let Some(store) = test_store().await else {
-            return;
-        };
-        let _serial = TEST_LOCK.lock().await;
-        let (partition, partitioned_store) = DatabasePartition::start().await;
-        let thread_key =
-            ThreadKey::parse(format!("test:stream-resume-{}", uuid::Uuid::new_v4())).unwrap();
-        let execution_id = orphaned_execution(&store, &thread_key, None, false).await;
-        let listener = partitioned_store
-            .listen_session_events()
-            .await
-            .expect("listener");
-        let mut stream = Box::pin(session_event_stream(
-            partitioned_store.clone(),
-            thread_key.clone(),
-            0,
-            Some(execution_id.clone()),
-            listener,
-            tracing::Span::none(),
-        ));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(300), stream.next())
-                .await
-                .is_err()
-        );
-
-        // The stream loses the database while the turn finishes, then the
-        // database comes back: it must deliver the terminal event, not an error.
-        partition.cut();
-        let next = tokio::spawn(async move {
-            stream
-                .next()
-                .await
-                .map(|result| result.map(|e| e.event_type))
-        });
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        store
-            .append_event(
-                &thread_key,
-                Some(&execution_id),
-                "session.execution_completed",
-                json!({ "execution_id": execution_id }),
-            )
-            .await
-            .expect("append terminal event");
-        partition.heal().await;
-        let event_type = tokio::time::timeout(Duration::from_secs(20), next)
-            .await
-            .expect("stream should resume and deliver the event")
-            .unwrap()
-            .expect("stream should not end")
-            .expect("stream should not report an error");
-        assert_eq!(event_type, "session.execution_completed");
-        reset_test_store(&store).await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn turn_recovers_when_its_stdout_pump_loses_the_database() {
-        let Some(store) = test_store().await else {
-            return;
-        };
-        let _serial = TEST_LOCK.lock().await;
-        let (partition, partitioned_store) = DatabasePartition::start().await;
-        let thread_key =
-            ThreadKey::parse(format!("test:pump-failure-{}", uuid::Uuid::new_v4())).unwrap();
-        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-mock"), true).await;
-        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
-        let (io, mut stdout, _stdin) = mock_io();
-        backend.push_io(io).await;
-        let runtime = runtime_with(&partitioned_store, backend.clone());
-        runtime.adopt_orphaned_executions().await;
-        assert_eq!(backend.opens(), 1);
-
-        // A brief partition fails the pump's write but heals before the
-        // stdout-owner renewer next needs the database.
-        partition.cut();
-        stdout
-            .write_all(b"{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\"}}\n")
-            .await
-            .unwrap();
-        sleep(Duration::from_secs(1)).await;
-        partition.heal().await;
-
-        // The dead pump must give up the turn so a recovery scan re-attaches it.
-        let (io, mut stdout, _stdin) = mock_io();
-        backend.push_io(io).await;
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while backend.opens() < 2 {
-            assert!(
-                Instant::now() < deadline,
-                "no recovery scan re-attached the turn"
-            );
-            runtime.adopt_orphaned_executions().await;
-            sleep(Duration::from_millis(250)).await;
-        }
-        stdout
-            .write_all(
-                b"{\"type\":\"turn.completed\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}\n",
-            )
-            .await
-            .unwrap();
-        wait_for_event(&store, &thread_key, "session.execution_completed").await;
-        let status: String =
-            sqlx::query_scalar("select status from session_executions where execution_id = $1")
-                .bind(&execution_id)
-                .fetch_one(store.pool())
-                .await
-                .expect("execution status");
-        assert_eq!(status, "completed");
         reset_test_store(&store).await;
     }
 

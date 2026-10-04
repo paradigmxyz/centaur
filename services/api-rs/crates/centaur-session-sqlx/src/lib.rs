@@ -1778,24 +1778,6 @@ pub enum SessionStoreError {
     Bm25IndexesPresent { indexes: Vec<String> },
 }
 
-impl SessionStoreError {
-    /// Whether the error is a lost or unavailable database connection that a
-    /// retry can outlast: I/O (including DNS) and TLS failures, pool timeouts,
-    /// and Postgres connection, shutdown, and too-many-connections states.
-    pub fn is_transient(&self) -> bool {
-        let Self::Sqlx(error) = self else {
-            return false;
-        };
-        match error {
-            sqlx::Error::Io(_) | sqlx::Error::Tls(_) | sqlx::Error::PoolTimedOut => true,
-            sqlx::Error::Database(error) => error.code().is_some_and(|code| {
-                code.starts_with("08") || matches!(&*code, "57P01" | "57P02" | "57P03" | "53300")
-            }),
-            _ => false,
-        }
-    }
-}
-
 #[derive(Debug, FromRow)]
 struct SessionRow {
     thread_key: String,
