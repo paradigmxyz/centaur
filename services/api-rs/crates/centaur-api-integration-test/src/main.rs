@@ -249,6 +249,7 @@ async fn test_harness_wire_values(http: &HttpClient, base_url: &str) -> Result<(
         (HarnessType::ClaudeCode, "claudecode"),
         (HarnessType::Nanocodex, "nanocodex"),
         (HarnessType::Hermes, "hermes"),
+        (HarnessType::Pi, "pi"),
     ];
 
     for (harness_type, expected_wire_value) in cases {

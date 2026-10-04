@@ -342,9 +342,9 @@ sandbox:
   # matters for containers started outside api-rs.
   harnessEngine: codex
   # Copied into every sandbox pod. CLAUDE_MODEL / CODEX_MODEL set here are also
-  # mirrored into slackbotv2 and the Console; CODEX_MODEL_REASONING_EFFORT is
-  # mirrored into slackbotv2. This keeps Slack's model/thinking footer aligned
-  # with the policy the sandbox actually runs.
+  # mirrored into slackbotv2 and the Console; CODEX_MODEL_REASONING_EFFORT and
+  # CENTAUR_PI_MODEL are mirrored into slackbotv2. This keeps Slack's
+  # model/thinking footer aligned with the policy the sandbox actually runs.
   extraEnv: {}
   telemetry:
     # Include user prompts, assistant responses, and bounded shell commands on
@@ -352,9 +352,14 @@ sandbox:
     # Token usage, cost, status, session, and tool telemetry remain available
     # when this is disabled.
     captureTranscripts: false
+  # New agent-k8s sandboxes get a ReadWriteOnce PVC at /home/agent/state. The
+  # entrypoint keeps the session's workspace clone, uploads, branches, and native
+  # Codex/Claude files there, so they survive idle pause and pod replacement, but
+  # not final sandbox deletion. Existing sandboxes/claims are not migrated.
   stateVolume:
     enabled: false
     size: 10Gi
+    # Empty uses the cluster default storage class.
     storageClassName: ""
   # Requests/limits for the agent container of every sandbox pod, per-session
   # and warm (k8s resources map).

@@ -32,6 +32,7 @@ describe('extractMessageOverrides', () => {
     expect(extractMessageOverrides('--codex review this').harnessType).toBe('codex')
     expect(extractMessageOverrides('--nanocodex review this').harnessType).toBe('nanocodex')
     expect(extractMessageOverrides('--hermes review this').harnessType).toBe('hermes')
+    expect(extractMessageOverrides('--pi review this').harnessType).toBe('pi')
   })
 
   test('parses harness flag anywhere in the message', () => {
@@ -507,6 +508,12 @@ describe('validateStrategyOverrides', () => {
       model: undefined,
       provider: undefined,
       reasoning: 'high'
+    })
+    expect(validateStrategyOverrides({ harness: 'pi', reasoning: 'none' })).toEqual({
+      harnessType: 'pi',
+      model: undefined,
+      provider: undefined,
+      reasoning: 'none'
     })
   })
 })

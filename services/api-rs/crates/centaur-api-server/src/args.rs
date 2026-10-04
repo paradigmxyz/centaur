@@ -26,7 +26,7 @@ use centaur_iron_proxy::{
 };
 use centaur_sandbox_agent_k8s::{
     AgentSandboxBackend, AgentSandboxConfig, GitHubTokenRef, IronControlSettings, IronProxyConfig,
-    OtlpEgressTarget, Toleration, ToolSource, ToolsConfig,
+    OtlpEgressTarget, StateVolumeConfig, Toleration, ToolSource, ToolsConfig,
 };
 use centaur_sandbox_core::{Mount, MountKind, ResourceRequirements, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
@@ -686,6 +686,24 @@ struct SandboxArgs {
     /// into this because api-rs creates these pods at runtime.
     #[arg(long = "session-sandbox-resources", env = "SESSION_SANDBOX_RESOURCES")]
     sandbox_resources_json: Option<String>,
+    #[arg(
+        long = "session-sandbox-state-volume-enabled",
+        env = "SESSION_SANDBOX_STATE_VOLUME_ENABLED",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    state_volume_enabled: bool,
+    #[arg(
+        long = "session-sandbox-state-volume-size",
+        env = "SESSION_SANDBOX_STATE_VOLUME_SIZE",
+        default_value = "10Gi"
+    )]
+    state_volume_size: String,
+    #[arg(
+        long = "session-sandbox-state-volume-storage-class-name",
+        env = "SESSION_SANDBOX_STATE_VOLUME_STORAGE_CLASS_NAME"
+    )]
+    state_volume_storage_class_name: Option<String>,
     #[arg(
         long = "session-sandbox-ready-timeout-secs",
         alias = "kubernetes-sandbox-ready-timeout-s",
@@ -1653,6 +1671,14 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
         let mut config =
             AgentSandboxConfig::new(args.k8s_namespace.clone(), args.iron_control.settings()?);
         config.image_pull_policy = args.agent_image_pull_policy.clone();
+        if args.state_volume_enabled {
+            // The sandbox entrypoint persists native harness state here.
+            let mut state_volume =
+                StateVolumeConfig::new("/home/agent/state", args.state_volume_size.clone());
+            state_volume.storage_class_name =
+                clean_optional_value(args.state_volume_storage_class_name.as_deref());
+            config = config.state_volume(state_volume);
+        }
         config.image_pull_secrets = args
             .image_pull_secrets
             .iter()
@@ -2211,6 +2237,13 @@ impl IronProxyHarnessArgs {
     fn fragment(&self) -> Result<ProxyFragment, ServerError> {
         let engine = harness_fragment_engine_name(&self.engine);
         let auth_mode = self.resolved_auth_mode();
+        // Pi reads placeholder API keys from the environment; it has no
+        // subscription (access_token) credential path.
+        if self.engine == HarnessType::Pi && auth_mode.replace('-', "_") != "api_key" {
+            return Err(ServerError::UnsupportedConfig(format!(
+                "the pi harness supports only api_key auth, not {auth_mode}"
+            )));
+        }
         harness_auth_fragment(engine, &auth_mode)?.ok_or_else(|| {
             ServerError::UnsupportedConfig(format!(
                 "no harness auth fragment for engine {engine} auth-mode {auth_mode}"
@@ -2300,6 +2333,8 @@ fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
         HarnessType::ClaudeCode => "claude-code",
         HarnessType::Nanocodex => "codex",
         HarnessType::Hermes => "hermes",
+        // Pi defaults to Anthropic when its key is present.
+        HarnessType::Pi => "claude-code",
     }
 }
 
@@ -2315,7 +2350,7 @@ fn merge_fragment(target: &mut ProxyFragment, source: ProxyFragment) {
 fn harness_auth_mode_env(engine: &HarnessType) -> Option<String> {
     match engine {
         HarnessType::Codex | HarnessType::Nanocodex => env::var("CODEX_AUTH_MODE").ok(),
-        HarnessType::ClaudeCode => env::var("CLAUDE_CODE_AUTH_MODE").ok(),
+        HarnessType::ClaudeCode | HarnessType::Pi => env::var("CLAUDE_CODE_AUTH_MODE").ok(),
         HarnessType::Amp => None,
         // Hermes resolves providers through its own credential store /
         // iron-proxy placeholder injection; no dedicated auth-mode env.
@@ -2715,6 +2750,75 @@ mod tests {
         assert_eq!(args.sandbox.k8s_namespace, "centaur-test");
         assert_eq!(args.sandbox.ready_timeout_secs, 17);
         assert_eq!(args.sandbox.k8s_context.as_deref(), Some("kind-test"));
+    }
+
+    #[test]
+    fn session_sandbox_state_volume_requires_opt_in() {
+        for flags in [
+            vec![],
+            vec![
+                "--session-sandbox-state-volume-enabled",
+                "false",
+                "--session-sandbox-state-volume-size",
+                "2Gi",
+                "--session-sandbox-state-volume-storage-class-name",
+                "fast",
+            ],
+        ] {
+            let args = Args::try_parse_from(
+                [
+                    "centaur-api-server",
+                    "--database-url",
+                    "postgres://postgres:postgres@localhost/centaur",
+                    "--iron-control-url",
+                    "http://console.local",
+                    "--iron-control-proxy-sync-url",
+                    "http://proxy-sync.local:8080",
+                    "--iron-control-api-key",
+                    "iak_test",
+                ]
+                .into_iter()
+                .chain(flags),
+            )
+            .unwrap();
+
+            let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
+            assert_eq!(config.state_volume, None);
+        }
+    }
+
+    #[test]
+    fn parses_session_sandbox_state_volume() {
+        for (storage_class, expected) in [("", None), ("fast", Some("fast"))] {
+            let args = Args::try_parse_from([
+                "centaur-api-server",
+                "--database-url",
+                "postgres://postgres:postgres@localhost/centaur",
+                "--iron-control-url",
+                "http://console.local",
+                "--iron-control-proxy-sync-url",
+                "http://proxy-sync.local:8080",
+                "--iron-control-api-key",
+                "iak_test",
+                "--session-sandbox-state-volume-enabled",
+                "true",
+                "--session-sandbox-state-volume-size",
+                "2Gi",
+                "--session-sandbox-state-volume-storage-class-name",
+                storage_class,
+            ])
+            .unwrap();
+
+            let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
+            assert_eq!(
+                config.state_volume,
+                Some(StateVolumeConfig {
+                    mount_path: "/home/agent/state".to_owned(),
+                    size: "2Gi".to_owned(),
+                    storage_class_name: expected.map(str::to_owned),
+                })
+            );
+        }
     }
 
     #[test]
@@ -3896,6 +4000,28 @@ mod tests {
             harness_auth_mode_env(&HarnessType::Nanocodex).as_deref(),
             Some("access_token")
         );
+    }
+
+    #[test]
+    fn pi_uses_anthropic_api_key_placeholder_and_rejects_access_token() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[("CLAUDE_CODE_AUTH_MODE", "api_key")]);
+        let pi = |auth_mode: Option<&str>| IronProxyHarnessArgs {
+            engine: HarnessType::Pi,
+            auth_mode: auth_mode.map(str::to_owned),
+        };
+
+        let fragment = pi(None).fragment().unwrap();
+        let replaced: Vec<_> = fragment
+            .transforms
+            .iter()
+            .flat_map(|transform| &transform.config.secrets)
+            .filter_map(|secret| secret.replace.as_ref()?.proxy_value.as_deref())
+            .collect();
+        assert_eq!(replaced, ["ANTHROPIC_API_KEY"]);
+
+        let error = pi(Some("access_token")).fragment().unwrap_err();
+        assert!(error.to_string().contains("only api_key"), "{error}");
     }
 
     #[test]

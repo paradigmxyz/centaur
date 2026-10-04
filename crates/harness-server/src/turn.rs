@@ -714,7 +714,7 @@ fn phase_from_stop_reason(stop_reason: Option<&str>) -> Option<MessagePhase> {
 }
 
 fn tool_projection(tool: &str, arguments: &Value) -> ToolProjection {
-    if matches!(tool, "Bash" | "shell_command")
+    if matches!(tool, "Bash" | "bash" | "shell_command")
         && let Some(command) = arguments.get("command").and_then(Value::as_str)
     {
         return ToolProjection::CommandExecution {
