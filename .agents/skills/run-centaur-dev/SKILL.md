@@ -105,8 +105,6 @@ DATABASE_TEXT_SEARCH=postgres \
 BIND_ADDR=0.0.0.0:8080 \
 SESSION_SANDBOX_K8S_CONTEXT=kind-centaur-api-rs-e2e \
 SESSION_SANDBOX_K8S_NAMESPACE=centaur-sandbox-e2e \
-SESSION_SANDBOX_BACKEND=agent-k8s \
-SESSION_SANDBOX_WORKLOAD=codex-app-server \
 SESSION_SANDBOX_IMAGE=centaur-agent:latest \
 SESSION_SANDBOX_IMAGE_PULL_POLICY=IfNotPresent \
 KUBERNETES_SANDBOX_IRON_PROXY_MODE=enabled \
@@ -279,7 +277,7 @@ For non-TUI interactive input, add `--stdin-events`. Lines are messages by defau
 
 1. Mention the Slack app in the configured workspace/channel.
 2. Confirm Slackbot logs show `slackbotv2_forward_started`.
-3. Confirm api-rs logs show session creation/execution and no mock workload.
+3. Confirm api-rs logs show session creation/execution.
 4. Confirm Kind created an Agent Sandbox:
 
 ```bash
@@ -290,7 +288,6 @@ kubectl --context kind-centaur-api-rs-e2e -n centaur-sandbox-e2e get sandboxes,p
 
 ## Troubleshooting
 
-- Mock output instead of Codex: restart api-rs with `SESSION_SANDBOX_BACKEND=agent-k8s` and `SESSION_SANDBOX_WORKLOAD=codex-app-server`.
 - Sandbox cannot call API/tools: verify `SANDBOX_HOST_API_URL` from inside a Kind pod and restart api-rs with the working value in `SESSION_SANDBOX_CENTAUR_API_URL`.
 - Agent or iron-proxy image pull failure after changing images: rebuild and run `KIND_E2E_FORCE_IMAGE_LOAD=1 just kind-e2e-load-images`; keep `SESSION_SANDBOX_IMAGE_PULL_POLICY=IfNotPresent` and `KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY=IfNotPresent`.
 - Iron-proxy missing CA: rerun `CENTAUR_NAMESPACE=centaur-sandbox-e2e just bootstrap-secrets` and verify `centaur-firewall-ca` plus `centaur-firewall-ca-key` exist.

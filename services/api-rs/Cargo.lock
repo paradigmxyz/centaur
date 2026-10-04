@@ -876,7 +876,6 @@ dependencies = [
  "centaur-iron-proxy",
  "centaur-sandbox-agent-k8s",
  "centaur-sandbox-core",
- "centaur-sandbox-local",
  "centaur-sandbox-manager",
  "centaur-session-core",
  "centaur-session-runtime",
@@ -978,18 +977,6 @@ dependencies = [
  "async-trait",
  "serde",
  "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
-name = "centaur-sandbox-local"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "centaur-sandbox-core",
- "centaur-sandbox-manager",
- "tempfile",
  "tokio",
 ]
 
@@ -5081,19 +5068,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "tempfile"
-version = "3.27.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
-dependencies = [
- "fastrand",
- "getrandom 0.4.2",
- "once_cell",
- "rustix",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

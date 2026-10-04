@@ -15,7 +15,6 @@ centaur-iron-control.workspace = true
 centaur-iron-proxy.workspace = true
 centaur-sandbox-agent-k8s.workspace = true
 centaur-sandbox-core.workspace = true
-centaur-sandbox-local.workspace = true
 centaur-sandbox-manager.workspace = true
 centaur-session-core.workspace = true
 centaur-session-runtime.workspace = true

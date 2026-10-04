@@ -415,7 +415,7 @@ repoCache:
   resources: {}
 
 # Installs the upstream agent-sandbox controller + CRDs (subchart). Required by
-# apiRs when apiRs.sandboxBackend is agent-k8s, which is the default.
+# apiRs, which runs every sandbox through it.
 agentSandbox:
   enabled: true
   namespace:
@@ -525,8 +525,6 @@ apiRs:
   sessionPrincipalAdmission: automatic
   # Expose the experimental centaur MCP dispatcher (currently action=list).
   mcpV2Enabled: false
-  sandboxBackend: agent-k8s
-  sandboxWorkload: codex-app-server
   sandboxReadyTimeoutSecs: 90
   sandboxWarmPoolSize: 3
   sandboxWarmPoolReplenishIntervalSecs: 5

@@ -333,20 +333,15 @@ pub struct SandboxRuntime {
 }
 
 #[derive(Clone, Debug)]
-pub enum SandboxWorkloadMode {
-    MockAppServer {
-        image: String,
-    },
-    CodexAppServer {
-        image: String,
-        env: Vec<(String, String)>,
-        mounts: Vec<Mount>,
-        /// Applied to every sandbox pod, per-session and warm.
-        resources: Option<ResourceRequirements>,
-        /// The harness used for warm sandboxes and as the workload default.
-        /// Per-session sandboxes run the session's own harness.
-        harness: HarnessType,
-    },
+pub struct SandboxWorkloadMode {
+    pub image: String,
+    pub env: Vec<(String, String)>,
+    pub mounts: Vec<Mount>,
+    /// Applied to every sandbox pod, per-session and warm.
+    pub resources: Option<ResourceRequirements>,
+    /// The harness used for warm sandboxes and as the workload default.
+    /// Per-session sandboxes run the session's own harness.
+    pub harness: HarnessType,
 }
 
 /// What to do when a session already exists with a different harness.
@@ -4183,7 +4178,7 @@ impl SandboxRuntime {
         backend: Arc<dyn SandboxBackend>,
         workload: SandboxWorkloadMode,
     ) -> Self {
-        let warm_harness = workload.default_harness();
+        let warm_harness = Some(workload.harness.clone());
         let warm_workload = workload.clone();
         let mut runtime = Self::backend_with_warm_spec_factory(
             backend,
@@ -4251,18 +4246,12 @@ impl SandboxRuntime {
 }
 
 impl SandboxWorkloadMode {
-    pub fn mock_app_server(image: impl Into<String>) -> Self {
-        Self::MockAppServer {
-            image: image.into(),
-        }
-    }
-
     pub fn codex_app_server(
         image: impl Into<String>,
         env: impl IntoIterator<Item = (String, String)>,
         harness: HarnessType,
     ) -> Self {
-        Self::CodexAppServer {
+        Self {
             image: image.into(),
             env: env.into_iter().collect(),
             mounts: Vec::new(),
@@ -4272,26 +4261,13 @@ impl SandboxWorkloadMode {
     }
 
     pub fn mount(mut self, mount: Mount) -> Self {
-        match &mut self {
-            Self::MockAppServer { .. } => {}
-            Self::CodexAppServer { mounts, .. } => mounts.push(mount),
-        }
+        self.mounts.push(mount);
         self
     }
 
     pub fn resources(mut self, requirements: ResourceRequirements) -> Self {
-        match &mut self {
-            Self::MockAppServer { .. } => {}
-            Self::CodexAppServer { resources, .. } => *resources = Some(requirements),
-        }
+        self.resources = Some(requirements);
         self
-    }
-
-    fn default_harness(&self) -> Option<HarnessType> {
-        match self {
-            Self::MockAppServer { .. } => None,
-            Self::CodexAppServer { harness, .. } => Some(harness.clone()),
-        }
     }
 
     fn spec(
@@ -4304,10 +4280,7 @@ impl SandboxWorkloadMode {
     }
 
     fn warm_spec(&self) -> SandboxSpec {
-        match self {
-            Self::MockAppServer { .. } => self.spec_for(None, &HarnessType::Codex, None),
-            Self::CodexAppServer { harness, .. } => self.spec_for(None, harness, None),
-        }
+        self.spec_for(None, &self.harness, None)
     }
 
     fn spec_for(
@@ -4316,43 +4289,26 @@ impl SandboxWorkloadMode {
         harness: &HarnessType,
         persona: Option<&PersonaContext>,
     ) -> SandboxSpec {
-        match self {
-            Self::MockAppServer { image } => apply_persona_spec(
-                SandboxSpec::new(image)
-                    .command(["/bin/sh", "-lc"])
-                    .args([mock_app_server_script()])
-                    .env("CENTAUR_HARNESS_TYPE", harness.as_ref()),
-                persona,
-            ),
-            Self::CodexAppServer {
-                image,
-                env,
-                mounts,
-                resources,
-                ..
-            } => {
-                // Pin the harness via container args (the image entrypoint is
-                // kept) so the sandbox runs the session's harness rather than
-                // whatever the image CMD defaults to.
-                let mut spec = SandboxSpec::new(image)
-                    .label("centaur.ai/component", "session-sandbox")
-                    .label("centaur.ai/harness", harness.to_string())
-                    .args(["harness-server", harness_server_subcommand(harness)]);
-                if let Some(thread_key) = thread_key {
-                    spec = spec.env("CENTAUR_THREAD_KEY", thread_key.as_str());
-                }
-                if let Some(resources) = resources {
-                    spec = spec.resources(resources.clone());
-                }
-                for mount in mounts {
-                    spec = spec.mount(mount.clone());
-                }
-                for (name, value) in env {
-                    spec = spec.env(name.clone(), value.clone());
-                }
-                apply_persona_spec(spec, persona)
-            }
+        // Pin the harness via container args (the image entrypoint is kept) so
+        // the sandbox runs the session's harness rather than whatever the image
+        // CMD defaults to.
+        let mut spec = SandboxSpec::new(&self.image)
+            .label("centaur.ai/component", "session-sandbox")
+            .label("centaur.ai/harness", harness.to_string())
+            .args(["harness-server", harness_server_subcommand(harness)]);
+        if let Some(thread_key) = thread_key {
+            spec = spec.env("CENTAUR_THREAD_KEY", thread_key.as_str());
         }
+        if let Some(resources) = &self.resources {
+            spec = spec.resources(resources.clone());
+        }
+        for mount in &self.mounts {
+            spec = spec.mount(mount.clone());
+        }
+        for (name, value) in &self.env {
+            spec = spec.env(name.clone(), value.clone());
+        }
+        apply_persona_spec(spec, persona)
     }
 }
 
@@ -4373,31 +4329,6 @@ fn sandbox_spec_key(spec: &SandboxSpec) -> String {
     let encoded = serde_json::to_vec(spec).expect("sandbox specs should serialize");
     let digest = Sha256::digest(encoded);
     format!("sandbox-spec-sha256:{}", hex::encode(digest))
-}
-
-fn mock_app_server_script() -> &'static str {
-    r#"while IFS= read -r line; do
-model="$(printf '%s\n' "$line" | sed -n 's/.*"model":"\([^"]*\)".*/\1/p')"
-[ -n "$model" ] || model="unknown"
-harness="${CENTAUR_HARNESS_TYPE:-unknown}"
-printf '%s\n' '{"type":"system","subtype":"wrapper_heartbeat","phase":"startup"}'
-sleep 0.2
-printf '%s\n' '{"type":"system","subtype":"wrapper_heartbeat","phase":"app_server_started"}'
-sleep 0.2
-printf '%s\n' '{"type":"thread.started","thread_id":"mock-codex-thread"}'
-sleep 0.2
-turn_index=1
-while [ "$turn_index" -le 3 ]; do
-  turn_id="mock-turn-$turn_index"
-  printf '{"type":"turn.started","turn_id":"%s"}\n' "$turn_id"
-  sleep 0.2
-  printf '{"type":"item.agentMessage.delta","turnId":"%s","session_id":"mock-codex-thread","delta":"PONG model=%s harness=%s"}\n' "$turn_id" "$model" "$harness"
-  sleep 0.2
-  printf '{"type":"turn.completed","turn":{"id":"%s"},"usage":{"input_tokens":0,"output_tokens":1}}\n' "$turn_id"
-  sleep 0.2
-  turn_index=$((turn_index + 1))
-done
-done"#
 }
 
 fn session_event_stream(
