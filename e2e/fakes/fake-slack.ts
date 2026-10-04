@@ -4,7 +4,7 @@
 // delivered to slackbotv2 as a signed app_mention event, the way Slack would.
 // No dependencies, so it runs from a ConfigMap on the stock Bun image.
 import { createHmac } from 'node:crypto'
-import { BOT, CHANNEL, TEAM, USER, USER_TOKEN } from './fixture'
+import { BOT, CHANNEL, TEAM, USER, USER_TOKEN } from './slack-fixture'
 
 type Message = {
   type: 'message'

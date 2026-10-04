@@ -5,9 +5,9 @@
 // flags never reach the model. Each step checks what actually ran: the
 // sandbox's harness and the model and effort the provider was asked for.
 import { expect, test } from 'bun:test'
-import claudeSettings from '../harness/claude/settings.json'
-import codexConfig from '../harness/codex/config.toml'
-import { model, slack, turnTimeoutMs, type Thread, type Turn } from './lib'
+import claudeSettings from '../../harness/claude/settings.json'
+import codexConfig from '../../harness/codex/config.toml'
+import { model, slack, turnTimeoutMs, type Thread, type Turn } from '../lib'
 
 const CODEX_MODEL = (codexConfig as { model: string }).model
 const CODEX_EFFORT = (codexConfig as { model_reasoning_effort: string }).model_reasoning_effort

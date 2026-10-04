@@ -9,7 +9,7 @@
 # slackbotv2, sandboxes, per-sandbox iron-proxies) plus two fakes for the
 # outside world: Slack, and the model providers, which CoreDNS resolves to an
 # in-cluster scripted model server. The test runner reaches the fakes,
-# Postgres, and api-rs on localhost through NodePorts mapped by e2e/kind.yaml.
+# Postgres, and api-rs on localhost through NodePorts mapped by e2e/infra/kind.yaml.
 #
 # Images are built from the working tree and loaded into kind by default. Set
 # CENTAUR_E2E_IMAGE_TAG (e.g. main or sha-abc1234) to pull published images.
@@ -49,11 +49,11 @@ up() {
   if kind get clusters | grep -qx "$CLUSTER"; then
     use_cluster
     if ! docker port "${CLUSTER}-control-plane" | grep -q '^30081/tcp'; then
-      echo "cluster $CLUSTER predates e2e/kind.yaml; run e2e/stack.sh down first" >&2
+      echo "cluster $CLUSTER predates e2e/infra/kind.yaml; run e2e/stack.sh down first" >&2
       exit 1
     fi
   else
-    kind create cluster --name "$CLUSTER" --config e2e/kind.yaml --kubeconfig "$KUBECONFIG" --wait 120s
+    kind create cluster --name "$CLUSTER" --config e2e/infra/kind.yaml --kubeconfig "$KUBECONFIG" --wait 120s
   fi
 
   # Pods inherit the host's DNS search domains, so every external lookup first
@@ -62,7 +62,7 @@ up() {
   docker exec "${CLUSTER}-control-plane" sh -c \
     "grep -v '^search ' /etc/resolv.conf > /tmp/resolv.conf && cat /tmp/resolv.conf > /etc/resolv.conf"
 
-  kubectl -n kube-system create configmap coredns --from-file=Corefile=e2e/Corefile \
+  kubectl -n kube-system create configmap coredns --from-file=Corefile=e2e/infra/Corefile \
     --dry-run=client -o yaml | apply_stdin
   kubectl -n kube-system rollout restart deploy/coredns > /dev/null
 
@@ -108,9 +108,9 @@ up() {
   fi
   helm dependency build contrib/chart > /dev/null
   helm upgrade --install "$RELEASE" contrib/chart -n "$NAMESPACE" \
-    -f contrib/chart/values.dev.yaml -f e2e/values.yaml \
+    -f contrib/chart/values.dev.yaml -f e2e/infra/values.yaml \
     ${image_args[@]+"${image_args[@]}"} --wait --timeout 20m
-  kubectl apply -f e2e/test-access.yaml > /dev/null
+  kubectl apply -f e2e/infra/test-access.yaml > /dev/null
 }
 
 deploy_model_server() {
@@ -129,8 +129,8 @@ deploy_model_server() {
   kubectl -n "$MODEL_NAMESPACE" create secret tls model-server-tls \
     --cert="$WORK/tls.crt" --key="$WORK/tls.key" --dry-run=client -o yaml | apply_stdin
   kubectl -n "$MODEL_NAMESPACE" create configmap model-server \
-    --from-file=e2e/model-server.ts --dry-run=client -o yaml | apply_stdin
-  kubectl apply -f e2e/model-server.yaml > /dev/null
+    --from-file=e2e/fakes/model-server.ts --dry-run=client -o yaml | apply_stdin
+  kubectl apply -f e2e/infra/model-server.yaml > /dev/null
   kubectl -n "$MODEL_NAMESPACE" rollout restart deploy/model-server > /dev/null
   kubectl -n "$MODEL_NAMESPACE" rollout status deploy/model-server --timeout=180s
 }
@@ -138,13 +138,13 @@ deploy_model_server() {
 deploy_fake_slack() {
   kubectl create namespace "$SLACK_NAMESPACE" --dry-run=client -o yaml | apply_stdin
   kubectl -n "$SLACK_NAMESPACE" create configmap fake-slack \
-    --from-file=e2e/fake-slack.ts --from-file=e2e/fixture.ts --dry-run=client -o yaml | apply_stdin
+    --from-file=e2e/fakes/fake-slack.ts --from-file=e2e/fakes/slack-fixture.ts --dry-run=client -o yaml | apply_stdin
   kubectl -n "$SLACK_NAMESPACE" create secret generic fake-slack \
     --from-literal=SLACK_BOT_TOKEN="$SLACK_BOT_TOKEN" \
     --from-literal=SLACK_SIGNING_SECRET="$SLACK_SIGNING_SECRET" \
     --from-literal=SLACK_EVENTS_URL="http://${RELEASE}-centaur-slackbotv2.${NAMESPACE}.svc.cluster.local:3001/api/webhooks/slack" \
     --dry-run=client -o yaml | apply_stdin
-  kubectl -n "$SLACK_NAMESPACE" apply -f e2e/fake-slack.yaml > /dev/null
+  kubectl -n "$SLACK_NAMESPACE" apply -f e2e/infra/fake-slack.yaml > /dev/null
   kubectl -n "$SLACK_NAMESPACE" rollout restart deploy/fake-slack > /dev/null
   kubectl -n "$SLACK_NAMESPACE" rollout status deploy/fake-slack --timeout=180s
 }
@@ -160,9 +160,9 @@ run_tests() {
   export E2E_API_URL=http://127.0.0.1:30081 E2E_API_KEY="$API_ADMIN_KEY"
   export E2E_OPENAI_KEY="$OPENAI_TEST_KEY" E2E_ANTHROPIC_KEY="$ANTHROPIC_TEST_KEY"
   # A wider burst of cold sandboxes overloads the single kind node.
-  # Arguments pick test files (e.g. e2e/lifecycle.test.ts); default is all.
+  # Arguments pick test files (e.g. e2e/tests/lifecycle.test.ts); default is all.
   local targets=("$@")
-  [[ "${#targets[@]}" -gt 0 ]] || targets=(./e2e)
+  [[ "${#targets[@]}" -gt 0 ]] || targets=(./e2e/tests)
   if ! bun test --max-concurrency=4 "${targets[@]}"; then
     kubectl get pods -A -o wide
     kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-slackbotv2" --tail=100 || true

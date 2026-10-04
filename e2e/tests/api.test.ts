@@ -2,7 +2,7 @@
 // creates a session on that harness, and stale names are rejected.
 import { randomUUID } from 'node:crypto'
 import { expect, test } from 'bun:test'
-import { api } from './lib'
+import { api } from '../lib'
 
 const sessionPath = (suffix: string) =>
   `/api/session/${encodeURIComponent(`e2e-api:${randomUUID()}:${suffix}`)}`

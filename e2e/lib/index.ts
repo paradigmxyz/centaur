@@ -9,7 +9,7 @@
 //   expect(turn.reply).toBe('Hello.')
 import { randomUUID } from 'node:crypto'
 import { SQL } from 'bun'
-import { BOT, CHANNEL, USER_TOKEN } from './fixture'
+import { BOT, CHANNEL, USER_TOKEN } from '../fakes/slack-fixture'
 
 /** A scripted model answer, matched by a token placed in the user's message. */
 export type Script = { token: string; text: string; delayMs?: number }

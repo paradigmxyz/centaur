@@ -5,7 +5,7 @@
 // directory, which is what WORKFLOW_DIRS points at on this stack.
 import { randomUUID } from 'node:crypto'
 import { expect, test } from 'bun:test'
-import { api, cluster, eventually, model, providerCredentials } from './lib'
+import { api, cluster, eventually, model, providerCredentials } from '../lib'
 
 const WORKFLOW_DIR = '/app/workflows'
 

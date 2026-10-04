@@ -1,4 +1,4 @@
-# Scripted model server for the e2e stack. CoreDNS (e2e/Corefile) resolves the
+# Scripted model server for the e2e stack. CoreDNS (e2e/infra/Corefile) resolves the
 # provider hostnames to this Service, and its certificate is signed by the
 # release's iron-proxy CA, which iron-proxy pods are told to trust. e2e/stack.sh
 # creates the model-server ConfigMap and TLS Secret.
@@ -64,7 +64,7 @@ spec:
       port: 443
       targetPort: https
 ---
-# The control API, reached by the test runner through e2e/kind.yaml.
+# The control API, reached by the test runner through e2e/infra/kind.yaml.
 apiVersion: v1
 kind: Service
 metadata:
