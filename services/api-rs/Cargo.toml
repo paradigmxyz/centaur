@@ -6,7 +6,6 @@ members = [
     "crates/centaur-iron-proxy",
     "crates/centaur-perms",
     "crates/centaur-sandbox-core",
-    "crates/centaur-sandbox-e2e",
     "crates/centaur-sandbox-agent-k8s",
     "crates/centaur-sandbox-local",
     "crates/centaur-sandbox-manager",

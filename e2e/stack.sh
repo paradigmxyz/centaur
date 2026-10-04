@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Brings up the e2e stack on a dedicated kind cluster and runs the scenarios.
 #
-#   e2e/stack.sh up     create/update the cluster and deploy everything
-#   e2e/stack.sh test   run `bun test e2e/` against the deployed stack
-#   e2e/stack.sh down   delete the cluster
+#   e2e/stack.sh up            create/update the cluster and deploy everything
+#   e2e/stack.sh test [files]  run the e2e scenarios (or the given files)
+#   e2e/stack.sh down          delete the cluster
 #
 # The stack is the chart's Slack path (Postgres, console, proxy-sync, api-rs,
 # slackbotv2, sandboxes, per-sandbox iron-proxies) plus two fakes for the
 # outside world: Slack, and the model providers, which CoreDNS resolves to an
-# in-cluster scripted model server. The test runner reaches the fakes and
-# Postgres on localhost through NodePorts mapped by e2e/kind.yaml.
+# in-cluster scripted model server. The test runner reaches the fakes,
+# Postgres, and api-rs on localhost through NodePorts mapped by e2e/kind.yaml.
 #
 # Images are built from the working tree and loaded into kind by default. Set
 # CENTAUR_E2E_IMAGE_TAG (e.g. main or sha-abc1234) to pull published images.
@@ -26,6 +26,8 @@ MODEL_NAMESPACE=centaur-e2e-model
 # Fixture values, not credentials: the fakes and the stack must agree on them.
 SLACK_BOT_TOKEN=xoxb-centaur-e2e
 SLACK_SIGNING_SECRET=centaur-e2e-signing-secret
+# Admin bearer for api-rs operator routes the tests call.
+API_ADMIN_KEY=centaur-e2e-api-admin-key
 OPENAI_TEST_KEY=sk-e2e-openai-test-key
 ANTHROPIC_TEST_KEY=sk-ant-e2e-anthropic-test-key
 IMAGES=(api-rs:apiRs proxy-sync:proxySync iron-proxy:ironProxy slackbotv2:slackbotv2 agent:sandbox console:console)
@@ -46,7 +48,7 @@ apply_stdin() {
 up() {
   if kind get clusters | grep -qx "$CLUSTER"; then
     use_cluster
-    if ! docker port "${CLUSTER}-control-plane" | grep -q '^30443/tcp'; then
+    if ! docker port "${CLUSTER}-control-plane" | grep -q '^30081/tcp'; then
       echo "cluster $CLUSTER predates e2e/kind.yaml; run e2e/stack.sh down first" >&2
       exit 1
     fi
@@ -90,7 +92,7 @@ up() {
     contrib/scripts/bootstrap-k8s-secrets.sh --namespace "$NAMESPACE"
   # iron-proxy's env secret source resolves the provider keys from here.
   kubectl -n "$NAMESPACE" patch secret centaur-infra-env --type merge -p \
-    "{\"stringData\":{\"OPENAI_API_KEY\":\"$OPENAI_TEST_KEY\",\"ANTHROPIC_API_KEY\":\"$ANTHROPIC_TEST_KEY\"}}" > /dev/null
+    "{\"stringData\":{\"OPENAI_API_KEY\":\"$OPENAI_TEST_KEY\",\"ANTHROPIC_API_KEY\":\"$ANTHROPIC_TEST_KEY\",\"CENTAUR_APIRS_ADMIN_API_KEY\":\"$API_ADMIN_KEY\"}}" > /dev/null
   # iron-proxy pods mount the release CA at this path; trusting it lets them
   # verify the model server, whose certificate the same CA signs below.
   kubectl -n "$NAMESPACE" create secret generic centaur-e2e-iron-proxy-env \
@@ -108,7 +110,7 @@ up() {
   helm upgrade --install "$RELEASE" contrib/chart -n "$NAMESPACE" \
     -f contrib/chart/values.dev.yaml -f e2e/values.yaml \
     ${image_args[@]+"${image_args[@]}"} --wait --timeout 20m
-  kubectl apply -f e2e/postgres-access.yaml > /dev/null
+  kubectl apply -f e2e/test-access.yaml > /dev/null
 }
 
 deploy_model_server() {
@@ -155,9 +157,13 @@ run_tests() {
   export E2E_SLACK_URL=http://127.0.0.1:30443
   export E2E_MODEL_URL=http://127.0.0.1:30080
   export E2E_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:30432/ai_v2"
+  export E2E_API_URL=http://127.0.0.1:30081 E2E_API_KEY="$API_ADMIN_KEY"
   export E2E_OPENAI_KEY="$OPENAI_TEST_KEY" E2E_ANTHROPIC_KEY="$ANTHROPIC_TEST_KEY"
   # A wider burst of cold sandboxes overloads the single kind node.
-  if ! bun test --max-concurrency=4 ./e2e "$@"; then
+  # Arguments pick test files (e.g. e2e/lifecycle.test.ts); default is all.
+  local targets=("$@")
+  [[ "${#targets[@]}" -gt 0 ]] || targets=(./e2e)
+  if ! bun test --max-concurrency=4 "${targets[@]}"; then
     kubectl get pods -A -o wide
     kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-slackbotv2" --tail=100 || true
     kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-api-rs" --tail=-1 \

@@ -297,9 +297,9 @@ kubectl --context kind-centaur-api-rs-e2e -n centaur-sandbox-e2e get sandboxes,p
 - Model auth failure: check api-rs sandbox env says `CODEX_AUTH_MODE=api_key`, iron-proxy is enabled, and `FIREWALL_MANAGER_SECRET_SOURCE=onepassword` has the expected `OP_SERVICE_ACCOUNT_TOKEN`/`OP_VAULT` in `centaur-infra-env`.
 - Slack does not reach the bot: `tailscale funnel status`, Slack Request URL must end in `/api/webhooks/slack`, and `SLACK_SIGNING_SECRET` must match the app.
 - Slackbot receives events but does not stream: check `SLACKBOTV2_DATABASE_URL`, Slack `assistant:write` scope, and `chat.startStream`/`chat.appendStream` errors in Slackbot logs.
-- Re-run sandbox invariant tests when changing sandbox/runtime behavior:
+- Re-run the end-to-end suite when changing sandbox/runtime behavior:
 
 ```bash
-cd services/api-rs
-just e2e-kind
+e2e/stack.sh up
+e2e/stack.sh test
 ```

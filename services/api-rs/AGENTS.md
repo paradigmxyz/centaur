@@ -99,19 +99,9 @@ The shared Absurd SDK is validated separately from the API workspace:
 cargo test --manifest-path ../../crates/absurd-sdk/Cargo.toml
 ```
 
-Sandbox backend invariants have a local Kind suite. Prepare the cluster and
-images with the `kind-e2e-*` recipes, then run all integration test binaries
-(the older `e2e-kind` wrapper names a removed test target):
-
-```bash
-just kind-e2e-up
-just kind-e2e-build-images
-KIND_E2E_FORCE_IMAGE_LOAD=1 just kind-e2e-load-images
-SANDBOX_E2E_IMPLS=all \
-SANDBOX_E2E_K8S_CONTEXT=kind-centaur-api-rs-e2e \
-SANDBOX_E2E_K8S_NAMESPACE=centaur-sandbox-e2e \
-cargo test -p centaur-sandbox-e2e --tests -- --ignored --nocapture
-```
+Sandbox lifecycle, session handoff, and harness selection are covered end to
+end by the repository's `e2e/` suite (`e2e/stack.sh up`, then
+`e2e/stack.sh test`), which runs the chart on a dedicated Kind cluster.
 
 For an API contract or runtime change, also build the API image, deploy to the local
 stack, drive a real session through create/append/execute/events, and verify the

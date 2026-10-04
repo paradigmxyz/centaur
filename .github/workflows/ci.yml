@@ -24,7 +24,6 @@ jobs:
       company_context_checks: ${{ steps.filter.outputs.company_context_checks }}
       rust_api: ${{ steps.filter.outputs.rust_api }}
       proxy_sync_checks: ${{ steps.filter.outputs.proxy_sync_checks }}
-      sandbox_e2e: ${{ steps.filter.outputs.sandbox_e2e }}
       sandbox_tests: ${{ steps.filter.outputs.sandbox_tests }}
       workflow_python_tests: ${{ steps.filter.outputs.workflow_python_tests }}
       tool_tests: ${{ steps.filter.outputs.tool_tests }}
@@ -139,11 +138,6 @@ jobs:
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^services/workflow-python/' \
             '^workflows/' \
-            '^\.github/workflows/ci\.yml$'
-          set_output sandbox_e2e \
-            '^services/api-rs/Cargo\.(toml|lock)$' \
-            '^services/api-rs/Justfile$' \
-            '^services/api-rs/crates/centaur-sandbox-(core|manager|local|agent-k8s|e2e)/' \
             '^\.github/workflows/ci\.yml$'
           set_output sandbox_tests \
             '^services/sandbox/' \
@@ -529,44 +523,6 @@ jobs:
         if: ${{ always() }}
         run: docker rm -f centaur-api-plain-postgres || true
 
-  sandbox-e2e:
-    name: Sandbox Kind e2e
-    runs-on: ubuntu-latest
-    needs: ci_changes
-    if: needs.ci_changes.outputs.sandbox_e2e == 'true'
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
-        with:
-          install_only: true
-          version: v0.30.0
-
-      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
-
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
-        with:
-          toolchain: stable
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: services/api-rs
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Run sandbox backend invariants in Kind
-        working-directory: services/api-rs
-        run: just e2e-kind
-
-      - name: Dump Kind diagnostics
-        if: ${{ failure() }}
-        run: |
-          kubectl --context kind-centaur-api-rs-e2e get pods,sandboxes -A -o wide || true
-          kubectl --context kind-centaur-api-rs-e2e get events -A --sort-by=.lastTimestamp || true
-          kubectl --context kind-centaur-api-rs-e2e -n agent-sandbox-system logs deploy/agent-sandbox-controller --all-containers --tail=-1 || true
-
   sandbox-tests:
     name: Sandbox Python tests
     runs-on: ubuntu-latest
@@ -815,7 +771,6 @@ jobs:
       - proxy-sync-checks
       - rust-api
       - rust-api-postgres
-      - sandbox-e2e
       - sandbox-tests
       - workflow-python-tests
       - tool-tests
@@ -828,5 +783,5 @@ jobs:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
-          allowed-skips: migration-order, harness-server-checks, company-context-checks, proxy-sync-checks, rust-api, rust-api-postgres, sandbox-e2e, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
+          allowed-skips: migration-order, harness-server-checks, company-context-checks, proxy-sync-checks, rust-api, rust-api-postgres, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
           jobs: ${{ toJSON(needs) }}

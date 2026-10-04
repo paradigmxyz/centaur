@@ -1,7 +1,8 @@
 // The vocabulary e2e scenarios are written in. Tests act through the same
 // doors a user and an operator have: Slack for input and visible output, the
-// durable session tables for what the control plane recorded, and the scripted
-// model server for what the harness actually asked its provider.
+// durable session tables for what the control plane recorded, the scripted
+// model server for what the harness actually asked its provider, and api-rs
+// and Kubernetes for operator actions and faults.
 //
 //   const thread = await slack.mention('--codex hi', model.says('Hello.'))
 //   const turn = await thread.nextTurn()
@@ -51,6 +52,10 @@ type SlackMessage = { ts: string; text?: string; bot_id?: string; streaming?: bo
 const slackUrl = required('E2E_SLACK_URL')
 const modelUrl = required('E2E_MODEL_URL')
 const db = new SQL(required('E2E_DATABASE_URL'))
+const apiUrl = required('E2E_API_URL')
+const apiKey = required('E2E_API_KEY')
+const namespace = 'centaur'
+const release = 'centaur'
 
 /** Provider keys iron-proxy holds, as each harness's provider receives them. */
 export const providerCredentials: Record<string, string> = {
@@ -68,6 +73,38 @@ export const model = {
    */
   says(text: string, options: { delayMs?: number } = {}): Script {
     return { token: `e2e-${randomUUID().slice(0, 8)}`, text, ...options }
+  }
+}
+
+export const api = {
+  /** Pauses the thread's sandbox now, as its idle timeout would; returns whether it paused. */
+  async pause(thread: Thread): Promise<boolean> {
+    const response = await fetch(`${apiUrl}/api/session/${encodeURIComponent(thread.key)}/pause`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${apiKey}` }
+    })
+    if (!response.ok) throw new Error(`pause failed: ${response.status} ${await response.text()}`)
+    return ((await response.json()) as { paused: boolean }).paused
+  }
+}
+
+export const cluster = {
+  /** Kills a sandbox's pod without a graceful shutdown. */
+  async killSandbox(sandboxId: string): Promise<void> {
+    await kubectl('delete', 'pod', sandboxId, '--grace-period=0', '--force')
+  },
+  /** Restarts a release component and waits for the new pods to be ready. */
+  async restart(component: string): Promise<void> {
+    await kubectl('rollout', 'restart', `deploy/${release}-centaur-${component}`)
+    await kubectl('rollout', 'status', `deploy/${release}-centaur-${component}`, '--timeout=180s')
+  },
+  /** Kubernetes objects api-rs created for a sandbox and has not removed. */
+  async sandboxResources(sandboxId: string): Promise<string[]> {
+    const out = await kubectl(
+      'get', 'sandboxes.agents.x-k8s.io,pods,services,networkpolicies',
+      '-l', `centaur.ai/sandbox-id=${sandboxId}`, '-o', 'name'
+    )
+    return out.split('\n').filter(Boolean)
   }
 }
 
@@ -109,12 +146,12 @@ export class Thread {
     const trigger = this.triggers[index]
     if (!trigger) throw new Error(`turn ${index + 1} was never triggered in ${this.key}`)
 
-    const execution = await poll(`execution ${index + 1} of ${this.key}`, turnTimeoutMs, async () => {
+    const execution = await eventually(`execution ${index + 1} of ${this.key}`, turnTimeoutMs, async () => {
       const executions = await this.executions()
       const execution = executions[index]
       return execution && isTerminal(execution.status) ? execution : undefined
     })
-    const replies = await poll(`reply to turn ${index + 1} of ${this.key}`, renderTimeoutMs, async () => {
+    const replies = await eventually(`reply to turn ${index + 1} of ${this.key}`, renderTimeoutMs, async () => {
       const replies = await this.repliesTo(index)
       return replies.length > 0 && replies.every(reply => !reply.streaming) ? replies : undefined
     })
@@ -219,8 +256,8 @@ function isTerminal(status: string): boolean {
   return ['completed', 'failed', 'cancelled'].includes(status)
 }
 
-/** Polls until `check` returns a value, or fails with what it last saw. */
-async function poll<T>(what: string, timeoutMs: number, check: () => Promise<T | undefined>): Promise<T> {
+/** Polls until `check` returns a value, or fails naming what it waited for. */
+export async function eventually<T>(what: string, timeoutMs: number, check: () => Promise<T | undefined>): Promise<T> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const value = await check()
@@ -239,6 +276,17 @@ async function slackApi<T>(method: string, body: Record<string, string>): Promis
   const payload = await response.json() as { ok: boolean; error?: string } & T
   if (!payload.ok) throw new Error(`${method} failed: ${payload.error}`)
   return payload
+}
+
+async function kubectl(...args: string[]): Promise<string> {
+  const proc = Bun.spawn(['kubectl', '-n', namespace, ...args], { stdout: 'pipe', stderr: 'pipe' })
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited
+  ])
+  if (code !== 0) throw new Error(`kubectl ${args.join(' ')} failed: ${stderr.trim()}`)
+  return stdout.trim()
 }
 
 function required(name: string): string {
