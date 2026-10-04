@@ -73,34 +73,68 @@ export const model = {
    */
   says(text: string, options: { delayMs?: number } = {}): Script {
     return { token: `e2e-${randomUUID().slice(0, 8)}`, text, ...options }
+  },
+  /** Registers a script for a prompt the test sends some other way than Slack. */
+  async register(script: Script): Promise<void> {
+    await registerScript(script)
+  },
+  /** Provider requests the script answered, oldest first. */
+  async requests(script: Script): Promise<ModelRequest[]> {
+    return modelRequests(script.token)
   }
 }
 
 export const api = {
+  /** Calls api-rs as an operator (the e2e admin key); returns the status and JSON body. */
+  async request(method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> {
+    const response = await fetch(`${apiUrl}${path}`, {
+      method,
+      headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) })
+    })
+    const text = await response.text()
+    let payload: unknown = text
+    try {
+      payload = text ? JSON.parse(text) : undefined
+    } catch {
+      // Rejections from request extractors are plain text.
+    }
+    return { status: response.status, body: payload }
+  },
+  /** Like request, but fails unless api-rs answers 2xx. */
+  async ok(method: string, path: string, body?: unknown): Promise<any> {
+    const { status, body: payload } = await api.request(method, path, body)
+    if (status < 200 || status > 299) throw new Error(`${method} ${path} failed: ${status} ${JSON.stringify(payload)}`)
+    return payload
+  },
   /** Pauses the thread's sandbox now, as its idle timeout would; returns whether it paused. */
   async pause(thread: Thread): Promise<boolean> {
-    const response = await fetch(`${apiUrl}/api/session/${encodeURIComponent(thread.key)}/pause`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${apiKey}` }
-    })
-    if (!response.ok) throw new Error(`pause failed: ${response.status} ${await response.text()}`)
-    return ((await response.json()) as { paused: boolean }).paused
+    const result = await api.ok('POST', `/api/session/${encodeURIComponent(thread.key)}/pause`)
+    return result.paused
   }
 }
 
 export const cluster = {
+  /** Runs a shell script in the api-rs pod, optionally feeding it stdin. */
+  async exec(script: string, stdin?: string): Promise<string> {
+    return kubectl(
+      { stdin },
+      'exec', '-i', `deploy/${release}-centaur-api-rs`, '--', 'sh', '-c', script
+    )
+  },
   /** Kills a sandbox's pod without a graceful shutdown. */
   async killSandbox(sandboxId: string): Promise<void> {
-    await kubectl('delete', 'pod', sandboxId, '--grace-period=0', '--force')
+    await kubectl({}, 'delete', 'pod', sandboxId, '--grace-period=0', '--force')
   },
   /** Restarts a release component and waits for the new pods to be ready. */
   async restart(component: string): Promise<void> {
-    await kubectl('rollout', 'restart', `deploy/${release}-centaur-${component}`)
-    await kubectl('rollout', 'status', `deploy/${release}-centaur-${component}`, '--timeout=180s')
+    await kubectl({}, 'rollout', 'restart', `deploy/${release}-centaur-${component}`)
+    await kubectl({}, 'rollout', 'status', `deploy/${release}-centaur-${component}`, '--timeout=180s')
   },
   /** Kubernetes objects api-rs created for a sandbox and has not removed. */
   async sandboxResources(sandboxId: string): Promise<string[]> {
     const out = await kubectl(
+      {},
       'get', 'sandboxes.agents.x-k8s.io,pods,services,networkpolicies',
       '-l', `centaur.ai/sandbox-id=${sandboxId}`, '-o', 'name'
     )
@@ -278,8 +312,12 @@ async function slackApi<T>(method: string, body: Record<string, string>): Promis
   return payload
 }
 
-async function kubectl(...args: string[]): Promise<string> {
-  const proc = Bun.spawn(['kubectl', '-n', namespace, ...args], { stdout: 'pipe', stderr: 'pipe' })
+async function kubectl(options: { stdin?: string }, ...args: string[]): Promise<string> {
+  const proc = Bun.spawn(['kubectl', '-n', namespace, ...args], {
+    stdin: options.stdin === undefined ? 'ignore' : new Blob([options.stdin]),
+    stdout: 'pipe',
+    stderr: 'pipe'
+  })
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),

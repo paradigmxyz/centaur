@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/centaur-api-server",
-    "crates/centaur-api-integration-test",
     "crates/centaur-iron-control",
     "crates/centaur-iron-proxy",
     "crates/centaur-perms",

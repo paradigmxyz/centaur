@@ -21,6 +21,9 @@ repoCache:
 apiRs:
   extraEnv:
     SLACK_API_URL: http://fake-slack.centaur-e2e-slack.svc.cluster.local:443/api
+    # Workflows the tests write or remove take effect within a second or two.
+    WORKFLOW_RECONCILE_INTERVAL_SECS: "1"
+    WORKFLOW_REAP_REMOVED_AFTER_TICKS: "1"
   sandboxWarmPoolSize: 0
   workflowHostSandbox: false
 
