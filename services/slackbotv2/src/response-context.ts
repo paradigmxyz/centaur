@@ -239,23 +239,28 @@ export function reasoningForModel(
 // Claude model IDs: family, dash-separated version, optional variant words,
 // optional date snapshot (claude-opus-5-5, claude-haiku-4-5-20251001,
 // claude-opus-5-fast).
-const CLAUDE_MODEL_ID = /^claude-([a-z]+)((?:-\d{1,2})*)((?:-[a-z]+)*)(?:-\d{8})?$/i
-// Named GPT models: version then codename (gpt-5.6-sol, gpt-6-astra).
-const NAMED_GPT_MODEL_ID = /^gpt-(\d+(?:\.\d+)?)-(sol|luna|terra|astra)$/i
-// Other GPT models: version then optional variant words (gpt-5.2, gpt-5.4-pro).
-const GPT_MODEL_ID = /^gpt-(\d+(?:\.\d+)?)((?:-[a-z]+)*)$/i
+const CLAUDE_MODEL_ID = /^claude-([a-z]+)((?:-\d{1,2})*)((?:-[a-z]+)*)(?:-\d{8})?$/
+// GPT model IDs: version, optional variant words, optional date snapshot
+// (gpt-5.2, gpt-5.4-pro, gpt-5.6-sol, gpt-5.2-2025-12-11).
+const GPT_MODEL_ID = /^gpt-(\d+(?:\.\d+)?)((?:-[a-z]+)*)(?:-\d{4}-\d{2}-\d{2})?$/
+// GPT codenames shown in place of the "GPT" prefix (gpt-5.6-sol -> "Sol 5.6").
+const GPT_CODENAMES = new Set(['sol', 'luna', 'terra', 'astra'])
 
 /**
  * Formats a model ID for the footer as its product name: claude-opus-5-5 ->
  * "Opus 5.5", gpt-5.6-sol -> "Sol 5.6", gpt-5.2 -> "GPT 5.2". Unrecognized
- * models are uppercased.
+ * models (provider-prefixed IDs, o-series) are uppercased.
  */
 export function modelDisplayName(model: string): string {
-  const namedGpt = NAMED_GPT_MODEL_ID.exec(model)
-  if (namedGpt) return `${titleCase(namedGpt[2] ?? '')} ${namedGpt[1]}`
-  const gpt = GPT_MODEL_ID.exec(model)
-  if (gpt) return ['GPT', gpt[1], titleCase(gpt[2] ?? '')].filter(Boolean).join(' ')
-  const claude = CLAUDE_MODEL_ID.exec(model)
+  const id = model.toLowerCase()
+  const gpt = GPT_MODEL_ID.exec(id)
+  if (gpt) {
+    const [, version = '', variant = ''] = gpt
+    const word = variant.slice(1)
+    if (GPT_CODENAMES.has(word)) return `${titleCase(word)} ${version}`
+    return ['GPT', version, titleCase(variant)].filter(Boolean).join(' ')
+  }
+  const claude = CLAUDE_MODEL_ID.exec(id)
   if (!claude) return model.toUpperCase()
   const [, family = '', version = '', variant = ''] = claude
   return [titleCase(family), version.slice(1).replace(/-/g, '.'), titleCase(variant)]

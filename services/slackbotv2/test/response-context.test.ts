@@ -206,7 +206,24 @@ describe('modelDisplayName', () => {
     expect(modelDisplayName('gpt-5.2')).toBe('GPT 5.2')
     expect(modelDisplayName('gpt-5.4-pro')).toBe('GPT 5.4 Pro')
     expect(modelDisplayName('gpt-5.2-codex')).toBe('GPT 5.2 Codex')
+    expect(modelDisplayName('gpt-5.6')).toBe('GPT 5.6')
+    expect(modelDisplayName('gpt-5.2-2025-12-11')).toBe('GPT 5.2')
+    expect(modelDisplayName('gpt-5.6-sol-2026-07-01')).toBe('Sol 5.6')
+  })
+
+  test('ignores input casing', () => {
+    expect(modelDisplayName('CLAUDE-OPUS-5-5')).toBe('Opus 5.5')
+    expect(modelDisplayName('GPT-5.6-SOL')).toBe('Sol 5.6')
+    expect(modelDisplayName('GPT-5.4-Pro')).toBe('GPT 5.4 Pro')
+  })
+
+  test('uppercases unrecognized model IDs', () => {
     expect(modelDisplayName('o3')).toBe('O3')
+    expect(modelDisplayName('claude-opus-4-6[1m]')).toBe('CLAUDE-OPUS-4-6[1M]')
+    expect(modelDisplayName('anthropic/claude-sonnet-4.5')).toBe('ANTHROPIC/CLAUDE-SONNET-4.5')
+    expect(modelDisplayName('us.anthropic.claude-sonnet-4-5-20250929-v1:0')).toBe(
+      'US.ANTHROPIC.CLAUDE-SONNET-4-5-20250929-V1:0'
+    )
   })
 })
 
