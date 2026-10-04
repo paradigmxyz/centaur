@@ -236,6 +236,24 @@ export function reasoningForModel(
   return supported?.has(effectiveEffort) ? effort : undefined
 }
 
+// Claude model IDs: family, dash-separated version, optional variant words,
+// optional date snapshot (claude-opus-5-5, claude-haiku-4-5-20251001,
+// claude-opus-5-fast).
+const CLAUDE_MODEL_ID = /^claude-([a-z]+)((?:-\d{1,2})*)((?:-[a-z]+)*)(?:-\d{8})?$/i
+
+/**
+ * Formats a model ID for the footer: Claude IDs read as their product name
+ * (claude-opus-5-5 -> "Opus 5.5"); other models are uppercased (GPT-5.2).
+ */
+export function modelDisplayName(model: string): string {
+  const match = CLAUDE_MODEL_ID.exec(model)
+  if (!match) return model.toUpperCase()
+  const [, family = '', version = '', variant = ''] = match
+  return [titleCase(family), version.slice(1).replace(/-/g, '.'), titleCase(variant)]
+    .filter(Boolean)
+    .join(' ')
+}
+
 function reasoningDisplayName(reasoning: string | null | undefined): string | undefined {
   const key = reasoning?.trim().toLowerCase()
   if (!key) return undefined
@@ -273,7 +291,7 @@ export function buildSlackResponseContextBlock(params: {
   if (notice) segments.push(`:warning: ${escapeSlackMrkdwn(notice)}`)
   if (includeMetadata) {
     const model = params.model?.trim()
-    if (model) segments.push(escapeSlackMrkdwn(model.toUpperCase()))
+    if (model) segments.push(escapeSlackMrkdwn(modelDisplayName(model)))
     const harness = harnessDisplayName(params.harnessType)
     if (harness) segments.push(escapeSlackMrkdwn(harness))
     const reasoning = reasoningDisplayName(params.reasoning)

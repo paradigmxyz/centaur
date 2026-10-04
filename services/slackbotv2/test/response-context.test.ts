@@ -6,6 +6,7 @@ import {
   defaultServiceTierForHarness,
   effectiveReasoningForHarness,
   harnessDisplayName,
+  modelDisplayName,
   personaFallbackNotice,
   reasoningForModel
 } from '../src/response-context'
@@ -194,6 +195,16 @@ describe('defaultServiceTierForHarness', () => {
   })
 })
 
+describe('modelDisplayName', () => {
+  test('formats Claude IDs as product names and uppercases other models', () => {
+    expect(modelDisplayName('claude-opus-5-5')).toBe('Opus 5.5')
+    expect(modelDisplayName('claude-fable-5')).toBe('Fable 5')
+    expect(modelDisplayName('claude-haiku-4-5-20251001')).toBe('Haiku 4.5')
+    expect(modelDisplayName('claude-opus-5-fast')).toBe('Opus 5 Fast')
+    expect(modelDisplayName('gpt-5.6-sol')).toBe('GPT-5.6-SOL')
+  })
+})
+
 describe('buildSlackResponseContextBlock', () => {
   test('builds a context block with uppercased model then harness, middot separated', () => {
     const block = buildSlackResponseContextBlock({
@@ -203,6 +214,15 @@ describe('buildSlackResponseContextBlock', () => {
       reasoning: 'xhigh'
     })
     expect(block?.elements[0]?.text).toBe('GPT-5.2 · Codex · XHigh')
+  })
+
+  test('shows Claude models by product name', () => {
+    const block = buildSlackResponseContextBlock({
+      harnessType: 'claudecode',
+      metadataEnabled: true,
+      model: 'claude-opus-5-5'
+    })
+    expect(block?.elements[0]?.text).toBe('Opus 5.5 · Claude Code')
   })
 
   test('omits the model segment when no model is provided', () => {

@@ -26,6 +26,7 @@ import {
 import { clearRequesterIdentityCacheForTests } from '../src/session-api'
 import { slackbotMetrics } from '../src/metrics'
 import { createOpenAiMessageOverridesStrategy } from '../src/message-overrides-strategy'
+import { modelDisplayName } from '../src/response-context'
 import claudeSettings from '../../../harness/claude/settings.json'
 
 const BOT_TOKEN = 'xoxb-slackbotv2-emulate'
@@ -1538,7 +1539,7 @@ describe('slackbotv2', () => {
     const blocks = metadataBlockTexts(slackApi.calls)
     expect(blocks).toHaveLength(1)
     expect(blocks[0]).toContain('Claude Code')
-    expect(blocks[0]).toContain(claudeSettings.model.toUpperCase())
+    expect(blocks[0]).toContain(modelDisplayName(claudeSettings.model))
 
     // The effective default model is recorded in execution metadata, but never
     // forwarded to the harness — only explicit overrides ride the input lines.
