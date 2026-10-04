@@ -1867,6 +1867,31 @@ impl SessionRuntime {
     /// Active, provisioning, and otherwise unknown sandboxes are left running
     /// and reported as `busy`. With `force`, every non-terminal sandbox is
     /// stopped regardless.
+    /// Pauses the session's sandbox now, exactly as its idle timeout would, so
+    /// the next turn resumes it. Returns whether it paused: a session with no
+    /// sandbox, an unfinished execution, or an already-suspended sandbox is
+    /// left alone.
+    pub async fn pause_idle_session(
+        &self,
+        thread_key: &ThreadKey,
+    ) -> Result<bool, SessionRuntimeError> {
+        let session = self.store.get_session(thread_key).await?;
+        let Some(sandbox_id) = session.sandbox_id else {
+            return Ok(false);
+        };
+        let Some(execution) = self.store.latest_execution_for_thread(thread_key).await? else {
+            return Ok(false);
+        };
+        record_idle_pause(
+            &self.context(),
+            thread_key,
+            &execution.execution_id,
+            &sandbox_id,
+            None,
+        )
+        .await
+    }
+
     pub async fn drain(&self, force: bool) -> Result<DrainReport, SessionRuntimeError> {
         // Block new execution admission while each sandbox's durable state is
         // checked and acted on, closing the idle-check/stop race in this runtime.
@@ -5778,21 +5803,31 @@ fn spawn_idle_pause(
 ) {
     tokio::spawn(async move {
         sleep(idle_timeout).await;
-        if let Err(error) =
-            record_idle_pause(&ctx, &thread_key, &execution_id, &sandbox_id, idle_timeout).await
+        if let Err(error) = record_idle_pause(
+            &ctx,
+            &thread_key,
+            &execution_id,
+            &sandbox_id,
+            Some(idle_timeout),
+        )
+        .await
         {
             warn!(%thread_key, %execution_id, %sandbox_id, %error, "idle pause task failed");
         }
     });
 }
 
+/// Pauses an idle session's sandbox and records why: its idle timeout, or an
+/// operator request (`idle_timeout` is `None`). Returns whether it paused; a
+/// sandbox that is no longer the session's, a newer or unfinished execution,
+/// and an already-suspended sandbox are left alone.
 async fn record_idle_pause(
     ctx: &RuntimeContext,
     thread_key: &ThreadKey,
     execution_id: &str,
     sandbox_id: &str,
-    idle_timeout: Duration,
-) -> Result<(), SessionRuntimeError> {
+    idle_timeout: Option<Duration>,
+) -> Result<bool, SessionRuntimeError> {
     let latest_execution = ctx.store.latest_execution_for_thread(thread_key).await?;
     let session = ctx.store.get_session(thread_key).await?;
     if !should_pause_idle_sandbox(
@@ -5801,17 +5836,17 @@ async fn record_idle_pause(
         execution_id,
         sandbox_id,
     ) {
-        return Ok(());
+        return Ok(false);
     }
 
     let id = SandboxId::new(sandbox_id);
     match ctx.manager.status(&id).await {
         Ok(SandboxStatus::Suspended | SandboxStatus::Stopped | SandboxStatus::Gone) => {
-            return Ok(());
+            return Ok(false);
         }
         Ok(SandboxStatus::Running | SandboxStatus::Created) => {}
-        Ok(SandboxStatus::Unknown(_)) => return Ok(()),
-        Err(SandboxError::NotFound(_)) => return Ok(()),
+        Ok(SandboxStatus::Unknown(_)) => return Ok(false),
+        Err(SandboxError::NotFound(_)) => return Ok(false),
         Err(error) => {
             record_idle_pause_failure(
                 &ctx.store,
@@ -5834,13 +5869,7 @@ async fn record_idle_pause(
                     thread_key,
                     Some(execution_id),
                     "session.sandbox_paused",
-                    json!({
-                        "execution_id": execution_id,
-                        "thread_key": thread_key.as_str(),
-                        "sandbox_id": sandbox_id,
-                        "reason": "idle_timeout",
-                        "idle_timeout_ms": duration_millis_u64(idle_timeout),
-                    }),
+                    pause_event_payload(thread_key, execution_id, sandbox_id, idle_timeout),
                 )
                 .await?;
         }
@@ -5857,7 +5886,7 @@ async fn record_idle_pause(
             return Err(SessionRuntimeError::Sandbox(error));
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 async fn record_idle_pause_failure(
@@ -5865,25 +5894,38 @@ async fn record_idle_pause_failure(
     thread_key: &ThreadKey,
     execution_id: &str,
     sandbox_id: &str,
-    idle_timeout: Duration,
+    idle_timeout: Option<Duration>,
     error: &str,
 ) -> Result<(), SessionRuntimeError> {
+    let mut payload = pause_event_payload(thread_key, execution_id, sandbox_id, idle_timeout);
+    payload["error"] = json!(error);
     store
         .append_event(
             thread_key,
             Some(execution_id),
             "session.sandbox_pause_failed",
-            json!({
-                "execution_id": execution_id,
-                "thread_key": thread_key.as_str(),
-                "sandbox_id": sandbox_id,
-                "reason": "idle_timeout",
-                "idle_timeout_ms": duration_millis_u64(idle_timeout),
-                "error": error,
-            }),
+            payload,
         )
         .await?;
     Ok(())
+}
+
+fn pause_event_payload(
+    thread_key: &ThreadKey,
+    execution_id: &str,
+    sandbox_id: &str,
+    idle_timeout: Option<Duration>,
+) -> Value {
+    let mut payload = json!({
+        "execution_id": execution_id,
+        "thread_key": thread_key.as_str(),
+        "sandbox_id": sandbox_id,
+        "reason": if idle_timeout.is_some() { "idle_timeout" } else { "requested" },
+    });
+    if let Some(idle_timeout) = idle_timeout {
+        payload["idle_timeout_ms"] = json!(duration_millis_u64(idle_timeout));
+    }
+    payload
 }
 
 fn should_pause_idle_sandbox(
@@ -10298,6 +10340,40 @@ mod adoption_tests {
                 .await
                 .expect("execution status");
         assert_eq!(status, "completed");
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn requested_pause_suspends_only_an_idle_session_sandbox() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:requested-pause-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-mock"), true).await;
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with(&store, backend.clone());
+
+        // A turn still running keeps its sandbox.
+        assert!(!runtime.pause_idle_session(&thread_key).await.unwrap());
+        assert_eq!(backend.status_of("sbx-mock"), None);
+
+        store.complete_execution(&execution_id).await.unwrap();
+        assert!(runtime.pause_idle_session(&thread_key).await.unwrap());
+        assert_eq!(
+            backend.status_of("sbx-mock"),
+            Some(SandboxStatus::Suspended)
+        );
+        let paused = events(&store, &thread_key)
+            .await
+            .into_iter()
+            .find(|event| event.event_type == "session.sandbox_paused")
+            .expect("paused event");
+        assert_eq!(paused.payload["reason"], json!("requested"));
+
+        // Already suspended: nothing left to pause.
+        assert!(!runtime.pause_idle_session(&thread_key).await.unwrap());
         reset_test_store(&store).await;
     }
 
