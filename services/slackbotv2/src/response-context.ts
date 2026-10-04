@@ -240,15 +240,19 @@ export function reasoningForModel(
 // optional date snapshot (claude-opus-5-5, claude-haiku-4-5-20251001,
 // claude-opus-5-fast).
 const CLAUDE_MODEL_ID = /^claude-([a-z]+)((?:-\d{1,2})*)((?:-[a-z]+)*)(?:-\d{8})?$/i
+// Named GPT models: version then codename (gpt-5.6-sol, gpt-6-astra).
+const NAMED_GPT_MODEL_ID = /^gpt-(\d+(?:\.\d+)?)-(sol|luna|terra|astra)$/i
 
 /**
- * Formats a model ID for the footer: Claude IDs read as their product name
- * (claude-opus-5-5 -> "Opus 5.5"); other models are uppercased (GPT-5.2).
+ * Formats a model ID for the footer as its product name: claude-opus-5-5 ->
+ * "Opus 5.5", gpt-5.6-sol -> "Sol 5.6". Other models are uppercased (GPT-5.2).
  */
 export function modelDisplayName(model: string): string {
-  const match = CLAUDE_MODEL_ID.exec(model)
-  if (!match) return model.toUpperCase()
-  const [, family = '', version = '', variant = ''] = match
+  const gpt = NAMED_GPT_MODEL_ID.exec(model)
+  if (gpt) return `${titleCase(gpt[2] ?? '')} ${gpt[1]}`
+  const claude = CLAUDE_MODEL_ID.exec(model)
+  if (!claude) return model.toUpperCase()
+  const [, family = '', version = '', variant = ''] = claude
   return [titleCase(family), version.slice(1).replace(/-/g, '.'), titleCase(variant)]
     .filter(Boolean)
     .join(' ')

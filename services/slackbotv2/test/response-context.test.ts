@@ -196,12 +196,15 @@ describe('defaultServiceTierForHarness', () => {
 })
 
 describe('modelDisplayName', () => {
-  test('formats Claude IDs as product names and uppercases other models', () => {
+  test('formats Claude and named GPT IDs as product names and uppercases other models', () => {
     expect(modelDisplayName('claude-opus-5-5')).toBe('Opus 5.5')
     expect(modelDisplayName('claude-fable-5')).toBe('Fable 5')
     expect(modelDisplayName('claude-haiku-4-5-20251001')).toBe('Haiku 4.5')
     expect(modelDisplayName('claude-opus-5-fast')).toBe('Opus 5 Fast')
-    expect(modelDisplayName('gpt-5.6-sol')).toBe('GPT-5.6-SOL')
+    expect(modelDisplayName('gpt-5.6-sol')).toBe('Sol 5.6')
+    expect(modelDisplayName('gpt-6-astra')).toBe('Astra 6')
+    expect(modelDisplayName('gpt-5.2')).toBe('GPT-5.2')
+    expect(modelDisplayName('gpt-5.4-pro')).toBe('GPT-5.4-PRO')
   })
 })
 
@@ -241,7 +244,7 @@ describe('buildSlackResponseContextBlock', () => {
       reasoning: 'low'
     })
 
-    expect(block?.elements[0]?.text).toBe('GPT-5.6-SOL · Nanocodex · Low')
+    expect(block?.elements[0]?.text).toBe('Sol 5.6 · Nanocodex · Low')
   })
 
   test('skips the block when metadata and notices are absent', () => {
@@ -262,7 +265,7 @@ describe('buildSlackResponseContextBlock', () => {
       serviceTier: 'fast'
     })
 
-    expect(block?.elements[0]?.text).toBe('GPT-5.6-SOL · Codex · Low · Fast')
+    expect(block?.elements[0]?.text).toBe('Sol 5.6 · Codex · Low · Fast')
   })
 
   test('renders and escapes a notice when response metadata is absent', () => {

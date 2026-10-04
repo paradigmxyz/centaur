@@ -1323,7 +1323,7 @@ describe('slackbotv2', () => {
         .filter(call => call.method === 'chat.stopStream')
         .flatMap(call => (Array.isArray(call.body.blocks) ? (call.body.blocks as unknown[]) : []))
         .map(block => JSON.stringify(block))
-        .filter(text => text.includes('GPT-5.6-SOL'))
+        .filter(text => text.includes('Sol 5.6'))
 
     const parent = await postUserMessage('Response metadata thread context.')
     const firstMention = await postUserMessage(`<@${BOT_USER_ID}> start`, parent.ts)
@@ -1390,7 +1390,7 @@ describe('slackbotv2', () => {
         .filter(call => call.method === 'chat.stopStream')
         .flatMap(call => (Array.isArray(call.body.blocks) ? (call.body.blocks as unknown[]) : []))
         .map(block => JSON.stringify(block))
-        .filter(text => text.includes('GPT-5.6-SOL'))
+        .filter(text => text.includes('Sol 5.6'))
 
     const parent = await postUserMessage('Service tier thread context.')
     const firstMention = await postUserMessage(`<@${BOT_USER_ID}> start`, parent.ts)
