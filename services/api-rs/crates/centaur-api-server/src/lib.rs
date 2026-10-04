@@ -248,6 +248,11 @@ mod tests {
                 .body(Body::empty())
                 .unwrap(),
             Request::builder()
+                .method(Method::POST)
+                .uri("/api/session/slack%3AC123%3A123.456/pause")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
                 .uri("/api/workflows/runs")
                 .body(Body::empty())
                 .unwrap(),
@@ -285,6 +290,12 @@ mod tests {
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/sandboxes/drain")
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/session/slack%3AC123%3A123.456/pause")
                 .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                 .body(Body::empty())
                 .unwrap(),
@@ -406,6 +417,15 @@ mod tests {
                 Request::builder()
                     .method(Method::POST)
                     .uri("/api/sandboxes/drain")
+                    .header(header::AUTHORIZATION, &authorized)
+                    .body(Body::empty())
+                    .unwrap(),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/session/slack%3AC123%3A123.456/pause")
                     .header(header::AUTHORIZATION, &authorized)
                     .body(Body::empty())
                     .unwrap(),

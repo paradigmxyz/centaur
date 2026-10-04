@@ -1850,17 +1850,6 @@ impl SessionRuntime {
         });
     }
 
-    /// Stop every non-terminal sandbox the backend currently owns.
-    ///
-    /// Intended for a clean control-plane shutdown (e.g. before a deploy):
-    /// each sandbox is stopped independently so one failure does not abort the
-    /// rest, and the [`DrainReport`] records which were stopped and which
-    /// failed so the caller can surface partial failure.
-    ///
-    /// Without `force`, only sandboxes durably known to be idle are stopped.
-    /// Active, provisioning, and otherwise unknown sandboxes are left running
-    /// and reported as `busy`. With `force`, every non-terminal sandbox is
-    /// stopped regardless.
     /// Pauses the session's sandbox now, exactly as its idle timeout would, so
     /// the next turn resumes it. Returns whether it paused: a session with no
     /// sandbox, an unfinished execution, or an already-suspended sandbox is
@@ -1886,6 +1875,17 @@ impl SessionRuntime {
         .await
     }
 
+    /// Stop every non-terminal sandbox the backend currently owns.
+    ///
+    /// Intended for a clean control-plane shutdown (e.g. before a deploy):
+    /// each sandbox is stopped independently so one failure does not abort the
+    /// rest, and the [`DrainReport`] records which were stopped and which
+    /// failed so the caller can surface partial failure.
+    ///
+    /// Without `force`, only sandboxes durably known to be idle are stopped.
+    /// Active, provisioning, and otherwise unknown sandboxes are left running
+    /// and reported as `busy`. With `force`, every non-terminal sandbox is
+    /// stopped regardless.
     pub async fn drain(&self, force: bool) -> Result<DrainReport, SessionRuntimeError> {
         // Block new execution admission while each sandbox's durable state is
         // checked and acted on, closing the idle-check/stop race in this runtime.
