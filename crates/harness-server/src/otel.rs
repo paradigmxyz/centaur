@@ -27,8 +27,15 @@ const TRANSCRIPT_CAPTURE_ENV: &str = "CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS";
 static TELEMETRY: OnceLock<Option<TelemetryRuntime>> = OnceLock::new();
 
 struct TelemetryRuntime {
-    _provider: SdkTracerProvider,
+    provider: SdkTracerProvider,
     tracer: SdkTracer,
+}
+
+/// Exports spans the batch processor still holds, e.g. before the process exits.
+pub fn flush_telemetry() {
+    if let Some(Some(runtime)) = TELEMETRY.get() {
+        let _ = runtime.provider.force_flush();
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -518,10 +525,7 @@ fn build_telemetry_runtime() -> Result<Option<TelemetryRuntime>, String> {
         .with_batch_exporter(exporter)
         .build();
     let tracer = provider.tracer("centaur.harness-server");
-    Ok(Some(TelemetryRuntime {
-        _provider: provider,
-        tracer,
-    }))
+    Ok(Some(TelemetryRuntime { provider, tracer }))
 }
 
 fn traces_export_disabled() -> bool {
