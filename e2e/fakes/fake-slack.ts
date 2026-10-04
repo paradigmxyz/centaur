@@ -4,7 +4,9 @@
 // delivered to slackbotv2 as a signed app_mention event, the way Slack would.
 // No dependencies, so it runs from a ConfigMap on the stock Bun image.
 import { createHmac } from 'node:crypto'
-import { BOT, CHANNELS, TEAM, USER, USER_TOKEN } from './slack-fixture'
+import { BOT, CHANNELS, TEAM, USERS, type SlackUser } from './slack-fixture'
+
+type Actor = 'bot' | SlackUser
 
 type Message = {
   type: 'message'
@@ -44,18 +46,18 @@ Bun.serve({
 })
 log('fake_slack_started', { port, events_url: eventsUrl })
 
-function handle(method: string, actor: 'bot' | 'user', body: Record<string, unknown>) {
+function handle(method: string, actor: Actor, body: Record<string, unknown>) {
   const channel = str(body.channel)
   switch (method) {
     case 'auth.test':
       return actor === 'bot'
         ? { ok: true, url: 'https://centaur-e2e.slack.com/', team: TEAM.name, team_id: TEAM.id, user: BOT.name, user_id: BOT.userId, bot_id: BOT.id }
-        : { ok: true, url: 'https://centaur-e2e.slack.com/', team: TEAM.name, team_id: TEAM.id, user: USER.name, user_id: USER.id }
+        : { ok: true, url: 'https://centaur-e2e.slack.com/', team: TEAM.name, team_id: actor.teamId, user: actor.name, user_id: actor.id }
     case 'team.info':
       return { ok: true, team: TEAM }
     case 'users.info':
     case 'users.profile.get': {
-      const user = slackUser(str(body.user) || (actor === 'bot' ? BOT.userId : USER.id))
+      const user = slackUser(str(body.user) || (actor === 'bot' ? BOT.userId : actor.id))
       if (!user) return { ok: false, error: 'user_not_found' }
       return method === 'users.info' ? { ok: true, user } : { ok: true, profile: user.profile }
     }
@@ -100,7 +102,7 @@ function handle(method: string, actor: 'bot' | 'user', body: Record<string, unkn
         blocks: Array.isArray(body.blocks) ? body.blocks : undefined,
         streaming: method === 'chat.startStream'
       })
-      if (actor === 'user' && message.text.includes(`<@${BOT.userId}>`)) void deliverMention(message)
+      if (actor !== 'bot' && message.text.includes(`<@${BOT.userId}>`)) void deliverMention(message, actor)
       return { ok: true, channel, ts: message.ts, message }
     }
     case 'chat.update':
@@ -131,7 +133,7 @@ function handle(method: string, actor: 'bot' | 'user', body: Record<string, unkn
 }
 
 function post(
-  actor: 'bot' | 'user',
+  actor: Actor,
   channel: string,
   fields: Omit<Message, 'type' | 'channel' | 'ts' | 'user'>
 ): Message {
@@ -139,7 +141,7 @@ function post(
     type: 'message',
     channel,
     ts: nextTs(),
-    user: actor === 'bot' ? BOT.userId : USER.id,
+    user: actor === 'bot' ? BOT.userId : actor.id,
     ...(actor === 'bot' ? { bot_id: BOT.id } : {}),
     ...fields
   }
@@ -147,7 +149,7 @@ function post(
   return message
 }
 
-async function deliverMention(message: Message): Promise<void> {
+async function deliverMention(message: Message, sender: SlackUser): Promise<void> {
   const eventTime = Math.floor(Date.now() / 1000)
   const body = JSON.stringify({
     type: 'event_callback',
@@ -162,7 +164,9 @@ async function deliverMention(message: Message): Promise<void> {
     event: {
       type: 'app_mention',
       user: message.user,
-      team: TEAM.id,
+      team: sender.teamId,
+      // Slack Connect events name the sender's own workspace.
+      ...(sender.teamId === TEAM.id ? {} : { user_team: sender.teamId, source_team: sender.teamId }),
       channel: message.channel,
       text: message.text,
       ts: message.ts,
@@ -202,21 +206,31 @@ async function deliverMention(message: Message): Promise<void> {
   }
 }
 
-function authenticate(request: Request, url: URL): 'bot' | 'user' | undefined {
+function authenticate(request: Request, url: URL): Actor | undefined {
   const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ?? url.searchParams.get('token')
   if (token === botToken) return 'bot'
-  if (token === USER_TOKEN) return 'user'
-  return undefined
+  return USERS.find(user => user.token === token)
 }
 
 function slackUser(id: string) {
   if (id === BOT.userId) {
     return { id, team_id: TEAM.id, name: BOT.name, real_name: BOT.name, is_bot: true, profile: { real_name: BOT.name, display_name: BOT.name, bot_id: BOT.id } }
   }
-  if (id === USER.id) {
-    return { id, team_id: TEAM.id, name: USER.name, real_name: 'E2E User', is_bot: false, profile: { real_name: 'E2E User', display_name: USER.name, email: USER.email } }
+  const user = USERS.find(candidate => candidate.id === id)
+  if (!user) return undefined
+  // users.profile.get with include_labels returns custom fields keyed by field id.
+  const fields = user.github
+    ? { XfE2EGITHUB: { label: 'GitHub', value: `https://github.com/${user.github}`, alt: '' } }
+    : {}
+  return {
+    id,
+    team_id: user.teamId,
+    name: user.name,
+    real_name: user.displayName,
+    is_bot: false,
+    is_stranger: user.teamId !== TEAM.id,
+    profile: { real_name: user.displayName, display_name: user.displayName, email: user.email, fields }
   }
-  return undefined
 }
 
 function withReplies(message: Message) {

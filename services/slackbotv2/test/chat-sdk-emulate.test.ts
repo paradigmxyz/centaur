@@ -1434,48 +1434,6 @@ describe('slackbotv2', () => {
     expect(executeInput).not.toContain('data:image/png;base64')
   })
 
-  it('injects Slack requester identity and verified GitHub handle into Codex input', async () => {
-    slackApi.setUserProfile(USER_ID, {
-      name: 'akshaan',
-      real_name: 'Akshaan Kakar',
-      fields: {
-        X_GITHUB: {
-          label: 'GitHub',
-          value: 'https://github.com/decofe'
-        }
-      }
-    })
-    const mention = await sendMessage(`<@${BOT_USER_ID}> what is my name?`)
-
-    expect(mention.response.status).toBe(200)
-    await mention.finished()
-
-    expect(codexApi.creates[0]!.body.metadata).toEqual(
-      expect.objectContaining({
-        slack_user_id: USER_ID
-      })
-    )
-    const executeMetadata = codexApi.executes[0]!.body.metadata
-    expect(executeMetadata).toEqual(
-      expect.objectContaining({
-        github_handle: '@decofe',
-        slack_display_name: 'Akshaan Kakar',
-        slack_user_id: USER_ID,
-        slack_user_name: 'akshaan'
-      })
-    )
-    const input = JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!) as {
-      message: { content: Array<{ text?: string; type: string }> }
-    }
-    const requesterContext = contentTextWithHeading(input.message.content, '# Requester Context')
-    expect(requesterContext).toContain('# Requester Context')
-    expect(requesterContext).toContain(`Slack user ID: ${USER_ID}`)
-    expect(requesterContext).toContain('Slack username: akshaan')
-    expect(requesterContext).toContain('GitHub handle from Slack profile: @decofe')
-    expect(requesterContext).toContain('Prompted by: @decofe')
-    expect(input.message.content.at(-1)?.text).toBe('@centaur what is my name?')
-  })
-
   it('caches Slack requester identity across mentions from the same user', async () => {
     slackApi.setUserProfile(USER_ID, {
       name: 'akshaan',
@@ -1504,58 +1462,6 @@ describe('slackbotv2', () => {
         'GitHub handle from Slack profile: @decofe'
       )
     }
-  })
-
-  it('uses the reply mention requester identity instead of the root requester', async () => {
-    slackApi.setUserProfile(USER_ID, {
-      name: 'alice',
-      real_name: 'Alice Requester',
-      fields: {
-        X_GITHUB: {
-          label: 'GitHub',
-          value: 'alice-gh'
-        }
-      }
-    })
-    slackApi.setUserProfile(USER_B_ID, {
-      name: 'bob',
-      real_name: 'Bob Builder',
-      fields: {
-        X_GITHUB: {
-          label: 'GitHub',
-          value: 'https://github.com/bob-gh'
-        }
-      }
-    })
-
-    const rootMention = await sendMessage(`<@${BOT_USER_ID}> start this PR thread`)
-    expect(rootMention.response.status).toBe(200)
-    await rootMention.finished()
-
-    const replyMention = await sendMessage(`<@${BOT_USER_ID}> now make the PR`, {
-      threadTs: rootMention.ts,
-      client: slackB
-    })
-    expect(replyMention.response.status).toBe(200)
-    await replyMention.finished()
-
-    expect(codexApi.executes).toHaveLength(2)
-    const rootInput = JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!) as {
-      message: { content: Array<{ text?: string; type: string }> }
-    }
-    const replyInput = JSON.parse(codexApi.executes[1]!.body.input_lines.at(-1)!) as {
-      message: { content: Array<{ text?: string; type: string }> }
-    }
-    const rootContext = contentTextWithHeading(rootInput.message.content, '# Requester Context')
-    const replyContext = contentTextWithHeading(replyInput.message.content, '# Requester Context')
-
-    expect(rootContext).toContain(`Slack user ID: ${USER_ID}`)
-    expect(rootContext).toContain('GitHub handle from Slack profile: @alice-gh')
-    expect(replyContext).toContain(`Slack user ID: ${USER_B_ID}`)
-    expect(replyContext).toContain('Slack username: bob')
-    expect(replyContext).toContain('GitHub handle from Slack profile: @bob-gh')
-    expect(replyContext).toContain('Prompted by: @bob-gh')
-    expect(replyContext).not.toContain('@alice-gh')
   })
 
   it('includes reply mention requester identity when steering an active execution', async () => {

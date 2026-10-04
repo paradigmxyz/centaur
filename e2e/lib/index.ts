@@ -9,9 +9,17 @@
 //   expect(turn.reply).toBe('Hello.')
 import { randomUUID } from 'node:crypto'
 import { SQL } from 'bun'
-import { BOT, CHANNEL, USER_TOKEN } from '../fakes/slack-fixture'
+import { BOT, CHANNEL, USER, type SlackUser } from '../fakes/slack-fixture'
 
-export { CHANNEL, DEFAULTS_CHANNEL } from '../fakes/slack-fixture'
+export {
+  CHANNEL,
+  DEFAULTS_CHANNEL,
+  EXTERNAL_USER,
+  TEAM,
+  USER,
+  USER_B,
+  type SlackUser
+} from '../fakes/slack-fixture'
 export type Channel = { id: string; name: string }
 
 /** A scripted model answer, matched by a token placed in the user's message. */
@@ -33,6 +41,8 @@ export type ModelRequest = {
    * switch, the re-fed thread transcript.
    */
   userText: string
+  /** Every text block of the newest user message: the context slackbotv2 added, then what the user wrote. */
+  userMessage: string
   /** Earlier assistant turns in the conversation the model was asked to continue. */
   assistantTurns: string[]
   /** Everything the model was given, as text: system instructions and the whole conversation. */
@@ -65,6 +75,7 @@ type SlackMessage = {
 const slackUrl = required('E2E_SLACK_URL')
 const modelUrl = required('E2E_MODEL_URL')
 const db = new SQL(required('E2E_DATABASE_URL'))
+const ironControlDb = new SQL(required('E2E_IRON_CONTROL_DATABASE_URL'))
 const apiUrl = required('E2E_API_URL')
 const apiKey = required('E2E_API_KEY')
 const namespace = 'centaur'
@@ -155,11 +166,57 @@ export const cluster = {
   }
 }
 
+type MentionOptions = { channel?: Channel; as?: SlackUser }
+
 export const slack = {
-  /** Starts a thread with a channel message that mentions the bot. */
-  async mention(text: string, script?: Script, channel: Channel = CHANNEL): Promise<Thread> {
-    const ts = await postMention(channel, text, script)
+  /** Starts a thread with a channel message that mentions the bot, by USER unless `as` says otherwise. */
+  async mention(text: string, script?: Script, options: MentionOptions = {}): Promise<Thread> {
+    const channel = options.channel ?? CHANNEL
+    const ts = await postMention(channel, options.as ?? USER, text, script)
     return new Thread(channel, ts, script)
+  }
+}
+
+/** A principal as iron-control holds it: who a proxy's credentials act for. */
+export type Principal = {
+  foreignId: string
+  name: string
+  kind: string
+  slackUserId: string | null
+  slackTeamId: string | null
+  slackEmail: string | null
+}
+
+/**
+ * What the control plane registered in iron-control, the source of every
+ * sandbox proxy's credentials and grants.
+ */
+export const ironControl = {
+  /** The principals a sandbox's proxy acts for: the conversation, and the requester if one is bound. */
+  async proxy(sandboxId: string): Promise<{ principal: Principal; requester: Principal | null }> {
+    const [proxy] = await ironControlDb`
+      select principal_id, requester_principal_id from proxies where name = ${sandboxId}`
+    if (!proxy) throw new Error(`iron-control has no proxy for sandbox ${sandboxId}`)
+    const [principal, requester] = await Promise.all(
+      [proxy.principal_id, proxy.requester_principal_id].map(async id => {
+        if (id === null) return null
+        const [row]: Principal[] = await ironControlDb`
+          select foreign_id as "foreignId", name, kind, slack_user_id as "slackUserId",
+            slack_team_id as "slackTeamId", slack_email as "slackEmail"
+          from principals where id = ${id}`
+        return row ?? null
+      })
+    )
+    if (!principal) throw new Error(`proxy for sandbox ${sandboxId} has no principal`)
+    return { principal, requester: requester ?? null }
+  },
+  /** The principal for a Slack user, if iron-control has one. */
+  async slackUser(user: SlackUser): Promise<Principal | undefined> {
+    const [row]: Principal[] = await ironControlDb`
+      select foreign_id as "foreignId", name, kind, slack_user_id as "slackUserId",
+        slack_team_id as "slackTeamId", slack_email as "slackEmail"
+      from principals where slack_user_id = ${user.id}`
+    return row
   }
 }
 
@@ -178,9 +235,9 @@ export class Thread {
     return `slack:${this.channel.id}:${this.ts}`
   }
 
-  /** Follows up in the thread with a message that mentions the bot. */
-  async mention(text: string, script?: Script): Promise<void> {
-    this.triggers.push(await postMention(this.channel, text, script, this.ts))
+  /** Follows up in the thread with a message that mentions the bot, by USER unless `as` says otherwise. */
+  async mention(text: string, script?: Script, options: { as?: SlackUser } = {}): Promise<void> {
+    this.triggers.push(await postMention(this.channel, options.as ?? USER, text, script, this.ts))
     this.scripts.push(script?.token)
   }
 
@@ -246,7 +303,7 @@ export class Thread {
 
   /** Bot messages posted after a turn's trigger and before the next user message. */
   private async repliesTo(index: number): Promise<SlackMessage[]> {
-    const { messages } = await slackApi<{ messages: SlackMessage[] }>('conversations.replies', {
+    const { messages } = await slackApi<{ messages: SlackMessage[] }>(USER, 'conversations.replies', {
       channel: this.channel.id,
       ts: this.ts
     })
@@ -258,12 +315,13 @@ export class Thread {
 
 async function postMention(
   channel: Channel,
+  user: SlackUser,
   text: string,
   script: Script | undefined,
   threadTs?: string
 ): Promise<string> {
   if (script) await registerScript(script)
-  const posted = await slackApi<{ ts: string }>('chat.postMessage', {
+  const posted = await slackApi<{ ts: string }>(user, 'chat.postMessage', {
     channel: channel.id,
     text: `<@${BOT.userId}> ${text}${script ? ` ${script.token}` : ''}`,
     ...(threadTs ? { thread_ts: threadTs } : {})
@@ -292,6 +350,7 @@ async function modelRequests(token: string): Promise<ModelRequest[]> {
       ...request,
       effort: body.reasoning?.effort ?? body.output_config?.effort,
       userText: lastBlockText(history.filter(item => item.role === 'user').at(-1)?.content),
+      userMessage: contentText(history.filter(item => item.role === 'user').at(-1)?.content),
       assistantTurns: history
         .filter(item => item.role === 'assistant')
         .map(item => contentText(item.content)),
@@ -310,7 +369,7 @@ function lastBlockText(content: unknown): string {
 function contentText(content: unknown): string {
   if (typeof content === 'string') return content
   if (!Array.isArray(content)) return ''
-  return content.map(part => (typeof part?.text === 'string' ? part.text : '')).join('')
+  return content.map(part => (typeof part?.text === 'string' ? part.text : '')).join('\n')
 }
 
 function isTerminal(status: string): boolean {
@@ -328,10 +387,10 @@ export async function eventually<T>(what: string, timeoutMs: number, check: () =
   throw new Error(`timed out after ${timeoutMs / 1000}s waiting for ${what}`)
 }
 
-async function slackApi<T>(method: string, body: Record<string, string>): Promise<T> {
+async function slackApi<T>(user: SlackUser, method: string, body: Record<string, string>): Promise<T> {
   const response = await fetch(`${slackUrl}/api/${method}`, {
     method: 'POST',
-    headers: { authorization: `Bearer ${USER_TOKEN}`, 'content-type': 'application/json' },
+    headers: { authorization: `Bearer ${user.token}`, 'content-type': 'application/json' },
     body: JSON.stringify(body)
   })
   const payload = await response.json() as { ok: boolean; error?: string } & T

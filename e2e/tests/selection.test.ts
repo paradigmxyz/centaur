@@ -10,7 +10,6 @@ import { expect, test } from 'bun:test'
 import claudeSettings from '../../harness/claude/settings.json'
 import codexConfig from '../../harness/codex/config.toml'
 import {
-  CHANNEL,
   DEFAULTS_CHANNEL,
   model,
   slack,
@@ -46,6 +45,8 @@ type Step = {
   persona?: string
   /** Warning shown under the reply; omitted when none. */
   notice?: string
+  /** Response metadata under the reply (model · harness · effort); slackbotv2 shows it on a thread's first reply. */
+  footer?: string
 }
 
 type Scenario = {
@@ -56,11 +57,11 @@ type Scenario = {
 
 const scenarios: Record<string, Scenario> = {
   'no flag runs the deployment default': {
-    steps: [{ say: 'hello', harness: 'codex', model: CODEX_MODEL, effort: CODEX_EFFORT }]
+    steps: [{ say: 'hello', harness: 'codex', model: CODEX_MODEL, effort: CODEX_EFFORT, footer: 'Sol 5.6 · Codex · Medium' }]
   },
   'a harness flag sticks to the thread': {
     steps: [
-      { say: '--claude hello', harness: 'claudecode', model: CLAUDE_MODEL, effort: CLAUDE_EFFORT },
+      { say: '--claude hello', harness: 'claudecode', model: CLAUDE_MODEL, effort: CLAUDE_EFFORT, footer: 'Opus 5.5 · Claude Code' },
       { say: 'again', harness: 'claudecode', model: CLAUDE_MODEL, effort: CLAUDE_EFFORT, sandbox: 'same', sees: [1] }
     ]
   },
@@ -73,7 +74,7 @@ const scenarios: Record<string, Scenario> = {
   },
   'a model flag sticks to the thread': {
     steps: [
-      { say: '--codex --model gpt-5.4 hello', harness: 'codex', model: 'gpt-5.4', effort: CODEX_EFFORT },
+      { say: '--codex --model gpt-5.4 hello', harness: 'codex', model: 'gpt-5.4', effort: CODEX_EFFORT, footer: 'GPT 5.4 · Codex · Medium' },
       { say: 'again', harness: 'codex', model: 'gpt-5.4', effort: CODEX_EFFORT, sandbox: 'same' }
     ]
   },
@@ -86,7 +87,7 @@ const scenarios: Record<string, Scenario> = {
   },
   'a Claude model shortcut picks the harness and model': {
     steps: [
-      { say: '--sonnet hello', harness: 'claudecode', model: 'claude-sonnet-5' },
+      { say: '--sonnet hello', harness: 'claudecode', model: 'claude-sonnet-5', footer: 'Sonnet 5 · Claude Code' },
       { say: 'again', harness: 'claudecode', model: 'claude-sonnet-5', sandbox: 'same' }
     ]
   },
@@ -95,7 +96,7 @@ const scenarios: Record<string, Scenario> = {
   },
   'claude reasoning effort applies to one turn': {
     steps: [
-      { say: '--claude -rsn low hello', harness: 'claudecode', model: CLAUDE_MODEL, effort: 'low' },
+      { say: '--claude -rsn low hello', harness: 'claudecode', model: CLAUDE_MODEL, effort: 'low', footer: 'Opus 5.5 · Claude Code · Low' },
       { say: 'again', harness: 'claudecode', model: CLAUDE_MODEL, effort: CLAUDE_EFFORT, sandbox: 'same' }
     ]
   },
@@ -136,7 +137,7 @@ const scenarios: Record<string, Scenario> = {
   'a channel default picks the persona, harness, and model': {
     channel: DEFAULTS_CHANNEL,
     steps: [
-      { say: 'hello', harness: 'claudecode', model: 'claude-sonnet-5', persona: 'eng' },
+      { say: 'hello', harness: 'claudecode', model: 'claude-sonnet-5', persona: 'eng', footer: 'Sonnet 5 · Claude Code · High' },
       { say: 'again', harness: 'claudecode', model: 'claude-sonnet-5', persona: 'eng', sandbox: 'same', sees: [1] }
     ]
   },
@@ -165,6 +166,11 @@ function noticeIn(context: string): string | undefined {
   return context.match(/:warning: (.+?)(?: · |$)/)?.[1]
 }
 
+/** A reply's context line without its warning: the response metadata. */
+function footerIn(context: string): string {
+  return context.split(' · ').filter(segment => !segment.startsWith(':warning:')).join(' · ')
+}
+
 for (const [name, scenario] of Object.entries(scenarios)) {
   test.concurrent(name, async () => {
     let thread: Thread | undefined
@@ -172,7 +178,7 @@ for (const [name, scenario] of Object.entries(scenarios)) {
     for (const [index, step] of scenario.steps.entries()) {
       const answer = model.says(`Answer ${index + 1}.`)
       if (thread) await thread.mention(step.say, answer)
-      else thread = await slack.mention(step.say, answer, scenario.channel ?? CHANNEL)
+      else thread = await slack.mention(step.say, answer, { channel: scenario.channel })
       const turn = await thread.nextTurn()
       const request = turn.request
       // Each check carries the step, so a failure says which turn broke.
@@ -186,6 +192,7 @@ for (const [name, scenario] of Object.entries(scenarios)) {
       if (step.sandbox) check(turn.sandbox.id === turns.at(-1)?.sandbox.id ? 'same' : 'new', step.sandbox)
       check(personaIn(request), step.persona)
       check(noticeIn(turn.context), step.notice)
+      if (step.footer) check(footerIn(turn.context), step.footer)
       for (const flag of step.say.split(' ').filter(word => word.startsWith('-'))) {
         check(request?.userText.includes(flag), false)
       }

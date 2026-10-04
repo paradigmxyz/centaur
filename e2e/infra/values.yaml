@@ -37,6 +37,8 @@ slackbotv2:
   # expects these defaults.
   channelDefaults:
     CE2E00002: { persona: eng, harness: claude, model: sonnet, reasoning: high }
+  # EXTERNAL_TEAM in e2e/fakes/slack-fixture.ts, a Slack Connect partner.
+  externalOrgAllowlist: TE2EEXT01
 
 networkPolicy:
   ingressSourceNamespaces:
