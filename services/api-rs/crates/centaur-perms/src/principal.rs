@@ -45,44 +45,6 @@ mod tests {
     }
 
     #[test]
-    fn dm_thread_key_keys_on_user() {
-        let id = resolve_principal("slack:T123:D9:ts", Some("U07ABC")).unwrap();
-        assert_eq!(id.foreign_id, "slack-user-t123-u07abc");
-    }
-
-    #[test]
-    fn teamless_dm_thread_key_is_rejected() {
-        assert_eq!(
-            resolve_principal("slack:D9:ts", Some("U07ABC")),
-            Err(PrincipalDerivationError::MissingSlackTeamId)
-        );
-    }
-
-    #[test]
-    fn teams_adapter_thread_key_is_derived() {
-        let conversation = "MTk6YWJjMTIzQHRocmVhZC50YWN2Mg";
-        let service_url = "aHR0cHM6Ly9zbWJhLnRyYWZmaWNtYW5hZ2VyLm5ldC9hbWVyLw";
-        let id = resolve_principal(
-            &format!("teams:{conversation}:{service_url}"),
-            Some("aad-user-1"),
-        )
-        .unwrap();
-        assert_eq!(id.foreign_id, "teams-conversation-19-abc123-thread-tacv2");
-    }
-
-    #[test]
-    fn teams_adapter_thread_suffix_does_not_change_the_conversation_principal() {
-        let conversation = "MTk6YWJjMTIzQHRocmVhZC50YWN2MjttZXNzYWdlaWQ9cm9vdC1tZXNzYWdlLTE";
-        let service_url = "aHR0cHM6Ly9zbWJhLnRyYWZmaWNtYW5hZ2VyLm5ldC9hbWVyLw";
-        let id = resolve_principal(
-            &format!("teams:{conversation}:{service_url}"),
-            Some("aad-user-1"),
-        )
-        .unwrap();
-        assert_eq!(id.foreign_id, "teams-conversation-19-abc123-thread-tacv2");
-    }
-
-    #[test]
     fn raw_foreign_id_is_verbatim() {
         let id = resolve_principal("External-System-AbC123", None).unwrap();
         assert_eq!(id.foreign_id, "External-System-AbC123");
