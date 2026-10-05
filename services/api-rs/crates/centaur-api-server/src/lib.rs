@@ -796,6 +796,44 @@ mod tests {
             });
     }
 
+    /// Messages and executes carry attachments and long transcripts, so these
+    /// routes must read bodies past axum's 2 MiB default limit.
+    #[tokio::test]
+    async fn session_writes_accept_bodies_over_the_default_limit() {
+        let pool =
+            PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
+        let app = build_router_with_runtime(
+            PgSessionStore::new(pool),
+            SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
+        );
+        let padding = "x".repeat(3 * 1024 * 1024);
+
+        for (route, field) in [("messages", "messages"), ("execute", "input_lines")] {
+            // A well-formed body with the wrong shape: rejecting it as 422 proves
+            // the whole body was read and parsed rather than refused as too large.
+            let body = json!({ field: padding }).to_string();
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/session/slack%3AC123%3A123.456/{route}"))
+                        .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{route}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn session_context_exposes_slack_channel_and_thread_ts() {
         let pool =
