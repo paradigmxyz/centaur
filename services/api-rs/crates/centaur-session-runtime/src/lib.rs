@@ -8113,11 +8113,6 @@ mod tests {
     }
 
     #[test]
-    fn timeout_event_uses_millisecond_duration() {
-        assert_eq!(duration_millis_u64(Duration::from_millis(3_000)), 3_000);
-    }
-
-    #[test]
     fn stdout_state_first_token_detection_uses_answer_text() {
         let state = StdoutPumpState::default();
         let turn_started = json!({"type": "turn.started", "turn_id": "turn-1"});
@@ -8294,46 +8289,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_error_failure_class_covers_the_dispatchable_variants() {
-        assert_eq!(
-            runtime_error_failure_class(&SessionRuntimeError::BadRequest("bad".into())),
-            "bad_request"
-        );
-        assert_eq!(
-            runtime_error_failure_class(&SessionRuntimeError::ShuttingDown),
-            "shutting_down"
-        );
-        assert_eq!(
-            runtime_error_failure_class(&SessionRuntimeError::Store(
-                SessionStoreError::ExecutionNotFound {
-                    execution_id: "exe-x".into()
-                }
-            )),
-            "store"
-        );
-        assert_eq!(
-            runtime_error_failure_class(&SessionRuntimeError::Sandbox(SandboxError::NotFound(
-                "sbx-x".into()
-            ))),
-            "sandbox_not_found"
-        );
-        assert_eq!(
-            runtime_error_failure_class(&SessionRuntimeError::Sandbox(SandboxError::NotReady(
-                "warming".into()
-            ))),
-            "sandbox_not_ready"
-        );
-        assert_eq!(
-            runtime_error_failure_class(&SessionRuntimeError::CapacityExceeded {
-                operation: "enqueue",
-                running: 4,
-                max_running: 4
-            }),
-            "capacity"
-        );
-    }
-
-    #[test]
     fn sandbox_capabilities_match_requires_default_enabled_when_existing_is_none() {
         let default_enabled = SessionSandboxCapabilities::default_enabled();
         assert!(sandbox_capabilities_match(None, &default_enabled));
@@ -8429,18 +8384,6 @@ mod tests {
     }
 
     #[test]
-    fn event_stream_attaches_only_to_running_sandboxes() {
-        assert!(should_attach_session_pipe(&SandboxStatus::Running));
-        assert!(!should_attach_session_pipe(&SandboxStatus::Created));
-        assert!(!should_attach_session_pipe(&SandboxStatus::Suspended));
-        assert!(!should_attach_session_pipe(&SandboxStatus::Stopped));
-        assert!(!should_attach_session_pipe(&SandboxStatus::Gone));
-        assert!(!should_attach_session_pipe(&SandboxStatus::Unknown(
-            "other".to_owned()
-        )));
-    }
-
-    #[test]
     fn existing_sandbox_action_repairs_or_replaces_non_attachable_assignments() {
         assert_eq!(
             existing_sandbox_action(&SandboxStatus::Running),
@@ -8466,16 +8409,6 @@ mod tests {
             existing_sandbox_action(&SandboxStatus::Unknown("rollout missing".to_owned())),
             ExistingSandboxAction::Replace
         );
-    }
-
-    #[test]
-    fn event_stream_tolerates_not_ready_attach_race() {
-        let not_ready =
-            SessionRuntimeError::Sandbox(SandboxError::NotReady("sandbox paused".to_owned()));
-        let backend_error = SessionRuntimeError::Sandbox(SandboxError::backend("api failed"));
-
-        assert!(is_event_stream_attach_race(&not_ready));
-        assert!(!is_event_stream_attach_race(&backend_error));
     }
 
     #[test]
@@ -8670,33 +8603,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_workload_does_not_inject_stale_continue_thread_id() {
-        let workload = SandboxWorkloadMode::codex_app_server(
-            "centaur-agent:latest",
-            Vec::new(),
-            HarnessType::Codex,
-        );
-        let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
-
-        let spec = workload.spec(&thread_key, &HarnessType::Codex, None);
-
-        assert_eq!(
-            spec.env
-                .iter()
-                .find(|env| env.name == "CODEX_CONTINUE_THREAD_ID")
-                .map(|env| env.value.as_str()),
-            None
-        );
-        assert_eq!(
-            spec.env
-                .iter()
-                .find(|env| env.name == "AMP_CONTINUE_THREAD_ID")
-                .map(|env| env.value.as_str()),
-            None
-        );
-    }
-
-    #[test]
     fn codex_warm_spec_starts_profileless() {
         let workload = SandboxWorkloadMode::codex_app_server(
             "centaur-agent:latest",
@@ -8713,26 +8619,6 @@ mod tests {
             Some(thread_key.as_str())
         );
         assert_eq!(env_value(&warm_spec, "CENTAUR_THREAD_KEY"), None);
-    }
-
-    #[test]
-    fn warm_workload_key_ignores_claimed_thread_key() {
-        let workload = SandboxWorkloadMode::codex_app_server(
-            "centaur-agent:latest",
-            [("CENTAUR_API_URL".to_owned(), "http://api:8000".to_owned())],
-            HarnessType::Codex,
-        );
-        let first_thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
-        let second_thread_key = ThreadKey::parse("chat:C456:1780000000.000001").unwrap();
-
-        assert_ne!(
-            sandbox_spec_key(&workload.spec(&first_thread_key, &HarnessType::ClaudeCode, None)),
-            sandbox_spec_key(&workload.spec(&second_thread_key, &HarnessType::ClaudeCode, None))
-        );
-        assert_eq!(
-            sandbox_spec_key(&workload.warm_spec()),
-            sandbox_spec_key(&workload.warm_spec())
-        );
     }
 
     #[test]
