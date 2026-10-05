@@ -73,7 +73,7 @@ updates:
   - package-ecosystem: cargo
     directory: /services/api-rs
     allow:
-      - dependency-type: all
+      - dependency-type: direct
     schedule:
       interval: weekly
       day: monday
@@ -91,7 +91,7 @@ updates:
   - package-ecosystem: cargo
     directory: /crates/absurd-sdk
     allow:
-      - dependency-type: all
+      - dependency-type: direct
     schedule:
       interval: weekly
       day: monday
@@ -109,7 +109,7 @@ updates:
   - package-ecosystem: cargo
     directory: /crates/active-record-encryption
     allow:
-      - dependency-type: all
+      - dependency-type: direct
     schedule:
       interval: weekly
       day: monday
@@ -127,7 +127,7 @@ updates:
   - package-ecosystem: cargo
     directory: /crates/harness-server
     allow:
-      - dependency-type: all
+      - dependency-type: direct
     schedule:
       interval: weekly
       day: monday
