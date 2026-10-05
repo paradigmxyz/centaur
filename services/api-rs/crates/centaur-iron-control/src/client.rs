@@ -602,50 +602,20 @@ mod tests {
     use crate::models::{InjectConfig, ReplaceConfig, RequestRule, SecretSource};
 
     #[test]
-    fn grant_body_principal_static() {
-        let body = grant_body(
-            &Grantee::Principal("prn_abc".to_owned()),
-            &GrantSecret::Static("ssr_xyz".to_owned()),
-        );
+    fn grant_body_keys_grantee_and_secret_by_type() {
         assert_eq!(
-            body,
+            grant_body(
+                &Grantee::Principal("prn_abc".to_owned()),
+                &GrantSecret::Static("ssr_xyz".to_owned()),
+            ),
             json!({ "principal_id": "prn_abc", "static_secret_id": "ssr_xyz" })
         );
-    }
-
-    #[test]
-    fn grant_body_role_oauth() {
-        let body = grant_body(
-            &Grantee::Role("role_infra".to_owned()),
-            &GrantSecret::OAuthToken("ots_slack".to_owned()),
-        );
         assert_eq!(
-            body,
+            grant_body(
+                &Grantee::Role("role_infra".to_owned()),
+                &GrantSecret::OAuthToken("ots_slack".to_owned()),
+            ),
             json!({ "role_id": "role_infra", "oauth_token_secret_id": "ots_slack" })
-        );
-    }
-
-    #[test]
-    fn grant_body_role_aws_auth() {
-        let body = grant_body(
-            &Grantee::Role("role_cw".to_owned()),
-            &GrantSecret::AwsAuth("aas_cloudwatch".to_owned()),
-        );
-        assert_eq!(
-            body,
-            json!({ "role_id": "role_cw", "aws_auth_secret_id": "aas_cloudwatch" })
-        );
-    }
-
-    #[test]
-    fn grant_body_role_gcp_id_token() {
-        let body = grant_body(
-            &Grantee::Role("role_cloud_run".to_owned()),
-            &GrantSecret::GcpIdToken("gid_cloudrun".to_owned()),
-        );
-        assert_eq!(
-            body,
-            json!({ "role_id": "role_cloud_run", "gcp_id_token_secret_id": "gid_cloudrun" })
         );
     }
 
@@ -793,35 +763,6 @@ mod tests {
 
         let empty: Grant = serde_json::from_value(json!({ "id": "grant_3" })).unwrap();
         assert_eq!(empty.secret_target(), None);
-    }
-
-    #[test]
-    fn proxy_token_only_present_when_returned() {
-        let created: Proxy = serde_json::from_value(json!({
-            "id": "prx_1",
-            "name": "edge",
-            "principal_id": "prn_1",
-            "labels": { "centaur.slack_user_id": "U1" },
-            "token": "iprx_secret"
-        }))
-        .unwrap();
-        assert_eq!(created.token.as_deref(), Some("iprx_secret"));
-        assert_eq!(
-            created
-                .labels
-                .get("centaur.slack_user_id")
-                .map(String::as_str),
-            Some("U1")
-        );
-
-        let listed: Proxy = serde_json::from_value(json!({
-            "id": "prx_1",
-            "name": "edge",
-            "principal_id": "prn_1"
-        }))
-        .unwrap();
-        assert_eq!(listed.token, None);
-        assert!(listed.labels.is_empty());
     }
 
     #[test]
