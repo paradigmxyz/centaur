@@ -485,7 +485,14 @@ mod tests {
 
     #[tokio::test]
     async fn preapproved_session_rejects_a_missing_principal_without_writing() {
-        let (base_url, requests, server) = spawn_iron_control_stub().await;
+        let (base_url, requests, server) = spawn_iron_control_stub(|method, _| match method {
+            "GET" => not_found(),
+            _ => (
+                "500 Internal Server Error",
+                r#"{"error":"unexpected"}"#.to_owned(),
+            ),
+        })
+        .await;
         let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
         let metadata = json!({
             "slack_user_id": "U123",
@@ -507,9 +514,119 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .all(|request| request.starts_with("GET ")),
+                .all(|request| request.method == "GET"),
             "preapproved admission must not write to iron-control"
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn existing_dm_principal_refreshes_its_permission_on_the_upserted_record() {
+        // The lookup and upsert answer with different ids, so the permission
+        // write shows which record it was bound to.
+        let (base_url, requests, server) =
+            spawn_iron_control_stub(|method, path| match (method, path) {
+                ("GET", "/api/v1/principals/lookup/slack-user-t123-u123") => {
+                    principal("prn_looked_up", "slack-user-t123-u123", json!({}))
+                }
+                ("PUT", "/api/v1/principals/slack-user-t123-u123") => {
+                    principal("prn_upserted", "slack-user-t123-u123", json!({}))
+                }
+                ("POST", "/api/v1/principals/prn_upserted/slack_channel_permissions") => {
+                    ("200 OK", r#"{"data":{"ok":true}}"#.to_owned())
+                }
+                _ => not_found(),
+            })
+            .await;
+        let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+
+        let record = registrar
+            .register_session(
+                "slack:T123:D123:1773364194.179929",
+                Some(&json!({"slack_user_id": "U123", "slack_team_id": "T123"})),
+            )
+            .await
+            .expect("register DM session");
+
+        assert_eq!(record.id, "prn_upserted");
+        let permission = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|request| request.path.ends_with("/slack_channel_permissions"))
+            .and_then(|request| request.body.clone())
+            .expect("DM permission is written");
+        assert_eq!(
+            permission["data"],
+            json!({
+                "channel_id": "D123",
+                "upload_enabled": true,
+                "download_enabled": true,
+                "history_enabled": true
+            })
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn unknown_console_requester_is_an_error_not_an_omitted_requester() {
+        let (base_url, _requests, server) = spawn_iron_control_stub(|_, _| not_found()).await;
+        let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+
+        let error = registrar
+            .register_requester(
+                "console:9f1b7a3c-2d4e-4f6a-8b0c-1d2e3f4a5b6c",
+                Some(&json!({"requester_principal_foreign_id": "console-user-ghost"})),
+            )
+            .await
+            .expect_err("a console requester the console never provisioned must fail");
+
+        assert!(is_status(&error, 404), "{error:?}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn channel_requester_upsert_keeps_existing_labels_and_sets_email() {
+        let (base_url, requests, server) =
+            spawn_iron_control_stub(|method, path| match (method, path) {
+                ("GET", "/api/v1/principals/lookup/slack-user-t123-u123") => principal(
+                    "prn_user",
+                    "slack-user-t123-u123",
+                    json!({"team": "finance"}),
+                ),
+                ("PUT", "/api/v1/principals/slack-user-t123-u123") => {
+                    principal("prn_user", "slack-user-t123-u123", json!({}))
+                }
+                _ => not_found(),
+            })
+            .await;
+        let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+
+        let requester = registrar
+            .register_requester(
+                "slack:T123:C123:1773364194.179929",
+                Some(&json!({
+                    "slack_user_id": "U123",
+                    "slack_team_id": "T123",
+                    "slack_home_team_id": "T123",
+                    "slack_user_email": " ada@example.com "
+                })),
+            )
+            .await
+            .expect("register requester")
+            .expect("home-team channel requester resolves");
+
+        assert_eq!(requester.id, "prn_user");
+        let upsert = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|request| request.method == "PUT")
+            .and_then(|request| request.body.clone())
+            .expect("requester principal is upserted");
+        assert_eq!(upsert["data"]["slack_email"], "ada@example.com");
+        assert_eq!(upsert["data"]["labels"]["team"], "finance");
+        assert_eq!(upsert["data"]["labels"]["managed-by"], "centaur");
         server.abort();
     }
 
@@ -736,10 +853,34 @@ mod tests {
         );
     }
 
-    /// A stub iron-control API where no principal exists yet. `requests`
-    /// records `METHOD path` per call.
-    async fn spawn_iron_control_stub()
-    -> (String, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+    /// One request the stub received; `body` is the decoded JSON body, if any.
+    #[derive(Clone, Debug)]
+    struct StubRequest {
+        method: String,
+        path: String,
+        body: Option<Value>,
+    }
+
+    type StubResponder = fn(&str, &str) -> (&'static str, String);
+
+    /// A stub iron-control API answering with `respond(method, path)` and
+    /// recording every request it receives.
+    async fn spawn_iron_control_stub(
+        respond: StubResponder,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<StubRequest>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        fn content_length(headers: &str) -> usize {
+            headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, value)| value.trim().parse().ok())
+                .unwrap_or(0)
+        }
+
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -751,34 +892,53 @@ mod tests {
                 };
                 let mut request = Vec::new();
                 let mut buf = [0u8; 1024];
-                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                loop {
+                    let complete = request
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .is_some_and(|headers_end| {
+                            let headers = String::from_utf8_lossy(&request[..headers_end]);
+                            request.len() >= headers_end + 4 + content_length(&headers)
+                        });
+                    if complete {
+                        break;
+                    }
                     match stream.read(&mut buf).await {
                         Ok(0) | Err(_) => break,
                         Ok(read) => request.extend_from_slice(&buf[..read]),
                     }
                 }
                 let request = String::from_utf8_lossy(&request);
-                let mut parts = request
-                    .lines()
-                    .next()
-                    .unwrap_or_default()
-                    .split_whitespace();
-                let method = parts.next().unwrap_or_default();
-                let path = parts.next().unwrap_or_default();
-                seen.lock().unwrap().push(format!("{method} {path}"));
-                let (status_line, body) = if method == "GET" {
-                    ("404 Not Found", r#"{"error":"not found"}"#)
-                } else {
-                    ("500 Internal Server Error", r#"{"error":"unexpected"}"#)
-                };
+                let (head, body) = request.split_once("\r\n\r\n").unwrap_or((&request, ""));
+                let mut parts = head.lines().next().unwrap_or_default().split_whitespace();
+                let method = parts.next().unwrap_or_default().to_owned();
+                let path = parts.next().unwrap_or_default().to_owned();
+                let (status_line, response_body) = respond(&method, &path);
+                seen.lock().unwrap().push(StubRequest {
+                    method,
+                    path,
+                    body: serde_json::from_str(body).ok(),
+                });
                 let response = format!(
-                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len(),
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len(),
                 );
                 let _ = stream.write_all(response.as_bytes()).await;
                 let _ = stream.shutdown().await;
             }
         });
         (base_url, requests, handle)
+    }
+
+    fn not_found() -> (&'static str, String) {
+        ("404 Not Found", r#"{"error":"not found"}"#.to_owned())
+    }
+
+    fn principal(id: &str, foreign_id: &str, labels: Value) -> (&'static str, String) {
+        (
+            "200 OK",
+            json!({"data": {"id": id, "foreign_id": foreign_id, "name": "stub", "labels": labels}})
+                .to_string(),
+        )
     }
 }
