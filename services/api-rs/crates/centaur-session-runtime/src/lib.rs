@@ -94,6 +94,8 @@ type SandboxArtifactReader = Arc<
 type SessionInputSink = FramedWrite<SandboxWrite, LinesCodec>;
 type ExecutionSpanRegistry = Arc<Mutex<HashMap<String, Span>>>;
 type SessionPipeMap = Arc<DashMap<String, SessionPipe>>;
+/// Executions this process has claimed but not yet written to a sandbox.
+type DispatchingExecutions = Arc<DashSet<String>>;
 type SessionPipeOpenLocks = Arc<DashMap<String, Arc<Mutex<()>>>>;
 type ToolHostCallLocks = Arc<DashMap<String, Arc<Mutex<()>>>>;
 type SessionTitleThreadSet = Arc<DashSet<ThreadKey>>;
@@ -164,6 +166,7 @@ pub struct SessionRuntime {
     sandbox_runtime: SandboxRuntime,
     sandbox_pipes: SessionPipeMap,
     sandbox_pipe_open_locks: SessionPipeOpenLocks,
+    dispatching_executions: DispatchingExecutions,
     tool_host_call_locks: ToolHostCallLocks,
     execution_spans: ExecutionSpanRegistry,
     iron_control: Arc<dyn SessionPrincipalRegistrar>,
@@ -588,6 +591,7 @@ struct RuntimeContext {
     store: PgSessionStore,
     manager: Arc<SandboxManager>,
     sandbox_pipes: SessionPipeMap,
+    dispatching_executions: DispatchingExecutions,
     execution_spans: ExecutionSpanRegistry,
     stdout_owner_id: String,
 }
@@ -745,6 +749,7 @@ impl SessionRuntime {
             sandbox_runtime,
             sandbox_pipes: Arc::new(DashMap::new()),
             sandbox_pipe_open_locks: Arc::new(DashMap::new()),
+            dispatching_executions: Arc::new(DashSet::new()),
             tool_host_call_locks: Arc::new(DashMap::new()),
             execution_spans: Arc::new(Mutex::new(HashMap::new())),
             iron_control: Arc::new(iron_control),
@@ -830,6 +835,7 @@ impl SessionRuntime {
             store: self.store.clone(),
             manager: self.sandbox_runtime.manager.clone(),
             sandbox_pipes: self.sandbox_pipes.clone(),
+            dispatching_executions: self.dispatching_executions.clone(),
             execution_spans: self.execution_spans.clone(),
             stdout_owner_id: self.stdout_owner_id.clone(),
         }
@@ -2193,6 +2199,10 @@ impl SessionRuntime {
                     .await;
                 return Err(error);
             }
+            // Until its input reaches a sandbox, this execution belongs to this
+            // dispatch, not to a stdout pump left over from an earlier turn.
+            let dispatching =
+                DispatchingExecution::new(&self.dispatching_executions, &execution.execution_id);
             drop(admission);
             let execution_trace_span = info_span!(
                 parent: None,
@@ -2320,6 +2330,7 @@ impl SessionRuntime {
                     .await;
                 return Err(error);
             }
+            drop(dispatching);
 
             if let Some(max_duration) = max_duration {
                 spawn_max_duration_failure(
@@ -4502,6 +4513,28 @@ fn spawn_stderr_drain(sandbox_id: String, stderr: SandboxRead) {
     });
 }
 
+/// Marks an execution as being dispatched for as long as it lives.
+struct DispatchingExecution {
+    executions: DispatchingExecutions,
+    execution_id: String,
+}
+
+impl DispatchingExecution {
+    fn new(executions: &DispatchingExecutions, execution_id: &str) -> Self {
+        executions.insert(execution_id.to_owned());
+        Self {
+            executions: executions.clone(),
+            execution_id: execution_id.to_owned(),
+        }
+    }
+}
+
+impl Drop for DispatchingExecution {
+    fn drop(&mut self) {
+        self.executions.remove(&self.execution_id);
+    }
+}
+
 fn remove_pipe_if_current(sandbox_pipes: &SessionPipeMap, sandbox_id: &str, pipe: &SessionPipe) {
     sandbox_pipes.remove_if(sandbox_id, |_sandbox_id, current| {
         Arc::ptr_eq(&current.stdin, &pipe.stdin)
@@ -4557,6 +4590,24 @@ fn spawn_stdout_pump_loop(state: StdoutPumpLoop) {
                     break;
                 }
             };
+
+            // The thread's active execution may not have reached this sandbox yet:
+            // a turn arriving just after the sandbox died is still queued or in
+            // its own dispatch, which resumes or replaces the sandbox and opens a
+            // fresh pipe. This dead stream is not that execution's to fail.
+            if execution.status == ExecutionStatus::Queued
+                || ctx.dispatching_executions.contains(&execution.execution_id)
+            {
+                info!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "session_stdout_pump_closed_during_dispatch",
+                    thread_key = %thread_key,
+                    sandbox_id = %sandbox_id,
+                    execution_id = %execution.execution_id,
+                    "sandbox stdout closed before the active execution was dispatched to it"
+                );
+                break;
+            }
 
             if recover_detached_terminal_output(&ctx, &thread_key, &sandbox_id, &execution)
                 .await
@@ -11341,6 +11392,68 @@ mod adoption_tests {
                 .as_str()
                 .is_some_and(|error| error.contains("sandbox instance changed")),
             "replacement should fail rather than inherit the active execution"
+        );
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stdout_eof_leaves_an_execution_still_being_dispatched_alone() {
+        stdout_eof_leaves_an_undelivered_execution_alone(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stdout_eof_leaves_a_queued_execution_alone() {
+        stdout_eof_leaves_an_undelivered_execution_alone(false).await;
+    }
+
+    /// The next turn has not reached a sandbox (it is queued, or claimed and
+    /// still dispatching) when the earlier turn's sandbox is replaced and its
+    /// stdout closes. The dead stream must not fail that turn.
+    async fn stdout_eof_leaves_an_undelivered_execution_alone(claimed: bool) {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:eof-undelivered-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id =
+            orphaned_execution(&store, &thread_key, Some("sbx-undelivered"), claimed).await;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let (io, stdout, _stdin) = mock_io();
+        backend.push_io(io).await;
+        let runtime = runtime_with(&store, backend.clone());
+        let dispatching = claimed
+            .then(|| DispatchingExecution::new(&runtime.dispatching_executions, &execution_id));
+        // The dispatch holds stdout ownership by the time the pump would fail
+        // the execution, even when the pump found it still queued.
+        claim_test_stdout_owner(&runtime, &execution_id).await;
+        runtime
+            .ensure_session_pipe(&thread_key, "sbx-undelivered")
+            .await
+            .expect("open the earlier turn's pipe");
+        backend.set_instance_id("replacement-instance");
+        drop(stdout);
+
+        wait_for_event(&store, &thread_key, "session.stdout_eof").await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runtime.sandbox_pipes.contains_key("sbx-undelivered") {
+            assert!(Instant::now() < deadline, "the dead pipe should be dropped");
+            sleep(Duration::from_millis(25)).await;
+        }
+        drop(dispatching);
+        let execution = store
+            .latest_execution_for_thread(&thread_key)
+            .await
+            .expect("load execution")
+            .expect("execution exists");
+        assert_ne!(execution.status, ExecutionStatus::Failed);
+        assert!(
+            !events(&store, &thread_key)
+                .await
+                .iter()
+                .any(|event| event.event_type == "session.execution_failed"),
+            "the dead stream must not fail an execution it never carried"
         );
         reset_test_store(&store).await;
     }
