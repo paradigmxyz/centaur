@@ -13,7 +13,6 @@
 | 1. Internal API | ⬜ | |
 | 2. HTTP edge | ⬜ | |
 | 3a. Slackbot | ⬜ | |
-| 3b. Web App | ⬜ | |
 
 ---
 
@@ -88,17 +87,11 @@
 
 ---
 
-## Layer 3b: Web App
-
-See dogfood report: `{OUTPUT_DIR}/dogfood-report.md`
-
----
-
 ## Issues Found
 
 ### {Issue title}
 
-- **Layer:** {1 / 2 / 3a / 3b}
+- **Layer:** {1 / 2 / 3a}
 - **Request:** {what was called}
 - **Error:** {error message}
 - **Root cause:** {analysis}
