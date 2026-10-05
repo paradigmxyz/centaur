@@ -101,7 +101,8 @@ cargo test --manifest-path ../../crates/absurd-sdk/Cargo.toml
 
 Sandbox lifecycle, session handoff, and harness selection are covered end to
 end by the repository's `e2e/` suite (`e2e/stack.sh up`, then
-`e2e/stack.sh test`), which runs the chart on a dedicated Kind cluster.
+`e2e/stack.sh test`), which deploys the chart to dedicated namespaces on the
+host's k3s.
 
 For an API contract or runtime change, also build the API image, deploy to the local
 stack, drive a real session through create/append/execute/events, and verify the

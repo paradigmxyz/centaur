@@ -57,4 +57,4 @@ spec:
     - name: http
       port: 443
       targetPort: http
-      nodePort: 30443 # reached by the test runner via e2e/infra/kind.yaml
+      nodePort: 30443 # reached by the test runner

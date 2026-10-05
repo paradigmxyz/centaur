@@ -64,7 +64,7 @@ spec:
       port: 443
       targetPort: https
 ---
-# The control API, reached by the test runner through e2e/infra/kind.yaml.
+# The control API, reached by the test runner through a NodePort.
 apiVersion: v1
 kind: Service
 metadata:
@@ -88,7 +88,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: e2e-iron-proxy-to-model-server
-  namespace: centaur
+  namespace: centaur-e2e
 spec:
   podSelector:
     matchLabels:

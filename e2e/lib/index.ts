@@ -78,7 +78,7 @@ const db = new SQL(required('E2E_DATABASE_URL'))
 const ironControlDb = new SQL(required('E2E_IRON_CONTROL_DATABASE_URL'))
 const apiUrl = required('E2E_API_URL')
 const apiKey = required('E2E_API_KEY')
-const namespace = 'centaur'
+const namespace = 'centaur-e2e'
 const release = 'centaur'
 
 /** Provider keys iron-proxy holds, as each harness's provider receives them. */

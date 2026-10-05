@@ -1,0 +1,11 @@
+# Rewrites that send the model providers' hostnames to the e2e model server.
+# e2e/stack.sh installs this as k3s's coredns-custom ConfigMap, which the
+# bundled Corefile imports into its default server block.
+rewrite stop {
+  name exact api.openai.com model-server.centaur-e2e-model.svc.cluster.local
+  answer name model-server.centaur-e2e-model.svc.cluster.local api.openai.com
+}
+rewrite stop {
+  name exact api.anthropic.com model-server.centaur-e2e-model.svc.cluster.local
+  answer name model-server.centaur-e2e-model.svc.cluster.local api.anthropic.com
+}
