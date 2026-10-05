@@ -1,6 +1,8 @@
 version: 2
 updates:
   - package-ecosystem: github-actions
+    cooldown:
+      default-days: 7
     directory: /
     schedule:
       interval: weekly
@@ -17,6 +19,8 @@ updates:
           - "*"
 
   - package-ecosystem: docker
+    cooldown:
+      default-days: 7
     directories:
       - /services/api-rs
       - /services/company-context
@@ -50,6 +54,8 @@ updates:
           - "*"
 
   - package-ecosystem: bundler
+    cooldown:
+      default-days: 7
     directory: /services/console
     schedule:
       interval: weekly
@@ -148,6 +154,8 @@ updates:
           - "*"
 
   - package-ecosystem: npm
+    cooldown:
+      default-days: 7
     directories:
       - /
       - /packages/*
@@ -175,6 +183,8 @@ updates:
           - "*"
 
   - package-ecosystem: npm
+    cooldown:
+      default-days: 7
     directory: /docs
     schedule:
       interval: weekly
