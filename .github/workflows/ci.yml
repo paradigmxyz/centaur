@@ -17,7 +17,7 @@ permissions:
 jobs:
   ci_changes:
     name: Detect CI changes
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     outputs:
       migration_order: ${{ steps.filter.outputs.migration_order }}
       harness_server_checks: ${{ steps.filter.outputs.harness_server_checks }}
@@ -179,7 +179,7 @@ jobs:
 
   migration-order:
     name: Migration order
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: depot-ubuntu-24.04
     needs: ci_changes
     if: needs.ci_changes.outputs.migration_order == 'true'
     steps:
@@ -438,7 +438,7 @@ jobs:
 
   sandbox-tests:
     name: Sandbox Python tests
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04-4
     needs: ci_changes
     if: needs.ci_changes.outputs.sandbox_tests == 'true'
     steps:
@@ -461,7 +461,7 @@ jobs:
 
   workflow-python-tests:
     name: Workflow Python tests
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04-4
     needs: ci_changes
     if: needs.ci_changes.outputs.workflow_python_tests == 'true'
     steps:
@@ -493,7 +493,7 @@ jobs:
 
   tool-tests:
     name: Tool tests
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04-4
     needs: ci_changes
     if: needs.ci_changes.outputs.tool_tests == 'true'
     steps:
@@ -544,7 +544,7 @@ jobs:
 
   linearbot-tests:
     name: Linearbot typecheck and tests
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04-16
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -674,7 +674,7 @@ jobs:
 
   ci-success:
     name: CI success
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     if: always()
     needs:
       - ci_changes
