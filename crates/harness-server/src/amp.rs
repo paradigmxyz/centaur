@@ -133,7 +133,11 @@ impl HarnessServer for AmpHarness {
             "--stream-json-input",
             "--stream-json-thinking",
             "--mode",
-            &state.model,
+            if state.model == "fast" {
+                "rush"
+            } else {
+                &state.model
+            },
         ]);
         if let Ok(visibility) = env::var("AMP_THREAD_VISIBILITY")
             && !visibility.trim().is_empty()
@@ -216,12 +220,12 @@ fn amp_user_stdin(input: &[UserInput], steer: bool) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use codex_app_server_protocol::UserInput;
+    use std::path::PathBuf;
+
+    use codex_app_server_protocol::ThreadStartParams;
     use serde_json::Value;
 
-    use crate::HarnessServer;
-
-    use super::AmpHarness;
+    use super::*;
 
     #[test]
     fn turn_stdin_is_plain_user_message() {
@@ -253,5 +257,35 @@ mod tests {
         assert_eq!(value["steer"], true);
         assert_eq!(value["message"]["role"], "user");
         assert_eq!(value["message"]["content"][0]["text"], "new guidance");
+    }
+
+    #[test]
+    fn fast_alias_uses_native_rush_mode_and_preserves_resume() {
+        for (model, expected) in [
+            ("fast", "rush"),
+            ("rush", "rush"),
+            ("deep", "deep"),
+            ("smart", "smart"),
+        ] {
+            let mut state = AmpHarness.thread_state(
+                &ThreadStartParams {
+                    model: Some(model.to_owned()),
+                    ..Default::default()
+                },
+                PathBuf::from("/tmp"),
+            );
+            state.harness_session_id = Some("T-resume".to_owned());
+            let command = AmpHarness.command_for_turn(&state);
+            let args = command
+                .get_args()
+                .map(|arg| arg.to_str().unwrap())
+                .collect::<Vec<_>>();
+            let mode = args.iter().position(|arg| *arg == "--mode").unwrap();
+            assert_eq!(args[mode + 1], expected);
+            assert_eq!(
+                &args[args.len() - 3..],
+                &["threads", "continue", "T-resume"]
+            );
+        }
     }
 }
