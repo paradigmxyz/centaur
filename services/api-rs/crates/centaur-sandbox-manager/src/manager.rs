@@ -1,47 +1,20 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use centaur_sandbox_core::{
-    DesiredSandboxState, ObservedSandbox, SandboxBackend, SandboxHandle, SandboxId, SandboxIo,
-    SandboxResult, SandboxSpec, SandboxStatus,
+    ObservedSandbox, SandboxBackend, SandboxHandle, SandboxId, SandboxIo, SandboxResult,
+    SandboxSpec, SandboxStatus,
 };
 use centaur_telemetry::{record_sandbox_operation, record_sandbox_startup_duration};
 use tokio::time::Instant;
 use tracing::{Instrument, error, info, info_span};
 
-use crate::{
-    DesiredStateStore, DriftReason, InMemoryDesiredStateStore, ReconcileAction, ReconcileOutcome,
-    ReconcilePlan,
-};
-
-pub struct SandboxManager<S = InMemoryDesiredStateStore> {
+pub struct SandboxManager {
     backend: Arc<dyn SandboxBackend>,
-    store: S,
 }
 
-impl SandboxManager<InMemoryDesiredStateStore> {
+impl SandboxManager {
     pub fn new(backend: Arc<dyn SandboxBackend>) -> Self {
-        Self::with_store(backend, InMemoryDesiredStateStore::new())
-    }
-}
-
-impl<S> SandboxManager<S>
-where
-    S: DesiredStateStore,
-{
-    pub fn with_store(backend: Arc<dyn SandboxBackend>, store: S) -> Self {
-        Self { backend, store }
-    }
-
-    pub fn desired_state(&self, id: &SandboxId) -> Option<DesiredSandboxState> {
-        self.store.get(id)
-    }
-
-    pub fn set_desired_state(&self, id: SandboxId, state: DesiredSandboxState) {
-        self.store.set(id, state);
-    }
-
-    pub fn desired_states(&self) -> Vec<(SandboxId, DesiredSandboxState)> {
-        self.store.list()
+        Self { backend }
     }
 
     pub async fn create_running(&self, spec: SandboxSpec) -> SandboxResult<SandboxHandle> {
@@ -63,7 +36,7 @@ where
                 backend,
                 "creating sandbox"
             );
-            let handle = match self.backend.create(spec.clone()).await {
+            let handle = match self.backend.create(spec).await {
                 Ok(handle) => handle,
                 Err(error) => {
                     let startup_duration = started_at.elapsed();
@@ -84,8 +57,6 @@ where
             span.record("centaur.sandbox_id", handle.id.as_str());
             span.record("sandbox_id", handle.id.as_str());
             let startup_duration = started_at.elapsed();
-            self.store
-                .set(handle.id.clone(), DesiredSandboxState::Running(spec));
             record_sandbox_operation(backend, "create", "success");
             record_sandbox_startup_duration(backend, "success", startup_duration);
             info!(
@@ -188,12 +159,6 @@ where
                 return Err(error);
             }
         }
-        if let Some(DesiredSandboxState::Running(spec) | DesiredSandboxState::Suspended(spec)) =
-            self.store.get(id)
-        {
-            self.store
-                .set(id.clone(), DesiredSandboxState::Suspended(spec));
-        }
         Ok(())
     }
 
@@ -205,12 +170,6 @@ where
                 record_sandbox_operation(backend, "resume", "error");
                 return Err(error);
             }
-        }
-        if let Some(DesiredSandboxState::Running(spec) | DesiredSandboxState::Suspended(spec)) =
-            self.store.get(id)
-        {
-            self.store
-                .set(id.clone(), DesiredSandboxState::Running(spec));
         }
         Ok(())
     }
@@ -225,7 +184,6 @@ where
                     return Err(error);
                 }
             }
-            self.store.set(id.clone(), DesiredSandboxState::Stopped);
             info!(
                 component = "sandbox_manager",
                 event = "sandbox_stop_completed",
@@ -269,83 +227,8 @@ where
             .ensure_iron_control_proxy_resources(id, principal_id, requester_principal_id, labels)
             .await
     }
-
-    pub async fn reconcile_one(&self, id: &SandboxId) -> SandboxResult<ReconcileOutcome> {
-        let Some(desired) = self.store.get(id) else {
-            return Ok(ReconcileOutcome::Drift(DriftReason::NoDesiredState));
-        };
-        let observed = self.backend.observe(id).await?;
-        let plan = ReconcilePlan::for_state(&desired, &observed);
-        self.apply_plan(id, plan).await
-    }
-
-    async fn apply_plan(
-        &self,
-        id: &SandboxId,
-        plan: ReconcilePlan,
-    ) -> SandboxResult<ReconcileOutcome> {
-        let backend = self.backend.name();
-        match plan.action {
-            ReconcileAction::None => Ok(ReconcileOutcome::Noop),
-            ReconcileAction::Pause => {
-                match self.backend.pause(id).await {
-                    Ok(()) => record_sandbox_operation(backend, "pause", "success"),
-                    Err(error) => {
-                        record_sandbox_operation(backend, "pause", "error");
-                        return Err(error);
-                    }
-                }
-                Ok(ReconcileOutcome::Paused)
-            }
-            ReconcileAction::Resume => {
-                match self.backend.resume(id).await {
-                    Ok(()) => record_sandbox_operation(backend, "resume", "success"),
-                    Err(error) => {
-                        record_sandbox_operation(backend, "resume", "error");
-                        return Err(error);
-                    }
-                }
-                Ok(ReconcileOutcome::Resumed)
-            }
-            ReconcileAction::Stop => {
-                match self.backend.stop(id).await {
-                    Ok(()) => record_sandbox_operation(backend, "stop", "success"),
-                    Err(error) => {
-                        record_sandbox_operation(backend, "stop", "error");
-                        return Err(error);
-                    }
-                }
-                Ok(ReconcileOutcome::Stopped)
-            }
-            ReconcileAction::ReportDrift(reason) => Ok(ReconcileOutcome::Drift(reason)),
-        }
-    }
-
-    pub async fn reconcile_all(&self) -> SandboxResult<Vec<ManagedSandbox>> {
-        let mut reconciled = Vec::new();
-        for (id, desired) in self.store.list() {
-            let observed = self.backend.observe(&id).await?;
-            let plan = ReconcilePlan::for_state(&desired, &observed);
-            let outcome = self.apply_plan(&id, plan).await?;
-            reconciled.push(ManagedSandbox {
-                id,
-                desired,
-                observed,
-                outcome,
-            });
-        }
-        Ok(reconciled)
-    }
 }
 
 fn duration_millis_u64(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ManagedSandbox {
-    pub id: SandboxId,
-    pub desired: DesiredSandboxState,
-    pub observed: ObservedSandbox,
-    pub outcome: ReconcileOutcome,
 }
