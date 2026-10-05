@@ -260,7 +260,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: E2E scenarios
+          - name: e2e
             auth-mode: api_key
             tests: ""
           - name: e2e-subscription-harnesses
