@@ -245,7 +245,7 @@ jobs:
         run: |
           docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ steps.meta.outputs.version }}
 
-  # Deploys the images just published to a kind cluster and runs the e2e/
+  # Deploys the images just published to k3s on the runner and runs the e2e/
   # scenarios: real control plane, sandboxes, and harnesses against a fake
   # Slack and a scripted model server. Informational; not a required check.
   e2e:
@@ -263,10 +263,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
-        with:
-          install_only: true
-          version: v0.30.0
+      # NodePorts stay on localhost; e2e/stack.sh expects k3s to be installed.
+      - name: Install k3s
+        env:
+          INSTALL_K3S_VERSION: v1.36.5+k3s1
+          INSTALL_K3S_EXEC: >-
+            --disable traefik --disable servicelb --disable metrics-server
+            --kube-proxy-arg=nodeport-addresses=127.0.0.0/8
+        run: |
+          curl -sfL https://get.k3s.io | sh -
+          timeout 120 bash -c 'until sudo k3s kubectl wait --for=condition=Ready node --all --timeout=5s 2> /dev/null; do sleep 2; done'
 
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
@@ -276,7 +282,7 @@ jobs:
         run: CENTAUR_E2E_IMAGE_TAG="sha-${HEAD_SHA::7}" e2e/stack.sh up
 
       - name: Run e2e scenarios
-        run: e2e/stack.sh test
+        run: CENTAUR_E2E_CONCURRENCY=8 e2e/stack.sh test
 
       - name: Dump diagnostics
         if: ${{ failure() }}
