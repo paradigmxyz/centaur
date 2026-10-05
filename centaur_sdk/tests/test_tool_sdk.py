@@ -7,6 +7,7 @@ import pytest
 
 from centaur_sdk import (
     ToolContext,
+    company_context_database_url,
     current_chat_destination,
     current_discord_thread,
     current_github_thread,
@@ -455,3 +456,38 @@ async def test_get_sync_uses_background_thread_inside_running_loop():
     assert backend.get_sync("TOKEN") == "inside-loop"
     assert len(backend.get_thread_ids) == 1
     assert backend.get_thread_ids[0] != caller_thread_id
+
+
+def test_company_context_database_url_defaults_to_ai_v2(monkeypatch):
+    monkeypatch.delenv("COMPANY_CONTEXT_POSTGRES_DATABASE", raising=False)
+
+    assert company_context_database_url("postgresql://u:p@proxy:5432") == (
+        "postgresql://u:p@proxy:5432/ai_v2"
+    )
+
+
+def test_company_context_database_url_honors_database_override(monkeypatch):
+    monkeypatch.setenv("COMPANY_CONTEXT_POSTGRES_DATABASE", "centaur")
+
+    assert company_context_database_url("postgresql://proxy/") == "postgresql://proxy/centaur"
+
+
+def test_company_context_database_url_uses_default_for_blank_override(monkeypatch):
+    monkeypatch.setenv("COMPANY_CONTEXT_POSTGRES_DATABASE", " ")
+
+    assert company_context_database_url("postgresql://proxy") == "postgresql://proxy/ai_v2"
+
+
+def test_company_context_database_url_keeps_explicit_database():
+    assert company_context_database_url("postgresql://proxy/other") == "postgresql://proxy/other"
+
+
+def test_company_context_database_url_reads_dsn_env(monkeypatch):
+    monkeypatch.setenv("CENTAUR_POSTGRES_DSN", "postgresql://scoped")
+    monkeypatch.delenv("COMPANY_CONTEXT_POSTGRES_DATABASE", raising=False)
+
+    assert company_context_database_url() == "postgresql://scoped/ai_v2"
+
+
+def test_company_context_database_url_ignores_unresolved_placeholder():
+    assert company_context_database_url("CENTAUR_POSTGRES_DSN") == ""

@@ -105,8 +105,6 @@ DATABASE_TEXT_SEARCH=postgres \
 BIND_ADDR=0.0.0.0:8080 \
 SESSION_SANDBOX_K8S_CONTEXT=kind-centaur-api-rs-e2e \
 SESSION_SANDBOX_K8S_NAMESPACE=centaur-sandbox-e2e \
-SESSION_SANDBOX_BACKEND=agent-k8s \
-SESSION_SANDBOX_WORKLOAD=codex-app-server \
 SESSION_SANDBOX_IMAGE=centaur-agent:latest \
 SESSION_SANDBOX_IMAGE_PULL_POLICY=IfNotPresent \
 KUBERNETES_SANDBOX_IRON_PROXY_MODE=enabled \
@@ -279,7 +277,7 @@ For non-TUI interactive input, add `--stdin-events`. Lines are messages by defau
 
 1. Mention the Slack app in the configured workspace/channel.
 2. Confirm Slackbot logs show `slackbotv2_forward_started`.
-3. Confirm api-rs logs show session creation/execution and no mock workload.
+3. Confirm api-rs logs show session creation/execution.
 4. Confirm Kind created an Agent Sandbox:
 
 ```bash
@@ -290,16 +288,15 @@ kubectl --context kind-centaur-api-rs-e2e -n centaur-sandbox-e2e get sandboxes,p
 
 ## Troubleshooting
 
-- Mock output instead of Codex: restart api-rs with `SESSION_SANDBOX_BACKEND=agent-k8s` and `SESSION_SANDBOX_WORKLOAD=codex-app-server`.
 - Sandbox cannot call API/tools: verify `SANDBOX_HOST_API_URL` from inside a Kind pod and restart api-rs with the working value in `SESSION_SANDBOX_CENTAUR_API_URL`.
 - Agent or iron-proxy image pull failure after changing images: rebuild and run `KIND_E2E_FORCE_IMAGE_LOAD=1 just kind-e2e-load-images`; keep `SESSION_SANDBOX_IMAGE_PULL_POLICY=IfNotPresent` and `KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY=IfNotPresent`.
 - Iron-proxy missing CA: rerun `CENTAUR_NAMESPACE=centaur-sandbox-e2e just bootstrap-secrets` and verify `centaur-firewall-ca` plus `centaur-firewall-ca-key` exist.
 - Model auth failure: check api-rs sandbox env says `CODEX_AUTH_MODE=api_key`, iron-proxy is enabled, and `FIREWALL_MANAGER_SECRET_SOURCE=onepassword` has the expected `OP_SERVICE_ACCOUNT_TOKEN`/`OP_VAULT` in `centaur-infra-env`.
 - Slack does not reach the bot: `tailscale funnel status`, Slack Request URL must end in `/api/webhooks/slack`, and `SLACK_SIGNING_SECRET` must match the app.
 - Slackbot receives events but does not stream: check `SLACKBOTV2_DATABASE_URL`, Slack `assistant:write` scope, and `chat.startStream`/`chat.appendStream` errors in Slackbot logs.
-- Re-run sandbox invariant tests when changing sandbox/runtime behavior:
+- Re-run the end-to-end suite when changing sandbox/runtime behavior:
 
 ```bash
-cd services/api-rs
-just e2e-kind
+e2e/stack.sh up
+e2e/stack.sh test
 ```

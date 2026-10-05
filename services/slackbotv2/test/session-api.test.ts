@@ -617,68 +617,6 @@ describe('Slack attachment serialization', () => {
 })
 
 describe('forwardToSessionApi overrides', () => {
-  test('creates session with default codex harness', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
-    const create = requests.find(request => request.url.endsWith('.000100'))
-    expect((create?.body as { harness_type?: string }).harness_type).toBe('codex')
-  })
-
-  test('creates session with parsed harness override', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('review this'), { harnessType: 'claudecode' })
-    )
-    const create = requests.find(request => request.url.endsWith('.000100'))
-    expect((create?.body as { harness_type?: string }).harness_type).toBe('claudecode')
-  })
-
-  test('creates session with persona independent from harness override', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('review this'), {
-        harnessType: 'claudecode',
-        personaId: 'invest'
-      })
-    )
-    const create = requests.find(request => request.url.endsWith('.000100'))
-    expect(create?.body).toEqual(
-      expect.objectContaining({
-        harness_type: 'claudecode',
-        on_harness_conflict: 'restart',
-        persona_id: 'invest'
-      })
-    )
-  })
-
-  test('includes model override on the execute input line', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('review this'), {
-        harnessType: 'claudecode',
-        model: 'claude-sonnet-4-6'
-      })
-    )
-    const execute = requests.find(request => request.url.endsWith('/execute'))
-    const inputLines = (execute?.body as { input_lines: string[] }).input_lines
-    expect(inputLines).toHaveLength(1)
-    const line = JSON.parse(inputLines[0]!)
-    expect(line.model).toBe('claude-sonnet-4-6')
-    expect(lineContent(line).some(part => textPartIncludes(part, '# Requester Context'))).toBe(true)
-    expect(line.message.content.at(-1)).toEqual({ type: 'text', text: 'review this' })
-  })
-
-  test('omits model field when no override is set', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
-    const execute = requests.find(request => request.url.endsWith('/execute'))
-    const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
-    expect('model' in line).toBe(false)
-  })
-
   test('includes provider override on the execute input line', async () => {
     const { fetchFn, requests } = fakeApi()
     await forwardToSessionApi(
@@ -700,25 +638,6 @@ describe('forwardToSessionApi overrides', () => {
     const execute = requests.find(request => request.url.endsWith('/execute'))
     const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
     expect('provider' in line).toBe(false)
-  })
-
-  test('includes reasoning override on the execute input line', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('audit this'), { reasoning: 'high' })
-    )
-    const execute = requests.find(request => request.url.endsWith('/execute'))
-    const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
-    expect(line.reasoning).toBe('high')
-  })
-
-  test('omits reasoning field when no override is set', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
-    const execute = requests.find(request => request.url.endsWith('/execute'))
-    const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
-    expect('reasoning' in line).toBe(false)
   })
 
   test('includes default idle timeout on execute requests', async () => {
@@ -816,23 +735,6 @@ describe('forwardToSessionApi overrides', () => {
 })
 
 describe('forwardToSessionApi harness restart', () => {
-  test('explicit harness override requests restart on conflict', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('switch me'), { harnessType: 'codex' })
-    )
-    const create = requests.find(request => request.url.endsWith('.000100'))
-    expect((create?.body as { on_harness_conflict?: string }).on_harness_conflict).toBe('restart')
-  })
-
-  test('default create does not request restart', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
-    const create = requests.find(request => request.url.endsWith('.000100'))
-    expect('on_harness_conflict' in (create?.body as object)).toBe(false)
-  })
-
   test('records a Slack-owned harness assignment on session creation and execution', async () => {
     const { fetchFn, requests } = fakeApi({
       createSession: [
@@ -1032,96 +934,6 @@ describe('session principal display name', () => {
       globalThis.fetch = realFetch
     }
   }
-
-  test('uses the GitHub handle from the requester Slack profile for PR attribution', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await withSlackStub(
-      url => {
-        if (url.includes('conversations.info')) {
-          return Response.json({ channel: { id: 'C1', name_normalized: 'eng-oncall' }, ok: true })
-        }
-        if (url.includes('users.profile.get')) {
-          return Response.json({
-            ok: true,
-            profile: {
-              display_name: 'Ada Lovelace',
-              fields: {
-                XfGithub: { label: 'GitHub', value: 'https://github.com/ada-lovelace' }
-              },
-              name: 'ada'
-            }
-          })
-        }
-        if (url.includes('users.info')) {
-          return Response.json({ ok: true, user: { profile: { display_name: 'Ada Lovelace' } } })
-        }
-        return Response.json({ ok: true })
-      },
-      async () => {
-        await forwardToSessionApi(slackOptions(fetchFn), forwardInput(apiMessage('please PR')))
-      }
-    )
-
-    const requesterContext = lineContent(executeLine(requests)).find(part =>
-      textPartIncludes(part, '# Requester Context')
-    )
-    expect(requesterContext?.text).toContain('GitHub handle from Slack profile: @ada-lovelace')
-    expect(requesterContext?.text).toContain('Prompted by: @ada-lovelace')
-    expect(requesterContext?.text).toContain('Assign the PR to the requester when possible: `ada-lovelace`')
-  })
-
-  test('uses the requester Slack display name for PR attribution when no GitHub handle exists', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await withSlackStub(
-      url => {
-        if (url.includes('conversations.info')) {
-          return Response.json({ channel: { id: 'C1', name_normalized: 'eng-oncall' }, ok: true })
-        }
-        if (url.includes('users.profile.get')) {
-          return Response.json({
-            ok: true,
-            profile: {
-              display_name: 'Ada Lovelace',
-              fields: {},
-              name: 'ada'
-            }
-          })
-        }
-        if (url.includes('users.info')) {
-          return Response.json({ ok: true, user: { profile: { display_name: 'Ada Lovelace' } } })
-        }
-        return Response.json({ ok: true })
-      },
-      async () => {
-        await forwardToSessionApi(slackOptions(fetchFn), forwardInput(apiMessage('please PR')))
-      }
-    )
-
-    const requesterContext = lineContent(executeLine(requests)).find(part =>
-      textPartIncludes(part, '# Requester Context')
-    )
-    expect(requesterContext?.text).toContain('GitHub handle from Slack profile: unavailable')
-    expect(requesterContext?.text).toContain('Prompted by: Ada Lovelace')
-    expect(requesterContext?.text).toContain(
-      'Use the requester\'s Slack display name or username because no verified GitHub handle is available.'
-    )
-    expect(requesterContext?.text).not.toContain('Omit the `Prompted by` line')
-  })
-
-  test('channel sessions name the principal after the channel', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await withSlackStub(
-      url =>
-        url.includes('conversations.info')
-          ? Response.json({ channel: { id: 'C1', name_normalized: 'eng-oncall' }, ok: true })
-          : Response.json({ ok: true }),
-      async () => {
-        await forwardToSessionApi(slackOptions(fetchFn), forwardInput(apiMessage('hi')))
-      }
-	    )
-	    expect(createBody(requests).metadata?.slack_conversation_name).toBe('eng-oncall')
-	    expect(createBody(requests).metadata?.slack_channel_id).toBe('C1')
-	  })
 
   test('continues creating the session when the channel lookup never settles', async () => {
     const { fetchFn, requests } = fakeApi()

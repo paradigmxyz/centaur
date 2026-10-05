@@ -258,6 +258,10 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
             post(interrupt_session_execution),
         )
         .route("/api/session/{thread_key}/events", get(stream_events))
+        .route(
+            "/api/session/{thread_key}/pause",
+            post(pause_session_sandbox),
+        )
         .route("/api/sandboxes/drain", post(drain_sandboxes))
         .merge(slack_proxy_router())
         .route("/api/workflows/schedules", get(list_workflow_schedules))
@@ -547,7 +551,10 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
         | (&Method::POST, "/api/session/{thread_key}/interrupt") => {
             capability(Capability::SessionsWrite)
         }
-        (&Method::POST, "/api/sandboxes/drain") => capability(Capability::SandboxesDrain),
+        (&Method::POST, "/api/sandboxes/drain")
+        | (&Method::POST, "/api/session/{thread_key}/pause") => {
+            capability(Capability::SandboxesDrain)
+        }
         (&Method::GET, "/api/workflows/schedules")
         | (&Method::GET, "/api/workflows/runs")
         | (&Method::GET, "/api/workflows/runs/{run_id}") => capability(Capability::WorkflowsRead),
@@ -862,6 +869,17 @@ async fn drain_sandboxes(
         "busy": report.busy,
         "failed": failed,
     })))
+}
+
+/// Pauses a session's sandbox now, as its idle timeout would; the next turn
+/// resumes it. An operator action, so it needs the sandbox-control capability.
+async fn pause_session_sandbox(
+    State(state): State<AppState>,
+    Path(raw_thread_key): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    let paused = state.runtime()?.pause_idle_session(&thread_key).await?;
+    Ok(Json(json!({ "ok": true, "paused": paused })))
 }
 
 async fn stream_events(

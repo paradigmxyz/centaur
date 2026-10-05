@@ -22,7 +22,7 @@ import structlog
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from centaur_sdk.tool_sdk import secret
+from centaur_sdk.tool_sdk import COMPANY_CONTEXT_DSN_ENV, company_context_database_url, secret
 
 # structlog so these lines render as JSON through the tool-server's
 # configure_structlog() pipeline, like the rest of the service's logs.
@@ -78,26 +78,11 @@ class IndexedSlackClient:
 
     _DEFAULT_LIMIT = 20
     _MAX_LIMIT = 50
-    _DSN_ENV = "CENTAUR_POSTGRES_DSN"
-    _DATABASE_ENV = "COMPANY_CONTEXT_POSTGRES_DATABASE"
-    _DEFAULT_DATABASE = "centaur"
 
     def __init__(self, database_url: str | None = None):
-        value = database_url
-        if value is None:
-            value = os.getenv(self._DSN_ENV)  # noqa: TID251
-        if value is None:
-            value = secret(self._DSN_ENV, default="")
-        value = value.strip()
-        if not value or value == self._DSN_ENV:
-            raise RuntimeError(f"{self._DSN_ENV} is not configured")
-
-        database = os.getenv(self._DATABASE_ENV, self._DEFAULT_DATABASE).strip()  # noqa: TID251
-        parsed = urllib.parse.urlparse(value)
-        if parsed.scheme and parsed.netloc and parsed.path in ("", "/"):
-            value = urllib.parse.urlunparse(
-                parsed._replace(path=f"/{database or self._DEFAULT_DATABASE}")
-            )
+        value = company_context_database_url(database_url)
+        if not value:
+            raise RuntimeError(f"{COMPANY_CONTEXT_DSN_ENV} is not configured")
         self.database_url = value
 
     async def _search_messages(

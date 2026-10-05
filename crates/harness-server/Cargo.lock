@@ -1726,6 +1726,7 @@ dependencies = [
  "codex-protocol",
  "codex-utils-absolute-path",
  "image",
+ "libc",
  "nanocodex",
  "opentelemetry",
  "opentelemetry-otlp",

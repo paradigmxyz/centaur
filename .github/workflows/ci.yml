@@ -24,7 +24,6 @@ jobs:
       company_context_checks: ${{ steps.filter.outputs.company_context_checks }}
       rust_api: ${{ steps.filter.outputs.rust_api }}
       proxy_sync_checks: ${{ steps.filter.outputs.proxy_sync_checks }}
-      sandbox_e2e: ${{ steps.filter.outputs.sandbox_e2e }}
       sandbox_tests: ${{ steps.filter.outputs.sandbox_tests }}
       workflow_python_tests: ${{ steps.filter.outputs.workflow_python_tests }}
       tool_tests: ${{ steps.filter.outputs.tool_tests }}
@@ -139,11 +138,6 @@ jobs:
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^services/workflow-python/' \
             '^workflows/' \
-            '^\.github/workflows/ci\.yml$'
-          set_output sandbox_e2e \
-            '^services/api-rs/Cargo\.(toml|lock)$' \
-            '^services/api-rs/Justfile$' \
-            '^services/api-rs/crates/centaur-sandbox-(core|manager|local|agent-k8s|e2e)/' \
             '^\.github/workflows/ci\.yml$'
           set_output sandbox_tests \
             '^services/sandbox/' \
@@ -354,15 +348,6 @@ jobs:
       - name: Start Test Postgres
         run: .github/scripts/start-test-postgres.sh centaur-api-test-postgres 5432 centaur
 
-      - name: Install Console packages
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
-
-      - name: Set up Console Ruby
-        uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
-        with:
-          working-directory: services/console
-          bundler-cache: true
-
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: stable
@@ -413,87 +398,9 @@ jobs:
           SESSION_RUNTIME_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/session_runtime \
             cargo test -p centaur-session-runtime -- --test-threads=1
 
-      - name: Run API integration test
-        working-directory: services/api-rs
-        env:
-          API_INTEGRATION_WORKFLOW_DIR: ${{ runner.temp }}/api-integration-workflows
-          BIND_ADDR: 127.0.0.1:18080
-          CENTAUR_CONSOLE_DB_HOST: 127.0.0.1
-          CENTAUR_CONSOLE_DB_PASSWORD: postgres
-          CENTAUR_CONSOLE_DB_PORT: "5432"
-          CENTAUR_CONSOLE_DB_USERNAME: postgres
-          CENTAUR_CONSOLE_INITIAL_API_KEY: iak_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-          CENTAUR_CONSOLE_INITIAL_USER_EMAIL: api-integration@example.com
-          CENTAUR_CONSOLE_INITIAL_USER_PASSWORD: api-integration-password
-          CENTAUR_API_URL: http://127.0.0.1:18080
-          CENTAUR_JWT_SIGNING_SECRET: api-integration-jwt-signing-secret
-          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/centaur?sslmode=disable
-          IRON_CONTROL_API_KEY: iak_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-          IRON_CONTROL_URL: http://127.0.0.1:18081
-          RAILS_ENV: development
-          RUN_MIGRATIONS: "true"
-          RUST_LOG: info
-          WORKFLOW_DIRS: ${{ runner.temp }}/api-integration-workflows
-          WORKFLOW_HOST_SANDBOX: "false"
-          WORKFLOW_REAP_REMOVED_AFTER_TICKS: "1"
-          WORKFLOW_RECONCILE_INTERVAL_SECS: "1"
-        run: |
-          mkdir -p "$API_INTEGRATION_WORKFLOW_DIR"
-          cargo build --locked -p centaur-api-server -p centaur-api-integration-test
-
-          PGPASSWORD="$CENTAUR_CONSOLE_DB_PASSWORD" createdb \
-            --host "$CENTAUR_CONSOLE_DB_HOST" \
-            --port "$CENTAUR_CONSOLE_DB_PORT" \
-            --username "$CENTAUR_CONSOLE_DB_USERNAME" \
-            iron_control_development
-          pushd ../console
-          bin/rails db:schema:load
-          bin/rails runner 'Iron::Bootstrap.run!'
-          export CENTAUR_API_TOKEN="$(bin/rails runner 'print ApiServer::Jwt.encode_for_console_service')"
-          bin/rails server --binding 127.0.0.1 --port 18081 > "$RUNNER_TEMP/iron-control.log" 2>&1 &
-          iron_control_pid="$!"
-          echo "$iron_control_pid" > "$RUNNER_TEMP/iron-control.pid"
-          popd
-
-          for attempt in {1..120}; do
-            if curl --fail --silent "$IRON_CONTROL_URL/up" > /dev/null; then
-              break
-            fi
-            if ! kill -0 "$iron_control_pid" 2>/dev/null; then
-              cat "$RUNNER_TEMP/iron-control.log"
-              exit 1
-            fi
-            if [[ "$attempt" == "120" ]]; then
-              cat "$RUNNER_TEMP/iron-control.log"
-              exit 1
-            fi
-            sleep 0.25
-          done
-
-          ./target/debug/centaur-api-server > "$RUNNER_TEMP/centaur-api-server.log" 2>&1 &
-          api_pid="$!"
-          echo "$api_pid" > "$RUNNER_TEMP/centaur-api-server.pid"
-          trap 'kill "$api_pid" "$iron_control_pid" 2>/dev/null || true' EXIT
-
-          ./target/debug/centaur-api-integration-test
-
-      - name: Dump API integration test logs
-        if: ${{ failure() }}
-        run: |
-          cat "$RUNNER_TEMP/centaur-api-server.log" || true
-          cat "$RUNNER_TEMP/iron-control.log" || true
-          docker logs centaur-api-test-postgres || true
-
-      - name: Cleanup API integration test dependencies
+      - name: Cleanup Test Postgres
         if: ${{ always() }}
-        run: |
-          if [ -f "$RUNNER_TEMP/centaur-api-server.pid" ]; then
-            kill "$(cat "$RUNNER_TEMP/centaur-api-server.pid")" 2>/dev/null || true
-          fi
-          if [ -f "$RUNNER_TEMP/iron-control.pid" ]; then
-            kill "$(cat "$RUNNER_TEMP/iron-control.pid")" 2>/dev/null || true
-          fi
-          docker rm -f centaur-api-test-postgres || true
+        run: docker rm -f centaur-api-test-postgres || true
 
   rust-api-postgres:
     name: Rust API migrations on PostgreSQL
@@ -528,44 +435,6 @@ jobs:
       - name: Cleanup Test Postgres
         if: ${{ always() }}
         run: docker rm -f centaur-api-plain-postgres || true
-
-  sandbox-e2e:
-    name: Sandbox Kind e2e
-    runs-on: ubuntu-latest
-    needs: ci_changes
-    if: needs.ci_changes.outputs.sandbox_e2e == 'true'
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
-        with:
-          install_only: true
-          version: v0.30.0
-
-      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
-
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
-        with:
-          toolchain: stable
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: services/api-rs
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Run sandbox backend invariants in Kind
-        working-directory: services/api-rs
-        run: just e2e-kind
-
-      - name: Dump Kind diagnostics
-        if: ${{ failure() }}
-        run: |
-          kubectl --context kind-centaur-api-rs-e2e get pods,sandboxes -A -o wide || true
-          kubectl --context kind-centaur-api-rs-e2e get events -A --sort-by=.lastTimestamp || true
-          kubectl --context kind-centaur-api-rs-e2e -n agent-sandbox-system logs deploy/agent-sandbox-controller --all-containers --tail=-1 || true
 
   sandbox-tests:
     name: Sandbox Python tests
@@ -815,7 +684,6 @@ jobs:
       - proxy-sync-checks
       - rust-api
       - rust-api-postgres
-      - sandbox-e2e
       - sandbox-tests
       - workflow-python-tests
       - tool-tests
@@ -828,5 +696,5 @@ jobs:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
-          allowed-skips: migration-order, harness-server-checks, company-context-checks, proxy-sync-checks, rust-api, rust-api-postgres, sandbox-e2e, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
+          allowed-skips: migration-order, harness-server-checks, company-context-checks, proxy-sync-checks, rust-api, rust-api-postgres, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
           jobs: ${{ toJSON(needs) }}

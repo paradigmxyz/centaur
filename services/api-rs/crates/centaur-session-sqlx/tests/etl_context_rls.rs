@@ -60,7 +60,7 @@ struct CompanyContextReaderSettings<'a> {
     slack_include_public: Option<bool>,
     slack_team_id: Option<&'a str>,
     slack_user_id: Option<&'a str>,
-    user_email: Option<&'a str>,
+    user_email_override: Option<&'a str>,
     google_email: Option<&'a str>,
     google_subject: Option<&'a str>,
 }
@@ -336,7 +336,7 @@ async fn assert_multiterm_granola_keyword_score(
     conn: &mut PgConnection,
     backend: TextSearchBackend,
 ) -> Result<(), Box<dyn Error>> {
-    let rows = granola_keyword_search_rows(conn, backend, "viewer@example.com").await?;
+    let rows = granola_keyword_search_rows(conn, backend, "U_PRIVATE").await?;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].0, "granola:note:granola_note");
     assert!(
@@ -350,7 +350,7 @@ async fn assert_multiterm_granola_keyword_scope(
     conn: &mut PgConnection,
     backend: TextSearchBackend,
 ) -> Result<(), Box<dyn Error>> {
-    let viewer_rows = granola_keyword_search_rows(conn, backend, "viewer@example.com").await?;
+    let viewer_rows = granola_keyword_search_rows(conn, backend, "U_PRIVATE").await?;
     assert_eq!(
         viewer_rows
             .iter()
@@ -359,7 +359,7 @@ async fn assert_multiterm_granola_keyword_scope(
         vec!["granola:note:granola_note"]
     );
 
-    let other_rows = granola_keyword_search_rows(conn, backend, "other@example.com").await?;
+    let other_rows = granola_keyword_search_rows(conn, backend, "U_OTHER").await?;
     assert_eq!(
         other_rows
             .iter()
@@ -1093,7 +1093,6 @@ async fn assert_company_context_reader_denies_unauthorized_rows(
             slack_include_public: Some(false),
             slack_team_id: Some("T_HOME"),
             slack_user_id: Some("U_OTHER"),
-            user_email: Some("other@example.com"),
             google_subject: Some("google_subject_other"),
             ..Default::default()
         },
@@ -1163,20 +1162,28 @@ async fn assert_company_context_reader_denies_unauthorized_rows(
     assert!(google_email_only.google_docs.is_empty());
     assert!(google_email_only.google_docs_observations.is_empty());
 
-    let slack_email_only = company_context_reader_rows(
+    let untrusted_email_override = company_context_reader_rows(
         conn,
         CompanyContextReaderSettings {
             slack_history_channel_ids: Some("[]"),
             slack_include_public: Some(false),
             slack_team_id: Some("T_HOME"),
             slack_user_id: Some("U_PRIVATE"),
-            user_email: Some("viewer@example.com"),
+            user_email_override: Some("other@example.com"),
             ..Default::default()
         },
     )
     .await?;
-    assert!(slack_email_only.google_docs.is_empty());
-    assert!(slack_email_only.google_docs_observations.is_empty());
+    assert_eq!(
+        untrusted_email_override.granola_docs,
+        vec![
+            "granola:note:granola_note".to_owned(),
+            "granola:note:granola_note_old".to_owned(),
+        ],
+        "centaur.user_email must not override the Slack identity used for Granola access"
+    );
+    assert!(untrusted_email_override.google_docs.is_empty());
+    assert!(untrusted_email_override.google_docs_observations.is_empty());
 
     Ok(())
 }
@@ -1344,7 +1351,8 @@ async fn insert_fixture_rows(conn: &mut PgConnection) -> Result<(), sqlx::Error>
         insert into slack_sync_users (user_id, user_name, team_id, raw_payload) values
             ('U_ALPHA', 'alpha user', '', '{}'),
             ('U_BETA', 'beta user', '', '{}'),
-            ('U_PRIVATE', 'private user', 'T_HOME', '{"profile": {"email": "viewer@example.com"}}');
+            ('U_PRIVATE', 'private user', 'T_HOME', '{"profile": {"email": "viewer@example.com"}}'),
+            ('U_OTHER', 'other user', 'T_HOME', '{"profile": {"email": "other@example.com"}}');
 
         insert into slack_sync_messages (channel_id, message_ts, user_id, text) values
             ('C_ALPHA', '1000.000001', 'U_ALPHA', 'alpha channel message'),
@@ -1625,14 +1633,17 @@ fn granola_keyword_search_sql(backend: TextSearchBackend) -> &'static str {
 async fn granola_keyword_search_rows(
     conn: &mut PgConnection,
     backend: TextSearchBackend,
-    user_email: &str,
+    slack_user_id: &str,
 ) -> Result<Vec<(String, f32)>, sqlx::Error> {
     let mut tx = conn.begin().await?;
     tx.execute("set local search_path to public").await?;
     tx.execute("set role centaur_company_context_reader")
         .await?;
-    sqlx::query("select set_config('centaur.user_email', $1, true)")
-        .bind(user_email)
+    sqlx::query("select set_config('centaur.slack_team_id', 'T_HOME', true)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("select set_config('centaur.slack_user_id', $1, true)")
+        .bind(slack_user_id)
         .execute(&mut *tx)
         .await?;
     let occurred_after = time::Date::from_calendar_date(2026, time::Month::May, 1)
@@ -1682,9 +1693,6 @@ async fn company_context_search_rows(
         .execute(&mut *tx)
         .await?;
     sqlx::query("select set_config('centaur.slack_user_id', 'U_PRIVATE', true)")
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("select set_config('centaur.user_email', 'viewer@example.com', true)")
         .execute(&mut *tx)
         .await?;
     sqlx::query("select set_config('centaur.google_subject', 'google_subject', true)")
@@ -1741,7 +1749,7 @@ async fn company_context_reader_rows(
         ),
         ("centaur.slack_team_id", settings.slack_team_id),
         ("centaur.slack_user_id", settings.slack_user_id),
-        ("centaur.user_email", settings.user_email),
+        ("centaur.user_email", settings.user_email_override),
         ("centaur.google_email", settings.google_email),
         ("centaur.google_subject", settings.google_subject),
     ] {
@@ -1861,6 +1869,7 @@ fn public_visible_rows() -> VisibleRows {
         slack_users: vec![
             "U_ALPHA".to_owned(),
             "U_BETA".to_owned(),
+            "U_OTHER".to_owned(),
             "U_PRIVATE".to_owned(),
         ],
         slack_messages: vec![

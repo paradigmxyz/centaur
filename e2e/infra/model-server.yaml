@@ -1,0 +1,105 @@
+# Scripted model server for the e2e stack. CoreDNS (e2e/infra/Corefile) resolves the
+# provider hostnames to this Service, and its certificate is signed by the
+# release's iron-proxy CA, which iron-proxy pods are told to trust. e2e/stack.sh
+# creates the model-server ConfigMap and TLS Secret.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-server
+  namespace: centaur-e2e-model
+  labels:
+    app: model-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: model-server
+  template:
+    metadata:
+      labels:
+        app: model-server
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: model-server
+          image: oven/bun:1.4.2-slim
+          command: ["bun", "/app/model-server.ts"]
+          ports:
+            - containerPort: 8443
+              name: https
+            - containerPort: 8080
+              name: control
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: control
+            periodSeconds: 2
+          volumeMounts:
+            - name: app
+              mountPath: /app
+              readOnly: true
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: app
+          configMap:
+            name: model-server
+        - name: tls
+          secret:
+            secretName: model-server-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-server
+  namespace: centaur-e2e-model
+  labels:
+    app: model-server
+spec:
+  selector:
+    app: model-server
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+---
+# The control API, reached by the test runner through e2e/infra/kind.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-server-control
+  namespace: centaur-e2e-model
+  labels:
+    app: model-server
+spec:
+  type: NodePort
+  selector:
+    app: model-server
+  ports:
+    - name: control
+      port: 8080
+      targetPort: control
+      nodePort: 30080
+---
+# Per-sandbox iron-proxies may only dial public addresses. This additive policy
+# is the one exception the e2e stack needs: the in-cluster model server.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: e2e-iron-proxy-to-model-server
+  namespace: centaur
+spec:
+  podSelector:
+    matchLabels:
+      centaur.ai/iron-proxy: "true"
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: centaur-e2e-model
+      ports:
+        - protocol: TCP
+          port: 8443

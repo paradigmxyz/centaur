@@ -5,6 +5,7 @@ import json
 
 import pytest
 import slack.client as slack_client
+from centaur_sdk import company_context_database_url
 from slack.client import IndexedSlackClient, SlackAuthError, SlackClient, SlackRateLimitError
 from slack_sdk.errors import SlackApiError
 
@@ -1863,3 +1864,11 @@ def test_list_users_paginates_and_skips_deleted_by_default() -> None:
         {"limit": 10},
         {"limit": 9, "cursor": "cursor-2"},
     ]
+
+
+def test_indexed_search_uses_company_context_database(monkeypatch):
+    monkeypatch.setenv("CENTAUR_POSTGRES_DSN", "postgresql://u:p@proxy:5432")
+    monkeypatch.delenv("COMPANY_CONTEXT_POSTGRES_DATABASE", raising=False)
+
+    assert IndexedSlackClient().database_url == company_context_database_url()
+    assert IndexedSlackClient().database_url == "postgresql://u:p@proxy:5432/ai_v2"

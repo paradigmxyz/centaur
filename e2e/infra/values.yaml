@@ -1,0 +1,45 @@
+# Overrides layered on values.dev.yaml for the e2e stack: the real control
+# plane, proxy, sandboxes, and slackbotv2, minus optional services and anything
+# that needs real credentials.
+
+# Model keys are fixed test keys in centaur-infra-env instead of 1Password.
+ironProxy:
+  secretSource: env
+
+# With the env source, iron-proxy pods (and only they) also load this Secret.
+# e2e/stack.sh puts SSL_CERT_FILE in it so they trust the model server's cert.
+secrets:
+  bootstrapSecretName: centaur-e2e-iron-proxy-env
+
+# Sandboxes run the tools baked into the image; nothing is cloned from GitHub.
+toolServer:
+  enabled: false
+repoCache:
+  enabled: false
+
+# Both Slack clients talk to the fake Slack.
+apiRs:
+  extraEnv:
+    SLACK_API_URL: http://fake-slack.centaur-e2e-slack.svc.cluster.local:443/api
+    # Workflows the tests write or remove take effect within a second or two.
+    WORKFLOW_RECONCILE_INTERVAL_SECS: "1"
+    WORKFLOW_REAP_REMOVED_AFTER_TICKS: "1"
+  sandboxWarmPoolSize: 0
+  workflowHostSandbox: false
+
+proxySync:
+  replicaCount: 1
+
+slackbotv2:
+  extraEnv:
+    SLACK_API_URL: http://fake-slack.centaur-e2e-slack.svc.cluster.local:443/api/
+  # DEFAULTS_CHANNEL in e2e/fakes/slack-fixture.ts; e2e/tests/selection.test.ts
+  # expects these defaults.
+  channelDefaults:
+    CE2E00002: { persona: eng, harness: claude, model: sonnet, reasoning: high }
+  # EXTERNAL_TEAM in e2e/fakes/slack-fixture.ts, a Slack Connect partner.
+  externalOrgAllowlist: TE2EEXT01
+
+networkPolicy:
+  ingressSourceNamespaces:
+    - centaur-e2e-slack

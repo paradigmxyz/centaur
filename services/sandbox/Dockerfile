@@ -90,6 +90,7 @@ RUN useradd -m -s /bin/bash -u 1001 agent \
 
 ARG CLAUDE_CODE_VERSION=2.1.281
 ARG CODEX_VERSION=0.158.0
+ARG PI_CODING_AGENT_VERSION=1.0.0
 # Hermes Agent (NousResearch) — pinned by commit SHA per the dependency policy.
 ARG HERMES_AGENT_REF=e5e2fb8b2dbe1cae85aa5ad6ce45aef376016e43
 ARG NUSHELL_VERSION=0.112.2
@@ -149,12 +150,17 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm install -g --prefer-online --force \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
       "@openai/codex@${CODEX_VERSION}" \
+      "@earendil-works/pi-coding-agent@${PI_CODING_AGENT_VERSION}" \
       "pnpm@${PNPM_VERSION}" \
       agent-browser@0.26.0 \
     && find /usr/lib/node_modules -type f \( -name '*.map' -o -name '*.tsbuildinfo' \) -delete \
     && claude --version | grep -F "${CLAUDE_CODE_VERSION}" \
     && codex --version | grep -F "${CODEX_VERSION}" \
+    && pi --version | grep -Fx "${PI_CODING_AGENT_VERSION}" \
     && pnpm --version | grep -F "${PNPM_VERSION}"
+# Keep every pi run, the harness's and the agent's own, from phoning home.
+ENV PI_TELEMETRY=0 \
+    PI_SKIP_VERSION_CHECK=1
 
 # ── Hermes Agent (own venv; exposes `hermes` + the tui_gateway module) ───────
 # The hermes harness drives `python -m tui_gateway.entry` (see
