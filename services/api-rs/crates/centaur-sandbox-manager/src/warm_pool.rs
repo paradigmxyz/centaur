@@ -459,6 +459,75 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn claim_binds_the_turn_requester_to_the_warm_proxy() {
+        let _serial = TEST_LOCK.lock().await;
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let suffix = unique_suffix();
+        let workload_key = format!("test-claim-requester-{suffix}");
+        let first_sandbox = format!("claim-first-{suffix}");
+        let second_sandbox = format!("claim-second-{suffix}");
+        let first_thread = format!("test:claim-req-a-{suffix}");
+        let second_thread = format!("test:claim-req-b-{suffix}");
+        for thread_key in [&first_thread, &second_thread] {
+            insert_session_row(&store, thread_key).await;
+        }
+
+        let backend = Arc::new(TestBackend::new(format!("fresh-{suffix}")));
+        let pool = WarmPoolManager::new(
+            Arc::new(SandboxManager::new(backend.clone())),
+            store.clone(),
+            Arc::new(|| SandboxSpec::new("image")),
+            workload_key.clone(),
+            WarmPoolConfig {
+                target_size: 0,
+                replenish_interval: Duration::from_secs(60),
+                bootstrap_iron_control_principal: "prn_test_bootstrap".to_owned(),
+                max_running_sandboxes: None,
+            },
+        );
+        let labels = BTreeMap::from([("centaur.slack_channel_id".to_owned(), "C1".to_owned())]);
+
+        store
+            .insert_ready_warm_sandbox(&first_sandbox, &workload_key)
+            .await
+            .expect("insert first warm sandbox");
+        backend.set_status(&first_sandbox, SandboxStatus::Running);
+        let claimed = pool
+            .claim(&first_thread, Some("prn_conv"), Some("prn_req"), &labels)
+            .await
+            .expect("claim first warm sandbox");
+        assert_eq!(claimed, Some(first_sandbox.clone()));
+
+        store
+            .insert_ready_warm_sandbox(&second_sandbox, &workload_key)
+            .await
+            .expect("insert second warm sandbox");
+        backend.set_status(&second_sandbox, SandboxStatus::Running);
+        let claimed = pool
+            .claim(&second_thread, Some("prn_conv"), None, &labels)
+            .await
+            .expect("claim second warm sandbox");
+        assert_eq!(claimed, Some(second_sandbox.clone()));
+
+        // The proxy scopes credentials to the requester, so each claim must
+        // bind its own turn's requester, and no requester when there is none.
+        assert_eq!(
+            backend.assigned(),
+            vec![
+                (
+                    first_sandbox,
+                    "prn_conv".to_owned(),
+                    Some("prn_req".to_owned()),
+                    labels.clone()
+                ),
+                (second_sandbox, "prn_conv".to_owned(), None, labels),
+            ]
+        );
+    }
+
     async fn test_store() -> Option<PgSessionStore> {
         let Ok(url) = std::env::var("SESSION_RUNTIME_TEST_DATABASE_URL") else {
             eprintln!("skipping: SESSION_RUNTIME_TEST_DATABASE_URL not set");
@@ -495,10 +564,13 @@ mod tests {
             .to_string()
     }
 
+    type RecordedAssignment = (String, String, Option<String>, BTreeMap<String, String>);
+
     struct TestBackend {
         create_id: String,
         statuses: Mutex<BTreeMap<String, SandboxStatus>>,
         created: Mutex<Vec<String>>,
+        assigned: Mutex<Vec<RecordedAssignment>>,
     }
 
     impl TestBackend {
@@ -507,11 +579,16 @@ mod tests {
                 create_id,
                 statuses: Mutex::new(BTreeMap::new()),
                 created: Mutex::new(Vec::new()),
+                assigned: Mutex::new(Vec::new()),
             }
         }
 
         fn created(&self) -> Vec<String> {
             self.created.lock().unwrap().clone()
+        }
+
+        fn assigned(&self) -> Vec<RecordedAssignment> {
+            self.assigned.lock().unwrap().clone()
         }
 
         fn set_status(&self, sandbox_id: &str, status: SandboxStatus) {
@@ -584,11 +661,17 @@ mod tests {
 
         async fn assign_iron_control_proxy_principal(
             &self,
-            _id: &SandboxId,
-            _principal_id: &str,
-            _requester_principal_id: Option<&str>,
-            _labels: &BTreeMap<String, String>,
+            id: &SandboxId,
+            principal_id: &str,
+            requester_principal_id: Option<&str>,
+            labels: &BTreeMap<String, String>,
         ) -> SandboxResult<()> {
+            self.assigned.lock().unwrap().push((
+                id.as_str().to_owned(),
+                principal_id.to_owned(),
+                requester_principal_id.map(ToOwned::to_owned),
+                labels.clone(),
+            ));
             Ok(())
         }
 
