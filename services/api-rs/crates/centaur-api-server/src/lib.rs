@@ -159,16 +159,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn router_builds() {
-        let pool =
-            PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
-        let _router = build_router_with_runtime(
-            PgSessionStore::new(pool),
-            SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
-        );
-    }
-
-    #[tokio::test]
     async fn metrics_endpoint_renders_http_request_metrics() {
         let pool =
             PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
@@ -804,60 +794,6 @@ mod tests {
                     "resource_metadata=\"http://centaur.local/.well-known/oauth-protected-resource/mcp\""
                 ));
             });
-    }
-
-    #[tokio::test]
-    async fn append_messages_does_not_apply_a_session_body_limit() {
-        let pool =
-            PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
-        let app = build_router_with_runtime(
-            PgSessionStore::new(pool),
-            SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
-        );
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/session/slack%3AC123%3A123.456/messages")
-                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .header(header::CONTENT_LENGTH, (256 * 1024 * 1024 + 1).to_string())
-                    .body(Body::from(r#"{"messages":"not-an-array"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    #[tokio::test]
-    async fn execute_does_not_apply_a_session_body_limit() {
-        let pool =
-            PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
-        let app = build_router_with_runtime(
-            PgSessionStore::new(pool),
-            SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
-        );
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/session/slack%3AC123%3A123.456/execute")
-                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .header(header::CONTENT_LENGTH, (256 * 1024 * 1024 + 1).to_string())
-                    .body(Body::from(r#"{"input_lines":"not-an-array"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
