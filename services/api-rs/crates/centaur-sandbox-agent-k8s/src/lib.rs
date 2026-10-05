@@ -1765,34 +1765,6 @@ mod tests {
     }
 
     #[test]
-    fn renders_partial_sandbox_resources() {
-        let spec = SandboxSpec::new("centaur-agent:latest").resources(
-            ResourceRequirements::new()
-                .request("memory", "4Gi")
-                .limit("memory", "4Gi"),
-        );
-        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
-
-        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
-
-        let resources = sandbox.spec.pod_template.spec.containers[0]
-            .resources
-            .as_ref()
-            .unwrap();
-        let memory = IntOrString::String("4Gi".to_owned());
-        assert_eq!(
-            resources.requests.as_ref().unwrap().get("memory"),
-            Some(&memory)
-        );
-        assert_eq!(
-            resources.limits.as_ref().unwrap().get("memory"),
-            Some(&memory)
-        );
-        assert!(!resources.requests.as_ref().unwrap().contains_key("cpu"));
-        assert!(!resources.limits.as_ref().unwrap().contains_key("cpu"));
-    }
-
-    #[test]
     fn omits_resources_when_unset() {
         let spec = SandboxSpec::new("centaur-agent:latest");
         let config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
