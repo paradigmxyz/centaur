@@ -88,7 +88,7 @@ class ApplicationController < ActionController::Base
     end
   end
 
-  # Guard for admin-only controllers (the Control and Data Sync sections, user
+  # Guard for admin-only controllers (the Control section and user
   # management). Not a global gate. Bounces non-admins to their default section.
   # Keep this redirect silent: direct/admin-default URLs are not
   # actionable errors for non-admin operators, especially on a fresh visit.

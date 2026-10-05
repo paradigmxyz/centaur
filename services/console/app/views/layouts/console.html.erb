@@ -908,15 +908,14 @@
   <% scheduled_tasks_view = request.path.start_with?("/console/scheduled_tasks") %>
   <% workflows_view = request.path.start_with?("/console/workflows") %>
   <% skills_view = request.path.start_with?("/console/skills") %>
-  <%# The Control and Data Sync sections are admin-only (each controller enforces
+  <%# The Control section is admin-only (each controller enforces
       require_admin server-side); Integrations is for everyone -- it lists the
       public consent start links any team member can use. %>
   <% nav_items = [] %>
   <% if acting_admin? %>
     <% control_matches = [ "/console/principals", "/console/roles", "/console/secrets", "/console/credentials", "/console/oauth_apps", "/console/users" ] %>
     <% nav_items = [
-      { label: "Control", icon: "shield-check", path: console_principals_path, matches: control_matches, root_active: true },
-      { label: "Data Sync", icon: "database", path: console_etls_path, matches: [ "/console/etls" ] }
+      { label: "Control", icon: "shield-check", path: console_principals_path, matches: control_matches, root_active: true }
     ] %>
   <% end %>
   <% nav_items << { label: "Integrations", icon: "link", path: console_integrations_path, matches: [ "/console/integrations" ] } %>

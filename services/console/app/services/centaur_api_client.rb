@@ -22,34 +22,6 @@ class CentaurApiClient
     @api = HttpClient.new(http: http, open_timeout: timeout, read_timeout: read_timeout)
   end
 
-  def list_slack_archive_imports(limit: 100)
-    get("/api/admin/slack/archive-imports", limit: limit)
-  end
-
-  def create_slack_archive_import(filename:, content_type:, created_by:, metadata: {})
-    post(
-      "/api/admin/slack/archive-imports",
-      {
-        filename: filename,
-        content_type: content_type,
-        created_by: created_by,
-        metadata: metadata
-      }
-    )
-  end
-
-  def start_slack_archive_import(import_id)
-    post("/api/admin/slack/archive-imports/#{escape_path(import_id)}/start", {})
-  end
-
-  def retry_slack_archive_import(import_id)
-    post("/api/admin/slack/archive-imports/#{escape_path(import_id)}/retry", {})
-  end
-
-  def delete_slack_archive_import(import_id)
-    request(:delete, "/api/admin/slack/archive-imports/#{escape_path(import_id)}")
-  end
-
   def list_slack_dm_sync_checkpoints(broker_credential_id:, home_team_id: nil)
     get(
       "/api/admin/slack/dm-sync/checkpoints",
