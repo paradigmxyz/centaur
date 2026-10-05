@@ -1,6 +1,7 @@
-// A scripted stand-in for the model providers. CoreDNS sends api.openai.com
-// and api.anthropic.com to this server, so real harnesses reach it through
-// iron-proxy exactly as they would reach the providers. Tests register
+// A scripted stand-in for the model providers. CoreDNS sends api.openai.com,
+// chatgpt.com, and api.anthropic.com to this server, so real harnesses reach
+// it through iron-proxy exactly as they would reach the providers, with API
+// keys or with subscription (ChatGPT, Claude.ai) access tokens. Tests register
 // replies keyed by a token they put in their Slack message, and read back
 // every request the harness made.
 //
@@ -19,6 +20,8 @@ type Recorded = {
   model?: string
   /** The credential header as it arrived, after iron-proxy's substitution. */
   credential?: string
+  /** The ChatGPT workspace a subscription request was sent for, after iron-proxy's injection. */
+  account?: string
   /**
    * The whole conversation the model was asked to continue. Codex's WebSocket
    * transport sends only new input plus previous_response_id, so earlier
@@ -27,6 +30,15 @@ type Recorded = {
   conversation: unknown[]
   body: unknown
 }
+
+/** What the provider identifies a request by: its credential and, for ChatGPT, the workspace. */
+type Caller = { credential: string | null; account: string | null }
+
+/** The one ChatGPT workspace the e2e subscription belongs to; e2e/stack.sh sets it. */
+const chatgptAccountId = process.env.CHATGPT_ACCOUNT_ID
+if (!chatgptAccountId) throw new Error('CHATGPT_ACCOUNT_ID is required')
+// The Responses API, with an API key or through a ChatGPT subscription.
+const RESPONSES_PATHS = ['/v1/responses', '/backend-api/codex/responses']
 
 const replies: Reply[] = []
 const requests: Recorded[] = []
@@ -50,24 +62,38 @@ Bun.serve({
   }
 })
 
-Bun.serve<{ credential: string | null }>({
+Bun.serve<Caller & { path: string }>({
   port: 8443,
   tls: { cert: Bun.file('/tls/tls.crt'), key: Bun.file('/tls/tls.key') },
   async fetch(request, server) {
     const url = new URL(request.url)
+    const caller = {
+      credential: request.headers.get('authorization') ?? request.headers.get('x-api-key'),
+      account: request.headers.get('chatgpt-account-id')
+    }
     // Codex's preferred transport: one WebSocket per session, carrying
     // response.create requests and the same events the HTTP stream would.
-    if (url.pathname === '/v1/responses' && request.headers.get('upgrade')?.toLowerCase() === 'websocket') {
-      if (server.upgrade(request, { data: { credential: request.headers.get('authorization') } })) return
+    if (RESPONSES_PATHS.includes(url.pathname) && request.headers.get('upgrade')?.toLowerCase() === 'websocket') {
+      if (server.upgrade(request, { data: { ...caller, path: url.pathname } })) return
       return new Response('websocket upgrade failed', { status: 400 })
     }
-    if (request.method === 'POST' && url.pathname === '/v1/responses') {
-      const { events, delayMs } = openaiEvents(url.pathname, request.headers.get('authorization'), await request.json())
+    if (request.method === 'POST' && RESPONSES_PATHS.includes(url.pathname)) {
+      const { events, delayMs } = openaiEvents(url.pathname, caller, await request.json())
       await Bun.sleep(delayMs)
       return sse(events)
     }
     if (request.method === 'POST' && url.pathname === '/v1/messages') {
-      return anthropicMessage(url.pathname, request.headers, await request.json())
+      return anthropicMessage(url.pathname, caller, await request.json())
+    }
+    // ChatGPT workspace discovery: the workspaces the subscription can use.
+    // Codex refuses to run in a workspace it selected that is not listed.
+    if (request.method === 'GET' && url.pathname === '/backend-api/wham/accounts/check') {
+      const workspace = {
+        id: chatgptAccountId,
+        workspace_backend_origin: 'https://chatgpt.com',
+        account_routing_override: 'NO_CONSTRAINT'
+      }
+      return Response.json({ accounts: [workspace], default_account_id: chatgptAccountId })
     }
     log('model_server_unmodeled_request', { host: request.headers.get('host'), path: url.pathname })
     return Response.json({ error: { message: 'not modeled by the e2e model server' } }, { status: 404 })
@@ -79,7 +105,7 @@ Bun.serve<{ credential: string | null }>({
         log('model_server_unmodeled_websocket_message', { type })
         return
       }
-      const { events, delayMs } = openaiEvents('/v1/responses', socket.data.credential, body)
+      const { events, delayMs } = openaiEvents(socket.data.path, socket.data, body)
       await Bun.sleep(delayMs)
       for (const event of events) socket.send(JSON.stringify(event))
     }
@@ -90,11 +116,11 @@ log('model_server_started', {})
 /** A scripted answer as OpenAI events, and how long to wait before sending them. */
 function openaiEvents(
   path: string,
-  credential: string | null,
+  caller: Caller,
   body: any
 ): { events: Array<{ type: string }>; delayMs: number } {
   const conversation = [...(responses.get(body.previous_response_id) ?? []), ...(body.input ?? [])]
-  const reply = record('openai', path, credential, body, conversation)
+  const reply = record('openai', path, caller, body, conversation)
   const text = reply?.text ?? 'ok'
   const responseId = `resp_${randomUUID()}`
   const itemId = `msg_${randomUUID()}`
@@ -136,8 +162,8 @@ function openaiEvents(
   }
 }
 
-async function anthropicMessage(path: string, headers: Headers, body: any): Promise<Response> {
-  const reply = record('anthropic', path, headers.get('x-api-key'), body, body.messages ?? [])
+async function anthropicMessage(path: string, caller: Caller, body: any): Promise<Response> {
+  const reply = record('anthropic', path, caller, body, body.messages ?? [])
   const text = reply?.text ?? 'ok'
   await Bun.sleep(reply?.delayMs ?? 0)
   if (reply?.error) {
@@ -165,7 +191,7 @@ async function anthropicMessage(path: string, headers: Headers, body: any): Prom
 function record(
   provider: Recorded['provider'],
   path: string,
-  credential: string | null,
+  caller: Caller,
   body: any,
   conversation: unknown[]
 ): Reply | undefined {
@@ -176,7 +202,8 @@ function record(
     path,
     match: reply?.match,
     model: body.model,
-    credential: credential ?? undefined,
+    credential: caller.credential ?? undefined,
+    account: caller.account ?? undefined,
     conversation,
     body
   })

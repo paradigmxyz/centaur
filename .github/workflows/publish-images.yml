@@ -247,17 +247,24 @@ jobs:
 
   # Deploys the images just published to a kind cluster and runs the e2e/
   # scenarios: real control plane, sandboxes, and harnesses against a fake
-  # Slack and a scripted model server. Informational; not a required check.
+  # Slack and a scripted model server, once per harness auth mode (API keys,
+  # and ChatGPT/Claude.ai subscriptions), since harness upgrades can break
+  # either path on its own.
   e2e:
-    name: E2E scenarios
+    name: E2E scenarios (${{ matrix.auth-mode }})
     needs: merge
     if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
     runs-on: depot-ubuntu-24.04-16
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        auth-mode: [api_key, access_token]
     permissions:
       contents: read
     env:
       HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      CENTAUR_E2E_AUTH_MODE: ${{ matrix.auth-mode }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
