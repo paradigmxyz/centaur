@@ -18,7 +18,8 @@
 # CENTAUR_E2E_AUTH_MODE picks how the harnesses authenticate, for both Codex
 # and Claude Code: api_key (default) or access_token, the ChatGPT and Claude.ai
 # subscription path, where the console brokers the tokens iron-proxy injects.
-# `test` runs against whichever mode the stack was last brought up in. Going
+# `test` runs against whichever mode the stack was last brought up in; CI runs
+# only e2e/tests/harnesses.test.ts in access_token mode. Going
 # from access_token back to api_key needs `down` first: api-rs does not remove
 # the subscription credentials it registered, so they would still be injected.
 # Every command uses a private kubeconfig, never the ambient context.
@@ -230,8 +231,10 @@ run_tests() {
   export E2E_IRON_CONTROL_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:30432/iron_control_production"
   export E2E_API_URL=http://127.0.0.1:30081 E2E_API_KEY="$API_ADMIN_KEY"
   # Expect the credentials of the auth mode the stack runs in.
-  if [[ "$(kubectl -n "$NAMESPACE" get "deploy/${RELEASE}-centaur-api-rs" \
-    -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="CODEX_AUTH_MODE")].value}')" == access_token ]]; then
+  E2E_AUTH_MODE="$(kubectl -n "$NAMESPACE" get "deploy/${RELEASE}-centaur-api-rs" \
+    -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="CODEX_AUTH_MODE")].value}')"
+  export E2E_AUTH_MODE
+  if [[ "$E2E_AUTH_MODE" == access_token ]]; then
     export E2E_OPENAI_CREDENTIAL="Bearer $CODEX_ACCESS_TOKEN" E2E_ANTHROPIC_CREDENTIAL="Bearer $CLAUDE_ACCESS_TOKEN"
     export E2E_CHATGPT_ACCOUNT_ID="$CHATGPT_ACCOUNT_ID"
   else

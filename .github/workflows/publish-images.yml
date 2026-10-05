@@ -247,11 +247,11 @@ jobs:
 
   # Deploys the images just published to a kind cluster and runs the e2e/
   # scenarios: real control plane, sandboxes, and harnesses against a fake
-  # Slack and a scripted model server, once per harness auth mode (API keys,
-  # and ChatGPT/Claude.ai subscriptions), since harness upgrades can break
-  # either path on its own.
+  # Slack and a scripted model server, with API keys. e2e-subscription-harnesses
+  # runs only the harness smoke test with ChatGPT/Claude.ai subscriptions,
+  # since harness upgrades can break that path on its own. Both informational.
   e2e:
-    name: E2E scenarios (${{ matrix.auth-mode }})
+    name: ${{ matrix.name }}
     needs: merge
     if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
     runs-on: depot-ubuntu-24.04-16
@@ -259,12 +259,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        auth-mode: [api_key, access_token]
+        include:
+          - name: E2E scenarios
+            auth-mode: api_key
+            tests: ""
+          - name: e2e-subscription-harnesses
+            auth-mode: access_token
+            tests: e2e/tests/harnesses.test.ts
     permissions:
       contents: read
     env:
       HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       CENTAUR_E2E_AUTH_MODE: ${{ matrix.auth-mode }}
+      E2E_TESTS: ${{ matrix.tests }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -283,7 +290,7 @@ jobs:
         run: CENTAUR_E2E_IMAGE_TAG="sha-${HEAD_SHA::7}" e2e/stack.sh up
 
       - name: Run e2e scenarios
-        run: e2e/stack.sh test
+        run: e2e/stack.sh test $E2E_TESTS
 
       - name: Dump diagnostics
         if: ${{ failure() }}

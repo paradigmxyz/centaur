@@ -90,13 +90,15 @@ const apiKey = required('E2E_API_KEY')
 const namespace = 'centaur'
 const release = 'centaur'
 
+/** How the stack's Codex and Claude Code authenticate: api_key, or access_token (subscriptions). */
+export const authMode = required('E2E_AUTH_MODE')
 /**
- * The credential iron-proxy injects for each harness, as its provider receives
- * it: an API key, or a subscription access token in access_token mode.
+ * The credential iron-proxy injects for each provider, as the provider
+ * receives it: an API key, or a subscription access token in access_token mode.
  */
-export const providerCredentials: Record<string, string> = {
-  codex: required('E2E_OPENAI_CREDENTIAL'),
-  claudecode: required('E2E_ANTHROPIC_CREDENTIAL')
+export const providerCredentials: Record<ModelRequest['provider'], string> = {
+  openai: required('E2E_OPENAI_CREDENTIAL'),
+  anthropic: required('E2E_ANTHROPIC_CREDENTIAL')
 }
 /** The ChatGPT workspace iron-proxy routes Codex to; only subscription requests carry one. */
 export const chatgptAccountId = process.env.E2E_CHATGPT_ACCOUNT_ID
