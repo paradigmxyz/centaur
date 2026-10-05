@@ -369,9 +369,14 @@ export class Thread {
       const execution = executions[index]
       return execution && isTerminal(execution.status) ? execution : undefined
     })
+    // A failure names the execution and the replies so far, so it can be read without the stack.
+    const seen = `execution ${JSON.stringify(execution)}`
+    let lastReplies: SlackMessage[] = []
     const replies = await eventually(`reply to turn ${index + 1} of ${this.key}`, renderTimeoutMs, async () => {
-      const replies = await this.repliesTo(index)
-      return replies.length > 0 && replies.every(reply => !reply.streaming) ? replies : undefined
+      lastReplies = await this.repliesTo(index)
+      return lastReplies.length > 0 && lastReplies.every(reply => !reply.streaming) ? lastReplies : undefined
+    }).catch(error => {
+      throw new Error(`${error.message}; ${seen}; replies ${JSON.stringify(lastReplies.map(({ ts, text, streaming }) => ({ ts, text, streaming })))}`)
     })
     if (replies.length !== 1) {
       throw new Error(`turn ${index + 1} of ${this.key} produced ${replies.length} replies: ${JSON.stringify(replies)}`)
@@ -382,7 +387,7 @@ export class Thread {
       from session_events
       where execution_id = ${execution.execution_id} and event_type = 'session.sandbox_ready'
       order by event_id desc limit 1`
-    if (!sandbox) throw new Error(`turn ${index + 1} of ${this.key} recorded no ready sandbox`)
+    if (!sandbox) throw new Error(`turn ${index + 1} of ${this.key} recorded no ready sandbox; ${seen}`)
     const token = this.scripts[index]
     return {
       reply: replies[0]!.text ?? '',
