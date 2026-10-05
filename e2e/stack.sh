@@ -122,6 +122,21 @@ up() {
     -f contrib/chart/values.dev.yaml -f e2e/infra/values.yaml \
     ${image_args[@]+"${image_args[@]}"} --wait --timeout 20m
   kubectl apply -f e2e/infra/test-access.yaml > /dev/null
+  wait_for_test_access
+}
+
+# The NodePorts and the policy admitting them take a moment to start routing;
+# until then connections are reset, so wait before declaring the stack up.
+wait_for_test_access() {
+  for _ in $(seq 60); do
+    if curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:30081/readyz 2> /dev/null &&
+      timeout 2 bash -c '< /dev/tcp/127.0.0.1/30432' 2> /dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "api-rs and Postgres NodePorts did not become reachable" >&2
+  return 1
 }
 
 deploy_model_server() {
