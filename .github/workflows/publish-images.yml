@@ -252,7 +252,7 @@ jobs:
     name: E2E scenarios
     needs: merge
     if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: centaur-paradigm-agent-builder
     timeout-minutes: 45
     permissions:
       contents: read
