@@ -609,8 +609,20 @@ mod tests {
     }
 
     #[test]
-    fn drive_version_is_the_stable_revision_key() {
-        assert_eq!(file(PDF_MIME_TYPE, false).source_version(), "42");
+    fn drive_version_falls_back_to_checksum_then_modified_time() {
+        let mut drive_file = file(PDF_MIME_TYPE, false);
+        drive_file.md5_checksum = "d41d8cd98f00b204e9800998ecf8427e".to_owned();
+        drive_file.modified_time = Some("2026-07-08T12:00:00Z".parse().unwrap());
+        assert_eq!(drive_file.source_version(), "42");
+
+        drive_file.version.clear();
+        assert_eq!(
+            drive_file.source_version(),
+            "d41d8cd98f00b204e9800998ecf8427e"
+        );
+
+        drive_file.md5_checksum.clear();
+        assert_eq!(drive_file.source_version(), "2026-07-08T12:00:00+00:00");
     }
 
     #[test]

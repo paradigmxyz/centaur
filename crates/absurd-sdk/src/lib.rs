@@ -2204,9 +2204,10 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_jitter_is_stable() {
-        assert_eq!(deterministic_jitter("run-a"), deterministic_jitter("run-a"));
-        assert!(deterministic_jitter("run-a") <= UNKNOWN_TASK_DEFER_JITTER_SECONDS);
+    fn deterministic_jitter_stays_within_the_defer_window() {
+        for run_id in ["run-a", "run-b", "", "0196f0c4-7b5e-7c3a-9d1e-2f4a6b8c0d1e"] {
+            assert!(deterministic_jitter(run_id) <= UNKNOWN_TASK_DEFER_JITTER_SECONDS);
+        }
     }
 
     #[tokio::test]
