@@ -1,7 +1,7 @@
 # Scripted model server for the e2e stack. CoreDNS (e2e/infra/Corefile) resolves the
 # provider hostnames to this Service, and its certificate is signed by the
 # release's iron-proxy CA, which iron-proxy pods are told to trust. e2e/stack.sh
-# creates the model-server ConfigMap and TLS Secret.
+# creates the model-server ConfigMap, Secret, and TLS Secret.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -24,6 +24,9 @@ spec:
         - name: model-server
           image: oven/bun:1.4.2-slim
           command: ["bun", "/app/model-server.ts"]
+          envFrom:
+            - secretRef:
+                name: model-server
           ports:
             - containerPort: 8443
               name: https

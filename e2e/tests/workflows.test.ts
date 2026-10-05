@@ -224,7 +224,7 @@ async def handler(params, ctx):
   expect(output.agent.result_text).toBe(answer.text)
   const [request] = await model.requests(answer)
   expect(request?.model).toBe('gpt-5.4')
-  expect(request?.credential).toBe(providerCredentials.codex)
+  expect(request?.credential).toBe(providerCredentials.openai)
 
   expect(output.child.created).toBe(true)
   const childRun = await waitForRun(output.child.run_id, 'completed')

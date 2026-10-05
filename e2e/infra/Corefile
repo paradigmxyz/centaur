@@ -11,6 +11,10 @@
       answer name model-server.centaur-e2e-model.svc.cluster.local api.openai.com
     }
     rewrite stop {
+      name exact chatgpt.com model-server.centaur-e2e-model.svc.cluster.local
+      answer name model-server.centaur-e2e-model.svc.cluster.local chatgpt.com
+    }
+    rewrite stop {
       name exact api.anthropic.com model-server.centaur-e2e-model.svc.cluster.local
       answer name model-server.centaur-e2e-model.svc.cluster.local api.anthropic.com
     }

@@ -37,6 +37,8 @@ export type ModelRequest = {
   model?: string
   /** The credential header as the provider received it, after iron-proxy. */
   credential?: string
+  /** The ChatGPT workspace the request was sent for, after iron-proxy. */
+  account?: string
   /** Reasoning effort the harness asked for. */
   effort?: string
   /**
@@ -88,11 +90,18 @@ const apiKey = required('E2E_API_KEY')
 const namespace = 'centaur'
 const release = 'centaur'
 
-/** Provider keys iron-proxy holds, as each harness's provider receives them. */
-export const providerCredentials: Record<string, string> = {
-  codex: `Bearer ${required('E2E_OPENAI_KEY')}`,
-  claudecode: required('E2E_ANTHROPIC_KEY')
+/** How the stack's Codex and Claude Code authenticate: api_key, or access_token (subscriptions). */
+export const authMode = required('E2E_AUTH_MODE')
+/**
+ * The credential iron-proxy injects for each provider, as the provider
+ * receives it: an API key, or a subscription access token in access_token mode.
+ */
+export const providerCredentials: Record<ModelRequest['provider'], string> = {
+  openai: required('E2E_OPENAI_CREDENTIAL'),
+  anthropic: required('E2E_ANTHROPIC_CREDENTIAL')
 }
+/** The ChatGPT workspace iron-proxy routes Codex to; only subscription requests carry one. */
+export const chatgptAccountId = process.env.E2E_CHATGPT_ACCOUNT_ID
 export const turnTimeoutMs = Number(process.env.E2E_TURN_TIMEOUT_MS ?? 300_000)
 /** How long a finished execution may take to show up in Slack. */
 const renderTimeoutMs = 60_000
@@ -465,7 +474,7 @@ async function registerScript(script: Script): Promise<void> {
 async function modelRequests(token: string): Promise<ModelRequest[]> {
   const response = await fetch(`${modelUrl}/_e2e/requests?match=${encodeURIComponent(token)}`)
   const recorded = (await response.json()) as Array<
-    Pick<ModelRequest, 'provider' | 'model' | 'credential' | 'body'> & { conversation: unknown[] }
+    Pick<ModelRequest, 'provider' | 'model' | 'credential' | 'account' | 'body'> & { conversation: unknown[] }
   >
   return recorded.map(({ conversation, ...request }) => {
     const body = request.body

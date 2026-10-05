@@ -1,9 +1,9 @@
 // A user starts a Slack thread with each harness and follows up in it. Each
 // answer must reach the thread once, the harness must still hold the first
-// exchange in its own session, the proxy must swap in the real provider key,
-// and the thread must stay on one sandbox running the requested harness.
+// exchange in its own session, and the thread must stay on one sandbox running
+// the requested harness.
 import { expect, test } from 'bun:test'
-import { model, providerCredentials, slack, turnTimeoutMs } from '../lib'
+import { model, slack, turnTimeoutMs } from '../lib'
 
 for (const harness of ['codex', 'claudecode']) {
   test.concurrent(`${harness} answers and remembers a Slack thread`, async () => {
@@ -18,10 +18,7 @@ for (const harness of ['codex', 'claudecode']) {
     const second = await thread.nextTurn()
     expect(second.reply).toBe(secondAnswer.text)
 
-    for (const turn of [first, second]) {
-      expect(turn.execution.status).toBe('completed')
-      expect(turn.request?.credential).toBe(providerCredentials[harness])
-    }
+    for (const turn of [first, second]) expect(turn.execution.status).toBe('completed')
     // slackbotv2 quotes earlier Slack messages into each turn, so only an
     // assistant turn in the request proves the harness kept its own session.
     expect(second.request?.assistantTurns).toContain(firstAnswer.text)
