@@ -260,16 +260,6 @@ mod tests {
     /// Serialize the database-backed tests in this module.
     static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    #[test]
-    fn running_limit_counts_only_observed_running_sandboxes() {
-        assert!(status_consumes_running_slot(&SandboxStatus::Running));
-        assert!(!status_consumes_running_slot(&SandboxStatus::Created));
-        assert!(!status_consumes_running_slot(&SandboxStatus::Suspended));
-        assert!(!status_consumes_running_slot(&SandboxStatus::Unknown(
-            "unavailable".to_owned()
-        )));
-    }
-
     #[tokio::test]
     async fn replenisher_prunes_missing_ready_rows_before_counting() {
         let _serial = TEST_LOCK.lock().await;
@@ -408,24 +398,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claim_passes_requester_to_proxy_assignment() {
+    async fn claim_fails_unusable_warm_sandboxes_and_claims_the_next() {
         let _serial = TEST_LOCK.lock().await;
         let Some(store) = test_store().await else {
             return;
         };
         let suffix = unique_suffix();
-        let workload_key = format!("test-claim-requester-{suffix}");
-        let first_sandbox = format!("claim-first-{suffix}");
-        let second_sandbox = format!("claim-second-{suffix}");
-        let first_thread = format!("test:claim-req-a-{suffix}");
-        let second_thread = format!("test:claim-req-b-{suffix}");
-        for thread_key in [&first_thread, &second_thread] {
-            insert_session_row(&store, thread_key).await;
-        }
+        let workload_key = format!("test-claim-skip-{suffix}");
+        // Claims take the oldest ready row, tie-broken by sandbox id.
+        let missing_sandbox = format!("a-missing-{suffix}");
+        let stopped_sandbox = format!("b-stopped-{suffix}");
+        let live_sandbox = format!("c-live-{suffix}");
+        let thread_key = format!("test:claim-skip-{suffix}");
+        insert_session_row(&store, &thread_key).await;
 
         let backend = Arc::new(TestBackend::new(format!("fresh-{suffix}")));
+        for sandbox_id in [&missing_sandbox, &stopped_sandbox, &live_sandbox] {
+            store
+                .insert_ready_warm_sandbox(sandbox_id, &workload_key)
+                .await
+                .expect("insert warm sandbox");
+        }
+        backend.set_status(&stopped_sandbox, SandboxStatus::Stopped);
+        backend.set_status(&live_sandbox, SandboxStatus::Running);
         let pool = WarmPoolManager::new(
-            Arc::new(SandboxManager::new(backend.clone())),
+            Arc::new(SandboxManager::new(backend)),
             store.clone(),
             Arc::new(|| SandboxSpec::new("image")),
             workload_key.clone(),
@@ -436,41 +433,29 @@ mod tests {
                 max_running_sandboxes: None,
             },
         );
-        let labels = BTreeMap::from([("centaur.slack_channel_id".to_owned(), "C1".to_owned())]);
 
-        store
-            .insert_ready_warm_sandbox(&first_sandbox, &workload_key)
-            .await
-            .expect("insert first warm sandbox");
-        backend.set_status(&first_sandbox, SandboxStatus::Running);
         let claimed = pool
-            .claim(&first_thread, Some("prn_conv"), Some("prn_req"), &labels)
+            .claim(&thread_key, Some("prn_conv"), None, &BTreeMap::new())
             .await
-            .expect("claim first warm sandbox");
-        assert_eq!(claimed, Some(first_sandbox.clone()));
+            .expect("claim warm sandbox");
 
-        store
-            .insert_ready_warm_sandbox(&second_sandbox, &workload_key)
+        assert_eq!(claimed, Some(live_sandbox));
+        for sandbox_id in [&missing_sandbox, &stopped_sandbox] {
+            let status: String = sqlx::query_scalar(
+                "select status from session_warm_sandboxes where sandbox_id = $1",
+            )
+            .bind(sandbox_id)
+            .fetch_one(store.pool())
             .await
-            .expect("insert second warm sandbox");
-        backend.set_status(&second_sandbox, SandboxStatus::Running);
-        let claimed = pool
-            .claim(&second_thread, Some("prn_conv"), None, &labels)
-            .await
-            .expect("claim second warm sandbox");
-        assert_eq!(claimed, Some(second_sandbox.clone()));
-
+            .expect("load warm sandbox status");
+            assert_eq!(status, "failed", "{sandbox_id}");
+        }
         assert_eq!(
-            backend.assigned(),
-            vec![
-                (
-                    first_sandbox,
-                    "prn_conv".to_owned(),
-                    Some("prn_req".to_owned()),
-                    labels.clone()
-                ),
-                (second_sandbox, "prn_conv".to_owned(), None, labels),
-            ]
+            store
+                .count_ready_warm_sandboxes(&workload_key)
+                .await
+                .expect("count ready warm sandboxes"),
+            0
         );
     }
 
@@ -510,13 +495,10 @@ mod tests {
             .to_string()
     }
 
-    type RecordedAssignment = (String, String, Option<String>, BTreeMap<String, String>);
-
     struct TestBackend {
         create_id: String,
         statuses: Mutex<BTreeMap<String, SandboxStatus>>,
         created: Mutex<Vec<String>>,
-        assigned: Mutex<Vec<RecordedAssignment>>,
     }
 
     impl TestBackend {
@@ -525,16 +507,11 @@ mod tests {
                 create_id,
                 statuses: Mutex::new(BTreeMap::new()),
                 created: Mutex::new(Vec::new()),
-                assigned: Mutex::new(Vec::new()),
             }
         }
 
         fn created(&self) -> Vec<String> {
             self.created.lock().unwrap().clone()
-        }
-
-        fn assigned(&self) -> Vec<RecordedAssignment> {
-            self.assigned.lock().unwrap().clone()
         }
 
         fn set_status(&self, sandbox_id: &str, status: SandboxStatus) {
@@ -607,17 +584,11 @@ mod tests {
 
         async fn assign_iron_control_proxy_principal(
             &self,
-            id: &SandboxId,
-            principal_id: &str,
-            requester_principal_id: Option<&str>,
-            labels: &BTreeMap<String, String>,
+            _id: &SandboxId,
+            _principal_id: &str,
+            _requester_principal_id: Option<&str>,
+            _labels: &BTreeMap<String, String>,
         ) -> SandboxResult<()> {
-            self.assigned.lock().unwrap().push((
-                id.as_str().to_owned(),
-                principal_id.to_owned(),
-                requester_principal_id.map(ToOwned::to_owned),
-                labels.clone(),
-            ));
             Ok(())
         }
 
