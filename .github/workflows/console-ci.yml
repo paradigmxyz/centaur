@@ -13,7 +13,7 @@ defaults:
 jobs:
   console_changes:
     name: Detect Console CI changes
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     outputs:
       relevant: ${{ steps.filter.outputs.relevant }}
     defaults:
@@ -46,7 +46,7 @@ jobs:
           fi
 
   scan_ruby:
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: depot-ubuntu-24.04
     needs: console_changes
     if: needs.console_changes.outputs.relevant == 'true'
 
@@ -71,7 +71,7 @@ jobs:
           fi
 
   scan_js:
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: depot-ubuntu-24.04
     needs: console_changes
     if: needs.console_changes.outputs.relevant == 'true'
 
@@ -167,7 +167,7 @@ jobs:
 
   console-ci-success:
     name: Console CI success
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     if: always()
     needs:
       - console_changes

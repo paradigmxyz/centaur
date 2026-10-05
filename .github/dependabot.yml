@@ -78,6 +78,8 @@ updates:
 
   - package-ecosystem: cargo
     directory: /services/api-rs
+    cooldown:
+      default-days: 7
     allow:
       - dependency-type: all
     schedule:
@@ -96,6 +98,8 @@ updates:
 
   - package-ecosystem: cargo
     directory: /crates/absurd-sdk
+    cooldown:
+      default-days: 7
     allow:
       - dependency-type: all
     schedule:
@@ -114,6 +118,8 @@ updates:
 
   - package-ecosystem: cargo
     directory: /crates/active-record-encryption
+    cooldown:
+      default-days: 7
     allow:
       - dependency-type: all
     schedule:
@@ -132,6 +138,8 @@ updates:
 
   - package-ecosystem: cargo
     directory: /crates/harness-server
+    cooldown:
+      default-days: 7
     allow:
       - dependency-type: all
     schedule:
