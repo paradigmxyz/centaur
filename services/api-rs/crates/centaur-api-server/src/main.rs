@@ -138,12 +138,7 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         }
     }
 
-    app_state.mark_ready_with_workflow_host(
-        runtime,
-        workflows,
-        Some(pool),
-        iron_control.workflow_host_principal,
-    );
+    app_state.mark_ready(runtime, workflows, Some(pool));
     info!("centaur api-rs runtime initialized");
     Ok(())
 }

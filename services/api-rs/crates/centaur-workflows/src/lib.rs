@@ -1131,7 +1131,7 @@ enum WorkflowQueueClass {
 fn workflow_queue_class(workflow_name: &str) -> WorkflowQueueClass {
     match workflow_name {
         "slack_sync" => WorkflowQueueClass::SlackLive,
-        "slack_backfill" | "slack_archive_import" => WorkflowQueueClass::EtlBackfill,
+        "slack_backfill" => WorkflowQueueClass::EtlBackfill,
         "google_calendar_sync"
         | "google_drive_sync"
         | "linear_sync"

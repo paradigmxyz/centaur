@@ -246,10 +246,6 @@ mod tests {
                 .uri("/api/workflows/runs")
                 .body(Body::empty())
                 .unwrap(),
-            Request::builder()
-                .uri("/api/admin/slack/archive-imports")
-                .body(Body::empty())
-                .unwrap(),
         ] {
             let response = build_router_with_app_state(AppState::unready(test_auth()))
                 .oneshot(request)
@@ -300,11 +296,6 @@ mod tests {
                 .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"event_name":"test.event","payload":{}}"#))
-                .unwrap(),
-            Request::builder()
-                .uri("/api/admin/slack/archive-imports")
-                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
-                .body(Body::empty())
                 .unwrap(),
             Request::builder()
                 .uri("/api/admin/slack/dm-sync/checkpoints")
@@ -503,7 +494,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn principal_jwt_is_capability_scoped_and_archive_exception_is_subject_scoped() {
+    async fn principal_jwt_is_capability_scoped() {
         let principal = principal_token("prn_sandbox");
         let write_response = build_router_with_app_state(AppState::unready(test_auth()))
             .oneshot(
@@ -531,47 +522,6 @@ mod tests {
             .unwrap();
         assert_ne!(slack_response.status(), StatusCode::UNAUTHORIZED);
         assert_ne!(slack_response.status(), StatusCode::FORBIDDEN);
-
-        let pool =
-            PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
-        let state = AppState::unready(test_auth());
-        state.mark_ready_with_workflow_host(
-            centaur_session_runtime::SessionRuntime::new(
-                PgSessionStore::new(pool),
-                SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
-                TestSessionPrincipalRegistrar,
-            ),
-            None,
-            None,
-            "prn_workflow_host".to_owned(),
-        );
-
-        let other_response = build_router_with_app_state(state.clone())
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/api/admin/slack/archive-imports/import-1/download-url")
-                    .header(header::AUTHORIZATION, format!("Bearer {principal}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(other_response.status(), StatusCode::FORBIDDEN);
-
-        let workflow_host = principal_token("prn_workflow_host");
-        let host_response = build_router_with_app_state(state)
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/api/admin/slack/archive-imports/import-1/download-url")
-                    .header(header::AUTHORIZATION, format!("Bearer {workflow_host}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(host_response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

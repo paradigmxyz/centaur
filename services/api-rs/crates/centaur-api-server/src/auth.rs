@@ -25,12 +25,11 @@ pub(crate) enum Capability {
     WorkflowsWrite,
     WorkflowsEvents,
     WorkflowsActions,
-    AdminArchive,
     AdminSync,
 }
 
 impl Capability {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 8] = [
         Self::SessionsRead,
         Self::SessionsWrite,
         Self::SandboxesDrain,
@@ -38,7 +37,6 @@ impl Capability {
         Self::WorkflowsWrite,
         Self::WorkflowsEvents,
         Self::WorkflowsActions,
-        Self::AdminArchive,
         Self::AdminSync,
     ];
 }
