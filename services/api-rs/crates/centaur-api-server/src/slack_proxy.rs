@@ -210,6 +210,15 @@ struct SlackFileInfoResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct SlackMessagesResponse {
+    ok: bool,
+    channel: String,
+    messages: Vec<Value>,
+    has_more: bool,
+    response_metadata: SlackResponseMetadata,
+}
+
+#[derive(Debug, Serialize)]
 struct SlackChannelItem {
     id: String,
     name: String,
@@ -268,7 +277,16 @@ struct SlackChannelsPage {
     response_metadata: SlackResponseMetadata,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
+struct SlackMessagesPage {
+    messages: Vec<Value>,
+    #[serde(default)]
+    has_more: bool,
+    #[serde(default)]
+    response_metadata: SlackResponseMetadata,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct SlackResponseMetadata {
     #[serde(default)]
     next_cursor: String,
@@ -606,7 +624,7 @@ async fn get_slack_channel_history(
     headers: HeaderMap,
     Path(channel_id): Path<String>,
     Query(query): Query<SlackChannelHistoryQuery>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<SlackMessagesResponse>, ApiError> {
     let claims = authorize_slack_file_proxy(&headers)?;
     validate_slack_channel_id(&channel_id)?;
     validate_slack_channel_history_query(&query)?;
@@ -652,7 +670,7 @@ async fn get_slack_thread_replies(
     headers: HeaderMap,
     Path((channel_id, thread_ts)): Path<(String, String)>,
     Query(query): Query<SlackChannelHistoryQuery>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<SlackMessagesResponse>, ApiError> {
     let claims = authorize_slack_file_proxy(&headers)?;
     validate_slack_channel_id(&channel_id)?;
     validate_slack_thread_ts(&thread_ts)?;
@@ -1145,11 +1163,10 @@ async fn slack_channel_history(
     config: &SlackFileProxyConfig,
     channel_id: &str,
     query: &SlackChannelHistoryQuery,
-) -> Result<Value, ApiError> {
+) -> Result<SlackMessagesResponse, ApiError> {
     let form = slack_channel_history_form(channel_id, query);
-    let mut value = slack_api_post_form(client, config, "conversations.history", &form).await?;
-    value["channel"] = json!(channel_id);
-    Ok(value)
+    let value = slack_api_post_form(client, config, "conversations.history", &form).await?;
+    slack_messages_response("conversations.history", channel_id, value)
 }
 
 async fn slack_thread_replies(
@@ -1158,11 +1175,27 @@ async fn slack_thread_replies(
     channel_id: &str,
     thread_ts: &str,
     query: &SlackChannelHistoryQuery,
-) -> Result<Value, ApiError> {
+) -> Result<SlackMessagesResponse, ApiError> {
     let form = slack_thread_replies_form(channel_id, thread_ts, query);
-    let mut value = slack_api_post_form(client, config, "conversations.replies", &form).await?;
-    value["channel"] = json!(channel_id);
-    Ok(value)
+    let value = slack_api_post_form(client, config, "conversations.replies", &form).await?;
+    slack_messages_response("conversations.replies", channel_id, value)
+}
+
+fn slack_messages_response(
+    method: &str,
+    channel_id: &str,
+    value: Value,
+) -> Result<SlackMessagesResponse, ApiError> {
+    let page = serde_json::from_value::<SlackMessagesPage>(value).map_err(|error| {
+        ApiError::Internal(format!("Slack {method} response was invalid: {error}"))
+    })?;
+    Ok(SlackMessagesResponse {
+        ok: true,
+        channel: channel_id.to_owned(),
+        messages: page.messages,
+        has_more: page.has_more,
+        response_metadata: page.response_metadata,
+    })
 }
 
 async fn slack_files_list(
@@ -2786,7 +2819,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            history,
+            serde_json::to_value(history).unwrap(),
             json!({
                 "ok": true,
                 "channel": "C123456789",
@@ -2806,9 +2839,13 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            replies,
+            serde_json::to_value(replies).unwrap(),
             json!({
-                "ok": true, "channel": "G123456789", "messages": [], "has_more": false
+                "ok": true,
+                "channel": "G123456789",
+                "messages": [],
+                "has_more": false,
+                "response_metadata": {"next_cursor": ""}
             })
         );
         server.abort();
