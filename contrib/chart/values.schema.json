@@ -108,7 +108,9 @@
       "type": "object",
       "properties": {
         "existingCaSecretName": { "type": "string" },
+        "existingCaSecretKey": { "type": "string", "minLength": 1 },
         "existingCaKeySecretName": { "type": "string" },
+        "existingCaKeySecretKey": { "type": "string", "minLength": 1 },
         "ca": {
           "type": "object",
           "properties": {
@@ -503,6 +505,14 @@
           "type": "object",
           "additionalProperties": { "type": "string" }
         }
+      }
+    },
+    "externalDatabase": {
+      "type": "object",
+      "properties": {
+        "cidrs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "textSearch": { "enum": ["", "paradedb", "postgres"] }
       }
     },
     "postgres": {

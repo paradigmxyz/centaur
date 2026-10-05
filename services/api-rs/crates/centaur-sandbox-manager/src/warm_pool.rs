@@ -482,7 +482,10 @@ mod tests {
         let store = PgSessionStore::connect(&url)
             .await
             .expect("connect test db");
-        store.run_migrations().await.expect("run migrations");
+        store
+            .run_migrations(centaur_session_sqlx::TextSearchBackend::Postgres)
+            .await
+            .expect("run migrations");
         Some(store)
     }
 

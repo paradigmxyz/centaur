@@ -9,8 +9,12 @@ secretManager:
   existingSecretName: centaur-infra-env
 
 firewall:
+  # Name fields select Kubernetes Secrets (they may be the same Secret); Key
+  # fields select the PEM entries inside them.
   existingCaSecretName: centaur-firewall-ca
+  existingCaSecretKey: ca-cert.pem
   existingCaKeySecretName: centaur-firewall-ca-key
+  existingCaKeySecretKey: ca-key.pem
   ca:
     certPem: ""
     keyPem: ""
@@ -338,9 +342,9 @@ sandbox:
   # matters for containers started outside api-rs.
   harnessEngine: codex
   # Copied into every sandbox pod. CLAUDE_MODEL / CODEX_MODEL set here are also
-  # mirrored into slackbotv2 and the Console; CODEX_MODEL_REASONING_EFFORT is
-  # mirrored into slackbotv2. This keeps Slack's model/thinking footer aligned
-  # with the policy the sandbox actually runs.
+  # mirrored into slackbotv2 and the Console; CODEX_MODEL_REASONING_EFFORT and
+  # CENTAUR_PI_MODEL are mirrored into slackbotv2. This keeps Slack's
+  # model/thinking footer aligned with the policy the sandbox actually runs.
   extraEnv: {}
   telemetry:
     # Include user prompts, assistant responses, and bounded shell commands on
@@ -348,9 +352,14 @@ sandbox:
     # Token usage, cost, status, session, and tool telemetry remain available
     # when this is disabled.
     captureTranscripts: false
+  # New agent-k8s sandboxes get a ReadWriteOnce PVC at /home/agent/state. The
+  # entrypoint keeps the session's workspace clone, uploads, branches, and native
+  # Codex/Claude files there, so they survive idle pause and pod replacement, but
+  # not final sandbox deletion. Existing sandboxes/claims are not migrated.
   stateVolume:
     enabled: false
     size: 10Gi
+    # Empty uses the cluster default storage class.
     storageClassName: ""
   # Requests/limits for the agent container of every sandbox pod, per-session
   # and warm (k8s resources map).
@@ -406,7 +415,7 @@ repoCache:
   resources: {}
 
 # Installs the upstream agent-sandbox controller + CRDs (subchart). Required by
-# apiRs when apiRs.sandboxBackend is agent-k8s, which is the default.
+# apiRs, which runs every sandbox through it.
 agentSandbox:
   enabled: true
   namespace:
@@ -442,9 +451,10 @@ proxySync:
     annotations: {}
   resources: {}
 
-# Standalone company-context ingestion service. The first version indexes PDFs
-# from Google Drive into its private system and data schemas. Disabled while the
-# corpus is validated alongside the legacy Python workflows.
+# Standalone company-context ingestion service. It indexes Google Docs and PDFs
+# from Google Drive and Granola meeting notes into its private system and data
+# schemas. Disabled while the corpus is validated alongside the legacy Python
+# workflows.
 experimentalCompanyContext:
   enabled: false
   replicaCount: 1
@@ -460,7 +470,11 @@ experimentalCompanyContext:
   # synchronized. The embeddings API key comes from OPENAI_API_KEY in the
   # shared Kubernetes Secret.
   googleOauthAppSlug: google
+  # Rails Console OAuth app whose live per-user Granola MCP credentials are
+  # synchronized.
+  granolaOauthAppSlug: granola
   scanIntervalSeconds: 300
+  granolaSyncIntervalSeconds: 1800
   drivePageSize: 100
   maxScanPages: 10
   maxPdfBytes: 26214400
@@ -511,8 +525,6 @@ apiRs:
   sessionPrincipalAdmission: automatic
   # Expose the experimental centaur MCP dispatcher (currently action=list).
   mcpV2Enabled: false
-  sandboxBackend: agent-k8s
-  sandboxWorkload: codex-app-server
   sandboxReadyTimeoutSecs: 90
   sandboxWarmPoolSize: 3
   sandboxWarmPoolReplenishIntervalSecs: 5
@@ -692,18 +704,20 @@ slackbotv2:
   mcpPublicUrl: "http://localhost:3000"
   externalOrgAllowlist: ""
   triggerBotAllowlist: ""
-  # Per-channel default harness / model / provider / reasoning, keyed by Slack
-  # conversation id (the C…/G…/D… id). Each value is an object of optional
-  # harness / model / provider / reasoning fields, using the same vocabulary as
+  # Per-channel default persona / harness / model / provider / reasoning, keyed
+  # by Slack conversation id (the C…/G…/D… id). Each value is an object of
+  # optional persona / harness / model / provider / reasoning fields, using the same vocabulary as
   # the inline Slack flags (harness: claude|codex|nanocodex|amp, provider: bedrock|meta,
   # model accepts Claude aliases like opus). A model is only meaningful within a
   # harness, so name the harness alongside it. Applied when a message in that
   # channel carries no explicit/sticky per-thread flag, below such a flag and
   # above the deployment/baked harness default, and forwarded onto the harness
   # input line so it takes effect. reasoning only affects the codex harness.
+  # persona names a deployed persona and applies when a thread's session is
+  # created, like --persona.
   # Example:
   #   channelDefaults:
-  #     C0ENG: { harness: claude, model: opus, reasoning: high }
+  #     C0ENG: { persona: eng, harness: claude, model: opus, reasoning: high }
   #     C0TRIAGE: { reasoning: low }
   channelDefaults: {}
   # Message overrides strategy for Slack message text. "flags" keeps the legacy
@@ -838,6 +852,8 @@ teamsbot:
   extraEnv: {}
   resources: {}
 
+# Bundled PostgreSQL. Set enabled=false to use an external server such as RDS
+# or Cloud SQL, and configure externalDatabase.
 postgres:
   enabled: true
   # Scheduling for the PostgreSQL pod. When persistence is enabled, ensure the
@@ -873,6 +889,26 @@ postgres:
     enabled: true
     sizeLimit: 1Gi
   resources: {}
+
+# External PostgreSQL, used when postgres.enabled=false. Database URLs come from
+# secretManager.existingSecretName; these settings scope NetworkPolicy egress.
+externalDatabase:
+  # Address ranges the database endpoint can resolve to. Control-plane pods and
+  # per-sandbox iron-proxies may reach only these ranges on port. NetworkPolicy
+  # cannot match hostnames: use the RDS DB subnet group's CIDRs (the endpoint IP
+  # moves on failover) or the Cloud SQL private IP as a /32. Required when
+  # networkPolicy.enabled=true; must be empty while postgres.enabled=true.
+  cidrs: []
+  #   - 10.0.32.0/20
+  port: 5432
+  # Keyword search backend for company context. "postgres" (used when empty)
+  # uses built-in full-text search and works on RDS and Cloud SQL; "paradedb"
+  # uses BM25 and requires the pg_search extension. Must be empty while
+  # postgres.enabled=true: the bundled Postgres always uses "paradedb". A
+  # database keeps the backend it was first migrated with, and migrations fail
+  # if this setting later disagrees. To change backends, migrate a fresh
+  # database and move the data into it; see the production deployment guide.
+  textSearch: ""
 
 ingress:
   enabled: false

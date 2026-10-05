@@ -1,0 +1,60 @@
+# Lets the test runner reach the release from the node: Postgres, to read the
+# durable session tables, and api-rs, for operator actions such as pausing a
+# session's sandbox. The chart's NetworkPolicies only admit release components,
+# so additive policies admit NodePort traffic, which arrives from the node.
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-postgres
+  namespace: centaur
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: centaur
+    app.kubernetes.io/instance: centaur
+    app.kubernetes.io/component: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+      nodePort: 30432
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-api-rs
+  namespace: centaur
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: centaur
+    app.kubernetes.io/instance: centaur
+    app.kubernetes.io/component: api-rs
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 30081
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: e2e-from-node
+  namespace: centaur
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [postgres, api-rs]
+    matchLabels:
+      app.kubernetes.io/instance: centaur
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 8080

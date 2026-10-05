@@ -1,9 +1,8 @@
 """Generate performance graphs from block metrics.
 
-This module is one of two existing matplotlib sites in the repo. Phase 1 of the
-charting overhaul aligns it with the Centaur visual signature: 16:9, 200 DPI on
-save, Okabe-Ito categorical palette, sentence-case takeaway titles, no top/right
-spines, horizontal-only gridlines.
+Graphs follow the Centaur visual signature: 16:9, 200 DPI on save, Okabe-Ito
+categorical palette, sentence-case takeaway titles, no top/right spines, and
+horizontal-only gridlines.
 """
 
 from __future__ import annotations

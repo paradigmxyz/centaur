@@ -261,6 +261,10 @@ spec:
 {{- end }}
             - name: RUN_MIGRATIONS
               value: {{ .Values.apiRs.runMigrations | quote }}
+{{- if not (hasKey .Values.apiRs.extraEnv "DATABASE_TEXT_SEARCH") }}
+            - name: DATABASE_TEXT_SEARCH
+              value: {{ ternary "paradedb" (default "postgres" .Values.externalDatabase.textSearch) .Values.postgres.enabled | quote }}
+{{- end }}
 {{- if not (hasKey .Values.apiRs.extraEnv "CENTAUR_SESSION_PRINCIPAL_ADMISSION") }}
             - name: CENTAUR_SESSION_PRINCIPAL_ADMISSION
               value: {{ .Values.apiRs.sessionPrincipalAdmission | quote }}
@@ -316,10 +320,6 @@ spec:
             - name: CENTAUR_OVERLAY_DIR
               value: {{ .Values.overlay.mountPath | quote }}
 {{- end }}
-            - name: SESSION_SANDBOX_BACKEND
-              value: {{ .Values.apiRs.sandboxBackend | quote }}
-            - name: SESSION_SANDBOX_WORKLOAD
-              value: {{ .Values.apiRs.sandboxWorkload | quote }}
             # Default harness for warm sandboxes. Per-session sandboxes run
             # their session's harness regardless (pinned via container args).
             - name: SESSION_SANDBOX_HARNESS
@@ -370,6 +370,18 @@ spec:
               value: {{ printf "%s:%s" .Values.sandbox.image.repository .Values.sandbox.image.tag | quote }}
             - name: SESSION_SANDBOX_IMAGE_PULL_POLICY
               value: {{ .Values.sandbox.image.pullPolicy | quote }}
+{{- if .Values.sandbox.stateVolume.enabled }}
+            - name: SESSION_SANDBOX_STATE_VOLUME_ENABLED
+              value: "true"
+{{- if and .Values.sandbox.stateVolume.size (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_STATE_VOLUME_SIZE")) }}
+            - name: SESSION_SANDBOX_STATE_VOLUME_SIZE
+              value: {{ .Values.sandbox.stateVolume.size | quote }}
+{{- end }}
+{{- if and .Values.sandbox.stateVolume.storageClassName (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_STATE_VOLUME_STORAGE_CLASS_NAME")) }}
+            - name: SESSION_SANDBOX_STATE_VOLUME_STORAGE_CLASS_NAME
+              value: {{ .Values.sandbox.stateVolume.storageClassName | quote }}
+{{- end }}
+{{- end }}
 {{- if and .Values.sandbox.resources (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_RESOURCES")) }}
             - name: SESSION_SANDBOX_RESOURCES
               value: {{ toJson .Values.sandbox.resources | quote }}
@@ -422,6 +434,14 @@ spec:
               value: {{ .Values.ironProxy.image.pullPolicy | quote }}
             - name: KUBERNETES_IRON_PROXY_UPSTREAM_DENY_CIDRS
               value: {{ join "," .Values.ironProxy.upstreamDenyCidrs | quote }}
+{{- if and (not .Values.postgres.enabled) .Values.externalDatabase.cidrs }}
+            # Per-sandbox iron-proxies forward the tool-server sidecar's pool to
+            # the core database; allow them to reach the external database.
+            - name: KUBERNETES_IRON_PROXY_DATABASE_CIDRS
+              value: {{ join "," .Values.externalDatabase.cidrs | quote }}
+            - name: KUBERNETES_IRON_PROXY_DATABASE_PORT
+              value: {{ .Values.externalDatabase.port | quote }}
+{{- end }}
 {{- if and .Values.ironProxy.resources (not (hasKey .Values.apiRs.extraEnv "KUBERNETES_IRON_PROXY_RESOURCES")) }}
             - name: KUBERNETES_IRON_PROXY_RESOURCES
               value: {{ toJson .Values.ironProxy.resources | quote }}
@@ -430,6 +450,10 @@ spec:
               value: {{ include "centaur.trustedCaSecretName" . | quote }}
             - name: KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME
               value: {{ include "centaur.trustedCaKeySecretName" . | quote }}
+            - name: KUBERNETES_FIREWALL_CA_SECRET_KEY
+              value: {{ .Values.firewall.existingCaSecretKey | default "ca-cert.pem" | quote }}
+            - name: KUBERNETES_FIREWALL_CA_KEY_SECRET_KEY
+              value: {{ .Values.firewall.existingCaKeySecretKey | default "ca-key.pem" | quote }}
             - name: KUBERNETES_SECRET_ENV_NAME
               value: {{ include "centaur.secretEnvName" . | quote }}
 {{- if .Values.secrets.bootstrapSecretName }}

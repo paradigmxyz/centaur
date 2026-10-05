@@ -1,73 +1,79 @@
 import base64
+import struct
 import unittest
 
-import matplotlib.pyplot as plt
-import pandas as pd
-from tools.infra.chart.client import ChartClient, _apply_annotations, _prepare_time_axis
+from centaur_tool_chart.client import VegaLiteClient
+
+BAR_SPEC = {
+    "data": {"values": [{"label": "A", "value": 3}, {"label": "B", "value": 5}]},
+    "mark": "bar",
+    "encoding": {
+        "x": {"field": "label", "type": "nominal"},
+        "y": {"field": "value", "type": "quantitative"},
+    },
+}
 
 
-class TimeAxisTests(unittest.TestCase):
-    def test_iso_dates_are_parsed_and_sorted(self):
-        frame = pd.DataFrame(
-            [
-                {"date": "2026-03-10", "value": 2},
-                {"date": "2026-01-01", "value": 1},
-            ]
-        )
+class VegaLiteClientTests(unittest.TestCase):
+    def test_renders_inline_spec_to_png_with_useful_default_size(self):
+        rendered = base64.b64decode(VegaLiteClient().render(BAR_SPEC, scale=1))
 
-        prepared, is_time_axis = _prepare_time_axis(frame, "date")
+        self.assertTrue(rendered.startswith(b"\x89PNG"))
+        width, height = struct.unpack(">II", rendered[16:24])
+        self.assertEqual((width, height), (800, 450))
 
-        self.assertTrue(is_time_axis)
-        self.assertEqual(
-            prepared["date"].dt.strftime("%Y-%m-%d").tolist(),
-            ["2026-01-01", "2026-03-10"],
-        )
+    def test_renders_inline_spec_to_svg_with_default_style(self):
+        encoded = VegaLiteClient().render(BAR_SPEC, output_format="svg")
 
-    def test_category_labels_are_not_coerced(self):
-        frame = pd.DataFrame([{"label": "Series A", "value": 1}])
+        rendered = base64.b64decode(encoded).decode("utf-8")
+        self.assertIn("<svg", rendered[:500])
+        self.assertIn("#F8F9FA", rendered)
+        self.assertIn("#0072B2", rendered)
+        self.assertIn("Inter", rendered)
 
-        prepared, is_time_axis = _prepare_time_axis(frame, "label")
+    def test_rejects_external_data_url(self):
+        spec = {
+            "data": {"url": "https://example.com/data.csv"},
+            "mark": "bar",
+            "encoding": {"x": {"field": "category", "type": "nominal"}},
+        }
 
-        self.assertFalse(is_time_axis)
-        self.assertEqual(prepared["label"].tolist(), ["Series A"])
+        with self.assertRaisesRegex(ValueError, "External data URLs are not allowed"):
+            VegaLiteClient().render(spec)
 
-    def test_regions_and_events_render_on_time_axis(self):
-        fig, ax = plt.subplots()
-        ax.plot(pd.to_datetime(["2026-01-01", "2026-04-01"]), [0, 1])
+    def test_rejects_oversized_dimensions(self):
+        spec = {**BAR_SPEC, "width": 2000}
 
-        _apply_annotations(
-            ax,
-            [
-                {"start": "2026-02-01", "end": "2026-02-10", "label": "Trade window"},
-                {"date": "2026-03-01", "label": "Single trade"},
-            ],
-            True,
-        )
+        with self.assertRaisesRegex(ValueError, "width must be between"):
+            VegaLiteClient().render(spec)
 
-        self.assertEqual(len(ax.patches), 1)
-        self.assertEqual(len(ax.lines), 2)
-        self.assertEqual(
-            [text.get_text() for text in ax.texts],
-            ["Trade window", "Single trade"],
-        )
-        plt.close(fig)
-
-    def test_render_chart_accepts_time_regions(self):
-        encoded = ChartClient().render_chart(
-            chart_type="line",
-            data=[
-                {"date": "2026-01-01", "PF return": 0},
-                {"date": "2026-04-01", "PF return": 12},
-            ],
-            title="PF gained over the period",
-            x="date",
-            y="PF return",
-            extras={
-                "annotations": [{"start": "2026-02-01", "end": "2026-02-14", "label": "Purchases"}]
+    def test_does_not_treat_data_field_as_chart_dimension(self):
+        spec = {
+            "data": {"values": [{"width": 2000, "count": 1}]},
+            "mark": "bar",
+            "encoding": {
+                "x": {"field": "width", "type": "quantitative"},
+                "y": {"field": "count", "type": "quantitative"},
             },
-        )
+        }
 
-        self.assertTrue(base64.b64decode(encoded).startswith(b"\x89PNG"))
+        rendered = base64.b64decode(VegaLiteClient().render(spec, scale=1))
+
+        self.assertTrue(rendered.startswith(b"\x89PNG"))
+
+    def test_rejects_too_many_named_dataset_rows(self):
+        spec = {
+            "datasets": {"points": [{}] * 50_001},
+            "data": {"name": "points"},
+            "mark": "point",
+        }
+
+        with self.assertRaisesRegex(ValueError, "50001 inline values"):
+            VegaLiteClient().render(spec)
+
+    def test_compiler_rejects_invalid_spec(self):
+        with self.assertRaises(ValueError):
+            VegaLiteClient().render({"mark": {"type": "not-a-mark"}})
 
 
 if __name__ == "__main__":

@@ -1,6 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    pin::pin,
     sync::Arc,
+    time::Duration,
 };
 
 use absurd::{Client as AbsurdClient, Error as AbsurdError, SpawnOptions, TaskContext};
@@ -8,6 +10,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
+use tokio::time::interval;
 use tracing::{error, info, warn};
 
 use crate::{
@@ -16,11 +19,13 @@ use crate::{
         DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK, GOOGLE_DOC_MIME_TYPE, PDF_MIME_TYPE,
         SHARED_DRIVE_SCAN_TASK, SHARED_DRIVES_DISCOVER_TASK, SHARED_FOLDERS_BATCH_TASK,
     },
-    credentials::GoogleCredential,
+    credentials::{ConsoleCredentials, GoogleCredential},
     drive::{DriveChange, DriveClient, DriveFile},
     embeddings::EmbeddingsClient,
     errors::{is_rejected, rejected},
     extraction::{chunk_text, extract_google_doc_text, extract_pdf_text, hex_sha256},
+    granola::GranolaClient,
+    granola_tasks,
 };
 
 #[derive(Clone)]
@@ -28,7 +33,9 @@ pub struct TaskState {
     pub config: Arc<Config>,
     pub pool: PgPool,
     pub absurd: AbsurdClient,
+    pub credentials: Arc<ConsoleCredentials>,
     pub drive: DriveClient,
+    pub granola: GranolaClient,
     pub embeddings: EmbeddingsClient,
 }
 
@@ -105,12 +112,14 @@ pub struct TaskSummary {
 }
 
 pub fn register(state: TaskState) -> Result<()> {
+    granola_tasks::register(&state)?;
+
     let reconcile_state = state.clone();
     state.absurd.register_task(
         DRIVE_CREDENTIALS_RECONCILE_TASK,
         move |params: ReconcileCredentialsParams, ctx| {
             let state = reconcile_state.clone();
-            async move { task_result(reconcile_credentials(&state, params, &ctx).await) }
+            async move { run_task(&ctx, reconcile_credentials(&state, params, &ctx)).await }
         },
     )?;
 
@@ -119,7 +128,7 @@ pub fn register(state: TaskState) -> Result<()> {
         .absurd
         .register_task(DRIVE_SCAN_TASK, move |params: ScanParams, ctx| {
             let state = scan_state.clone();
-            async move { task_result(scan_drive(&state, params, &ctx).await) }
+            async move { run_task(&ctx, scan_drive(&state, params, &ctx)).await }
         })?;
 
     let discover_state = state.clone();
@@ -127,7 +136,7 @@ pub fn register(state: TaskState) -> Result<()> {
         SHARED_DRIVES_DISCOVER_TASK,
         move |params: DiscoverSharedDrivesParams, ctx| {
             let state = discover_state.clone();
-            async move { task_result(discover_shared_drives(&state, params, &ctx).await) }
+            async move { run_task(&ctx, discover_shared_drives(&state, params, &ctx)).await }
         },
     )?;
 
@@ -136,7 +145,7 @@ pub fn register(state: TaskState) -> Result<()> {
         SHARED_FOLDERS_BATCH_TASK,
         move |params: FolderBatchParams, ctx| {
             let state = batch_state.clone();
-            async move { task_result(walk_folder_batch(&state, params, &ctx).await) }
+            async move { run_task(&ctx, walk_folder_batch(&state, params, &ctx)).await }
         },
     )?;
 
@@ -145,7 +154,7 @@ pub fn register(state: TaskState) -> Result<()> {
         SHARED_DRIVE_SCAN_TASK,
         move |params: SharedDriveScanParams, ctx| {
             let state = shared_scan_state.clone();
-            async move { task_result(scan_shared_drive(&state, params, &ctx).await) }
+            async move { run_task(&ctx, scan_shared_drive(&state, params, &ctx)).await }
         },
     )?;
 
@@ -154,7 +163,7 @@ pub fn register(state: TaskState) -> Result<()> {
         .absurd
         .register_task(DOCUMENT_EXTRACT_TASK, move |params: ExtractParams, ctx| {
             let state = extract_state.clone();
-            async move { task_result(extract_document(&state, params, &ctx).await) }
+            async move { run_task(&ctx, extract_document(&state, params, &ctx)).await }
         })?;
 
     let embed_state = state.clone();
@@ -162,14 +171,14 @@ pub fn register(state: TaskState) -> Result<()> {
         .absurd
         .register_task(DOCUMENT_EMBED_TASK, move |params: EmbedParams, ctx| {
             let state = embed_state.clone();
-            async move { task_result(embed_document(&state, params, &ctx).await) }
+            async move { run_task(&ctx, embed_document(&state, params, &ctx)).await }
         })?;
 
     let delete_client = state.absurd.clone();
     let delete_state = state;
     delete_client.register_task(DOCUMENT_DELETE_TASK, move |params: DeleteParams, ctx| {
         let state = delete_state.clone();
-        async move { task_result(delete_document(&state, params, &ctx).await) }
+        async move { run_task(&ctx, delete_document(&state, params, &ctx)).await }
     })?;
     Ok(())
 }
@@ -1686,7 +1695,7 @@ async fn record_embedding_failure(
     }
 }
 
-fn bounded_error(error: &anyhow::Error) -> String {
+pub(crate) fn bounded_error(error: &anyhow::Error) -> String {
     error.to_string().chars().take(1_000).collect()
 }
 
@@ -1694,7 +1703,26 @@ fn nonempty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
-fn task_result<T>(result: Result<T>) -> absurd::Result<T> {
+/// Absurd reclaims a task whose lease is not extended within the worker's
+/// claim timeout (120 seconds by default), and the worker exits once a task
+/// overruns it twice. Extending the lease while the task runs lets long
+/// external calls, such as embeddings requests, finish.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Runs a task handler, extending its lease until it finishes.
+pub(crate) async fn run_task<T>(
+    ctx: &TaskContext,
+    work: impl Future<Output = Result<T>>,
+) -> absurd::Result<T> {
+    let mut work = pin!(work);
+    let mut heartbeat = interval(HEARTBEAT_INTERVAL);
+    heartbeat.tick().await;
+    let result = loop {
+        tokio::select! {
+            result = &mut work => break result,
+            _ = heartbeat.tick() => ctx.heartbeat(None).await?,
+        }
+    };
     result.map_err(|error| AbsurdError::TaskFailed(error.into_boxed_dyn_error()))
 }
 

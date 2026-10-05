@@ -7,9 +7,10 @@ use centaur_sandbox_core::{
 };
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvFromSource,
-    EnvVar as K8sEnvVar, HTTPGetAction, Pod, PodSpec, Probe, ResourceClaim as K8sResourceClaim,
-    ResourceRequirements as K8sResourceRequirements, SecretEnvSource, SecretVolumeSource,
-    SecurityContext, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
+    EnvVar as K8sEnvVar, HTTPGetAction, KeyToPath, Pod, PodSpec, Probe, ProjectedVolumeSource,
+    ResourceClaim as K8sResourceClaim, ResourceRequirements as K8sResourceRequirements,
+    SecretEnvSource, SecretProjection, SecurityContext, Service, ServicePort, ServiceSpec, Volume,
+    VolumeMount, VolumeProjection,
 };
 use k8s_openapi::api::networking::v1::{
     IPBlock, NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyIngressRule, NetworkPolicyPeer,
@@ -32,6 +33,10 @@ const IRON_PROXY_LABEL: &str = "centaur.ai/iron-proxy";
 const IRON_CONTROL_PROXY_ID_ANNOTATION: &str = "centaur.ai/iron-control-proxy-id";
 const FIREWALL_CA_MOUNT_PATH: &str = "/firewall-certs";
 pub(crate) const FIREWALL_CA_CERT_PATH: &str = "/firewall-certs/ca-cert.pem";
+/// File names the sandbox and iron-proxy entrypoint expect inside their CA
+/// mounts; Secret entries are projected onto these regardless of their keys.
+const CA_CERT_FILE: &str = "ca-cert.pem";
+const CA_KEY_FILE: &str = "ca-key.pem";
 const PROXY_MANAGEMENT_PORT: u16 = 9092;
 const PROXY_HEALTH_PORT: u16 = 9090;
 // Managed-mode proxies carry no rendered config; these local listen/TLS
@@ -83,10 +88,19 @@ pub struct IronProxyConfig {
     pub fragments: Vec<ProxyFragment>,
     pub source_policy: SourcePolicy,
     pub ca_cert_secret_name: String,
+    /// Entry in `ca_cert_secret_name` holding the PEM CA certificate.
+    pub ca_cert_secret_key: String,
     pub ca_key_secret_name: String,
+    /// Entry in `ca_key_secret_name` holding the PEM CA private key.
+    pub ca_key_secret_key: String,
     pub env_from_secret_names: Vec<String>,
     pub extra_env: BTreeMap<String, String>,
     pub upstream_deny_cidrs: Vec<String>,
+    /// Address ranges of an external core database (for example RDS or Cloud
+    /// SQL). Proxies may reach them on `database_port`; the public-upstream rule
+    /// excludes private ranges, where managed databases usually live.
+    pub database_cidrs: Vec<String>,
+    pub database_port: u16,
     pub op_connect_app_name: String,
     pub op_connect_port: u16,
     pub api_pod_labels: BTreeMap<String, String>,
@@ -106,10 +120,14 @@ impl IronProxyConfig {
             fragments: Vec::new(),
             source_policy: SourcePolicy::default(),
             ca_cert_secret_name: ca_cert_secret_name.into(),
+            ca_cert_secret_key: CA_CERT_FILE.to_owned(),
             ca_key_secret_name: ca_key_secret_name.into(),
+            ca_key_secret_key: CA_KEY_FILE.to_owned(),
             env_from_secret_names: Vec::new(),
             extra_env: BTreeMap::new(),
             upstream_deny_cidrs: Vec::new(),
+            database_cidrs: Vec::new(),
+            database_port: 5432,
             op_connect_app_name: "onepassword-connect".to_owned(),
             op_connect_port: 8080,
             api_pod_labels: BTreeMap::from([(
@@ -1408,7 +1426,10 @@ pub(crate) fn sandbox_ca_volume_mount_json() -> Value {
 pub(crate) fn sandbox_ca_volume_json(iron_proxy: &IronProxyConfig) -> Value {
     json!({
         "name": "firewall-ca",
-        "secret": {"secretName": iron_proxy.ca_cert_secret_name},
+        "secret": {
+            "secretName": iron_proxy.ca_cert_secret_name,
+            "items": [{"key": iron_proxy.ca_cert_secret_key, "path": CA_CERT_FILE}],
+        },
     })
 }
 
@@ -1656,13 +1677,39 @@ fn iron_proxy_volumes(iron_proxy: &IronProxyConfig) -> Vec<Volume> {
         empty_dir_volume("iron-proxy-certs"),
         Volume {
             name: "iron-proxy-ca".to_owned(),
-            secret: Some(SecretVolumeSource {
-                secret_name: Some(iron_proxy.ca_key_secret_name.clone()),
+            projected: Some(ProjectedVolumeSource {
+                sources: Some(vec![
+                    secret_file_projection(
+                        &iron_proxy.ca_cert_secret_name,
+                        &iron_proxy.ca_cert_secret_key,
+                        CA_CERT_FILE,
+                    ),
+                    secret_file_projection(
+                        &iron_proxy.ca_key_secret_name,
+                        &iron_proxy.ca_key_secret_key,
+                        CA_KEY_FILE,
+                    ),
+                ]),
                 ..Default::default()
             }),
             ..Default::default()
         },
     ]
+}
+
+fn secret_file_projection(secret_name: &str, key: &str, path: &str) -> VolumeProjection {
+    VolumeProjection {
+        secret: Some(SecretProjection {
+            name: secret_name.to_owned(),
+            items: Some(vec![KeyToPath {
+                key: key.to_owned(),
+                path: path.to_owned(),
+                mode: None,
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
 }
 
 fn build_iron_proxy_service(id: &SandboxId, resolved: &ResolvedIronProxy) -> Service {
@@ -1771,6 +1818,16 @@ fn proxy_egress_rules(
         vec![network_port(PG_LISTENER_PORT)],
     ));
     rules.push(egress_to(vec![public_ipv4_peer()], upstream_ports));
+    if !iron_proxy.database_cidrs.is_empty() {
+        rules.push(egress_to(
+            iron_proxy
+                .database_cidrs
+                .iter()
+                .map(|cidr| ip_block_peer(cidr))
+                .collect(),
+            vec![network_port(iron_proxy.database_port)],
+        ));
+    }
     if observability_enabled {
         rules.push(egress_to(
             vec![pod_peer(iron_proxy.api_pod_labels.clone())],
@@ -1829,6 +1886,16 @@ fn namespace_pod_peer(namespace: &str, labels: BTreeMap<String, String>) -> Netw
 fn all_namespaces_peer() -> NetworkPolicyPeer {
     NetworkPolicyPeer {
         namespace_selector: Some(LabelSelector::default()),
+        ..Default::default()
+    }
+}
+
+fn ip_block_peer(cidr: &str) -> NetworkPolicyPeer {
+    NetworkPolicyPeer {
+        ip_block: Some(IPBlock {
+            cidr: cidr.to_owned(),
+            except: None,
+        }),
         ..Default::default()
     }
 }
@@ -2615,6 +2682,66 @@ mod tests {
     }
 
     #[test]
+    fn ca_secret_entries_are_projected_onto_expected_file_names() {
+        let id = SandboxId::new("asbx-test");
+        let mut iron_proxy = IronProxyConfig::new("proxy:test", "combined", "combined");
+        iron_proxy.ca_cert_secret_key = "CA_CERT_PEM".to_owned();
+        iron_proxy.ca_key_secret_key = "CA_KEY_PEM".to_owned();
+        let sync = ProxySyncEnv {
+            proxy_id: "iprx_test".to_owned(),
+            control_url: "http://console:3000".to_owned(),
+            token: "proxy-token".to_owned(),
+            config_hash: None,
+        };
+
+        // The sandbox sees only the certificate, never the private key.
+        assert_eq!(
+            sandbox_ca_volume_json(&iron_proxy)["secret"],
+            json!({
+                "secretName": "combined",
+                "items": [{"key": "CA_CERT_PEM", "path": "ca-cert.pem"}],
+            })
+        );
+
+        let pod = build_iron_proxy_pod(&id, &iron_proxy, &resolved(), &sync, no_scheduling());
+        let volume = pod
+            .spec
+            .unwrap()
+            .volumes
+            .unwrap()
+            .into_iter()
+            .find(|volume| volume.name == "iron-proxy-ca")
+            .unwrap();
+        let projected: Vec<_> = volume
+            .projected
+            .unwrap()
+            .sources
+            .unwrap()
+            .into_iter()
+            .map(|source| {
+                let secret = source.secret.unwrap();
+                let item = secret.items.unwrap().remove(0);
+                (secret.name, item.key, item.path)
+            })
+            .collect();
+        assert_eq!(
+            projected,
+            vec![
+                (
+                    "combined".to_owned(),
+                    "CA_CERT_PEM".to_owned(),
+                    "ca-cert.pem".to_owned()
+                ),
+                (
+                    "combined".to_owned(),
+                    "CA_KEY_PEM".to_owned(),
+                    "ca-key.pem".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn iron_proxy_pod_omits_resources_when_unset() {
         let id = SandboxId::new("asbx-test");
         let iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
@@ -3013,6 +3140,44 @@ mod tests {
                 .iter()
                 .any(|rule| rule_allows_public_port(rule, 3000))
         );
+    }
+
+    #[test]
+    fn proxy_policy_allows_external_database_cidrs_on_database_port() {
+        let id = SandboxId::new("asbx-test");
+        let mut iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
+        iron_proxy.database_cidrs = vec!["10.0.32.0/20".to_owned(), "10.0.48.0/20".to_owned()];
+        iron_proxy.database_port = 6432;
+
+        let policies = build_iron_proxy_network_policies(
+            &id,
+            &resolved(),
+            &iron_proxy,
+            &control_target(),
+            None,
+            false,
+        );
+        let allows_database = |rule: &NetworkPolicyEgressRule| {
+            let cidrs: Vec<&str> = rule
+                .to
+                .iter()
+                .flatten()
+                .filter_map(|peer| peer.ip_block.as_ref())
+                .map(|block| block.cidr.as_str())
+                .collect();
+            cidrs == ["10.0.32.0/20", "10.0.48.0/20"]
+                && rule.ports.as_ref()
+                    == Some(&vec![NetworkPolicyPort {
+                        port: Some(IntOrString::Int(6432)),
+                        protocol: Some("TCP".to_owned()),
+                        ..Default::default()
+                    }])
+        };
+
+        let sandbox_egress = policies[0].spec.as_ref().unwrap().egress.as_ref().unwrap();
+        assert!(!sandbox_egress.iter().any(allows_database));
+        let proxy_egress = policies[1].spec.as_ref().unwrap().egress.as_ref().unwrap();
+        assert!(proxy_egress.iter().any(allows_database));
     }
 
     #[test]

@@ -1,0 +1,50 @@
+# Using the Pi Harness
+
+Centaur can run [Pi](https://github.com/earendil-works/pi) as a session
+harness alongside Codex, Claude Code, Amp, Nanocodex, and Hermes. Start a
+Slack thread with `--pi`, or set `pi` as a Slack channel default. Pi is
+available from Slack only for now.
+
+The sandbox keeps one `pi --mode rpc` process per thread. Pi saves the session
+on disk under an id derived from the thread key, so an interrupt (which stops
+the Pi process, as with Claude Code), a model switch, or a sandbox restart with
+persistent state resumes the same conversation. Pi trusts the
+workspace (`--approve`), so it loads the skills the sandbox installs, and runs
+with telemetry and version checks off.
+
+Pi's [codemode](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/codemode.md)
+tool is on, so the model can write a script that calls the other
+tools, for example in parallel. Each call the script makes shows up as its own
+tool item.
+
+## Credentials
+
+Pi supports API-key auth only. It reads `ANTHROPIC_API_KEY` and
+`OPENAI_API_KEY` from the sandbox environment, where api-rs sets iron-proxy
+placeholders that the proxy replaces with the real keys. The sandbox has the
+Anthropic placeholder only when `CLAUDE_CODE_AUTH_MODE` is `api_key`, and the
+OpenAI one only when `CODEX_AUTH_MODE` is `api_key`; Pi uses the providers it
+has keys for. api-rs refuses to start with `pi` as the default harness when
+`CLAUDE_CODE_AUTH_MODE` is `access_token`.
+
+## Configuration
+
+| Variable | Purpose |
+|---|---|
+| `CENTAUR_PI_MODEL` | Default model as `provider/id`, for example `anthropic/claude-opus-4-8` or `openai/gpt-5.5`. When unset, Pi picks a default from the providers it has keys for. |
+
+Set it through `sandbox.extraEnv`. A per-thread `--model provider/id`
+overrides it. Turns run at the `medium` thinking level unless `-rsn <level>`
+sets one for that turn (`none` turns thinking off).
+
+A model must be one Centaur supports on Pi, as `provider/id` or a bare `id`:
+
+- `anthropic/`: `claude-fable-5`, `claude-haiku-4-5`, `claude-opus-4-7`,
+  `claude-opus-4-8`, `claude-opus-5`, `claude-opus-5-5`, `claude-sonnet-4-6`,
+  `claude-sonnet-5`
+- `openai/`: `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.4-pro`,
+  `gpt-5.5`, `gpt-5.5-pro`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`,
+  `gpt-6-astra`, `gpt-6-luna`, `gpt-6-sol`
+
+Another model fails that turn instead of reaching Pi. Slack then clears the
+rejected model from the thread, so later turns run the previous model.
