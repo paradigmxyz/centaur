@@ -153,6 +153,98 @@ class GitBranchTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must be set together", result.stderr)
 
+    def _advance_upstream(self, default_branch: str = "main") -> str:
+        upstream = self.root / "upstream"
+        self._git("clone", str(self.source), str(upstream))
+        self._git("-C", str(upstream), "config", "user.name", "Seed User")
+        self._git("-C", str(upstream), "config", "user.email", "seed@example.com")
+        self._git("-C", str(upstream), "branch", "-m", default_branch)
+        (upstream / "README.md").write_text("latest upstream\n")
+        self._git("-C", str(upstream), "commit", "-am", "chore: advance upstream")
+        self._git("-C", str(self.source), "remote", "add", "origin", str(upstream))
+        return self._git("-C", str(upstream), "rev-parse", "HEAD").stdout.strip()
+
+    def test_starts_at_upstream_default_branch_not_pinned_cache(self) -> None:
+        cached_head = self._git("-C", str(self.source), "rev-parse", "HEAD").stdout
+        self._git("-C", str(self.source), "checkout", "--detach")
+        upstream_head = self._advance_upstream("trunk")
+
+        destination = self._run_git_branch({"GITHUB_TOKEN": ""})
+
+        self.assertEqual(
+            self._git("-C", str(destination), "rev-parse", "HEAD").stdout.strip(),
+            upstream_head,
+        )
+        self.assertEqual(
+            self._git("-C", str(self.source), "rev-parse", "HEAD").stdout,
+            cached_head,
+        )
+
+    def test_moved_tag_does_not_block_fresh_branch(self) -> None:
+        self._git("-C", str(self.source), "tag", "v1")
+        upstream_head = self._advance_upstream()
+        self._git("-C", str(self.root / "upstream"), "tag", "-f", "v1")
+
+        destination = self._run_git_branch({"GITHUB_TOKEN": ""})
+
+        self.assertEqual(
+            self._git("-C", str(destination), "rev-parse", "HEAD").stdout.strip(),
+            upstream_head,
+        )
+
+    def test_reuse_refreshes_refs_without_changing_work(self) -> None:
+        destination = self._run_git_branch({"GITHUB_TOKEN": ""})
+        original_head = self._git("-C", str(destination), "rev-parse", "HEAD").stdout
+        original_branch = self._git(
+            "-C", str(destination), "branch", "--show-current"
+        ).stdout
+        (destination / "README.md").write_text("unfinished work\n")
+        (destination / "untracked.txt").write_text("keep me\n")
+        upstream_head = self._advance_upstream()
+        self._git(
+            "-C", str(destination), "remote", "set-url", "origin", str(self.root / "upstream")
+        )
+
+        self.assertEqual(self._run_git_branch({"GITHUB_TOKEN": ""}), destination)
+
+        self.assertEqual(
+            self._git("-C", str(destination), "rev-parse", "origin/main").stdout.strip(),
+            upstream_head,
+        )
+        self.assertEqual(
+            self._git("-C", str(destination), "rev-parse", "HEAD").stdout, original_head
+        )
+        self.assertEqual(
+            self._git("-C", str(destination), "branch", "--show-current").stdout,
+            original_branch,
+        )
+        self.assertEqual((destination / "README.md").read_text(), "unfinished work\n")
+        self.assertEqual((destination / "untracked.txt").read_text(), "keep me\n")
+
+    def test_fetch_failure_does_not_report_a_stale_checkout_as_success(self) -> None:
+        self._git(
+            "-C", str(self.source), "remote", "add", "origin", str(self.root / "missing")
+        )
+        for _ in range(2):
+            result = subprocess.run(
+                [str(GIT_BRANCH), "acme/centaur", "fix-attribution"],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "HOME": str(self.home), "GITHUB_TOKEN": ""},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+            self.assertFalse((self.home / "branches" / "acme" / "centaur").exists())
+
+        self._git("-C", str(self.source), "remote", "remove", "origin")
+        upstream_head = self._advance_upstream()
+        destination = self._run_git_branch({"GITHUB_TOKEN": ""})
+        self.assertEqual(
+            self._git("-C", str(destination), "rev-parse", "HEAD").stdout.strip(),
+            upstream_head,
+        )
+
 
 class CommitMessageHookTest(unittest.TestCase):
     def test_rejects_centaur_ai_coauthor(self) -> None:
