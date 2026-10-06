@@ -670,6 +670,7 @@ apiRs:
 # (:8080) and streams responses back. Listens on :3001.
 slackbotv2:
   enabled: true
+  # Must stay 1: the Slack inbox replays a previous pod's unfinished requests.
   replicaCount: 1
   image:
     repository: centaur-slackbotv2
