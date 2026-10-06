@@ -212,7 +212,7 @@ struct SlackFileInfoResponse {
 #[derive(Debug, Deserialize, Serialize)]
 struct SlackMessagesResponse {
     ok: bool,
-    #[serde(skip_deserializing)]
+    #[serde(default)]
     channel_id: String,
     messages: Vec<Value>,
     #[serde(default)]
