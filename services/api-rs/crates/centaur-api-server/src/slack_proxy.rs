@@ -13,7 +13,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::{
     ApiError,
@@ -209,11 +209,20 @@ struct SlackFileInfoResponse {
     file: Value,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct SlackMessagesResponse {
+    ok: bool,
+    #[serde(skip_deserializing)]
     channel: String,
-    #[serde(flatten)]
-    slack: Map<String, Value>,
+    messages: Vec<Value>,
+    #[serde(default)]
+    has_more: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pin_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    latest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    response_metadata: Option<SlackResponseMetadata>,
 }
 
 #[derive(Debug, Serialize)]
@@ -275,7 +284,7 @@ struct SlackChannelsPage {
     response_metadata: SlackResponseMetadata,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct SlackResponseMetadata {
     #[serde(default)]
     next_cursor: String,
@@ -1175,16 +1184,11 @@ fn slack_messages_response(
     channel_id: &str,
     value: Value,
 ) -> Result<SlackMessagesResponse, ApiError> {
-    let Value::Object(mut slack) = value else {
-        return Err(ApiError::Internal(format!(
-            "Slack {method} response was not a JSON object"
-        )));
-    };
-    slack.remove("channel");
-    Ok(SlackMessagesResponse {
-        channel: channel_id.to_owned(),
-        slack,
-    })
+    let mut response = serde_json::from_value::<SlackMessagesResponse>(value).map_err(|error| {
+        ApiError::Internal(format!("Slack {method} response was invalid: {error}"))
+    })?;
+    response.channel = channel_id.to_owned();
+    Ok(response)
 }
 
 async fn slack_files_list(
