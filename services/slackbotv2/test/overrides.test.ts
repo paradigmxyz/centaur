@@ -2,12 +2,26 @@ import { describe, expect, test } from 'bun:test'
 import { SlackFormatConverter } from '@chat-adapter/slack'
 import {
   extractMessageOverrides,
+  isHarnessEnabled,
+  parseEnabledHarnesses,
   normalizeHarnessOverrides,
   validateStrategyOverrides
 } from '../src/overrides'
 import { messageOverridesForText } from '../src/index'
 import { createOpenAiMessageOverridesStrategy } from '../src/message-overrides-strategy'
 import type { SlackbotV2Options, SlackbotV2Trace } from '../src/types'
+
+describe('deployment harness allowlist', () => {
+  test('validates configured harnesses and preserves unrestricted deployments', () => {
+    expect(parseEnabledHarnesses(undefined)).toBeUndefined()
+    expect(isHarnessEnabled('amp')).toBe(true)
+    expect(parseEnabledHarnesses('codex, CLAUDECODE, codex')).toEqual(['codex', 'claudecode'])
+    expect(isHarnessEnabled('amp', ['codex', 'claudecode'])).toBe(false)
+    expect(isHarnessEnabled('codex', ['codex', 'claudecode'])).toBe(true)
+    expect(() => parseEnabledHarnesses('')).toThrow('SLACKBOTV2_ENABLED_HARNESSES')
+    expect(() => parseEnabledHarnesses('codex,typo')).toThrow('SLACKBOTV2_ENABLED_HARNESSES')
+  })
+})
 
 describe('extractMessageOverrides', () => {
   test('returns text untouched without flags', () => {

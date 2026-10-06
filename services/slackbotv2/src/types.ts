@@ -161,6 +161,7 @@ export type SlackbotV2Options = {
    * nanocodex | hermes). Defaults to codex.
    */
   defaultHarnessType?: string
+  enabledHarnesses?: readonly string[]
   fetch?: SlackbotV2Fetch
   /**
    * Deployment-configured default model per harness wire value (claudecode |

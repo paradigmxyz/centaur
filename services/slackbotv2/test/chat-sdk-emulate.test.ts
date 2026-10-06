@@ -527,6 +527,49 @@ describe('slackbotv2', () => {
   // The paragraph break (`\n\n`) after the model value is deliberate: the
   // unpatched chat SDK dropped it, gluing the value to the next word
   // (`fablefirst`); this exercises the patched extractPlainText end to end.
+  for (const scenario of ['classifier', 'harness flag', 'model flag', 'channel default', 'sticky thread', 'rollout', 'cleared model']) {
+    it(`does not route to a disabled harness via ${scenario}`, async () => {
+      const state = createMemoryState()
+      await state.connect()
+      bot = createTestBot({
+        state,
+        enabledHarnesses: ['codex', 'claudecode'],
+        defaultHarnessType: scenario === 'cleared model' ? 'claudecode' : undefined,
+        channelDefaults: scenario === 'channel default' || scenario === 'cleared model'
+          ? { [CHANNEL_ID]: { harnessType: 'amp', model: 'fast' } } : undefined,
+        codexNanocodexRolloutPercent: scenario === 'rollout' ? 100 : 0,
+        messageOverridesStrategy: scenario === 'classifier'
+          ? async () => ({ overrides: { harnessType: 'amp', model: 'fast' } }) : undefined
+      })
+      const parent = await postUserMessage('Harness policy thread context.')
+      if (scenario === 'sticky thread') {
+        await state.set(`thread-state:${threadKey(parent.ts)}`, {
+          harnessType: 'amp', model: 'fast', provider: 'responses'
+        })
+      }
+      const text = scenario === 'harness flag' ? '--amp --model fast review this'
+        : scenario === 'model flag' ? '--model fast review this'
+        : scenario === 'cleared model' ? '--codex review this'
+        : 'get average scanner fast runtime and scanner superfast runtime'
+      const mention = await sendMessage(`<@${BOT_USER_ID}> ${text}`, { threadTs: parent.ts })
+      expect(mention.response.status).toBe(200)
+      await mention.finished()
+      expect(codexApi.creates.map(create => create.body.harness_type)).toEqual(['codex'])
+      expect(codexApi.executes).toHaveLength(1)
+      const execute = codexApi.executes[0]!.body
+      expect(JSON.parse(execute.input_lines.at(-1)!).model).toBeUndefined()
+      expect(JSON.parse(execute.input_lines.at(-1)!).provider).toBeUndefined()
+      expect(execute.metadata.harness_type).toBe('codex')
+      if (scenario !== 'rollout') {
+        expect(await state.get(`thread-state:${threadKey(parent.ts)}`)).toEqual(
+          expect.objectContaining({ harnessType: 'codex' })
+        )
+      }
+      const replies = await slack.conversations.replies({ channel: CHANNEL_ID, ts: parent.ts })
+      expect(JSON.stringify(replies.messages?.filter(message => message.user === BOT_USER_ID)))
+        .not.toContain('Amp')
+    })
+  }
   it('pins sticky persona state without labeling a pinned mismatch as unavailable', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()

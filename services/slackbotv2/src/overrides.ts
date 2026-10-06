@@ -388,3 +388,16 @@ function stripMatch(text: string, match: RegExpExecArray): string {
     before && after && !/\s$/.test(before) && !/^\s/.test(after) ? ' ' : ''
   return `${before}${separator}${after}`
 }
+
+export function parseEnabledHarnesses(value: string | undefined): string[] | undefined {
+  if (value === undefined) return undefined
+  const harnesses = value.split(',').map(harness => harness.trim().toLowerCase())
+  if (harnesses.some(harness => !STRATEGY_HARNESSES.has(harness))) {
+    throw new Error('SLACKBOTV2_ENABLED_HARNESSES must contain known comma-separated harness types')
+  }
+  return [...new Set(harnesses)]
+}
+
+export function isHarnessEnabled(harness: string, enabledHarnesses?: readonly string[]): boolean {
+  return enabledHarnesses === undefined || enabledHarnesses.includes(harness)
+}
