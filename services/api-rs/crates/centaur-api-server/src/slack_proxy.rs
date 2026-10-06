@@ -13,7 +13,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::{
     ApiError,
@@ -211,11 +211,9 @@ struct SlackFileInfoResponse {
 
 #[derive(Debug, Serialize)]
 struct SlackMessagesResponse {
-    ok: bool,
     channel: String,
-    messages: Vec<Value>,
-    has_more: bool,
-    response_metadata: SlackResponseMetadata,
+    #[serde(flatten)]
+    slack: Map<String, Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -277,16 +275,7 @@ struct SlackChannelsPage {
     response_metadata: SlackResponseMetadata,
 }
 
-#[derive(Debug, Deserialize)]
-struct SlackMessagesPage {
-    messages: Vec<Value>,
-    #[serde(default)]
-    has_more: bool,
-    #[serde(default)]
-    response_metadata: SlackResponseMetadata,
-}
-
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize)]
 struct SlackResponseMetadata {
     #[serde(default)]
     next_cursor: String,
@@ -1186,15 +1175,15 @@ fn slack_messages_response(
     channel_id: &str,
     value: Value,
 ) -> Result<SlackMessagesResponse, ApiError> {
-    let page = serde_json::from_value::<SlackMessagesPage>(value).map_err(|error| {
-        ApiError::Internal(format!("Slack {method} response was invalid: {error}"))
-    })?;
+    let Value::Object(mut slack) = value else {
+        return Err(ApiError::Internal(format!(
+            "Slack {method} response was not a JSON object"
+        )));
+    };
+    slack.remove("channel");
     Ok(SlackMessagesResponse {
-        ok: true,
         channel: channel_id.to_owned(),
-        messages: page.messages,
-        has_more: page.has_more,
-        response_metadata: page.response_metadata,
+        slack,
     })
 }
 
@@ -2790,6 +2779,7 @@ mod tests {
                             "ok": true,
                             "messages": [{"ts": "1700000000.000001", "text": "report"}],
                             "has_more": true,
+                            "pin_count": 2,
                             "response_metadata": {"next_cursor": "next"}
                         }))
                     },
@@ -2825,6 +2815,7 @@ mod tests {
                 "channel": "C123456789",
                 "messages": [{"ts": "1700000000.000001", "text": "report"}],
                 "has_more": true,
+                "pin_count": 2,
                 "response_metadata": {"next_cursor": "next"}
             })
         );
@@ -2844,8 +2835,7 @@ mod tests {
                 "ok": true,
                 "channel": "G123456789",
                 "messages": [],
-                "has_more": false,
-                "response_metadata": {"next_cursor": ""}
+                "has_more": false
             })
         );
         server.abort();
