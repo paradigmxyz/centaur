@@ -69,7 +69,7 @@ def test_channel_calls_proxy_client(monkeypatch) -> None:
         calls.append((args, kwargs))
         return {
             "ok": True,
-            "channel": "C1234567890",
+            "channel_id": "C1234567890",
             "messages": [{"user": "U123", "text": "root"}],
             "has_more": False,
             "response_metadata": {},
@@ -92,7 +92,7 @@ def test_channel_calls_proxy_client(monkeypatch) -> None:
     )
 
     assert result.exit_code == 0
-    assert json.loads(result.output)["channel"] == "C1234567890"
+    assert json.loads(result.output)["channel_id"] == "C1234567890"
     assert json.loads(result.output)["messages"][0]["text"] == "root"
     assert calls == [
         (

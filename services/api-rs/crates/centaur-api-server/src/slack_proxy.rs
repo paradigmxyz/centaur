@@ -212,8 +212,8 @@ struct SlackFileInfoResponse {
 #[derive(Debug, Deserialize, Serialize)]
 struct SlackMessagesResponse {
     ok: bool,
-    #[serde(default)]
-    channel: String,
+    #[serde(skip_deserializing)]
+    channel_id: String,
     messages: Vec<Value>,
     #[serde(default)]
     has_more: bool,
@@ -1185,7 +1185,7 @@ fn slack_messages_response(
     let mut response = serde_json::from_value::<SlackMessagesResponse>(value).map_err(|error| {
         ApiError::Internal(format!("Slack {method} response was invalid: {error}"))
     })?;
-    response.channel = channel_id.to_owned();
+    response.channel_id = channel_id.to_owned();
     Ok(response)
 }
 
@@ -2814,7 +2814,7 @@ mod tests {
             serde_json::to_value(history).unwrap(),
             json!({
                 "ok": true,
-                "channel": "C123456789",
+                "channel_id": "C123456789",
                 "messages": [{"ts": "1700000000.000001", "text": "report"}],
                 "has_more": true,
                 "pin_count": 2,
@@ -2835,7 +2835,7 @@ mod tests {
             serde_json::to_value(replies).unwrap(),
             json!({
                 "ok": true,
-                "channel": "G123456789",
+                "channel_id": "G123456789",
                 "messages": [],
                 "has_more": false
             })
