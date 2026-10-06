@@ -246,6 +246,9 @@ async fn create_roles(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
             if not exists (select 1 from pg_roles where rolname = 'centaur_slack_reader') then
                 create role centaur_slack_reader nologin;
             end if;
+            if not exists (select 1 from pg_roles where rolname = 'centaur_readonly') then
+                create role centaur_readonly nologin;
+            end if;
         end
         $$;
         "#,
