@@ -13,7 +13,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::{
     ApiError,
@@ -212,17 +212,15 @@ struct SlackFileInfoResponse {
 #[derive(Debug, Deserialize, Serialize)]
 struct SlackMessagesResponse {
     ok: bool,
-    #[serde(skip_deserializing)]
+    #[serde(default)]
     channel: String,
     messages: Vec<Value>,
     #[serde(default)]
     has_more: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pin_count: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    latest: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     response_metadata: Option<SlackResponseMetadata>,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
 }
 
 #[derive(Debug, Serialize)]
