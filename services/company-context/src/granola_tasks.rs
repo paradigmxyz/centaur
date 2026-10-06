@@ -761,15 +761,12 @@ async fn record_embedding_failure(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        env,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::env;
 
-    use sqlx::{Connection, Executor, PgConnection};
+    use sqlx::Executor;
 
     use super::*;
-    use crate::{database, granola::Participant};
+    use crate::{granola::Participant, test_support::TestDatabase};
 
     fn credential(id: i64) -> GranolaCredential {
         GranolaCredential {
@@ -810,21 +807,8 @@ mod tests {
             eprintln!("skipping: set COMPANY_CONTEXT_TEST_DATABASE_URL to a ParadeDB Postgres URL");
             return;
         };
-        let mut admin = PgConnection::connect(&database_url).await.unwrap();
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let name = format!("company_context_granola_{}_{nanos}", std::process::id());
-        admin
-            .execute(format!(r#"create database "{name}""#).as_str())
-            .await
-            .unwrap();
-        let mut test_url = url::Url::parse(&database_url).unwrap();
-        test_url.set_path(&name);
-        let pool = database::connect_and_migrate(test_url.as_str())
-            .await
-            .unwrap();
+        let database = TestDatabase::create(&database_url, "granola").await;
+        let pool = database.pool.clone();
 
         // Unchanged pending notes are returned again so a lost embed spawn recovers.
         let staged = stage_note(
@@ -894,10 +878,6 @@ mod tests {
         .unwrap();
         assert_eq!(restored, Some(4));
 
-        pool.close().await;
-        admin
-            .execute(format!(r#"drop database if exists "{name}""#).as_str())
-            .await
-            .unwrap();
+        database.drop().await;
     }
 }
