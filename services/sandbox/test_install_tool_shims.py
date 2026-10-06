@@ -125,7 +125,7 @@ class CopyPublishedToolsTest(unittest.TestCase):
             root = Path(tmp) / "tools"
             tools = [
                 ("infra", "vlogs", "vlogs", "vlogs"),
-                ("infra", "centaur_investigator", "centaur_investigator", "centaur-investigator"),
+                ("infra", "infra_probe", "infra_probe", "infra-probe"),
                 ("research", "websearch", "websearch", "websearch"),
             ]
             for category, dirname, project, script in tools:
@@ -137,12 +137,12 @@ class CopyPublishedToolsTest(unittest.TestCase):
 
             with mock.patch.dict(
                 "os.environ",
-                {"TOOL_BLOCKLIST": "vlogs,centaur_investigator,centaur-investigator"},
+                {"TOOL_BLOCKLIST": "vlogs,infra_probe,infra-probe"},
             ):
                 scripts = install_tool_shims._discover_scripts([root])
 
             self.assertNotIn("vlogs", scripts)
-            self.assertNotIn("centaur-investigator", scripts)
+            self.assertNotIn("infra-probe", scripts)
             self.assertIn("websearch", scripts)
 
 

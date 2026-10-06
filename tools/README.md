@@ -61,8 +61,6 @@ my-tool --help
 
 The open-source tool inventory lives in this `tools/` tree and changes over time. To see what ships in a running sandbox, use `centaur-tools list`; private deployments may mount additional overlay tool directories.
 
-- `centaur_investigator`: parse Centaur Slack thread references and enrich them
-  with best-effort vlogs/vmetrics context without exposing message context.
 - `centaur-console`: inspect sandbox permissions and configured OAuth apps, and
   manage the linked user's scheduled tasks.
 - `centaur-skills`: discover merged repository and overlay skills alongside

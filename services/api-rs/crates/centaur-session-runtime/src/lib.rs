@@ -81,8 +81,7 @@ const PUBLIC_REPO_CACHE_SUBPATH: &str = "public";
 const CENTAUR_SKILL_DIRS_ENV: &str = "CENTAUR_SKILL_DIRS";
 const CENTAUR_PUBLIC_SKILL_DIRS_ENV: &str = "CENTAUR_PUBLIC_SKILL_DIRS";
 const SANDBOX_REPO_CACHE_LABEL: &str = "centaur.sandbox_repo_cache";
-const OBSERVABILITY_TOOL_BLOCKLIST: &str =
-    "vlogs,vmetrics,grafana,centaur_investigator,centaur-investigator";
+const OBSERVABILITY_TOOL_BLOCKLIST: &str = "vlogs,vmetrics,grafana";
 const ARTIFACT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 type SandboxSpecFactory = Arc<
