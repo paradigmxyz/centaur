@@ -150,6 +150,10 @@ jobs:
             '^tools/' \
             '^centaur_sdk/' \
             '^\.github/scripts/run-tool-tests\.sh$' \
+            '^\.github/scripts/start-test-postgres\.sh$' \
+            '^services/api-rs/crates/centaur-session-sqlx/(search-)?migrations/' \
+            '^services/company-context/migrations/' \
+            '^services/iron-proxy/Dockerfile$' \
             '^\.github/workflows/ci\.yml$'
           set_output slackbotv2_tests \
             '^services/slackbotv2/' \
@@ -511,7 +515,12 @@ jobs:
           prune-cache: true
           cache-dependency-glob: tools/**/pyproject.toml
 
+      - name: Start Test Postgres
+        run: .github/scripts/start-test-postgres.sh tool-test-postgres 5432 postgres
+
       - name: Run tool tests
+        env:
+          COMPANY_CONTEXT_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: .github/scripts/run-tool-tests.sh
 
   slackbotv2-tests:
