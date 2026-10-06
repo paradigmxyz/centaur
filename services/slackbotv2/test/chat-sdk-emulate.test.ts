@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto'
+import { createHmac, randomUUID } from 'node:crypto'
 import {
   createServer,
   request as httpRequest,
@@ -7,7 +7,8 @@ import {
   type ServerResponse
 } from 'node:http'
 import { connect } from 'node:net'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
+import pg from 'pg'
 import { WebClient } from '@slack/web-api'
 import { createEmulator, type Emulator } from 'emulate'
 import { createMemoryState } from '@chat-adapter/state-memory'
@@ -27,7 +28,6 @@ import { clearRequesterIdentityCacheForTests } from '../src/session-api'
 import { slackbotMetrics } from '../src/metrics'
 import { createOpenAiMessageOverridesStrategy } from '../src/message-overrides-strategy'
 import { modelDisplayName } from '../src/response-context'
-import { createMemorySlackInboxStore } from '../src/inbox'
 import claudeSettings from '../../../harness/claude/settings.json'
 
 const BOT_TOKEN = 'xoxb-slackbotv2-emulate'
@@ -2762,7 +2762,7 @@ describe('slackbotv2', () => {
     expect(text).not.toContain('pnpm test')
   })
 
-  it('acknowledges Slack once saved while a slow session execute shows status', async () => {
+  it('shows assistant status while waiting for slow session execute', async () => {
     const logs: CapturedLog[] = []
     bot = createTestBot({ logger: captureLogger(logs) })
     codexApi.autoRespond = false
@@ -2797,9 +2797,9 @@ describe('slackbotv2', () => {
       return response
     })
 
-    // The webhook does not wait for the held execute: the durable record is enough.
-    await waitFor(() => responseSettled && codexApi.executes.length === 1)
-    expect((await responsePromise).status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await sleep(50)
+    expect(responseSettled).toBe(false)
     expect(
       slackApi.calls
         .filter(call => call.method === 'assistant.threads.setStatus')
@@ -2807,6 +2807,7 @@ describe('slackbotv2', () => {
     ).toEqual(['Thinking...'])
     expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(false)
     expect(codexApi.eventRequests).toHaveLength(0)
+    await waitFor(() => hasLog(logs, 'slackbotv2_webhook_handoff_wait_started'))
     expect(logData(logs, 'slackbotv2_handoff_started')).toEqual(
       expect.objectContaining({
         assistant_status_requested: true,
@@ -2845,7 +2846,7 @@ describe('slackbotv2', () => {
         trigger: 'new_mention'
       })
     )
-    expect(logData(logs, 'slackbotv2_webhook_received')).toEqual(
+    expect(logData(logs, 'slackbotv2_webhook_handoff_wait_started')).toEqual(
       expect.objectContaining({
         slack_channel: CHANNEL_ID,
         slack_event_id: 'Ev-slackbotv2-slow-execute',
@@ -2853,11 +2854,21 @@ describe('slackbotv2', () => {
         slack_message_ts: mention.ts,
         slack_retry_num: '1',
         slack_retry_reason: 'http_timeout',
-        slack_thread_ts: parent.ts
+        slack_thread_ts: parent.ts,
+        task_count: expect.any(Number)
       })
     )
 
     releaseExecute()
+    const response = await responsePromise
+    expect(response.status).toBe(200)
+    await waitFor(() => hasLog(logs, 'slackbotv2_webhook_handoff_wait_complete'))
+    expect(logData(logs, 'slackbotv2_webhook_handoff_wait_complete')).toEqual(
+      expect.objectContaining({
+        phase_ms: expect.any(Number),
+        slack_event_id: 'Ev-slackbotv2-slow-execute'
+      })
+    )
     await waitFor(() => codexApi.eventRequests.length === 1)
     await waitFor(() => codexApi.streamCount === 1)
     codexApi.closeStreams()
@@ -2867,98 +2878,6 @@ describe('slackbotv2', () => {
         .filter(call => call.method === 'assistant.threads.setStatus')
         .map(call => stringField(call.body.status))
     ).toEqual(expect.arrayContaining(['Thinking...', '']))
-  })
-
-  it('replays an inbox message whose process died before the execution was committed', async () => {
-    const sharedState = createMemoryState()
-    await sharedState.connect()
-    const inboxStore = createMemorySlackInboxStore()
-    bot = createTestBot({
-      inboxStore,
-      messageDedupeTtlMs: 25,
-      // The first process dies mid-execute: its request never returns.
-      fetch: async (input, init) =>
-        String(input).endsWith('/execute') ? new Promise<Response>(() => {}) : fetch(input, init),
-      sessionApiTimeoutMs: 10 * 60 * 1000,
-      state: sharedState
-    })
-
-    const parent = await postUserMessage('Context before the crash.')
-    const mention = await postUserMessage(`<@${BOT_USER_ID}> survive a crash`, parent.ts)
-    const response = await bot.app.request(
-      '/api/webhooks/slack',
-      signedSlackEvent({
-        event_id: 'Ev-slackbotv2-handoff-crash',
-        event: {
-          type: 'app_mention',
-          user: USER_ID,
-          channel: CHANNEL_ID,
-          team: TEAM_ID,
-          ts: mention.ts,
-          thread_ts: parent.ts,
-          text: `<@${BOT_USER_ID}> survive a crash`
-        }
-      }),
-      {},
-      waitUntilContext([])
-    )
-    expect(response.status).toBe(200)
-    await waitFor(() => codexApi.appends.length === 1)
-
-    bot = createTestBot({
-      messageDedupeTtlMs: 25,
-      inboxStore,
-      replayInboxOnStart: true,
-      state: sharedState
-    })
-
-    await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 1.'), 3000)
-    expect(codexApi.executes.map(execute => execute.body.idempotency_key)).toEqual([mention.ts])
-    expect(codexApi.appends).toHaveLength(1)
-  })
-
-  it('drops a late Slack retry of a stop command it already handled', async () => {
-    let interrupts = 0
-    bot = createTestBot({
-      fetch: async (input, init) => {
-        if (!String(input).endsWith('/interrupt')) return fetch(input, init)
-        interrupts += 1
-        return Response.json({ execution_id: null, interrupted: false })
-      },
-      messageDedupeTtlMs: 25
-    })
-    const parent = await postUserMessage('Context before stopping.')
-    const stop = await postUserMessage(`<@${BOT_USER_ID}> stop`, parent.ts)
-    const deliver = async (retry?: { retry_num: string; retry_reason: string }) => {
-      const waits: Promise<unknown>[] = []
-      const response = await bot.app.request(
-        '/api/webhooks/slack',
-        signedSlackEvent({
-          event_id: 'Ev-slackbotv2-stop-retry',
-          event: {
-            type: 'app_mention',
-            user: USER_ID,
-            channel: CHANNEL_ID,
-            team: TEAM_ID,
-            ts: stop.ts,
-            thread_ts: parent.ts,
-            text: `<@${BOT_USER_ID}> stop`
-          },
-          ...retry
-        }),
-        {},
-        waitUntilContext(waits)
-      )
-      expect(response.status).toBe(200)
-      await Promise.all(waits)
-    }
-
-    await deliver()
-    expect(interrupts).toBe(1)
-    // After the Chat SDK's duplicate window, only the retry marker can tell.
-    await sleep(50)
-    await deliver({ retry_num: '1', retry_reason: 'http_timeout' })
-    expect(interrupts).toBe(1)
   })
 
   it('does not wait for hung assistant status before creating Slack sessions', async () => {
@@ -3482,6 +3401,9 @@ describe('slackbotv2', () => {
     // The retryable failure is retried in-process; Slack is acknowledged so
     // its own redelivery (which would be deduped anyway) is never needed.
     expect(response.status).toBe(200)
+    expect(codexApi.appends).toHaveLength(1)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(codexApi.eventRequests).toHaveLength(0)
 
     await waitFor(() => codexApi.executes.length === 2, 3000)
     await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 1.'), 3000)
@@ -3603,7 +3525,7 @@ describe('slackbotv2', () => {
       waitUntilContext(waits)
     )
     expect(response.status).toBe(200)
-    await waitFor(() => codexApi.executes.length === 1)
+    expect(codexApi.executes).toHaveLength(1)
     expect(codexApi.eventRequests).toHaveLength(0)
 
     await waitFor(() => codexApi.executes.length === 2, 3000)
@@ -3637,7 +3559,7 @@ describe('slackbotv2', () => {
       threadTs: parent.ts
     })
     expect(firstMention.response.status).toBe(200)
-    await waitFor(() => codexApi.executes.length === 1)
+    expect(codexApi.executes).toHaveLength(1)
 
     // A second mention lands while the first message's retry is still pending
     // and starts the thread's execution. Keep it running (no auto response)
@@ -3647,7 +3569,7 @@ describe('slackbotv2', () => {
       threadTs: parent.ts
     })
     expect(secondMention.response.status).toBe(200)
-    await waitFor(() => codexApi.executes.length === 2)
+    expect(codexApi.executes).toHaveLength(2)
 
     // The first message's retry fires into the active execution and must not
     // start a third execution; its text is already in the session, so the
@@ -3673,7 +3595,7 @@ describe('slackbotv2', () => {
     const parent = await postUserMessage('History before exhaustion.')
     const mention = await sendMessage(`<@${BOT_USER_ID}> exhaust retries`, { threadTs: parent.ts })
     expect(mention.response.status).toBe(200)
-    await waitFor(() => codexApi.executes.length === 1)
+    expect(codexApi.executes).toHaveLength(1)
 
     // Fail the scheduled retry too so the budget of one retry is exhausted.
     codexApi.failNextExecute = true
@@ -3963,8 +3885,6 @@ function createProductionDefaultTestBot(
     signingSecret: SIGNING_SECRET,
     slackApiUrl,
     state: createMemoryState(),
-    // Opt in per test so a bot cannot replay entries into a later test.
-    replayInboxOnStart: false,
     ...overrides
   })
   Object.assign(instance.chat.getAdapter('slack'), {
@@ -4373,23 +4293,10 @@ async function sendMessage(
   return { ...posted, ...delivery }
 }
 
-// Like a platform waitUntil, keep awaiting work that background work registers
-// later, such as a render scheduled after the webhook acknowledged Slack.
 function waitUntilContext(waits: Promise<unknown>[]) {
-  const pending: Promise<unknown>[] = []
-  let draining: Promise<void> | undefined
   return {
     waitUntil(promise: Promise<unknown>) {
-      pending.push(promise)
-      if (draining) return
-      draining = (async () => {
-        try {
-          while (pending.length > 0) await pending.shift()
-        } finally {
-          draining = undefined
-        }
-      })()
-      waits.push(draining)
+      waits.push(promise)
     },
     passThroughOnException() {},
     props: {}
@@ -5741,6 +5648,80 @@ async function isPortOpen(port: number): Promise<boolean> {
 // Bun's global fetch cap (BUN_CONFIG_MAX_HTTP_REQUESTS, default 256) every
 // outbound fetch queued forever and all handoffs failed. parseSseEvents now
 // cancels the reader when the consumer stops, so connections are released.
+// A database initialized with the Absurd schema (api-rs migrations 0007-0009).
+const inboxPostgresUrl = process.env.SLACKBOTV2_TEST_DATABASE_URL
+
+describe.skipIf(!inboxPostgresUrl)('slackbotv2 Slack inbox', () => {
+  const cleanups: Array<() => Promise<void>> = []
+
+  afterEach(async () => {
+    for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
+  })
+
+  /** A bot with a Slack inbox queue of its own, or `namespace`'s when given. */
+  function createInboxBot(
+    namespace: string,
+    overrides: Partial<Parameters<typeof createSlackbotV2>[0]> = {}
+  ): { instance: SlackbotV2; pool: pg.Pool } {
+    const pool = new pg.Pool({ connectionString: inboxPostgresUrl })
+    const instance = createTestBot({ inboxPool: pool, stateKeyPrefix: namespace, ...overrides })
+    cleanups.push(async () => {
+      await instance.close()
+      await pool.end().catch(() => undefined)
+    })
+    return { instance, pool }
+  }
+
+  const testNamespace = () => `slackbotv2_test_${randomUUID().replaceAll('-', '')}`
+
+  it('acknowledges a mention before its session handoff finishes', async () => {
+    bot = createInboxBot(testNamespace()).instance
+    const releaseExecute = codexApi.holdNextExecute()
+
+    const parent = await postUserMessage('Context before the slow run.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> start soon`, { threadTs: parent.ts })
+    expect(mention.response.status).toBe(200)
+
+    await waitFor(() => codexApi.executes.length === 1, 5000)
+    releaseExecute()
+    await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 1.'), 5000)
+  })
+
+  it('redelivers a mention whose process died before the execution was committed', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    const namespace = testNamespace()
+    let killExecute = (_error: Error) => {}
+    const first = createInboxBot(namespace, {
+      messageDedupeTtlMs: 25,
+      // The first process dies mid-execute: its request never returns.
+      fetch: async (input, init) =>
+        String(input).endsWith('/execute')
+          ? new Promise<Response>((_, reject) => {
+              killExecute = reject
+            })
+          : fetch(input, init),
+      handoffRetryDelaysMs: [],
+      state: sharedState
+    })
+    bot = first.instance
+
+    const parent = await postUserMessage('Context before the crash.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> survive a crash`, { threadTs: parent.ts })
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.appends.length === 1, 5000)
+    // Its database goes with it, so its inbox lease is never extended.
+    await first.pool.end()
+
+    createInboxBot(namespace, { messageDedupeTtlMs: 25, state: sharedState })
+
+    await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 1.'), 5000)
+    expect(codexApi.executes.map(execute => execute.body.idempotency_key)).toEqual([mention.ts])
+    expect(codexApi.appends).toHaveLength(1)
+    killExecute(new Error('process exited'))
+  })
+})
+
 describe('session event stream connection lifecycle', () => {
   function openEventStreamGauge(): number {
     const match = /^slackbotv2_session_event_streams_open (\d+)$/m.exec(slackbotMetrics.expose())

@@ -14,11 +14,6 @@ metadata:
 {{ include "centaur.componentLabels" (dict "root" . "component" "slackbotv2") | nindent 4 }}
 spec:
   replicas: {{ .Values.slackbotv2.replicaCount }}
-  # Recreate stops the old pod before the new one starts, so the new pod can
-  # treat any Slack inbox request or execution mark it finds as abandoned.
-  # Slack retries message events that arrive during the gap.
-  strategy:
-    type: Recreate
   selector:
     matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 6 }}

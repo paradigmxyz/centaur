@@ -15,15 +15,16 @@ lifecycle, harness formatting, and durable execution state belong in `api-rs`.
 
 - Verify Slack signatures and policy gates before processing an event. Ignore
   bot/self events and unsupported event shapes without creating sessions.
-- Slack message events enter through the inbox (`src/inbox.ts`), which only
-  holds verified requests past Slack's 3-second deadline: it saves the raw
-  request, acknowledges, feeds it to the Chat SDK, and deletes it once the
-  handlers finish. Deduplication stays with the Chat SDK; the inbox forwards
-  Slack's retry headers on live delivery. The deployment uses one replica and
-  a Recreate rollout, so on startup (after the Chat SDK's duplicate window)
-  the inbox replays every request saved before the process started, and
-  execution marks older than the process are treated as abandoned. In-process
-  handoff retries and late-file repair are not covered.
+- Slack message events enter through the inbox (`src/inbox.ts`), an Absurd
+  queue in the service's Postgres database (schema from api-rs migrations). It
+  only holds verified requests past Slack's 3-second deadline: it queues the
+  raw request keyed by Slack event ID, acknowledges, and a worker feeds it to
+  the Chat SDK once. A delivery whose process dies is fed again by any replica
+  when its lease expires, after the Chat SDK's duplicate window; execution marks
+  from an inbox task that can no longer run are treated as abandoned. Without
+  Postgres, or before the queue exists, message events are handled
+  synchronously. In-process handoff retries and late-file repair are not
+  covered.
 - Preserve the boundary between create/reuse, durable append, execute, SSE
   replay, and final Slack delivery. Each phase needs its own timeout, retry,
   metrics, and idempotency behavior.

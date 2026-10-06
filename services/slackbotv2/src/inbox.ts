@@ -1,224 +1,223 @@
-import { createHmac, randomUUID } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { createHmac } from 'node:crypto'
 import { verifySlackSignature } from '@chat-adapter/slack/webhook'
+import { Absurd } from 'absurd-sdk'
 import type { Logger, WebhookOptions } from 'chat'
 import type pg from 'pg'
 import { errorMessage } from './utils'
 
-/** Slack webhook requests saved before Slack is acknowledged. */
-export type SlackInboxStore = {
-  save(body: string, acceptedAt: Date): Promise<string>
-  delete(id: string): Promise<void>
-  /** Drops requests accepted before `since`, then lists those accepted before `before`, oldest first. */
-  pending(since: Date, before: Date): Promise<Array<{ body: string; id: string }>>
+const TASK_NAME = 'slack_webhook'
+// Idempotency keys must outlive Slack's retries (minutes); bodies need not.
+const CLEANUP_TTL = '1 hour'
+const CLEANUP_INTERVAL_MS = 10 * 60 * 1000
+const START_RETRY_MAX_DELAY_MS = 10_000
+// Leave time to handle a request synchronously while the queue cannot be created.
+const QUEUE_READY_TIMEOUT_MS = 500
+
+const currentTask = new AsyncLocalStorage<string>()
+
+/** The inbox task delivering the current Slack request, if any. */
+export function currentSlackInboxTaskId(): string | undefined {
+  return currentTask.getStore()
 }
 
-const TABLE = 'slackbotv2_inbox'
-
-/** `namespace` keeps deployments that share a database apart. */
-export function createPostgresSlackInboxStore(pool: pg.Pool, namespace: string): SlackInboxStore {
-  let schema: Promise<unknown> | undefined
-  const query = async <T extends pg.QueryResultRow>(text: string, values: unknown[]) => {
-    schema ??= pool
-      .query(
-        `CREATE TABLE IF NOT EXISTS ${TABLE} (
-          namespace text NOT NULL,
-          id text NOT NULL,
-          body text NOT NULL,
-          accepted_at timestamptz NOT NULL,
-          PRIMARY KEY (namespace, id)
-        )`
-      )
-      .catch(error => {
-        schema = undefined
-        throw error
-      })
-    await schema
-    return pool.query<T>(text, values)
-  }
-
-  return {
-    async save(body, acceptedAt) {
-      const id = randomUUID()
-      await query(
-        `INSERT INTO ${TABLE} (namespace, id, body, accepted_at) VALUES ($1, $2, $3, $4)`,
-        [namespace, id, body, acceptedAt]
-      )
-      return id
-    },
-    async delete(id) {
-      await query(`DELETE FROM ${TABLE} WHERE namespace = $1 AND id = $2`, [namespace, id])
-    },
-    async pending(since, before) {
-      await query(`DELETE FROM ${TABLE} WHERE namespace = $1 AND accepted_at < $2`, [
-        namespace,
-        since
-      ])
-      const result = await query<{ body: string; id: string }>(
-        `SELECT id, body FROM ${TABLE}
-         WHERE namespace = $1 AND accepted_at < $2
-         ORDER BY accepted_at, id`,
-        [namespace, before]
-      )
-      return result.rows
-    }
-  }
-}
-
-/** Process-local store, for tests and deployments without Postgres. */
-export function createMemorySlackInboxStore(): SlackInboxStore {
-  const rows = new Map<string, { acceptedAt: Date; body: string }>()
-  return {
-    async save(body, acceptedAt) {
-      const id = randomUUID()
-      rows.set(id, { acceptedAt, body })
-      return id
-    },
-    async delete(id) {
-      rows.delete(id)
-    },
-    async pending(since, before) {
-      for (const [id, row] of rows) {
-        if (row.acceptedAt < since) rows.delete(id)
-      }
-      return Array.from(rows, ([id, row]) => ({ id, ...row }))
-        .filter(row => row.acceptedAt < before)
-        .sort((a, b) => a.acceptedAt.getTime() - b.acceptedAt.getTime())
-        .map(({ body, id }) => ({ body, id }))
-    }
-  }
+/** Absurd queue for a deployment; `namespace` keeps deployments that share a database apart. */
+export function slackInboxQueueName(namespace: string): string {
+  return `${namespace}_inbox`.toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 57)
 }
 
 export type SlackInbox = ReturnType<typeof createSlackInbox>
 
 /**
- * Holds verified Slack webhook requests for longer than Slack's 3-second
- * deadline and feeds them to the Chat SDK. A request is saved before Slack is
- * acknowledged and deleted once the Chat SDK's handlers finish; on startup,
- * requests a previous process left behind are fed again. It assumes one
- * replica whose previous process has exited before it starts (a Recreate
- * rollout), so every request saved before this process started is abandoned.
+ * Holds verified Slack webhook requests in an Absurd queue so Slack can be
+ * acknowledged before the Chat SDK handlers run. A worker feeds each request
+ * to the Chat SDK once; if its process dies first, the task's lease expires
+ * and any replica feeds it again. Slack retries of a queued event are
+ * acknowledged without queueing it twice.
  */
 export function createSlackInbox(deps: {
   /** Feeds a request to the Chat SDK, e.g. `chat.webhooks.slack`. */
   deliver: (request: Request, options: WebhookOptions) => Promise<Response>
   logger: Logger
-  maxAgeMs: number
-  replayDelayMs: number
-  replayOnStart: boolean
-  /** A save slower than this falls back to the synchronous path. */
-  saveTimeoutMs: number
+  /** Seconds a crashed delivery holds its task; must exceed the Chat SDK duplicate window. */
+  leaseSeconds: number
+  /** Seconds after which a request is too old to answer. */
+  maxAgeSeconds: number
+  pool: pg.Pool
+  queue: string
   signingSecret: string
-  store: SlackInboxStore
+  concurrency: number
 }) {
-  const { logger, store } = deps
-  const startedAt = new Date()
-
-  const deliver = async (id: string, body: string, retryHeaders?: Headers): Promise<void> => {
-    try {
-      const tasks: Promise<unknown>[] = []
-      const request = signedSlackRequest(body, deps.signingSecret, retryHeaders)
-      const response = await deps.deliver(request, {
-        waitUntil: task => {
-          tasks.push(task)
-        }
-      })
-      if (!response.ok) throw new Error(`Chat SDK rejected the request with HTTP ${response.status}`)
-      await Promise.all(tasks)
-    } finally {
-      // One delivery per request; a leftover row is dropped once it is too old.
-      await store.delete(id).catch(() => undefined)
+  const { logger, queue } = deps
+  const absurd = new Absurd({
+    db: deps.pool,
+    queueName: queue,
+    log: {
+      log: (...args) => logger.debug('slackbotv2_inbox_absurd', { message: args.join(' ') }),
+      info: (...args) => logger.info('slackbotv2_inbox_absurd', { message: args.join(' ') }),
+      warn: (...args) => logger.warn('slackbotv2_inbox_absurd', { message: args.join(' ') }),
+      error: (...args) => logger.error('slackbotv2_inbox_absurd', { message: args.join(' ') })
     }
-  }
+  })
 
-  const replay = async (): Promise<void> => {
-    await sleep(deps.replayDelayMs)
-    const deadlineMs = Date.now() + deps.maxAgeMs
-    let pending: Array<{ body: string; id: string }>
-    for (let attempt = 1; ; attempt += 1) {
+  absurd.registerTask<{ body: string }>(
+    {
+      name: TASK_NAME,
+      // Only a lost lease retries; a failed delivery is not fed again.
+      defaultMaxAttempts: 3,
+      defaultCancellation: { maxDelay: deps.maxAgeSeconds, maxDuration: deps.maxAgeSeconds }
+    },
+    async ({ body }, ctx) => {
+      const heartbeat = setInterval(
+        () => void ctx.heartbeat().catch(() => undefined),
+        (deps.leaseSeconds * 1000) / 3
+      )
       try {
-        pending = await store.pending(new Date(Date.now() - deps.maxAgeMs), startedAt)
-        break
+        await currentTask.run(ctx.taskID, async () => {
+          const tasks: Promise<unknown>[] = []
+          const response = await deps.deliver(signedSlackRequest(body, deps.signingSecret), {
+            waitUntil: task => {
+              tasks.push(task)
+            }
+          })
+          if (!response.ok) {
+            throw new Error(`Chat SDK rejected the request with HTTP ${response.status}`)
+          }
+          await Promise.all(tasks)
+        })
       } catch (error) {
-        logger.warn('slackbotv2_inbox_replay_scan_failed', { attempt, error: errorMessage(error) })
-        // Every request is too old to answer by then.
-        if (Date.now() >= deadlineMs) return
-        await sleep(Math.min(250 * 2 ** attempt, 5_000))
+        logger.warn('slackbotv2_inbox_delivery_failed', {
+          error: errorMessage(error),
+          inbox_task_id: ctx.taskID
+        })
+      } finally {
+        clearInterval(heartbeat)
       }
     }
-    for (const { body, id } of pending) {
-      logger.info('slackbotv2_inbox_replay_started', { inbox_id: id })
+  )
+
+  let closed = false
+  let worker: { close(): Promise<void> } | undefined
+  let queueCreated = () => {}
+  const queueReady = new Promise<void>(resolve => {
+    queueCreated = resolve
+  })
+  const cleanup = setInterval(() => {
+    deps.pool.query('SELECT * FROM absurd.cleanup_all_queues($1)', [queue]).catch(error => {
+      logger.warn('slackbotv2_inbox_cleanup_failed', { error: errorMessage(error) })
+    })
+  }, CLEANUP_INTERVAL_MS)
+  cleanup.unref?.()
+
+  const started = (async () => {
+    for (let attempt = 1; !closed; attempt += 1) {
       try {
-        await deliver(id, body)
-        logger.info('slackbotv2_inbox_replay_complete', { inbox_id: id })
+        await absurd.createQueue(queue, { cleanupTtl: CLEANUP_TTL })
+        queueCreated()
+        if (closed) return
+        worker = await absurd.startWorker({
+          claimTimeout: deps.leaseSeconds,
+          concurrency: deps.concurrency,
+          // A handler past its lease is replayed elsewhere; never kill the process for it.
+          fatalOnLeaseTimeout: false,
+          onError: error => {
+            logger.warn('slackbotv2_inbox_worker_error', { error: errorMessage(error) })
+          }
+        })
+        logger.info('slackbotv2_inbox_started', { queue })
+        return
       } catch (error) {
-        logger.warn('slackbotv2_inbox_replay_failed', { error: errorMessage(error), inbox_id: id })
+        logger.warn('slackbotv2_inbox_start_failed', { attempt, error: errorMessage(error) })
+        await sleep(Math.min(250 * 2 ** attempt, START_RETRY_MAX_DELAY_MS))
       }
     }
-  }
-
-  if (deps.replayOnStart) void replay()
+  })()
 
   return {
     /**
-     * Verifies and saves a Slack webhook request. Returns the response for
-     * Slack and the delivery to run in background, or null when the request
-     * could not be saved and must be fed to the Chat SDK synchronously.
+     * Verifies and queues a Slack webhook request, returning the response for
+     * Slack, or null when the queue is not ready and the caller must feed the
+     * request to the Chat SDK synchronously.
      */
-    async accept(
-      body: string,
-      headers: Headers
-    ): Promise<{ deliver?: () => Promise<void>; response: Response } | null> {
+    async accept(body: string, headers: Headers): Promise<Response | null> {
       try {
         await verifySlackSignature(body, headers, { signingSecret: deps.signingSecret })
       } catch (error) {
         logger.warn('slackbotv2_inbox_signature_rejected', { error: errorMessage(error) })
-        return { response: new Response('Invalid signature', { status: 401 }) }
+        return new Response('Invalid signature', { status: 401 })
       }
-      const saving = store.save(body, new Date())
-      let id: string
       try {
-        id = await withTimeout(saving, deps.saveTimeoutMs)
-      } catch (error) {
-        logger.warn('slackbotv2_inbox_save_failed', { error: errorMessage(error) })
-        // The caller delivers synchronously; a late save must not be replayed.
-        void saving.then(lateId => store.delete(lateId)).catch(() => undefined)
+        await withTimeout(queueReady, QUEUE_READY_TIMEOUT_MS)
+      } catch {
+        logger.warn('slackbotv2_inbox_not_ready', { queue })
         return null
       }
-      // Keep Slack's retry marker on live delivery so the Slack adapter can drop
-      // a retry it already dispatched. Replay omits it: a replayed request must
-      // be fed again even if the previous process had dispatched it.
-      const retryHeaders = new Headers()
-      for (const name of ['x-slack-retry-num', 'x-slack-retry-reason']) {
-        const value = headers.get(name)
-        if (value) retryHeaders.set(name, value)
+      const eventId = slackEventId(body)
+      try {
+        const spawned = await absurd.spawn(
+          TASK_NAME,
+          { body },
+          eventId ? { idempotencyKey: `slack-event:${eventId}` } : {}
+        )
+        logger.info('slackbotv2_inbox_queued', {
+          duplicate: !spawned.created,
+          inbox_task_id: spawned.taskID,
+          slack_event_id: eventId
+        })
+      } catch (error) {
+        // Slack retries the event; its idempotency key absorbs a late spawn.
+        logger.warn('slackbotv2_inbox_queue_failed', { error: errorMessage(error) })
+        return new Response('Slack inbox unavailable', { status: 503 })
       }
-      return {
-        deliver: () =>
-          deliver(id, body, retryHeaders).catch(error => {
-            logger.warn('slackbotv2_inbox_delivery_failed', {
-              error: errorMessage(error),
-              inbox_id: id
-            })
-          }),
-        response: new Response('ok', { status: 200 })
+      return new Response('ok', { status: 200 })
+    },
+
+    /** Whether the inbox task may still deliver, i.e. has not finished, failed, or been dropped. */
+    async isTaskLive(taskId: string): Promise<boolean> {
+      try {
+        const result = await absurd.fetchTaskResult(taskId)
+        return result !== null && ['pending', 'running', 'sleeping'].includes(result.state)
+      } catch (error) {
+        logger.warn('slackbotv2_inbox_task_lookup_failed', {
+          error: errorMessage(error),
+          inbox_task_id: taskId
+        })
+        return true
       }
+    },
+
+    /** Stops taking tasks and waits for running deliveries to finish. */
+    async close(): Promise<void> {
+      closed = true
+      clearInterval(cleanup)
+      await started
+      await worker?.close()
     }
   }
 }
 
+function slackEventId(body: string): string | undefined {
+  try {
+    const eventId = (JSON.parse(body) as { event_id?: unknown }).event_id
+    return typeof eventId === 'string' && eventId ? eventId : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** A freshly signed copy of a verified Slack webhook body. */
-function signedSlackRequest(body: string, signingSecret: string, extraHeaders?: Headers): Request {
+function signedSlackRequest(body: string, signingSecret: string): Request {
   const timestamp = Math.floor(Date.now() / 1000).toString()
   const signature = createHmac('sha256', signingSecret)
     .update(`v0:${timestamp}:${body}`)
     .digest('hex')
-  const headers = new Headers(extraHeaders)
-  headers.set('content-type', 'application/json')
-  headers.set('x-slack-request-timestamp', timestamp)
-  headers.set('x-slack-signature', `v0=${signature}`)
   return new Request('http://slackbotv2.internal/api/webhooks/slack', {
     body,
-    headers,
+    headers: {
+      'content-type': 'application/json',
+      'x-slack-request-timestamp': timestamp,
+      'x-slack-signature': `v0=${signature}`
+    },
     method: 'POST'
   })
 }
