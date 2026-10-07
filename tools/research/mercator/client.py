@@ -60,9 +60,18 @@ class MercatorClient:
         """Return authorization, wallet, and spending-limit readiness."""
         return self._call("get_connection_status", {})
 
-    def search(self, query: str, *, limit: int = DEFAULT_SEARCH_LIMIT) -> dict[str, Any]:
-        """Rank cataloged service endpoints for an intended outcome."""
-        return self._call("search_services", {"query": query, "limit": limit})
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int = DEFAULT_SEARCH_LIMIT,
+        prefer_services: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Rank endpoints, optionally preferring service IDs while retaining relevant fallbacks."""
+        arguments: dict[str, Any] = {"query": query, "limit": limit}
+        if prefer_services:
+            arguments.update(service_ids=prefer_services, service_mode="prefer")
+        return self._call("search_services", arguments)
 
     def describe(
         self,

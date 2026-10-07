@@ -4,7 +4,9 @@ import json
 
 import httpx
 import pytest
+from typer.testing import CliRunner
 
+from mercator.cli import app
 from mercator.client import MercatorClient
 
 PLAN = {"nodes": [{"id": "weather", "serviceId": "openweather", "method": "POST", "path": "/w"}]}
@@ -34,6 +36,53 @@ def test_search_calls_the_hosted_mcp_tool_without_sending_credentials():
     assert json.loads(request.content)["method"] == "tools/call"
     assert (tool, arguments) == ("search_services", {"query": "current weather", "limit": 3})
     assert "authorization" not in request.headers
+
+
+def test_search_prefers_services_without_requiring_them():
+    client, calls = _mercator(lambda tool, arguments: {"endpoints": []})
+
+    client.search("company web research", limit=3, prefer_services=["provider-a", "provider-b"])
+
+    request, tool, arguments = calls[0]
+    assert (tool, arguments) == (
+        "search_services",
+        {
+            "query": "company web research",
+            "limit": 3,
+            "service_ids": ["provider-a", "provider-b"],
+            "service_mode": "prefer",
+        },
+    )
+    assert "authorization" not in request.headers
+
+
+def test_search_ignores_an_empty_preference():
+    client, calls = _mercator(lambda tool, arguments: {"endpoints": []})
+
+    client.search("business maps and reviews", prefer_services=[])
+
+    assert calls[0][2] == {"query": "business maps and reviews", "limit": 8}
+
+
+@pytest.mark.parametrize(
+    ("options", "preference"),
+    [
+        ([], {}),
+        (
+            ["--prefer-service", "provider-a", "--prefer-service", "provider-b"],
+            {"service_ids": ["provider-a", "provider-b"], "service_mode": "prefer"},
+        ),
+    ],
+)
+def test_search_cli_forwards_optional_repeated_preferences(monkeypatch, options, preference):
+    client, calls = _mercator(lambda tool, arguments: {"endpoints": []})
+    monkeypatch.setattr("mercator.cli._client", lambda: client)
+
+    result = CliRunner().invoke(app, ["search", "company web research", "--limit", "3", *options])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"endpoints": []}
+    assert calls[0][2] == {"query": "company web research", "limit": 3, **preference}
 
 
 def test_submit_refuses_a_quote_over_max_spend():

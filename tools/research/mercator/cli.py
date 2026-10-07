@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
 import typer
@@ -74,9 +74,16 @@ def search(
     limit: int = typer.Option(
         DEFAULT_SEARCH_LIMIT, "--limit", "-n", min=1, max=25, help="Endpoints to return."
     ),
+    prefer_services: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--prefer-service",
+            help="Prefer this service ID while retaining relevant fallbacks. Repeat for multiple IDs.",
+        ),
+    ] = None,
 ) -> None:
     """Find and rank service endpoints for an outcome. Free."""
-    _echo(_run(lambda client: client.search(query, limit=limit)))
+    _echo(_run(lambda client: client.search(query, limit=limit, prefer_services=prefer_services)))
 
 
 @app.command()
