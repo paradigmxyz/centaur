@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone};
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::warn;
 
-use crate::{config::Config, credentials::GranolaCredential, errors::rejected};
+use crate::{config::Config, credentials::GranolaCredential, errors::rejected, telemetry};
 
 const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -167,20 +167,26 @@ impl McpSession<'_> {
     }
 
     async fn notify(&mut self, method: &str) -> Result<()> {
-        self.send(json!({ "jsonrpc": "2.0", "method": method, "params": {} }))
-            .await?;
+        self.send(
+            method,
+            json!({ "jsonrpc": "2.0", "method": method, "params": {} }),
+        )
+        .await?;
         Ok(())
     }
 
     async fn request(&mut self, method: &str, params: Value) -> Result<Option<Value>> {
         self.rpc_id += 1;
         let response = self
-            .send(json!({
-                "jsonrpc": "2.0",
-                "id": self.rpc_id,
-                "method": method,
-                "params": params,
-            }))
+            .send(
+                method,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": self.rpc_id,
+                    "method": method,
+                    "params": params,
+                }),
+            )
             .await?;
         if method == "initialize" {
             self.session_id = response
@@ -203,7 +209,7 @@ impl McpSession<'_> {
         Ok(payload.get_mut("result").map(Value::take))
     }
 
-    async fn send(&self, payload: Value) -> Result<reqwest::Response> {
+    async fn send(&self, method: &str, payload: Value) -> Result<reqwest::Response> {
         let mut request = self
             .client
             .http
@@ -216,7 +222,10 @@ impl McpSession<'_> {
                 .header("MCP-Protocol-Version", MCP_PROTOCOL_VERSION)
                 .header("MCP-Session-Id", session_id);
         }
-        let response = request.send().await.context("send Granola MCP request")?;
+        let started = Instant::now();
+        let response = request.send().await;
+        telemetry::upstream_response("granola", method, started, &response);
+        let response = response.context("send Granola MCP request")?;
         let status = response.status();
         if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
             bail!("Granola MCP returned HTTP {status}");

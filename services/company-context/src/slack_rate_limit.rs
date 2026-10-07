@@ -14,7 +14,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
-use crate::slack::SlackMethod;
+use crate::{slack::SlackMethod, telemetry};
 
 const MAX_BACKOFF: f64 = 16.0;
 /// How long a method must go without a rate limit before its backoff halves.
@@ -92,11 +92,8 @@ impl RateLimiter {
         self.store(&mut tx, team_id, method, &next, false).await?;
         tx.commit().await?;
         let wait = (slot - now).to_std().unwrap_or_default();
-        metrics::histogram!(
-            "company_context_slack_rate_limit_wait_seconds",
-            "method" => method.name()
-        )
-        .record(wait.as_secs_f64());
+        metrics::histogram!(telemetry::SLACK_RATE_LIMIT_WAIT, "method" => method.name())
+            .record(wait.as_secs_f64());
         Ok(wait)
     }
 

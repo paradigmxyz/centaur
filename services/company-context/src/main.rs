@@ -7,6 +7,7 @@ mod errors;
 mod extraction;
 mod granola;
 mod granola_tasks;
+mod sampler;
 mod scheduler;
 mod slack;
 mod slack_documents;
@@ -60,6 +61,7 @@ async fn main() -> Result<()> {
         .init();
 
     let config = Arc::new(Config::from_args());
+    let metrics = telemetry::init_metrics()?;
     let pool = database::connect_and_migrate(&config.database_url).await?;
     let credentials = Arc::new(ConsoleCredentials::connect(&config).await?);
     let absurd = Client::from_pool_with_options(
@@ -67,6 +69,7 @@ async fn main() -> Result<()> {
         ClientOptions {
             pool: Some(pool.clone()),
             queue_name: QUEUE_NAME.to_owned(),
+            hooks: telemetry::task_hooks(),
             ..ClientOptions::default()
         },
     )?;
@@ -79,6 +82,7 @@ async fn main() -> Result<()> {
         ClientOptions {
             pool: Some(pool.clone()),
             queue_name: SLACK_QUEUE_NAME.to_owned(),
+            hooks: telemetry::task_hooks(),
             ..ClientOptions::default()
         },
     )?;
@@ -122,7 +126,6 @@ async fn main() -> Result<()> {
         },
     )?;
 
-    let metrics = telemetry::init_metrics()?;
     let http_state = HttpState {
         pool: pool.clone(),
         credentials: credentials.clone(),
@@ -135,12 +138,15 @@ async fn main() -> Result<()> {
         .with_state(http_state);
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
 
+    telemetry::worker_concurrency(QUEUE_NAME, config.worker_concurrency);
+    telemetry::worker_concurrency(SLACK_QUEUE_NAME, config.slack_worker_concurrency);
     let worker = absurd.start_worker(WorkerOptions {
         worker_id: Some(format!("company-context-{}", Uuid::new_v4())),
         concurrency: config.worker_concurrency,
         on_error: Some(Arc::new(
             |error| error!(event = "company_context_worker_error", error = %error),
         )),
+        on_task_terminal: Some(telemetry::task_terminal_hook()),
         ..WorkerOptions::default()
     });
     let slack_worker = slack_absurd.start_worker(WorkerOptions {
@@ -149,6 +155,7 @@ async fn main() -> Result<()> {
         on_error: Some(Arc::new(
             |error| error!(event = "company_context_slack_worker_error", error = %error),
         )),
+        on_task_terminal: Some(telemetry::task_terminal_hook()),
         ..WorkerOptions::default()
     });
     let scheduler = tokio::spawn(scheduler::run(
@@ -166,6 +173,7 @@ async fn main() -> Result<()> {
         slack_absurd,
         credentials.clone(),
     ));
+    let sampler = tokio::spawn(sampler::run(pool.clone(), credentials.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let server_shutdown = shutdown_rx.clone();
     let server = tokio::spawn(async move {
@@ -184,6 +192,7 @@ async fn main() -> Result<()> {
     scheduler.abort();
     granola_scheduler.abort();
     slack_scheduler.abort();
+    sampler.abort();
     worker.close().await?;
     slack_worker.close().await?;
     server.await.context("join HTTP server")??;

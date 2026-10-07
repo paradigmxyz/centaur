@@ -1,11 +1,11 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use reqwest::{Client, StatusCode, header::RETRY_AFTER};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{config::Config, errors::rejected};
+use crate::{config::Config, errors::rejected, telemetry};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Slack sends Retry-After with every rate limit; this covers a missing header.
@@ -210,22 +210,27 @@ impl SlackClient {
         access_token: &str,
         params: &[(&str, String)],
     ) -> Result<SlackReply> {
+        let started = Instant::now();
         let response = self
             .http
             .post(format!("{}/{method}", self.base_url))
             .bearer_auth(access_token)
             .form(params)
             .send()
-            .await
+            .await;
+        let record =
+            |outcome| telemetry::upstream_request("slack", method, outcome, started.elapsed());
+        let response = response
+            .inspect_err(|_| record("transport_error"))
             .with_context(|| format!("send Slack {method} request"))?;
         let status = response.status();
         let retry_after = retry_after(&response);
         if status == StatusCode::TOO_MANY_REQUESTS {
-            record_request(method, "rate_limited");
+            record("rate_limited");
             return Ok(SlackReply::RateLimited(retry_after));
         }
         if !status.is_success() {
-            record_request(method, "error");
+            record(telemetry::http_outcome(status));
             if status.is_server_error() {
                 bail!("Slack {method} returned HTTP {status}");
             }
@@ -236,7 +241,7 @@ impl SlackClient {
             .await
             .with_context(|| format!("decode Slack {method} response"))?;
         if body.get("ok").and_then(Value::as_bool) == Some(true) {
-            record_request(method, "ok");
+            record("ok");
             return Ok(SlackReply::Ok(body));
         }
         let error = body
@@ -244,24 +249,15 @@ impl SlackClient {
             .and_then(Value::as_str)
             .unwrap_or("unknown_error");
         if error == "ratelimited" {
-            record_request(method, "rate_limited");
+            record("rate_limited");
             return Ok(SlackReply::RateLimited(retry_after));
         }
-        record_request(method, "error");
+        record("api_error");
         if PERMANENT_ERRORS.contains(&error) {
             return Err(rejected(format!("Slack {method} failed: {error}")));
         }
         bail!("Slack {method} failed: {error}")
     }
-}
-
-fn record_request(method: &str, outcome: &'static str) {
-    metrics::counter!(
-        "company_context_slack_requests_total",
-        "method" => method.to_owned(),
-        "outcome" => outcome
-    )
-    .increment(1);
 }
 
 fn retry_after(response: &reqwest::Response) -> Duration {

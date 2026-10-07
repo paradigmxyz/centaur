@@ -51,14 +51,14 @@ pub async fn run(config: Arc<Config>, client: Client, credentials: Arc<ConsoleCr
                 );
             }
             Err(error) => {
-                metrics::counter!("company_context_scheduler_errors_total").increment(1);
+                telemetry::scheduler_error("drive", "enqueue");
                 error!(event = "company_context_credentials_reconcile_enqueue_failed", error = %error);
             }
         }
         let credential_ids = match credentials.google_credential_ids().await {
             Ok(ids) => ids,
             Err(error) => {
-                metrics::counter!("company_context_scheduler_errors_total").increment(1);
+                telemetry::scheduler_error("drive", "load_credentials");
                 error!(event = "company_context_credentials_load_failed", error = %error);
                 continue;
             }
@@ -66,6 +66,7 @@ pub async fn run(config: Arc<Config>, client: Client, credentials: Arc<ConsoleCr
         for credential_id in credential_ids {
             spawn_credential_task(
                 &client,
+                "drive",
                 DRIVE_SCAN_TASK,
                 ScanParams {
                     credential_id,
@@ -77,6 +78,7 @@ pub async fn run(config: Arc<Config>, client: Client, credentials: Arc<ConsoleCr
             .await;
             spawn_credential_task(
                 &client,
+                "drive",
                 SHARED_DRIVES_DISCOVER_TASK,
                 DiscoverSharedDrivesParams {
                     credential_id,
@@ -119,14 +121,14 @@ pub async fn run_granola(
                 telemetry::task_enqueued(GRANOLA_CREDENTIALS_RECONCILE_TASK, result.created);
             }
             Err(error) => {
-                metrics::counter!("company_context_scheduler_errors_total").increment(1);
+                telemetry::scheduler_error("granola", "enqueue");
                 error!(event = "company_context_granola_reconcile_enqueue_failed", error = %error);
             }
         }
         let credential_ids = match credentials.granola_credential_ids().await {
             Ok(ids) => ids,
             Err(error) => {
-                metrics::counter!("company_context_scheduler_errors_total").increment(1);
+                telemetry::scheduler_error("granola", "load_credentials");
                 error!(event = "company_context_granola_credentials_load_failed", error = %error);
                 continue;
             }
@@ -134,6 +136,7 @@ pub async fn run_granola(
         for credential_id in credential_ids {
             spawn_credential_task(
                 &client,
+                "granola",
                 GRANOLA_SYNC_TASK,
                 GranolaSyncParams {
                     credential_id,
@@ -174,7 +177,7 @@ pub async fn run_slack(config: Arc<Config>, client: Client, credentials: Arc<Con
                 telemetry::task_enqueued(SLACK_CREDENTIALS_RECONCILE_TASK, result.created);
             }
             Err(error) => {
-                metrics::counter!("company_context_scheduler_errors_total").increment(1);
+                telemetry::scheduler_error("slack", "enqueue");
                 error!(event = "company_context_slack_reconcile_enqueue_failed", error = %error);
             }
         }
@@ -191,14 +194,14 @@ pub async fn run_slack(config: Arc<Config>, client: Client, credentials: Arc<Con
         {
             Ok(result) => telemetry::task_enqueued(SLACK_USERS_SYNC_TASK, result.created),
             Err(error) => {
-                metrics::counter!("company_context_scheduler_errors_total").increment(1);
+                telemetry::scheduler_error("slack", "enqueue");
                 error!(event = "company_context_slack_users_enqueue_failed", error = %error);
             }
         }
         let credential_ids = match credentials.slack_credential_ids().await {
             Ok(ids) => ids,
             Err(error) => {
-                metrics::counter!("company_context_scheduler_errors_total").increment(1);
+                telemetry::scheduler_error("slack", "load_credentials");
                 error!(event = "company_context_slack_credentials_load_failed", error = %error);
                 continue;
             }
@@ -206,6 +209,7 @@ pub async fn run_slack(config: Arc<Config>, client: Client, credentials: Arc<Con
         for credential_id in credential_ids {
             spawn_credential_task(
                 &client,
+                "slack",
                 SLACK_USER_DISCOVER_TASK,
                 SlackDiscoverParams {
                     credential_id,
@@ -221,6 +225,7 @@ pub async fn run_slack(config: Arc<Config>, client: Client, credentials: Arc<Con
 
 async fn spawn_credential_task<P: Serialize>(
     client: &Client,
+    source: &'static str,
     task_name: &'static str,
     params: P,
     idempotency_key: String,
@@ -248,7 +253,7 @@ async fn spawn_credential_task<P: Serialize>(
             );
         }
         Err(error) => {
-            metrics::counter!("company_context_scheduler_errors_total").increment(1);
+            telemetry::scheduler_error(source, "enqueue");
             error!(
                 event = "company_context_credential_task_enqueue_failed",
                 task_name,
