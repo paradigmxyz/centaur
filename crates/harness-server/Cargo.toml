@@ -21,6 +21,7 @@ codex-app-server-protocol = { git = "https://github.com/openai/codex", rev = "e9
 # Keep the rev in lockstep with the other codex crates.
 codex-protocol = { git = "https://github.com/openai/codex", rev = "e93dc98a48d597df322436ffe8d03bfd7ec63b3b", package = "codex-protocol" }
 codex-utils-absolute-path = { git = "https://github.com/openai/codex", rev = "e93dc98a48d597df322436ffe8d03bfd7ec63b3b", package = "codex-utils-absolute-path" }
+codex-utils-stream-parser = { git = "https://github.com/openai/codex", rev = "e93dc98a48d597df322436ffe8d03bfd7ec63b3b", package = "codex-utils-stream-parser" }
 # Decode + downscale oversized image attachments so they stay under the model
 # provider's per-image caps (Bedrock/mantle rejects images past ~5 MB / 8000 px).
 # Scoped to the formats chat clients actually paste to keep the build lean.
@@ -36,4 +37,5 @@ serde_json = "1.0"
 shell-words = "1.1"
 thiserror = "2.0"
 tokio = { version = "1.49", features = ["rt-multi-thread", "signal", "sync"] }
+url = "2.5"
 uuid = { version = "1.19", features = ["v4"] }
