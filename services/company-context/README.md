@@ -8,12 +8,14 @@ It also discovers the public and private Slack channels (and, when enabled, dire
 
 After each sync, the conversation's history is projected into documents on the main queue. Each channel's UTC day is rendered as a transcript in which thread replies follow their parent, in the day the thread started. Joins, topic changes, and similar system messages are left out. The transcript is split into chunks of at most `COMPANY_CONTEXT_CHUNK_CHARS` characters that together cover the whole day: chunks break between messages, a thread split across chunks repeats the start of its parent, and only a single message longer than a chunk is split. Each chunk starts with its channel, date, and time range, and is published as its own document with its own embedding. A day is rendered again when its messages, its channel's name, or the name of a user it mentions changes, and republished only when its content changes; vectors are reused for chunks whose text is unchanged. Slack documents are not yet exposed to retrieval.
 
+Files attached to projected messages are indexed as their own documents, not in the channel day transcripts, which only name them. Projection records which messages share each file, so a file shared in several channels is extracted once. Each file is downloaded with a live credential observing one of its conversations whose scopes include `files:read`; without one, files wait until such a credential syncs. PDFs are extracted with `pdftotext`; Word, PowerPoint, and Excel files (`docx`, `pptx`, `xlsx`), OpenDocument text, RTF, and EPUB with sandboxed `pandoc`; and snippets and other text files directly. Legacy binary Office formats, images, canvases, and external files such as Google Docs links are not indexed. Downloaded bytes are discarded after extraction, and only the extracted text, chunked like Drive documents, is stored. A file is extracted again when Slack reports different content for it, its documents are removed when it is deleted in Slack, and it is removed once no stored message shares it.
+
 Slack limits each Web API method per workspace per app, and every token the app issues shares that budget, including bot tokens used by other services. Workers therefore reserve request slots from a shared schedule in `company_context_system.slack_rate_limits`, spaced so that ingestion uses only `COMPANY_CONTEXT_SLACK_RATE_LIMIT_SHARE` of each method's documented tier. When Slack rate limits a method, every worker waits out its `Retry-After` and the spacing widens, then relaxes while no rate limits occur. A task that must wait longer than a few seconds suspends instead of holding a worker.
 
 The service owns these Postgres schemas:
 
 - `company_context_system`: private cursors, staging (including Slack messages and users), and processing state.
-- `company_context_data`: retrieval-facing Drive documents, Granola notes, and Slack channel documents, access observations (including Slack identities and channel memberships), and embeddings.
+- `company_context_data`: retrieval-facing Drive documents, Granola notes, Slack channel and file documents, access observations (including Slack identities and channel memberships), and embeddings.
 
 The `centaur_company_context_reader` role used by the company-context tool can read `google_drive_documents` and `google_drive_document_embeddings`. Row-level security limits each reader to files that a live broker credential with the same Google subject (`centaur.google_subject`) still observes; `google_drive_broker_observations` is the only source of that access. The reader cannot query the observations or the system schema directly. The reader has no access to Granola notes yet. The Helm deployment is gated by `experimentalCompanyContext.enabled` until it is ready for production.
 
@@ -21,6 +23,7 @@ The `centaur_company_context_reader` role used by the company-context tool can r
 
 - Postgres with the existing Absurd schema and the `vector` and `pg_search` extensions available.
 - `pdftotext` from Poppler (for PDF sources).
+- `pandoc` 3.4 or later (for Office, OpenDocument, RTF, and EPUB Slack files).
 - A Rails Console database containing live per-user Google and Granola OAuth broker credentials.
 - The Active Record encryption primary key and derivation salt used by Rails Console.
 - An embeddings API key supplied through a Kubernetes Secret.
@@ -83,6 +86,7 @@ Common optional settings:
 - `GOOGLE_DRIVE_API_BASE_URL`
 - `GRANOLA_MCP_URL` (default `https://mcp.granola.ai/mcp`)
 - `SLACK_API_BASE_URL` (default `https://slack.com/api`)
+- `SLACK_FILES_BASE_URL` (default `https://files.slack.com`): the only origin Slack file downloads, which carry user tokens, are sent to
 - `OPENAI_BASE_URL`
 - `COMPANY_CONTEXT_SCAN_INTERVAL_SECONDS` (default `300`)
 - `COMPANY_CONTEXT_GRANOLA_SYNC_INTERVAL_SECONDS` (default `1800`)
@@ -95,8 +99,8 @@ Common optional settings:
 - `COMPANY_CONTEXT_DRIVE_PAGE_SIZE` (default `100`)
 - `COMPANY_CONTEXT_MAX_SCAN_PAGES` (default `10`)
 - `COMPANY_CONTEXT_FOLDER_WALK_BATCH_SIZE` (default `50`, at most `100`)
-- `COMPANY_CONTEXT_MAX_PDF_BYTES` (default `26214400`)
-- `COMPANY_CONTEXT_MAX_EXTRACTED_BYTES` (default `52428800`; also limits exported Google Doc text)
+- `COMPANY_CONTEXT_MAX_PDF_BYTES` (default `26214400`; also limits Slack file downloads)
+- `COMPANY_CONTEXT_MAX_EXTRACTED_BYTES` (default `52428800`; also limits exported Google Doc text and extracted Slack file text)
 - `COMPANY_CONTEXT_EXTRACTION_TIMEOUT_SECONDS` (default `120`)
 - `COMPANY_CONTEXT_CHUNK_CHARS` (default `6000`)
 - `COMPANY_CONTEXT_WORKER_CONCURRENCY` (default `4`)

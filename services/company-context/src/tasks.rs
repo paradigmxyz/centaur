@@ -25,7 +25,9 @@ use crate::{
     errors::{is_rejected, rejected},
     extraction::{chunk_text, extract_google_doc_text, extract_pdf_text, hex_sha256},
     granola::GranolaClient,
-    granola_tasks, slack_documents,
+    granola_tasks,
+    slack::SlackClient,
+    slack_documents, slack_files,
 };
 
 #[derive(Clone)]
@@ -36,6 +38,7 @@ pub struct TaskState {
     pub credentials: Arc<ConsoleCredentials>,
     pub drive: DriveClient,
     pub granola: GranolaClient,
+    pub slack: SlackClient,
     pub embeddings: EmbeddingsClient,
 }
 
@@ -114,6 +117,7 @@ pub struct TaskSummary {
 pub fn register(state: TaskState) -> Result<()> {
     granola_tasks::register(&state)?;
     slack_documents::register(&state)?;
+    slack_files::register(&state)?;
 
     let reconcile_state = state.clone();
     state.absurd.register_task(

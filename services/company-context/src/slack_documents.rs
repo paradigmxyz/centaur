@@ -18,11 +18,14 @@ use crate::{
     embeddings::EmbeddingsClient,
     errors::is_rejected,
     extraction::{hex_sha256, split_long_text},
+    slack_files,
     tasks::{TaskState, bounded_error, run_task},
 };
 
 /// Bump to render every channel day again on its conversation's next sync.
-const PROJECTION_VERSION: i32 = 1;
+/// Chunks whose text is unchanged keep their vectors. Version 2 records the
+/// days' file shares.
+const PROJECTION_VERSION: i32 = 2;
 /// Message subtypes that carry conversation content. Others, such as joins
 /// and topic changes, are not rendered.
 const RENDERED_SUBTYPES: [&str; 4] = [
@@ -122,12 +125,14 @@ async fn project_conversation(
             .await?;
         pending += 1;
     }
+    let files = slack_files::spawn_pending(state, conversation_id).await?;
     info!(
         event = "company_context_slack_conversation_projected",
         task_id = ctx.task_id(),
         conversation_id,
         days_rendered = days.len(),
-        days_pending = pending
+        days_pending = pending,
+        files_pending = files
     );
     Ok(ProjectionSummary::new("completed", pending))
 }
@@ -191,7 +196,7 @@ async fn project_day(
     };
     let channel_name: String = conversation.try_get("name")?;
     let rendered_at: DateTime<Utc> = conversation.try_get("rendered_at")?;
-    let (messages, user_ids) = load_day(pool, conversation_id, day).await?;
+    let (messages, user_ids, shares) = load_day(pool, conversation_id, day).await?;
     let label = if channel_name.is_empty() {
         conversation_id
     } else {
@@ -271,6 +276,9 @@ async fn project_day(
     .bind(rendered_at)
     .fetch_optional(&mut *tx)
     .await?;
+    if row.is_some() {
+        slack_files::record_shares(&mut tx, conversation_id, day, &shares).await?;
+    }
     tx.commit().await?;
     let Some(row) = row else {
         return Ok(None);
@@ -289,12 +297,16 @@ struct Message {
     text: String,
 }
 
-/// Loads a channel day's rendered messages and the users they name.
+/// A file shared by a message: its timestamp and the file as Slack listed it.
+type FileShare = (String, Value);
+
+/// Loads a channel day's rendered messages, the users they name, and the
+/// files they share.
 async fn load_day(
     pool: &PgPool,
     conversation_id: &str,
     day: NaiveDate,
-) -> Result<(Vec<Message>, Vec<String>)> {
+) -> Result<(Vec<Message>, Vec<String>, Vec<FileShare>)> {
     let rows = sqlx::query(
         r#"
         SELECT message_ts, thread_ts, user_id, bot_id, text, occurred_at,
@@ -362,7 +374,9 @@ async fn load_day(
     .collect();
 
     let mut messages = Vec::with_capacity(rows.len());
+    let mut shares = Vec::new();
     for row in rows {
+        let ts: String = row.try_get("message_ts")?;
         let user_id: String = row.try_get("user_id")?;
         let bot_id: String = row.try_get("bot_id")?;
         let bot_name: String = row.try_get("bot_name")?;
@@ -381,6 +395,7 @@ async fn load_day(
             .trim()
             .to_owned();
         for file in files.as_array().into_iter().flatten() {
+            shares.push((ts.clone(), file.clone()));
             let name = ["title", "name"]
                 .into_iter()
                 .filter_map(|key| file[key].as_str())
@@ -396,14 +411,14 @@ async fn load_day(
             continue;
         }
         messages.push(Message {
-            ts: row.try_get("message_ts")?,
+            ts,
             thread_ts: row.try_get("thread_ts")?,
             occurred_at: row.try_get("occurred_at")?,
             author,
             text,
         });
     }
-    Ok((messages, user_ids))
+    Ok((messages, user_ids, shares))
 }
 
 /// Replaces each `<...>` tag in Slack message text with `render(tag)`.

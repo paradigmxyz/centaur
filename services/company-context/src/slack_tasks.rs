@@ -22,6 +22,7 @@ use crate::{
         SlackReply, User, UsersPage,
     },
     slack_documents::ConversationProjectParams,
+    slack_files,
     slack_rate_limit::RateLimiter,
     tasks::{bounded_error, run_task},
 };
@@ -1081,6 +1082,8 @@ async fn remove_unobserved(pool: &PgPool, retained_ids: &[i64]) -> Result<(u64, 
     .execute(&mut *tx)
     .await?
     .rows_affected();
+    // Files go with the last message sharing them.
+    slack_files::remove_unshared(&mut tx).await?;
     // Users go with the last live credential in their workspace.
     sqlx::query(
         r#"

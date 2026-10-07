@@ -32,6 +32,10 @@ pub const SLACK_USERS_SYNC_TASK: &str = "slack.team.users.sync";
 /// holds the embeddings client.
 pub const SLACK_CONVERSATION_PROJECT_TASK: &str = "slack.conversation.project";
 pub const SLACK_CHANNEL_DAY_EMBED_TASK: &str = "slack.channel_day.embed";
+/// File downloads are not paced against Slack's Web API limits, so file tasks
+/// run on the main queue too.
+pub const SLACK_FILE_EXTRACT_TASK: &str = "slack.file.extract";
+pub const SLACK_FILE_EMBED_TASK: &str = "slack.file.embed";
 /// Slack conversation types that can be synchronized.
 pub const SLACK_CONVERSATION_TYPES: [&str; 3] = ["public_channel", "private_channel", "im"];
 
@@ -165,6 +169,14 @@ pub struct Config {
         value_parser = normalized_base_url
     )]
     pub slack_api_base_url: String,
+    /// The only origin Slack file downloads, which carry user tokens, go to.
+    #[arg(
+        long,
+        env = "SLACK_FILES_BASE_URL",
+        default_value = "https://files.slack.com",
+        value_parser = normalized_base_url
+    )]
+    pub slack_files_base_url: String,
     #[arg(
         long,
         env = "OPENAI_BASE_URL",
@@ -269,6 +281,7 @@ pub struct Config {
         value_parser = folder_walk_batch_size
     )]
     pub folder_walk_batch_size: usize,
+    /// Largest Drive PDF or Slack file downloaded.
     #[arg(
         long,
         env = "COMPANY_CONTEXT_MAX_PDF_BYTES",

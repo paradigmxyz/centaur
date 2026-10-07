@@ -11,6 +11,7 @@ mod sampler;
 mod scheduler;
 mod slack;
 mod slack_documents;
+mod slack_files;
 mod slack_rate_limit;
 mod slack_tasks;
 mod tasks;
@@ -94,6 +95,7 @@ async fn main() -> Result<()> {
     let drive = DriveClient::new(&config, credentials.clone())?;
     let granola = GranolaClient::new(&config)?;
     let embeddings = EmbeddingsClient::new(&config)?;
+    let slack = SlackClient::new(&config)?;
     tasks::register(TaskState {
         config: config.clone(),
         pool: pool.clone(),
@@ -101,6 +103,7 @@ async fn main() -> Result<()> {
         credentials: credentials.clone(),
         drive,
         granola,
+        slack: slack.clone(),
         embeddings,
     })?;
     slack_tasks::register(
@@ -109,7 +112,7 @@ async fn main() -> Result<()> {
             pool: pool.clone(),
             absurd: slack_absurd.clone(),
             credentials: credentials.clone(),
-            slack: SlackClient::new(&config)?,
+            slack,
             limiter: RateLimiter::new(
                 pool.clone(),
                 config.slack_oauth_app_slug.clone(),

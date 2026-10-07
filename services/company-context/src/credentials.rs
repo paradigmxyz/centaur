@@ -33,6 +33,8 @@ pub struct SlackCredential {
     pub access_token: String,
     /// Conversation types the credential's scopes can list and read.
     pub conversation_types: Vec<&'static str>,
+    /// Whether the credential's scopes can download files.
+    pub can_read_files: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -406,6 +408,7 @@ impl ConsoleCredentials {
             access_token: self
                 .decrypt_required(row.try_get("access_token")?, "Slack broker access token")?,
             conversation_types: conversation_types(&scopes, &self.slack_conversation_types),
+            can_read_files: scopes.iter().any(|scope| scope == "files:read"),
         })
     }
 
