@@ -2433,17 +2433,21 @@ fn codex_bin() -> String {
 }
 
 #[test]
-fn fake_codex_filters_citations_in_jsonrpc_and_blocks_modes() {
+fn fake_codex_handles_resolved_and_unresolved_citations_in_both_modes() {
     let raw = "é [source](https://example.com)citeturn0search0 andcite:ship:turn1search2:walking: done";
-    let expected = "é [source](https://example.com) and done";
-    for blocks in [false, true] {
+    for (blocks, with_sources) in [(false, false), (false, true), (true, false), (true, true)] {
+        let expected = if with_sources {
+            "é [source](https://example.com) [1](https://example.com/native) and [2](https://example.com/other) done"
+        } else {
+            "é [source](https://example.com) and done"
+        };
         let fake_codex = temp_path("fake-citation-codex.sh");
         let log = temp_path("fake-citation-codex-requests.jsonl");
         let delta = json!({"method": "item/agentMessage/delta", "params": {
             "threadId": "thread-1", "turnId": "turn-1", "itemId": "answer-1", "delta": "codex blocks",
         }});
         let scripted_delta = "{\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"thread-1\",\"turnId\":\"turn-1\",\"itemId\":\"answer-1\",\"delta\":\"codex blocks\"}}";
-        let chunks = raw
+        let mut chunks = raw
             .chars()
             .map(|character| {
                 let mut delta = delta.clone();
@@ -2452,9 +2456,32 @@ fn fake_codex_filters_citations_in_jsonrpc_and_blocks_modes() {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let script = fake_codex_app_server_script(&log)
+        let sources = json!({"type": "webSearch", "id": "search-1", "query": "query", "action": {
+            "type": "search", "query": "query", "queries": null,
+        }, "results": [
+            {"type": "text_result", "ref_id": "turn0search0", "url": "https://example.com/native", "title": "Native"},
+            {"type": "text_result", "ref_id": "turn1search2", "url": "https://example.com/other", "title": "Other"},
+        ]});
+        if with_sources {
+            let mut started_item = sources.clone();
+            started_item["results"] = Value::Null;
+            let started = json!({"method": "item/started", "params": {
+                "threadId": "thread-1", "turnId": "turn-1", "item": started_item, "startedAtMs": 1,
+            }});
+            let completed = json!({"method": "item/completed", "params": {
+                "threadId": "thread-1", "turnId": "turn-1", "item": sources, "completedAtMs": 2,
+            }});
+            chunks = format!("printf '%s\\n' '{started}' '{completed}'\n{chunks}");
+        }
+        let mut script = fake_codex_app_server_script(&log)
             .replace(&format!("printf '%s\\n' '{scripted_delta}'"), &chunks)
             .replace("codex blocks", raw);
+        if with_sources {
+            script = script.replace(
+                "\"items\":[{\"type\":\"agentMessage\"",
+                &format!("\"items\":[{sources},{{\"type\":\"agentMessage\""),
+            );
+        }
         std::fs::write(&fake_codex, script).expect("write fake codex script");
         let mut permissions = std::fs::metadata(&fake_codex).unwrap().permissions();
         permissions.set_mode(0o755);
@@ -2490,7 +2517,15 @@ fn fake_codex_filters_citations_in_jsonrpc_and_blocks_modes() {
             .collect::<Vec<_>>();
         assert_eq!(terminals.len(), 2);
         for terminal in terminals {
-            assert_eq!(terminal["params"]["turn"]["items"][0]["text"], expected);
+            let items = terminal["params"]["turn"]["items"].as_array().unwrap();
+            let answer = items
+                .iter()
+                .find(|item| item["type"] == "agentMessage")
+                .unwrap();
+            assert_eq!(answer["text"], expected);
+            if with_sources {
+                assert_eq!(items[0], sources);
+            }
         }
         std::fs::remove_file(fake_codex).unwrap();
         std::fs::remove_file(log).unwrap();
