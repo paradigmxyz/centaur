@@ -23,7 +23,6 @@ use crate::{
 
 /// Bump to render every channel day again on its conversation's next sync.
 const PROJECTION_VERSION: i32 = 1;
-const PROJECTED_KINDS: [&str; 2] = ["public_channel", "private_channel"];
 /// Message subtypes that carry conversation content. Others, such as joins
 /// and topic changes, are not rendered.
 const RENDERED_SUBTYPES: [&str; 4] = [
@@ -147,12 +146,11 @@ async fn stale_days(pool: &PgPool, conversation_id: &str) -> Result<Vec<NaiveDat
           ON days.conversation_id = messages.conversation_id
          AND days.day = messages.projection_day
         WHERE messages.conversation_id = $1
-          AND conversations.kind = ANY($2::text[])
         GROUP BY messages.projection_day, conversations.conversation_id,
                  days.conversation_id, days.day
         HAVING days.day IS NULL
             OR max(messages.updated_at) > days.rendered_at
-            OR days.projection_version <> $3
+            OR days.projection_version <> $2
             OR days.channel_name <> conversations.name
             OR days.embedding_status = 'pending'
             OR EXISTS (
@@ -165,7 +163,6 @@ async fn stale_days(pool: &PgPool, conversation_id: &str) -> Result<Vec<NaiveDat
         "#,
     )
     .bind(conversation_id)
-    .bind(PROJECTED_KINDS)
     .bind(PROJECTION_VERSION)
     .fetch_all(pool)
     .await?)
@@ -1034,22 +1031,20 @@ mod tests {
         pool.execute(
             r#"
             INSERT INTO company_context_system.slack_conversations (conversation_id, team_id, kind, name)
-            VALUES ('C1', 'T1', 'public_channel', 'general'), ('D1', 'T1', 'im', '');
+            VALUES ('C1', 'T1', 'public_channel', 'general');
             INSERT INTO company_context_system.slack_messages
                 (conversation_id, message_ts, thread_ts, user_id, subtype, text, occurred_at, raw_payload)
             VALUES
                 ('C1', '1700000000.000000', '1700000000.000000', 'U1', NULL, 'ship it <@U2>?', to_timestamp(1700000000), '{}'),
                 ('C1', '1700007200.000000', '1700000000.000000', 'U2', NULL, 'shipped', to_timestamp(1700007200), '{}'),
                 ('C1', '1700000100.000000', NULL, 'U3', 'channel_join', 'joined', to_timestamp(1700000100), '{}'),
-                ('C1', '1700090000.000000', NULL, 'U1', NULL, 'next day', to_timestamp(1700090000), '{}'),
-                ('D1', '1700000000.000000', NULL, 'U1', NULL, 'private', to_timestamp(1700000000), '{}');
+                ('C1', '1700090000.000000', NULL, 'U1', NULL, 'next day', to_timestamp(1700090000), '{}');
             "#,
         )
         .await
         .unwrap();
         let day1 = NaiveDate::from_ymd_opt(2023, 11, 14).unwrap();
         let day2 = NaiveDate::from_ymd_opt(2023, 11, 15).unwrap();
-        assert!(stale_days(pool, "D1").await.unwrap().is_empty());
         assert_eq!(stale_days(pool, "C1").await.unwrap(), [day1, day2]);
 
         let publish = |day, revision| {
