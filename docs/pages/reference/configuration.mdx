@@ -280,13 +280,13 @@ Slack ETL workflows:
 
 | Env var | Set from | Controls |
 | --- | --- | --- |
-| `SLACK_ETL_ENABLED` | `apiRs.etl.slack.enabled`. | Master switch for Slack sync/backfill/context schedules. |
+| `SLACK_ETL_ENABLED` | `apiRs.etl.slack.enabled`; forced off when `companyContextV1.enabled=false`. | Master switch for Slack sync/backfill/context schedules. |
 | `SLACK_SYNC_INTERVAL_SECONDS`, `SLACK_BACKFILL_INTERVAL_SECONDS`, `COMPANY_CONTEXT_DOCUMENTS_INTERVAL_SECONDS` | `apiRs.etl.slack.syncIntervalSeconds`, `apiRs.etl.slack.backfill.intervalSeconds`, `apiRs.etl.companyContextDocuments.intervalSeconds`. | Slack ETL schedule intervals. |
 | `SLACK_SYNC_BACKFILL_LOOKBACK_DAYS`, `SLACK_SYNC_THREAD_LOOKBACK_DAYS` | `apiRs.etl.slack.syncBackfillLookbackDays`, `apiRs.etl.slack.syncThreadLookbackDays`. | Slack history/thread lookback windows. |
 | `SLACK_SYNC_INDEX_PRIVATE_CHANNELS` | `apiRs.etl.slack.indexPrivateChannels`. | Includes private channels visible to the ETL token. |
 | `SLACK_ETL_EXCLUDED_CHANNEL_PATTERNS` | `apiRs.etl.slack.excludedChannelPatterns`. | Comma-separated channel-name globs to skip. |
 | `SLACK_BACKFILL_ENABLED`, `SLACK_BACKFILL_CHANNEL_BATCH_LIMIT`, `SLACK_BACKFILL_CHANNEL_PAGES_PER_JOB` | `apiRs.etl.slack.backfill.*`. | Backfill enablement and batch sizing. |
-| `SLACK_RETENTION_ENABLED`, `SLACK_RETENTION_INTERVAL_MINUTES`, `SLACK_ETL_RETENTION_DAYS`, `SLACK_DM_RETENTION_DAYS` | `apiRs.etl.slack.retention.*`. | Slack retention enablement, cadence, and separate public ETL/DM TTLs. |
+| `SLACK_RETENTION_ENABLED`, `SLACK_RETENTION_INTERVAL_MINUTES`, `SLACK_ETL_RETENTION_DAYS`, `SLACK_DM_RETENTION_DAYS` | `apiRs.etl.slack.retention.*`; retention is forced off when `companyContextV1.enabled=false`. | Slack retention enablement, cadence, and separate public ETL/DM TTLs. |
 | `DATABASE_TEXT_SEARCH` | `externalDatabase.textSearch`, default `postgres`; always `paradedb` with the bundled PostgreSQL, where setting `externalDatabase.textSearch` fails rendering. | Company-context keyword search backend installed by api-rs migrations: `postgres` (built-in full-text search) or `paradedb` (BM25, requires `pg_search`). Fixed per database once migrated. |
 | `COMPANY_CONTEXT_DOCUMENTS_ENABLED` | `apiRs.etl.companyContextDocuments.enabled`. | Enables company-context projection when any ETL is on. |
 | `COMPANY_CONTEXT_DOCUMENTS_MAX_WINDOW_SECONDS` | `apiRs.etl.companyContextDocuments.maxWindowSeconds`. | Maximum source `updated_at` window projected by one company-context documents run. |

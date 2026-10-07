@@ -164,6 +164,12 @@
         }
       }
     },
+    "companyContextV1": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
     "console": { "$ref": "#/definitions/consoleConfig" },
     "ironControl": { "$ref": "#/definitions/consoleConfig" },
     "secrets": {

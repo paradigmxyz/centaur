@@ -451,6 +451,14 @@ proxySync:
     annotations: {}
   resources: {}
 
+# v1 company-context ingestion: the api-rs Slack workflows (slack_sync,
+# slack_backfill, slack_retention) and the Console Slack DM, Google Docs, and
+# Granola sync jobs. Set false to stop all of them, for example to roll out
+# experimentalCompanyContext in isolation. Already-synced data is kept, and
+# Slack retention does not run while this is false.
+companyContextV1:
+  enabled: true
+
 # Standalone company-context ingestion service. It indexes Google Docs and PDFs
 # from Google Drive and Granola meeting notes into its private system and data
 # schemas. Disabled while the corpus is validated alongside the legacy Python
