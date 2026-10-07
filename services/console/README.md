@@ -111,6 +111,13 @@ Google Docs metadata and document-content ETL is disabled by default. Set
 and queued Google Docs sync jobs. This switch does not affect Google OAuth,
 credential refresh, or previously indexed content.
 
+## Company Context v1 Sync
+
+`CENTAUR_CONSOLE_COMPANY_CONTEXT_V1_ENABLED=false` stops the Slack DM, Google
+Docs, and Granola sync jobs, including jobs already queued, without deleting
+synced data. It defaults to enabled; Google Docs sync also still requires
+`CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED`.
+
 ## Encryption Keys
 
 `iron-control` uses ActiveRecord encryption to protect secrets stored in the control plane (for example, the `control_plane` secret source type). The following environment variables configure the encryption keys:

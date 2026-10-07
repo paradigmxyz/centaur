@@ -45,6 +45,21 @@ module Granola
       assert_equal [ expected.id ], enqueued_ids
     end
 
+    test "poll and sync jobs do nothing while company context v1 is disabled" do
+      app = create_granola_app
+      credential = create_credential(app: app)
+      sync_factory = ->(_credential) { flunk "disabled Granola sync should not sync credentials" }
+
+      with_env("CENTAUR_CONSOLE_COMPANY_CONTEXT_V1_ENABLED" => "false") do
+        Granola::SyncCredential.stub(:new, sync_factory) do
+          PollSyncJob.perform_now(app.slug)
+          SyncCredentialJob.perform_now(credential.id)
+        end
+      end
+
+      assert_no_enqueued_jobs
+    end
+
     test "sync job retries when the Centaur API refuses the connection" do
       app = create_granola_app
       credential = create_credential(app: app)

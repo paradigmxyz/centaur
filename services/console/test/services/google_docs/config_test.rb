@@ -19,6 +19,10 @@ module GoogleDocs
 
       ENV[env_key] = "true"
       assert GoogleDocs::Config.sync_enabled?
+
+      with_env("CENTAUR_CONSOLE_COMPANY_CONTEXT_V1_ENABLED" => "false") do
+        refute GoogleDocs::Config.sync_enabled?
+      end
     ensure
       previous.each do |key, value|
         if value.nil?
