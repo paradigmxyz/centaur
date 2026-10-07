@@ -30,6 +30,7 @@ import {
   type RendererEvent
 } from '@centaur/rendering'
 import { conflateChatSdkStream } from './conflate'
+import { CitationTextFilter, stripUnresolvedCitations } from './citation-text'
 import { resolveHarnessRollout } from './harness-rollout'
 import { observeSeconds, slackbotMetrics } from './metrics'
 import {
@@ -2838,7 +2839,7 @@ class SlackRenderFallback {
   }
 
   text(): string {
-    const terminalText = this.terminalText.trim()
+    const terminalText = stripUnresolvedCitations(this.terminalText).trim()
     const markdownText = this.markdownText.trim()
     if (this.interrupted && !terminalText && markdownText === EMPTY_FINAL_ANSWER_TEXT) return ''
     return terminalText || markdownText
@@ -2883,9 +2884,17 @@ class SlackRenderFallback {
 async function* slackSafeChatSdkStream(
   stream: AsyncIterable<ChatSDKStreamChunk>
 ): AsyncIterable<ChatSDKStreamChunk> {
+  const citations = new CitationTextFilter()
   for await (const chunk of stream) {
+    if (chunk.type === 'markdown_text') {
+      const text = citations.append(chunk.text)
+      if (text) yield { ...chunk, text }
+      continue
+    }
     yield slackSafeChatSdkChunk(chunk)
   }
+  const text = citations.finish()
+  if (text) yield { type: 'markdown_text', text }
 }
 
 type SlackStreamTaskDisplayMode = NonNullable<SlackbotV2Options['streamTaskDisplayMode']>

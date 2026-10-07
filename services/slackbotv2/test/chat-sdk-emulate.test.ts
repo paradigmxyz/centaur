@@ -4303,6 +4303,79 @@ describe('slackbotv2', () => {
     ).toHaveLength(1)
   })
 
+  for (const plainText of [false, true]) {
+    it(`removes unresolved citations from ${plainText ? 'plain-text terminal replies' : 'streamed answers'}`, async () => {
+      codexApi.autoRespond = false
+
+      const parent = await postUserMessage('Context before an answer with citations.')
+      const prompt = plainText ? 'reply in plain text only' : 'answer with sources'
+      const mention = await postUserMessage(`<@${BOT_USER_ID}> ${prompt}`, parent.ts)
+      const key = threadKey(parent.ts)
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: `Ev-slackbotv2-citations-${plainText}`,
+          event: {
+            type: 'app_mention',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: mention.ts,
+            thread_ts: parent.ts,
+            text: `<@${BOT_USER_ID}> ${prompt}`
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+
+      expect(response.status).toBe(200)
+      await waitFor(() => codexApi.executes.length === 1)
+      await waitFor(() => codexApi.eventRequests.length === 1)
+      await waitFor(() => codexApi.streamCount === 1)
+
+      const deltas = [
+        'CITATION_START \uE200ci',
+        'te\uE202turn0search8',
+        '\uE201 [Docs](https://example.com) ',
+        '\uE200cite:ship:turn0search7:walk',
+        'ing: CITATION_END :ship:'
+      ]
+      codexApi.emitOutputLine(key, JSON.stringify({
+        type: 'item.started',
+        item: { id: 'answer-citations', type: 'agentMessage', text: '', phase: 'final_answer' }
+      }))
+      for (const delta of deltas) {
+        codexApi.emitOutputLine(key, JSON.stringify({
+          type: 'item.agentMessage.delta',
+          itemId: 'answer-citations',
+          delta
+        }))
+      }
+      codexApi.emitSessionEvent(key, 'session.execution_completed', {
+        execution_id: 'exe-citations',
+        status: 'completed',
+        result_text: deltas.join('')
+      })
+
+      await Promise.all(waits)
+      if (plainText) {
+        const replies = await threadTexts(parent.ts)
+        expect(replies.filter(text => text.startsWith('CITATION_START'))).toEqual([
+          'CITATION_START  [Docs](https://example.com)  CITATION_END :ship:'
+        ])
+      } else {
+        const transcripts = slackStreamTranscripts(slackApi.calls)
+        expect(transcripts).toHaveLength(1)
+        expect(transcripts[0]!.chunks.filter(chunk => chunk.type === 'markdown_text')
+          .map(chunk => chunk.text).join('')).toBe(
+          'CITATION_START  [Docs](https://example.com)  CITATION_END :ship:'
+        )
+      }
+    })
+  }
+
   it('keeps each task on one bounded card as details grow and output expands', async () => {
     codexApi.autoRespond = false
 
