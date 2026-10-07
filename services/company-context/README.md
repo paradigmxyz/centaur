@@ -4,7 +4,7 @@ Standalone company-context ingestion service. It indexes regular Google Docs and
 
 It also indexes Granola meeting notes (title, summary, owner, and attendees) through each user's Granola MCP OAuth credential. Each sync lists the account's meetings from its checkpoint onward, fetches their details ten meetings at a time, and republishes a note only when its content changes. Transcripts are not indexed; the Granola tool fetches them on demand. Notes that no live Granola credential still observes are removed.
 
-It also discovers the public and private Slack channels each user belongs to, through the same per-user Slack broker credentials the Rails Console Slack DM sync uses. Each discovery records the credential's Slack identity and its channel memberships; channels that no live Slack credential still observes are removed. Message history is not synchronized yet. Slack tasks run on their own `company_context_slack` queue and worker.
+It also discovers the public and private Slack channels (and, when enabled, direct messages) each user belongs to, through the same per-user Slack broker credentials the Rails Console Slack DM sync uses. Each discovery records the credential's Slack identity and its channel memberships; channels that no live Slack credential still observes are removed. Message history is not synchronized yet. Slack tasks run on their own `company_context_slack` queue and worker.
 
 Slack limits each Web API method per workspace per app, and every token the app issues shares that budget, including bot tokens used by other services. Workers therefore reserve request slots from a shared schedule in `company_context_system.slack_rate_limits`, spaced so that ingestion uses only `COMPANY_CONTEXT_SLACK_RATE_LIMIT_SHARE` of each method's documented tier. When Slack rate limits a method, every worker waits out its `Retry-After` and the spacing widens, then relaxes while no rate limits occur. A task that must wait longer than a few seconds suspends instead of holding a worker.
 
@@ -57,6 +57,18 @@ walk runs as one Absurd task per batch of folders: each batch lists its
 folders' children in a single Drive search and spawns batches for the
 subfolders. The Helm deployment reads
 `OPENAI_API_KEY` directly from the shared Kubernetes Secret.
+
+Rollout limits (unset means no limit; values are comma-separated):
+
+- `COMPANY_CONTEXT_GOOGLE_DRIVE_USER_EMAILS`: sync only these Google credential emails.
+- `COMPANY_CONTEXT_GRANOLA_USER_EMAILS`: sync only these Granola credential emails.
+- `COMPANY_CONTEXT_SLACK_USER_IDS`: sync only these Slack user IDs.
+- `COMPANY_CONTEXT_SLACK_CHANNEL_IDS`: sync only these Slack conversation IDs.
+- `COMPANY_CONTEXT_SLACK_CONVERSATION_TYPES` (default `public_channel,private_channel`): any of `public_channel`, `private_channel`, and `im`.
+
+Emails match case-insensitively. Credentials outside a limit are treated like
+dead credentials, so narrowing a limit removes data that only the excluded
+users or conversations still observed.
 
 Common optional settings:
 

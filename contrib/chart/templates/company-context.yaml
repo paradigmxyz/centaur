@@ -93,6 +93,14 @@ spec:
               value: {{ $companyContext.slackRateLimitShare | quote }}
             - name: COMPANY_CONTEXT_SLACK_WORKER_CONCURRENCY
               value: {{ $companyContext.slackWorkerConcurrency | quote }}
+{{- with $companyContext.syncLimits }}
+{{- range $env, $values := dict "COMPANY_CONTEXT_GOOGLE_DRIVE_USER_EMAILS" .googleDriveUserEmails "COMPANY_CONTEXT_GRANOLA_USER_EMAILS" .granolaUserEmails "COMPANY_CONTEXT_SLACK_USER_IDS" .slackUserIds "COMPANY_CONTEXT_SLACK_CHANNEL_IDS" .slackChannelIds "COMPANY_CONTEXT_SLACK_CONVERSATION_TYPES" .slackConversationTypes }}
+{{- if $values }}
+            - name: {{ $env }}
+              value: {{ join "," $values | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:

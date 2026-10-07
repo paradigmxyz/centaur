@@ -11,10 +11,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Slack sends Retry-After with every rate limit; this covers a missing header.
 const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(60);
 
-/// Ingested conversation types and the read and history scopes each requires.
+/// Ingestible conversation types and the read and history scopes each requires.
 const INGESTED_CONVERSATION_TYPES: &[(&str, [&str; 2])] = &[
     ("public_channel", ["channels:read", "channels:history"]),
     ("private_channel", ["groups:read", "groups:history"]),
+    ("im", ["im:read", "im:history"]),
 ];
 
 /// Slack errors that retrying the same request with the same token cannot fix.
@@ -32,14 +33,15 @@ const PERMANENT_ERRORS: &[&str] = &[
     "token_revoked",
 ];
 
-/// Returns the ingested conversation types the scopes can list and read.
-pub fn conversation_types(scopes: &[String]) -> Vec<&'static str> {
+/// Returns the allowed conversation types the scopes can list and read.
+pub fn conversation_types(scopes: &[String], allowed: &[String]) -> Vec<&'static str> {
     INGESTED_CONVERSATION_TYPES
         .iter()
-        .filter(|(_, required)| {
-            required
-                .iter()
-                .all(|scope| scopes.iter().any(|granted| granted == scope))
+        .filter(|(kind, required)| {
+            allowed.iter().any(|allowed| allowed == kind)
+                && required
+                    .iter()
+                    .all(|scope| scopes.iter().any(|granted| granted == scope))
         })
         .map(|(kind, _)| *kind)
         .collect()
@@ -233,22 +235,31 @@ mod tests {
     use crate::errors::is_rejected;
 
     #[test]
-    fn conversation_types_require_both_read_and_history_scopes() {
-        let scopes = |values: &[&str]| -> Vec<String> {
+    fn conversation_types_require_allowance_and_both_scopes() {
+        let strings = |values: &[&str]| -> Vec<String> {
             values.iter().map(|value| value.to_string()).collect()
         };
+        let all = strings(&["public_channel", "private_channel", "im"]);
+        let granted = strings(&[
+            "channels:read",
+            "channels:history",
+            "groups:read",
+            "groups:history",
+            "im:read",
+            "im:history",
+        ]);
         assert_eq!(
-            conversation_types(&scopes(&[
-                "channels:read",
-                "channels:history",
-                "groups:read",
-                "groups:history"
-            ])),
-            ["public_channel", "private_channel"]
+            conversation_types(&granted, &all),
+            ["public_channel", "private_channel", "im"]
         );
         assert_eq!(
-            conversation_types(&scopes(&["channels:read", "groups:history"])),
+            conversation_types(&strings(&["channels:read", "groups:history"]), &all),
             Vec::<&str>::new()
+        );
+        assert_eq!(
+            conversation_types(&granted, &strings(&["im"])),
+            ["im"],
+            "only allowed types are synchronized"
         );
     }
 

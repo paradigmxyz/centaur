@@ -30,6 +30,8 @@ pub struct SlackTaskState {
     pub credentials: Arc<ConsoleCredentials>,
     pub slack: SlackClient,
     pub limiter: RateLimiter,
+    /// Conversations to synchronize; empty synchronizes every conversation.
+    pub channel_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -147,7 +149,9 @@ async fn discover(
                 ],
             )
             .await?;
-            conversations.extend(page.channels);
+            conversations.extend(page.channels.into_iter().filter(|conversation| {
+                state.channel_ids.is_empty() || state.channel_ids.contains(&conversation.id)
+            }));
             cursor = page.response_metadata.next_cursor;
             if cursor.is_empty() {
                 break;

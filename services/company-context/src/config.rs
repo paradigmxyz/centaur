@@ -25,6 +25,8 @@ pub const GRANOLA_NOTE_EMBED_TASK: &str = "granola.note.embed";
 pub const SLACK_QUEUE_NAME: &str = "company_context_slack";
 pub const SLACK_CREDENTIALS_RECONCILE_TASK: &str = "slack.credentials.reconcile";
 pub const SLACK_USER_DISCOVER_TASK: &str = "slack.user.discover";
+/// Slack conversation types that can be synchronized.
+pub const SLACK_CONVERSATION_TYPES: [&str; 3] = ["public_channel", "private_channel", "im"];
 
 #[derive(Clone, Debug, Parser)]
 #[command(
@@ -75,6 +77,48 @@ pub struct Config {
         value_parser = nonempty
     )]
     pub slack_oauth_app_slug: String,
+    /// Limits Google Drive sync to these credential emails. Unset syncs every user.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_GOOGLE_DRIVE_USER_EMAILS",
+        value_delimiter = ',',
+        value_parser = email
+    )]
+    pub google_drive_user_emails: Vec<String>,
+    /// Limits Granola sync to these credential emails. Unset syncs every user.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_GRANOLA_USER_EMAILS",
+        value_delimiter = ',',
+        value_parser = email
+    )]
+    pub granola_user_emails: Vec<String>,
+    /// Limits Slack sync to these Slack user IDs. Unset syncs every user.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_SLACK_USER_IDS",
+        value_delimiter = ',',
+        value_parser = nonempty
+    )]
+    pub slack_user_ids: Vec<String>,
+    /// Limits Slack sync to these conversation IDs. Unset syncs every
+    /// conversation of an allowed type.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_SLACK_CHANNEL_IDS",
+        value_delimiter = ',',
+        value_parser = nonempty
+    )]
+    pub slack_channel_ids: Vec<String>,
+    /// Slack conversation types to sync.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_SLACK_CONVERSATION_TYPES",
+        value_delimiter = ',',
+        default_value = "public_channel,private_channel",
+        value_parser = slack_conversation_type
+    )]
+    pub slack_conversation_types: Vec<String>,
     #[arg(
         long,
         env = "OPENAI_API_KEY",
@@ -244,6 +288,21 @@ fn nonempty(value: &str) -> Result<String, String> {
     Ok(value.to_owned())
 }
 
+fn email(value: &str) -> Result<String, String> {
+    Ok(nonempty(value)?.to_lowercase())
+}
+
+fn slack_conversation_type(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if !SLACK_CONVERSATION_TYPES.contains(&value) {
+        return Err(format!(
+            "value must be one of {}",
+            SLACK_CONVERSATION_TYPES.join(", ")
+        ));
+    }
+    Ok(value.to_owned())
+}
+
 fn normalized_base_url(value: &str) -> Result<String, String> {
     let value = nonempty(value)?;
     Ok(value.trim_end_matches('/').to_owned())
@@ -327,6 +386,38 @@ mod tests {
         assert_eq!(config.openai_base_url, "http://localhost:8080/v1");
         assert_eq!(config.scan_interval, Duration::from_secs(300));
         assert_eq!(config.slack_rate_limit_share, 0.3);
+    }
+
+    #[test]
+    fn parses_sync_limits() {
+        let config = Config::try_parse_from(required_args()).unwrap();
+        assert!(config.google_drive_user_emails.is_empty());
+        assert!(config.slack_channel_ids.is_empty());
+        assert_eq!(
+            config.slack_conversation_types,
+            ["public_channel", "private_channel"]
+        );
+
+        let mut args = required_args();
+        args.extend([
+            "--google-drive-user-emails",
+            "Ada@Example.com, grace@example.com",
+            "--slack-channel-ids",
+            "C1,G2",
+            "--slack-conversation-types",
+            "im, public_channel",
+        ]);
+        let config = Config::try_parse_from(args).unwrap();
+        assert_eq!(
+            config.google_drive_user_emails,
+            ["ada@example.com", "grace@example.com"]
+        );
+        assert_eq!(config.slack_channel_ids, ["C1", "G2"]);
+        assert_eq!(config.slack_conversation_types, ["im", "public_channel"]);
+
+        let mut args = required_args();
+        args.extend(["--slack-conversation-types", "mpim"]);
+        assert!(Config::try_parse_from(args).is_err());
     }
 
     #[test]

@@ -109,6 +109,7 @@ async fn main() -> Result<()> {
                 config.slack_oauth_app_slug.clone(),
                 config.slack_rate_limit_share,
             ),
+            channel_ids: config.slack_channel_ids.clone(),
         },
     )?;
 

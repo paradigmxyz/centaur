@@ -482,6 +482,16 @@ experimentalCompanyContext:
   # The rest is left for other services calling Slack as the same app.
   slackRateLimitShare: 0.3
   slackWorkerConcurrency: 4
+  # Rollout limits. An empty list syncs every user or conversation. Narrowing a
+  # list removes indexed data that only the excluded users or conversations kept.
+  syncLimits:
+    googleDriveUserEmails: []
+    granolaUserEmails: []
+    slackUserIds: []
+    # Slack conversation IDs (channels and DMs).
+    slackChannelIds: []
+    # Any of public_channel, private_channel, im.
+    slackConversationTypes: [public_channel, private_channel]
   drivePageSize: 100
   maxScanPages: 10
   maxPdfBytes: 26214400
