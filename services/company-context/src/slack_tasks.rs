@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use absurd::{Client as AbsurdClient, SpawnOptions, TaskContext};
 use anyhow::{Context, Result, bail};
@@ -49,8 +49,27 @@ pub struct SlackTaskState {
     pub limiter: RateLimiter,
     /// Conversations to synchronize; empty synchronizes every conversation.
     pub channel_ids: Vec<String>,
-    /// History synchronized for a conversation without a checkpoint.
-    pub initial_lookback: chrono::Duration,
+    /// How far back message history is synchronized.
+    pub history: chrono::Duration,
+    /// Per-conversation overrides of `history`.
+    pub channel_history: HashMap<String, chrono::Duration>,
+}
+
+impl SlackTaskState {
+    fn history(&self, conversation_id: &str) -> chrono::Duration {
+        self.channel_history
+            .get(conversation_id)
+            .copied()
+            .unwrap_or(self.history)
+    }
+}
+
+/// The span a history sync reads: from `oldest` to the present, which it
+/// records as synchronized up to `until`.
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+struct HistoryWindow {
+    oldest: DateTime<Utc>,
+    until: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -276,7 +295,7 @@ async fn discover(
     }
 }
 
-/// Stores a conversation's history since its checkpoint, rereading at least
+/// Stores a conversation's history since its last sync, rereading at least
 /// the thread refresh window, and syncs each thread whose replies changed.
 async fn sync_conversation(
     state: &SlackTaskState,
@@ -286,18 +305,23 @@ async fn sync_conversation(
     let conversation_id = params.conversation_id.as_str();
     let task_id = ctx.task_id();
     // Checkpoint the claim and window so a resumed run pages the same range.
-    let oldest: Option<String> = match ctx.begin_step("slack.history.window").await? {
+    let window: Option<HistoryWindow> = match ctx.begin_step("slack.history.window").await? {
         handle if handle.done => handle.state.context("history window checkpoint is empty")?,
         handle => {
-            let oldest = claim_history(&state.pool, conversation_id, task_id)
+            let window = claim_history(&state.pool, conversation_id, task_id)
                 .await?
-                .map(|watermark| {
-                    history_oldest(watermark.as_deref(), Utc::now(), state.initial_lookback)
+                .map(|(synced_from, synced_until)| {
+                    history_window(
+                        synced_from,
+                        synced_until,
+                        Utc::now(),
+                        state.history(conversation_id),
+                    )
                 });
-            ctx.complete_step(handle, oldest).await?
+            ctx.complete_step(handle, window).await?
         }
     };
-    let Some(oldest) = oldest else {
+    let Some(window) = window else {
         info!(
             event = "company_context_slack_history_skipped",
             task_id, conversation_id
@@ -310,8 +334,12 @@ async fn sync_conversation(
             .credentials
             .slack_credential(params.credential_id)
             .await?;
+        let oldest = format!(
+            "{}.{:06}",
+            window.oldest.timestamp(),
+            window.oldest.timestamp_subsec_micros()
+        );
         let mut stored = 0;
-        let mut latest: Option<String> = None;
         let mut cursor = String::new();
         for page_number in 0.. {
             let page: MessagesPage = paced_call(
@@ -336,12 +364,6 @@ async fn sync_conversation(
                 let Some(ts) = message["ts"].as_str() else {
                     continue;
                 };
-                if latest
-                    .as_deref()
-                    .is_none_or(|latest| ts_key(ts) > ts_key(latest))
-                {
-                    latest = Some(ts.to_owned());
-                }
                 // Only parents carry latest_reply, so a thread is resynced
                 // only when it has a reply it did not have before.
                 if let Some(latest_reply) = message["latest_reply"].as_str() {
@@ -370,7 +392,7 @@ async fn sync_conversation(
                 break;
             }
         }
-        finish_history(&state.pool, conversation_id, task_id, latest.as_deref()).await?;
+        finish_history(&state.pool, conversation_id, task_id, &window).await?;
         Ok(stored)
     }
     .await;
@@ -463,32 +485,21 @@ async fn sync_thread(
     }
 }
 
-/// Returns the Slack timestamp to read history from: the checkpoint or the
-/// start of the thread refresh window, whichever is older, or the initial
-/// lookback for a conversation without a checkpoint.
-fn history_oldest(
-    watermark: Option<&str>,
+/// Returns the span to read: the whole configured history if part of it has
+/// not been synchronized yet, and otherwise everything since the last sync or
+/// within the thread refresh window, whichever starts earlier.
+fn history_window(
+    synced_from: Option<DateTime<Utc>>,
+    synced_until: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
-    initial_lookback: chrono::Duration,
-) -> String {
-    let Some(watermark) = watermark else {
-        return format!("{}.000000", (now - initial_lookback).timestamp());
+    history: chrono::Duration,
+) -> HistoryWindow {
+    let start = (now - history).max(DateTime::UNIX_EPOCH);
+    let oldest = match (synced_from, synced_until) {
+        (Some(from), Some(until)) if from <= start => until.min(now - THREAD_REFRESH_WINDOW),
+        _ => start,
     };
-    let refresh_start = (now - THREAD_REFRESH_WINDOW).timestamp();
-    if ts_key(watermark).0 < refresh_start {
-        watermark.to_owned()
-    } else {
-        format!("{refresh_start}.000000")
-    }
-}
-
-/// Orders Slack timestamps (`seconds.micros`) numerically.
-fn ts_key(ts: &str) -> (i64, i64) {
-    let (seconds, fraction) = ts.split_once('.').unwrap_or((ts, "0"));
-    (
-        seconds.parse().unwrap_or_default(),
-        fraction.parse().unwrap_or_default(),
-    )
+    HistoryWindow { oldest, until: now }
 }
 
 /// Calls a paced Slack method as a durable step. The response is checkpointed
@@ -684,14 +695,16 @@ async fn record_discovery(
     Ok(())
 }
 
-/// Claims a conversation's history for a sync task. Returns its checkpoint,
-/// or `None` if the conversation is gone or another live sync holds it.
+/// Claims a conversation's history for a sync task. Returns the span already
+/// synchronized, or `None` if the conversation is gone or another live sync
+/// holds it.
+#[allow(clippy::type_complexity)]
 async fn claim_history(
     pool: &PgPool,
     conversation_id: &str,
     task_id: &str,
-) -> Result<Option<Option<String>>> {
-    Ok(sqlx::query_scalar(&format!(
+) -> Result<Option<(Option<DateTime<Utc>>, Option<DateTime<Utc>>)>> {
+    Ok(sqlx::query_as(&format!(
         r#"
         UPDATE company_context_system.slack_conversations
         SET history_sync_task_id = $2,
@@ -702,7 +715,7 @@ async fn claim_history(
               OR history_sync_task_id = $2
               OR history_sync_heartbeat_at < NOW() - INTERVAL '{HISTORY_SYNC_LEASE}'
           )
-        RETURNING history_watermark_ts
+        RETURNING history_synced_from, history_synced_until
         "#
     ))
     .bind(conversation_id)
@@ -711,22 +724,19 @@ async fn claim_history(
     .await?)
 }
 
-/// Advances the checkpoint and releases the conversation.
+/// Extends the synchronized span by the window read and releases the
+/// conversation.
 async fn finish_history(
     pool: &PgPool,
     conversation_id: &str,
     task_id: &str,
-    latest: Option<&str>,
+    window: &HistoryWindow,
 ) -> Result<()> {
     sqlx::query(
         r#"
         UPDATE company_context_system.slack_conversations
-        SET history_watermark_ts = CASE
-                WHEN history_watermark_ts IS NULL
-                    OR $3::numeric > history_watermark_ts::numeric THEN $3
-                ELSE history_watermark_ts
-            END,
-            history_synced_at = NOW(),
+        SET history_synced_from = LEAST(history_synced_from, $3),
+            history_synced_until = GREATEST(history_synced_until, $4),
             history_last_error = '',
             history_sync_task_id = NULL,
             history_sync_heartbeat_at = NULL,
@@ -737,7 +747,8 @@ async fn finish_history(
     )
     .bind(conversation_id)
     .bind(task_id)
-    .bind(latest)
+    .bind(window.oldest)
+    .bind(window.until)
     .execute(pool)
     .await?;
     Ok(())
@@ -1052,23 +1063,33 @@ mod tests {
     }
 
     #[test]
-    fn history_reads_from_checkpoint_or_refresh_window() {
+    fn history_window_backfills_unsynced_history_then_rereads_recent_history() {
         let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
-        let lookback = chrono::Duration::days(90);
+        let days = chrono::Duration::days;
+        let window = |from, until, history| history_window(from, until, now, history).oldest;
+
+        // A conversation never synced reads its whole history.
+        assert_eq!(window(None, None, days(90)), now - days(90));
+        // A recent sync still rereads the thread refresh window.
+        let recent = Some(now - chrono::Duration::hours(1));
         assert_eq!(
-            history_oldest(None, now, lookback),
-            format!("{}.000000", 1_800_000_000 - 90 * 86_400)
+            window(Some(now - days(90)), recent, days(90)),
+            now - THREAD_REFRESH_WINDOW
         );
-        // A recent checkpoint still rereads the thread refresh window.
+        // An older sync is read from so no messages are skipped.
+        let stale = Some(now - days(10));
         assert_eq!(
-            history_oldest(Some("1799999000.000100"), now, lookback),
-            format!("{}.000000", 1_800_000_000 - 72 * 3_600)
+            window(Some(now - days(90)), stale, days(90)),
+            now - days(10)
         );
-        // An older checkpoint is read from so no messages are skipped.
+        // Raising a conversation's history backfills what was not synced.
         assert_eq!(
-            history_oldest(Some("1700000000.000100"), now, lookback),
-            "1700000000.000100"
+            window(Some(now - days(90)), recent, days(3650)),
+            now - days(3650)
         );
+        // History never starts before the Unix epoch.
+        assert_eq!(window(None, None, days(36_500)), DateTime::UNIX_EPOCH);
+        assert_eq!(history_window(None, None, now, days(90)).until, now);
     }
 
     async fn message_texts(pool: &PgPool) -> Vec<(String, String, Option<String>)> {
@@ -1103,7 +1124,7 @@ mod tests {
         // Only one sync holds a conversation at a time.
         assert_eq!(
             claim_history(pool, "C1", "task-a").await.unwrap(),
-            Some(None)
+            Some((None, None))
         );
         assert_eq!(claim_history(pool, "C1", "task-b").await.unwrap(), None);
         assert_eq!(claim_history(pool, "C9", "task-b").await.unwrap(), None);
@@ -1139,20 +1160,37 @@ mod tests {
             ]
         );
 
-        // The checkpoint only advances, comparing timestamps numerically.
-        finish_history(pool, "C1", "task-a", Some("1700000010.000001"))
-            .await
-            .unwrap();
+        // The synchronized span only grows.
+        let at = |seconds| DateTime::from_timestamp(seconds, 0).unwrap();
+        let first = HistoryWindow {
+            oldest: at(1_000),
+            until: at(5_000),
+        };
+        finish_history(pool, "C1", "task-a", &first).await.unwrap();
         assert_eq!(
             claim_history(pool, "C1", "task-b").await.unwrap(),
-            Some(Some("1700000010.000001".to_owned()))
+            Some((Some(at(1_000)), Some(at(5_000))))
         );
-        finish_history(pool, "C1", "task-b", Some("999999999.999999"))
+        let recent = HistoryWindow {
+            oldest: at(4_000),
+            until: at(6_000),
+        };
+        finish_history(pool, "C1", "task-b", &recent).await.unwrap();
+        assert_eq!(
+            claim_history(pool, "C1", "task-c").await.unwrap(),
+            Some((Some(at(1_000)), Some(at(6_000))))
+        );
+        // Only the sync holding the conversation records its span.
+        let stalled = HistoryWindow {
+            oldest: at(0),
+            until: at(9_000),
+        };
+        finish_history(pool, "C1", "task-a", &stalled)
             .await
             .unwrap();
         assert_eq!(
             claim_history(pool, "C1", "task-c").await.unwrap(),
-            Some(Some("1700000010.000001".to_owned()))
+            Some((Some(at(1_000)), Some(at(6_000))))
         );
 
         // Messages go with their conversation, and are not stored again.

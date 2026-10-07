@@ -201,14 +201,22 @@ pub struct Config {
         value_parser = positive_duration
     )]
     pub slack_discovery_interval: Duration,
-    /// Days of history synchronized for a Slack conversation without a checkpoint.
+    /// Days of Slack message history to synchronize.
     #[arg(
         long,
-        env = "COMPANY_CONTEXT_SLACK_INITIAL_LOOKBACK_DAYS",
+        env = "COMPANY_CONTEXT_SLACK_HISTORY_DAYS",
         default_value = "90",
-        value_parser = positive_usize
+        value_parser = history_days
     )]
-    pub slack_initial_lookback_days: usize,
+    pub slack_history_days: usize,
+    /// Per-conversation overrides of the history days, as `ID=DAYS` pairs.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_SLACK_CHANNEL_HISTORY_DAYS",
+        value_delimiter = ',',
+        value_parser = channel_history_days
+    )]
+    pub slack_channel_history_days: Vec<(String, usize)>,
     /// Fraction of each Slack method's documented rate limit that ingestion
     /// may use. Other services calling Slack as the same app share the rest.
     #[arg(
@@ -311,6 +319,21 @@ fn slack_conversation_type(value: &str) -> Result<String, String> {
         ));
     }
     Ok(value.to_owned())
+}
+
+fn channel_history_days(value: &str) -> Result<(String, usize), String> {
+    let (channel_id, days) = value
+        .split_once('=')
+        .ok_or_else(|| "value must be CONVERSATION_ID=DAYS".to_owned())?;
+    Ok((nonempty(channel_id)?, history_days(days.trim())?))
+}
+
+fn history_days(value: &str) -> Result<usize, String> {
+    let value = positive_usize(value)?;
+    if value > 36_500 {
+        return Err("value must not exceed 36500".to_owned());
+    }
+    Ok(value)
 }
 
 fn normalized_base_url(value: &str) -> Result<String, String> {
@@ -416,6 +439,8 @@ mod tests {
             "C1,G2",
             "--slack-conversation-types",
             "im, public_channel",
+            "--slack-channel-history-days",
+            "C1=3650, G2=365",
         ]);
         let config = Config::try_parse_from(args).unwrap();
         assert_eq!(
@@ -424,10 +449,20 @@ mod tests {
         );
         assert_eq!(config.slack_channel_ids, ["C1", "G2"]);
         assert_eq!(config.slack_conversation_types, ["im", "public_channel"]);
+        assert_eq!(
+            config.slack_channel_history_days,
+            [("C1".to_owned(), 3650), ("G2".to_owned(), 365)]
+        );
 
         let mut args = required_args();
         args.extend(["--slack-conversation-types", "mpim"]);
         assert!(Config::try_parse_from(args).is_err());
+
+        for invalid in ["C1", "C1=0", "=30", "C1=36501"] {
+            let mut args = required_args();
+            args.extend(["--slack-channel-history-days", invalid]);
+            assert!(Config::try_parse_from(args).is_err(), "{invalid}");
+        }
     }
 
     #[test]

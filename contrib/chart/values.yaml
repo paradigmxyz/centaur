@@ -482,6 +482,12 @@ experimentalCompanyContext:
   # The rest is left for other services calling Slack as the same app.
   slackRateLimitShare: 0.3
   slackWorkerConcurrency: 4
+  # Days of Slack message history to sync, at most 36500. Raising a value
+  # backfills the older history on the next sync; lowering one keeps messages
+  # already synced.
+  slackHistoryDays: 90
+  # Per-conversation overrides, e.g. {C0123456789: 3650}.
+  slackChannelHistoryDays: {}
   # Rollout limits. An empty list syncs every user or conversation. Narrowing a
   # list removes indexed data that only the excluded users or conversations kept.
   syncLimits:

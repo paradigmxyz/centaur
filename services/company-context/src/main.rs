@@ -111,7 +111,12 @@ async fn main() -> Result<()> {
                 config.slack_rate_limit_share,
             ),
             channel_ids: config.slack_channel_ids.clone(),
-            initial_lookback: chrono::Duration::days(config.slack_initial_lookback_days as i64),
+            history: chrono::Duration::days(config.slack_history_days as i64),
+            channel_history: config
+                .slack_channel_history_days
+                .iter()
+                .map(|(id, days)| (id.clone(), chrono::Duration::days(*days as i64)))
+                .collect(),
         },
     )?;
 

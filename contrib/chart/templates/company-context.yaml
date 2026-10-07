@@ -93,6 +93,16 @@ spec:
               value: {{ $companyContext.slackRateLimitShare | quote }}
             - name: COMPANY_CONTEXT_SLACK_WORKER_CONCURRENCY
               value: {{ $companyContext.slackWorkerConcurrency | quote }}
+            - name: COMPANY_CONTEXT_SLACK_HISTORY_DAYS
+              value: {{ $companyContext.slackHistoryDays | quote }}
+{{- with $companyContext.slackChannelHistoryDays }}
+{{- $pairs := list }}
+{{- range $id, $days := . }}
+{{- $pairs = append $pairs (printf "%s=%d" $id (int $days)) }}
+{{- end }}
+            - name: COMPANY_CONTEXT_SLACK_CHANNEL_HISTORY_DAYS
+              value: {{ join "," $pairs | quote }}
+{{- end }}
 {{- with $companyContext.syncLimits }}
 {{- range $env, $values := dict "COMPANY_CONTEXT_GOOGLE_DRIVE_USER_EMAILS" .googleDriveUserEmails "COMPANY_CONTEXT_GRANOLA_USER_EMAILS" .granolaUserEmails "COMPANY_CONTEXT_SLACK_USER_IDS" .slackUserIds "COMPANY_CONTEXT_SLACK_CHANNEL_IDS" .slackChannelIds "COMPANY_CONTEXT_SLACK_CONVERSATION_TYPES" .slackConversationTypes }}
 {{- if $values }}

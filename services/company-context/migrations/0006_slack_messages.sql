@@ -4,9 +4,10 @@
 -- no live credential observes it.
 
 alter table company_context_system.slack_conversations
-    -- Newest top-level message timestamp synchronized so far.
-    add column history_watermark_ts text,
-    add column history_synced_at timestamptz,
+    -- The span of history synchronized so far. Raising a conversation's
+    -- history days moves its start back past history_synced_from.
+    add column history_synced_from timestamptz,
+    add column history_synced_until timestamptz,
     add column history_last_error text not null default '',
     -- The history sync task currently holding the conversation, so that syncs
     -- from consecutive discoveries do not page the same history concurrently.
