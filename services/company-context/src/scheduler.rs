@@ -12,11 +12,11 @@ use crate::{
     config::{
         Config, DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK,
         GRANOLA_CREDENTIALS_RECONCILE_TASK, GRANOLA_SYNC_TASK, SHARED_DRIVES_DISCOVER_TASK,
-        SLACK_CREDENTIALS_RECONCILE_TASK, SLACK_USER_DISCOVER_TASK,
+        SLACK_CREDENTIALS_RECONCILE_TASK, SLACK_USER_DISCOVER_TASK, SLACK_USERS_SYNC_TASK,
     },
     credentials::ConsoleCredentials,
     granola_tasks::{GranolaReconcileParams, GranolaSyncParams},
-    slack_tasks::{SlackDiscoverParams, SlackReconcileParams},
+    slack_tasks::{SlackDiscoverParams, SlackReconcileParams, UsersSyncParams},
     tasks::{DiscoverSharedDrivesParams, ReconcileCredentialsParams, ScanParams},
     telemetry,
 };
@@ -147,7 +147,8 @@ pub async fn run_granola(
     }
 }
 
-/// Enqueues Slack reconciliation and per-credential discovery on the Slack queue.
+/// Enqueues Slack reconciliation, the bot's users sync, and per-credential
+/// discovery on the Slack queue.
 pub async fn run_slack(config: Arc<Config>, client: Client, credentials: Arc<ConsoleCredentials>) {
     let mut ticker = interval(config.slack_discovery_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -175,6 +176,25 @@ pub async fn run_slack(config: Arc<Config>, client: Client, credentials: Arc<Con
             Err(error) => {
                 metrics::counter!("company_context_scheduler_errors_total").increment(1);
                 error!(event = "company_context_slack_reconcile_enqueue_failed", error = %error);
+            }
+        }
+        if config.slack_bot_token.is_some() {
+            match client
+                .spawn(
+                    SLACK_USERS_SYNC_TASK,
+                    UsersSyncParams { bucket },
+                    SpawnOptions {
+                        idempotency_key: Some(format!("slack.team.users.sync:{bucket}")),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .await
+            {
+                Ok(result) => telemetry::task_enqueued(SLACK_USERS_SYNC_TASK, result.created),
+                Err(error) => {
+                    metrics::counter!("company_context_scheduler_errors_total").increment(1);
+                    error!(event = "company_context_slack_users_enqueue_failed", error = %error);
+                }
             }
         }
         let credential_ids = match credentials.slack_credential_ids().await {

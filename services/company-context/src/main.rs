@@ -118,6 +118,7 @@ async fn main() -> Result<()> {
                 .iter()
                 .map(|(id, days)| (id.clone(), chrono::Duration::days(*days as i64)))
                 .collect(),
+            bot_token: config.slack_bot_token.clone(),
         },
     )?;
 

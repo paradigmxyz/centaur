@@ -57,6 +57,8 @@ pub struct SlackTaskState {
     pub history: chrono::Duration,
     /// Per-conversation overrides of `history`.
     pub channel_history: HashMap<String, chrono::Duration>,
+    /// The app's bot token, which lists workspace users.
+    pub bot_token: Option<String>,
 }
 
 impl SlackTaskState {
@@ -104,8 +106,7 @@ pub struct ThreadSyncParams {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct UsersSyncParams {
-    pub credential_id: i64,
-    pub team_id: String,
+    pub bucket: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -211,26 +212,7 @@ async fn discover(
                 "Slack credential cannot read any ingested conversation type",
             ));
         }
-        // auth.test has its own generous limit, so it is not paced, but its
-        // result is checkpointed so a resumed run does not call it again.
-        let identity: AuthTest = match ctx.begin_step("slack.auth.test").await? {
-            handle if handle.done => handle.state.context("auth.test checkpoint is empty")?,
-            handle => {
-                let SlackReply::Ok(body) = state
-                    .slack
-                    .call("auth.test", &credential.access_token, &[])
-                    .await?
-                else {
-                    bail!("Slack rate limited auth.test");
-                };
-                let identity: AuthTest =
-                    serde_json::from_value(body).context("decode Slack auth.test response")?;
-                if identity.team_id.is_empty() || identity.user_id.is_empty() {
-                    return Err(rejected("Slack auth.test did not identify a user"));
-                }
-                ctx.complete_step(handle, identity).await?
-            }
-        };
+        let identity = auth_test(&state.slack, ctx, &credential.access_token).await?;
 
         let types = credential.conversation_types.join(",");
         let mut conversations = Vec::new();
@@ -260,27 +242,6 @@ async fn discover(
             }
         }
         record_discovery(&state.pool, credential.id, &identity, &conversations).await?;
-        // The first discovery in a cycle able to list its workspace's users
-        // syncs them.
-        if credential.can_list_users {
-            state
-                .absurd
-                .spawn(
-                    SLACK_USERS_SYNC_TASK,
-                    UsersSyncParams {
-                        credential_id: credential.id,
-                        team_id: identity.team_id.clone(),
-                    },
-                    SpawnOptions {
-                        idempotency_key: Some(format!(
-                            "slack.team.users.sync:{}:{}",
-                            identity.team_id, params.bucket
-                        )),
-                        ..SpawnOptions::default()
-                    },
-                )
-                .await?;
-        }
         // The first discovery in a cycle to list a conversation syncs its history.
         for conversation in &conversations {
             state
@@ -527,17 +488,18 @@ async fn sync_thread(
     }
 }
 
-/// Stores every user of a workspace, so projections can render names.
+/// Stores every user of the bot's workspace, so projections can render names.
 async fn sync_users(
     state: &SlackTaskState,
     params: UsersSyncParams,
     ctx: &TaskContext,
 ) -> Result<MessagesSummary> {
+    let mut team_id = String::new();
     let result = async {
-        let credential = state
-            .credentials
-            .slack_credential(params.credential_id)
-            .await?;
+        let Some(bot_token) = state.bot_token.as_deref() else {
+            return Err(rejected("SLACK_BOT_TOKEN is not configured"));
+        };
+        team_id = auth_test(&state.slack, ctx, bot_token).await?.team_id;
         let mut stored = 0;
         let mut cursor = String::new();
         for page_number in 0.. {
@@ -546,16 +508,16 @@ async fn sync_users(
                 &state.limiter,
                 ctx,
                 &format!("slack.users.list.{page_number}"),
-                &params.team_id,
+                &team_id,
                 SlackMethod::UsersList,
-                &credential.access_token,
+                bot_token,
                 &[
                     ("limit", USERS_PAGE_SIZE.to_owned()),
                     ("cursor", cursor.clone()),
                 ],
             )
             .await?;
-            stored += store_users(&state.pool, &params.team_id, &page.members).await?;
+            stored += store_users(&state.pool, &team_id, &page.members).await?;
             cursor = page.response_metadata.next_cursor;
             if cursor.is_empty() {
                 break;
@@ -570,7 +532,8 @@ async fn sync_users(
             info!(
                 event = "company_context_slack_users_synced",
                 task_id = ctx.task_id(),
-                team_id = params.team_id,
+                bucket = params.bucket,
+                team_id,
                 users_changed = users
             );
             Ok(MessagesSummary::new("completed", users))
@@ -579,13 +542,32 @@ async fn sync_users(
             warn!(
                 event = "company_context_slack_users_rejected",
                 task_id = ctx.task_id(),
-                team_id = params.team_id,
+                bucket = params.bucket,
                 error = %error
             );
             Ok(MessagesSummary::new("rejected", 0))
         }
         Err(error) => Err(error),
     }
+}
+
+/// Identifies a token's workspace and user. auth.test has its own generous
+/// limit, so it is not paced, but its result is checkpointed so a resumed run
+/// does not call it again.
+async fn auth_test(slack: &SlackClient, ctx: &TaskContext, access_token: &str) -> Result<AuthTest> {
+    let handle = ctx.begin_step::<AuthTest>("slack.auth.test").await?;
+    if handle.done {
+        return handle.state.context("auth.test checkpoint is empty");
+    }
+    let SlackReply::Ok(body) = slack.call("auth.test", access_token, &[]).await? else {
+        bail!("Slack rate limited auth.test");
+    };
+    let identity: AuthTest =
+        serde_json::from_value(body).context("decode Slack auth.test response")?;
+    if identity.team_id.is_empty() || identity.user_id.is_empty() {
+        return Err(rejected("Slack auth.test did not identify a user"));
+    }
+    Ok(ctx.complete_step(handle, identity).await?)
 }
 
 /// Projects a conversation's changed days after its messages were stored.

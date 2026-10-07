@@ -485,6 +485,8 @@ experimentalCompanyContext:
   granolaSyncIntervalSeconds: 1800
   # Slack conversations are discovered through the same per-user Slack
   # credentials as the Console DM sync (console.slackDmSync.oauthAppSlug).
+  # Workspace users are listed with SLACK_BOT_TOKEN from the shared Secret, if
+  # present, so Slack documents show names instead of user IDs.
   slackDiscoveryIntervalSeconds: 1800
   # Fraction of each Slack method's documented rate limit ingestion may use.
   # The rest is left for other services calling Slack as the same app.
