@@ -2960,6 +2960,87 @@ describe('slackbotv2', () => {
     expect(renderedText).not.toContain('Execution completed, but no final text was captured.')
   })
 
+  it.each(['stream', 'plain-text', 'fallback'])(
+    'filters internal citations before Slack delivery in %s mode', async mode => {
+      codexApi.autoRespond = false
+      if (mode === 'fallback') slackApi.failStreamAppendsAfter(0, 'message_not_in_streaming_state')
+      const prompt = `<@${BOT_USER_ID}> show sources${mode === 'plain-text' ? '. Plain text only.' : ''}`
+      const parent = await postUserMessage('Context before a citation rendering test.')
+      const mention = await postUserMessage(prompt, parent.ts)
+      const key = threadKey(parent.ts)
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: `Ev-slackbotv2-citations-${mode}`,
+          event: {
+            type: 'app_mention',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: mention.ts,
+            thread_ts: parent.ts,
+            text: prompt
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+      expect(response.status).toBe(200)
+      await waitFor(() => codexApi.executes.length === 1)
+      await waitFor(() => codexApi.streamCount === 1)
+      if (mode === 'fallback') {
+        codexApi.emitOutputLine(key, JSON.stringify({
+          type: 'item.completed',
+          item: {
+            id: 'citation-search',
+            type: 'commandExecution',
+            command: 'true',
+            status: 'completed',
+            aggregatedOutput: ''
+          }
+        }))
+        await waitFor(() => slackApi.calls.some(call => call.method === 'chat.startStream'))
+      }
+      const deltas = [
+        'CITATION_FILTER_VISIBLE.ci',
+        'teturn0search0turn1search1',
+        ' [Source](https://example.com/source)',
+        'cite:ship:turn2search0:walk',
+        'ing:'
+      ]
+      if (mode === 'stream') {
+        codexApi.emitOutputLine(key, JSON.stringify({
+          type: 'item.started',
+          item: { id: 'citation-answer', type: 'agentMessage', text: '', phase: 'final_answer' }
+        }))
+        for (const delta of deltas) {
+          codexApi.emitOutputLine(key, JSON.stringify({
+            type: 'item.agentMessage.delta', itemId: 'citation-answer', delta
+          }))
+        }
+      }
+      codexApi.emitSessionEvent(key, 'session.execution_completed', {
+        execution_id: `exe-citations-${mode}`,
+        status: 'completed',
+        result_text: deltas.join('')
+      })
+      await Promise.all(waits)
+      const text = await threadText(parent.ts)
+      expect(text).toContain('CITATION_FILTER_VISIBLE.')
+      expect(text).toContain('https://example.com/source')
+      const outbound = JSON.stringify(slackApi.calls)
+      expect(outbound).not.toContain('cite')
+      expect(outbound).not.toContain('turn0search0')
+      expect(outbound).not.toContain('turn1search1')
+      expect(outbound).not.toContain('turn2search0')
+      if (mode === 'fallback') {
+        expect(codexApi.eventRequests.length).toBeGreaterThan(1)
+        expect(slackApi.calls.some(call => call.method === 'chat.postMessage')).toBe(true)
+      }
+    }
+  )
+
   it('renders api-rs completion result text when no final answer delta streamed', async () => {
     codexApi.autoRespond = false
 
