@@ -111,27 +111,11 @@ const options: SlackbotV2Options = {
 }
 options.slackHomeTeamId = await resolveSlackHomeTeamId(options)
 
-const bot = createSlackbotV2(options)
+const { app } = createSlackbotV2(options)
 const server = Bun.serve({
   port,
-  fetch: bot.app.fetch
+  fetch: app.fetch
 })
-
-// Let running Slack inbox deliveries finish; any cut short by the kill are
-// redelivered by another process once their leases expire.
-let shuttingDown = false
-const shutdown = async (signal: string): Promise<void> => {
-  if (shuttingDown) return
-  shuttingDown = true
-  consoleLogger.info('slackbotv2_shutdown_started', { signal })
-  server.stop()
-  await bot.close().catch(error => {
-    consoleLogger.warn('slackbotv2_shutdown_failed', { error: String(error) })
-  })
-  process.exit(0)
-}
-process.on('SIGTERM', () => void shutdown('SIGTERM'))
-process.on('SIGINT', () => void shutdown('SIGINT'))
 
 console.log(
   JSON.stringify({
