@@ -24,7 +24,6 @@ import { createPostgresState } from '@chat-adapter/state-pg'
 import pg from 'pg'
 import {
   harnessToChatSdkStream,
-  renderCodexAppServerAnswerText,
   EMPTY_FINAL_ANSWER_TEXT,
   type CodexAppServerToChatStreamOptions,
   type ChatSDKStreamChunk,
@@ -2839,7 +2838,7 @@ class SlackRenderFallback {
   }
 
   text(): string {
-    const terminalText = renderCodexAppServerAnswerText(this.terminalText).trim()
+    const terminalText = this.terminalText.trim()
     const markdownText = this.markdownText.trim()
     if (this.interrupted && !terminalText && markdownText === EMPTY_FINAL_ANSWER_TEXT) return ''
     return terminalText || markdownText

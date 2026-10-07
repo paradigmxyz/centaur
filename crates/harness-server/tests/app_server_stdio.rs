@@ -2432,6 +2432,71 @@ fn codex_bin() -> String {
     "codex".to_string()
 }
 
+#[test]
+fn fake_codex_filters_citations_in_jsonrpc_and_blocks_modes() {
+    let raw = "é [source](https://example.com)citeturn0search0 andcite:ship:turn1search2:walking: done";
+    let expected = "é [source](https://example.com) and done";
+    for blocks in [false, true] {
+        let fake_codex = temp_path("fake-citation-codex.sh");
+        let log = temp_path("fake-citation-codex-requests.jsonl");
+        let delta = json!({"method": "item/agentMessage/delta", "params": {
+            "threadId": "thread-1", "turnId": "turn-1", "itemId": "answer-1", "delta": "codex blocks",
+        }});
+        let scripted_delta = "{\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"thread-1\",\"turnId\":\"turn-1\",\"itemId\":\"answer-1\",\"delta\":\"codex blocks\"}}";
+        let chunks = raw
+            .chars()
+            .map(|character| {
+                let mut delta = delta.clone();
+                delta["params"]["delta"] = character.to_string().into();
+                format!("printf '%s\\n' '{delta}'")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let script = fake_codex_app_server_script(&log)
+            .replace(&format!("printf '%s\\n' '{scripted_delta}'"), &chunks)
+            .replace("codex blocks", raw);
+        std::fs::write(&fake_codex, script).expect("write fake codex script");
+        let mut permissions = std::fs::metadata(&fake_codex).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_codex, permissions).unwrap();
+        let extra_env = Some(("CODEX_BIN", fake_codex.to_str().unwrap()));
+        let mut bridge = if blocks {
+            BridgeProcess::spawn_harness_blocks(Harness::Codex, None, extra_env)
+        } else {
+            BridgeProcess::spawn_harness(Harness::Codex, None, extra_env)
+        };
+        let timeout = Duration::from_secs(10);
+        let thread_id = if blocks {
+            None
+        } else {
+            Some(bridge.initialize_and_start_thread(Harness::Codex, timeout))
+        };
+        for request_id in [3, 4] {
+            let turn = if let Some(thread_id) = &thread_id {
+                bridge.run_turn(thread_id, request_id, "say hello", None, timeout)
+            } else {
+                bridge.run_blocks_user_turn("say hello", timeout)
+            };
+            assert_completed_turn(&turn);
+            assert_codex_v2_turn(&turn);
+            assert_eq!(turn.text_from_deltas, expected);
+            assert_eq!(turn.completed_agent_items["answer-1"], expected);
+        }
+        let lines = bridge.finish_successfully();
+        let terminals = lines
+            .iter()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|value| value["method"] == "turn/completed")
+            .collect::<Vec<_>>();
+        assert_eq!(terminals.len(), 2);
+        for terminal in terminals {
+            assert_eq!(terminal["params"]["turn"]["items"][0]["text"], expected);
+        }
+        std::fs::remove_file(fake_codex).unwrap();
+        std::fs::remove_file(log).unwrap();
+    }
+}
+
 fn fake_codex_app_server_script(log_path: &Path) -> String {
     let mut script = String::new();
     script.push_str("#!/bin/sh\n");
