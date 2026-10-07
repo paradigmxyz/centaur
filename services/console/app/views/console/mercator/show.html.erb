@@ -13,7 +13,7 @@
     <div class="flex flex-wrap items-center gap-3">
       <%= link_to "Manage wallet ↗", "https://mercator.sh/account", class: "btn-secondary", target: "_blank", rel: "noopener noreferrer" %>
       <% if @claimed %>
-        <button class="btn-primary" disabled>MACH already claimed</button>
+        <button type="button" class="btn-primary disabled:pointer-events-none disabled:opacity-50" disabled>MACH already claimed</button>
       <% elsif @claim_url %>
         <%= link_to "Claim 100 MACH through Slack", @claim_url, class: "btn-primary", target: "_blank", rel: "noopener noreferrer" %>
       <% end %>
