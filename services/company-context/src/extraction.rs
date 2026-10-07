@@ -133,7 +133,7 @@ pub fn hex_sha256(value: &[u8]) -> String {
     format!("{:x}", Sha256::digest(value))
 }
 
-fn split_long_text(text: &str, max_chars: usize, output: &mut Vec<String>) {
+pub(crate) fn split_long_text(text: &str, max_chars: usize, output: &mut Vec<String>) {
     let chars: Vec<char> = text.chars().collect();
     for chunk in chars.chunks(max_chars) {
         output.push(chunk.iter().collect());

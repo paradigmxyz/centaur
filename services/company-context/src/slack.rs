@@ -56,6 +56,7 @@ pub enum SlackMethod {
     UsersConversations,
     ConversationsHistory,
     ConversationsReplies,
+    UsersList,
 }
 
 impl SlackMethod {
@@ -64,6 +65,7 @@ impl SlackMethod {
             Self::UsersConversations => "users.conversations",
             Self::ConversationsHistory => "conversations.history",
             Self::ConversationsReplies => "conversations.replies",
+            Self::UsersList => "users.list",
         }
     }
 
@@ -74,6 +76,8 @@ impl SlackMethod {
             Self::UsersConversations | Self::ConversationsHistory | Self::ConversationsReplies => {
                 50.0
             }
+            // Tier 2.
+            Self::UsersList => 20.0,
         }
     }
 }
@@ -112,6 +116,37 @@ pub struct MessagesPage {
     pub messages: Vec<Value>,
     #[serde(default)]
     pub response_metadata: ResponseMetadata,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct UsersPage {
+    #[serde(default)]
+    pub members: Vec<User>,
+    #[serde(default)]
+    pub response_metadata: ResponseMetadata,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct User {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub real_name: String,
+    #[serde(default)]
+    pub deleted: bool,
+    #[serde(default)]
+    pub is_bot: bool,
+    #[serde(default)]
+    pub profile: UserProfile,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct UserProfile {
+    #[serde(default)]
+    pub real_name: String,
+    #[serde(default)]
+    pub display_name: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

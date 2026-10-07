@@ -27,6 +27,11 @@ pub const SLACK_CREDENTIALS_RECONCILE_TASK: &str = "slack.credentials.reconcile"
 pub const SLACK_USER_DISCOVER_TASK: &str = "slack.user.discover";
 pub const SLACK_CONVERSATION_SYNC_TASK: &str = "slack.conversation.sync";
 pub const SLACK_THREAD_SYNC_TASK: &str = "slack.thread.sync";
+pub const SLACK_USERS_SYNC_TASK: &str = "slack.team.users.sync";
+/// Projection does not call Slack, so it runs on the main queue, which also
+/// holds the embeddings client.
+pub const SLACK_CONVERSATION_PROJECT_TASK: &str = "slack.conversation.project";
+pub const SLACK_CHANNEL_DAY_EMBED_TASK: &str = "slack.channel_day.embed";
 /// Slack conversation types that can be synchronized.
 pub const SLACK_CONVERSATION_TYPES: [&str; 3] = ["public_channel", "private_channel", "im"];
 

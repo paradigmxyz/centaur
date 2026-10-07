@@ -33,6 +33,8 @@ pub struct SlackCredential {
     pub access_token: String,
     /// Conversation types the credential's scopes can list and read.
     pub conversation_types: Vec<&'static str>,
+    /// Whether the credential can list its workspace's users.
+    pub can_list_users: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -406,6 +408,7 @@ impl ConsoleCredentials {
             access_token: self
                 .decrypt_required(row.try_get("access_token")?, "Slack broker access token")?,
             conversation_types: conversation_types(&scopes, &self.slack_conversation_types),
+            can_list_users: scopes.iter().any(|scope| scope == "users:read"),
         })
     }
 

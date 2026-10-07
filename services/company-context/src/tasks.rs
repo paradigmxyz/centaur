@@ -25,7 +25,7 @@ use crate::{
     errors::{is_rejected, rejected},
     extraction::{chunk_text, extract_google_doc_text, extract_pdf_text, hex_sha256},
     granola::GranolaClient,
-    granola_tasks,
+    granola_tasks, slack_documents,
 };
 
 #[derive(Clone)]
@@ -113,6 +113,7 @@ pub struct TaskSummary {
 
 pub fn register(state: TaskState) -> Result<()> {
     granola_tasks::register(&state)?;
+    slack_documents::register(&state)?;
 
     let reconcile_state = state.clone();
     state.absurd.register_task(

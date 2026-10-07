@@ -9,6 +9,7 @@ mod granola;
 mod granola_tasks;
 mod scheduler;
 mod slack;
+mod slack_documents;
 mod slack_rate_limit;
 mod slack_tasks;
 mod tasks;
