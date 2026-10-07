@@ -1885,6 +1885,13 @@ struct IronProxyArgs {
     bootstrap_secret_name: Option<String>,
     #[arg(long = "kubernetes-api-pod-label-selector", env = "KUBERNETES_API_POD_LABEL_SELECTOR", value_parser = parse_label_selector_arg)]
     api_pod_label_selector: Option<BTreeMap<String, String>>,
+    /// Pod labels for the proxy-sync service that per-sandbox proxies contact.
+    #[arg(
+        long = "kubernetes-iron-proxy-sync-pod-label-selector",
+        env = "KUBERNETES_IRON_PROXY_SYNC_POD_LABEL_SELECTOR",
+        value_parser = parse_label_selector_arg
+    )]
+    proxy_sync_pod_label_selector: Option<BTreeMap<String, String>>,
 }
 
 impl IronProxyArgs {
@@ -1926,6 +1933,13 @@ impl IronProxyArgs {
             .filter(|labels| !labels.is_empty())
         {
             config.api_pod_labels = labels.clone();
+        }
+        if let Some(labels) = self
+            .proxy_sync_pod_label_selector
+            .as_ref()
+            .filter(|labels| !labels.is_empty())
+        {
+            config.proxy_sync_pod_labels = labels.clone();
         }
         Ok(config)
     }

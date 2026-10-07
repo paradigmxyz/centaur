@@ -240,6 +240,7 @@ Kubernetes backend:
 | `FIREWALL_MANAGER_SECRET_SOURCE`, `FIREWALL_MANAGER_SECRET_TTL` | `ironProxy.secretSource`, `ironProxy.secretTtl`. | Secret source and cache TTL for rendered proxy config. |
 | `KUBERNETES_OP_CONNECT_HOST`, `KUBERNETES_OP_CONNECT_APP_NAME`, `KUBERNETES_OP_CONNECT_PORT` | Chart helper or `api.extraEnv`. | 1Password Connect endpoint details. |
 | `KUBERNETES_API_POD_LABEL_SELECTOR` | Chart-rendered labels or `api.extraEnv`. | API pod selector for API-managed proxy policies. |
+| `KUBERNETES_IRON_PROXY_SYNC_POD_LABEL_SELECTOR` | Chart-rendered proxy-sync labels or `apiRs.extraEnv`. | Proxy-sync pod selector for API-created proxy egress policies. Defaults to `app.kubernetes.io/component=proxy-sync`; the destination port comes from `IRON_CONTROL_PROXY_SYNC_URL`. |
 | `KUBERNETES_EGRESS_DISCOVERY_ENABLED`, `KUBERNETES_EGRESS_SERVICE_NAMESPACE`, `KUBERNETES_CLUSTER_DOMAIN`, `KUBERNETES_EGRESS_TAILNET_FQDN_ANNOTATION` | `api.egressDiscovery.*`. | Egress service discovery for sandbox NetworkPolicies. |
 | `REPOS_PATH` | `sandbox.reposPath`. | Repo cache path mounted into sandboxes. |
 
