@@ -43,7 +43,7 @@ pub fn init_metrics() -> Result<PrometheusHandle, metrics_exporter_prometheus::B
         (TASKS_ENQUEUED, "Tasks durably enqueued by task type."),
         (
             TASK_RUNS,
-            "Task run attempts by queue, task, and outcome (completed, rejected, superseded, skipped, suspended, cancelled, or failed).",
+            "Task run attempts by queue, task, and outcome (completed, rejected, superseded, skipped, denied, suspended, cancelled, or failed).",
         ),
         (
             TASK_TERMINAL,
@@ -214,6 +214,7 @@ fn run_outcome(result: &Result<Value, AbsurdError>) -> &'static str {
             Some("rejected") => "rejected",
             Some("superseded") => "superseded",
             Some("skipped") => "skipped",
+            Some("denied") => "denied",
             _ => "completed",
         },
         Err(AbsurdError::Suspend) => "suspended",
@@ -316,6 +317,7 @@ mod tests {
             "superseded"
         );
         assert_eq!(run_outcome(&Ok(json!({"status": "skipped"}))), "skipped");
+        assert_eq!(run_outcome(&Ok(json!({"status": "denied"}))), "denied");
         assert_eq!(run_outcome(&Ok(json!(null))), "completed");
         assert_eq!(run_outcome(&Err(AbsurdError::Suspend)), "suspended");
         assert_eq!(run_outcome(&Err(AbsurdError::Cancelled)), "cancelled");

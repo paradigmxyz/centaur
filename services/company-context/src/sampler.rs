@@ -136,6 +136,13 @@ async fn item_samples(pool: &PgPool) -> Result<Vec<Sample>> {
         UNION ALL
         SELECT 'slack', 'embedding', embedding_status, count(*)::float8
         FROM company_context_system.slack_channel_days GROUP BY embedding_status
+        UNION ALL
+        SELECT 'slack_file', 'extraction', extraction_status, count(*)::float8
+        FROM company_context_system.slack_files GROUP BY extraction_status
+        UNION ALL
+        SELECT 'slack_file', 'embedding', embedding_status, count(*)::float8
+        FROM company_context_system.slack_files
+        WHERE extraction_status = 'completed' GROUP BY embedding_status
         "#,
     )
     .fetch_all(pool)

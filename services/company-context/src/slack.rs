@@ -9,7 +9,11 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{config::Config, errors::rejected, telemetry};
+use crate::{
+    config::Config,
+    errors::{denied, rejected},
+    telemetry,
+};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// File downloads can be much larger than API responses.
@@ -237,7 +241,9 @@ impl SlackClient {
     }
 
     /// Downloads a file's content with a token that has `files:read`, up to
-    /// `max_bytes`. The token is only sent to the Slack files host.
+    /// `max_bytes`. The token is only sent to the Slack files host. A file the
+    /// token cannot read is denied rather than rejected, since another
+    /// user's token may read it.
     pub async fn download_file(
         &self,
         url: &str,
@@ -247,6 +253,10 @@ impl SlackClient {
         if !url.starts_with(&format!("{}/", self.files_base_url)) {
             return Err(rejected("Slack file URL is not on the Slack files host"));
         }
+        let started = Instant::now();
+        let record = |outcome| {
+            telemetry::upstream_request("slack", "files.download", outcome, started.elapsed())
+        };
         let response = self
             .http
             .get(url)
@@ -254,14 +264,24 @@ impl SlackClient {
             .timeout(DOWNLOAD_TIMEOUT)
             .send()
             .await
+            .inspect_err(|_| record("transport_error"))
             .context("send Slack file download request")?;
         let status = response.status();
+        if !status.is_success() {
+            record(telemetry::http_outcome(status));
+        }
         if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-            record_request("files.download", "error");
             bail!("Slack file download returned HTTP {status}");
         }
+        if matches!(
+            status,
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
+        ) {
+            return Err(denied(format!(
+                "Slack file download returned HTTP {status}"
+            )));
+        }
         if !status.is_success() {
-            record_request("files.download", "error");
             return Err(rejected(format!(
                 "Slack file download returned HTTP {status}"
             )));
@@ -273,28 +293,30 @@ impl SlackClient {
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.trim_start().starts_with("text/html"));
         if html {
-            record_request("files.download", "error");
-            return Err(rejected("Slack returned a web page instead of the file"));
+            record("sign_in_page");
+            return Err(denied("Slack returned a web page instead of the file"));
         }
         let limit_error = "Slack file exceeds the configured byte limit";
         if response
             .content_length()
             .is_some_and(|length| length > max_bytes as u64)
         {
-            record_request("files.download", "error");
+            record("too_large");
             return Err(rejected(limit_error));
         }
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("read Slack file download")?;
+            let chunk = chunk
+                .inspect_err(|_| record("transport_error"))
+                .context("read Slack file download")?;
             if bytes.len().saturating_add(chunk.len()) > max_bytes {
-                record_request("files.download", "error");
+                record("too_large");
                 return Err(rejected(limit_error));
             }
             bytes.extend_from_slice(&chunk);
         }
-        record_request("files.download", "ok");
+        record("ok");
         Ok(bytes)
     }
 
@@ -378,7 +400,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::errors::is_rejected;
+    use crate::errors::{is_denied, is_rejected};
 
     #[test]
     fn conversation_types_require_allowance_and_both_scopes() {
@@ -495,6 +517,7 @@ mod tests {
         match name.as_str() {
             "notes.txt" => ([("content-type", "text/plain")], "meeting notes").into_response(),
             "busy.txt" => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            "malformed.txt" => StatusCode::BAD_REQUEST.into_response(),
             _ => StatusCode::NOT_FOUND.into_response(),
         }
     }
@@ -533,12 +556,17 @@ mod tests {
             .download_file(&url("notes.txt"), "other-token", 100)
             .await
             .unwrap_err();
-        assert!(is_rejected(&sign_in), "a sign-in page is not the file");
+        assert!(is_denied(&sign_in), "a sign-in page is not the file");
         let missing = client
             .download_file(&url("gone.txt"), "token-1", 100)
             .await
             .unwrap_err();
-        assert!(is_rejected(&missing), "{missing}");
+        assert!(is_denied(&missing), "{missing}");
+        let malformed = client
+            .download_file(&url("malformed.txt"), "token-1", 100)
+            .await
+            .unwrap_err();
+        assert!(is_rejected(&malformed), "{malformed}");
         let busy = client
             .download_file(&url("busy.txt"), "token-1", 100)
             .await

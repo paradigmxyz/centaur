@@ -17,7 +17,7 @@ use tracing::{error, info, warn};
 use crate::{
     config::{Config, PDF_MIME_TYPE, SLACK_FILE_EMBED_TASK, SLACK_FILE_EXTRACT_TASK},
     embeddings::EmbeddingsClient,
-    errors::{is_rejected, rejected},
+    errors::{is_denied, is_rejected, rejected},
     extraction::{
         chunk_text, extract_pandoc_text, extract_pdf_text, extract_plain_text, hex_sha256,
         pandoc_reader,
@@ -241,6 +241,15 @@ pub(crate) async fn record_shares(
                         THEN slack_files.last_error
                     ELSE EXCLUDED.last_error
                 END,
+                task_requested_at = CASE
+                    WHEN slack_files.source_version = EXCLUDED.source_version
+                        THEN slack_files.task_requested_at
+                END,
+                denied_credential_ids = CASE
+                    WHEN slack_files.source_version = EXCLUDED.source_version
+                        THEN slack_files.denied_credential_ids
+                    ELSE '{}'
+                END,
                 updated_at = NOW()
             -- A listing without details does not replace one with them.
             WHERE EXCLUDED.source_version <> $15
@@ -309,15 +318,42 @@ pub(crate) async fn record_shares(
     Ok(())
 }
 
-/// Enqueues extraction of the conversation's files awaiting it, with a live
-/// credential observing the conversation that can read files. Without one,
-/// the files wait for a later projection.
-pub(crate) async fn spawn_pending(state: &TaskState, conversation_id: &str) -> Result<usize> {
-    let pending: Vec<(String, String)> = sqlx::query_as(
+/// Unfinished work on a file is enqueued again once its last request is this
+/// old, so a lost or exhausted task cannot leave the file unfinished.
+const TASK_RETRY_INTERVAL: &str = "1 hour";
+
+/// The next task a file with unfinished work needs.
+#[derive(Debug, PartialEq)]
+enum NextTask {
+    Extract,
+    /// Extraction staged text with this hash; it awaits publication.
+    Embed(String),
+}
+
+/// A file shared in a conversation whose work is unfinished and not
+/// requested within the retry interval.
+#[derive(Debug, PartialEq)]
+struct DueFile {
+    file_id: String,
+    source_version: String,
+    next: NextTask,
+    denied_credential_ids: Vec<i64>,
+}
+
+async fn due_files(pool: &PgPool, conversation_id: &str) -> Result<Vec<DueFile>> {
+    let rows = sqlx::query(&format!(
         r#"
-        SELECT files.file_id, files.source_version
+        SELECT files.file_id, files.source_version, files.extraction_status,
+               files.content_hash, files.denied_credential_ids
         FROM company_context_system.slack_files files
-        WHERE files.extraction_status = 'pending'
+        WHERE (
+              files.extraction_status = 'pending'
+              OR (files.extraction_status = 'completed' AND files.embedding_status = 'pending')
+          )
+          AND (
+              files.task_requested_at IS NULL
+              OR files.task_requested_at < NOW() - INTERVAL '{TASK_RETRY_INTERVAL}'
+          )
           AND EXISTS (
               SELECT 1
               FROM company_context_system.slack_file_shares shares
@@ -325,14 +361,129 @@ pub(crate) async fn spawn_pending(state: &TaskState, conversation_id: &str) -> R
                 AND shares.conversation_id = $1
           )
         ORDER BY files.file_id
-        "#,
-    )
+        "#
+    ))
     .bind(conversation_id)
-    .fetch_all(&state.pool)
+    .fetch_all(pool)
     .await?;
-    if pending.is_empty() {
+    rows.into_iter()
+        .map(|row| {
+            let extraction_status: String = row.try_get("extraction_status")?;
+            Ok(DueFile {
+                file_id: row.try_get("file_id")?,
+                source_version: row.try_get("source_version")?,
+                next: if extraction_status == "completed" {
+                    NextTask::Embed(row.try_get("content_hash")?)
+                } else {
+                    NextTask::Extract
+                },
+                denied_credential_ids: row.try_get("denied_credential_ids")?,
+            })
+        })
+        .collect()
+}
+
+/// Records that a due file's next task is being enqueued. Returns the time
+/// of the request, which distinguishes the task from earlier ones, or `None`
+/// if another projection requested it first.
+async fn claim(pool: &PgPool, file: &DueFile) -> Result<Option<DateTime<Utc>>> {
+    Ok(sqlx::query_scalar(&format!(
+        r#"
+        UPDATE company_context_system.slack_files
+        SET task_requested_at = NOW()
+        WHERE file_id = $1
+          AND source_version = $2
+          AND (
+              task_requested_at IS NULL
+              OR task_requested_at < NOW() - INTERVAL '{TASK_RETRY_INTERVAL}'
+          )
+        RETURNING task_requested_at
+        "#
+    ))
+    .bind(&file.file_id)
+    .bind(&file.source_version)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Enqueues the next task of the conversation's files with unfinished work.
+/// Each file is extracted with a live credential observing the conversation
+/// that can read files and that Slack has not refused the file to; without
+/// one, the file waits for a later projection.
+pub(crate) async fn spawn_due(state: &TaskState, conversation_id: &str) -> Result<usize> {
+    let due = due_files(&state.pool, conversation_id).await?;
+    if due.is_empty() {
         return Ok(0);
     }
+    let readers = if due.iter().any(|file| file.next == NextTask::Extract) {
+        file_readers(state, conversation_id).await?
+    } else {
+        Vec::new()
+    };
+    let mut spawned = 0;
+    let mut waiting = 0;
+    for file in &due {
+        let reader = readers
+            .iter()
+            .copied()
+            .find(|id| !file.denied_credential_ids.contains(id));
+        if file.next == NextTask::Extract && reader.is_none() {
+            waiting += 1;
+            continue;
+        }
+        let Some(requested_at) = claim(&state.pool, file).await? else {
+            continue;
+        };
+        let attempt = requested_at.timestamp_micros().to_string();
+        match (&file.next, reader) {
+            (NextTask::Embed(content_hash), _) => {
+                spawn_embed(
+                    state,
+                    FileEmbedParams {
+                        file_id: file.file_id.clone(),
+                        source_version: file.source_version.clone(),
+                        content_hash: content_hash.clone(),
+                    },
+                    &attempt,
+                )
+                .await?
+            }
+            (NextTask::Extract, Some(credential_id)) => {
+                state
+                    .absurd
+                    .spawn(
+                        SLACK_FILE_EXTRACT_TASK,
+                        FileExtractParams {
+                            file_id: file.file_id.clone(),
+                            source_version: file.source_version.clone(),
+                            credential_id,
+                        },
+                        SpawnOptions {
+                            idempotency_key: Some(format!(
+                                "slack.file.extract:{}:{}:{attempt}",
+                                file.file_id, file.source_version
+                            )),
+                            ..SpawnOptions::default()
+                        },
+                    )
+                    .await?;
+            }
+            (NextTask::Extract, None) => unreachable!("files without a reader wait"),
+        }
+        spawned += 1;
+    }
+    if waiting > 0 {
+        info!(
+            event = "company_context_slack_files_awaiting_reader",
+            conversation_id,
+            files = waiting
+        );
+    }
+    Ok(spawned)
+}
+
+/// Lists the live credentials observing the conversation that can read files.
+async fn file_readers(state: &TaskState, conversation_id: &str) -> Result<Vec<i64>> {
     let observers: Vec<i64> = sqlx::query_scalar(
         r#"
         SELECT broker_credential_id
@@ -345,13 +496,10 @@ pub(crate) async fn spawn_pending(state: &TaskState, conversation_id: &str) -> R
     .bind(conversation_id)
     .fetch_all(&state.pool)
     .await?;
-    let mut reader = None;
+    let mut readers = Vec::new();
     for credential_id in observers {
         match state.credentials.slack_credential(credential_id).await {
-            Ok(credential) if credential.can_read_files => {
-                reader = Some(credential.id);
-                break;
-            }
+            Ok(credential) if credential.can_read_files => readers.push(credential.id),
             Ok(_) => {}
             Err(error) => warn!(
                 event = "company_context_slack_file_credential_unavailable",
@@ -360,34 +508,29 @@ pub(crate) async fn spawn_pending(state: &TaskState, conversation_id: &str) -> R
             ),
         }
     }
-    let Some(credential_id) = reader else {
-        info!(
-            event = "company_context_slack_files_awaiting_scope",
-            conversation_id,
-            files = pending.len()
-        );
-        return Ok(0);
-    };
-    for (file_id, source_version) in &pending {
-        state
-            .absurd
-            .spawn(
-                SLACK_FILE_EXTRACT_TASK,
-                FileExtractParams {
-                    file_id: file_id.clone(),
-                    source_version: source_version.clone(),
-                    credential_id,
-                },
-                SpawnOptions {
-                    idempotency_key: Some(format!(
-                        "slack.file.extract:{file_id}:{source_version}:{credential_id}"
-                    )),
-                    ..SpawnOptions::default()
-                },
-            )
-            .await?;
-    }
-    Ok(pending.len())
+    Ok(readers)
+}
+
+async fn spawn_embed(state: &TaskState, params: FileEmbedParams, attempt: &str) -> Result<()> {
+    let key = format!(
+        "slack.file.embed:{}:{}:{}:{}:{attempt}",
+        params.file_id,
+        params.source_version,
+        params.content_hash,
+        state.embeddings.model()
+    );
+    state
+        .absurd
+        .spawn(
+            SLACK_FILE_EMBED_TASK,
+            params,
+            SpawnOptions {
+                idempotency_key: Some(key),
+                ..SpawnOptions::default()
+            },
+        )
+        .await?;
+    Ok(())
 }
 
 async fn extract_file(
@@ -395,84 +538,161 @@ async fn extract_file(
     params: FileExtractParams,
     ctx: &TaskContext,
 ) -> Result<FileSummary> {
-    let credential = match state
+    // A failed lookup is retried. A credential that can no longer read files
+    // leaves the file for a later projection to pick another.
+    let credential = state
         .credentials
         .slack_credential(params.credential_id)
-        .await
-    {
-        Ok(credential) if credential.can_read_files => credential,
-        result => {
-            // Leave the file pending for a projection to pick another credential.
-            warn!(
-                event = "company_context_slack_file_credential_unavailable",
-                task_id = ctx.task_id(),
-                credential_id = params.credential_id,
-                error = result.err().map(|error| error.to_string())
-            );
-            return Ok(FileSummary::new("skipped", 0));
-        }
-    };
-    let result = stage_file(
+        .await?;
+    if !credential.can_read_files {
+        warn!(
+            event = "company_context_slack_file_credential_unavailable",
+            task_id = ctx.task_id(),
+            credential_id = params.credential_id,
+            error = "credential cannot read files"
+        );
+        return Ok(FileSummary::new("skipped", 0));
+    }
+    let outcome = extract(
         &state.pool,
         &state.slack,
         &state.config,
         &params,
         &credential.access_token,
+        ctx.task_id(),
+    )
+    .await?;
+    let Extraction::Staged {
+        content_hash,
+        chunks,
+    } = outcome
+    else {
+        return Ok(FileSummary::new(outcome.status(), 0));
+    };
+    spawn_embed(
+        state,
+        FileEmbedParams {
+            file_id: params.file_id.clone(),
+            source_version: params.source_version.clone(),
+            content_hash,
+        },
+        ctx.task_id(),
+    )
+    .await?;
+    info!(
+        event = "company_context_slack_file_extracted",
+        task_id = ctx.task_id(),
+        file_id = params.file_id,
+        chunks
+    );
+    Ok(FileSummary::new("completed", chunks))
+}
+
+#[derive(Debug, PartialEq)]
+enum Extraction {
+    Staged {
+        content_hash: String,
+        chunks: usize,
+    },
+    /// The file changed or was extracted meanwhile.
+    Superseded,
+    /// Slack refused the file to the credential; another may read it.
+    Denied,
+    Rejected,
+}
+
+impl Extraction {
+    fn status(&self) -> &'static str {
+        match self {
+            Self::Staged { .. } => "completed",
+            Self::Superseded => "superseded",
+            Self::Denied => "denied",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// Extracts a pending file with a credential's token and records the
+/// outcome. Retryable failures are returned for the task to retry.
+async fn extract(
+    pool: &PgPool,
+    slack: &SlackClient,
+    config: &Config,
+    params: &FileExtractParams,
+    access_token: &str,
+    task_id: &str,
+) -> Result<Extraction> {
+    let error = match stage_file(pool, slack, config, params, access_token).await {
+        Ok(Some((content_hash, chunks))) => {
+            return Ok(Extraction::Staged {
+                content_hash,
+                chunks,
+            });
+        }
+        Ok(None) => return Ok(Extraction::Superseded),
+        Err(error) => error,
+    };
+    if is_denied(&error) {
+        record_denied(pool, params, &error).await;
+        warn!(
+            event = "company_context_slack_file_denied",
+            task_id,
+            file_id = params.file_id,
+            credential_id = params.credential_id,
+            error = %error
+        );
+        return Ok(Extraction::Denied);
+    }
+    let rejected = is_rejected(&error);
+    record_failure(
+        pool,
+        &params.file_id,
+        &params.source_version,
+        false,
+        rejected,
+        &error,
     )
     .await;
-    match result {
-        Ok(None) => Ok(FileSummary::new("superseded", 0)),
-        Ok(Some((content_hash, chunks))) => {
-            state
-                .absurd
-                .spawn(
-                    SLACK_FILE_EMBED_TASK,
-                    FileEmbedParams {
-                        file_id: params.file_id.clone(),
-                        source_version: params.source_version.clone(),
-                        content_hash: content_hash.clone(),
-                    },
-                    SpawnOptions {
-                        idempotency_key: Some(format!(
-                            "slack.file.embed:{}:{}:{content_hash}:{}",
-                            params.file_id,
-                            params.source_version,
-                            state.embeddings.model()
-                        )),
-                        ..SpawnOptions::default()
-                    },
-                )
-                .await?;
-            info!(
-                event = "company_context_slack_file_extracted",
-                task_id = ctx.task_id(),
-                file_id = params.file_id,
-                chunks
-            );
-            Ok(FileSummary::new("completed", chunks))
-        }
-        Err(error) => {
-            let rejected = is_rejected(&error);
-            record_failure(
-                &state.pool,
-                &params.file_id,
-                &params.source_version,
-                false,
-                rejected,
-                &error,
-            )
-            .await;
-            if rejected {
-                warn!(
-                    event = "company_context_slack_file_rejected",
-                    task_id = ctx.task_id(),
-                    file_id = params.file_id,
-                    error = %error
-                );
-                return Ok(FileSummary::new("rejected", 0));
-            }
-            Err(error)
-        }
+    if !rejected {
+        return Err(error);
+    }
+    warn!(
+        event = "company_context_slack_file_rejected",
+        task_id,
+        file_id = params.file_id,
+        error = %error
+    );
+    Ok(Extraction::Rejected)
+}
+
+/// Excludes the credential from extracting this version of the file and
+/// lets the next projection pick another.
+async fn record_denied(pool: &PgPool, params: &FileExtractParams, error: &anyhow::Error) {
+    if let Err(db_error) = sqlx::query(
+        r#"
+        UPDATE company_context_system.slack_files
+        SET denied_credential_ids = array_append(denied_credential_ids, $3),
+            task_requested_at = NULL,
+            last_error = $4,
+            updated_at = NOW()
+        WHERE file_id = $1
+          AND source_version = $2
+          AND extraction_status = 'pending'
+          AND NOT ($3 = ANY(denied_credential_ids))
+        "#,
+    )
+    .bind(&params.file_id)
+    .bind(&params.source_version)
+    .bind(params.credential_id)
+    .bind(bounded_error(error))
+    .execute(pool)
+    .await
+    {
+        error!(
+            event = "company_context_failure_record_failed",
+            file_id = params.file_id,
+            error = %db_error
+        );
     }
 }
 
@@ -570,6 +790,8 @@ async fn stage_file(
             extraction_status = 'completed',
             embedding_status = 'pending',
             last_error = '',
+            -- The embed task enqueued next gets a full retry interval.
+            task_requested_at = NOW(),
             updated_at = NOW()
         WHERE file_id = $1
         "#,
@@ -854,7 +1076,8 @@ async fn embed_file(
 }
 
 /// Records a failed extraction or embedding of the file's current version.
-/// Retryable failures stay pending so that the next attempt can finish.
+/// Retryable failures stay pending so that the next attempt can finish. A
+/// rejected version also loses whatever an earlier version published.
 async fn record_failure(
     pool: &PgPool,
     file_id: &str,
@@ -863,32 +1086,49 @@ async fn record_failure(
     rejected: bool,
     error: &anyhow::Error,
 ) {
-    if let Err(db_error) = sqlx::query(
-        r#"
-        UPDATE company_context_system.slack_files
-        SET extraction_status = CASE
-                WHEN $4 AND NOT $3 THEN 'rejected'
-                ELSE extraction_status
-            END,
-            embedding_status = CASE
-                WHEN $4 AND $3 THEN 'rejected'
-                ELSE embedding_status
-            END,
-            last_error = $5,
-            updated_at = NOW()
-        WHERE file_id = $1
-          AND source_version = $2
-          AND (CASE WHEN $3 THEN embedding_status ELSE extraction_status END) = 'pending'
-        "#,
-    )
-    .bind(file_id)
-    .bind(source_version)
-    .bind(embedding)
-    .bind(rejected)
-    .bind(bounded_error(error))
-    .execute(pool)
-    .await
-    {
+    let result = async {
+        let mut tx = pool.begin().await?;
+        let recorded = sqlx::query(
+            r#"
+            UPDATE company_context_system.slack_files
+            SET extraction_status = CASE
+                    WHEN $4 AND NOT $3 THEN 'rejected'
+                    ELSE extraction_status
+                END,
+                embedding_status = CASE
+                    WHEN $4 AND $3 THEN 'rejected'
+                    ELSE embedding_status
+                END,
+                last_error = $5,
+                updated_at = NOW()
+            WHERE file_id = $1
+              AND source_version = $2
+              AND (CASE WHEN $3 THEN embedding_status ELSE extraction_status END) = 'pending'
+            "#,
+        )
+        .bind(file_id)
+        .bind(source_version)
+        .bind(embedding)
+        .bind(rejected)
+        .bind(bounded_error(error))
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if rejected && recorded > 0 {
+            sqlx::query("DELETE FROM company_context_data.slack_file_documents WHERE file_id = $1")
+                .bind(file_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM company_context_system.slack_file_chunks WHERE file_id = $1")
+                .bind(file_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Result::<()>::Ok(())
+    }
+    .await;
+    if let Err(db_error) = result {
         error!(
             event = "company_context_failure_record_failed",
             file_id,
@@ -1032,15 +1272,19 @@ mod tests {
         );
     }
 
-    async fn fake_files(headers: HeaderMap) -> Response {
+    async fn fake_files(
+        axum::extract::Path((_, name)): axum::extract::Path<(String, String)>,
+        headers: HeaderMap,
+    ) -> Response {
         if headers.get("authorization").map(|value| value.as_bytes()) != Some(b"Bearer token-1") {
             return StatusCode::FORBIDDEN.into_response();
         }
-        (
-            [("content-type", "text/plain")],
-            "launch checklist\n\nship it",
-        )
-            .into_response()
+        let body = if name == "blank.txt" {
+            " \n"
+        } else {
+            "launch checklist\n\nship it"
+        };
+        ([("content-type", "text/plain")], body).into_response()
     }
 
     async fn fake_embeddings(
@@ -1204,33 +1448,85 @@ mod tests {
             ]
         );
 
-        let params = |source_version: &str| FileExtractParams {
+        let version = || async {
+            sqlx::query_scalar::<_, String>(
+                "SELECT source_version FROM company_context_system.slack_files WHERE file_id = 'F1'",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap()
+        };
+        let params = |source_version: &str, credential_id| FileExtractParams {
             file_id: "F1".to_owned(),
             source_version: source_version.to_owned(),
-            credential_id: 1,
+            credential_id,
         };
-        let version: String = sqlx::query_scalar(
-            "SELECT source_version FROM company_context_system.slack_files WHERE file_id = 'F1'",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        let error = stage_file(pool, &slack, &config, &params(&version), "token-2")
+        let due = |denied: &[i64], next| {
+            vec![DueFile {
+                file_id: "F1".to_owned(),
+                source_version: String::new(),
+                next,
+                denied_credential_ids: denied.to_vec(),
+            }]
+        };
+        let due_now = || async {
+            due_files(pool, "C1")
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|file| DueFile {
+                    source_version: String::new(),
+                    ..file
+                })
+                .collect::<Vec<_>>()
+        };
+        let overdue = || {
+            pool.execute(
+                "UPDATE company_context_system.slack_files SET task_requested_at = NOW() - INTERVAL '2 hours'",
+            )
+        };
+        let v1 = version().await;
+        assert_eq!(due_now().await, due(&[], NextTask::Extract));
+
+        // Requesting the extraction holds the file until the request is
+        // overdue, so projections do not enqueue it twice.
+        let [file] = due_files(pool, "C1").await.unwrap().try_into().unwrap();
+        assert!(claim(pool, &file).await.unwrap().is_some());
+        assert!(claim(pool, &file).await.unwrap().is_none());
+        assert!(due_now().await.is_empty());
+
+        // A credential Slack refuses the file to is excluded, and the file is
+        // due again for another credential.
+        assert_eq!(
+            extract(pool, &slack, &config, &params(&v1, 2), "token-2", "task")
+                .await
+                .unwrap(),
+            Extraction::Denied
+        );
+        assert_eq!(due_now().await, due(&[2], NextTask::Extract));
+
+        let Extraction::Staged {
+            content_hash,
+            chunks: 1,
+        } = extract(pool, &slack, &config, &params(&v1, 1), "token-1", "task")
             .await
-            .unwrap_err();
-        assert!(is_rejected(&error), "{error}");
-        let (content_hash, chunks) =
-            stage_file(pool, &slack, &config, &params(&version), "token-1")
+            .unwrap()
+        else {
+            panic!("the snippet is staged");
+        };
+        assert_eq!(
+            extract(pool, &slack, &config, &params(&v1, 1), "token-1", "task")
                 .await
-                .unwrap()
-                .unwrap();
-        assert_eq!(chunks, 1);
-        assert!(
-            stage_file(pool, &slack, &config, &params(&version), "token-1")
-                .await
-                .unwrap()
-                .is_none(),
+                .unwrap(),
+            Extraction::Superseded,
             "an extracted version is not extracted again"
+        );
+        // A lost embed task is enqueued again once overdue.
+        assert!(due_now().await.is_empty());
+        overdue().await.unwrap();
+        assert_eq!(
+            due_now().await,
+            due(&[2], NextTask::Embed(content_hash.clone()))
         );
         let publish = || {
             embed_file(
@@ -1238,7 +1534,7 @@ mod tests {
                 &embeddings,
                 FileEmbedParams {
                     file_id: "F1".to_owned(),
-                    source_version: version.clone(),
+                    source_version: v1.clone(),
                     content_hash: content_hash.clone(),
                 },
                 "task",
@@ -1255,6 +1551,8 @@ mod tests {
             )]
         );
         assert_eq!(inputs.load(Ordering::SeqCst), 1);
+        overdue().await.unwrap();
+        assert!(due_now().await.is_empty());
 
         // Projecting the days again keeps the published file.
         project(pool, "C1", day).await;
@@ -1273,7 +1571,38 @@ mod tests {
         tx.commit().await.unwrap();
         assert_eq!(documents(pool).await.len(), 1);
 
-        // Deleting the file in Slack removes its documents.
+        // A new version starts over with every credential, and keeps the
+        // published text until it is replaced or rejected.
+        let mut edited = snippet.clone();
+        edited["size"] = json!(2);
+        edited["url_private_download"] =
+            json!(format!("{base_url}/files-pri/T1-F1/download/blank.txt"));
+        sqlx::query(
+            r#"
+            UPDATE company_context_system.slack_messages
+            SET raw_payload = jsonb_build_object('files', jsonb_build_array($1::jsonb))
+            WHERE conversation_id = 'C1'
+            "#,
+        )
+        .bind(&edited)
+        .execute(pool)
+        .await
+        .unwrap();
+        project(pool, "C1", day).await;
+        let v2 = version().await;
+        assert_ne!(v1, v2);
+        assert_eq!(due_now().await, due(&[], NextTask::Extract));
+        assert_eq!(documents(pool).await.len(), 1);
+        assert_eq!(
+            extract(pool, &slack, &config, &params(&v2, 1), "token-1", "task")
+                .await
+                .unwrap(),
+            Extraction::Rejected
+        );
+        assert_eq!(statuses(pool).await[0].1, "rejected");
+        assert!(documents(pool).await.is_empty());
+
+        // Deleting the file in Slack marks it deleted.
         pool.execute(
             r#"
             UPDATE company_context_system.slack_messages
@@ -1291,7 +1620,6 @@ mod tests {
                 ("F2".to_owned(), "rejected".to_owned(), "pending".to_owned()),
             ]
         );
-        assert!(documents(pool).await.is_empty());
 
         // Files go once no message shares them.
         pool.execute(

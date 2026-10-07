@@ -125,7 +125,7 @@ async fn project_conversation(
             .await?;
         pending += 1;
     }
-    let files = slack_files::spawn_pending(state, conversation_id).await?;
+    let files = slack_files::spawn_due(state, conversation_id).await?;
     info!(
         event = "company_context_slack_conversation_projected",
         task_id = ctx.task_id(),

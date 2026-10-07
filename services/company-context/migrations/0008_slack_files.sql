@@ -21,6 +21,11 @@ create table company_context_system.slack_files (
     extraction_status text not null,
     embedding_status text not null default 'pending',
     last_error text not null default '',
+    -- When the file's current extraction or embedding was last enqueued, so
+    -- that unfinished work is enqueued again once it is overdue.
+    task_requested_at timestamptz,
+    -- Credentials Slack refused this version of the file to.
+    denied_credential_ids bigint[] not null default '{}',
     -- The file object as Slack sent it.
     metadata jsonb not null default '{}'::jsonb,
     first_seen_at timestamptz not null default now(),
