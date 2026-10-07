@@ -458,8 +458,7 @@ The server needs:
 - The `vector` extension, pgvector 0.5.0 or newer, for embedding search.
   `uuid-ossp` is also required. `pg_cron` is optional.
 - A migrating user that can create extensions and roles. Migrations create
-  cluster-wide roles such as `centaur_readonly` and
-  `centaur_company_context_reader`. That is the `DATABASE_URL` user when api-rs
+  cluster-wide roles such as `centaur_company_context_reader`. That is the `DATABASE_URL` user when api-rs
   migrates at startup, or the user passed to `centaur-api-server migrate` below.
   The Console also creates its databases with the `DATABASE_URL` user. The RDS
   master user and the Cloud SQL `postgres` user can do all of this. With a less

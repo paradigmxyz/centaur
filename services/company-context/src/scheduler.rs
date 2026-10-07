@@ -12,9 +12,11 @@ use crate::{
     config::{
         Config, DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK,
         GRANOLA_CREDENTIALS_RECONCILE_TASK, GRANOLA_SYNC_TASK, SHARED_DRIVES_DISCOVER_TASK,
+        SLACK_CREDENTIALS_RECONCILE_TASK, SLACK_USER_DISCOVER_TASK,
     },
     credentials::ConsoleCredentials,
     granola_tasks::{GranolaReconcileParams, GranolaSyncParams},
+    slack_tasks::{SlackDiscoverParams, SlackReconcileParams},
     tasks::{DiscoverSharedDrivesParams, ReconcileCredentialsParams, ScanParams},
     telemetry,
 };
@@ -138,6 +140,60 @@ pub async fn run_granola(
                     bucket,
                 },
                 format!("granola.user.sync:{credential_id}:{bucket}"),
+                credential_id,
+            )
+            .await;
+        }
+    }
+}
+
+/// Enqueues Slack reconciliation and per-credential discovery on the Slack queue.
+pub async fn run_slack(config: Arc<Config>, client: Client, credentials: Arc<ConsoleCredentials>) {
+    let mut ticker = interval(config.slack_discovery_interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let bucket = now / config.slack_discovery_interval.as_secs().max(1);
+        match client
+            .spawn(
+                SLACK_CREDENTIALS_RECONCILE_TASK,
+                SlackReconcileParams { bucket },
+                SpawnOptions {
+                    idempotency_key: Some(format!("slack.credentials.reconcile:{bucket}")),
+                    ..SpawnOptions::default()
+                },
+            )
+            .await
+        {
+            Ok(result) => {
+                telemetry::task_enqueued(SLACK_CREDENTIALS_RECONCILE_TASK, result.created);
+            }
+            Err(error) => {
+                metrics::counter!("company_context_scheduler_errors_total").increment(1);
+                error!(event = "company_context_slack_reconcile_enqueue_failed", error = %error);
+            }
+        }
+        let credential_ids = match credentials.slack_credential_ids().await {
+            Ok(ids) => ids,
+            Err(error) => {
+                metrics::counter!("company_context_scheduler_errors_total").increment(1);
+                error!(event = "company_context_slack_credentials_load_failed", error = %error);
+                continue;
+            }
+        };
+        for credential_id in credential_ids {
+            spawn_credential_task(
+                &client,
+                SLACK_USER_DISCOVER_TASK,
+                SlackDiscoverParams {
+                    credential_id,
+                    bucket,
+                },
+                format!("slack.user.discover:{credential_id}:{bucket}"),
                 credential_id,
             )
             .await;

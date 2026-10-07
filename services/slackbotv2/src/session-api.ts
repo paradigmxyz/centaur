@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { RustSessionStreamEvent } from '@centaur/harness-events'
 import { isRetryableCodexErrorNotification } from '@centaur/rendering'
 import type { Attachment, LinkPreview, Message } from 'chat'
+import { isHarnessEnabled } from './overrides'
 import { renderSlackDisplayText, slackMessagePromptText } from './slack-display-text'
 import type {
   ForwardSessionInput,
@@ -499,6 +500,9 @@ export async function forwardToSessionApi(
     sessionApiTimeoutMs(options),
     'create session'
   )
+  if (created.harnessType && !isHarnessEnabled(created.harnessType, options.enabledHarnesses)) {
+    throw new Error(`Harness ${created.harnessType} is not enabled for this deployment`)
+  }
   if (created.harnessType) input.metadataHarnessType = created.harnessType
   input.harnessAssignment = created.harnessAssignment
   traceLog(options, 'slackbotv2_session_create_complete', input.trace, {
@@ -834,6 +838,9 @@ async function createSession(
   harnessAssignment?: SlackbotV2HarnessAssignment
 ): Promise<CreateSessionOutcome> {
   const requested = harnessType ?? options.defaultHarnessType ?? DEFAULT_HARNESS_TYPE
+  if (!isHarnessEnabled(requested, options.enabledHarnesses)) {
+    throw new Error(`Harness ${requested} is not enabled for this deployment`)
+  }
   // A sticky --claude/--amp/--codex/--nanocodex selection restarts a thread
   // pinned to another harness; the implicit default never forces a switch.
   const response = await postCreateSession(
@@ -861,13 +868,14 @@ async function createSession(
   // harness instead of failing the message.
   const existing = response.status === 409 ? existingHarnessFromConflict(body) : undefined
   if (existing && existing !== requested) {
+    const existingEnabled = isHarnessEnabled(existing, options.enabledHarnesses)
     const retry = await postCreateSession(
       options,
       threadId,
-      existing,
+      existingEnabled ? existing : requested,
       personaId,
       message,
-      undefined,
+      existingEnabled ? undefined : 'restart',
       harnessAssignment
     )
     await ensureApiOk(retry, 'create session')

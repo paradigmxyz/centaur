@@ -43,7 +43,7 @@ const GPT_5_6_REASONING_EFFORTS = new Set([
   ...STANDARD_CODEX_REASONING_EFFORTS,
   'max'
 ])
-const GPT_6_ASTRA_REASONING_EFFORTS = new Set([
+const GPT_6_ULTRA_REASONING_EFFORTS = new Set([
   'low',
   'medium',
   'high',
@@ -84,8 +84,9 @@ const CODEX_REASONING_EFFORTS_BY_MODEL: Record<string, ReadonlySet<string>> = {
   'gpt-5.6-luna': GPT_5_6_REASONING_EFFORTS,
   'gpt-5.6-sol': GPT_5_6_REASONING_EFFORTS,
   'gpt-5.6-terra': GPT_5_6_REASONING_EFFORTS,
-  'gpt-6-astra': GPT_6_ASTRA_REASONING_EFFORTS,
+  'gpt-6-astra': GPT_6_ULTRA_REASONING_EFFORTS,
   'gpt-6-sol': GPT_5_6_REASONING_EFFORTS,
+  'gpt-6.1-sol': GPT_6_ULTRA_REASONING_EFFORTS,
   'gpt-6-luna': GPT_5_6_REASONING_EFFORTS
 }
 

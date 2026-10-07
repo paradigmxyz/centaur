@@ -20,11 +20,16 @@ pub const GRANOLA_CREDENTIALS_RECONCILE_TASK: &str = "granola.credentials.reconc
 pub const GRANOLA_SYNC_TASK: &str = "granola.user.sync";
 pub const GRANOLA_NOTES_FETCH_TASK: &str = "granola.notes.fetch";
 pub const GRANOLA_NOTE_EMBED_TASK: &str = "granola.note.embed";
+/// Slack tasks wait on the Slack app's shared rate limits, so they run on their
+/// own queue and worker instead of delaying Drive and Granola work.
+pub const SLACK_QUEUE_NAME: &str = "company_context_slack";
+pub const SLACK_CREDENTIALS_RECONCILE_TASK: &str = "slack.credentials.reconcile";
+pub const SLACK_USER_DISCOVER_TASK: &str = "slack.user.discover";
 
 #[derive(Clone, Debug, Parser)]
 #[command(
     name = "centaur-company-context",
-    about = "Ingest company context from Google Drive and Granola"
+    about = "Ingest company context from Google Drive, Granola, and Slack"
 )]
 pub struct Config {
     #[arg(long, env = "DATABASE_URL", value_parser = nonempty)]
@@ -61,6 +66,15 @@ pub struct Config {
         value_parser = nonempty
     )]
     pub granola_oauth_app_slug: String,
+    /// Rails Console OAuth app whose per-user Slack credentials are synchronized.
+    /// Keep it aligned with the app the Console Slack DM sync uses.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_SLACK_OAUTH_APP_SLUG",
+        default_value = "slack",
+        value_parser = nonempty
+    )]
+    pub slack_oauth_app_slug: String,
     #[arg(
         long,
         env = "OPENAI_API_KEY",
@@ -84,6 +98,13 @@ pub struct Config {
         value_parser = nonempty
     )]
     pub granola_mcp_url: String,
+    #[arg(
+        long,
+        env = "SLACK_API_BASE_URL",
+        default_value = "https://slack.com/api",
+        value_parser = normalized_base_url
+    )]
+    pub slack_api_base_url: String,
     #[arg(
         long,
         env = "OPENAI_BASE_URL",
@@ -127,6 +148,29 @@ pub struct Config {
         value_parser = positive_usize
     )]
     pub granola_initial_lookback_days: usize,
+    #[arg(
+        long = "slack-discovery-interval-seconds",
+        env = "COMPANY_CONTEXT_SLACK_DISCOVERY_INTERVAL_SECONDS",
+        default_value = "1800",
+        value_parser = positive_duration
+    )]
+    pub slack_discovery_interval: Duration,
+    /// Fraction of each Slack method's documented rate limit that ingestion
+    /// may use. Other services calling Slack as the same app share the rest.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_SLACK_RATE_LIMIT_SHARE",
+        default_value = "0.3",
+        value_parser = rate_limit_share
+    )]
+    pub slack_rate_limit_share: f64,
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_SLACK_WORKER_CONCURRENCY",
+        default_value = "4",
+        value_parser = positive_usize
+    )]
+    pub slack_worker_concurrency: usize,
     #[arg(
         long = "drive-page-size",
         env = "COMPANY_CONTEXT_DRIVE_PAGE_SIZE",
@@ -236,6 +280,17 @@ fn folder_walk_batch_size(value: &str) -> Result<usize, String> {
     Ok(value)
 }
 
+fn rate_limit_share(value: &str) -> Result<f64, String> {
+    let value = value
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| "value must be a number".to_owned())?;
+    if !(value > 0.0 && value <= 1.0) {
+        return Err("value must be greater than 0 and at most 1".to_owned());
+    }
+    Ok(value)
+}
+
 fn embeddings_dimensions(value: &str) -> Result<usize, String> {
     let value = positive_usize(value)?;
     if value != 1_536 {
@@ -271,5 +326,14 @@ mod tests {
         let config = Config::try_parse_from(args).unwrap();
         assert_eq!(config.openai_base_url, "http://localhost:8080/v1");
         assert_eq!(config.scan_interval, Duration::from_secs(300));
+        assert_eq!(config.slack_rate_limit_share, 0.3);
+    }
+
+    #[test]
+    fn rate_limit_share_must_be_a_fraction() {
+        assert_eq!(rate_limit_share("1"), Ok(1.0));
+        assert!(rate_limit_share("0").is_err());
+        assert!(rate_limit_share("1.5").is_err());
+        assert!(rate_limit_share("NaN").is_err());
     }
 }

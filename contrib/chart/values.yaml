@@ -475,6 +475,13 @@ experimentalCompanyContext:
   granolaOauthAppSlug: granola
   scanIntervalSeconds: 300
   granolaSyncIntervalSeconds: 1800
+  # Slack conversations are discovered through the same per-user Slack
+  # credentials as the Console DM sync (console.slackDmSync.oauthAppSlug).
+  slackDiscoveryIntervalSeconds: 1800
+  # Fraction of each Slack method's documented rate limit ingestion may use.
+  # The rest is left for other services calling Slack as the same app.
+  slackRateLimitShare: 0.3
+  slackWorkerConcurrency: 4
   drivePageSize: 100
   maxScanPages: 10
   maxPdfBytes: 26214400

@@ -246,6 +246,12 @@ async fn create_roles(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
             if not exists (select 1 from pg_roles where rolname = 'centaur_slack_reader') then
                 create role centaur_slack_reader nologin;
             end if;
+            -- Migration 0040 creates policies for centaur_readonly. Full
+            -- migrations create it in 0019 and drop it in 0059, so this test
+            -- creates it before running 0040 in isolation.
+            if not exists (select 1 from pg_roles where rolname = 'centaur_readonly') then
+                create role centaur_readonly nologin;
+            end if;
         end
         $$;
         "#,

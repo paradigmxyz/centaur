@@ -263,13 +263,6 @@ async fn assert_channel_visibility(conn: &mut PgConnection) -> Result<(), Box<dy
         }
     );
 
-    let readonly_role = visible_rows(conn, "centaur_readonly", None).await?;
-    assert_eq!(readonly_role, public_visible_rows());
-
-    let readonly_private_channel =
-        visible_rows(conn, "centaur_readonly", Some("G_PRIVATE")).await?;
-    assert_eq!(readonly_private_channel, public_and_private_visible_rows());
-
     Ok(())
 }
 
@@ -537,10 +530,6 @@ fn expected_policies() -> Vec<(String, String)> {
         ),
         (
             "company_context_documents",
-            "centaur_readonly_company_context_documents_select",
-        ),
-        (
-            "company_context_documents",
             "centaur_cc_reader_documents_select",
         ),
         ("slack_sync_channels", "centaur_cc_reader_channels_select"),
@@ -575,106 +564,42 @@ fn expected_policies() -> Vec<(String, String)> {
             "centaur_google_drive_runs_reader_select",
         ),
         (
-            "google_drive_sync_runs",
-            "centaur_readonly_google_drive_sync_runs_select",
-        ),
-        (
             "google_drive_sync_files",
             "centaur_google_drive_files_reader_select",
-        ),
-        (
-            "google_drive_sync_files",
-            "centaur_readonly_google_drive_sync_files_select",
         ),
         (
             "google_drive_sync_checkpoints",
             "centaur_google_drive_checkpoints_reader_select",
         ),
         (
-            "google_drive_sync_checkpoints",
-            "centaur_readonly_google_drive_sync_checkpoints_select",
-        ),
-        (
             "google_calendar_sync_runs",
             "centaur_google_calendar_runs_reader_select",
-        ),
-        (
-            "google_calendar_sync_runs",
-            "centaur_readonly_google_calendar_sync_runs_select",
         ),
         (
             "google_calendar_sync_calendars",
             "centaur_google_calendar_calendars_reader_select",
         ),
         (
-            "google_calendar_sync_calendars",
-            "centaur_readonly_google_calendar_sync_calendars_select",
-        ),
-        (
             "google_calendar_sync_events",
             "centaur_google_calendar_events_reader_select",
-        ),
-        (
-            "google_calendar_sync_events",
-            "centaur_readonly_google_calendar_sync_events_select",
         ),
         (
             "google_calendar_sync_checkpoints",
             "centaur_google_calendar_checkpoints_reader_select",
         ),
-        (
-            "google_calendar_sync_checkpoints",
-            "centaur_readonly_google_calendar_sync_checkpoints_select",
-        ),
         ("linear_sync_runs", "centaur_linear_runs_reader_select"),
-        (
-            "linear_sync_runs",
-            "centaur_readonly_linear_sync_runs_select",
-        ),
         (
             "linear_sync_projects",
             "centaur_linear_projects_reader_select",
         ),
-        (
-            "linear_sync_projects",
-            "centaur_readonly_linear_sync_projects_select",
-        ),
         ("linear_sync_issues", "centaur_linear_issues_reader_select"),
-        (
-            "linear_sync_issues",
-            "centaur_readonly_linear_sync_issues_select",
-        ),
         (
             "linear_sync_comments",
             "centaur_linear_comments_reader_select",
         ),
         (
-            "linear_sync_comments",
-            "centaur_readonly_linear_sync_comments_select",
-        ),
-        (
             "linear_sync_checkpoints",
             "centaur_linear_checkpoints_reader_select",
-        ),
-        (
-            "linear_sync_checkpoints",
-            "centaur_readonly_linear_sync_checkpoints_select",
-        ),
-        (
-            "slack_sync_channels",
-            "centaur_readonly_slack_sync_channels_select",
-        ),
-        (
-            "slack_sync_users",
-            "centaur_readonly_slack_sync_users_select",
-        ),
-        (
-            "slack_sync_messages",
-            "centaur_readonly_slack_sync_messages_select",
-        ),
-        (
-            "slack_sync_message_attachments",
-            "centaur_readonly_slack_sync_message_attachments_select",
         ),
     ]
     .into_iter()
@@ -1857,57 +1782,4 @@ fn empty_visible_rows() -> VisibleRows {
         linear_comments: 0,
         linear_checkpoints: 0,
     }
-}
-
-fn public_visible_rows() -> VisibleRows {
-    VisibleRows {
-        slack_channels: vec![
-            "C_ADMIN".to_owned(),
-            "C_ALPHA".to_owned(),
-            "C_BETA".to_owned(),
-        ],
-        slack_users: vec![
-            "U_ALPHA".to_owned(),
-            "U_BETA".to_owned(),
-            "U_OTHER".to_owned(),
-            "U_PRIVATE".to_owned(),
-        ],
-        slack_messages: vec![
-            "C_ALPHA:1000.000001".to_owned(),
-            "C_BETA:1000.000002".to_owned(),
-        ],
-        slack_attachments: vec![
-            "C_ALPHA:1000.000001:F_ALPHA".to_owned(),
-            "C_BETA:1000.000002:F_BETA".to_owned(),
-        ],
-        context_docs: vec![
-            "doc_gcal".to_owned(),
-            "doc_gdrive".to_owned(),
-            "doc_linear".to_owned(),
-            "doc_slack_alpha".to_owned(),
-            "doc_slack_beta".to_owned(),
-        ],
-        google_drive_runs: 1,
-        google_drive_files: 1,
-        google_drive_checkpoints: 1,
-        google_calendar_runs: 1,
-        google_calendar_calendars: 1,
-        google_calendar_events: 1,
-        google_calendar_checkpoints: 1,
-        linear_runs: 1,
-        linear_projects: 1,
-        linear_issues: 1,
-        linear_comments: 1,
-        linear_checkpoints: 1,
-    }
-}
-
-fn public_and_private_visible_rows() -> VisibleRows {
-    let mut rows = public_visible_rows();
-    rows.slack_channels.push("G_PRIVATE".to_owned());
-    rows.slack_messages.push("G_PRIVATE:1000.000003".to_owned());
-    rows.slack_attachments
-        .push("G_PRIVATE:1000.000003:F_PRIVATE".to_owned());
-    rows.context_docs.push("doc_slack_private".to_owned());
-    rows
 }

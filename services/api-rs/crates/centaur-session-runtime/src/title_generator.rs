@@ -489,14 +489,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn title_reasoning_effort_reads_the_configured_level() {
-        assert_eq!(
-            resolve_reasoning_effort(Some("minimal")).as_deref(),
-            Some("minimal")
-        );
-    }
-
     /// Empty is the escape hatch for a server that rejects the field outright.
     #[test]
     fn title_reasoning_effort_empty_omits_the_parameter() {

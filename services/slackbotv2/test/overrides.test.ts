@@ -2,12 +2,26 @@ import { describe, expect, test } from 'bun:test'
 import { SlackFormatConverter } from '@chat-adapter/slack'
 import {
   extractMessageOverrides,
+  isHarnessEnabled,
+  parseEnabledHarnesses,
   normalizeHarnessOverrides,
   validateStrategyOverrides
 } from '../src/overrides'
 import { messageOverridesForText } from '../src/index'
 import { createOpenAiMessageOverridesStrategy } from '../src/message-overrides-strategy'
 import type { SlackbotV2Options, SlackbotV2Trace } from '../src/types'
+
+describe('deployment harness allowlist', () => {
+  test('validates configured harnesses and preserves unrestricted deployments', () => {
+    expect(parseEnabledHarnesses(undefined)).toBeUndefined()
+    expect(isHarnessEnabled('amp')).toBe(true)
+    expect(parseEnabledHarnesses('codex, CLAUDECODE, codex')).toEqual(['codex', 'claudecode'])
+    expect(isHarnessEnabled('amp', ['codex', 'claudecode'])).toBe(false)
+    expect(isHarnessEnabled('codex', ['codex', 'claudecode'])).toBe(true)
+    expect(() => parseEnabledHarnesses('')).toThrow('SLACKBOTV2_ENABLED_HARNESSES')
+    expect(() => parseEnabledHarnesses('codex,typo')).toThrow('SLACKBOTV2_ENABLED_HARNESSES')
+  })
+})
 
 describe('extractMessageOverrides', () => {
   test('returns text untouched without flags', () => {
@@ -365,7 +379,7 @@ describe('normalizeHarnessOverrides', () => {
 })
 
 describe('validateStrategyOverrides', () => {
-  for (const model of ['gpt-6-sol', 'gpt-6-luna']) {
+  for (const model of ['gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna']) {
     test(`accepts ${model} and routes it to Codex`, () => {
       expect(validateStrategyOverrides({ model, reasoning: 'max' })).toEqual({
         harnessType: 'codex',
@@ -775,7 +789,7 @@ describe('messageOverridesForText strategy invocation', () => {
                 {
                   text: JSON.stringify({
                     harness: 'codex',
-                    model: 'gpt-6-sol',
+                    model: 'gpt-6.1-sol',
                     provider: null,
                     reasoning: null
                   })
@@ -798,18 +812,20 @@ describe('messageOverridesForText strategy invocation', () => {
       cleanedText: 'use sol for this',
       overrides: {
         harnessType: 'codex',
-        model: 'gpt-6-sol',
+        model: 'gpt-6.1-sol',
         personaId: 'invest',
         provider: undefined,
         reasoning: undefined
       }
     })
     expect(requestBody?.input).toBe('use sol for this')
-    expect(requestBody?.instructions).toContain('sol -> gpt-6-sol')
+    expect(requestBody?.instructions).toContain('sol -> gpt-6.1-sol')
+    expect(requestBody?.instructions).toContain('6 sol -> gpt-6-sol')
     expect(requestBody?.instructions).toContain('luna -> gpt-6-luna')
     const format = (requestBody?.text as {
       format: { schema: { properties: { model: { enum: (string | null)[] } } } }
     }).format
+    expect(format.schema.properties.model.enum).toContain('gpt-6.1-sol')
     expect(format.schema.properties.model.enum).toContain('gpt-6-sol')
     expect(format.schema.properties.model.enum).toContain('gpt-6-luna')
     expect(format.schema.properties.model.enum).toContain('gpt-5.6-sol')

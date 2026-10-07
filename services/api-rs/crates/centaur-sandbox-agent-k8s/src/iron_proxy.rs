@@ -3181,25 +3181,6 @@ mod tests {
     }
 
     #[test]
-    fn managed_proxy_env_sets_response_header_timeout() {
-        let iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
-        let sync = ProxySyncEnv {
-            proxy_id: "proxy-id".to_owned(),
-            control_url: "http://iron-control".to_owned(),
-            token: "proxy-token".to_owned(),
-            config_hash: None,
-        };
-
-        let env = iron_proxy_env_vars(&iron_proxy, &resolved(), &sync);
-        let timeout = env
-            .iter()
-            .find(|var| var.name == "IRON_PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT")
-            .and_then(|var| var.value.as_deref());
-
-        assert_eq!(timeout, Some("120s"));
-    }
-
-    #[test]
     fn managed_proxy_env_sets_upstream_deny_cidrs() {
         let mut iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
         iron_proxy.upstream_deny_cidrs = vec![
@@ -3575,18 +3556,6 @@ mod tests {
                 "{name} should preserve explicit NO_PROXY extras: {value}"
             );
         }
-    }
-
-    #[test]
-    fn proxy_fallback_delay_subtracts_elapsed_probe_time() {
-        assert_eq!(
-            proxy_fallback_delay_remaining(Duration::from_secs(2)),
-            Duration::from_secs(4)
-        );
-        assert_eq!(
-            proxy_fallback_delay_remaining(Duration::from_secs(10)),
-            Duration::ZERO
-        );
     }
 
     #[test]

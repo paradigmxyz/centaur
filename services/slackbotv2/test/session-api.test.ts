@@ -714,6 +714,51 @@ describe('forwardToSessionApi overrides', () => {
     )
   })
 
+  test('restarts an existing disabled harness instead of routing back to it on conflict', async () => {
+    const { fetchFn, requests } = fakeApi({
+      createSession: [
+        {
+          body: {
+            error: 'session slack:C1:1700000000.000100 already exists with harness_type amp, requested codex',
+            ok: false
+          },
+          status: 409
+        },
+        { status: 200 }
+      ]
+    })
+    await forwardToSessionApi(
+      { ...options(fetchFn), enabledHarnesses: ['codex', 'claudecode'] },
+      forwardInput(apiMessage('hi'))
+    )
+    const creates = requests.filter(request => request.url.endsWith('.000100'))
+    expect(creates.map(request => request.body)).toEqual([
+      expect.objectContaining({ harness_type: 'codex' }),
+      expect.objectContaining({ harness_type: 'codex', on_harness_conflict: 'restart' })
+    ])
+    expect(requests.some(request => request.url.endsWith('/execute'))).toBe(true)
+  })
+
+  test('rejects disabled harnesses before making any session API requests', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await expect(forwardToSessionApi(
+      { ...options(fetchFn), enabledHarnesses: ['codex'] },
+      forwardInput(apiMessage('hi'), { harnessType: 'amp' })
+    )).rejects.toThrow('Harness amp is not enabled for this deployment')
+    expect(requests).toEqual([])
+  })
+
+  test('does not execute when the API resolves a disabled harness', async () => {
+    const { fetchFn, requests } = fakeApi({
+      createSession: [{ status: 200, body: { harness_type: 'amp' } }]
+    })
+    await expect(forwardToSessionApi(
+      { ...options(fetchFn), enabledHarnesses: ['codex'] },
+      forwardInput(apiMessage('hi'))
+    )).rejects.toThrow('Harness amp is not enabled for this deployment')
+    expect(requests.some(request => request.url.endsWith('/execute'))).toBe(false)
+  })
+
   test('surfaces non-conflict create failures', async () => {
     const { fetchFn } = fakeApi({
       createSession: [{ body: { error: 'boom', ok: false }, status: 500 }]

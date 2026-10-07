@@ -9,7 +9,7 @@ use sqlx::{
     types::Json,
 };
 
-use crate::config::Config;
+use crate::{config::Config, slack::conversation_types};
 
 const DRIVE_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/drive.readonly";
 
@@ -19,6 +19,15 @@ pub struct ConsoleCredentials {
     encryption: Arc<ActiveRecordEncryption>,
     google_oauth_app_slug: String,
     granola_oauth_app_slug: String,
+    slack_oauth_app_slug: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SlackCredential {
+    pub id: i64,
+    pub access_token: String,
+    /// Conversation types the credential's scopes can list and read.
+    pub conversation_types: Vec<&'static str>,
 }
 
 #[derive(Clone, Debug)]
@@ -58,6 +67,7 @@ impl ConsoleCredentials {
             )),
             google_oauth_app_slug: config.google_oauth_app_slug.clone(),
             granola_oauth_app_slug: config.granola_oauth_app_slug.clone(),
+            slack_oauth_app_slug: config.slack_oauth_app_slug.clone(),
         };
         credentials.google_credential_ids().await?;
         Ok(credentials)
@@ -249,6 +259,99 @@ impl ConsoleCredentials {
             provider_subject: row
                 .try_get::<Option<String>, _>("provider_subject")?
                 .unwrap_or_default(),
+        })
+    }
+
+    /// Lists the credentials the Console Slack DM sync selects, narrowed to
+    /// those whose scopes cover an ingested conversation type.
+    pub async fn slack_credential_ids(&self) -> Result<Vec<i64>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT credentials.id, credentials.scopes
+            FROM broker_credentials credentials
+            JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+            WHERE app.provider = 'slack'
+              AND app.slug = $1
+              AND app.enabled = TRUE
+              AND credentials.dead = FALSE
+              AND credentials.access_token IS NOT NULL
+              AND (
+                  credentials.expires_at IS NULL
+                  OR credentials.expires_at > NOW()
+              )
+            ORDER BY credentials.id
+            "#,
+        )
+        .bind(&self.slack_oauth_app_slug)
+        .fetch_all(&self.pool)
+        .await
+        .context("list Slack broker credentials from Rails Console")?;
+
+        let mut ids = Vec::new();
+        for row in rows {
+            let Json(scopes): Json<Vec<String>> = row
+                .try_get("scopes")
+                .context("decode Slack broker credential scopes")?;
+            if !conversation_types(&scopes).is_empty() {
+                ids.push(
+                    row.try_get("id")
+                        .context("decode Slack broker credential ID")?,
+                );
+            }
+        }
+        Ok(ids)
+    }
+
+    pub async fn retained_slack_credential_ids(&self) -> Result<Vec<i64>> {
+        sqlx::query_scalar(
+            r#"
+            SELECT credentials.id
+            FROM broker_credentials credentials
+            JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+            WHERE app.provider = 'slack'
+              AND app.slug = $1
+              AND credentials.dead = FALSE
+            ORDER BY credentials.id
+            "#,
+        )
+        .bind(&self.slack_oauth_app_slug)
+        .fetch_all(&self.pool)
+        .await
+        .context("list retained Slack broker credentials from Rails Console")
+    }
+
+    pub async fn slack_credential(&self, credential_id: i64) -> Result<SlackCredential> {
+        let row = sqlx::query(
+            r#"
+            SELECT credentials.access_token,
+                   credentials.expires_at,
+                   credentials.scopes
+            FROM broker_credentials credentials
+            JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+            WHERE credentials.id = $1
+              AND app.provider = 'slack'
+              AND app.slug = $2
+              AND app.enabled = TRUE
+              AND credentials.dead = FALSE
+            "#,
+        )
+        .bind(credential_id)
+        .bind(&self.slack_oauth_app_slug)
+        .fetch_optional(&self.pool)
+        .await
+        .context("load Slack broker credential from Rails Console")?
+        .with_context(|| format!("Slack broker credential {credential_id} is not syncable"))?;
+
+        let expires_at: Option<NaiveDateTime> = row.try_get("expires_at")?;
+        if expires_at.is_some_and(|expires_at| expires_at <= Utc::now().naive_utc()) {
+            bail!("Slack broker credential {credential_id} is expired");
+        }
+        let Json(scopes): Json<Vec<String>> = row.try_get("scopes")?;
+        Ok(SlackCredential {
+            id: credential_id,
+            access_token: self
+                .decrypt_required(row.try_get("access_token")?, "Slack broker access token")?,
+            conversation_types: conversation_types(&scopes),
         })
     }
 

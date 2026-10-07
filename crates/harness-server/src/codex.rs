@@ -353,8 +353,14 @@ fn run_codex_user_turn<W: Write>(
 ) -> Result<()> {
     let (model, model_provider) = model_and_provider;
     if thread_id.is_none() {
-        let thread =
-            start_or_resume_thread(codex, stdout, request_id, &model_provider, traceparent)?;
+        let thread = start_or_resume_thread(
+            codex,
+            stdout,
+            request_id,
+            model.as_deref(),
+            &model_provider,
+            traceparent,
+        )?;
         *thread_id = Some(thread.id);
         *thread_model = thread.model;
         *thread_provider = Some(model_provider.clone());
@@ -464,6 +470,7 @@ fn start_or_resume_thread<W: Write>(
     codex: &mut CodexJsonRpcChild,
     stdout: &mut W,
     request_id: &mut i64,
+    model: Option<&str>,
     model_provider: &str,
     traceparent: Option<&str>,
 ) -> Result<StartedCodexThread> {
@@ -471,7 +478,7 @@ fn start_or_resume_thread<W: Write>(
     let resume = env::var("CODEX_CONTINUE_THREAD_ID")
         .or_else(|_| env::var("AMP_CONTINUE_THREAD_ID"))
         .unwrap_or_default();
-    let (method, params) = if resume.trim().is_empty() {
+    let (method, mut params) = if resume.trim().is_empty() {
         (
             "thread/start",
             json!({
@@ -496,6 +503,13 @@ fn start_or_resume_thread<W: Write>(
             }),
         )
     };
+    // Start the thread on the model its first turn runs. Without this, the
+    // thread starts on config.toml's `model` and switches on its first turn,
+    // and the Responses backend intermittently refuses that first request
+    // with "model '…' is not enabled in …" (400).
+    if let Some(model) = model {
+        params["model"] = Value::String(model.to_owned());
+    }
 
     let id = next_request_id(request_id);
     codex.send_request(id, method, params, traceparent)?;

@@ -13,7 +13,7 @@ defaults:
 
 jobs:
   scan_gems:
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: depot-ubuntu-24.04
 
     steps:
       - name: Checkout code

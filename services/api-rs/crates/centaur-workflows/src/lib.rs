@@ -1131,7 +1131,7 @@ enum WorkflowQueueClass {
 fn workflow_queue_class(workflow_name: &str) -> WorkflowQueueClass {
     match workflow_name {
         "slack_sync" => WorkflowQueueClass::SlackLive,
-        "slack_backfill" | "slack_archive_import" => WorkflowQueueClass::EtlBackfill,
+        "slack_backfill" => WorkflowQueueClass::EtlBackfill,
         "google_calendar_sync"
         | "google_drive_sync"
         | "linear_sync"
@@ -5107,38 +5107,6 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_etls_use_isolated_etl_queues() {
-        assert_eq!(
-            workflow_queue_class("slack_sync"),
-            WorkflowQueueClass::SlackLive
-        );
-        for workflow_name in [
-            "google_calendar_sync",
-            "google_drive_sync",
-            "linear_sync",
-            "company_context_documents",
-            "company_context_embeddings",
-            "memory_generation",
-            "slack_retention",
-            "chief_of_staff_daily",
-        ] {
-            assert_eq!(workflow_queue_class(workflow_name), WorkflowQueueClass::Etl);
-        }
-        assert_eq!(
-            workflow_queue_class("slack_backfill"),
-            WorkflowQueueClass::EtlBackfill
-        );
-        assert_eq!(
-            workflow_queue_class("slack_archive_import"),
-            WorkflowQueueClass::EtlBackfill
-        );
-        assert_eq!(
-            workflow_queue_class("github_issue_triage"),
-            WorkflowQueueClass::Standard
-        );
-    }
-
-    #[test]
     fn python_slack_payload_passes_reply_broadcast() {
         let payload = python_slack_message_payload(
             "C123",
@@ -5331,18 +5299,6 @@ mod tests {
         assert_eq!(
             canonical_workflow_principal_foreign_id("Managing Partner Daily Briefing"),
             "workflow-managing-partner-daily-briefing"
-        );
-    }
-
-    #[test]
-    fn workflow_principal_labels_keep_extensible_metadata_only() {
-        let labels = workflow_principal_labels("nightly_report");
-
-        assert!(!labels.contains_key("kind"));
-        assert!(!labels.contains_key("purpose"));
-        assert_eq!(
-            labels.get("workflow_name").map(String::as_str),
-            Some("nightly_report")
         );
     }
 

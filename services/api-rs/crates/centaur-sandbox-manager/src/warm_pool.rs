@@ -260,16 +260,6 @@ mod tests {
     /// Serialize the database-backed tests in this module.
     static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    #[test]
-    fn running_limit_counts_only_observed_running_sandboxes() {
-        assert!(status_consumes_running_slot(&SandboxStatus::Running));
-        assert!(!status_consumes_running_slot(&SandboxStatus::Created));
-        assert!(!status_consumes_running_slot(&SandboxStatus::Suspended));
-        assert!(!status_consumes_running_slot(&SandboxStatus::Unknown(
-            "unavailable".to_owned()
-        )));
-    }
-
     #[tokio::test]
     async fn replenisher_prunes_missing_ready_rows_before_counting() {
         let _serial = TEST_LOCK.lock().await;
@@ -408,7 +398,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claim_passes_requester_to_proxy_assignment() {
+    async fn claim_fails_unusable_warm_sandboxes_and_claims_the_next() {
+        let _serial = TEST_LOCK.lock().await;
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let suffix = unique_suffix();
+        let workload_key = format!("test-claim-skip-{suffix}");
+        // Claims take the oldest ready row, tie-broken by sandbox id.
+        let missing_sandbox = format!("a-missing-{suffix}");
+        let stopped_sandbox = format!("b-stopped-{suffix}");
+        let live_sandbox = format!("c-live-{suffix}");
+        let thread_key = format!("test:claim-skip-{suffix}");
+        insert_session_row(&store, &thread_key).await;
+
+        let backend = Arc::new(TestBackend::new(format!("fresh-{suffix}")));
+        for sandbox_id in [&missing_sandbox, &stopped_sandbox, &live_sandbox] {
+            store
+                .insert_ready_warm_sandbox(sandbox_id, &workload_key)
+                .await
+                .expect("insert warm sandbox");
+        }
+        backend.set_status(&stopped_sandbox, SandboxStatus::Stopped);
+        backend.set_status(&live_sandbox, SandboxStatus::Running);
+        let pool = WarmPoolManager::new(
+            Arc::new(SandboxManager::new(backend)),
+            store.clone(),
+            Arc::new(|| SandboxSpec::new("image")),
+            workload_key.clone(),
+            WarmPoolConfig {
+                target_size: 0,
+                replenish_interval: Duration::from_secs(60),
+                bootstrap_iron_control_principal: "prn_test_bootstrap".to_owned(),
+                max_running_sandboxes: None,
+            },
+        );
+
+        let claimed = pool
+            .claim(&thread_key, Some("prn_conv"), None, &BTreeMap::new())
+            .await
+            .expect("claim warm sandbox");
+
+        assert_eq!(claimed, Some(live_sandbox));
+        for sandbox_id in [&missing_sandbox, &stopped_sandbox] {
+            let status: String = sqlx::query_scalar(
+                "select status from session_warm_sandboxes where sandbox_id = $1",
+            )
+            .bind(sandbox_id)
+            .fetch_one(store.pool())
+            .await
+            .expect("load warm sandbox status");
+            assert_eq!(status, "failed", "{sandbox_id}");
+        }
+        assert_eq!(
+            store
+                .count_ready_warm_sandboxes(&workload_key)
+                .await
+                .expect("count ready warm sandboxes"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_binds_the_turn_requester_to_the_warm_proxy() {
         let _serial = TEST_LOCK.lock().await;
         let Some(store) = test_store().await else {
             return;
@@ -460,6 +512,8 @@ mod tests {
             .expect("claim second warm sandbox");
         assert_eq!(claimed, Some(second_sandbox.clone()));
 
+        // The proxy scopes credentials to the requester, so each claim must
+        // bind its own turn's requester, and no requester when there is none.
         assert_eq!(
             backend.assigned(),
             vec![

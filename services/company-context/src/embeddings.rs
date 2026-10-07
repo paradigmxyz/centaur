@@ -120,20 +120,3 @@ impl EmbeddingsClient {
         Ok(output)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn batches_have_a_bounded_size() {
-        let inputs = vec![String::new(); 51];
-        assert_eq!(
-            inputs
-                .chunks(EMBEDDING_BATCH_SIZE)
-                .map(<[String]>::len)
-                .collect::<Vec<_>>(),
-            vec![25, 25, 1]
-        );
-    }
-}

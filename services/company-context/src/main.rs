@@ -8,8 +8,13 @@ mod extraction;
 mod granola;
 mod granola_tasks;
 mod scheduler;
+mod slack;
+mod slack_rate_limit;
+mod slack_tasks;
 mod tasks;
 mod telemetry;
+#[cfg(test)]
+mod test_support;
 
 use std::sync::Arc;
 
@@ -29,11 +34,14 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use crate::{
-    config::{Config, QUEUE_NAME},
+    config::{Config, QUEUE_NAME, SLACK_QUEUE_NAME},
     credentials::ConsoleCredentials,
     drive::DriveClient,
     embeddings::EmbeddingsClient,
     granola::GranolaClient,
+    slack::SlackClient,
+    slack_rate_limit::RateLimiter,
+    slack_tasks::SlackTaskState,
     tasks::TaskState,
 };
 
@@ -65,6 +73,18 @@ async fn main() -> Result<()> {
         .create_queue(None, CreateQueueOptions::default())
         .await
         .context("create company context Absurd queue")?;
+    let slack_absurd = Client::from_pool_with_options(
+        pool.clone(),
+        ClientOptions {
+            pool: Some(pool.clone()),
+            queue_name: SLACK_QUEUE_NAME.to_owned(),
+            ..ClientOptions::default()
+        },
+    )?;
+    slack_absurd
+        .create_queue(None, CreateQueueOptions::default())
+        .await
+        .context("create company context Slack Absurd queue")?;
 
     let drive = DriveClient::new(&config, credentials.clone())?;
     let granola = GranolaClient::new(&config)?;
@@ -78,6 +98,19 @@ async fn main() -> Result<()> {
         granola,
         embeddings,
     })?;
+    slack_tasks::register(
+        &slack_absurd,
+        SlackTaskState {
+            pool: pool.clone(),
+            credentials: credentials.clone(),
+            slack: SlackClient::new(&config)?,
+            limiter: RateLimiter::new(
+                pool.clone(),
+                config.slack_oauth_app_slug.clone(),
+                config.slack_rate_limit_share,
+            ),
+        },
+    )?;
 
     let metrics = telemetry::init_metrics()?;
     let http_state = HttpState {
@@ -100,6 +133,14 @@ async fn main() -> Result<()> {
         )),
         ..WorkerOptions::default()
     });
+    let slack_worker = slack_absurd.start_worker(WorkerOptions {
+        worker_id: Some(format!("company-context-slack-{}", Uuid::new_v4())),
+        concurrency: config.slack_worker_concurrency,
+        on_error: Some(Arc::new(
+            |error| error!(event = "company_context_slack_worker_error", error = %error),
+        )),
+        ..WorkerOptions::default()
+    });
     let scheduler = tokio::spawn(scheduler::run(
         config.clone(),
         absurd.clone(),
@@ -108,6 +149,11 @@ async fn main() -> Result<()> {
     let granola_scheduler = tokio::spawn(scheduler::run_granola(
         config.clone(),
         absurd,
+        credentials.clone(),
+    ));
+    let slack_scheduler = tokio::spawn(scheduler::run_slack(
+        config.clone(),
+        slack_absurd,
         credentials.clone(),
     ));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -127,7 +173,9 @@ async fn main() -> Result<()> {
     let _ = shutdown_tx.send(true);
     scheduler.abort();
     granola_scheduler.abort();
+    slack_scheduler.abort();
     worker.close().await?;
+    slack_worker.close().await?;
     server.await.context("join HTTP server")??;
     credentials.close().await;
     pool.close().await;

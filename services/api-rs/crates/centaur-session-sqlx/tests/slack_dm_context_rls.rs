@@ -12,8 +12,6 @@ const SLACK_DM_CONTEXT_DOCUMENTS_SQL: &str =
     include_str!("../migrations/0028_slack_dm_context_documents.sql");
 const SLACK_DM_CONVERSATION_CONTEXT_DOCUMENTS_SQL: &str =
     include_str!("../migrations/0029_slack_dm_conversation_context_documents.sql");
-const READONLY_DM_RLS_SQL: &str =
-    include_str!("../migrations/0042_centaur_readonly_slack_dm_rls.sql");
 const SLACK_PRIVATE_CONVERSATIONS_SQL: &str =
     include_str!("../migrations/0045_slack_private_channel_oauth_sync.sql");
 
@@ -62,7 +60,6 @@ async fn run_rls_assertions(conn: &mut PgConnection, schema: &str) -> Result<(),
     execute_migration(conn, SLACK_DM_SYNC_SQL).await?;
     execute_migration(conn, SLACK_DM_CONTEXT_DOCUMENTS_SQL).await?;
     execute_migration(conn, SLACK_DM_CONVERSATION_CONTEXT_DOCUMENTS_SQL).await?;
-    execute_migration(conn, READONLY_DM_RLS_SQL).await?;
     grant_schema_usage(conn, schema).await?;
 
     assert_rls_enabled(conn).await?;
@@ -175,20 +172,6 @@ async fn run_rls_assertions(conn: &mut PgConnection, schema: &str) -> Result<(),
         }
     );
 
-    let readonly = visible_rows(
-        conn,
-        schema,
-        "centaur_readonly",
-        Some("T_HOME"),
-        Some("U_A"),
-    )
-    .await?;
-    assert_eq!(readonly, user_a);
-
-    let readonly_missing_user =
-        visible_rows(conn, schema, "centaur_readonly", Some("T_HOME"), None).await?;
-    assert_eq!(readonly_missing_user, empty_visible_dm_rows());
-
     Ok(())
 }
 
@@ -252,7 +235,7 @@ async fn create_roles(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
 async fn grant_schema_usage(conn: &mut PgConnection, schema: &str) -> Result<(), sqlx::Error> {
     conn.execute(
         format!(
-            r#"grant usage on schema "{}" to centaur_slack_reader, centaur_readonly"#,
+            r#"grant usage on schema "{}" to centaur_slack_reader"#,
             schema
         )
         .as_str(),
@@ -373,42 +356,6 @@ async fn assert_expected_policies(conn: &mut PgConnection) -> Result<(), sqlx::E
         (
             "slack_dm_conversation_context_documents",
             "centaur_slack_dm_conversation_context_documents_reader_select",
-        ),
-        (
-            "slack_dm_sync_conversations",
-            "centaur_readonly_slack_dm_sync_conversations_select",
-        ),
-        (
-            "slack_dm_sync_conversation_members",
-            "centaur_readonly_slack_dm_sync_conversation_members_select",
-        ),
-        (
-            "slack_dm_sync_messages",
-            "centaur_readonly_slack_dm_sync_messages_select",
-        ),
-        (
-            "slack_dm_sync_message_attachments",
-            "centaur_readonly_slack_dm_sync_message_attachments_select",
-        ),
-        (
-            "slack_dm_sync_checkpoints",
-            "centaur_readonly_slack_dm_sync_checkpoints_select",
-        ),
-        (
-            "slack_dm_sync_runs",
-            "centaur_readonly_slack_dm_sync_runs_select",
-        ),
-        (
-            "slack_dm_sync_backfill_jobs",
-            "centaur_readonly_slack_dm_sync_backfill_jobs_select",
-        ),
-        (
-            "slack_dm_context_documents",
-            "centaur_readonly_slack_dm_context_documents_select",
-        ),
-        (
-            "slack_dm_conversation_context_documents",
-            "centaur_readonly_slack_dm_conversation_context_documents_select",
         ),
     ] {
         assert!(

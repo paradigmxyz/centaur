@@ -3,121 +3,98 @@ from __future__ import annotations
 import datetime as dt
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
-import asyncpg
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 from company_context.drive_v2 import DriveV2Client
+from conftest import embedding
 
 
-class _FakeConnection:
-    def __init__(self, *, results=None) -> None:
-        self.results = list(results or [])
-        self.queries = []
-        self.closed = False
+class _FakeOpenAIClient:
+    def __init__(self, vector) -> None:
+        async def create(**_kwargs):
+            return SimpleNamespace(data=[SimpleNamespace(embedding=vector)])
 
-    async def _next(self, query, args, default):
-        self.queries.append((query, args))
-        result = self.results.pop(0) if self.results else default
-        if isinstance(result, BaseException):
-            raise result
-        return result
-
-    async def fetch(self, query, *args):
-        return await self._next(query, args, [])
-
-    async def fetchrow(self, query, *args):
-        return await self._next(query, args, None)
-
-    async def fetchval(self, query, *args):
-        return await self._next(query, args, 1)
-
-    async def close(self):
-        self.closed = True
+        self.embeddings = SimpleNamespace(create=create)
 
 
-@pytest.fixture
-def connect(monkeypatch):
+@pytest.fixture(autouse=True)
+def _disable_embeddings(monkeypatch):
     monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", "false")
 
-    def install(fake: _FakeConnection) -> _FakeConnection:
-        async def fake_connect(*args, **kwargs):
-            return fake
 
-        monkeypatch.setattr(asyncpg, "connect", fake_connect)
-        return fake
-
-    return install
-
-
-def _drive_row(**overrides):
-    row = {
-        "document_id": "google-drive:file-1:0",
+def _add_roadmap(database, **overrides):
+    values = {
         "file_id": "file-1",
-        "chunk_id": "0",
-        "document_type": "pdf",
         "title": "Roadmap.pdf",
         "body": "Roadmap PDF covers launch sequencing.",
-        "url": "https://drive.google.com/file/d/file-1/view",
-        "mime_type": "application/pdf",
-        "drive_id": "shared-drive-1",
-        "page_start": 1,
-        "page_end": 2,
-        "source_created_at": dt.datetime(2026, 5, 1, 9, 0, tzinfo=dt.UTC),
-        "source_modified_at": dt.datetime(2026, 5, 8, 12, 0, tzinfo=dt.UTC),
-        "metadata": {},
+        "created_at": dt.datetime(2026, 5, 1, 9, 0, tzinfo=dt.UTC),
+        "modified_at": dt.datetime(2026, 5, 8, 12, 0, tzinfo=dt.UTC),
     }
-    row.update(overrides)
-    return row
+    values.update(overrides)
+    database.add_drive_document(f"google-drive:{values['file_id']}:0", **values)
 
 
-def test_search_returns_drive_documents(connect):
-    fake = connect(_FakeConnection(results=[[_drive_row(score=1.5)]]))
+def test_search_returns_visible_drive_documents(paradedb_database):
+    _add_roadmap(paradedb_database)
+    _add_roadmap(paradedb_database, file_id="file-other", subject="subject-other")
+    _add_roadmap(paradedb_database, file_id="file-doc", document_type="google_doc")
 
-    result = DriveV2Client("postgresql://example").search(
+    result = DriveV2Client(paradedb_database.dsn).search(
         "roadmap", source_type="pdf", occurred_after="2026-05-01"
     )
 
     assert result["status"] == "ok"
     assert result["search_mode"] == "keyword"
-    assert result["count"] == 1
+    assert [document["document_id"] for document in result["results"]] == ["google-drive:file-1:0"]
     document = result["results"][0]
-    assert document["document_id"] == "google-drive:file-1:0"
     assert document["source"] == "docs"
     assert document["source_type"] == "pdf"
     assert document["source_document_id"] == "file-1"
-    assert document["score"] == 1.5
-    assert document["metadata"]["drive_id"] == "shared-drive-1"
+    assert document["score"] > 0
+    assert document["metadata"]["drive_id"] == "shared-drive"
     assert document["metadata"]["page_start"] == 1
-    query, args = fake.queries[0]
-    assert "FROM company_context_data.google_drive_documents" in query
-    assert args == (
-        "roadmap",
-        "roadmap",
-        "pdf",
-        dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
-        None,
-        10,
+
+
+def test_search_fuses_vector_results_through_iron_proxy(paradedb_database, monkeypatch):
+    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", "true")
+    _add_roadmap(paradedb_database, embedding=embedding(1.0))
+    _add_roadmap(
+        paradedb_database,
+        file_id="file-vector",
+        title="Plan.pdf",
+        body="Sequencing for the quarter.",
+        embedding=embedding(0.9, 0.1),
     )
-    assert fake.closed is True
+
+    result = DriveV2Client(
+        paradedb_database.dsn,
+        embeddings_client=_FakeOpenAIClient(embedding(1.0)),
+    ).search("roadmap")
+
+    assert "vector_error" not in result
+    assert result["search_mode"] == "hybrid"
+    assert [(document["document_id"], document["lane"]) for document in result["results"]] == [
+        ("google-drive:file-1:0", "hybrid"),
+        ("google-drive:file-vector:0", "vector"),
+    ]
 
 
-def test_search_rejects_unknown_source_type(connect):
-    fake = connect(_FakeConnection())
-
+def test_search_rejects_unknown_source_type():
     result = DriveV2Client("postgresql://example").search("roadmap", source_type="slack_thread")
 
     assert result == {"status": "error", "error": "source_type must be one of google_doc, pdf"}
-    assert fake.queries == []
 
 
-def test_read_document_returns_bounded_content(connect):
-    connect(_FakeConnection(results=[_drive_row()]))
+def test_read_document_returns_bounded_content(paradedb_database):
+    _add_roadmap(paradedb_database)
 
-    result = DriveV2Client("postgresql://example").read_document(
+    result = DriveV2Client(paradedb_database.dsn).read_document(
         "google-drive:file-1:0", max_chars=7
     )
 
@@ -127,42 +104,30 @@ def test_read_document_returns_bounded_content(connect):
     assert result["truncated"] is True
 
 
-def test_read_document_reports_missing_document(connect):
-    connect(_FakeConnection(results=[None]))
+def test_read_document_reports_missing_and_hidden_documents(paradedb_database):
+    _add_roadmap(paradedb_database, file_id="file-other", subject="subject-other")
+    client = DriveV2Client(paradedb_database.dsn)
 
-    result = DriveV2Client("postgresql://example").read_document("google-drive:missing:0")
+    for document_id in ("google-drive:missing:0", "google-drive:file-other:0"):
+        assert client.read_document(document_id) == {
+            "status": "error",
+            "error": f"document not found: {document_id}",
+        }
 
-    assert result == {"status": "error", "error": "document not found: google-drive:missing:0"}
 
-
-def test_status_is_active_when_documents_table_is_readable(connect):
-    fake = connect(_FakeConnection())
-
-    result = DriveV2Client("postgresql://example").status()
+def test_status_is_active_when_documents_table_is_readable(paradedb_database):
+    result = DriveV2Client(paradedb_database.dsn).status()
 
     assert result == {
         "status": "ok",
         "active": True,
         "table": "company_context_data.google_drive_documents",
     }
-    assert fake.closed is True
 
 
-@pytest.mark.parametrize(
-    "error",
-    [
-        asyncpg.UndefinedTableError(
-            'relation "company_context_data.google_drive_documents" does not exist'
-        ),
-        asyncpg.InsufficientPrivilegeError("permission denied for schema company_context_data"),
-    ],
-)
-def test_status_is_inactive_when_documents_table_is_unavailable(connect, error):
-    fake = connect(_FakeConnection(results=[error]))
-
-    result = DriveV2Client("postgresql://example").status()
+def test_status_is_inactive_without_the_company_context_service(postgres_database):
+    result = DriveV2Client(postgres_database.dsn).status()
 
     assert result["status"] == "ok"
     assert result["active"] is False
-    assert result["reason"] == str(error)
-    assert fake.closed is True
+    assert "company_context_data.google_drive_documents" in result["reason"]

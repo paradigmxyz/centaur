@@ -69,6 +69,8 @@ import { resolveChannelDefault } from './channel-defaults'
 import {
   extractMessageOverrides,
   extractPersonaOverride,
+  isHarnessEnabled,
+  validateStrategyOverrides,
   type HarnessOverrides
 } from './overrides'
 import { createFlagMessageOverridesStrategy } from './message-overrides-strategy'
@@ -1273,6 +1275,30 @@ async function syncThreadMessageToSession(
   // (unlike it) ridden on the input line to take effect. harness/model/provider
   // are sticky (effectiveOverrides); reasoning is per-turn.
   const channelDefault = resolveChannelDefault(input.options.channelDefaults, thread.id)
+  const selectedHarnessType =
+    effectiveOverrides.harnessType ?? channelDefault?.harnessType ??
+    input.options.defaultHarnessType ?? 'codex'
+  const modelHarness = validateStrategyOverrides({
+    model: stickyOverrideRaw(state, stickyOverridesUpdate, 'model') === null
+      ? undefined : effectiveOverrides.model ?? channelDefault?.model
+  }).harnessType ?? selectedHarnessType
+  if (!isHarnessEnabled(selectedHarnessType, input.options.enabledHarnesses) ||
+    !isHarnessEnabled(modelHarness, input.options.enabledHarnesses)) {
+    const fallbackHarness = input.options.defaultHarnessType ?? 'codex'
+    stickyOverridesUpdate = {
+      ...stickyOverridesUpdate,
+      harnessType: fallbackHarness,
+      model: null,
+      provider: null
+    }
+    effectiveOverrides.harnessType = fallbackHarness
+    effectiveOverrides.model = undefined
+    effectiveOverrides.provider = undefined
+    traceLog(input.options, 'slackbotv2_disabled_harness_reset', trace, {
+      disabled_harness: selectedHarnessType,
+      fallback_harness: fallbackHarness
+    })
+  }
   const resolvedHarnessType = effectiveOverrides.harnessType ?? channelDefault?.harnessType
   // A `null` sticky model/provider is a tombstone from a harness switch: honor
   // it, don't re-pair a stale channel default with the new harness. Only
@@ -1314,7 +1340,9 @@ async function syncThreadMessageToSession(
   const harnessRollout = resolveHarnessRollout({
     modelOverride,
     requestedHarness: effectiveHarnessType,
-    rolloutPercent: input.options.codexNanocodexRolloutPercent ?? 0,
+    rolloutPercent: isHarnessEnabled('nanocodex', input.options.enabledHarnesses)
+      ? input.options.codexNanocodexRolloutPercent ?? 0
+      : 0,
     threadId: thread.id
   })
   const rolloutSelected = harnessRollout.assignment !== undefined

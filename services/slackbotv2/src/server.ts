@@ -1,5 +1,6 @@
 import { createSlackbotV2, type SlackbotV2Options } from './index'
 import { parseChannelDefaults } from './channel-defaults'
+import { isHarnessEnabled, parseEnabledHarnesses } from './overrides'
 import { resolveSlackHomeTeamId } from './session-api'
 import { resolveSlackBotUserId } from './slack-user'
 import {
@@ -13,6 +14,11 @@ const botToken = requiredEnv('SLACK_BOT_TOKEN')
 const signingSecret = requiredEnv('SLACK_SIGNING_SECRET')
 const slackApiUrl = optionalEnv('SLACK_API_URL')
 const slackApiTimeoutMs = optionalNumberEnv('SLACKBOTV2_SLACK_API_TIMEOUT_MS')
+const enabledHarnesses = parseEnabledHarnesses(process.env.SLACKBOTV2_ENABLED_HARNESSES)
+const defaultHarnessType = stringEnv('SLACKBOTV2_DEFAULT_HARNESS', 'codex')
+if (!isHarnessEnabled(defaultHarnessType, enabledHarnesses)) {
+  throw new Error('SLACKBOTV2_DEFAULT_HARNESS must be enabled in SLACKBOTV2_ENABLED_HARNESSES')
+}
 const botUserId = await resolveSlackBotUserId({
   botToken,
   configuredBotUserId: optionalEnv('SLACK_BOT_USER_ID'),
@@ -62,7 +68,8 @@ const options: SlackbotV2Options = {
   ),
   responseMetadataMode: responseMetadataModeEnv('SLACKBOTV2_RESPONSE_METADATA_MODE'),
   responseServiceTierEnabled: booleanEnv('SLACKBOTV2_RESPONSE_SERVICE_TIER_ENABLED', false),
-  defaultHarnessType: optionalEnv('SLACKBOTV2_DEFAULT_HARNESS'),
+  defaultHarnessType,
+  enabledHarnesses,
   // Same env vars deployers use to override the sandbox harness model
   // (sandbox.extraEnv); the chart mirrors them here so displayed defaults
   // track the deployment instead of the baked harness config.
@@ -120,6 +127,7 @@ console.log(
     activity_summary_status_enabled: options.activitySummaryStatusEnabled,
     auto_join_created_channels_enabled: options.autoJoinCreatedChannels,
     message_overrides_strategy: messageOverridesStrategyMode,
+    enabled_harnesses: enabledHarnesses,
     message_overrides_strategy_enabled:
       messageOverridesStrategyMode !== 'llm' || Boolean(messageOverridesStrategyApiKey),
     response_metadata_mode: options.responseMetadataMode,

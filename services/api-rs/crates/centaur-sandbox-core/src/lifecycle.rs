@@ -2,8 +2,6 @@ use std::{collections::BTreeMap, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use crate::SandboxSpec;
-
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 /// Opaque backend-owned sandbox identifier.
 pub struct SandboxId(String);
@@ -86,11 +84,7 @@ impl SandboxStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-/// Backend observation used by reconciliation.
-///
-/// This is the runtime's current view of the world, not the control plane's
-/// desired state. Managers compare this with [`DesiredSandboxState`] to repair
-/// drift after crashes, controller actions, or external operator changes.
+/// Backend observation of a sandbox: the runtime's current view of the world.
 pub struct ObservedSandbox {
     /// Observed sandbox identifier.
     pub id: SandboxId,
@@ -155,18 +149,4 @@ impl ObservedSandbox {
         self.instance_id = instance_id;
         self
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-/// Control-plane desired state for reconciliation.
-///
-/// A manager compares this value with [`ObservedSandbox`] and issues backend
-/// operations until the observed runtime converges, or reports ambiguous drift.
-pub enum DesiredSandboxState {
-    /// The sandbox should exist and serve byte I/O using this spec.
-    Running(SandboxSpec),
-    /// The sandbox should retain backend-supported state but not serve live I/O.
-    Suspended(SandboxSpec),
-    /// The sandbox should be stopped and cleaned up.
-    Stopped,
 }

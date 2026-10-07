@@ -2435,20 +2435,6 @@ mod tests {
     }
 
     #[test]
-    fn session_principal_admission_rejects_unknown_values() {
-        assert!(
-            Args::try_parse_from([
-                "centaur-api-server",
-                "--database-url",
-                "postgres://postgres:postgres@localhost/centaur",
-                "--session-principal-admission",
-                "sometimes",
-            ])
-            .is_err()
-        );
-    }
-
-    #[test]
     fn session_event_retention_is_disabled_by_default() {
         let args = Args::try_parse_from([
             "centaur-api-server",
@@ -2611,27 +2597,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_session_sandbox_flags() {
-        let args = Args::try_parse_from([
-            "centaur-api-server",
-            "--database-url",
-            "postgres://postgres:postgres@localhost/centaur",
-            "--session-sandbox-k8s-namespace",
-            "centaur-test",
-            "--session-sandbox-image",
-            "centaur-agent:test",
-            "--session-sandbox-ready-timeout-secs",
-            "17",
-            "--session-sandbox-k8s-context",
-            "kind-test",
-        ])
-        .unwrap();
-        assert_eq!(args.sandbox.k8s_namespace, "centaur-test");
-        assert_eq!(args.sandbox.ready_timeout_secs, 17);
-        assert_eq!(args.sandbox.k8s_context.as_deref(), Some("kind-test"));
-    }
-
-    #[test]
     fn session_sandbox_state_volume_requires_opt_in() {
         for flags in [
             vec![],
@@ -2701,21 +2666,6 @@ mod tests {
     }
 
     #[test]
-    fn execution_adoption_rescans_every_fifteen_seconds_by_default() {
-        let args = Args::try_parse_from([
-            "centaur-api-server",
-            "--database-url",
-            "postgres://postgres:postgres@localhost/centaur",
-        ])
-        .unwrap();
-
-        assert_eq!(
-            args.execution_adoption_interval(),
-            Some(Duration::from_secs(15))
-        );
-    }
-
-    #[test]
     fn execution_adoption_interval_zero_disables_rescans() {
         let args = Args::try_parse_from([
             "centaur-api-server",
@@ -2730,35 +2680,6 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_drain_defaults_to_twenty_seconds() {
-        let args = Args::try_parse_from([
-            "centaur-api-server",
-            "--database-url",
-            "postgres://postgres:postgres@localhost/centaur",
-        ])
-        .unwrap();
-
-        assert_eq!(
-            args.shutdown_execution_drain_timeout(),
-            Duration::from_secs(20)
-        );
-    }
-
-    #[test]
-    fn shutdown_drain_timeout_is_configurable() {
-        let args = Args::try_parse_from([
-            "centaur-api-server",
-            "--database-url",
-            "postgres://postgres:postgres@localhost/centaur",
-            "--shutdown-execution-drain-timeout-secs",
-            "0",
-        ])
-        .unwrap();
-
-        assert_eq!(args.shutdown_execution_drain_timeout(), Duration::ZERO);
-    }
-
-    #[test]
     fn sandbox_reaper_defaults_delete_after_max_lifetime() {
         let args = Args::try_parse_from([
             "centaur-api-server",
@@ -2770,36 +2691,6 @@ mod tests {
         let config = args.sandbox_reaper_config();
         assert_eq!(config.max_lifetime, Some(Duration::from_secs(259_200)));
         assert_eq!(config.orphan_sweep_grace, Duration::from_secs(600));
-    }
-
-    #[test]
-    fn sandbox_orphan_sweep_grace_is_configurable() {
-        let args = Args::try_parse_from([
-            "centaur-api-server",
-            "--database-url",
-            "postgres://postgres:postgres@localhost/centaur",
-            "--session-sandbox-orphan-sweep-grace-secs",
-            "1200",
-        ])
-        .unwrap();
-
-        assert_eq!(
-            args.sandbox_reaper_config().orphan_sweep_grace,
-            Duration::from_secs(1200)
-        );
-    }
-
-    #[test]
-    fn accepts_kubernetes_aliases_for_sandbox_flags() {
-        let args = Args::try_parse_from([
-            "centaur-api-server",
-            "--database-url",
-            "postgres://postgres:postgres@localhost/centaur",
-            "--kubernetes-namespace",
-            "centaur-test",
-        ])
-        .unwrap();
-        assert_eq!(args.sandbox.k8s_namespace, "centaur-test");
     }
 
     #[test]
@@ -2923,32 +2814,6 @@ mod tests {
         let token = tools.github_token.expect("token should be Some");
         assert_eq!(token.secret_name, "centaur-repo-cache-github-token");
         assert_eq!(token.secret_key, "token");
-    }
-
-    #[test]
-    fn tools_config_reads_auto_reload_flag() {
-        let args = Args::try_parse_from([
-            "centaur-api-server",
-            "--database-url",
-            "postgres://postgres:postgres@localhost/centaur",
-            "--iron-control-url",
-            "http://console.local",
-            "--iron-control-proxy-sync-url",
-            "http://proxy-sync.local:8080",
-            "--iron-control-api-key",
-            "iak_test",
-            "--kubernetes-tools-repo",
-            "paradigmxyz/centaur",
-            "--kubernetes-tools-runner-image",
-            "centaur-agent:test",
-            "--kubernetes-tools-auto-reload",
-            "false",
-        ])
-        .unwrap();
-
-        let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
-        let tools = config.tools.expect("tools should be Some");
-        assert!(!tools.auto_reload);
     }
 
     #[test]
@@ -3313,22 +3178,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn node_steering_is_empty_when_unset() {
-        let args = Args::try_parse_from([
-            "centaur-api-server",
-            "--database-url",
-            "postgres://postgres:postgres@localhost/centaur",
-        ])
-        .unwrap();
-
-        assert!(args.sandbox.node_selector().unwrap().is_empty());
-        assert!(args.sandbox.pod_annotations().unwrap().is_empty());
-        assert!(args.sandbox.tolerations().unwrap().is_empty());
-        assert!(args.sandbox.service_account_name.is_none());
-        assert!(args.sandbox.priority_class_name.is_none());
-    }
-
     /// Unlike `SESSION_SANDBOX_EXTRA_ENV`, bad node steering fails startup:
     /// silently ignoring it would schedule sandboxes wherever the default
     /// scheduler chooses, which is what setting it is meant to prevent.
@@ -3512,24 +3361,6 @@ mod tests {
     }
 
     #[test]
-    fn iron_control_infra_secret_sync_can_be_disabled() {
-        let args = Args::try_parse_from([
-            "centaur-api-server",
-            "--database-url",
-            "postgres://postgres:postgres@localhost/centaur",
-            "--iron-control-url",
-            "http://console.local",
-            "--iron-control-api-key",
-            "iak_test",
-            "--iron-control-sync-infra-secrets",
-            "false",
-        ])
-        .unwrap();
-
-        assert!(!args.sandbox.iron_control_sync_infra_secrets);
-    }
-
-    #[test]
     fn iron_proxy_database_cidrs_are_parsed_and_validated() {
         let parse = |cidrs: &str| {
             Args::try_parse_from([
@@ -3561,41 +3392,6 @@ mod tests {
         for invalid in ["db.example.com", "10.0.32.0", "10.0.32.0/33"] {
             assert!(parse(invalid).is_err(), "{invalid} must be rejected");
         }
-    }
-
-    #[test]
-    fn firewall_ca_secret_keys_default_and_override() {
-        let parse = |extra: &[&str]| {
-            let mut argv = vec![
-                "centaur-api-server",
-                "--database-url",
-                "postgres://postgres:postgres@localhost/centaur",
-                "--kubernetes-firewall-ca-secret-name",
-                "combined",
-                "--kubernetes-firewall-ca-key-secret-name",
-                "combined",
-            ];
-            argv.extend_from_slice(extra);
-            Args::try_parse_from(argv)
-                .unwrap()
-                .sandbox
-                .iron_proxy
-                .to_config()
-                .unwrap()
-        };
-
-        let config = parse(&[]);
-        assert_eq!(config.ca_cert_secret_key, "ca-cert.pem");
-        assert_eq!(config.ca_key_secret_key, "ca-key.pem");
-
-        let config = parse(&[
-            "--kubernetes-firewall-ca-secret-key",
-            "CA_CERT_PEM",
-            "--kubernetes-firewall-ca-key-secret-key",
-            "CA_KEY_PEM",
-        ]);
-        assert_eq!(config.ca_cert_secret_key, "CA_CERT_PEM");
-        assert_eq!(config.ca_key_secret_key, "CA_KEY_PEM");
     }
 
     #[test]

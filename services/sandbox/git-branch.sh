@@ -6,7 +6,8 @@
 #
 # Creates ~/branches/<org>/<repo> as a --shared clone from ~/github/<org>/<repo>
 # with a unique agent branch checked out. The resulting directory is fully writable
-# and supports commit, push, and PR workflows.
+# and supports commit, push, and PR workflows. New branches start at the upstream
+# default branch, not the potentially stale or pinned cache HEAD.
 
 set -euo pipefail
 
@@ -76,6 +77,8 @@ fi
 
 if [ -d "$DEST/.git" ]; then
     echo "$DEST already exists — reusing" >&2
+    # Refresh remote refs without moving the user's branch or working files.
+    git -C "$DEST" fetch --quiet --no-tags origin
     configure_git_identity
     echo "$DEST"
     exit 0
@@ -83,21 +86,30 @@ fi
 
 mkdir -p "$(dirname "$DEST")"
 
-if ! git clone --quiet --shared "$SRC" "$DEST"; then
+CLONE_DIR=$(mktemp -d "$(dirname "$DEST")/.git-branch.XXXXXX")
+trap 'rm -rf -- "$CLONE_DIR"' EXIT
+
+if ! git clone --quiet --shared "$SRC" "$CLONE_DIR"; then
     echo "shared clone failed; retrying with regular clone" >&2
-    rm -rf "$DEST"
-    git clone --quiet "$SRC" "$DEST"
+    rm -rf -- "$CLONE_DIR"
+    git clone --quiet "$SRC" "$CLONE_DIR"
 fi
 
 # --shared clones set origin to the local path; fix it to the upstream URL
 # so that git push and gh pr create target the real GitHub remote.
 UPSTREAM_URL=$(git -C "$SRC" config --get remote.origin.url 2>/dev/null || echo "")
 if [ -n "$UPSTREAM_URL" ]; then
-    git -C "$DEST" remote set-url origin "$UPSTREAM_URL"
+    git -C "$CLONE_DIR" remote set-url origin "$UPSTREAM_URL"
 fi
 
+# Fetch branches only: moved upstream tags must not prevent a fresh checkout.
+# Fail rather than silently create a branch from the cached commit.
+git -C "$CLONE_DIR" fetch --quiet --no-tags origin
+git -C "$CLONE_DIR" remote set-head origin --auto >/dev/null
+
 BRANCH="centaur/$SLUG-$(date +%s)"
-git -C "$DEST" checkout -q -b "$BRANCH"
+git -C "$CLONE_DIR" checkout -q -b "$BRANCH" refs/remotes/origin/HEAD
+mv "$CLONE_DIR" "$DEST"
 
 configure_git_identity
 

@@ -363,6 +363,13 @@ fn fake_codex_blocks_mode_uses_openrouter_provider_when_model_is_configured() {
             .and_then(Value::as_str),
         Some("openrouter")
     );
+    assert_eq!(
+        thread_start
+            .pointer("/params/model")
+            .and_then(Value::as_str),
+        Some("openrouter/auto"),
+        "the thread must start on the turn's model, not switch to it on the first turn"
+    );
     let turn_start = requests
         .iter()
         .find(|value| value.get("method").and_then(Value::as_str) == Some("turn/start"))
@@ -421,6 +428,13 @@ fn fake_codex_blocks_mode_uses_openrouter_provider_for_explicit_model_slug() {
             .and_then(Value::as_str),
         Some("openrouter")
     );
+    assert_eq!(
+        thread_start
+            .pointer("/params/model")
+            .and_then(Value::as_str),
+        Some("anthropic/claude-fable-5"),
+        "the thread must start on the turn's model, not switch to it on the first turn"
+    );
     let turn_start = requests
         .iter()
         .find(|value| value.get("method").and_then(Value::as_str) == Some("turn/start"))
@@ -428,6 +442,65 @@ fn fake_codex_blocks_mode_uses_openrouter_provider_for_explicit_model_slug() {
     assert_eq!(
         turn_start.pointer("/params/model").and_then(Value::as_str),
         Some("anthropic/claude-fable-5")
+    );
+
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(fake_codex_log);
+}
+
+#[test]
+fn fake_codex_blocks_mode_resumes_thread_on_the_configured_model() {
+    let fake_codex = temp_path("fake-resume-model-codex.sh");
+    let fake_codex_log = temp_path("fake-resume-model-codex-requests.jsonl");
+    let script = fake_codex_app_server_script(&fake_codex_log);
+    std::fs::write(&fake_codex, script).expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex)
+        .expect("fake codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
+        Harness::Codex,
+        None,
+        Some((
+            "CODEX_BIN",
+            fake_codex.to_str().expect("utf-8 fake codex path"),
+        )),
+        &[
+            ("CODEX_CONTINUE_THREAD_ID", "thread-1"),
+            ("CODEX_MODEL", "gpt-test-model"),
+        ],
+    );
+    let turn = bridge.run_blocks_user_turn("say resumed blocks", Duration::from_secs(10));
+    bridge.finish_successfully();
+
+    assert_completed_turn(&turn);
+    assert_codex_v2_turn(&turn);
+
+    let requests = std::fs::read_to_string(&fake_codex_log).expect("read fake codex request log");
+    let requests: Vec<Value> = requests
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("fake codex request JSON"))
+        .collect();
+    let thread_resume = requests
+        .iter()
+        .find(|value| value.get("method").and_then(Value::as_str) == Some("thread/resume"))
+        .unwrap_or_else(|| panic!("blocks mode did not send thread/resume; requests={requests:?}"));
+    assert_eq!(
+        thread_resume
+            .pointer("/params/model")
+            .and_then(Value::as_str),
+        Some("gpt-test-model"),
+        "the resumed thread must run on the turn's model, not switch to it on the first turn"
+    );
+    let turn_start = requests
+        .iter()
+        .find(|value| value.get("method").and_then(Value::as_str) == Some("turn/start"))
+        .unwrap_or_else(|| panic!("blocks mode did not send turn/start; requests={requests:?}"));
+    assert_eq!(
+        turn_start.pointer("/params/model").and_then(Value::as_str),
+        Some("gpt-test-model")
     );
 
     let _ = std::fs::remove_file(fake_codex);

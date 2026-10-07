@@ -189,6 +189,7 @@ class DriveV2Client:
                 keyword_results.append(result)
 
             vector_results: list[dict[str, Any]] = []
+            vector_error = None
             if embeddings_available:
                 try:
                     vector_results = await self._search_vectors_async(
@@ -199,9 +200,10 @@ class DriveV2Client:
                         occurred_after=occurred_after,
                         occurred_before=occurred_before,
                     )
-                except Exception:
+                except Exception as exc:
                     # Vector search is optional; fall back to keyword results.
                     vector_results = []
+                    vector_error = str(exc)
         finally:
             await conn.close()
 
@@ -211,7 +213,7 @@ class DriveV2Client:
         else:
             results = keyword_results[:limit]
             search_mode = "keyword"
-        return {
+        response = {
             "status": "ok",
             "query": query,
             "source": SOURCE,
@@ -222,6 +224,9 @@ class DriveV2Client:
             "count": len(results),
             "results": results,
         }
+        if vector_error:
+            response["vector_error"] = vector_error
+        return response
 
     async def _search_vectors_async(
         self,
@@ -251,7 +256,7 @@ class DriveV2Client:
                 d.source_created_at,
                 d.source_modified_at,
                 d.metadata,
-                1 - (e.embedding <=> $1::vector) AS vector_similarity
+                1 - (e.embedding <=> $1::text::vector) AS vector_similarity
             FROM {EMBEDDINGS_TABLE} e
             JOIN {DOCUMENTS_TABLE} d
               ON d.document_id = e.document_id
@@ -259,7 +264,7 @@ class DriveV2Client:
               AND ($3::text IS NULL OR d.document_type = $3)
               AND ($4::timestamptz IS NULL OR d.source_modified_at >= $4)
               AND ($5::timestamptz IS NULL OR d.source_modified_at < $5)
-            ORDER BY e.embedding <=> $1::vector,
+            ORDER BY e.embedding <=> $1::text::vector,
                      d.source_modified_at DESC NULLS LAST,
                      d.document_id ASC
             LIMIT $6

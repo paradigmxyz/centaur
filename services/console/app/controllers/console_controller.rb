@@ -1,7 +1,7 @@
 # Operator console: a lightweight, server-rendered HTML view over principals,
 # their effective grants, and secrets. Read-only; gated behind a console session
 # (ApplicationController#require_login) and restricted to admins (require_admin),
-# like every Control/Data Sync page. Distinct from the JSON API.
+# like every Control page. Distinct from the JSON API.
 class ConsoleController < ApplicationController
   include SecretKinds
   include Console::SlackChannelPermissionManagement
