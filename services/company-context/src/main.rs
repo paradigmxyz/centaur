@@ -102,6 +102,7 @@ async fn main() -> Result<()> {
         &slack_absurd,
         SlackTaskState {
             pool: pool.clone(),
+            absurd: slack_absurd.clone(),
             credentials: credentials.clone(),
             slack: SlackClient::new(&config)?,
             limiter: RateLimiter::new(
@@ -110,6 +111,7 @@ async fn main() -> Result<()> {
                 config.slack_rate_limit_share,
             ),
             channel_ids: config.slack_channel_ids.clone(),
+            initial_lookback: chrono::Duration::days(config.slack_initial_lookback_days as i64),
         },
     )?;
 

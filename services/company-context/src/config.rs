@@ -25,6 +25,8 @@ pub const GRANOLA_NOTE_EMBED_TASK: &str = "granola.note.embed";
 pub const SLACK_QUEUE_NAME: &str = "company_context_slack";
 pub const SLACK_CREDENTIALS_RECONCILE_TASK: &str = "slack.credentials.reconcile";
 pub const SLACK_USER_DISCOVER_TASK: &str = "slack.user.discover";
+pub const SLACK_CONVERSATION_SYNC_TASK: &str = "slack.conversation.sync";
+pub const SLACK_THREAD_SYNC_TASK: &str = "slack.thread.sync";
 /// Slack conversation types that can be synchronized.
 pub const SLACK_CONVERSATION_TYPES: [&str; 3] = ["public_channel", "private_channel", "im"];
 
@@ -199,6 +201,14 @@ pub struct Config {
         value_parser = positive_duration
     )]
     pub slack_discovery_interval: Duration,
+    /// Days of history synchronized for a Slack conversation without a checkpoint.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_SLACK_INITIAL_LOOKBACK_DAYS",
+        default_value = "90",
+        value_parser = positive_usize
+    )]
+    pub slack_initial_lookback_days: usize,
     /// Fraction of each Slack method's documented rate limit that ingestion
     /// may use. Other services calling Slack as the same app share the rest.
     #[arg(

@@ -21,6 +21,7 @@ const INGESTED_CONVERSATION_TYPES: &[(&str, [&str; 2])] = &[
 /// Slack errors that retrying the same request with the same token cannot fix.
 const PERMANENT_ERRORS: &[&str] = &[
     "account_inactive",
+    "channel_not_found",
     "ekm_access_denied",
     "invalid_auth",
     "invalid_cursor",
@@ -28,7 +29,9 @@ const PERMANENT_ERRORS: &[&str] = &[
     "no_permission",
     "not_allowed_token_type",
     "not_authed",
+    "not_in_channel",
     "team_access_not_granted",
+    "thread_not_found",
     "token_expired",
     "token_revoked",
 ];
@@ -51,12 +54,16 @@ pub fn conversation_types(scopes: &[String], allowed: &[String]) -> Vec<&'static
 #[derive(Clone, Copy, Debug)]
 pub enum SlackMethod {
     UsersConversations,
+    ConversationsHistory,
+    ConversationsReplies,
 }
 
 impl SlackMethod {
     pub fn name(self) -> &'static str {
         match self {
             Self::UsersConversations => "users.conversations",
+            Self::ConversationsHistory => "conversations.history",
+            Self::ConversationsReplies => "conversations.replies",
         }
     }
 
@@ -64,7 +71,9 @@ impl SlackMethod {
     pub fn tier_per_minute(self) -> f64 {
         match self {
             // Tier 3.
-            Self::UsersConversations => 50.0,
+            Self::UsersConversations | Self::ConversationsHistory | Self::ConversationsReplies => {
+                50.0
+            }
         }
     }
 }
@@ -91,6 +100,16 @@ pub struct AuthTest {
 pub struct ConversationsPage {
     #[serde(default)]
     pub channels: Vec<Conversation>,
+    #[serde(default)]
+    pub response_metadata: ResponseMetadata,
+}
+
+/// A page of `conversations.history` or `conversations.replies`. Messages are
+/// kept as Slack sent them so they can be stored verbatim.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MessagesPage {
+    #[serde(default)]
+    pub messages: Vec<Value>,
     #[serde(default)]
     pub response_metadata: ResponseMetadata,
 }
