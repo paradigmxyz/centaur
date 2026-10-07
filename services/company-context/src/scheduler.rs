@@ -178,23 +178,21 @@ pub async fn run_slack(config: Arc<Config>, client: Client, credentials: Arc<Con
                 error!(event = "company_context_slack_reconcile_enqueue_failed", error = %error);
             }
         }
-        if config.slack_bot_token.is_some() {
-            match client
-                .spawn(
-                    SLACK_USERS_SYNC_TASK,
-                    UsersSyncParams { bucket },
-                    SpawnOptions {
-                        idempotency_key: Some(format!("slack.team.users.sync:{bucket}")),
-                        ..SpawnOptions::default()
-                    },
-                )
-                .await
-            {
-                Ok(result) => telemetry::task_enqueued(SLACK_USERS_SYNC_TASK, result.created),
-                Err(error) => {
-                    metrics::counter!("company_context_scheduler_errors_total").increment(1);
-                    error!(event = "company_context_slack_users_enqueue_failed", error = %error);
-                }
+        match client
+            .spawn(
+                SLACK_USERS_SYNC_TASK,
+                UsersSyncParams { bucket },
+                SpawnOptions {
+                    idempotency_key: Some(format!("slack.team.users.sync:{bucket}")),
+                    ..SpawnOptions::default()
+                },
+            )
+            .await
+        {
+            Ok(result) => telemetry::task_enqueued(SLACK_USERS_SYNC_TASK, result.created),
+            Err(error) => {
+                metrics::counter!("company_context_scheduler_errors_total").increment(1);
+                error!(event = "company_context_slack_users_enqueue_failed", error = %error);
             }
         }
         let credential_ids = match credentials.slack_credential_ids().await {

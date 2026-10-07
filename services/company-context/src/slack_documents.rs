@@ -1024,6 +1024,8 @@ mod tests {
             "test-key",
             "--openai-base-url",
             &format!("http://{address}"),
+            "--slack-bot-token",
+            "xoxb-test",
         ])
         .unwrap();
         let embeddings = EmbeddingsClient::new(&config).unwrap();

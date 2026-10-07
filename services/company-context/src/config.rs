@@ -134,14 +134,14 @@ pub struct Config {
     )]
     pub openai_api_key: String,
     /// Bot token of the Slack app, used to list workspace users so that
-    /// documents show names. Users are not synced without it.
+    /// documents show names.
     #[arg(
         long,
         env = "SLACK_BOT_TOKEN",
         value_parser = nonempty,
         hide_env_values = true
     )]
-    pub slack_bot_token: Option<String>,
+    pub slack_bot_token: String,
     #[arg(long, env = "BIND_ADDR", default_value = "0.0.0.0:8080")]
     pub bind_addr: SocketAddr,
     #[arg(
@@ -422,6 +422,8 @@ mod tests {
             "salt",
             "--openai-api-key",
             "test-key",
+            "--slack-bot-token",
+            "xoxb-test",
         ]
     }
 

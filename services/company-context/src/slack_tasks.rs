@@ -58,7 +58,7 @@ pub struct SlackTaskState {
     /// Per-conversation overrides of `history`.
     pub channel_history: HashMap<String, chrono::Duration>,
     /// The app's bot token, which lists workspace users.
-    pub bot_token: Option<String>,
+    pub bot_token: String,
 }
 
 impl SlackTaskState {
@@ -496,9 +496,7 @@ async fn sync_users(
 ) -> Result<MessagesSummary> {
     let mut team_id = String::new();
     let result = async {
-        let Some(bot_token) = state.bot_token.as_deref() else {
-            return Err(rejected("SLACK_BOT_TOKEN is not configured"));
-        };
+        let bot_token = state.bot_token.as_str();
         team_id = auth_test(&state.slack, ctx, bot_token).await?.team_id;
         let mut stored = 0;
         let mut cursor = String::new();
