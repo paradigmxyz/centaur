@@ -24,13 +24,13 @@ import { createPostgresState } from '@chat-adapter/state-pg'
 import pg from 'pg'
 import {
   harnessToChatSdkStream,
+  renderCodexAppServerAnswerText,
   EMPTY_FINAL_ANSWER_TEXT,
   type CodexAppServerToChatStreamOptions,
   type ChatSDKStreamChunk,
   type RendererEvent
 } from '@centaur/rendering'
 import { conflateChatSdkStream } from './conflate'
-import { stripSlackCitations, stripSlackCitationsFromStream } from './citations'
 import { resolveHarnessRollout } from './harness-rollout'
 import { observeSeconds, slackbotMetrics } from './metrics'
 import {
@@ -2839,8 +2839,8 @@ class SlackRenderFallback {
   }
 
   text(): string {
-    const terminalText = stripSlackCitations(this.terminalText).trim()
-    const markdownText = stripSlackCitations(this.markdownText).trim()
+    const terminalText = renderCodexAppServerAnswerText(this.terminalText).trim()
+    const markdownText = this.markdownText.trim()
     if (this.interrupted && !terminalText && markdownText === EMPTY_FINAL_ANSWER_TEXT) return ''
     return terminalText || markdownText
   }
@@ -2884,7 +2884,7 @@ class SlackRenderFallback {
 async function* slackSafeChatSdkStream(
   stream: AsyncIterable<ChatSDKStreamChunk>
 ): AsyncIterable<ChatSDKStreamChunk> {
-  for await (const chunk of stripSlackCitationsFromStream(stream)) {
+  for await (const chunk of stream) {
     yield slackSafeChatSdkChunk(chunk)
   }
 }

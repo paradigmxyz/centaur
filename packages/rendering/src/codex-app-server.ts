@@ -16,6 +16,10 @@ import type {
 
 const COMMAND_EXECUTION_TITLE = 'Command execution'
 const PRE_STREAM_GRACE_MS = 500
+const CITATION_MARKERS = [
+  { prefix: 'cite', ending: '' },
+  { prefix: 'cite:ship:', ending: ':walking:' }
+]
 
 const limits = {
   stream: {
@@ -121,6 +125,7 @@ export class CodexAppServerRendererEventMapper
   flush(): RendererEvent[] {
     if (this.state.done) return []
     this.state.done = true
+    recomposeBuffers(this.state)
     const out: RendererEvent[] = []
     completeOpenTasks(this.state)
     this.emitActivitySummary(out, { final: true })
@@ -324,6 +329,7 @@ export class CodexAppServerRendererEventMapper
   private fail(error: string): RendererEvent[] {
     if (this.state.done) return []
     this.state.done = true
+    recomposeBuffers(this.state)
     const out: RendererEvent[] = []
     let hadOpenTask = false
     for (const [id, task] of this.state.taskByUseId) {
@@ -341,8 +347,7 @@ export class CodexAppServerRendererEventMapper
       })
     }
     if (!this.state.answerText.trim()) {
-      this.state.harnessAnswerText += `Execution failed: ${error || 'Execution failed'}`
-      recomposeBuffers(this.state)
+      this.state.answerText = `Execution failed: ${error || 'Execution failed'}`
     }
     this.emitActivitySummary(out, { final: true })
     this.emitPendingAssistantText(out, { force: true })
@@ -358,8 +363,7 @@ export class CodexAppServerRendererEventMapper
 
   private ensureFinalAnswerText(): void {
     if (this.state.answerText.trim()) return
-    this.state.harnessAnswerText += EMPTY_FINAL_ANSWER_TEXT
-    recomposeBuffers(this.state)
+    this.state.answerText = EMPTY_FINAL_ANSWER_TEXT
   }
 
   private emitActivitySummary(out: RendererEvent[], opts: { final?: boolean } = {}): void {
@@ -861,7 +865,10 @@ function eventCarriesAgentMessageText(event: any): boolean {
 }
 
 function recomposeBuffers(state: CodexMapperState): void {
-  state.answerText = compose(state.answerByItemId, state.harnessAnswerText)
+  state.answerText = renderCodexAppServerAnswerText(
+    compose(state.answerByItemId, state.harnessAnswerText),
+    { streaming: !state.done }
+  )
   state.commentaryText = compose(state.commentaryByItemId, state.harnessCommentaryText)
 }
 
@@ -1458,4 +1465,36 @@ function unwrapShellCommand(command: string): string {
 
 function commandExecutionTitle(index?: number): string {
   return index !== undefined ? `${index}. ${COMMAND_EXECUTION_TITLE}` : COMMAND_EXECUTION_TITLE
+}
+
+export function renderCodexAppServerAnswerText(
+  value: string,
+  options: { streaming?: boolean } = {}
+): string {
+  let remaining = value
+  let visible = ''
+  while (remaining) {
+    const start = remaining.indexOf('')
+    if (start < 0) return visible + remaining
+    visible += remaining.slice(0, start)
+    remaining = remaining.slice(start)
+    const marker = CITATION_MARKERS.find(marker => remaining.startsWith(marker.prefix))
+    if (!marker) {
+      if (options.streaming && CITATION_MARKERS.some(marker => marker.prefix.startsWith(remaining))) {
+        return visible
+      }
+      visible += remaining[0]
+      remaining = remaining.slice(1)
+      continue
+    }
+    const end = remaining.indexOf(marker.ending, marker.prefix.length)
+    const invalid = remaining.slice(marker.prefix.length).search(/[^A-Za-z0-9_:.\-]/u)
+    if (invalid >= 0 && (end < 0 || marker.prefix.length + invalid < end)) {
+      remaining = remaining.slice(marker.prefix.length + invalid)
+      continue
+    }
+    if (end < 0) return visible
+    remaining = remaining.slice(end + marker.ending.length)
+  }
+  return visible
 }

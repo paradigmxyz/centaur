@@ -3,8 +3,124 @@ import {
   CodexAppServerRendererEventMapper,
   codexAppServerToChatSdkStream,
   codexAppServerToRendererEvents,
-  isRetryableCodexErrorNotification
+  isRetryableCodexErrorNotification,
+  renderCodexAppServerAnswerText
 } from './codex-app-server'
+import type { RendererEvent } from './types'
+
+describe('Codex App Server answer citations', () => {
+  const markers = [
+    'citeturn0search0',
+    'citeturn0search0turn1search2',
+    'cite:ship:turn0search0:walking:'
+  ]
+
+  function messageDeltas(events: RendererEvent[]): string {
+    return events.flatMap(event => event.type === 'renderer.message.delta' ? [event.delta] : []).join('')
+  }
+
+  it('removes internal references while preserving source links and unrelated text', () => {
+    for (const marker of markers) {
+      expect(renderCodexAppServerAnswerText(`Answer.${marker} [Source](https://example.com/source)`))
+        .toBe('Answer. [Source](https://example.com/source)')
+    }
+    expect(renderCodexAppServerAnswerText(`Answer.${markers.join('')} Next :ship: :walking:.`))
+      .toBe('Answer. Next :ship: :walking:.')
+    expect(renderCodexAppServerAnswerText('Other chartdata and cite example.'))
+      .toBe('Other chartdata and cite example.')
+  })
+
+  it('filters every streaming split boundary before generic renderer events are emitted', () => {
+    for (const marker of markers) {
+      for (let boundary = 1; boundary < marker.length; boundary++) {
+        const mapper = new CodexAppServerRendererEventMapper({ preStreamGraceMs: 0 })
+        mapper.process({
+          type: 'item.started', item: { id: 'answer', type: 'agentMessage', phase: 'final_answer' }
+        })
+        expect(messageDeltas(mapper.process({
+          type: 'item.agentMessage.delta', itemId: 'answer', delta: `Answer.${marker.slice(0, boundary)}`
+        }))).toBe('Answer.')
+        expect(messageDeltas(mapper.process({
+          type: 'item.agentMessage.delta', itemId: 'answer', delta: `${marker.slice(boundary)} Next.`
+        }))).toBe(' Next.')
+        expect(mapper.answerText()).toBe('Answer. Next.')
+        expect(mapper.flush()).toContainEqual({
+          type: 'renderer.done', answerMarkdown: 'Answer. Next.', streamFinalUpdates: true,
+          threadId: undefined
+        })
+      }
+    }
+  })
+
+  it('handles character-sized deltas and task events without false answer divergence', () => {
+    const logs: string[] = []
+    const mapper = new CodexAppServerRendererEventMapper({
+      preStreamGraceMs: 0, logInfo: event => logs.push(event)
+    })
+    mapper.process({
+      type: 'item.started', item: { id: 'answer', type: 'agentMessage', phase: 'final_answer' }
+    })
+    let visible = messageDeltas(mapper.process({
+      type: 'item.agentMessage.delta', itemId: 'answer', delta: 'Answer.'
+    }))
+    for (const delta of markers[0]!) {
+      visible += messageDeltas(mapper.process({ type: 'item.agentMessage.delta', itemId: 'answer', delta }))
+    }
+    mapper.process({ type: 'item.started', item: { id: 'command', type: 'commandExecution', command: 'true' } })
+    visible += messageDeltas(mapper.process({
+      type: 'item.agentMessage.delta', itemId: 'answer', delta: ' Next.'
+    }))
+    mapper.process({
+      type: 'item.completed',
+      item: {
+        id: 'answer', type: 'agentMessage', phase: 'final_answer',
+        text: 'Answer.citeturn1search2 Next.'
+      }
+    })
+    expect(visible).toBe('Answer. Next.')
+    expect(mapper.answerText()).toBe('Answer. Next.')
+    expect(logs).toContain('codex_renderer_canonical_answer_correction')
+    expect(logs).not.toContain('codex_renderer_stream_divergence_suppressed')
+  })
+
+  it('filters canonical item snapshots and durable terminal results', () => {
+    for (const source of [
+      {
+        type: 'item.completed',
+        item: { id: 'answer', type: 'agentMessage', phase: 'final_answer', text: `Answer.${markers[0]}` }
+      },
+      { eventKind: 'session.execution_completed', data: { result_text: `Answer.${markers[0]}` } },
+      { eventKind: 'session.execution_cancelled', data: { result_text: `Answer.${markers[0]}` } },
+      { type: 'result', result: `Answer.${markers[0]}` }
+    ]) {
+      const mapper = new CodexAppServerRendererEventMapper({ preStreamGraceMs: 0 })
+      const events = [...mapper.process(source), ...mapper.flush()]
+      expect(messageDeltas(events)).toBe('Answer.')
+      expect(events.find(event => event.type === 'renderer.done')).toMatchObject({
+        answerMarkdown: 'Answer.'
+      })
+    }
+  })
+
+  it('drops unfinished references without swallowing subsequent prose', () => {
+    for (const marker of ['citeturn0search0', 'cite:ship:turn0search0']) {
+      expect(renderCodexAppServerAnswerText(`Answer.${marker}`)).toBe('Answer.')
+      expect(renderCodexAppServerAnswerText(`Answer.${marker}\nNext paragraph.`))
+        .toBe('Answer.\nNext paragraph.')
+    }
+    expect(renderCodexAppServerAnswerText('Literal cit', { streaming: true })).toBe('Literal ')
+    expect(renderCodexAppServerAnswerText('Literal cit')).toBe('Literal cit')
+  })
+
+  it('still supplies the empty-answer placeholder when the answer contains only a citation', () => {
+    const mapper = new CodexAppServerRendererEventMapper()
+    expect(mapper.process({
+      eventKind: 'session.execution_completed', data: { result_text: 'citeturn0search0' }
+    }).find(event => event.type === 'renderer.done')).toMatchObject({
+      answerMarkdown: 'Execution completed, but no final text was captured.'
+    })
+  })
+})
 
 describe('CodexAppServerRendererEventMapper', () => {
   it('maps final answer deltas to generic renderer message deltas after activity exists', () => {
