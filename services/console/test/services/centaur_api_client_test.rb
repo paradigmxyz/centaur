@@ -9,53 +9,16 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     expect_http_call(http, status: status, body: body) { |request| yield request if block_given? }
   end
 
-  test "lists Slack archive imports with query params" do
-    http = Minitest::Mock.new
-    expect_request(http, status: 200, body: { imports: [] }.to_json) do |request|
-      assert_equal :get, request[:method]
-      assert_equal "http://api.internal:8080/api/admin/slack/archive-imports?limit=25", request[:url]
-      assert_equal "application/json", request[:headers]["Accept"]
-    end
-    client = api_client(base_url: "http://api.internal:8080", http: http)
-
-    assert_equal({ "imports" => [] }, client.list_slack_archive_imports(limit: 25))
-    http.verify
-  end
-
-  test "creates Slack archive imports with a Console service JWT" do
-    http = Minitest::Mock.new
-    expect_request(http, status: 201, body: { ok: true }.to_json) do |request|
-      assert_equal :post, request[:method]
-      assert_equal "Bearer console-service-jwt", request[:headers]["Authorization"]
-      body = JSON.parse(request[:body])
-      assert_equal "export.zip", body["filename"]
-      assert_equal({ "source" => "test" }, body["metadata"])
-    end
-    client = api_client(
-      base_url: "http://api.internal:8080/",
-      http: http
-    )
-
-    client.create_slack_archive_import(
-      filename: "export.zip",
-      content_type: "application/zip",
-      created_by: "admin@example.com",
-      metadata: { source: "test" }
-    )
-
-    http.verify
-  end
-
   test "raises useful errors for non-2xx responses" do
     http = Minitest::Mock.new
-    expect_request(http, status: 400, body: { error: "bad archive" }.to_json)
+    expect_request(http, status: 400, body: { error: "bad run" }.to_json)
     client = api_client(base_url: "http://api.internal:8080", http: http)
 
     error = assert_raises(CentaurApiClient::Error) do
-      client.start_slack_archive_import("sai_bad")
+      client.get_workflow_run("run_bad")
     end
     http.verify
-    assert_equal "bad archive", error.message
+    assert_equal "bad run", error.message
     assert_equal 400, error.status
   end
 

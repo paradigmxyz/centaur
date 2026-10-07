@@ -1,0 +1,60 @@
+# Fake Slack for the e2e stack. It lives outside the release namespace so it
+# reaches slackbotv2 the way Slack does: as an allowed ingress source, while
+# slackbotv2 calls it through its ordinary port-443 Slack egress. e2e/stack.sh
+# creates the fake-slack ConfigMap and Secret.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fake-slack
+  labels:
+    app: fake-slack
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fake-slack
+  template:
+    metadata:
+      labels:
+        app: fake-slack
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: fake-slack
+          image: oven/bun:1.4.2-slim
+          command: ["bun", "/app/fake-slack.ts"]
+          envFrom:
+            - secretRef:
+                name: fake-slack
+          ports:
+            - containerPort: 443
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+          volumeMounts:
+            - name: app
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: app
+          configMap:
+            name: fake-slack
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fake-slack
+  labels:
+    app: fake-slack
+spec:
+  type: NodePort
+  selector:
+    app: fake-slack
+  ports:
+    - name: http
+      port: 443
+      targetPort: http
+      nodePort: 30443 # reached by the test runner via e2e/infra/kind.yaml

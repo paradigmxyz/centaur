@@ -1,6 +1,8 @@
 version: 2
 updates:
   - package-ecosystem: github-actions
+    cooldown:
+      default-days: 7
     directory: /
     schedule:
       interval: weekly
@@ -16,7 +18,43 @@ updates:
         patterns:
           - "*"
 
+  - package-ecosystem: docker
+    cooldown:
+      default-days: 7
+    directories:
+      - /services/api-rs
+      - /services/company-context
+      - /services/console
+      - /services/discordbot
+      - /services/githubbot
+      - /services/iron-proxy
+      - /services/linearbot
+      - /services/proxy-sync
+      - /services/sandbox
+      - /services/slackbotv2
+      - /services/teamsbot
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Denver
+    commit-message:
+      prefix: chore
+      include: scope
+    open-pull-requests-limit: 5
+    ignore:
+      # The sandbox/harness-server image stays pinned to ubuntu:24.04. Release
+      # upgrades change apt repo codenames and system Python paths, so they
+      # need a deliberate migration.
+      - dependency-name: ubuntu
+    groups:
+      docker-base-images:
+        patterns:
+          - "*"
+
   - package-ecosystem: bundler
+    cooldown:
+      default-days: 7
     directory: /services/console
     schedule:
       interval: weekly
@@ -28,10 +66,10 @@ updates:
       include: scope
     open-pull-requests-limit: 5
     ignore:
-      # rails-paradedb 0.10+ requires ParadeDB 0.25+, while Console runs 0.23.
-      - dependency-name: rails-paradedb
+      # Rails 8.1.4 is broken; see the exclusion in services/console/Gemfile.
+      - dependency-name: rails
         versions:
-          - ">= 0.10.0"
+          - "8.1.4"
     groups:
       ruby-dependencies:
         patterns:
@@ -39,6 +77,10 @@ updates:
 
   - package-ecosystem: cargo
     directory: /services/api-rs
+    cooldown:
+      default-days: 7
+    allow:
+      - dependency-type: all
     schedule:
       interval: weekly
       day: monday
@@ -55,6 +97,10 @@ updates:
 
   - package-ecosystem: cargo
     directory: /crates/absurd-sdk
+    cooldown:
+      default-days: 7
+    allow:
+      - dependency-type: all
     schedule:
       interval: weekly
       day: monday
@@ -71,6 +117,10 @@ updates:
 
   - package-ecosystem: cargo
     directory: /crates/active-record-encryption
+    cooldown:
+      default-days: 7
+    allow:
+      - dependency-type: all
     schedule:
       interval: weekly
       day: monday
@@ -87,6 +137,10 @@ updates:
 
   - package-ecosystem: cargo
     directory: /crates/harness-server
+    cooldown:
+      default-days: 7
+    allow:
+      - dependency-type: all
     schedule:
       interval: weekly
       day: monday
@@ -101,12 +155,25 @@ updates:
       - dependency-name: allocative
         versions:
           - ">= 0.3.6"
+      # The codex git dependency pins rama-core 0.3.0-alpha.4, whose caret requirements
+      # on these crates resolve to the incompatible stable 0.3.0 release.
+      - dependency-name: rama-error
+        versions:
+          - ">= 0.3.0"
+      - dependency-name: rama-macros
+        versions:
+          - ">= 0.3.0"
+      - dependency-name: rama-utils
+        versions:
+          - ">= 0.3.0"
     groups:
       harness-server-dependencies:
         patterns:
           - "*"
 
   - package-ecosystem: npm
+    cooldown:
+      default-days: 7
     directories:
       - /
       - /packages/*
@@ -134,6 +201,8 @@ updates:
           - "*"
 
   - package-ecosystem: npm
+    cooldown:
+      default-days: 7
     directory: /docs
     schedule:
       interval: weekly

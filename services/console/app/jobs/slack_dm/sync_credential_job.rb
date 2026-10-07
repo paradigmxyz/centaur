@@ -14,6 +14,8 @@ module SlackDm
     )
 
     def perform(oauth_app_slug = SlackDm::SyncCredential.oauth_app_slug, expected_not_before = nil)
+      return unless CompanyContextV1.enabled?
+
       # Credential IDs were the argument before this became a global cursor job.
       # Ignore any of those jobs that were already queued during deployment.
       return unless oauth_app_slug.is_a?(String)

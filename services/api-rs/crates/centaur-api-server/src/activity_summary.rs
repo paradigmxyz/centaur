@@ -1070,19 +1070,6 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_requires_conversational_step_status() {
-        assert!(SYSTEM_PROMPT.contains("first-person"));
-        assert!(SYSTEM_PROMPT.contains("at most 40 characters"));
-        assert!(SYSTEM_PROMPT.contains("hard limit is 45 characters"));
-        assert!(SYSTEM_PROMPT.contains("current step or latest finding"));
-        assert!(SYSTEM_PROMPT.contains("not the overall session goal"));
-        assert!(SYSTEM_PROMPT.contains("Name one specific thing"));
-        assert!(SYSTEM_PROMPT.contains("output exactly SKIP"));
-        assert!(SYSTEM_PROMPT.contains("Do not mention commands"));
-        assert!(SYSTEM_PROMPT.contains("Do not refer to \"the agent\""));
-    }
-
-    #[test]
     fn extracts_output_text_from_responses_body() {
         let text = extract_response_text(&json!({
             "output": [

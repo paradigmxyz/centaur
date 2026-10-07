@@ -1,6 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    pin::pin,
     sync::Arc,
+    time::Duration,
 };
 
 use absurd::{Client as AbsurdClient, Error as AbsurdError, SpawnOptions, TaskContext};
@@ -8,19 +10,24 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
+use tokio::time::interval;
 use tracing::{error, info, warn};
 
 use crate::{
     config::{
-        Config, DOCUMENT_DELETE_TASK, DOCUMENT_EMBED_TASK, DRIVE_CREDENTIALS_RECONCILE_TASK,
-        DRIVE_SCAN_TASK, PDF_EXTRACT_TASK, SHARED_DRIVE_SCAN_TASK, SHARED_DRIVES_DISCOVER_TASK,
-        SHARED_FOLDERS_BATCH_TASK,
+        Config, DOCUMENT_DELETE_TASK, DOCUMENT_EMBED_TASK, DOCUMENT_EXTRACT_TASK,
+        DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK, GOOGLE_DOC_MIME_TYPE, PDF_MIME_TYPE,
+        SHARED_DRIVE_SCAN_TASK, SHARED_DRIVES_DISCOVER_TASK, SHARED_FOLDERS_BATCH_TASK,
     },
-    credentials::GoogleCredential,
-    drive::{DriveChange, DriveClient, DriveFile, Permission},
+    credentials::{ConsoleCredentials, GoogleCredential},
+    drive::{DriveChange, DriveClient, DriveFile},
     embeddings::EmbeddingsClient,
     errors::{is_rejected, rejected},
-    extraction::{chunk_text, extract_pdf_text, hex_sha256},
+    extraction::{chunk_text, extract_google_doc_text, extract_pdf_text, hex_sha256},
+    granola::GranolaClient,
+    granola_tasks,
+    slack::SlackClient,
+    slack_documents, slack_files,
 };
 
 #[derive(Clone)]
@@ -28,7 +35,10 @@ pub struct TaskState {
     pub config: Arc<Config>,
     pub pool: PgPool,
     pub absurd: AbsurdClient,
+    pub credentials: Arc<ConsoleCredentials>,
     pub drive: DriveClient,
+    pub granola: GranolaClient,
+    pub slack: SlackClient,
     pub embeddings: EmbeddingsClient,
 }
 
@@ -105,12 +115,16 @@ pub struct TaskSummary {
 }
 
 pub fn register(state: TaskState) -> Result<()> {
+    granola_tasks::register(&state)?;
+    slack_documents::register(&state)?;
+    slack_files::register(&state)?;
+
     let reconcile_state = state.clone();
     state.absurd.register_task(
         DRIVE_CREDENTIALS_RECONCILE_TASK,
         move |params: ReconcileCredentialsParams, ctx| {
             let state = reconcile_state.clone();
-            async move { task_result(reconcile_credentials(&state, params, &ctx).await) }
+            async move { run_task(&ctx, reconcile_credentials(&state, params, &ctx)).await }
         },
     )?;
 
@@ -119,7 +133,7 @@ pub fn register(state: TaskState) -> Result<()> {
         .absurd
         .register_task(DRIVE_SCAN_TASK, move |params: ScanParams, ctx| {
             let state = scan_state.clone();
-            async move { task_result(scan_drive(&state, params, &ctx).await) }
+            async move { run_task(&ctx, scan_drive(&state, params, &ctx)).await }
         })?;
 
     let discover_state = state.clone();
@@ -127,7 +141,7 @@ pub fn register(state: TaskState) -> Result<()> {
         SHARED_DRIVES_DISCOVER_TASK,
         move |params: DiscoverSharedDrivesParams, ctx| {
             let state = discover_state.clone();
-            async move { task_result(discover_shared_drives(&state, params, &ctx).await) }
+            async move { run_task(&ctx, discover_shared_drives(&state, params, &ctx)).await }
         },
     )?;
 
@@ -136,7 +150,7 @@ pub fn register(state: TaskState) -> Result<()> {
         SHARED_FOLDERS_BATCH_TASK,
         move |params: FolderBatchParams, ctx| {
             let state = batch_state.clone();
-            async move { task_result(walk_folder_batch(&state, params, &ctx).await) }
+            async move { run_task(&ctx, walk_folder_batch(&state, params, &ctx)).await }
         },
     )?;
 
@@ -145,16 +159,16 @@ pub fn register(state: TaskState) -> Result<()> {
         SHARED_DRIVE_SCAN_TASK,
         move |params: SharedDriveScanParams, ctx| {
             let state = shared_scan_state.clone();
-            async move { task_result(scan_shared_drive(&state, params, &ctx).await) }
+            async move { run_task(&ctx, scan_shared_drive(&state, params, &ctx)).await }
         },
     )?;
 
     let extract_state = state.clone();
     state
         .absurd
-        .register_task(PDF_EXTRACT_TASK, move |params: ExtractParams, ctx| {
+        .register_task(DOCUMENT_EXTRACT_TASK, move |params: ExtractParams, ctx| {
             let state = extract_state.clone();
-            async move { task_result(extract_pdf(&state, params, &ctx).await) }
+            async move { run_task(&ctx, extract_document(&state, params, &ctx)).await }
         })?;
 
     let embed_state = state.clone();
@@ -162,14 +176,14 @@ pub fn register(state: TaskState) -> Result<()> {
         .absurd
         .register_task(DOCUMENT_EMBED_TASK, move |params: EmbedParams, ctx| {
             let state = embed_state.clone();
-            async move { task_result(embed_document(&state, params, &ctx).await) }
+            async move { run_task(&ctx, embed_document(&state, params, &ctx)).await }
         })?;
 
     let delete_client = state.absurd.clone();
     let delete_state = state;
     delete_client.register_task(DOCUMENT_DELETE_TASK, move |params: DeleteParams, ctx| {
         let state = delete_state.clone();
-        async move { task_result(delete_document(&state, params, &ctx).await) }
+        async move { run_task(&ctx, delete_document(&state, params, &ctx)).await }
     })?;
     Ok(())
 }
@@ -187,32 +201,17 @@ async fn reconcile_credentials(
     let mut tx = state.pool.begin().await?;
     let stale_observations = sqlx::query(
         r#"
-        UPDATE company_context_system.google_drive_broker_observations
+        UPDATE company_context_data.google_drive_broker_observations
         SET active = FALSE,
             updated_at = NOW()
         WHERE active
           AND NOT (broker_credential_id = ANY($1::bigint[]))
-        RETURNING broker_credential_id, file_id
         "#,
     )
     .bind(&retained_ids)
-    .fetch_all(&mut *tx)
-    .await?;
-    for observation in &stale_observations {
-        let credential_id: i64 = observation.try_get("broker_credential_id")?;
-        let file_id: String = observation.try_get("file_id")?;
-        sqlx::query(
-            r#"
-            DELETE FROM company_context_data.google_drive_document_access
-            WHERE file_id = $1
-              AND permission_id = $2
-            "#,
-        )
-        .bind(file_id)
-        .bind(format!("broker:{credential_id}"))
-        .execute(&mut *tx)
-        .await?;
-    }
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
 
     let candidate_rows = sqlx::query(
         r#"
@@ -220,7 +219,7 @@ async fn reconcile_credentials(
         FROM company_context_system.google_drive_files files
         WHERE NOT EXISTS (
             SELECT 1
-            FROM company_context_system.google_drive_broker_observations observations
+            FROM company_context_data.google_drive_broker_observations observations
             WHERE observations.file_id = files.file_id
               AND observations.active
         )
@@ -258,7 +257,7 @@ async fn reconcile_credentials(
             r#"
             SELECT EXISTS (
                 SELECT 1
-                FROM company_context_system.google_drive_broker_observations
+                FROM company_context_data.google_drive_broker_observations
                 WHERE file_id = $1
                   AND active
             )
@@ -312,7 +311,7 @@ async fn reconcile_credentials(
     info!(
         event = "company_context_credentials_reconciled",
         task_id = ctx.task_id(),
-        observations_deactivated = stale_observations.len(),
+        observations_deactivated = stale_observations,
         files_enqueued = deletions.len()
     );
     Ok(TaskSummary {
@@ -397,7 +396,7 @@ async fn discover_shared_drives(
     let departed_files: Vec<String> = sqlx::query_scalar(
         r#"
         SELECT observations.file_id
-        FROM company_context_system.google_drive_broker_observations observations
+        FROM company_context_data.google_drive_broker_observations observations
         JOIN company_context_system.google_drive_files files
           ON files.file_id = observations.file_id
         WHERE observations.broker_credential_id = $1
@@ -505,7 +504,7 @@ fn group_folder_roots(
                 .or_default()
                 .folder_ids
                 .push(file.id);
-        } else if file.is_active_pdf() {
+        } else if file.is_active_document() {
             roots
                 .entry(file.drive_id.clone())
                 .or_default()
@@ -517,7 +516,7 @@ fn group_folder_roots(
 }
 
 /// Lists the children of a batch of shared folders in a Shared Drive the user
-/// is not a member of, records the PDFs, and spawns batches for the subfolders.
+/// is not a member of, records supported documents, and spawns batches for the subfolders.
 /// Discovery spawns the root batches each interval, and its sweep removes files
 /// that these walks have not reached for a while.
 async fn walk_folder_batch(
@@ -544,7 +543,7 @@ async fn walk_folder_batch(
             }
             if child.is_active_folder() {
                 child_folder_ids.push(child.id);
-            } else if child.is_active_pdf() {
+            } else if child.is_active_document() {
                 files += enqueue_file(state, &credential, child).await? as usize;
             }
         }
@@ -629,7 +628,7 @@ enum ChangeAction {
 fn classify_change(change: DriveChange, shared_drive_id: Option<&str>) -> ChangeAction {
     match change.file {
         Some(file) if !file.belongs_to(shared_drive_id) => ChangeAction::Skip,
-        Some(file) if !change.removed && file.is_active_pdf() => {
+        Some(file) if !change.removed && file.is_active_document() => {
             ChangeAction::Observe(Box::new(file))
         }
         _ => ChangeAction::Remove(change.file_id),
@@ -676,7 +675,7 @@ async fn scan_corpus(
             };
             let page = state
                 .drive
-                .list_pdfs(
+                .list_documents(
                     credential.id,
                     shared_drive_id,
                     state.config.scan_page_size,
@@ -801,7 +800,7 @@ async fn enqueue_files(
     let mut count = 0;
     for file in files
         .into_iter()
-        .filter(|file| file.is_active_pdf() && file.belongs_to(shared_drive_id))
+        .filter(|file| file.is_active_document() && file.belongs_to(shared_drive_id))
     {
         count += enqueue_file(state, credential, file).await? as usize;
     }
@@ -822,7 +821,7 @@ async fn enqueue_file(
     let result = state
         .absurd
         .spawn(
-            PDF_EXTRACT_TASK,
+            DOCUMENT_EXTRACT_TASK,
             ExtractParams {
                 credential_id: credential.id,
                 credential_revision: credential.revision.clone(),
@@ -831,7 +830,7 @@ async fn enqueue_file(
             },
             SpawnOptions {
                 idempotency_key: Some(format!(
-                    "drive.pdf.extract:{}:{}:{source_version}:{}",
+                    "drive.document.extract:{}:{}:{source_version}:{}",
                     credential.id, file.id, credential.revision
                 )),
                 ..SpawnOptions::default()
@@ -882,7 +881,7 @@ async fn observe_file(
     let mut tx = pool.begin().await?;
     sqlx::query(
         r#"
-        INSERT INTO company_context_system.google_drive_broker_observations (
+        INSERT INTO company_context_data.google_drive_broker_observations (
             broker_credential_id, file_id, provider_email, provider_subject,
             observation_key, active, last_seen_at, updated_at
         )
@@ -901,25 +900,6 @@ async fn observe_file(
     .bind(&credential.provider_email)
     .bind(&credential.provider_subject)
     .bind(observation_key)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO company_context_data.google_drive_document_access (
-            file_id, permission_id, permission_type, role, email_address,
-            source_version, updated_at
-        )
-        VALUES ($1, $2, 'broker_user', 'reader', $3, $4, NOW())
-        ON CONFLICT (file_id, permission_id) DO UPDATE
-        SET email_address = EXCLUDED.email_address,
-            source_version = EXCLUDED.source_version,
-            updated_at = NOW()
-        "#,
-    )
-    .bind(&file.id)
-    .bind(format!("broker:{}", credential.id))
-    .bind(&credential.provider_email)
-    .bind(file.source_version())
     .execute(&mut *tx)
     .await?;
     let updated = sqlx::query(
@@ -984,7 +964,7 @@ async fn observe_delete(
     let mut tx = pool.begin().await?;
     let observed = sqlx::query(
         r#"
-        UPDATE company_context_system.google_drive_broker_observations
+        UPDATE company_context_data.google_drive_broker_observations
         SET active = FALSE,
             observation_key = $3,
             updated_at = NOW()
@@ -1005,22 +985,11 @@ async fn observe_delete(
         tx.rollback().await?;
         return Ok(false);
     }
-    sqlx::query(
-        r#"
-        DELETE FROM company_context_data.google_drive_document_access
-        WHERE file_id = $1
-          AND permission_id = $2
-        "#,
-    )
-    .bind(file_id)
-    .bind(format!("broker:{credential_id}"))
-    .execute(&mut *tx)
-    .await?;
     let remains_visible = sqlx::query_scalar::<_, bool>(
         r#"
         SELECT EXISTS (
             SELECT 1
-            FROM company_context_system.google_drive_broker_observations
+            FROM company_context_data.google_drive_broker_observations
             WHERE file_id = $1
               AND active
         )
@@ -1057,7 +1026,7 @@ async fn observe_delete(
     Ok(true)
 }
 
-async fn extract_pdf(
+async fn extract_document(
     state: &TaskState,
     params: ExtractParams,
     ctx: &TaskContext,
@@ -1071,22 +1040,36 @@ async fn extract_pdf(
         });
     }
     let result = async {
-        if !file.is_active_pdf() {
-            return Err(rejected("extract task received a non-PDF or trashed file"));
+        if !file.is_active_document() {
+            return Err(rejected(
+                "extract task received an unsupported or trashed file",
+            ));
         }
-        let pdf = state
-            .drive
-            .download_pdf(params.credential_id, &file.id)
-            .await?;
-        let text = extract_pdf_text(
-            pdf,
-            state.config.extraction_timeout,
-            state.config.max_extracted_bytes,
-        )
-        .await?;
+        let text = match file.mime_type.as_str() {
+            PDF_MIME_TYPE => {
+                let pdf = state
+                    .drive
+                    .download_pdf(params.credential_id, &file.id)
+                    .await?;
+                extract_pdf_text(
+                    pdf,
+                    state.config.extraction_timeout,
+                    state.config.max_extracted_bytes,
+                )
+                .await?
+            }
+            GOOGLE_DOC_MIME_TYPE => {
+                let document = state
+                    .drive
+                    .export_google_doc(params.credential_id, &file.id)
+                    .await?;
+                extract_google_doc_text(document, state.config.max_extracted_bytes)?
+            }
+            _ => unreachable!("active documents have a supported MIME type"),
+        };
         let chunks = chunk_text(&text, state.config.chunk_chars);
         if chunks.is_empty() {
-            return Err(rejected("PDF produced no non-empty chunks"));
+            return Err(rejected("Drive document produced no non-empty chunks"));
         }
         let content_hash = hex_sha256(text.as_bytes());
         let mut tx = state.pool.begin().await?;
@@ -1151,7 +1134,7 @@ async fn extract_pdf(
                 },
                 SpawnOptions {
                     idempotency_key: Some(format!(
-                        "drive.document.embed:{}:{}:{content_hash}:{}:{}",
+                        "drive.document.embed:{}:{}:{content_hash}:{}:{}:{observation_key}",
                         params.credential_id,
                         file.id,
                         state.embeddings.model(),
@@ -1172,7 +1155,7 @@ async fn extract_pdf(
         }),
         Ok(chunks) => {
             info!(
-                event = "company_context_pdf_extracted",
+                event = "company_context_drive_document_extracted",
                 task_id = ctx.task_id(),
                 file_id = file.id,
                 chunks
@@ -1195,7 +1178,7 @@ async fn extract_pdf(
             .await;
             if rejected {
                 warn!(
-                    event = "company_context_pdf_rejected",
+                    event = "company_context_drive_document_rejected",
                     task_id = ctx.task_id(),
                     file_id = file.id,
                     error = %error
@@ -1281,21 +1264,65 @@ async fn embed_document(
             files: 0,
         });
     }
-    let title: String = row.try_get("name")?;
-    let inputs = chunk_rows
+    let metadata: Value = row.try_get("metadata")?;
+    let file: DriveFile =
+        serde_json::from_value(metadata.clone()).context("decode staged Drive metadata")?;
+    let mut chunks = Vec::with_capacity(chunk_rows.len());
+    for chunk in &chunk_rows {
+        let chunk_id: String = chunk.try_get("chunk_id")?;
+        let body: String = chunk.try_get("body")?;
+        let content_hash = hex_sha256(format!("{}\n\n{}", file.name, body).as_bytes());
+        let document_id = format!("google-drive:{}:{chunk_id}", file.id);
+        chunks.push((document_id, chunk_id, body, content_hash));
+    }
+    // Drive versions change for metadata-only edits; reuse vectors for unchanged chunk text.
+    let reusable: BTreeSet<String> = sqlx::query_scalar(
+        r#"
+        SELECT embeddings.document_id
+        FROM company_context_data.google_drive_document_embeddings embeddings
+        JOIN unnest($1::text[], $2::text[]) AS chunks(document_id, content_hash)
+          ON chunks.document_id = embeddings.document_id
+         AND chunks.content_hash = embeddings.content_hash
+        WHERE embeddings.model = $3
+          AND embeddings.dimensions = $4
+        "#,
+    )
+    .bind(
+        chunks
+            .iter()
+            .map(|chunk| chunk.0.as_str())
+            .collect::<Vec<_>>(),
+    )
+    .bind(
+        chunks
+            .iter()
+            .map(|chunk| chunk.3.as_str())
+            .collect::<Vec<_>>(),
+    )
+    .bind(state.embeddings.model())
+    .bind(state.embeddings.dimensions() as i32)
+    .fetch_all(&state.pool)
+    .await?
+    .into_iter()
+    .collect();
+    let inputs = chunks
         .iter()
-        .map(|row| {
-            let body = row.get::<String, _>("body");
-            if title.is_empty() {
-                body
+        .filter(|chunk| !reusable.contains(&chunk.0))
+        .map(|(_, _, body, _)| {
+            if file.name.is_empty() {
+                body.clone()
             } else {
-                format!("{title}\n\n{body}")
+                format!("{}\n\n{body}", file.name)
             }
         })
         .collect::<Vec<_>>();
-    let result = state.embeddings.embed(&inputs).await;
-    let embeddings = match result {
-        Ok(embeddings) => embeddings,
+    let result = if inputs.is_empty() {
+        Ok(Vec::new())
+    } else {
+        state.embeddings.embed(&inputs).await
+    };
+    let mut embeddings = match result {
+        Ok(embeddings) => embeddings.into_iter(),
         Err(error) => {
             let rejected = is_rejected(&error);
             record_embedding_failure(
@@ -1321,9 +1348,6 @@ async fn embed_document(
             return Err(error);
         }
     };
-    let metadata: Value = row.try_get("metadata")?;
-    let file: DriveFile =
-        serde_json::from_value(metadata.clone()).context("decode staged Drive metadata")?;
     let mut tx = state.pool.begin().await?;
     if !lock_current_observation(&mut tx, &file.id, &params.observation_key).await? {
         tx.rollback().await?;
@@ -1332,13 +1356,8 @@ async fn embed_document(
             files: 0,
         });
     }
-    replace_access(&mut tx, &file.id, &file.source_version(), &file.permissions).await?;
-    let mut document_ids = Vec::with_capacity(chunk_rows.len());
-    for (chunk, embedding) in chunk_rows.iter().zip(embeddings) {
-        let chunk_id: String = chunk.try_get("chunk_id")?;
-        let body: String = chunk.try_get("body")?;
-        let content_hash = hex_sha256(format!("{}\n\n{}", file.name, body).as_bytes());
-        let document_id = format!("google-drive:{}:{chunk_id}", file.id);
+    let mut document_ids = Vec::with_capacity(chunks.len());
+    for (document_id, chunk_id, body, content_hash) in &chunks {
         document_ids.push(document_id.clone());
         sqlx::query(
             r#"
@@ -1348,11 +1367,13 @@ async fn embed_document(
                 source_version, content_hash, metadata, updated_at
             )
             VALUES (
-                $1, $2, $3, 'pdf', $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                $13, NOW()
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                $14, NOW()
             )
             ON CONFLICT (document_id) DO UPDATE
-            SET title = EXCLUDED.title,
+            SET document_type = EXCLUDED.document_type,
+                mime_type = EXCLUDED.mime_type,
+                title = EXCLUDED.title,
                 body = EXCLUDED.body,
                 url = EXCLUDED.url,
                 drive_id = EXCLUDED.drive_id,
@@ -1364,21 +1385,31 @@ async fn embed_document(
                 updated_at = NOW()
             "#,
         )
-        .bind(&document_id)
+        .bind(document_id)
         .bind(&file.id)
-        .bind(&chunk_id)
+        .bind(chunk_id)
+        .bind(
+            file.document_type()
+                .context("staged Drive file has unsupported MIME type")?,
+        )
         .bind(&file.mime_type)
         .bind(&file.name)
-        .bind(&body)
+        .bind(body)
         .bind(&file.web_view_link)
         .bind(&file.drive_id)
         .bind(file.created_time)
         .bind(file.modified_time)
         .bind(file.source_version())
-        .bind(&content_hash)
+        .bind(content_hash)
         .bind(&metadata)
         .execute(&mut *tx)
         .await?;
+        if reusable.contains(document_id) {
+            continue;
+        }
+        let embedding = embeddings
+            .next()
+            .context("embeddings response omitted a chunk")?;
         let vector = serde_json::to_string(&embedding)?;
         sqlx::query(
             r#"
@@ -1394,10 +1425,10 @@ async fn embed_document(
                 updated_at = NOW()
             "#,
         )
-        .bind(&document_id)
+        .bind(document_id)
         .bind(state.embeddings.model())
         .bind(state.embeddings.dimensions() as i32)
-        .bind(&content_hash)
+        .bind(content_hash)
         .bind(vector)
         .execute(&mut *tx)
         .await?;
@@ -1443,49 +1474,6 @@ async fn embed_document(
     })
 }
 
-async fn replace_access(
-    tx: &mut Transaction<'_, Postgres>,
-    file_id: &str,
-    source_version: &str,
-    permissions: &[Permission],
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        DELETE FROM company_context_data.google_drive_document_access
-        WHERE file_id = $1
-          AND permission_type <> 'broker_user'
-        "#,
-    )
-    .bind(file_id)
-    .execute(&mut **tx)
-    .await?;
-    for permission in permissions
-        .iter()
-        .filter(|permission| !permission.id.is_empty())
-    {
-        sqlx::query(
-            r#"
-            INSERT INTO company_context_data.google_drive_document_access (
-                file_id, permission_id, permission_type, role, email_address,
-                domain, allow_file_discovery, source_version
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            "#,
-        )
-        .bind(file_id)
-        .bind(&permission.id)
-        .bind(&permission.permission_type)
-        .bind(&permission.role)
-        .bind(&permission.email_address)
-        .bind(&permission.domain)
-        .bind(permission.allow_file_discovery)
-        .bind(source_version)
-        .execute(&mut **tx)
-        .await?;
-    }
-    Ok(())
-}
-
 async fn delete_document(
     state: &TaskState,
     params: DeleteParams,
@@ -1503,7 +1491,7 @@ async fn delete_document(
         r#"
         SELECT EXISTS (
             SELECT 1
-            FROM company_context_system.google_drive_broker_observations
+            FROM company_context_data.google_drive_broker_observations
             WHERE file_id = $1
               AND active
         )
@@ -1522,15 +1510,6 @@ async fn delete_document(
     sqlx::query(
         r#"
         DELETE FROM company_context_data.google_drive_documents
-        WHERE file_id = $1
-        "#,
-    )
-    .bind(&params.file_id)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        r#"
-        DELETE FROM company_context_data.google_drive_document_access
         WHERE file_id = $1
         "#,
     )
@@ -1721,7 +1700,7 @@ async fn record_embedding_failure(
     }
 }
 
-fn bounded_error(error: &anyhow::Error) -> String {
+pub(crate) fn bounded_error(error: &anyhow::Error) -> String {
     error.to_string().chars().take(1_000).collect()
 }
 
@@ -1729,8 +1708,38 @@ fn nonempty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
-fn task_result<T>(result: Result<T>) -> absurd::Result<T> {
-    result.map_err(|error| AbsurdError::TaskFailed(error.into_boxed_dyn_error()))
+/// Absurd reclaims a task whose lease is not extended within the worker's
+/// claim timeout (120 seconds by default), and the worker exits once a task
+/// overruns it twice. Extending the lease while the task runs lets long
+/// external calls, such as embeddings requests, finish.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Runs a task handler, extending its lease until it finishes.
+pub(crate) async fn run_task<T>(
+    ctx: &TaskContext,
+    work: impl Future<Output = Result<T>>,
+) -> absurd::Result<T> {
+    let mut work = pin!(work);
+    let mut heartbeat = interval(HEARTBEAT_INTERVAL);
+    heartbeat.tick().await;
+    let result = loop {
+        tokio::select! {
+            result = &mut work => break result,
+            _ = heartbeat.tick() => ctx.heartbeat(None).await?,
+        }
+    };
+    result.map_err(task_error)
+}
+
+/// Keeps Absurd's control flow, such as suspending for a durable sleep, intact
+/// through `anyhow` so a sleeping task is not recorded as failed.
+fn task_error(error: anyhow::Error) -> AbsurdError {
+    match error.downcast_ref::<AbsurdError>() {
+        Some(AbsurdError::Suspend) => AbsurdError::Suspend,
+        Some(AbsurdError::Cancelled) => AbsurdError::Cancelled,
+        Some(AbsurdError::FailedRun) => AbsurdError::FailedRun,
+        _ => AbsurdError::TaskFailed(error.into_boxed_dyn_error()),
+    }
 }
 
 #[cfg(test)]
@@ -1761,7 +1770,11 @@ mod tests {
     }
 
     fn pdf(drive_id: &str) -> DriveFile {
-        drive_file("file-1", "application/pdf", drive_id)
+        drive_file("file-1", PDF_MIME_TYPE, drive_id)
+    }
+
+    fn google_doc(drive_id: &str) -> DriveFile {
+        drive_file("doc-1", GOOGLE_DOC_MIME_TYPE, drive_id)
     }
 
     #[test]
@@ -1770,8 +1783,8 @@ mod tests {
         let roots = group_folder_roots(
             vec![
                 drive_file("folder-a", folder, "drive-a"),
-                drive_file("pdf-a", "application/pdf", "drive-a"),
-                drive_file("doc-a", "application/vnd.google-apps.document", "drive-a"),
+                drive_file("pdf-a", PDF_MIME_TYPE, "drive-a"),
+                drive_file("doc-a", GOOGLE_DOC_MIME_TYPE, "drive-a"),
                 drive_file("folder-b", folder, "drive-b"),
                 drive_file("folder-member", folder, "drive-member"),
                 drive_file("folder-my-drive", folder, ""),
@@ -1786,7 +1799,7 @@ mod tests {
                 .iter()
                 .map(|file| file.id.as_str())
                 .collect::<Vec<_>>(),
-            ["pdf-a"]
+            ["pdf-a", "doc-a"]
         );
         assert_eq!(roots["drive-b"].folder_ids, ["folder-b"]);
         assert!(roots["drive-b"].files.is_empty());
@@ -1809,6 +1822,10 @@ mod tests {
         ));
         assert!(matches!(
             classify_change(change("file-1", false, Some(pdf(""))), None),
+            ChangeAction::Observe(_)
+        ));
+        assert!(matches!(
+            classify_change(change("doc-1", false, Some(google_doc(""))), None),
             ChangeAction::Observe(_)
         ));
     }
@@ -1835,6 +1852,18 @@ mod tests {
             checkpoint_scope(7, Some("drive-a")),
             "shared_drive:drive-a:broker:7"
         );
+    }
+
+    #[test]
+    fn suspension_is_not_a_task_failure() {
+        let suspended = Err::<(), _>(AbsurdError::Suspend)
+            .context("wait for Slack rate limit")
+            .unwrap_err();
+        assert!(matches!(task_error(suspended), AbsurdError::Suspend));
+        assert!(matches!(
+            task_error(anyhow!("boom")),
+            AbsurdError::TaskFailed(_)
+        ));
     }
 
     #[test]

@@ -31,9 +31,10 @@ use crate::amp::AmpHarness;
 use crate::claude::ClaudeCodeHarness;
 use crate::codex::CodexHarnessServer;
 use crate::otel::{TraceContext, TurnStatus as TelemetryTurnStatus, TurnTelemetry};
+use crate::pi::PiHarness;
 use crate::traits::{
     AppServerNormalizer, AppServerRuntime, HarnessChild, HarnessKind, HarnessServer,
-    NormalizedEvent, ThreadState,
+    NormalizedEvent, ThreadState, TurnHold,
 };
 use crate::turn::{BridgeConfig, CodexTurnNormalizer};
 use crate::util::{absolute_path, default_codex_home, write_value};
@@ -45,6 +46,7 @@ pub fn server_for(kind: HarnessKind) -> Box<dyn AppServerRuntime> {
         HarnessKind::Codex => Box::new(CodexHarnessServer::codex()),
         HarnessKind::ClaudeCode => Box::new(AppServerNormalizer::new(ClaudeCodeHarness)),
         HarnessKind::Amp => Box::new(AppServerNormalizer::new(AmpHarness)),
+        HarnessKind::Pi => Box::new(AppServerNormalizer::new(PiHarness)),
     }
 }
 
@@ -57,6 +59,7 @@ pub fn run_blocks_server(kind: HarnessKind) -> Result<()> {
         HarnessKind::Codex => crate::codex::run_codex_blocks_server(CodexHarnessServer::codex()),
         HarnessKind::ClaudeCode => run_blocks_app_server(&ClaudeCodeHarness),
         HarnessKind::Amp => run_blocks_app_server(&AmpHarness),
+        HarnessKind::Pi => run_blocks_app_server(&PiHarness),
     }
 }
 
@@ -144,16 +147,23 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                 input,
                 client_user_message_id,
                 model,
-                // Provider selection and reasoning effort only apply to the codex
-                // harness; the emulated (claude/amp) app-server has no equivalent
-                // knob (its provider is fixed at thread start from session params).
+                // Provider selection only applies to the codex harness; the
+                // emulated (claude/amp) app-server fixes its provider at thread
+                // start from session params. Reasoning effort is applied by
+                // per turn by harnesses that support it.
                 provider: _,
-                reasoning: _,
+                reasoning,
                 trace_context,
             }) => {
                 if let Some(model) = model {
                     state.model = model;
                 }
+                if trace_context.thread_key.is_some() {
+                    state.thread_key.clone_from(&trace_context.thread_key);
+                }
+                state.reasoning_effort = reasoning
+                    .as_deref()
+                    .and_then(|reasoning| harness.reasoning_effort(reasoning));
                 let result = run_blocks_turn(
                     harness,
                     &mut state,
@@ -967,6 +977,13 @@ fn handle_request<H: HarnessServer, W: Write>(
                     thread_id: params.thread_id.clone(),
                 }
             })?;
+            let effort = match &params.effort {
+                Some(effort) => serde_json::to_value(effort)?.as_str().map(str::to_owned),
+                None => None,
+            };
+            state.reasoning_effort = effort
+                .as_deref()
+                .and_then(|effort| harness.reasoning_effort(effort));
             let turn_id = format!("turn-{}", Uuid::new_v4().simple());
             let mut normalizer = normalizer_for(harness, state, &turn_id);
             let response = TurnStartResponse {
@@ -1053,7 +1070,9 @@ fn resumed_thread_state<H: HarnessServer>(
             .clone()
             .unwrap_or_else(|| harness.default_model_provider().to_string()),
         service_tier: params.service_tier.clone().flatten(),
+        reasoning_effort: None,
         harness_session_id: Some(params.thread_id.clone()),
+        thread_key: None,
         completed_turns: Vec::new(),
         process: None,
         thread_started_sent: false,
@@ -1300,6 +1319,13 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
         // late `result` (and trailing rate-limit noise) behind, which would
         // otherwise read as this turn's instant terminal.
         while process.stdout.try_recv().is_ok() {}
+        if process.reasoning_effort != state.reasoning_effort {
+            let effort = state.reasoning_effort.as_deref();
+            process
+                .stdin
+                .write_all(&harness.stdin_for_reasoning_effort(effort)?)?;
+            process.reasoning_effort = state.reasoning_effort.clone();
+        }
         process.stdin.write_all(&harness.stdin_for_turn(input)?)?;
         process.stdin.flush()?;
     }
@@ -1310,6 +1336,9 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
     // the fallback. Any further output (the native result on its way, trailing
     // noise, or a continuation of the turn) pushes the deadline back.
     let mut settle_deadline: Option<Instant> = None;
+    // Armed while the harness holds the turn for a background follow-up that
+    // has not started; any output pushes it back.
+    let mut hold_deadline: Option<Instant> = None;
     let mut last_session_id = state.harness_session_id.clone();
     let mut event_normalizer = H::EventNormalizer::default();
     let mut completed_turn = None;
@@ -1373,6 +1402,17 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
                         _ => {}
                     }
                 }
+                hold_deadline = match harness.turn_hold(&event_normalizer) {
+                    TurnHold::Idle(window) => Some(Instant::now() + window),
+                    TurnHold::Released | TurnHold::Waiting => None,
+                };
+            }
+            Err(RecvTimeoutError::Timeout)
+                if hold_deadline.is_some_and(|deadline| Instant::now() >= deadline) =>
+            {
+                return Err(HarnessServerError::BackgroundFollowUpStalled {
+                    kind: harness.kind(),
+                });
             }
             Err(RecvTimeoutError::Timeout) => match settle_deadline {
                 Some(deadline) if Instant::now() >= deadline => terminal = true,
@@ -1401,6 +1441,12 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
             }
         }
         if terminal {
+            // Background work outliving the turn (e.g. an error result while
+            // agents run) would deliver its output into the next turn; stop
+            // it with the process, which the next turn resumes.
+            if harness.turn_hold(&event_normalizer) != TurnHold::Released {
+                state.process = None;
+            }
             if let Some(notification) = normalizer.finish_turn(None)? {
                 if let ServerNotification::TurnCompleted(completed) = &notification {
                     completed_turn = Some(completed.turn.clone());
@@ -1445,12 +1491,23 @@ pub(crate) fn usage_span_input_value(input: &[UserInput]) -> Option<String> {
 }
 
 fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState) -> Result<()> {
-    if let Some(process) = state.process.as_mut() {
-        if process.child.try_wait()?.is_none() {
-            return Ok(());
-        }
-        state.process = None;
+    if let Some(process) = state.process.as_mut()
+        && (process.model == state.model || !harness.restart_on_model_change())
+        && process.child.try_wait()?.is_none()
+    {
+        return Ok(());
     }
+    if !state.model.is_empty()
+        && let Err(message) = harness.validate_model(&state.model)
+    {
+        // Fail this turn, and let later turns run the last working model.
+        state.model = state
+            .process
+            .as_ref()
+            .map_or_else(|| harness.default_model(), |process| process.model.clone());
+        return Err(HarnessServerError::UnknownModel { message });
+    }
+    state.process = None;
 
     let mut command = harness.command_for_turn(state);
     let mut child = command
@@ -1500,6 +1557,8 @@ fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState
         child,
         stdin,
         stdout: stdout_rx,
+        model: state.model.clone(),
+        reasoning_effort: None,
     });
     Ok(())
 }

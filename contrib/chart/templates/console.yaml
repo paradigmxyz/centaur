@@ -268,6 +268,8 @@ spec:
 {{- end }}
             - name: CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED
               value: {{ $console.googleDocsSync.enabled | quote }}
+            - name: CENTAUR_CONSOLE_COMPANY_CONTEXT_V1_ENABLED
+              value: {{ .Values.companyContextV1.enabled | quote }}
             - name: PORT
               value: {{ $console.service.httpPort | quote }}
             - name: RAILS_LOG_TO_STDOUT
@@ -328,9 +330,8 @@ spec:
     - Egress
   ingress:
     # api-rs is the control-plane caller (it registers principals/roles/grants
-    # on startup and per session); per-sandbox
-    # iron-proxy pods sync their effective config from the control plane over
-    # /proxy/sync in managed mode. Widen this when another concrete client
+    # on startup and per session); per-sandbox iron-proxy pods forward sandbox
+    # entitlement requests. Widen this when another concrete client
     # integrates. (kubectl port-forward works regardless — it arrives via the
     # kubelet, not pod-to-pod.)
     - from:
@@ -339,7 +340,7 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
 {{- end }}
-        # Per-sandbox iron-proxy pods pulling their config in managed mode.
+        # Per-sandbox iron-proxy pods forwarding sandbox entitlement requests.
         - podSelector:
             matchLabels:
               centaur.ai/iron-proxy: "true"
@@ -356,15 +357,7 @@ spec:
         - protocol: TCP
           port: {{ $console.service.httpPort }}
   egress:
-{{- if .Values.postgres.enabled }}
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: 5432
-{{- end }}
+    {{- include "centaur.postgresEgress" . | nindent 4 }}
 {{- if .Values.apiRs.enabled }}
     - to:
         - podSelector:

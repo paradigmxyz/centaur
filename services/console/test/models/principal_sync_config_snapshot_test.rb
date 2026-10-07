@@ -316,7 +316,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
       foreign_id: "pg-analytics-privileged",
       name: "analytics privileged",
       database: low.database,
-      role: "centaur_readonly",
+      role: "analytics_reader",
       created_by: users(:acme_admin)
     )
     high.build_dsn_source(source_type: "env", config: { "var" => "PG_PRIVILEGED_DSN" })

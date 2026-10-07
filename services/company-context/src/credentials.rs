@@ -9,7 +9,7 @@ use sqlx::{
     types::Json,
 };
 
-use crate::config::Config;
+use crate::{config::Config, slack::conversation_types};
 
 const DRIVE_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/drive.readonly";
 
@@ -18,6 +18,31 @@ pub struct ConsoleCredentials {
     pool: PgPool,
     encryption: Arc<ActiveRecordEncryption>,
     google_oauth_app_slug: String,
+    granola_oauth_app_slug: String,
+    slack_oauth_app_slug: String,
+    /// Sync limits; an empty list allows every credential.
+    google_user_emails: Vec<String>,
+    granola_user_emails: Vec<String>,
+    slack_user_ids: Vec<String>,
+    slack_conversation_types: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SlackCredential {
+    pub id: i64,
+    pub access_token: String,
+    /// Conversation types the credential's scopes can list and read.
+    pub conversation_types: Vec<&'static str>,
+    /// Whether the credential's scopes can download files.
+    pub can_read_files: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct GranolaCredential {
+    pub id: i64,
+    pub access_token: String,
+    pub provider_email: String,
+    pub provider_subject: String,
 }
 
 #[derive(Clone, Debug)]
@@ -48,6 +73,12 @@ impl ConsoleCredentials {
                 &config.active_record_key_derivation_salt,
             )),
             google_oauth_app_slug: config.google_oauth_app_slug.clone(),
+            granola_oauth_app_slug: config.granola_oauth_app_slug.clone(),
+            slack_oauth_app_slug: config.slack_oauth_app_slug.clone(),
+            google_user_emails: config.google_drive_user_emails.clone(),
+            granola_user_emails: config.granola_user_emails.clone(),
+            slack_user_ids: config.slack_user_ids.clone(),
+            slack_conversation_types: config.slack_conversation_types.clone(),
         };
         credentials.google_credential_ids().await?;
         Ok(credentials)
@@ -63,6 +94,10 @@ impl ConsoleCredentials {
               AND app.slug = $1
               AND app.enabled = TRUE
               AND credentials.dead = FALSE
+              AND (
+                  cardinality($2::text[]) = 0
+                  OR LOWER(credentials.provider_email) = ANY($2::text[])
+              )
               AND credentials.access_token IS NOT NULL
               AND (
                   credentials.expires_at IS NULL
@@ -72,6 +107,7 @@ impl ConsoleCredentials {
             "#,
         )
         .bind(&self.google_oauth_app_slug)
+        .bind(&self.google_user_emails)
         .fetch_all(&self.pool)
         .await
         .context("list Google broker credentials from Rails Console")?;
@@ -100,10 +136,15 @@ impl ConsoleCredentials {
             WHERE app.provider = 'google'
               AND app.slug = $1
               AND credentials.dead = FALSE
+              AND (
+                  cardinality($2::text[]) = 0
+                  OR LOWER(credentials.provider_email) = ANY($2::text[])
+              )
             ORDER BY credentials.id
             "#,
         )
         .bind(&self.google_oauth_app_slug)
+        .bind(&self.google_user_emails)
         .fetch_all(&self.pool)
         .await
         .context("list retained Google broker credentials from Rails Console")
@@ -126,10 +167,15 @@ impl ConsoleCredentials {
               AND app.slug = $2
               AND app.enabled = TRUE
               AND credentials.dead = FALSE
+              AND (
+                  cardinality($3::text[]) = 0
+                  OR LOWER(credentials.provider_email) = ANY($3::text[])
+              )
             "#,
         )
         .bind(credential_id)
         .bind(&self.google_oauth_app_slug)
+        .bind(&self.google_user_emails)
         .fetch_optional(&self.pool)
         .await
         .context("load Google broker credential from Rails Console")?
@@ -157,6 +203,212 @@ impl ConsoleCredentials {
                 .try_get::<NaiveDateTime, _>("updated_at")?
                 .and_utc()
                 .to_rfc3339(),
+        })
+    }
+
+    pub async fn granola_credential_ids(&self) -> Result<Vec<i64>> {
+        sqlx::query_scalar(
+            r#"
+            SELECT credentials.id
+            FROM broker_credentials credentials
+            JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+            WHERE app.provider = 'granola'
+              AND app.slug = $1
+              AND app.enabled = TRUE
+              AND credentials.dead = FALSE
+              AND (
+                  cardinality($2::text[]) = 0
+                  OR LOWER(credentials.provider_email) = ANY($2::text[])
+              )
+              AND credentials.access_token IS NOT NULL
+              AND (
+                  credentials.expires_at IS NULL
+                  OR credentials.expires_at > NOW()
+              )
+            ORDER BY credentials.id
+            "#,
+        )
+        .bind(&self.granola_oauth_app_slug)
+        .bind(&self.granola_user_emails)
+        .fetch_all(&self.pool)
+        .await
+        .context("list Granola broker credentials from Rails Console")
+    }
+
+    pub async fn retained_granola_credential_ids(&self) -> Result<Vec<i64>> {
+        sqlx::query_scalar(
+            r#"
+            SELECT credentials.id
+            FROM broker_credentials credentials
+            JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+            WHERE app.provider = 'granola'
+              AND app.slug = $1
+              AND credentials.dead = FALSE
+              AND (
+                  cardinality($2::text[]) = 0
+                  OR LOWER(credentials.provider_email) = ANY($2::text[])
+              )
+            ORDER BY credentials.id
+            "#,
+        )
+        .bind(&self.granola_oauth_app_slug)
+        .bind(&self.granola_user_emails)
+        .fetch_all(&self.pool)
+        .await
+        .context("list retained Granola broker credentials from Rails Console")
+    }
+
+    pub async fn granola_credential(&self, credential_id: i64) -> Result<GranolaCredential> {
+        let row = sqlx::query(
+            r#"
+            SELECT credentials.access_token,
+                   credentials.expires_at,
+                   credentials.provider_email,
+                   credentials.provider_subject
+            FROM broker_credentials credentials
+            JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+            WHERE credentials.id = $1
+              AND app.provider = 'granola'
+              AND app.slug = $2
+              AND app.enabled = TRUE
+              AND credentials.dead = FALSE
+              AND (
+                  cardinality($3::text[]) = 0
+                  OR LOWER(credentials.provider_email) = ANY($3::text[])
+              )
+            "#,
+        )
+        .bind(credential_id)
+        .bind(&self.granola_oauth_app_slug)
+        .bind(&self.granola_user_emails)
+        .fetch_optional(&self.pool)
+        .await
+        .context("load Granola broker credential from Rails Console")?
+        .with_context(|| format!("Granola broker credential {credential_id} is not syncable"))?;
+
+        let expires_at: Option<NaiveDateTime> = row.try_get("expires_at")?;
+        if expires_at.is_some_and(|expires_at| expires_at <= Utc::now().naive_utc()) {
+            bail!("Granola broker credential {credential_id} is expired");
+        }
+        Ok(GranolaCredential {
+            id: credential_id,
+            access_token: self
+                .decrypt_required(row.try_get("access_token")?, "Granola broker access token")?,
+            provider_email: row
+                .try_get::<Option<String>, _>("provider_email")?
+                .unwrap_or_default(),
+            provider_subject: row
+                .try_get::<Option<String>, _>("provider_subject")?
+                .unwrap_or_default(),
+        })
+    }
+
+    /// Lists the credentials the Console Slack DM sync selects, narrowed to
+    /// those whose scopes cover an ingested conversation type.
+    pub async fn slack_credential_ids(&self) -> Result<Vec<i64>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT credentials.id, credentials.scopes
+            FROM broker_credentials credentials
+            JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+            WHERE app.provider = 'slack'
+              AND app.slug = $1
+              AND app.enabled = TRUE
+              AND credentials.dead = FALSE
+              AND (
+                  cardinality($2::text[]) = 0
+                  OR credentials.provider_subject = ANY($2::text[])
+              )
+              AND credentials.access_token IS NOT NULL
+              AND (
+                  credentials.expires_at IS NULL
+                  OR credentials.expires_at > NOW()
+              )
+            ORDER BY credentials.id
+            "#,
+        )
+        .bind(&self.slack_oauth_app_slug)
+        .bind(&self.slack_user_ids)
+        .fetch_all(&self.pool)
+        .await
+        .context("list Slack broker credentials from Rails Console")?;
+
+        let mut ids = Vec::new();
+        for row in rows {
+            let Json(scopes): Json<Vec<String>> = row
+                .try_get("scopes")
+                .context("decode Slack broker credential scopes")?;
+            if !conversation_types(&scopes, &self.slack_conversation_types).is_empty() {
+                ids.push(
+                    row.try_get("id")
+                        .context("decode Slack broker credential ID")?,
+                );
+            }
+        }
+        Ok(ids)
+    }
+
+    pub async fn retained_slack_credential_ids(&self) -> Result<Vec<i64>> {
+        sqlx::query_scalar(
+            r#"
+            SELECT credentials.id
+            FROM broker_credentials credentials
+            JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+            WHERE app.provider = 'slack'
+              AND app.slug = $1
+              AND credentials.dead = FALSE
+              AND (
+                  cardinality($2::text[]) = 0
+                  OR credentials.provider_subject = ANY($2::text[])
+              )
+            ORDER BY credentials.id
+            "#,
+        )
+        .bind(&self.slack_oauth_app_slug)
+        .bind(&self.slack_user_ids)
+        .fetch_all(&self.pool)
+        .await
+        .context("list retained Slack broker credentials from Rails Console")
+    }
+
+    pub async fn slack_credential(&self, credential_id: i64) -> Result<SlackCredential> {
+        let row = sqlx::query(
+            r#"
+            SELECT credentials.access_token,
+                   credentials.expires_at,
+                   credentials.scopes
+            FROM broker_credentials credentials
+            JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+            WHERE credentials.id = $1
+              AND app.provider = 'slack'
+              AND app.slug = $2
+              AND app.enabled = TRUE
+              AND credentials.dead = FALSE
+              AND (
+                  cardinality($3::text[]) = 0
+                  OR credentials.provider_subject = ANY($3::text[])
+              )
+            "#,
+        )
+        .bind(credential_id)
+        .bind(&self.slack_oauth_app_slug)
+        .bind(&self.slack_user_ids)
+        .fetch_optional(&self.pool)
+        .await
+        .context("load Slack broker credential from Rails Console")?
+        .with_context(|| format!("Slack broker credential {credential_id} is not syncable"))?;
+
+        let expires_at: Option<NaiveDateTime> = row.try_get("expires_at")?;
+        if expires_at.is_some_and(|expires_at| expires_at <= Utc::now().naive_utc()) {
+            bail!("Slack broker credential {credential_id} is expired");
+        }
+        let Json(scopes): Json<Vec<String>> = row.try_get("scopes")?;
+        Ok(SlackCredential {
+            id: credential_id,
+            access_token: self
+                .decrypt_required(row.try_get("access_token")?, "Slack broker access token")?,
+            conversation_types: conversation_types(&scopes, &self.slack_conversation_types),
+            can_read_files: scopes.iter().any(|scope| scope == "files:read"),
         })
     }
 

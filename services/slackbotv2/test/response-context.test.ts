@@ -6,6 +6,7 @@ import {
   defaultServiceTierForHarness,
   effectiveReasoningForHarness,
   harnessDisplayName,
+  modelDisplayName,
   personaFallbackNotice,
   reasoningForModel
 } from '../src/response-context'
@@ -57,6 +58,7 @@ describe('reasoningForModel', () => {
     'gpt-5.6-terra': [...standardEfforts, 'max'],
     'gpt-6-astra': ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
     'gpt-6-sol': [...standardEfforts, 'max'],
+    'gpt-6.1-sol': ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
     'gpt-6-luna': [...standardEfforts, 'max']
   }
 
@@ -94,8 +96,33 @@ describe('reasoningForModel', () => {
     expect(reasoningForModel('codex', 'gpt-5.3', 'high')).toBeUndefined()
   })
 
-  test('rejects Codex efforts for the currently selected non-Codex model', () => {
-    expect(reasoningForModel('claudecode', 'claude-opus-4-8', 'high')).toBeUndefined()
+  test('forwards Claude Code effort levels and rejects Codex-only efforts', () => {
+    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+      expect(reasoningForModel('claudecode', 'claude-opus-5-5', effort)).toBe(effort)
+    }
+    expect(reasoningForModel('claudecode', undefined, 'HIGH')).toBe('high')
+    for (const effort of ['none', 'minimal', 'ultra']) {
+      expect(reasoningForModel('claudecode', 'claude-opus-5-5', effort)).toBeUndefined()
+    }
+  })
+
+  test('rejects Claude efforts the selected model does not support', () => {
+    expect(reasoningForModel('claudecode', 'claude-haiku-4-5', 'max')).toBeUndefined()
+    expect(reasoningForModel('claudecode', 'claude-haiku-4-5-20251001', 'low')).toBeUndefined()
+    expect(reasoningForModel('claudecode', 'claude-sonnet-4-6', 'xhigh')).toBeUndefined()
+    expect(reasoningForModel('claudecode', 'claude-sonnet-4-6', 'max')).toBe('max')
+    expect(reasoningForModel('claudecode', 'claude-opus-4-5', 'max')).toBeUndefined()
+    expect(reasoningForModel('claudecode', 'claude-opus-4-5', 'high')).toBe('high')
+  })
+
+  test('forwards Pi thinking levels for any model and rejects Codex-only efforts', () => {
+    for (const effort of ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
+      expect(reasoningForModel('pi', undefined, effort)).toBe(effort)
+    }
+    expect(reasoningForModel('pi', 'openai/gpt-5.5', 'ultra')).toBeUndefined()
+  })
+
+  test('rejects efforts for harnesses without an effort control', () => {
     expect(reasoningForModel('amp', 'fast', 'low')).toBeUndefined()
   })
 })
@@ -152,7 +179,9 @@ describe('defaultReasoningForHarness', () => {
   test('reports the effort the selected harness actually runs', () => {
     expect(effectiveReasoningForHarness('codex', 'xhigh')).toBe('xhigh')
     expect(effectiveReasoningForHarness('nanocodex', 'minimal')).toBe('low')
-    expect(effectiveReasoningForHarness('claudecode', 'high')).toBeUndefined()
+    expect(effectiveReasoningForHarness('claudecode', 'high')).toBe('high')
+    expect(effectiveReasoningForHarness('claudecode', undefined)).toBeUndefined()
+    expect(effectiveReasoningForHarness('amp', 'high')).toBeUndefined()
   })
 })
 
@@ -167,15 +196,56 @@ describe('defaultServiceTierForHarness', () => {
   })
 })
 
+describe('modelDisplayName', () => {
+  test('formats Claude and GPT IDs as product names and uppercases other models', () => {
+    expect(modelDisplayName('claude-opus-5-5')).toBe('Opus 5.5')
+    expect(modelDisplayName('claude-fable-5')).toBe('Fable 5')
+    expect(modelDisplayName('claude-haiku-4-5-20251001')).toBe('Haiku 4.5')
+    expect(modelDisplayName('claude-opus-5-fast')).toBe('Opus 5 Fast')
+    expect(modelDisplayName('gpt-5.6-sol')).toBe('Sol 5.6')
+    expect(modelDisplayName('gpt-6-astra')).toBe('Astra 6')
+    expect(modelDisplayName('gpt-5.2')).toBe('GPT 5.2')
+    expect(modelDisplayName('gpt-5.4-pro')).toBe('GPT 5.4 Pro')
+    expect(modelDisplayName('gpt-5.2-codex')).toBe('GPT 5.2 Codex')
+    expect(modelDisplayName('gpt-5.6')).toBe('GPT 5.6')
+    expect(modelDisplayName('gpt-5.2-2025-12-11')).toBe('GPT 5.2')
+    expect(modelDisplayName('gpt-5.6-sol-2026-07-01')).toBe('Sol 5.6')
+  })
+
+  test('ignores input casing', () => {
+    expect(modelDisplayName('CLAUDE-OPUS-5-5')).toBe('Opus 5.5')
+    expect(modelDisplayName('GPT-5.6-SOL')).toBe('Sol 5.6')
+    expect(modelDisplayName('GPT-5.4-Pro')).toBe('GPT 5.4 Pro')
+  })
+
+  test('uppercases unrecognized model IDs', () => {
+    expect(modelDisplayName('o3')).toBe('O3')
+    expect(modelDisplayName('claude-opus-4-6[1m]')).toBe('CLAUDE-OPUS-4-6[1M]')
+    expect(modelDisplayName('anthropic/claude-sonnet-4.5')).toBe('ANTHROPIC/CLAUDE-SONNET-4.5')
+    expect(modelDisplayName('us.anthropic.claude-sonnet-4-5-20250929-v1:0')).toBe(
+      'US.ANTHROPIC.CLAUDE-SONNET-4-5-20250929-V1:0'
+    )
+  })
+})
+
 describe('buildSlackResponseContextBlock', () => {
-  test('builds a context block with uppercased model then harness, middot separated', () => {
+  test('builds a context block with model then harness, middot separated', () => {
     const block = buildSlackResponseContextBlock({
       harnessType: 'codex',
       metadataEnabled: true,
       model: 'gpt-5.2',
       reasoning: 'xhigh'
     })
-    expect(block?.elements[0]?.text).toBe('GPT-5.2 · Codex · XHigh')
+    expect(block?.elements[0]?.text).toBe('GPT 5.2 · Codex · XHigh')
+  })
+
+  test('shows Claude models by product name', () => {
+    const block = buildSlackResponseContextBlock({
+      harnessType: 'claudecode',
+      metadataEnabled: true,
+      model: 'claude-opus-5-5'
+    })
+    expect(block?.elements[0]?.text).toBe('Opus 5.5 · Claude Code')
   })
 
   test('omits the model segment when no model is provided', () => {
@@ -194,7 +264,7 @@ describe('buildSlackResponseContextBlock', () => {
       reasoning: 'low'
     })
 
-    expect(block?.elements[0]?.text).toBe('GPT-5.6-SOL · Nanocodex · Low')
+    expect(block?.elements[0]?.text).toBe('Sol 5.6 · Nanocodex · Low')
   })
 
   test('skips the block when metadata and notices are absent', () => {
@@ -215,7 +285,7 @@ describe('buildSlackResponseContextBlock', () => {
       serviceTier: 'fast'
     })
 
-    expect(block?.elements[0]?.text).toBe('GPT-5.6-SOL · Codex · Low · Fast')
+    expect(block?.elements[0]?.text).toBe('Sol 5.6 · Codex · Low · Fast')
   })
 
   test('renders and escapes a notice when response metadata is absent', () => {

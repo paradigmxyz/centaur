@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -9,18 +12,18 @@ use tokio::time::sleep;
 use tracing::warn;
 
 use crate::{
-    config::{Config, FOLDER_MIME_TYPE, PDF_MIME_TYPE},
+    config::{
+        Config, FOLDER_MIME_TYPE, GOOGLE_DOC_EXPORT_MIME_TYPE, GOOGLE_DOC_MIME_TYPE, PDF_MIME_TYPE,
+    },
     credentials::ConsoleCredentials,
     errors::rejected,
+    telemetry,
 };
 
 const DRIVE_REQUEST_ATTEMPTS: u32 = 4;
-const FILE_FIELDS: &str = "id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress),permissions(id,type,role,emailAddress,domain,allowFileDiscovery)";
-/// Drive caps pages at 100 when permissions are requested, and omits Shared
-/// Drive permissions for non-members anyway, so walks list without them.
+const FILE_FIELDS: &str = "id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress)";
 const WALK_PAGE_SIZE: u16 = 1_000;
-const WALK_FILE_FIELDS: &str = "id,name,mimeType,webViewLink,driveId,version,md5Checksum,trashed,createdTime,modifiedTime,owners(displayName,emailAddress)";
-const FOLDER_OR_PDF_QUERY: &str = "trashed = false and (mimeType = 'application/vnd.google-apps.folder' or mimeType = 'application/pdf')";
+const FOLDER_OR_DOCUMENT_QUERY: &str = "trashed = false and (mimeType = 'application/vnd.google-apps.folder' or mimeType = 'application/pdf' or mimeType = 'application/vnd.google-apps.document')";
 /// The user corpus plus Shared Drive items the user can reach without membership.
 const ACCESSIBLE_CORPUS: &[(&str, &str)] =
     &[("corpora", "user"), ("includeItemsFromAllDrives", "true")];
@@ -32,6 +35,7 @@ pub struct DriveClient {
     base_url: String,
     credentials: Arc<ConsoleCredentials>,
     max_pdf_bytes: usize,
+    max_extracted_bytes: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -56,13 +60,24 @@ pub struct DriveFile {
     pub modified_time: Option<DateTime<Utc>>,
     #[serde(default)]
     pub owners: Vec<Identity>,
-    #[serde(default)]
-    pub permissions: Vec<Permission>,
 }
 
 impl DriveFile {
-    pub fn is_active_pdf(&self) -> bool {
-        !self.trashed && self.mime_type == PDF_MIME_TYPE && !self.id.is_empty()
+    pub fn is_active_document(&self) -> bool {
+        !self.trashed
+            && matches!(
+                self.mime_type.as_str(),
+                PDF_MIME_TYPE | GOOGLE_DOC_MIME_TYPE
+            )
+            && !self.id.is_empty()
+    }
+
+    pub fn document_type(&self) -> Option<&'static str> {
+        match self.mime_type.as_str() {
+            PDF_MIME_TYPE => Some("pdf"),
+            GOOGLE_DOC_MIME_TYPE => Some("google_doc"),
+            _ => None,
+        }
     }
 
     pub fn is_active_folder(&self) -> bool {
@@ -94,22 +109,6 @@ pub struct Identity {
     pub display_name: String,
     #[serde(default)]
     pub email_address: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Permission {
-    #[serde(default)]
-    pub id: String,
-    #[serde(rename = "type", default)]
-    pub permission_type: String,
-    #[serde(default)]
-    pub role: String,
-    #[serde(default)]
-    pub email_address: String,
-    #[serde(default)]
-    pub domain: String,
-    pub allow_file_discovery: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,6 +167,7 @@ impl DriveClient {
             base_url: config.google_api_base_url.clone(),
             credentials,
             max_pdf_bytes: config.max_pdf_bytes,
+            max_extracted_bytes: config.max_extracted_bytes,
         })
     }
 
@@ -188,7 +188,7 @@ impl DriveClient {
             request = request.query(&[("driveId", drive_id)]);
         }
         let response = self
-            .send(request, credential_id)
+            .send(request, credential_id, "changes.startPageToken")
             .await?
             .json::<StartPageToken>()
             .await
@@ -211,15 +211,16 @@ impl DriveClient {
         if let Some(page_token) = page_token {
             request = request.query(&[("pageToken", page_token)]);
         }
-        self.send(request, credential_id)
+        self.send(request, credential_id, "drives.list")
             .await?
             .json::<SharedDrivePage>()
             .await
             .context("decode Drive shared drive page")
     }
 
-    /// Lists PDFs in the user's corpus, or in one Shared Drive when `shared_drive_id` is set.
-    pub async fn list_pdfs(
+    /// Lists supported documents in the user's corpus, or in one Shared Drive when
+    /// `shared_drive_id` is set.
+    pub async fn list_documents(
         &self,
         credential_id: i64,
         shared_drive_id: Option<&str>,
@@ -236,7 +237,9 @@ impl DriveClient {
         };
         self.list_files(
             credential_id,
-            &format!("mimeType = '{PDF_MIME_TYPE}' and trashed = false"),
+            &format!(
+                "(mimeType = '{PDF_MIME_TYPE}' or mimeType = '{GOOGLE_DOC_MIME_TYPE}') and trashed = false"
+            ),
             corpus,
             FILE_FIELDS,
             page_size,
@@ -245,7 +248,7 @@ impl DriveClient {
         .await
     }
 
-    /// Lists folders and PDFs shared with the user, including Shared Drive items
+    /// Lists folders and supported documents shared with the user, including Shared Drive items
     /// shared with users who are not members of that drive.
     pub async fn list_shared_with_me(
         &self,
@@ -254,16 +257,16 @@ impl DriveClient {
     ) -> Result<FilePage> {
         self.list_files(
             credential_id,
-            &format!("sharedWithMe = true and {FOLDER_OR_PDF_QUERY}"),
+            &format!("sharedWithMe = true and {FOLDER_OR_DOCUMENT_QUERY}"),
             ACCESSIBLE_CORPUS,
-            WALK_FILE_FIELDS,
+            FILE_FIELDS,
             WALK_PAGE_SIZE,
             page_token,
         )
         .await
     }
 
-    /// Lists the folders and PDFs directly inside any of the given folders.
+    /// Lists the folders and supported documents directly inside any of the given folders.
     pub async fn list_folder_children(
         &self,
         credential_id: i64,
@@ -280,7 +283,7 @@ impl DriveClient {
             credential_id,
             &folder_children_query(folder_ids),
             ACCESSIBLE_CORPUS,
-            WALK_FILE_FIELDS,
+            FILE_FIELDS,
             WALK_PAGE_SIZE,
             page_token,
         )
@@ -311,7 +314,7 @@ impl DriveClient {
             request = request.query(&[("pageToken", page_token)]);
         }
         let page = self
-            .send(request, credential_id)
+            .send(request, credential_id, "files.list")
             .await?
             .json::<FilePage>()
             .await
@@ -344,7 +347,7 @@ impl DriveClient {
             }
             None => request.query(&[("includeItemsFromAllDrives", "false")]),
         };
-        self.send(request, credential_id)
+        self.send(request, credential_id, "changes.list")
             .await?
             .json::<ChangePage>()
             .await
@@ -356,49 +359,93 @@ impl DriveClient {
             .http
             .get(format!("{}/files/{file_id}", self.base_url))
             .query(&[("alt", "media"), ("supportsAllDrives", "true")]);
-        let response = self.send(request, credential_id).await?;
-        if response
-            .content_length()
-            .is_some_and(|length| length > self.max_pdf_bytes as u64)
-        {
-            return Err(rejected("PDF exceeds the configured byte limit"));
-        }
-        let mut bytes = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("read Drive PDF response")?;
-            if bytes.len().saturating_add(chunk.len()) > self.max_pdf_bytes {
-                return Err(rejected("PDF exceeds the configured byte limit"));
-            }
-            bytes.extend_from_slice(&chunk);
-        }
+        let bytes = self
+            .download_bounded(
+                request,
+                credential_id,
+                "files.download",
+                self.max_pdf_bytes,
+                "PDF exceeds the configured byte limit",
+            )
+            .await?;
         if !bytes.starts_with(b"%PDF-") {
             return Err(rejected("Drive response is not a PDF"));
         }
         Ok(bytes)
     }
 
-    async fn send(&self, request: RequestBuilder, credential_id: i64) -> Result<reqwest::Response> {
+    pub async fn export_google_doc(&self, credential_id: i64, file_id: &str) -> Result<Vec<u8>> {
+        let request = self
+            .http
+            .get(format!("{}/files/{file_id}/export", self.base_url))
+            .query(&[("mimeType", GOOGLE_DOC_EXPORT_MIME_TYPE)]);
+        self.download_bounded(
+            request,
+            credential_id,
+            "files.export",
+            self.max_extracted_bytes,
+            "exported Google Doc exceeds the configured byte limit",
+        )
+        .await
+    }
+
+    async fn download_bounded(
+        &self,
+        request: RequestBuilder,
+        credential_id: i64,
+        operation: &'static str,
+        max_bytes: usize,
+        limit_error: &'static str,
+    ) -> Result<Vec<u8>> {
+        let response = self.send(request, credential_id, operation).await?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
+            return Err(rejected(limit_error));
+        }
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("read Google Drive file response")?;
+            if bytes.len().saturating_add(chunk.len()) > max_bytes {
+                return Err(rejected(limit_error));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    }
+
+    async fn send(
+        &self,
+        request: RequestBuilder,
+        credential_id: i64,
+        operation: &'static str,
+    ) -> Result<reqwest::Response> {
         for attempt in 1..=DRIVE_REQUEST_ATTEMPTS {
             let access_token = self
                 .credentials
                 .google_credential(credential_id)
                 .await?
                 .access_token;
+            let started = Instant::now();
             let response = request
                 .try_clone()
                 .context("clone Google Drive request for retry")?
                 .bearer_auth(access_token)
                 .send()
-                .await
-                .context("send Google Drive request")?;
+                .await;
+            telemetry::upstream_response("drive", operation, started, &response);
+            let response = response.context("send Google Drive request")?;
             let status = response.status();
             if attempt < DRIVE_REQUEST_ATTEMPTS
                 && (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
             {
                 let delay = if status == StatusCode::TOO_MANY_REQUESTS {
+                    telemetry::upstream_retry("drive", "rate_limited");
                     retry_after_delay(&response).unwrap_or_else(|| server_retry_delay(attempt))
                 } else {
+                    telemetry::upstream_retry("drive", "server_error");
                     server_retry_delay(attempt)
                 };
                 warn!(
@@ -416,6 +463,16 @@ impl DriveClient {
                     "Google Drive request was rejected with status {status}"
                 )));
             }
+            if status == StatusCode::FORBIDDEN {
+                let body = response
+                    .bytes()
+                    .await
+                    .context("read Google Drive error response")?;
+                if is_export_size_limit_error(&body) {
+                    return Err(rejected("Google Doc exceeds Drive's export size limit"));
+                }
+                bail!("Google Drive request failed with status {status}");
+            }
             return response
                 .error_for_status()
                 .context("Google Drive request failed");
@@ -424,13 +481,41 @@ impl DriveClient {
     }
 }
 
+#[derive(Deserialize)]
+struct DriveErrorResponse {
+    error: DriveError,
+}
+
+#[derive(Deserialize)]
+struct DriveError {
+    #[serde(default)]
+    errors: Vec<DriveErrorReason>,
+}
+
+#[derive(Deserialize)]
+struct DriveErrorReason {
+    #[serde(default)]
+    reason: String,
+}
+
+/// Drive reports oversized exports as 403 with this reason; rate limits also use 403.
+fn is_export_size_limit_error(body: &[u8]) -> bool {
+    serde_json::from_slice::<DriveErrorResponse>(body).is_ok_and(|response| {
+        response
+            .error
+            .errors
+            .iter()
+            .any(|error| error.reason == "exportSizeLimitExceeded")
+    })
+}
+
 fn folder_children_query(folder_ids: &[String]) -> String {
     let parents = folder_ids
         .iter()
         .map(|id| format!("'{id}' in parents"))
         .collect::<Vec<_>>()
         .join(" or ");
-    format!("({parents}) and {FOLDER_OR_PDF_QUERY}")
+    format!("({parents}) and {FOLDER_OR_DOCUMENT_QUERY}")
 }
 
 fn is_drive_id(value: &str) -> bool {
@@ -491,19 +576,25 @@ mod tests {
             created_time: None,
             modified_time: None,
             owners: Vec::new(),
-            permissions: Vec::new(),
         }
     }
 
     #[test]
-    fn only_active_pdfs_are_processable() {
-        assert!(file(PDF_MIME_TYPE, false).is_active_pdf());
-        assert!(!file(PDF_MIME_TYPE, true).is_active_pdf());
-        assert!(!file("application/vnd.google-apps.document", false).is_active_pdf());
+    fn only_active_supported_documents_are_processable() {
+        assert!(file(PDF_MIME_TYPE, false).is_active_document());
+        assert!(file(GOOGLE_DOC_MIME_TYPE, false).is_active_document());
+        assert!(!file(PDF_MIME_TYPE, true).is_active_document());
+        assert!(!file("application/vnd.google-apps.spreadsheet", false).is_active_document());
 
-        let mut shared_drive_file = file(PDF_MIME_TYPE, false);
+        assert_eq!(file(PDF_MIME_TYPE, false).document_type(), Some("pdf"));
+        assert_eq!(
+            file(GOOGLE_DOC_MIME_TYPE, false).document_type(),
+            Some("google_doc")
+        );
+
+        let mut shared_drive_file = file(GOOGLE_DOC_MIME_TYPE, false);
         shared_drive_file.drive_id = "shared-drive-1".to_owned();
-        assert!(shared_drive_file.is_active_pdf());
+        assert!(shared_drive_file.is_active_document());
     }
 
     #[test]
@@ -534,8 +625,35 @@ mod tests {
     }
 
     #[test]
-    fn drive_version_is_the_stable_revision_key() {
-        assert_eq!(file(PDF_MIME_TYPE, false).source_version(), "42");
+    fn drive_version_falls_back_to_checksum_then_modified_time() {
+        let mut drive_file = file(PDF_MIME_TYPE, false);
+        drive_file.md5_checksum = "d41d8cd98f00b204e9800998ecf8427e".to_owned();
+        drive_file.modified_time = Some("2026-07-08T12:00:00Z".parse().unwrap());
+        assert_eq!(drive_file.source_version(), "42");
+
+        drive_file.version.clear();
+        assert_eq!(
+            drive_file.source_version(),
+            "d41d8cd98f00b204e9800998ecf8427e"
+        );
+
+        drive_file.md5_checksum.clear();
+        assert_eq!(drive_file.source_version(), "2026-07-08T12:00:00+00:00");
+    }
+
+    #[test]
+    fn only_export_size_limit_errors_are_permanent_forbidden_errors() {
+        let error = |reason: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "error": {"code": 403, "errors": [{"domain": "global", "reason": reason}]}
+            }))
+            .unwrap()
+        };
+        assert!(is_export_size_limit_error(&error(
+            "exportSizeLimitExceeded"
+        )));
+        assert!(!is_export_size_limit_error(&error("userRateLimitExceeded")));
+        assert!(!is_export_size_limit_error(b"not json"));
     }
 
     #[test]

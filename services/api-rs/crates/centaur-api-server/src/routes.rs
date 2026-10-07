@@ -3,17 +3,10 @@ use std::{
     convert::Infallible,
     convert::TryFrom,
     env,
-    path::Path as FsPath,
     sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
 
-use aws_config::BehaviorVersion;
-use aws_sdk_s3::{
-    Client as S3Client,
-    config::{Builder as S3ConfigBuilder, Region},
-    presigning::PresigningConfig,
-};
 use axum::{
     Extension, Json, Router,
     body::{Body, Bytes},
@@ -50,7 +43,6 @@ use sqlx::PgPool;
 use time::{Duration as TimeDuration, OffsetDateTime};
 use tower_http::trace::TraceLayer;
 use tracing::Span;
-use uuid::Uuid;
 
 use crate::{
     ApiError,
@@ -80,7 +72,6 @@ struct AppRuntimeState {
     runtime: SessionRuntime,
     workflows: Option<WorkflowRuntime>,
     pool: Option<PgPool>,
-    workflow_host_principal: Option<String>,
 }
 
 impl AppState {
@@ -125,26 +116,6 @@ impl AppState {
             runtime,
             workflows,
             pool,
-            workflow_host_principal: None,
-        });
-    }
-
-    pub fn mark_ready_with_workflow_host(
-        &self,
-        runtime: SessionRuntime,
-        workflows: Option<WorkflowRuntime>,
-        pool: Option<PgPool>,
-        workflow_host_principal: String,
-    ) {
-        let mut initialized = self
-            .initialized
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *initialized = Some(AppRuntimeState {
-            runtime,
-            workflows,
-            pool,
-            workflow_host_principal: Some(workflow_host_principal),
         });
     }
 
@@ -157,12 +128,6 @@ impl AppState {
 
     fn is_ready(&self) -> bool {
         self.initialized().is_some()
-    }
-
-    fn is_workflow_host(&self, subject: &str) -> bool {
-        self.initialized()
-            .and_then(|initialized| initialized.workflow_host_principal)
-            .is_some_and(|principal| principal == subject)
     }
 
     /// The session runtime, if initialization completed. Unlike the private
@@ -258,6 +223,10 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
             post(interrupt_session_execution),
         )
         .route("/api/session/{thread_key}/events", get(stream_events))
+        .route(
+            "/api/session/{thread_key}/pause",
+            post(pause_session_sandbox),
+        )
         .route("/api/sandboxes/drain", post(drain_sandboxes))
         .merge(slack_proxy_router())
         .route("/api/workflows/schedules", get(list_workflow_schedules))
@@ -274,34 +243,6 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .route(
             "/api/workflows/actions/invoke",
             post(invoke_workflow_button),
-        )
-        .route(
-            "/api/admin/slack/archive-imports",
-            get(list_slack_archive_imports).post(presign_slack_archive_import),
-        )
-        .route(
-            "/api/admin/slack/archive-imports/presign",
-            post(presign_slack_archive_import),
-        )
-        .route(
-            "/api/admin/slack/archive-imports/{import_id}",
-            get(get_slack_archive_import).delete(delete_slack_archive_import),
-        )
-        .route(
-            "/api/admin/slack/archive-imports/{import_id}/upload-url",
-            post(refresh_slack_archive_import_upload_url),
-        )
-        .route(
-            "/api/admin/slack/archive-imports/{import_id}/download-url",
-            post(create_slack_archive_import_download_url),
-        )
-        .route(
-            "/api/admin/slack/archive-imports/{import_id}/start",
-            post(start_slack_archive_import),
-        )
-        .route(
-            "/api/admin/slack/archive-imports/{import_id}/retry",
-            post(retry_slack_archive_import),
         )
         .route(
             "/api/admin/slack/dm-sync/checkpoints",
@@ -448,7 +389,6 @@ async fn metrics(State(state): State<AppState>) -> Response {
 enum RouteAccess {
     Capability(Capability),
     PrincipalOnly,
-    ArchiveDownload,
 }
 
 async fn authorize_api_request(
@@ -485,12 +425,6 @@ async fn authorize_api_request(
     let allowed = match access {
         RouteAccess::Capability(capability) => caller.has_capability(capability),
         RouteAccess::PrincipalOnly => caller.class() == CallerClass::Principal,
-        RouteAccess::ArchiveDownload => {
-            caller.has_capability(Capability::AdminArchive)
-                || caller
-                    .principal_subject()
-                    .is_some_and(|subject| state.is_workflow_host(subject))
-        }
     };
     if !allowed {
         record_api_authentication(caller.class().as_str(), "forbidden");
@@ -547,7 +481,10 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
         | (&Method::POST, "/api/session/{thread_key}/interrupt") => {
             capability(Capability::SessionsWrite)
         }
-        (&Method::POST, "/api/sandboxes/drain") => capability(Capability::SandboxesDrain),
+        (&Method::POST, "/api/sandboxes/drain")
+        | (&Method::POST, "/api/session/{thread_key}/pause") => {
+            capability(Capability::SandboxesDrain)
+        }
         (&Method::GET, "/api/workflows/schedules")
         | (&Method::GET, "/api/workflows/runs")
         | (&Method::GET, "/api/workflows/runs/{run_id}") => capability(Capability::WorkflowsRead),
@@ -559,13 +496,7 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
         (&Method::POST, "/api/workflows/actions/invoke") => {
             capability(Capability::WorkflowsActions)
         }
-        (&Method::POST, "/api/admin/slack/archive-imports/{import_id}/download-url") => {
-            Some(RouteAccess::ArchiveDownload)
-        }
         (_, route) if route.starts_with("/api/slack/") => Some(RouteAccess::PrincipalOnly),
-        (_, route) if route.starts_with("/api/admin/slack/archive-imports") => {
-            capability(Capability::AdminArchive)
-        }
         (_, route) if route.starts_with("/api/admin/slack/dm-sync/") => {
             capability(Capability::AdminSync)
         }
@@ -612,7 +543,7 @@ fn session_thread_key_from_request<B>(request: &Request<B>) -> Option<ThreadKey>
 /// Whether an ingress caller scoped to `prefixes` may touch this session.
 /// A bot can mint several thread-key families (githubbot: `github:`,
 /// `github-manage:`, `github-review:`), so the caller carries them all.
-fn thread_key_matches_platform(prefixes: &[&str], thread_key: &str) -> bool {
+pub(crate) fn thread_key_matches_platform(prefixes: &[&str], thread_key: &str) -> bool {
     prefixes.iter().any(|prefix| thread_key.starts_with(prefix))
 }
 
@@ -864,6 +795,17 @@ async fn drain_sandboxes(
     })))
 }
 
+/// Pauses a session's sandbox now, as its idle timeout would; the next turn
+/// resumes it. An operator action, so it needs the sandbox-control capability.
+async fn pause_session_sandbox(
+    State(state): State<AppState>,
+    Path(raw_thread_key): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    let paused = state.runtime()?.pause_idle_session(&thread_key).await?;
+    Ok(Json(json!({ "ok": true, "paused": paused })))
+}
+
 async fn stream_events(
     State(state): State<AppState>,
     Extension(caller): Extension<AuthenticatedCaller>,
@@ -925,40 +867,8 @@ fn principal_subject_owns_session(subject: Option<&str>, session_principal: Opti
 
 #[cfg(test)]
 mod session_authorization_tests {
-    use super::{
-        CallerClass, principal_subject_owns_session, sanitize_execute_metadata,
-        thread_key_matches_platform,
-    };
+    use super::{CallerClass, principal_subject_owns_session, sanitize_execute_metadata};
     use serde_json::json;
-
-    #[test]
-    fn ingress_scope_covers_every_family_the_bot_mints() {
-        let github = [
-            "github:",
-            "github-issue:",
-            "github-manage:",
-            "github-review:",
-        ];
-        assert!(thread_key_matches_platform(&github, "github:acme/repo:12"));
-        assert!(thread_key_matches_platform(
-            &github,
-            "github-issue:acme/repo:12"
-        ));
-        assert!(thread_key_matches_platform(
-            &github,
-            "github-manage:acme/repo:12"
-        ));
-        assert!(thread_key_matches_platform(
-            &github,
-            "github-review:acme/repo:12"
-        ));
-        assert!(!thread_key_matches_platform(&github, "slack:C123:1.2"));
-        // `github-anything:` outside the listed families stays denied.
-        assert!(!thread_key_matches_platform(
-            &github,
-            "githubx:acme/repo:12"
-        ));
-    }
 
     #[test]
     fn principal_session_reads_require_exact_persisted_owner() {
@@ -1348,93 +1258,6 @@ fn granola_access_emails(
     }
     emails.into_iter().collect()
 }
-
-#[derive(Debug, Deserialize)]
-struct PresignSlackArchiveImportRequest {
-    filename: String,
-    #[serde(default)]
-    content_type: Option<String>,
-    #[serde(default)]
-    created_by: Option<String>,
-    #[serde(default)]
-    metadata: Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct ListSlackArchiveImportsQuery {
-    #[serde(default)]
-    limit: Option<i64>,
-    #[serde(default)]
-    status: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct SlackArchiveImportResponse {
-    import_id: String,
-    mode: String,
-    archive_uri: String,
-    object_bucket: String,
-    object_key: String,
-    original_filename: String,
-    content_type: String,
-    file_size_bytes: Option<i64>,
-    sha256: Option<String>,
-    status: String,
-    workflow_run_id: Option<String>,
-    workflow_task_id: Option<String>,
-    channels_imported: i32,
-    users_imported: i32,
-    messages_imported: i32,
-    error_text: String,
-    created_by: String,
-    #[serde(with = "time::serde::rfc3339::option")]
-    uploaded_at: Option<OffsetDateTime>,
-    #[serde(with = "time::serde::rfc3339::option")]
-    started_at: Option<OffsetDateTime>,
-    #[serde(with = "time::serde::rfc3339::option")]
-    finished_at: Option<OffsetDateTime>,
-    #[serde(with = "time::serde::rfc3339::option")]
-    upload_url_expires_at: Option<OffsetDateTime>,
-    #[serde(with = "time::serde::rfc3339")]
-    created_at: OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339")]
-    updated_at: OffsetDateTime,
-    metadata: Value,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct SlackArchiveImportRow {
-    import_id: String,
-    mode: String,
-    archive_uri: String,
-    object_bucket: String,
-    object_key: String,
-    original_filename: String,
-    content_type: String,
-    file_size_bytes: Option<i64>,
-    sha256: Option<String>,
-    status: String,
-    workflow_run_id: Option<String>,
-    workflow_task_id: Option<String>,
-    channels_imported: i32,
-    users_imported: i32,
-    messages_imported: i32,
-    error_text: String,
-    created_by: String,
-    uploaded_at: Option<OffsetDateTime>,
-    started_at: Option<OffsetDateTime>,
-    finished_at: Option<OffsetDateTime>,
-    upload_url_expires_at: Option<OffsetDateTime>,
-    created_at: OffsetDateTime,
-    updated_at: OffsetDateTime,
-    metadata: Value,
-}
-
-const SLACK_ARCHIVE_IMPORT_COLUMNS: &str = "import_id, mode, archive_uri, \
-object_bucket, object_key, original_filename, content_type, file_size_bytes, sha256, status, \
-workflow_run_id, workflow_task_id, channels_imported, users_imported, messages_imported, \
-error_text, created_by, uploaded_at, started_at, finished_at, upload_url_expires_at, created_at, \
-updated_at, metadata";
 
 #[derive(Debug, Deserialize)]
 struct ListSlackDmSyncCheckpointsQuery {
@@ -1855,319 +1678,6 @@ struct GoogleDocsSyncCheckpointPayload {
     last_error: String,
     #[serde(default = "empty_object")]
     metadata: Value,
-}
-
-impl From<SlackArchiveImportRow> for SlackArchiveImportResponse {
-    fn from(row: SlackArchiveImportRow) -> Self {
-        Self {
-            import_id: row.import_id,
-            mode: row.mode,
-            archive_uri: row.archive_uri,
-            object_bucket: row.object_bucket,
-            object_key: row.object_key,
-            original_filename: row.original_filename,
-            content_type: row.content_type,
-            file_size_bytes: row.file_size_bytes,
-            sha256: row.sha256,
-            status: row.status,
-            workflow_run_id: row.workflow_run_id,
-            workflow_task_id: row.workflow_task_id,
-            channels_imported: row.channels_imported,
-            users_imported: row.users_imported,
-            messages_imported: row.messages_imported,
-            error_text: row.error_text,
-            created_by: row.created_by,
-            uploaded_at: row.uploaded_at,
-            started_at: row.started_at,
-            finished_at: row.finished_at,
-            upload_url_expires_at: row.upload_url_expires_at,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-            metadata: row.metadata,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SlackArchiveUploadConfig {
-    bucket: String,
-    prefix: String,
-    region: Option<String>,
-    endpoint: Option<String>,
-    presign_ttl: Duration,
-}
-
-async fn list_slack_archive_imports(
-    State(state): State<AppState>,
-    Query(query): Query<ListSlackArchiveImportsQuery>,
-) -> Result<Json<Value>, ApiError> {
-    let pool = db_pool(&state)?;
-    let limit = query.limit.unwrap_or(50).clamp(1, 200);
-    let sql = format!(
-        "SELECT {SLACK_ARCHIVE_IMPORT_COLUMNS} FROM slack_archive_imports \
-         WHERE ($1::text IS NULL OR status = $1) \
-         ORDER BY created_at DESC LIMIT $2"
-    );
-    let rows = sqlx::query_as::<_, SlackArchiveImportRow>(&sql)
-        .bind(query.status.as_deref().filter(|value| !value.is_empty()))
-        .bind(limit)
-        .fetch_all(&pool)
-        .await?;
-    let imports = rows
-        .into_iter()
-        .map(SlackArchiveImportResponse::from)
-        .collect::<Vec<_>>();
-    Ok(Json(json!({ "ok": true, "imports": imports })))
-}
-
-async fn get_slack_archive_import(
-    State(state): State<AppState>,
-    Path(import_id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    let pool = db_pool(&state)?;
-    let import = load_slack_archive_import(&pool, &import_id).await?;
-    Ok(Json(
-        json!({ "ok": true, "import": SlackArchiveImportResponse::from(import) }),
-    ))
-}
-
-async fn presign_slack_archive_import(
-    State(state): State<AppState>,
-    Json(request): Json<PresignSlackArchiveImportRequest>,
-) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let pool = db_pool(&state)?;
-    let config = slack_archive_upload_config()?;
-    let filename = sanitize_filename(&request.filename)?;
-    let content_type = request
-        .content_type
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("application/zip")
-        .to_owned();
-    if !matches!(
-        content_type.as_str(),
-        "application/zip" | "application/x-zip-compressed"
-    ) {
-        return Err(ApiError::BadRequest(
-            "content_type must be application/zip".to_owned(),
-        ));
-    }
-    let import_id = prefixed_id("sai");
-    let object_key = slack_archive_object_key(&config.prefix, &import_id, &filename);
-    let archive_uri = format!("s3://{}/{}", config.bucket, object_key);
-    let upload_url = presign_s3_put_url(&config, &object_key, &content_type).await?;
-    let expires_at = OffsetDateTime::now_utc() + config.presign_ttl;
-    let metadata = if request.metadata.is_object() {
-        request.metadata
-    } else {
-        json!({})
-    };
-
-    let sql = format!(
-        "INSERT INTO slack_archive_imports (\
-         import_id, mode, archive_uri, object_bucket, object_key, \
-         original_filename, content_type, status, created_by, upload_url_expires_at, metadata\
-         ) VALUES ($1, 'public_channels', $2, $3, $4, $5, $6, \
-         'upload_pending', $7, $8, $9::jsonb) \
-         RETURNING {SLACK_ARCHIVE_IMPORT_COLUMNS}"
-    );
-    let row = sqlx::query_as::<_, SlackArchiveImportRow>(&sql)
-        .bind(&import_id)
-        .bind(&archive_uri)
-        .bind(&config.bucket)
-        .bind(&object_key)
-        .bind(&filename)
-        .bind(&content_type)
-        .bind(request.created_by.as_deref().unwrap_or(""))
-        .bind(expires_at)
-        .bind(metadata)
-        .fetch_one(&pool)
-        .await?;
-
-    Ok((
-        StatusCode::CREATED,
-        Json(slack_archive_upload_response(row, upload_url, expires_at)),
-    ))
-}
-
-async fn refresh_slack_archive_import_upload_url(
-    State(state): State<AppState>,
-    Path(import_id): Path<String>,
-) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let pool = db_pool(&state)?;
-    let import = load_slack_archive_import(&pool, &import_id).await?;
-    ensure_archive_import_status(
-        &import.status,
-        &["upload_pending"],
-        "archive upload URL cannot be refreshed",
-    )?;
-    let config = slack_archive_upload_config()?;
-    ensure_archive_import_bucket_matches_config(&import, &config)?;
-    let upload_url = presign_s3_put_url(&config, &import.object_key, &import.content_type).await?;
-    let expires_at = OffsetDateTime::now_utc() + config.presign_ttl;
-    let sql = format!(
-        "UPDATE slack_archive_imports SET upload_url_expires_at = $2, updated_at = NOW() \
-         WHERE import_id = $1 RETURNING {SLACK_ARCHIVE_IMPORT_COLUMNS}"
-    );
-    let row = sqlx::query_as::<_, SlackArchiveImportRow>(&sql)
-        .bind(&import.import_id)
-        .bind(expires_at)
-        .fetch_one(&pool)
-        .await?;
-
-    Ok((
-        StatusCode::OK,
-        Json(slack_archive_upload_response(row, upload_url, expires_at)),
-    ))
-}
-
-async fn create_slack_archive_import_download_url(
-    State(state): State<AppState>,
-    Path(import_id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    let pool = db_pool(&state)?;
-    let import = load_slack_archive_import(&pool, &import_id).await?;
-    ensure_archive_import_status(
-        &import.status,
-        &["uploaded", "importing", "failed"],
-        "archive download URL cannot be created",
-    )?;
-    let config = slack_archive_upload_config()?;
-    ensure_archive_import_bucket_matches_config(&import, &config)?;
-    let download_url = presign_s3_get_url(&config, &import.object_key).await?;
-    let expires_at = OffsetDateTime::now_utc() + config.presign_ttl;
-    Ok(Json(slack_archive_download_response(
-        import,
-        download_url,
-        expires_at,
-    )))
-}
-
-async fn delete_slack_archive_import(
-    State(state): State<AppState>,
-    Path(import_id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    let pool = db_pool(&state)?;
-    let import = load_slack_archive_import(&pool, &import_id).await?;
-    ensure_archive_import_status(
-        &import.status,
-        &["upload_pending", "uploaded", "failed", "cancelled"],
-        "archive import cannot be deleted",
-    )?;
-    let mut object_delete = json!({"attempted": false, "deleted": false});
-    if import.status != "cancelled" {
-        let config = slack_archive_upload_config()?;
-        ensure_archive_import_bucket_matches_config(&import, &config)?;
-        delete_s3_object(&config, &import.object_key).await?;
-        object_delete = json!({"attempted": true, "deleted": true});
-    }
-    let sql = format!(
-        "UPDATE slack_archive_imports SET status = 'cancelled', \
-         finished_at = COALESCE(finished_at, NOW()), error_text = '', updated_at = NOW() \
-         WHERE import_id = $1 RETURNING {SLACK_ARCHIVE_IMPORT_COLUMNS}"
-    );
-    let row = sqlx::query_as::<_, SlackArchiveImportRow>(&sql)
-        .bind(&import.import_id)
-        .fetch_one(&pool)
-        .await?;
-    Ok(Json(json!({
-        "ok": true,
-        "import": SlackArchiveImportResponse::from(row),
-        "archive_object": object_delete,
-    })))
-}
-
-async fn start_slack_archive_import(
-    State(state): State<AppState>,
-    Path(import_id): Path<String>,
-) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let pool = db_pool(&state)?;
-    let import = load_slack_archive_import(&pool, &import_id).await?;
-    ensure_archive_import_status(
-        &import.status,
-        &["upload_pending"],
-        "archive upload cannot be confirmed",
-    )?;
-    let config = slack_archive_upload_config()?;
-    ensure_archive_import_bucket_matches_config(&import, &config)?;
-    let head = head_s3_object(&config, &import.object_key).await?;
-    let workflows = workflow_runtime(&state)?;
-    let workflow = workflows
-        .create_run(CreateWorkflowRunRequest {
-            workflow_name: "slack_archive_import".to_owned(),
-            input: json!({ "import_id": import.import_id }),
-            idempotency_key: Some(format!("slack_archive_import:{}", import.import_id)),
-            harness_type: None,
-            max_attempts: Some(1),
-        })
-        .await?;
-    let row =
-        mark_slack_archive_import_queued(&pool, &import, head, &workflow.run_id, &workflow.task_id)
-            .await?;
-
-    Ok((
-        StatusCode::OK,
-        Json(json!({
-            "ok": true,
-            "import": SlackArchiveImportResponse::from(row),
-            "ingestion": {
-                "status": workflow.status,
-                "workflow_name": "slack_archive_import",
-                "workflow_run_id": workflow.run_id,
-                "workflow_task_id": workflow.task_id,
-                "created": workflow.created
-            }
-        })),
-    ))
-}
-
-async fn retry_slack_archive_import(
-    State(state): State<AppState>,
-    Path(import_id): Path<String>,
-) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let pool = db_pool(&state)?;
-    let import = load_slack_archive_import(&pool, &import_id).await?;
-    ensure_archive_import_status(
-        &import.status,
-        &["failed"],
-        "archive import cannot be retried",
-    )?;
-    let config = slack_archive_upload_config()?;
-    ensure_archive_import_bucket_matches_config(&import, &config)?;
-    let head = head_s3_object(&config, &import.object_key).await?;
-    let workflows = workflow_runtime(&state)?;
-    let workflow = workflows
-        .create_run(CreateWorkflowRunRequest {
-            workflow_name: "slack_archive_import".to_owned(),
-            input: json!({ "import_id": import.import_id }),
-            idempotency_key: Some(format!(
-                "slack_archive_import:{}:retry:{}",
-                import.import_id,
-                Uuid::new_v4().simple()
-            )),
-            harness_type: None,
-            max_attempts: Some(1),
-        })
-        .await?;
-    let row =
-        mark_slack_archive_import_queued(&pool, &import, head, &workflow.run_id, &workflow.task_id)
-            .await?;
-
-    Ok((
-        StatusCode::OK,
-        Json(json!({
-            "ok": true,
-            "import": SlackArchiveImportResponse::from(row),
-            "ingestion": {
-                "status": workflow.status,
-                "workflow_name": "slack_archive_import",
-                "workflow_run_id": workflow.run_id,
-                "workflow_task_id": workflow.task_id,
-                "created": workflow.created
-            }
-        })),
-    ))
 }
 
 async fn list_slack_private_sync_checkpoints(
@@ -3042,115 +2552,6 @@ fn db_pool(state: &AppState) -> Result<PgPool, ApiError> {
     state.pool()
 }
 
-async fn load_slack_archive_import(
-    pool: &PgPool,
-    import_id: &str,
-) -> Result<SlackArchiveImportRow, ApiError> {
-    let sql = format!(
-        "SELECT {SLACK_ARCHIVE_IMPORT_COLUMNS} FROM slack_archive_imports WHERE import_id = $1"
-    );
-    sqlx::query_as::<_, SlackArchiveImportRow>(&sql)
-        .bind(import_id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| ApiError::NotFound("archive import not found".to_owned()))
-}
-
-fn slack_archive_upload_response(
-    row: SlackArchiveImportRow,
-    upload_url: String,
-    expires_at: OffsetDateTime,
-) -> Value {
-    let archive_uri = row.archive_uri.clone();
-    json!({
-        "ok": true,
-        "import": SlackArchiveImportResponse::from(row),
-        "upload": {
-            "archive_uri": archive_uri,
-            "upload_url": upload_url,
-            "expires_at": expires_at,
-        }
-    })
-}
-
-fn slack_archive_download_response(
-    row: SlackArchiveImportRow,
-    download_url: String,
-    expires_at: OffsetDateTime,
-) -> Value {
-    let archive_uri = row.archive_uri.clone();
-    json!({
-        "ok": true,
-        "import": SlackArchiveImportResponse::from(row),
-        "download": {
-            "archive_uri": archive_uri,
-            "download_url": download_url,
-            "expires_at": expires_at,
-        }
-    })
-}
-
-fn ensure_archive_import_status(
-    status: &str,
-    allowed: &[&str],
-    action: &str,
-) -> Result<(), ApiError> {
-    if allowed.contains(&status) {
-        return Ok(());
-    }
-    Err(ApiError::BadRequest(format!(
-        "{action} from status {status}"
-    )))
-}
-
-fn ensure_archive_import_bucket_matches_config(
-    import: &SlackArchiveImportRow,
-    config: &SlackArchiveUploadConfig,
-) -> Result<(), ApiError> {
-    if import.object_bucket == config.bucket {
-        return Ok(());
-    }
-    Err(ApiError::BadRequest(
-        "archive import bucket no longer matches configured bucket".to_owned(),
-    ))
-}
-
-async fn mark_slack_archive_import_queued(
-    pool: &PgPool,
-    import: &SlackArchiveImportRow,
-    head: S3ObjectHead,
-    workflow_run_id: &str,
-    workflow_task_id: &str,
-) -> Result<SlackArchiveImportRow, ApiError> {
-    let sql = format!(
-        "UPDATE slack_archive_imports SET \
-         status = 'uploaded', \
-         file_size_bytes = $2, \
-         sha256 = COALESCE(sha256, $3), \
-         uploaded_at = COALESCE(uploaded_at, NOW()), \
-         started_at = NULL, \
-         finished_at = NULL, \
-         workflow_run_id = $4, \
-         workflow_task_id = $5, \
-         channels_imported = 0, \
-         users_imported = 0, \
-         messages_imported = 0, \
-         error_text = '', \
-         updated_at = NOW() \
-         WHERE import_id = $1 \
-         RETURNING {SLACK_ARCHIVE_IMPORT_COLUMNS}"
-    );
-    sqlx::query_as::<_, SlackArchiveImportRow>(&sql)
-        .bind(&import.import_id)
-        .bind(head.size_bytes)
-        .bind(head.sha256)
-        .bind(workflow_run_id)
-        .bind(workflow_task_id)
-        .fetch_one(pool)
-        .await
-        .map_err(ApiError::from)
-}
-
 async fn upsert_slack_dm_sync_run(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run: &SlackDmSyncRunPayload,
@@ -3261,32 +2662,6 @@ async fn upsert_google_docs_sync_run(
     Ok(())
 }
 
-fn slack_archive_upload_config() -> Result<SlackArchiveUploadConfig, ApiError> {
-    let bucket = env::var("SLACK_ARCHIVE_UPLOAD_BUCKET")
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-    if bucket.is_empty() {
-        return Err(ApiError::BadRequest(
-            "SLACK_ARCHIVE_UPLOAD_BUCKET is not configured".to_owned(),
-        ));
-    }
-    let prefix = env::var("SLACK_ARCHIVE_UPLOAD_PREFIX")
-        .unwrap_or_else(|_| "slack-archives".to_owned())
-        .trim_matches('/')
-        .to_owned();
-    Ok(SlackArchiveUploadConfig {
-        bucket,
-        prefix,
-        region: non_empty_env("SLACK_ARCHIVE_UPLOAD_REGION"),
-        endpoint: non_empty_env("SLACK_ARCHIVE_UPLOAD_ENDPOINT"),
-        presign_ttl: Duration::from_secs(positive_env_u64(
-            "SLACK_ARCHIVE_UPLOAD_PRESIGN_TTL_SECONDS",
-            900,
-        )),
-    })
-}
-
 pub(crate) fn non_empty_env(name: &str) -> Option<String> {
     env::var(name)
         .ok()
@@ -3300,10 +2675,6 @@ pub(crate) fn positive_env_u64(name: &str, default: u64) -> u64 {
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(default)
-}
-
-fn prefixed_id(prefix: &str) -> String {
-    format!("{prefix}_{}", Uuid::new_v4().simple())
 }
 
 fn default_slack_dm_sync_mode() -> String {
@@ -3663,145 +3034,6 @@ fn validate_google_docs_sync_batch(request: &GoogleDocsSyncBatchRequest) -> Resu
             checkpoint.last_incremental_sync_at.as_deref(),
         )?;
     }
-    Ok(())
-}
-
-fn sanitize_path_segment(value: &str) -> String {
-    value
-        .trim()
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('.')
-        .trim_matches('_')
-        .to_owned()
-}
-
-fn sanitize_filename(value: &str) -> Result<String, ApiError> {
-    let basename = FsPath::new(value.trim())
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("");
-    let filename = sanitize_path_segment(basename);
-    if filename.is_empty() {
-        return Err(ApiError::BadRequest(
-            "filename must not be empty".to_owned(),
-        ));
-    }
-    if !filename.to_ascii_lowercase().ends_with(".zip") {
-        return Err(ApiError::BadRequest("filename must end in .zip".to_owned()));
-    }
-    Ok(filename)
-}
-
-fn slack_archive_object_key(prefix: &str, import_id: &str, filename: &str) -> String {
-    [prefix, import_id, filename]
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-async fn s3_client(config: &SlackArchiveUploadConfig) -> S3Client {
-    let mut loader = aws_config::defaults(BehaviorVersion::latest());
-    if let Some(region) = &config.region {
-        loader = loader.region(Region::new(region.clone()));
-    }
-    if let Some(endpoint) = &config.endpoint {
-        loader = loader.endpoint_url(endpoint);
-    }
-    let shared_config = loader.load().await;
-    let mut builder = S3ConfigBuilder::from(&shared_config);
-    if config.endpoint.is_some() {
-        builder = builder.force_path_style(true);
-    }
-    S3Client::from_conf(builder.build())
-}
-
-async fn presign_s3_put_url(
-    config: &SlackArchiveUploadConfig,
-    object_key: &str,
-    content_type: &str,
-) -> Result<String, ApiError> {
-    let client = s3_client(config).await;
-    let presigning = PresigningConfig::expires_in(config.presign_ttl)
-        .map_err(|error| ApiError::Internal(error.to_string()))?;
-    let request = client
-        .put_object()
-        .bucket(&config.bucket)
-        .key(object_key)
-        .content_type(content_type)
-        .presigned(presigning)
-        .await
-        .map_err(|error| ApiError::Internal(error.to_string()))?;
-    Ok(request.uri().to_string())
-}
-
-async fn presign_s3_get_url(
-    config: &SlackArchiveUploadConfig,
-    object_key: &str,
-) -> Result<String, ApiError> {
-    let client = s3_client(config).await;
-    let presigning = PresigningConfig::expires_in(config.presign_ttl)
-        .map_err(|error| ApiError::Internal(error.to_string()))?;
-    let request = client
-        .get_object()
-        .bucket(&config.bucket)
-        .key(object_key)
-        .presigned(presigning)
-        .await
-        .map_err(|error| ApiError::Internal(error.to_string()))?;
-    Ok(request.uri().to_string())
-}
-
-struct S3ObjectHead {
-    size_bytes: Option<i64>,
-    sha256: Option<String>,
-}
-
-async fn head_s3_object(
-    config: &SlackArchiveUploadConfig,
-    object_key: &str,
-) -> Result<S3ObjectHead, ApiError> {
-    let client = s3_client(config).await;
-    let response = client
-        .head_object()
-        .bucket(&config.bucket)
-        .key(object_key)
-        .send()
-        .await
-        .map_err(|error| {
-            ApiError::BadRequest(format!("archive object is not readable: {error}"))
-        })?;
-    let sha256 = response
-        .metadata()
-        .and_then(|metadata| metadata.get("sha256").cloned());
-    Ok(S3ObjectHead {
-        size_bytes: response.content_length(),
-        sha256,
-    })
-}
-
-async fn delete_s3_object(
-    config: &SlackArchiveUploadConfig,
-    object_key: &str,
-) -> Result<(), ApiError> {
-    let client = s3_client(config).await;
-    client
-        .delete_object()
-        .bucket(&config.bucket)
-        .key(object_key)
-        .send()
-        .await
-        .map_err(|error| {
-            ApiError::BadRequest(format!("archive object could not be deleted: {error}"))
-        })?;
     Ok(())
 }
 
@@ -4200,166 +3432,6 @@ mod granola_sync_tests {
                 "owner@example.com".to_owned(),
             ]
         );
-    }
-}
-
-#[cfg(test)]
-mod slack_archive_import_tests {
-    use super::*;
-
-    fn archive_row(status: &str) -> SlackArchiveImportRow {
-        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
-        SlackArchiveImportRow {
-            import_id: "sai_test".to_owned(),
-            mode: "public_channels".to_owned(),
-            archive_uri: "s3://bucket/prefix/sai_test/archive.zip".to_owned(),
-            object_bucket: "bucket".to_owned(),
-            object_key: "prefix/sai_test/archive.zip".to_owned(),
-            original_filename: "archive.zip".to_owned(),
-            content_type: "application/zip".to_owned(),
-            file_size_bytes: None,
-            sha256: None,
-            status: status.to_owned(),
-            workflow_run_id: None,
-            workflow_task_id: None,
-            channels_imported: 0,
-            users_imported: 0,
-            messages_imported: 0,
-            error_text: String::new(),
-            created_by: "tester".to_owned(),
-            uploaded_at: None,
-            started_at: None,
-            finished_at: None,
-            upload_url_expires_at: None,
-            created_at: now,
-            updated_at: now,
-            metadata: json!({}),
-        }
-    }
-
-    #[test]
-    fn archive_import_status_gate_allows_only_requested_statuses() {
-        assert!(
-            ensure_archive_import_status(
-                "upload_pending",
-                &["upload_pending"],
-                "archive upload URL cannot be refreshed",
-            )
-            .is_ok()
-        );
-        let error = ensure_archive_import_status(
-            "failed",
-            &["upload_pending"],
-            "archive upload URL cannot be refreshed",
-        )
-        .unwrap_err();
-        assert!(matches!(error, ApiError::BadRequest(_)));
-    }
-
-    #[test]
-    fn archive_import_delete_statuses_exclude_active_and_completed_imports() {
-        for status in ["upload_pending", "uploaded", "failed", "cancelled"] {
-            ensure_archive_import_status(
-                status,
-                &["upload_pending", "uploaded", "failed", "cancelled"],
-                "archive import cannot be deleted",
-            )
-            .unwrap();
-        }
-        for status in ["importing", "completed"] {
-            let error = ensure_archive_import_status(
-                status,
-                &["upload_pending", "uploaded", "failed", "cancelled"],
-                "archive import cannot be deleted",
-            )
-            .unwrap_err();
-            assert!(matches!(error, ApiError::BadRequest(_)));
-        }
-    }
-
-    #[test]
-    fn archive_import_download_url_statuses_exclude_unuploaded_or_terminal_imports() {
-        for status in ["uploaded", "importing", "failed"] {
-            ensure_archive_import_status(
-                status,
-                &["uploaded", "importing", "failed"],
-                "archive download URL cannot be created",
-            )
-            .unwrap();
-        }
-        for status in ["upload_pending", "completed", "cancelled"] {
-            let error = ensure_archive_import_status(
-                status,
-                &["uploaded", "importing", "failed"],
-                "archive download URL cannot be created",
-            )
-            .unwrap_err();
-            assert!(matches!(error, ApiError::BadRequest(_)));
-        }
-    }
-
-    #[test]
-    fn archive_import_bucket_must_match_current_upload_config() {
-        let import = archive_row("upload_pending");
-        let config = SlackArchiveUploadConfig {
-            bucket: "bucket".to_owned(),
-            prefix: "prefix".to_owned(),
-            region: Some("us-east-1".to_owned()),
-            endpoint: None,
-            presign_ttl: Duration::from_secs(900),
-        };
-        ensure_archive_import_bucket_matches_config(&import, &config).unwrap();
-
-        let config = SlackArchiveUploadConfig {
-            bucket: "other-bucket".to_owned(),
-            ..config
-        };
-        let error = ensure_archive_import_bucket_matches_config(&import, &config).unwrap_err();
-        assert!(matches!(error, ApiError::BadRequest(_)));
-    }
-
-    #[test]
-    fn archive_upload_response_includes_import_and_upload_contract() {
-        let expires_at = OffsetDateTime::from_unix_timestamp(1_700_000_900).unwrap();
-        let body = slack_archive_upload_response(
-            archive_row("upload_pending"),
-            "https://uploads.example/presigned".to_owned(),
-            expires_at,
-        );
-        assert_eq!(body["ok"], json!(true));
-        assert_eq!(body["import"]["import_id"], json!("sai_test"));
-        assert!(body["import"].get("workspace_id").is_none());
-        assert_eq!(
-            body["upload"]["archive_uri"],
-            json!("s3://bucket/prefix/sai_test/archive.zip")
-        );
-        assert_eq!(
-            body["upload"]["upload_url"],
-            json!("https://uploads.example/presigned")
-        );
-        assert!(body["upload"]["expires_at"].is_array());
-    }
-
-    #[test]
-    fn archive_download_response_includes_import_and_download_contract() {
-        let expires_at = OffsetDateTime::from_unix_timestamp(1_700_000_900).unwrap();
-        let body = slack_archive_download_response(
-            archive_row("uploaded"),
-            "https://uploads.example/presigned-download".to_owned(),
-            expires_at,
-        );
-        assert_eq!(body["ok"], json!(true));
-        assert_eq!(body["import"]["import_id"], json!("sai_test"));
-        assert_eq!(
-            body["download"]["archive_uri"],
-            json!("s3://bucket/prefix/sai_test/archive.zip")
-        );
-        assert_eq!(
-            body["download"]["download_url"],
-            json!("https://uploads.example/presigned-download")
-        );
-        assert!(body["download"]["expires_at"].is_array());
-        assert!(body.get("upload").is_none());
     }
 }
 

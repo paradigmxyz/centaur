@@ -13,7 +13,7 @@ defaults:
 jobs:
   console_changes:
     name: Detect Console CI changes
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     outputs:
       relevant: ${{ steps.filter.outputs.relevant }}
     defaults:
@@ -46,7 +46,7 @@ jobs:
           fi
 
   scan_ruby:
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: depot-ubuntu-24.04
     needs: console_changes
     if: needs.console_changes.outputs.relevant == 'true'
 
@@ -61,10 +61,17 @@ jobs:
           bundler-cache: true
 
       - name: Scan for common Rails security vulnerabilities using static analysis
-        run: bin/brakeman --no-pager
+        run: |
+          # --ensure-latest (added by bin/brakeman) fails on new upstream releases;
+          # enforce it only on pushes to main so PRs and the merge queue aren't blocked.
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            bin/brakeman --no-pager
+          else
+            bundle exec brakeman --no-pager
+          fi
 
   scan_js:
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: depot-ubuntu-24.04
     needs: console_changes
     if: needs.console_changes.outputs.relevant == 'true'
 
@@ -117,7 +124,7 @@ jobs:
 
     services:
       postgres:
-        image: paradedb/paradedb:0.23.0-pg16
+        image: postgres:16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -160,7 +167,7 @@ jobs:
 
   console-ci-success:
     name: Console CI success
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     if: always()
     needs:
       - console_changes

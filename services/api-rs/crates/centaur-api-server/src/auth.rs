@@ -25,12 +25,11 @@ pub(crate) enum Capability {
     WorkflowsWrite,
     WorkflowsEvents,
     WorkflowsActions,
-    AdminArchive,
     AdminSync,
 }
 
 impl Capability {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 8] = [
         Self::SessionsRead,
         Self::SessionsWrite,
         Self::SandboxesDrain,
@@ -38,7 +37,6 @@ impl Capability {
         Self::WorkflowsWrite,
         Self::WorkflowsEvents,
         Self::WorkflowsActions,
-        Self::AdminArchive,
         Self::AdminSync,
     ];
 }
@@ -401,6 +399,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::routes::thread_key_matches_platform;
 
     #[test]
     fn authenticates_console_service_jwt() {
@@ -546,26 +545,33 @@ mod tests {
     }
 
     #[test]
-    fn githubbot_ingress_covers_every_thread_key_family_it_mints() {
-        // Mirrors services/githubbot/src: chat threads (body-mention.ts), issue
-        // work (issue-manager.ts), owned-PR management (pr-manager.ts) and review
-        // runs (review.ts). githubbot/test/thread-keys.test.ts pins the producer
-        // side; dropping a family here 403s the bot out of its own sessions.
+    fn githubbot_ingress_admits_every_thread_key_family_it_mints() {
+        // The same keys services/githubbot/test/thread-keys.test.ts pins on
+        // the producer side: chat threads (body-mention.ts), issue work
+        // (issue-manager.ts), owned-PR management (pr-manager.ts), and review
+        // runs (review.ts). Dropping a family 403s the bot out of its sessions.
         let githubbot = INGRESS_SPECS
             .iter()
             .find(|spec| spec.identity == "githubbot")
             .expect("githubbot ingress spec");
 
-        assert_eq!(
-            githubbot.platform_prefixes,
-            [
-                "github:",
-                "github-issue:",
-                "github-manage:",
-                "github-review:"
-            ]
-            .as_slice()
-        );
+        for thread_key in [
+            "github:acme/repo:7",
+            "github-issue:acme/repo:7",
+            "github-manage:acme/repo:7",
+            "github-review:acme/repo:7",
+        ] {
+            assert!(
+                thread_key_matches_platform(githubbot.platform_prefixes, thread_key),
+                "{thread_key}"
+            );
+        }
+        for thread_key in ["slack:C123:1.2", "githubx:acme/repo:7"] {
+            assert!(
+                !thread_key_matches_platform(githubbot.platform_prefixes, thread_key),
+                "{thread_key}"
+            );
+        }
     }
 
     #[test]

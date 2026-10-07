@@ -9,10 +9,7 @@ gem "propshaft"
 # Tailwind CSS, compiled by a standalone binary into app/assets/builds.
 gem "tailwindcss-rails", "4.6.0"
 # Use pg as the database for Active Record
-gem "pg", "~> 1.5"
-# Preserve ParadeDB indexes in Rails schema dumps and migrations. Versions 0.10+
-# require ParadeDB 0.25+, while Console currently runs ParadeDB 0.23.
-gem "rails-paradedb", "0.9.0", require: "parade_db"
+gem "pg", "~> 1.7"
 # Opaque ID encoding (bigint <-> short string) for externally-exposed IDs
 gem "sqids", "~> 0.2"
 # JSON Schema validation for jsonb config columns
@@ -32,7 +29,7 @@ gem "jbuilder"
 # Collapse multi-line request logs into a single JSON event [https://github.com/roidrage/lograge]
 gem "lograge"
 # Report unhandled Rails and background-job errors when SENTRY_DSN is configured.
-gem "sentry-ruby", "~> 7.0"
+gem "sentry-ruby", "~> 7.1"
 gem "sentry-rails", "~> 7.0"
 
 # Use Active Model has_secure_password [https://guides.rubyonrails.org/active_model_basics.html#securepassword]
@@ -59,7 +56,7 @@ gem "bootsnap", require: false
 gem "thruster", require: false
 
 # Use Active Storage variants [https://guides.rubyonrails.org/active_storage_overview.html#transforming-images]
-gem "image_processing", "~> 2.1"
+gem "image_processing", "~> 2.2"
 gem "ruby-vips", "~> 2.2", require: false
 
 group :development, :test do

@@ -1,0 +1,37 @@
+# kind's default CoreDNS config, plus rewrites that send the model providers'
+# hostnames to the e2e model server. Applied by e2e/stack.sh.
+.:53 {
+    errors
+    health {
+       lameduck 5s
+    }
+    ready
+    rewrite stop {
+      name exact api.openai.com model-server.centaur-e2e-model.svc.cluster.local
+      answer name model-server.centaur-e2e-model.svc.cluster.local api.openai.com
+    }
+    rewrite stop {
+      name exact chatgpt.com model-server.centaur-e2e-model.svc.cluster.local
+      answer name model-server.centaur-e2e-model.svc.cluster.local chatgpt.com
+    }
+    rewrite stop {
+      name exact api.anthropic.com model-server.centaur-e2e-model.svc.cluster.local
+      answer name model-server.centaur-e2e-model.svc.cluster.local api.anthropic.com
+    }
+    kubernetes cluster.local in-addr.arpa ip6.arpa {
+       pods insecure
+       fallthrough in-addr.arpa ip6.arpa
+       ttl 30
+    }
+    prometheus :9153
+    forward . /etc/resolv.conf {
+       max_concurrent 1000
+    }
+    cache 30 {
+       disable success cluster.local
+       disable denial cluster.local
+    }
+    loop
+    reload
+    loadbalance
+}

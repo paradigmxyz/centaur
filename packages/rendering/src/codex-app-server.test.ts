@@ -871,3 +871,68 @@ describe('CodexAppServerRendererEventMapper retryable errors', () => {
     })
   })
 })
+
+describe('background agent task cards', () => {
+  it('tracks a Claude background agent from launch to its summary', () => {
+    const mapper = new CodexAppServerRendererEventMapper()
+    const item = {
+      id: 'agent-1',
+      type: 'dynamicToolCall',
+      tool: 'BackgroundAgent',
+      arguments: {
+        description: 'Research card prices',
+        subagent_type: 'general-purpose'
+      }
+    }
+
+    expect(
+      mapper.process({
+        type: 'item.started',
+        item: { ...item, status: 'inProgress' }
+      })
+    ).toContainEqual(
+      expect.objectContaining({
+        type: 'renderer.task.update',
+        task: expect.objectContaining({
+          id: 'agent-1',
+          title: 'Agent: Research card prices',
+          status: 'in_progress'
+        })
+      })
+    )
+
+    expect(
+      mapper.process({
+        type: 'item.completed',
+        item: {
+          ...item,
+          status: 'completed',
+          success: true,
+          contentItems: [{ type: 'inputText', text: 'Prices are up 4%.' }]
+        }
+      })
+    ).toContainEqual(
+      expect.objectContaining({
+        type: 'renderer.task.update',
+        task: expect.objectContaining({
+          id: 'agent-1',
+          output: [expect.objectContaining({ text: 'Prices are up 4%.' })]
+        })
+      })
+    )
+  })
+
+  it('leaves other dynamic tool calls without task cards', () => {
+    const mapper = new CodexAppServerRendererEventMapper()
+    const events = mapper.process({
+      type: 'item.started',
+      item: {
+        id: 'tool-1',
+        type: 'dynamicToolCall',
+        tool: 'WebSearch',
+        arguments: {}
+      }
+    })
+    expect(events.some(event => event.type === 'renderer.task.update')).toBe(false)
+  })
+})

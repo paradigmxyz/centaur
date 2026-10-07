@@ -13,7 +13,7 @@ const SYSTEM_PROMPT = [
   'Decide whether the Slack message asks to use a specific AI harness, model, provider, or reasoning effort.',
   'Return only canonical override values from the schema.',
   'Use null for every field when the message does not ask to change model selection.',
-  'Allowed harness values: codex, claudecode, amp, nanocodex.',
+  'Allowed harness values: codex, claudecode, amp, nanocodex, pi.',
   'Allowed provider values: responses, amazon-bedrock, openrouter.',
   'Allowed reasoning values: none, minimal, low, medium, high, xhigh, max, ultra.',
   'Treat inline flags such as "--claude", "--claude --model=fable", and "--fable" as model selection requests.',
@@ -21,13 +21,20 @@ const SYSTEM_PROMPT = [
   'Only return reasoning when the user explicitly asks to change model reasoning or effort. A reasoning word appearing incidentally, in quoted text, pasted model output, code, or task requirements is not a selection request.',
   'When the user explicitly requests a reasoning or effort change, map fuzzy magnitude words to the nearest reasoning value. Examples: tiny/cheap/fast -> low or minimal; normal/default -> medium; deep/strong/intense -> high or xhigh; maximum/superduper/biggest -> max.',
   'Return reasoning even when the requested model is not Codex; validation will ignore reasoning that cannot apply.',
-  'Map OpenAI model aliases to canonical IDs: astra -> gpt-6-astra, sol -> gpt-6-sol, luna -> gpt-6-luna, terra -> gpt-5.6-terra, 5.6 sol -> gpt-5.6-sol, 5.6 luna -> gpt-5.6-luna, 5.5 -> gpt-5.5, 5.5 pro -> gpt-5.5-pro, 5.4 -> gpt-5.4, 5.4 pro -> gpt-5.4-pro, 5.4 mini -> gpt-5.4-mini, 5.4 nano -> gpt-5.4-nano. Preserve explicitly requested model generations; there is no GPT-6 Terra in the supported catalog.',
+  'Map OpenAI model aliases to canonical IDs: astra -> gpt-6-astra, sol -> gpt-6.1-sol, 6.1 sol -> gpt-6.1-sol, 6 sol -> gpt-6-sol, luna -> gpt-6-luna, terra -> gpt-5.6-terra, 5.6 sol -> gpt-5.6-sol, 5.6 luna -> gpt-5.6-luna, 5.5 -> gpt-5.5, 5.5 pro -> gpt-5.5-pro, 5.4 -> gpt-5.4, 5.4 pro -> gpt-5.4-pro, 5.4 mini -> gpt-5.4-mini, 5.4 nano -> gpt-5.4-nano. Preserve explicitly requested model generations; there is no GPT-6 Terra in the supported catalog.',
   'Map Claude model aliases to canonical IDs: fable -> claude-fable-5, opus -> claude-opus-5-5, opus 4.8 -> claude-opus-4-8, opus 4.7 -> claude-opus-4-7, opus 5 -> claude-opus-5, opus 5 fast -> claude-opus-5-fast, opus 5.5 -> claude-opus-5-5, sonnet -> claude-sonnet-5, sonnet 4.6 -> claude-sonnet-4-6, sonnet 5 -> claude-sonnet-5, haiku -> claude-haiku-4-5.',
   'Map Amp model aliases to canonical IDs: deep -> deep, fast -> fast. Select an Amp model only when the user explicitly names Amp or clearly asks for the deep or fast model/mode. Requests such as "use the deep model" and "switch to fast mode" select the corresponding Amp model. Do not infer Amp from superlatives, coined terms, or casual requests to be more intelligent, thorough, or fast.',
   'Words containing or merely evoking model aliases are not model requests. For example, "think deeply", "do a deep analysis", "use your strongest thinking", and "give me a fast answer" do not select Amp. Unless another explicit selector is present, return null for every field.',
-  'For example, "use max effort and the sol model" should return model "gpt-6-sol" and reasoning "max".',
+  'For example, "use max effort and the sol model" should return model "gpt-6.1-sol" and reasoning "max".',
   'Do not treat ordinary discussion of model names as a selection request.'
 ].join('\n')
+
+// Only messages that mention a model name or selection term can ask for an
+// override, so other messages skip the classifier and its latency. The letter
+// lookarounds keep version suffixes ("gpt5", "opus-4.7") and plurals matching
+// while ignoring longer words such as "solve" or "terraform".
+const SELECTOR_TERM_PATTERN =
+  /(?<![a-z])(?:claude|claudecode|codex|amp|nanocodex|opus|sonnet|haiku|fable|gpt|astra|sol|luna|terra|model|harness|provider|reasoning|effort|mode|bedrock|openrouter|think|thinking)(?:s|es)?(?![a-z])/i
 
 const MODEL_VALUES = [
   'claude-fable-5',
@@ -52,6 +59,7 @@ const MODEL_VALUES = [
   'gpt-5.6-terra',
   'gpt-6-astra',
   'gpt-6-sol',
+  'gpt-6.1-sol',
   'gpt-6-luna',
   null
 ] as const
@@ -60,7 +68,7 @@ const MESSAGE_OVERRIDES_SCHEMA = {
   additionalProperties: false,
   properties: {
     harness: {
-      enum: ['codex', 'claudecode', 'amp', 'nanocodex', null],
+      enum: ['codex', 'claudecode', 'amp', 'nanocodex', 'pi', null],
       type: ['string', 'null']
     },
     model: {
@@ -125,7 +133,11 @@ export function createOpenAiMessageOverridesStrategy(
     if (!strategyText) {
       return { cleanedText, overrides: {} }
     }
+    if (!SELECTOR_TERM_PATTERN.test(strategyText)) {
+      return { overrides: {} }
+    }
 
+    const startedAtMs = Date.now()
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
     try {
@@ -161,6 +173,7 @@ export function createOpenAiMessageOverridesStrategy(
       const value = await response.json()
       const outputText = responseOutputText(value)
       options.logger?.info('slackbotv2_message_overrides_strategy_response_received', {
+        elapsed_ms: Date.now() - startedAtMs,
         model: options.model,
         output_text: outputText
       })
@@ -174,6 +187,7 @@ export function createOpenAiMessageOverridesStrategy(
       return { overrides: strategyOverrides }
     } catch (error) {
       options.logger?.warn('slackbotv2_message_overrides_strategy_request_failed', {
+        elapsed_ms: Date.now() - startedAtMs,
         error: errorMessage(error),
         model: options.model,
         timeout_ms: timeoutMs

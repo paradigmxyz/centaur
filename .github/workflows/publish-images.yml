@@ -176,7 +176,7 @@ jobs:
           retention-days: 1
 
   merge:
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: depot-ubuntu-24.04
     needs: build
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
     strategy:
@@ -245,11 +245,62 @@ jobs:
         run: |
           docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ steps.meta.outputs.version }}
 
+  # Deploys the images just published to a kind cluster and runs the e2e/
+  # scenarios: real control plane, sandboxes, and harnesses against a fake
+  # Slack and a scripted model server, with API keys. e2e-subscription-harnesses
+  # runs only the harness smoke test with ChatGPT/Claude.ai subscriptions,
+  # since harness upgrades can break that path on its own. Both informational.
+  e2e:
+    name: ${{ matrix.name }}
+    needs: merge
+    if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
+    runs-on: depot-ubuntu-24.04-16
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: e2e
+            auth-mode: api_key
+            tests: ""
+          - name: e2e-subscription-harnesses
+            auth-mode: access_token
+            tests: e2e/tests/harnesses.test.ts
+    permissions:
+      contents: read
+    env:
+      HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      CENTAUR_E2E_AUTH_MODE: ${{ matrix.auth-mode }}
+      E2E_TESTS: ${{ matrix.tests }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          install_only: true
+          version: v0.30.0
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Deploy the e2e stack
+        run: CENTAUR_E2E_IMAGE_TAG="sha-${HEAD_SHA::7}" e2e/stack.sh up
+
+      - name: Run e2e scenarios
+        run: e2e/stack.sh test $E2E_TESTS
+
+      - name: Dump diagnostics
+        if: ${{ failure() }}
+        run: e2e/stack.sh logs
+
   notify-centaur-paradigm:
     name: Notify Paradigm Overlay
     needs: merge
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     environment: centaur-paradigm-dispatch
     permissions: {}
     steps:

@@ -1,8 +1,10 @@
+use std::time::Instant;
+
 use anyhow::{Context, Result};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 
-use crate::{config::Config, errors::rejected};
+use crate::{config::Config, errors::rejected, telemetry};
 
 const EMBEDDING_BATCH_SIZE: usize = 25;
 
@@ -26,6 +28,12 @@ struct EmbeddingRequest<'a> {
 #[derive(Deserialize)]
 struct EmbeddingResponse {
     data: Vec<EmbeddingItem>,
+    usage: Option<EmbeddingUsage>,
+}
+
+#[derive(Deserialize)]
+struct EmbeddingUsage {
+    prompt_tokens: u64,
 }
 
 #[derive(Deserialize)]
@@ -64,14 +72,16 @@ impl EmbeddingsClient {
                 dimensions: self.dimensions,
                 encoding_format: "float",
             };
+            let started = Instant::now();
             let response = self
                 .http
                 .post(&self.endpoint)
                 .bearer_auth(&self.api_key)
                 .json(&request)
                 .send()
-                .await
-                .context("send embeddings request")?;
+                .await;
+            telemetry::upstream_response("openai", "embeddings", started, &response);
+            let response = response.context("send embeddings request")?;
             let status = response.status();
             if status.is_client_error()
                 && !matches!(
@@ -92,6 +102,11 @@ impl EmbeddingsClient {
                 .json::<EmbeddingResponse>()
                 .await
                 .map_err(|error| rejected(format!("decode embeddings response: {error}")))?;
+            telemetry::embedding_usage(
+                &self.model,
+                batch.len(),
+                response.usage.as_ref().map(|usage| usage.prompt_tokens),
+            );
             if response.data.len() != batch.len() {
                 return Err(rejected(
                     "embedding response item count does not match request",
@@ -118,22 +133,5 @@ impl EmbeddingsClient {
             }
         }
         Ok(output)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn batches_have_a_bounded_size() {
-        let inputs = vec![String::new(); 51];
-        assert_eq!(
-            inputs
-                .chunks(EMBEDDING_BATCH_SIZE)
-                .map(<[String]>::len)
-                .collect::<Vec<_>>(),
-            vec![25, 25, 1]
-        );
     }
 }

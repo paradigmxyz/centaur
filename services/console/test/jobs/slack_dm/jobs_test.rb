@@ -60,6 +60,19 @@ module SlackDm
       assert_nil cursor.not_before
     end
 
+    test "SyncCredentialJob does nothing while company context v1 is disabled" do
+      slack_credential(app: slack_app)
+      sync_factory = ->(_credential) { flunk "disabled Slack DM sync should not sync credentials" }
+
+      with_env("CENTAUR_CONSOLE_COMPANY_CONTEXT_V1_ENABLED" => "false") do
+        SlackDm::SyncCredential.stub(:new, sync_factory) do
+          assert_no_enqueued_jobs { SlackDm::SyncCredentialJob.perform_now("slack-dms") }
+        end
+      end
+
+      assert_nil SlackDmSyncCursor.find_by(oauth_app_slug: "slack-dms")
+    end
+
     test "SyncCredentialJob resumes from the persisted credential cursor" do
       app = slack_app
       first = slack_credential(app: app)

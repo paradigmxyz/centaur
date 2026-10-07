@@ -32,11 +32,33 @@ RUN --mount=type=cache,id=company-context-cargo-registry-${TARGETARCH},target=/u
       *) echo "unsupported RUST_BUILD_PROFILE=$RUST_BUILD_PROFILE" >&2; exit 2 ;; \
     esac
 
+# Debian's pandoc predates the pptx and xlsx readers. The release binary is
+# static, so it is fetched on the build platform for the target architecture.
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS pandoc
+ARG PANDOC_VERSION=3.12
+ARG TARGETARCH
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends ca-certificates curl
+RUN case "$TARGETARCH" in \
+      amd64) checksum=67d7d011fed8c8543306022b985b9b2499ab9b74818df91d8727c7e9ebc5ba06 ;; \
+      arm64) checksum=6cefcf7100e23a99447c26f89d1ff5b253f3407fcef99a9e27ae06f3ed16cb82 ;; \
+      *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 2 ;; \
+    esac && \
+    archive="pandoc-${PANDOC_VERSION}-linux-${TARGETARCH}.tar.gz" && \
+    curl --fail --location --silent --show-error --output "/tmp/${archive}" \
+      "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/${archive}" && \
+    echo "${checksum}  /tmp/${archive}" | sha256sum --check - && \
+    tar --extract --gzip --file "/tmp/${archive}" --strip-components=2 \
+      --directory /usr/local/bin "pandoc-${PANDOC_VERSION}/bin/pandoc" && \
+    rm "/tmp/${archive}"
+
 FROM debian:bookworm-slim
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends ca-certificates poppler-utils \
     && rm -rf /var/lib/apt/lists/*
+COPY --from=pandoc /usr/local/bin/pandoc /usr/local/bin/pandoc
 COPY --from=builder /usr/local/bin/centaur-company-context /usr/local/bin/centaur-company-context
 USER 65532:65532
 EXPOSE 8080

@@ -3,6 +3,8 @@ module Granola
     queue_as :default
 
     def perform(oauth_app_slug = Granola::SyncCredential.oauth_app_slug)
+      return unless CompanyContextV1.enabled?
+
       credentials = BrokerCredential
         .includes(:oauth_app)
         .joins(:oauth_app)

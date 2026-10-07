@@ -15,7 +15,8 @@ const HARNESS_DISPLAY_NAMES: Record<string, string> = {
   amp: 'Amp',
   claudecode: 'Claude Code',
   codex: 'Codex',
-  nanocodex: 'Nanocodex'
+  nanocodex: 'Nanocodex',
+  pi: 'Pi'
 }
 
 const REASONING_DISPLAY_NAMES: Record<string, string> = {
@@ -42,7 +43,7 @@ const GPT_5_6_REASONING_EFFORTS = new Set([
   ...STANDARD_CODEX_REASONING_EFFORTS,
   'max'
 ])
-const GPT_6_ASTRA_REASONING_EFFORTS = new Set([
+const GPT_6_ULTRA_REASONING_EFFORTS = new Set([
   'low',
   'medium',
   'high',
@@ -50,6 +51,27 @@ const GPT_6_ASTRA_REASONING_EFFORTS = new Set([
   'max',
   'ultra'
 ])
+// Claude Code `effortLevel` values; applied per turn by the harness server.
+const CLAUDE_CODE_REASONING_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
+// Pi thinking levels (`none` runs with thinking off); applied per turn by the
+// harness server. Pi clamps a level to what the selected model supports.
+const PI_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+// Older Claude models Claude Code limits to fewer effort levels (none for
+// models without effort support); newer models support every level.
+const NO_REASONING_EFFORTS: ReadonlySet<string> = new Set()
+const CLAUDE_NO_XHIGH_REASONING_EFFORTS = new Set(['low', 'medium', 'high', 'max'])
+const CLAUDE_REASONING_EFFORTS_BY_MODEL: Record<string, ReadonlySet<string>> = {
+  'claude-haiku-4-5': NO_REASONING_EFFORTS,
+  'claude-opus-4': NO_REASONING_EFFORTS,
+  'claude-opus-4-0': NO_REASONING_EFFORTS,
+  'claude-opus-4-1': NO_REASONING_EFFORTS,
+  'claude-opus-4-5': new Set(['low', 'medium', 'high']),
+  'claude-opus-4-6': CLAUDE_NO_XHIGH_REASONING_EFFORTS,
+  'claude-sonnet-4': NO_REASONING_EFFORTS,
+  'claude-sonnet-4-0': NO_REASONING_EFFORTS,
+  'claude-sonnet-4-5': NO_REASONING_EFFORTS,
+  'claude-sonnet-4-6': CLAUDE_NO_XHIGH_REASONING_EFFORTS
+}
 const CODEX_REASONING_EFFORTS_BY_MODEL: Record<string, ReadonlySet<string>> = {
   'gpt-5.2': STANDARD_CODEX_REASONING_EFFORTS,
   'gpt-5.2-codex': CODEX_MODEL_REASONING_EFFORTS,
@@ -62,8 +84,9 @@ const CODEX_REASONING_EFFORTS_BY_MODEL: Record<string, ReadonlySet<string>> = {
   'gpt-5.6-luna': GPT_5_6_REASONING_EFFORTS,
   'gpt-5.6-sol': GPT_5_6_REASONING_EFFORTS,
   'gpt-5.6-terra': GPT_5_6_REASONING_EFFORTS,
-  'gpt-6-astra': GPT_6_ASTRA_REASONING_EFFORTS,
+  'gpt-6-astra': GPT_6_ULTRA_REASONING_EFFORTS,
   'gpt-6-sol': GPT_5_6_REASONING_EFFORTS,
+  'gpt-6.1-sol': GPT_6_ULTRA_REASONING_EFFORTS,
   'gpt-6-luna': GPT_5_6_REASONING_EFFORTS
 }
 
@@ -80,8 +103,8 @@ const CODEX_CONFIG = codexConfig as {
 // Deployers who override the sandbox model via CLAUDE_MODEL / CODEX_MODEL
 // (sandbox.extraEnv) get the same values mirrored into slackbotv2 by the chart
 // and passed here through SlackbotV2Options.harnessDefaultModels, which takes
-// precedence. Amp has no fixed default model (deep/fast modes), so it is
-// intentionally absent.
+// precedence. Pi's default comes only from CENTAUR_PI_MODEL. Amp has no fixed
+// default model (deep/fast modes), so it is intentionally absent.
 const BAKED_DEFAULT_MODELS: Record<string, string | undefined> = {
   claudecode: typeof claudeSettings.model === 'string' ? claudeSettings.model : undefined,
   codex: typeof CODEX_CONFIG.model === 'string' ? CODEX_CONFIG.model : undefined,
@@ -173,6 +196,9 @@ export function effectiveReasoningForHarness(
   configured?: Record<string, string>
 ): string | undefined {
   const key = harnessType?.trim().toLowerCase()
+  // Claude Code's and Pi's default efforts depend on the model, so only a
+  // requested (already model-validated) effort is known.
+  if (key === 'claudecode' || key === 'pi') return requested?.trim().toLowerCase() || undefined
   if (key !== 'codex' && key !== 'nanocodex') return undefined
   const reasoning = requested?.trim().toLowerCase() || defaultReasoningForHarness(key, configured)
   // Nanocodex has no distinct Minimal level; its adapter maps Minimal to Low.
@@ -188,6 +214,14 @@ export function reasoningForModel(
   const harness = harnessType?.trim().toLowerCase()
   const selectedModel = model?.trim().toLowerCase()
   const effort = reasoning?.trim().toLowerCase()
+  if (harness === 'claudecode') {
+    const supported =
+      Object.entries(CLAUDE_REASONING_EFFORTS_BY_MODEL).find(
+        ([modelId]) => selectedModel === modelId || selectedModel?.startsWith(`${modelId}-20`)
+      )?.[1] ?? CLAUDE_CODE_REASONING_EFFORTS
+    return effort && supported.has(effort) ? effort : undefined
+  }
+  if (harness === 'pi') return effort && PI_REASONING_EFFORTS.has(effort) ? effort : undefined
   if (!selectedModel || !effort) return undefined
   if (harness !== 'codex' && harness !== 'nanocodex') return undefined
   // Nanocodex maps its compatibility-only Minimal value to Low before it
@@ -201,6 +235,38 @@ export function reasoningForModel(
     ([modelId]) => selectedModel === modelId || selectedModel.startsWith(`${modelId}-20`)
   )?.[1]
   return supported?.has(effectiveEffort) ? effort : undefined
+}
+
+// Claude model IDs: family, dash-separated version, optional variant words,
+// optional date snapshot (claude-opus-5-5, claude-haiku-4-5-20251001,
+// claude-opus-5-fast).
+const CLAUDE_MODEL_ID = /^claude-([a-z]+)((?:-\d{1,2})*)((?:-[a-z]+)*)(?:-\d{8})?$/
+// GPT model IDs: version, optional variant words, optional date snapshot
+// (gpt-5.2, gpt-5.4-pro, gpt-5.6-sol, gpt-5.2-2025-12-11).
+const GPT_MODEL_ID = /^gpt-(\d+(?:\.\d+)?)((?:-[a-z]+)*)(?:-\d{4}-\d{2}-\d{2})?$/
+// GPT codenames shown in place of the "GPT" prefix (gpt-5.6-sol -> "Sol 5.6").
+const GPT_CODENAMES = new Set(['sol', 'luna', 'terra', 'astra'])
+
+/**
+ * Formats a model ID for the footer as its product name: claude-opus-5-5 ->
+ * "Opus 5.5", gpt-5.6-sol -> "Sol 5.6", gpt-5.2 -> "GPT 5.2". Unrecognized
+ * models (provider-prefixed IDs, o-series) are uppercased.
+ */
+export function modelDisplayName(model: string): string {
+  const id = model.toLowerCase()
+  const gpt = GPT_MODEL_ID.exec(id)
+  if (gpt) {
+    const [, version = '', variant = ''] = gpt
+    const word = variant.slice(1)
+    if (GPT_CODENAMES.has(word)) return `${titleCase(word)} ${version}`
+    return ['GPT', version, titleCase(variant)].filter(Boolean).join(' ')
+  }
+  const claude = CLAUDE_MODEL_ID.exec(id)
+  if (!claude) return model.toUpperCase()
+  const [, family = '', version = '', variant = ''] = claude
+  return [titleCase(family), version.slice(1).replace(/-/g, '.'), titleCase(variant)]
+    .filter(Boolean)
+    .join(' ')
 }
 
 function reasoningDisplayName(reasoning: string | null | undefined): string | undefined {
@@ -240,7 +306,7 @@ export function buildSlackResponseContextBlock(params: {
   if (notice) segments.push(`:warning: ${escapeSlackMrkdwn(notice)}`)
   if (includeMetadata) {
     const model = params.model?.trim()
-    if (model) segments.push(escapeSlackMrkdwn(model.toUpperCase()))
+    if (model) segments.push(escapeSlackMrkdwn(modelDisplayName(model)))
     const harness = harnessDisplayName(params.harnessType)
     if (harness) segments.push(escapeSlackMrkdwn(harness))
     const reasoning = reasoningDisplayName(params.reasoning)

@@ -1,5 +1,3 @@
-create extension if not exists pg_search;
-
 create table if not exists slack_dm_context_documents (
     document_id text primary key,
     home_team_id text not null,
@@ -41,46 +39,6 @@ create index if not exists idx_slack_dm_context_documents_user_time
 
 create index if not exists idx_slack_dm_context_documents_metadata
     on slack_dm_context_documents using gin (metadata);
-
-drop index if exists idx_slack_dm_context_documents_bm25;
-
-create index idx_slack_dm_context_documents_bm25
-    on slack_dm_context_documents
-    using bm25 (
-        document_id,
-        title,
-        body,
-        home_team_id,
-        conversation_id,
-        conversation_type,
-        user_id,
-        bot_id,
-        message_type,
-        message_subtype,
-        occurred_at,
-        source_updated_at,
-        metadata
-    )
-    with (
-        key_field = 'document_id',
-        text_fields = '{
-            "document_id": {
-                "tokenizer": {"type": "keyword"}
-            },
-            "home_team_id": {
-                "tokenizer": {"type": "keyword"}
-            },
-            "conversation_id": {
-                "tokenizer": {"type": "keyword"}
-            },
-            "user_id": {
-                "tokenizer": {"type": "keyword"}
-            },
-            "bot_id": {
-                "tokenizer": {"type": "keyword"}
-            }
-        }'
-    );
 
 create or replace function centaur_refresh_slack_dm_context_document(
     p_home_team_id text,

@@ -50,6 +50,7 @@ module ApplicationHelper
     when "claudecode" then "Claude Code"
     when "amp" then "Amp"
     when "nanocodex" then "Nanocodex"
+    when "pi" then "Pi"
     when "" then nil
     else harness_type.to_s.tr("_-", " ").squish.split.map(&:capitalize).join(" ")
     end
@@ -112,11 +113,6 @@ module ApplicationHelper
 
   def console_icon(name, classes: "size-4")
     case name
-    when "database"
-      outline_icon(
-        classes,
-        "M4.5 6.75c0 1.243 3.358 2.25 7.5 2.25s7.5-1.007 7.5-2.25S16.142 4.5 12 4.5 4.5 5.507 4.5 6.75Zm0 0v10.5c0 1.243 3.358 2.25 7.5 2.25s7.5-1.007 7.5-2.25V6.75M4.5 12c0 1.243 3.358 2.25 7.5 2.25s7.5-1.007 7.5-2.25"
-      )
     when "computer"
       outline_icon(
         classes,

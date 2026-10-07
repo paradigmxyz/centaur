@@ -119,21 +119,6 @@ Rails.application.routes.draw do
   # User-facing list of enabled OAuth apps and their consent start links. Not
   # admin-gated: any signed-in team member connects integrations from here.
   get "console/integrations", to: "console/integrations#index", as: :console_integrations
-  get "console/etls", to: "console/etls#index", as: :console_etls
-  namespace :console do
-    post "etls/slack_archive_imports",
-         to: "etls#create_slack_archive_import",
-         as: :slack_archive_imports
-    post "etls/slack_archive_imports/:import_id/start",
-         to: "etls#start_slack_archive_import",
-         as: :start_slack_archive_import
-    post "etls/slack_archive_imports/:import_id/retry",
-         to: "etls#retry_slack_archive_import",
-         as: :retry_slack_archive_import
-    delete "etls/slack_archive_imports/:import_id",
-           to: "etls#delete_slack_archive_import",
-           as: :delete_slack_archive_import
-  end
   # Create/edit forms for OAuth apps. Declared before the show route so
   # /console/oauth_apps/new wins over the generic `:id` match. Named
   # `*_oauth_app_form*` so the form helpers don't collide with the read

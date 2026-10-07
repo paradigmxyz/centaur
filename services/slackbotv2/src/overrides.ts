@@ -2,14 +2,14 @@ import { escapeRegExp } from './utils'
 
 /**
  * Inline message directives, restored from the v1 slackbot:
- *   --claude | --claude-code | --amp | --codex | --nanocodex
+ *   --claude | --claude-code | --amp | --codex | --nanocodex | --pi
  *                                                  pick the harness for the thread
  *   --bedrock                                    codex via the AWS Bedrock provider
  *   --meta                                       codex via Meta AI direct
  *   --provider <name>                            codex via a configured provider
  *   --persona <id> (or --persona=<id>)           pick the persona independently
  *   --model <name> (or --model=<name>)           pick the model within that harness
- *   -rsn <effort> (or -rsn=<effort>)             per-turn reasoning effort (codex/nanocodex)
+ *   -rsn <effort> (or -rsn=<effort>)             per-turn reasoning effort (codex/nanocodex/claude-code/pi)
  *   --fable | --opus | --sonnet | --haiku        model shortcuts (imply claude-code)
  *
  * Flags are stripped from the text before it reaches the agent. The harness
@@ -57,7 +57,8 @@ const HARNESS_FLAGS: Record<string, string> = {
   claudecode: 'claudecode',
   codex: 'codex',
   hermes: 'hermes',
-  nanocodex: 'nanocodex'
+  nanocodex: 'nanocodex',
+  pi: 'pi'
 }
 
 // Provider flags select a model provider within the codex harness (and imply
@@ -87,7 +88,7 @@ const MODEL_SHORTCUTS: Record<string, { harnessType: string; model: string }> =
     ])
   )
 
-const STRATEGY_HARNESSES = new Set(['amp', 'claudecode', 'codex', 'hermes', 'nanocodex'])
+const STRATEGY_HARNESSES = new Set(['amp', 'claudecode', 'codex', 'hermes', 'nanocodex', 'pi'])
 const STRATEGY_PROVIDERS = new Set(['amazon-bedrock', 'openrouter', 'responses'])
 const STRATEGY_REASONING_EFFORTS = new Set([
   'none',
@@ -123,6 +124,7 @@ const STRATEGY_MODEL_HARNESSES: Record<string, string> = {
   'gpt-5.6-terra': 'codex',
   'gpt-6-astra': 'codex',
   'gpt-6-sol': 'codex',
+  'gpt-6.1-sol': 'codex',
   'gpt-6-luna': 'codex'
 }
 
@@ -136,10 +138,10 @@ const PROVIDER_FLAG_PATTERN = valueFlagPattern(
   '--provider',
   String.raw`[A-Za-z][A-Za-z0-9_-]*`
 )
-const PERSONA_FLAG_PATTERN = valueFlagPattern(
-  '--persona',
-  String.raw`[A-Za-z0-9][A-Za-z0-9._-]*`
-)
+const PERSONA_ID_SOURCE = String.raw`[A-Za-z0-9][A-Za-z0-9._-]*`
+const PERSONA_FLAG_PATTERN = valueFlagPattern('--persona', PERSONA_ID_SOURCE)
+/** Matches a whole persona id, in the shape `--persona` accepts. */
+export const PERSONA_ID_PATTERN = new RegExp(`^${PERSONA_ID_SOURCE}$`)
 
 // Single dash by design: a short per-turn knob (`-rsn high`).
 const REASONING_FLAG_PATTERN = valueFlagPattern('-rsn', String.raw`[A-Za-z-]+`)
@@ -279,7 +281,10 @@ export function validateStrategyOverrides(
     const normalized = reasoningRaw.toLowerCase()
     if (!STRATEGY_REASONING_EFFORTS.has(normalized)) return {}
     reasoning =
-      harnessType === undefined || harnessType === 'codex' || harnessType === 'nanocodex'
+      harnessType === undefined ||
+      harnessType === 'codex' ||
+      harnessType === 'nanocodex' ||
+      harnessType === 'pi'
         ? normalized
         : undefined
   }
@@ -383,4 +388,17 @@ function stripMatch(text: string, match: RegExpExecArray): string {
   const separator =
     before && after && !/\s$/.test(before) && !/^\s/.test(after) ? ' ' : ''
   return `${before}${separator}${after}`
+}
+
+export function parseEnabledHarnesses(value: string | undefined): string[] | undefined {
+  if (value === undefined) return undefined
+  const harnesses = value.split(',').map(harness => harness.trim().toLowerCase())
+  if (harnesses.some(harness => !STRATEGY_HARNESSES.has(harness))) {
+    throw new Error('SLACKBOTV2_ENABLED_HARNESSES must contain known comma-separated harness types')
+  }
+  return [...new Set(harnesses)]
+}
+
+export function isHarnessEnabled(harness: string, enabledHarnesses?: readonly string[]): boolean {
+  return enabledHarnesses === undefined || enabledHarnesses.includes(harness)
 }

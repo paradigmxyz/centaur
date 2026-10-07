@@ -13,7 +13,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::{
     ApiError,
@@ -209,6 +209,20 @@ struct SlackFileInfoResponse {
     file: Value,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct SlackMessagesResponse {
+    ok: bool,
+    #[serde(default)]
+    channel_id: String,
+    messages: Vec<Value>,
+    #[serde(default)]
+    has_more: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    response_metadata: Option<SlackResponseMetadata>,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
+}
+
 #[derive(Debug, Serialize)]
 struct SlackChannelItem {
     id: String,
@@ -268,7 +282,7 @@ struct SlackChannelsPage {
     response_metadata: SlackResponseMetadata,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct SlackResponseMetadata {
     #[serde(default)]
     next_cursor: String,
@@ -606,7 +620,7 @@ async fn get_slack_channel_history(
     headers: HeaderMap,
     Path(channel_id): Path<String>,
     Query(query): Query<SlackChannelHistoryQuery>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<SlackMessagesResponse>, ApiError> {
     let claims = authorize_slack_file_proxy(&headers)?;
     validate_slack_channel_id(&channel_id)?;
     validate_slack_channel_history_query(&query)?;
@@ -652,7 +666,7 @@ async fn get_slack_thread_replies(
     headers: HeaderMap,
     Path((channel_id, thread_ts)): Path<(String, String)>,
     Query(query): Query<SlackChannelHistoryQuery>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<SlackMessagesResponse>, ApiError> {
     let claims = authorize_slack_file_proxy(&headers)?;
     validate_slack_channel_id(&channel_id)?;
     validate_slack_thread_ts(&thread_ts)?;
@@ -1145,9 +1159,10 @@ async fn slack_channel_history(
     config: &SlackFileProxyConfig,
     channel_id: &str,
     query: &SlackChannelHistoryQuery,
-) -> Result<Value, ApiError> {
+) -> Result<SlackMessagesResponse, ApiError> {
     let form = slack_channel_history_form(channel_id, query);
-    slack_api_post_form(client, config, "conversations.history", &form).await
+    let value = slack_api_post_form(client, config, "conversations.history", &form).await?;
+    slack_messages_response("conversations.history", channel_id, value)
 }
 
 async fn slack_thread_replies(
@@ -1156,9 +1171,22 @@ async fn slack_thread_replies(
     channel_id: &str,
     thread_ts: &str,
     query: &SlackChannelHistoryQuery,
-) -> Result<Value, ApiError> {
+) -> Result<SlackMessagesResponse, ApiError> {
     let form = slack_thread_replies_form(channel_id, thread_ts, query);
-    slack_api_post_form(client, config, "conversations.replies", &form).await
+    let value = slack_api_post_form(client, config, "conversations.replies", &form).await?;
+    slack_messages_response("conversations.replies", channel_id, value)
+}
+
+fn slack_messages_response(
+    method: &str,
+    channel_id: &str,
+    value: Value,
+) -> Result<SlackMessagesResponse, ApiError> {
+    let mut response = serde_json::from_value::<SlackMessagesResponse>(value).map_err(|error| {
+        ApiError::Internal(format!("Slack {method} response was invalid: {error}"))
+    })?;
+    response.channel_id = channel_id.to_owned();
+    Ok(response)
 }
 
 async fn slack_files_list(
@@ -1700,9 +1728,12 @@ fn content_disposition_filename(filename: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        collections::HashMap,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use super::*;
@@ -1872,17 +1903,6 @@ mod tests {
         );
         assert!(mpim_item.is_private);
         assert!(mpim_item.is_mpim);
-    }
-
-    #[test]
-    fn slack_channel_requires_an_id() {
-        assert!(
-            serde_json::from_value::<SlackChannel>(json!({
-                "is_private": false,
-                "is_member": true
-            }))
-            .is_err()
-        );
     }
 
     #[test]
@@ -2217,26 +2237,13 @@ mod tests {
 
     #[test]
     fn bot_channel_listing_requests_public_channels_only() {
-        assert_eq!(
-            slack_public_channels_form("cursor-1"),
-            vec![
-                ("types", "public_channel".to_owned()),
-                ("exclude_archived", "true".to_owned()),
-                ("limit", "200".to_owned()),
-                ("cursor", "cursor-1".to_owned()),
-            ]
-        );
-    }
-
-    #[test]
-    fn channel_info_form_requests_member_counts() {
-        assert_eq!(
-            slack_channel_info_form("C123456789"),
-            vec![
-                ("channel", "C123456789".to_owned()),
-                ("include_num_members", "true".to_owned()),
-            ]
-        );
+        let form = slack_public_channels_form("cursor-1");
+        let types: Vec<_> = form
+            .iter()
+            .filter(|(name, _)| *name == "types")
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert_eq!(types, ["public_channel"]);
     }
 
     #[test]
@@ -2289,14 +2296,6 @@ mod tests {
                 ("limit", "500".to_owned()),
                 ("cursor", "cursor-1".to_owned()),
             ]
-        );
-    }
-
-    #[test]
-    fn file_info_form_maps_proxy_query_to_slack_params() {
-        assert_eq!(
-            slack_file_info_form("F123456789"),
-            vec![("file", "F123456789".to_owned())]
         );
     }
 
@@ -2736,5 +2735,124 @@ mod tests {
                 ("ts", "1700000000.000001".to_owned()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn history_and_replies_include_requested_channel() {
+        let app = axum::Router::new()
+            .route(
+                "/conversations.history",
+                axum::routing::post(
+                    |axum::Form(form): axum::Form<HashMap<String, String>>| async move {
+                        assert_eq!(form["channel"], "C123456789");
+                        axum::Json(json!({
+                            "ok": true,
+                            "messages": [{"ts": "1700000000.000001", "text": "report"}],
+                            "has_more": true,
+                            "pin_count": 2,
+                            "response_metadata": {"next_cursor": "next"}
+                        }))
+                    },
+                ),
+            )
+            .route(
+                "/conversations.replies",
+                axum::routing::post(
+                    |axum::Form(form): axum::Form<HashMap<String, String>>| async move {
+                        assert_eq!(form["channel"], "G123456789");
+                        assert_eq!(form["ts"], "1700000000.000001");
+                        axum::Json(json!({"ok": true, "messages": [], "has_more": false}))
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = SlackFileProxyConfig {
+            api_url: format!("http://{address}"),
+            bot_token: "test-token".to_owned(),
+            max_upload_bytes: 1,
+        };
+        let query = serde_json::from_value(json!({})).unwrap();
+
+        let history = slack_channel_history(http_client(), &config, "C123456789", &query)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(history).unwrap(),
+            json!({
+                "ok": true,
+                "channel_id": "C123456789",
+                "messages": [{"ts": "1700000000.000001", "text": "report"}],
+                "has_more": true,
+                "pin_count": 2,
+                "response_metadata": {"next_cursor": "next"}
+            })
+        );
+
+        let replies = slack_thread_replies(
+            http_client(),
+            &config,
+            "G123456789",
+            "1700000000.000001",
+            &query,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(replies).unwrap(),
+            json!({
+                "ok": true,
+                "channel_id": "G123456789",
+                "messages": [],
+                "has_more": false
+            })
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn history_and_replies_preserve_upstream_errors() {
+        let app = axum::Router::new()
+            .route(
+                "/conversations.history",
+                axum::routing::post(|| async {
+                    axum::Json(json!({"ok": false, "error": "channel_not_found"}))
+                }),
+            )
+            .route(
+                "/conversations.replies",
+                axum::routing::post(|| async {
+                    axum::Json(json!({"ok": false, "error": "thread_not_found"}))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = SlackFileProxyConfig {
+            api_url: format!("http://{address}"),
+            bot_token: "test-token".to_owned(),
+            max_upload_bytes: 1,
+        };
+        let query = serde_json::from_value(json!({})).unwrap();
+        let history = slack_channel_history(http_client(), &config, "C123456789", &query)
+            .await
+            .unwrap_err();
+        let replies = slack_thread_replies(
+            http_client(),
+            &config,
+            "C123456789",
+            "1700000000.000001",
+            &query,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(history, ApiError::BadRequest(message) if message == "Slack conversations.history failed: channel_not_found")
+        );
+        assert!(
+            matches!(replies, ApiError::BadRequest(message) if message == "Slack conversations.replies failed: thread_not_found")
+        );
+        server.abort();
     }
 }

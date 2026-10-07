@@ -149,7 +149,7 @@ export type SlackbotV2Options = {
   /** Include the Codex service tier in response metadata footers when they render. */
   responseServiceTierEnabled?: boolean
   /**
-   * Per-channel default harness/model/provider/reasoning, keyed by Slack
+   * Per-channel default persona/harness/model/provider/reasoning, keyed by Slack
    * conversation id (SLACKBOTV2_CHANNEL_DEFAULTS). See channel-defaults.ts.
    */
   channelDefaults?: ChannelDefaults
@@ -161,10 +161,12 @@ export type SlackbotV2Options = {
    * nanocodex | hermes). Defaults to codex.
    */
   defaultHarnessType?: string
+  enabledHarnesses?: readonly string[]
   fetch?: SlackbotV2Fetch
   /**
    * Deployment-configured default model per harness wire value (claudecode |
-   * codex), from the CLAUDE_MODEL / CODEX_MODEL env vars the chart mirrors
+   * codex | nanocodex | pi), from the CLAUDE_MODEL / CODEX_MODEL /
+   * CENTAUR_PI_MODEL env vars the chart mirrors
    * out of sandbox.extraEnv. Display/metadata only — never forwarded to the
    * harness. Unset harnesses fall back to the models pinned in this repo's
    * harness config files (see response-context.ts).
@@ -300,7 +302,7 @@ export type ForwardSessionInput = {
   personaId?: string
   /** Effective model provider selected by sticky thread flags (--bedrock); codex only. */
   provider?: string
-  /** Per-turn reasoning effort parsed from the `-rsn` flag (Codex/Nanocodex). */
+  /** Per-turn reasoning effort parsed from the `-rsn` flag (Codex/Nanocodex/Claude Code). */
   reasoning?: string
   /** Whether an explicit Slack override may restart a thread on harness conflict. */
   restartOnHarnessConflict?: boolean

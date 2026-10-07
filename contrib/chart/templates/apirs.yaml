@@ -70,11 +70,12 @@
 {{- $apiRsMetricsAnnotations = mergeOverwrite $apiRsMetricsAnnotations (.Values.apiRs.metrics.annotations | default dict) -}}
 {{- end -}}
 {{- $apiRsEtl := .Values.apiRs.etl | default dict -}}
+{{- $companyContextV1Enabled := .Values.companyContextV1.enabled -}}
 {{- $companyContextEmbeddingsEnabled := dig "companyContextEmbeddings" "enabled" false $apiRsEtl -}}
 {{- $companyContextEmbeddingsModel := dig "companyContextEmbeddings" "model" "text-embedding-3-small" $apiRsEtl -}}
 {{- $companyContextEmbeddingsDimensions := dig "companyContextEmbeddings" "dimensions" 1536 $apiRsEtl -}}
 {{- $apiRsEtlEnv := list
-  (dict "name" "SLACK_ETL_ENABLED" "value" (dig "slack" "enabled" false $apiRsEtl))
+  (dict "name" "SLACK_ETL_ENABLED" "value" (and $companyContextV1Enabled (dig "slack" "enabled" false $apiRsEtl)))
   (dict "name" "SLACK_SYNC_INTERVAL_SECONDS" "value" (dig "slack" "syncIntervalSeconds" 3600 $apiRsEtl))
   (dict "name" "SLACK_SYNC_BACKFILL_LOOKBACK_DAYS" "value" (dig "slack" "syncBackfillLookbackDays" 30 $apiRsEtl))
   (dict "name" "SLACK_SYNC_THREAD_LOOKBACK_DAYS" "value" (dig "slack" "syncThreadLookbackDays" 3 $apiRsEtl))
@@ -86,7 +87,7 @@
   (dict "name" "SLACK_BACKFILL_INTERVAL_SECONDS" "value" (dig "slack" "backfill" "intervalSeconds" 600 $apiRsEtl))
   (dict "name" "SLACK_BACKFILL_CHANNEL_BATCH_LIMIT" "value" (dig "slack" "backfill" "channelBatchLimit" 50 $apiRsEtl))
   (dict "name" "SLACK_BACKFILL_CHANNEL_PAGES_PER_JOB" "value" (dig "slack" "backfill" "channelPagesPerJob" 5 $apiRsEtl))
-  (dict "name" "SLACK_RETENTION_ENABLED" "value" (dig "slack" "retention" "enabled" true $apiRsEtl))
+  (dict "name" "SLACK_RETENTION_ENABLED" "value" (and $companyContextV1Enabled (dig "slack" "retention" "enabled" true $apiRsEtl)))
   (dict "name" "SLACK_RETENTION_INTERVAL_MINUTES" "value" (dig "slack" "retention" "intervalMinutes" 60 $apiRsEtl))
   (dict "name" "SLACK_ETL_RETENTION_DAYS" "value" (dig "slack" "retention" "etlDays" 0 $apiRsEtl))
   (dict "name" "SLACK_DM_RETENTION_DAYS" "value" (dig "slack" "retention" "dmDays" 0 $apiRsEtl))
@@ -261,6 +262,10 @@ spec:
 {{- end }}
             - name: RUN_MIGRATIONS
               value: {{ .Values.apiRs.runMigrations | quote }}
+{{- if not (hasKey .Values.apiRs.extraEnv "DATABASE_TEXT_SEARCH") }}
+            - name: DATABASE_TEXT_SEARCH
+              value: {{ ternary "paradedb" (default "postgres" .Values.externalDatabase.textSearch) .Values.postgres.enabled | quote }}
+{{- end }}
 {{- if not (hasKey .Values.apiRs.extraEnv "CENTAUR_SESSION_PRINCIPAL_ADMISSION") }}
             - name: CENTAUR_SESSION_PRINCIPAL_ADMISSION
               value: {{ .Values.apiRs.sessionPrincipalAdmission | quote }}
@@ -316,10 +321,6 @@ spec:
             - name: CENTAUR_OVERLAY_DIR
               value: {{ .Values.overlay.mountPath | quote }}
 {{- end }}
-            - name: SESSION_SANDBOX_BACKEND
-              value: {{ .Values.apiRs.sandboxBackend | quote }}
-            - name: SESSION_SANDBOX_WORKLOAD
-              value: {{ .Values.apiRs.sandboxWorkload | quote }}
             # Default harness for warm sandboxes. Per-session sandboxes run
             # their session's harness regardless (pinned via container args).
             - name: SESSION_SANDBOX_HARNESS
@@ -332,8 +333,6 @@ spec:
               value: {{ .Values.apiRs.sandboxWarmPoolReplenishIntervalSecs | quote }}
             - name: SESSION_SANDBOX_RUNNING_LIMIT
               value: {{ .Values.apiRs.sandboxRunningLimit | quote }}
-            - name: SESSION_SANDBOX_HOT_IDLE_GRACE_SECS
-              value: {{ .Values.apiRs.sandboxHotIdleGraceSecs | quote }}
             - name: SESSION_SANDBOX_MAX_LIFETIME_SECS
               value: {{ .Values.apiRs.sandboxMaxLifetimeSecs | quote }}
             - name: SESSION_SANDBOX_REAP_INTERVAL_SECS
@@ -372,6 +371,18 @@ spec:
               value: {{ printf "%s:%s" .Values.sandbox.image.repository .Values.sandbox.image.tag | quote }}
             - name: SESSION_SANDBOX_IMAGE_PULL_POLICY
               value: {{ .Values.sandbox.image.pullPolicy | quote }}
+{{- if .Values.sandbox.stateVolume.enabled }}
+            - name: SESSION_SANDBOX_STATE_VOLUME_ENABLED
+              value: "true"
+{{- if and .Values.sandbox.stateVolume.size (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_STATE_VOLUME_SIZE")) }}
+            - name: SESSION_SANDBOX_STATE_VOLUME_SIZE
+              value: {{ .Values.sandbox.stateVolume.size | quote }}
+{{- end }}
+{{- if and .Values.sandbox.stateVolume.storageClassName (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_STATE_VOLUME_STORAGE_CLASS_NAME")) }}
+            - name: SESSION_SANDBOX_STATE_VOLUME_STORAGE_CLASS_NAME
+              value: {{ .Values.sandbox.stateVolume.storageClassName | quote }}
+{{- end }}
+{{- end }}
 {{- if and .Values.sandbox.resources (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_RESOURCES")) }}
             - name: SESSION_SANDBOX_RESOURCES
               value: {{ toJson .Values.sandbox.resources | quote }}
@@ -424,6 +435,14 @@ spec:
               value: {{ .Values.ironProxy.image.pullPolicy | quote }}
             - name: KUBERNETES_IRON_PROXY_UPSTREAM_DENY_CIDRS
               value: {{ join "," .Values.ironProxy.upstreamDenyCidrs | quote }}
+{{- if and (not .Values.postgres.enabled) .Values.externalDatabase.cidrs }}
+            # Per-sandbox iron-proxies forward the tool-server sidecar's pool to
+            # the core database; allow them to reach the external database.
+            - name: KUBERNETES_IRON_PROXY_DATABASE_CIDRS
+              value: {{ join "," .Values.externalDatabase.cidrs | quote }}
+            - name: KUBERNETES_IRON_PROXY_DATABASE_PORT
+              value: {{ .Values.externalDatabase.port | quote }}
+{{- end }}
 {{- if and .Values.ironProxy.resources (not (hasKey .Values.apiRs.extraEnv "KUBERNETES_IRON_PROXY_RESOURCES")) }}
             - name: KUBERNETES_IRON_PROXY_RESOURCES
               value: {{ toJson .Values.ironProxy.resources | quote }}
@@ -432,6 +451,10 @@ spec:
               value: {{ include "centaur.trustedCaSecretName" . | quote }}
             - name: KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME
               value: {{ include "centaur.trustedCaKeySecretName" . | quote }}
+            - name: KUBERNETES_FIREWALL_CA_SECRET_KEY
+              value: {{ .Values.firewall.existingCaSecretKey | default "ca-cert.pem" | quote }}
+            - name: KUBERNETES_FIREWALL_CA_KEY_SECRET_KEY
+              value: {{ .Values.firewall.existingCaKeySecretKey | default "ca-key.pem" | quote }}
             - name: KUBERNETES_SECRET_ENV_NAME
               value: {{ include "centaur.secretEnvName" . | quote }}
 {{- if .Values.secrets.bootstrapSecretName }}
@@ -508,14 +531,12 @@ spec:
             - name: SESSION_SANDBOX_EXTRA_ENV
               value: {{ $sandboxEnvList | toJson | quote }}
 {{- end }}
-            # console control plane: principals/roles/grants + per-sandbox
-            # proxy sync.
+            # console control plane: principals/roles/grants. Per-sandbox
+            # proxies sync their config from proxy-sync.
             - name: IRON_CONTROL_URL
               value: {{ include "centaur.consoleUrl" . | quote }}
-{{- if .Values.proxySync.enabled }}
             - name: IRON_CONTROL_PROXY_SYNC_URL
               value: {{ include "centaur.proxySyncUrl" . | quote }}
-{{- end }}
             - name: IRON_CONTROL_API_KEY
               valueFrom:
                 secretKeyRef:

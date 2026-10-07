@@ -117,7 +117,9 @@ mod tests {
     }
 
     async fn check_index_recovery(store: PgSessionStore) -> Result<(), Box<dyn Error>> {
-        store.run_migrations().await?;
+        store
+            .run_migrations(centaur_session_sqlx::TextSearchBackend::Postgres)
+            .await?;
         let thread_key = ThreadKey::parse("test:retention-index")?;
         store
             .create_or_get_session(
