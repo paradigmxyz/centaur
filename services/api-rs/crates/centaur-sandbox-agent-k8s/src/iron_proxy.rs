@@ -106,6 +106,10 @@ pub struct IronProxyConfig {
     pub api_pod_labels: BTreeMap<String, String>,
     pub control_plane_pod_labels: BTreeMap<String, String>,
     pub proxy_sync_pod_labels: BTreeMap<String, String>,
+    /// In-cluster company-context API that proxies may reach on behalf of
+    /// sandboxes, and the labels of its pods. Unset allows no such egress.
+    pub company_context_url: Option<String>,
+    pub company_context_pod_labels: BTreeMap<String, String>,
     pub resources: Option<ResourceRequirements>,
 }
 
@@ -142,6 +146,11 @@ impl IronProxyConfig {
             proxy_sync_pod_labels: BTreeMap::from([(
                 "app.kubernetes.io/component".to_owned(),
                 "proxy-sync".to_owned(),
+            )]),
+            company_context_url: None,
+            company_context_pod_labels: BTreeMap::from([(
+                "app.kubernetes.io/component".to_owned(),
+                "company-context".to_owned(),
             )]),
             resources: None,
         }
@@ -392,11 +401,19 @@ impl AgentSandboxBackend {
             &self.config.namespace,
             iron_proxy.proxy_sync_pod_labels.clone(),
         );
+        let mut control_targets = vec![control_target, proxy_sync_target];
+        if let Some(url) = &iron_proxy.company_context_url {
+            control_targets.push(control_plane_egress_target(
+                url,
+                &self.config.namespace,
+                iron_proxy.company_context_pod_labels.clone(),
+            ));
+        }
         for policy in build_iron_proxy_network_policies(
             id,
             resolved,
             iron_proxy,
-            &[control_target, proxy_sync_target],
+            &control_targets,
             self.config.otlp_egress.as_ref(),
             resolved.observability_enabled,
         ) {

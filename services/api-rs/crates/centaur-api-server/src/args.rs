@@ -1892,6 +1892,19 @@ struct IronProxyArgs {
         value_parser = parse_label_selector_arg
     )]
     proxy_sync_pod_label_selector: Option<BTreeMap<String, String>>,
+    /// In-cluster company-context API URL that per-sandbox proxies may reach.
+    #[arg(
+        long = "kubernetes-iron-proxy-company-context-url",
+        env = "KUBERNETES_IRON_PROXY_COMPANY_CONTEXT_URL"
+    )]
+    company_context_url: Option<String>,
+    /// Pod labels for the company-context service.
+    #[arg(
+        long = "kubernetes-iron-proxy-company-context-pod-label-selector",
+        env = "KUBERNETES_IRON_PROXY_COMPANY_CONTEXT_POD_LABEL_SELECTOR",
+        value_parser = parse_label_selector_arg
+    )]
+    company_context_pod_label_selector: Option<BTreeMap<String, String>>,
 }
 
 impl IronProxyArgs {
@@ -1940,6 +1953,15 @@ impl IronProxyArgs {
             .filter(|labels| !labels.is_empty())
         {
             config.proxy_sync_pod_labels = labels.clone();
+        }
+        config.company_context_url =
+            non_empty(self.company_context_url.as_deref()).map(ToOwned::to_owned);
+        if let Some(labels) = self
+            .company_context_pod_label_selector
+            .as_ref()
+            .filter(|labels| !labels.is_empty())
+        {
+            config.company_context_pod_labels = labels.clone();
         }
         Ok(config)
     }
