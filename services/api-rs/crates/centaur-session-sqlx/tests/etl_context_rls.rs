@@ -272,7 +272,13 @@ async fn assert_company_context_reader_search_behavior(
     let company_context_public = company_context_docs(conn, None, r#"[]"#, true).await?;
     assert_eq!(
         company_context_public,
-        vec!["doc_slack_alpha".to_owned(), "doc_slack_beta".to_owned(),]
+        vec![
+            "doc_gcal".to_owned(),
+            "doc_gdrive".to_owned(),
+            "doc_linear".to_owned(),
+            "doc_slack_alpha".to_owned(),
+            "doc_slack_beta".to_owned(),
+        ]
     );
 
     let company_context_private_history =
@@ -280,6 +286,9 @@ async fn assert_company_context_reader_search_behavior(
     assert_eq!(
         company_context_private_history,
         vec![
+            "doc_gcal".to_owned(),
+            "doc_gdrive".to_owned(),
+            "doc_linear".to_owned(),
             "doc_slack_alpha".to_owned(),
             "doc_slack_beta".to_owned(),
             "doc_slack_private".to_owned(),
@@ -305,6 +314,9 @@ async fn assert_company_context_reader_search_behavior(
         search_rows,
         CompanyContextSearchRows {
             company_context_docs: vec![
+                "doc_gcal".to_owned(),
+                "doc_gdrive".to_owned(),
+                "doc_linear".to_owned(),
                 "doc_slack_alpha".to_owned(),
                 "doc_slack_beta".to_owned(),
                 "doc_slack_private".to_owned(),
@@ -531,6 +543,10 @@ fn expected_policies() -> Vec<(String, String)> {
         (
             "company_context_documents",
             "centaur_cc_reader_documents_select",
+        ),
+        (
+            "company_context_documents",
+            "centaur_cc_reader_non_slack_documents_select",
         ),
         ("slack_sync_channels", "centaur_cc_reader_channels_select"),
         ("slack_sync_messages", "centaur_cc_reader_messages_select"),
@@ -1186,7 +1202,13 @@ async fn assert_company_context_reader_public_message_visibility(
                 "C_ALPHA:1000.000004".to_owned(),
                 "C_BETA:1000.000002".to_owned(),
             ],
-            company_context_docs: vec!["doc_slack_alpha".to_owned(), "doc_slack_beta".to_owned(),],
+            company_context_docs: vec![
+                "doc_gcal".to_owned(),
+                "doc_gdrive".to_owned(),
+                "doc_linear".to_owned(),
+                "doc_slack_alpha".to_owned(),
+                "doc_slack_beta".to_owned(),
+            ],
             google_docs_observations: Vec::new(),
             google_docs: Vec::new(),
             granola_docs: Vec::new(),
@@ -1304,6 +1326,11 @@ async fn insert_fixture_rows(conn: &mut PgConnection) -> Result<(), sqlx::Error>
             ('doc_gdrive', 'google_drive', 'google_doc', 'gdrive_file', '{}'),
             ('doc_gcal', 'google_calendar', 'calendar_event', 'gcal_event', '{}'),
             ('doc_linear', 'linear', 'linear_issue', 'linear_issue', '{}');
+
+        insert into company_context_documents
+            (document_id, source, source_type, source_document_id, access_scope)
+        values
+            ('doc_linear_user_scope', 'linear', 'linear_issue', 'linear_issue_user_scope', 'user');
 
         insert into google_drive_sync_runs (run_id, status) values ('gdrive_run', 'succeeded');
         insert into google_drive_sync_files (file_id) values ('gdrive_file');
