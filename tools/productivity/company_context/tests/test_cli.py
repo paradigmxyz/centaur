@@ -74,46 +74,30 @@ def test_search_no_hybrid_flag_forces_keyword_mode(monkeypatch):
     ]
 
 
-def test_help_mentions_v2_status() -> None:
-    result = CliRunner().invoke(cli.app, ["--help"])
-
-    assert result.exit_code == 0, result.output
-    assert "v2 status" in result.output
-
-
-def test_v2_search_queries_drive_index(monkeypatch):
+def test_v2_search_forwards_filters(monkeypatch):
     calls = []
 
-    class FakeDriveClient:
+    class FakeV2Client:
         def search(self, **kwargs):
             calls.append(kwargs)
             return {"status": "ok", "results": []}
 
-    monkeypatch.setattr(cli, "DriveV2Client", FakeDriveClient)
+    monkeypatch.setattr(cli, "CompanyContextV2Client", FakeV2Client)
 
-    result = CliRunner().invoke(cli.app, ["v2", "search", "roadmap", "--source-type", "pdf"])
+    result = CliRunner().invoke(
+        cli.app,
+        ["v2", "search", "roadmap", "--type", "drive_doc", "--type", "slack_file", "-n", "5"],
+    )
 
     assert result.exit_code == 0, result.output
     assert calls == [
         {
             "query": "roadmap",
-            "limit": 10,
-            "source_type": "pdf",
+            "limit": 5,
+            "types": ["drive_doc", "slack_file"],
             "occurred_after": None,
             "occurred_before": None,
-            "hybrid": True,
+            "channel_ids": None,
+            "file_ids": None,
         }
     ]
-
-
-def test_v2_status_prints_drive_index_availability(monkeypatch):
-    class FakeDriveClient:
-        def status(self):
-            return {"status": "ok", "active": False, "reason": "missing"}
-
-    monkeypatch.setattr(cli, "DriveV2Client", FakeDriveClient)
-
-    result = CliRunner().invoke(cli.app, ["v2", "status"])
-
-    assert result.exit_code == 0, result.output
-    assert '"active": false' in result.output

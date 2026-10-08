@@ -19,7 +19,7 @@ Use one row-returning query. The command runs it inside a read-only transaction 
 company_context query "SELECT m.occurred_at, u.display_name, m.text, m.permalink FROM company_context_slack_messages m LEFT JOIN company_context_slack_users u ON u.user_id = m.user_id WHERE m.channel_id = 'CHANNEL_ID' AND m.occurred_at >= now() - interval '7 days' ORDER BY m.occurred_at DESC" --limit 100 --json
 ```
 
-When the company-context Drive indexer is deployed, `company_context_data.google_drive_documents` holds chunked Google Docs and PDFs (`document_type` is `google_doc` or `pdf`) visible to the requester's Google account. Run `company_context v2 status` to check availability; the preview `company_context v2 search|list|read|latest-date` commands query only this index, so pair them with the top-level commands for other sources; `--source-type pdf` narrows to PDFs.
+When the company-context service is deployed, the preview `company_context v2 search` and `company_context v2 read DOCUMENT_ID` commands query its API, which returns only documents visible to the requester: Slack channel days and files, Google Docs and PDFs, and Granola notes. Narrow searches with repeatable `--type` (`slack_message`, `slack_file`, `drive_doc`, `granola_note`), `--channel-id`, and `--file-id`, and with RFC 3339 `--after`/`--before`; `--limit` is at most 50 and there is no pagination. The commands report an error when `COMPANY_CONTEXT_API_URL` is unset, meaning the service is not deployed.
 
 ## Default Workflow
 

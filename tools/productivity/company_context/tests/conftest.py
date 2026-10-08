@@ -62,10 +62,6 @@ SEEDED_TABLES = (
     "granola_sync_notes",
     "slack_private_sync_conversations",
 )
-DRIVE_TABLES = (
-    "company_context_data.google_drive_documents",
-    "company_context_data.google_drive_broker_observations",
-)
 
 
 def embedding(*weights: float) -> list[float]:
@@ -281,8 +277,7 @@ class Database:
         asyncio.run(run())
 
     def clear(self) -> None:
-        tables = SEEDED_TABLES + (DRIVE_TABLES if self.backend == "paradedb" else ())
-        self.execute(f"TRUNCATE {', '.join(tables)} CASCADE")
+        self.execute(f"TRUNCATE {', '.join(SEEDED_TABLES)} CASCADE")
 
     def add_slack_channel(self, channel_id: str = CHANNEL_ID, *, is_private: bool = False) -> None:
         self.execute(
@@ -470,54 +465,6 @@ class Database:
             f"https://slack.example/archives/{conversation_id}/p{message_ts.replace('.', '')}",
         )
 
-    def add_drive_document(
-        self,
-        document_id: str,
-        *,
-        file_id: str,
-        title: str,
-        body: str,
-        document_type: str = "pdf",
-        subject: str = GOOGLE_SUBJECT,
-        created_at: datetime | None = None,
-        modified_at: datetime | None = None,
-        embedding: list[float] | None = None,
-    ) -> None:
-        """Insert a company-context service Drive chunk observed by ``subject``."""
-        self.execute(
-            "INSERT INTO company_context_data.google_drive_broker_observations "
-            "(broker_credential_id, file_id, provider_subject) "
-            "VALUES ((SELECT count(*) FROM company_context_data.google_drive_broker_observations),"
-            " $1, $2)",
-            file_id,
-            subject,
-        )
-        self.execute(
-            "INSERT INTO company_context_data.google_drive_documents (document_id, file_id, "
-            "chunk_id, document_type, mime_type, title, body, url, drive_id, page_start, "
-            "page_end, source_created_at, source_modified_at, content_hash) "
-            "VALUES ($1, $2, '0', $3, 'application/pdf', $4, $5, $6, 'shared-drive', 1, 2, "
-            "$7, $8, 'hash')",
-            document_id,
-            file_id,
-            document_type,
-            title,
-            body,
-            f"https://drive.google.com/file/d/{file_id}/view",
-            created_at,
-            modified_at,
-        )
-        if embedding is not None:
-            self.execute(
-                "INSERT INTO company_context_data.google_drive_document_embeddings "
-                "(document_id, model, dimensions, content_hash, embedding) "
-                "VALUES ($1, $2, $3, 'hash', $4::text::vector)",
-                document_id,
-                EMBEDDINGS_MODEL,
-                len(embedding),
-                json.dumps(embedding),
-            )
-
     def add_embedding(self, column: str, document_id: str, vector: list[float]) -> None:
         self.execute(
             f"INSERT INTO company_context_document_embeddings ({column}, model, content_hash, "
@@ -544,15 +491,3 @@ def _database(server: _Server, backend: str) -> Iterator[Database]:
 def database(request, _server: _Server) -> Iterator[Database]:
     """A database migrated for each api-rs text-search backend."""
     yield from _database(_server, request.param)
-
-
-@pytest.fixture
-def paradedb_database(_server: _Server) -> Iterator[Database]:
-    """The database that also carries the company-context service's tables."""
-    yield from _database(_server, "paradedb")
-
-
-@pytest.fixture
-def postgres_database(_server: _Server) -> Iterator[Database]:
-    """A stock-Postgres database without the company-context service's tables."""
-    yield from _database(_server, "postgres")
