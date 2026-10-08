@@ -133,16 +133,15 @@ indexed PDFs are not downloaded again.
 Both query endpoints are authenticated with the same principal API JWT the
 Console mints for api-rs (`Authorization: Bearer <jwt>`); iron-proxy injects it
 into sandbox requests to this service. The token's subject names the principal,
-whose Google subject (`google_subject` label), Slack user ID, and emails are
-looked up in the Rails Console database. A document is visible only while an
-active broker observation for one of those identities still reaches its Drive
-file, Slack conversation (for Slack files, any conversation the file is shared
-in), or Granola note. Granola notes are matched case-insensitively by the email
-of the Granola account that observes them, against the emails Console
-credential reconciliation matches the principal by: for a Console-user
-principal, its user's email and verified identity emails; otherwise its
-`email` and `google_email` labels and Slack email. A principal without one of
-those identities sees no documents of the corresponding types.
+whose Google subject (`google_subject` label), Slack user ID, and Granola
+subjects are looked up in the Rails Console database. A principal's Granola
+subjects are those of the live Granola broker credentials (from
+`COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG`) granted directly to it; role grants
+do not count. A document is visible only while an active broker observation
+for one of those identities still reaches its Drive file, Slack conversation
+(for Slack files, any conversation the file is shared in), or Granola note. A
+principal without one of those identities sees no documents of the
+corresponding types.
 
 Errors return `{"error": "..."}` with status 400 for an invalid request, 401
 for a missing or invalid token, 403 for a principal unknown to the Console, and

@@ -4,8 +4,8 @@
 //!
 //! Access mirrors the reader role's row-level security: a principal sees a
 //! document only while an active broker observation for its Google subject,
-//! Slack user ID, or one of its emails still reaches the document's file,
-//! conversation, or Granola note. Queries run as [`QUERY_ROLE`], which can only
+//! Slack user ID, or the Granola subject of a credential granted to it still
+//! reaches the document's file, conversation, or Granola note. Queries run as [`QUERY_ROLE`], which can only
 //! read `company_context_data`.
 
 use std::{
@@ -158,7 +158,11 @@ impl DataType {
                 identity.slack_user_id.as_deref().into_iter().collect()
             }
             Self::DriveDoc => identity.google_subject.as_deref().into_iter().collect(),
-            Self::GranolaNote => identity.emails.iter().map(String::as_str).collect(),
+            Self::GranolaNote => identity
+                .granola_subjects
+                .iter()
+                .map(String::as_str)
+                .collect(),
         }
     }
 
@@ -248,7 +252,6 @@ impl DataType {
                 in_channels: None,
                 file_id: Some("d.file_id"),
             },
-            // Granola observations record the account's lowercased email.
             Self::GranolaNote => Source {
                 id_prefix: GRANOLA_DOCUMENT_ID_PREFIX,
                 documents: "company_context_data.granola_documents",
@@ -264,7 +267,7 @@ impl DataType {
                 visible: r#"d.note_id IN (
                        SELECT o.note_id
                        FROM company_context_data.granola_broker_observations o
-                       WHERE o.active AND o.provider_email = ANY($2)
+                       WHERE o.active AND o.provider_subject = ANY($2)
                    )"#,
                 starts_at: "d.occurred_at",
                 ends_at: "d.occurred_at",
@@ -919,7 +922,7 @@ mod tests {
         PrincipalIdentity {
             google_subject: Some("G-ADA".to_owned()),
             slack_user_id: Some("U-ADA".to_owned()),
-            emails: vec!["ada@example.com".to_owned()],
+            granola_subjects: vec!["GR-ADA".to_owned()],
         }
     }
 
@@ -928,10 +931,7 @@ mod tests {
         PrincipalIdentity {
             google_subject: None,
             slack_user_id: Some("U-BOB".to_owned()),
-            emails: vec![
-                "bob@example.com".to_owned(),
-                "bob@personal.example".to_owned(),
-            ],
+            granola_subjects: vec!["GR-BOB".to_owned(), "GR-BOB-2".to_owned()],
         }
     }
 
@@ -939,7 +939,7 @@ mod tests {
     /// inactive) and Slack conversations C1 and C3; Bob observes C2. Slack
     /// file SF1 is shared in C1 and SF2 in both C2 and C3. Ada's Granola
     /// account observes note N1 (not N3, whose observation is inactive); Bob's
-    /// observes N2 under his second email.
+    /// second Granola account observes N2.
     async fn seed(pool: &PgPool) {
         pool.execute(
             r#"
@@ -992,9 +992,9 @@ mod tests {
                    ('slack-file:SF2', 'SF2', '0', 'falcon-retro.pdf', 'falcon launch retro deck', '2024-02-01Z', 'hash');
 
             INSERT INTO company_context_data.granola_broker_observations
-                (broker_credential_id, note_id, provider_email, active)
-            VALUES (20, 'N1', 'ada@example.com', true), (21, 'N2', 'bob@personal.example', true),
-                   (20, 'N3', 'ada@example.com', false);
+                (broker_credential_id, note_id, provider_subject, active)
+            VALUES (20, 'N1', 'GR-ADA', true), (21, 'N2', 'GR-BOB-2', true),
+                   (20, 'N3', 'GR-ADA', false);
             INSERT INTO company_context_data.granola_documents
                 (document_id, note_id, chunk_id, title, body, owner_email, occurred_at, content_hash)
             VALUES

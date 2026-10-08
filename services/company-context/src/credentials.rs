@@ -60,12 +60,10 @@ pub struct GoogleCredential {
 pub struct PrincipalIdentity {
     pub google_subject: Option<String>,
     pub slack_user_id: Option<String>,
-    /// The principal's lowercased emails, the ones Console credential
-    /// reconciliation matches the principal's credentials by: a Console-user
-    /// principal's user email and verified identity emails, otherwise its
-    /// `email` and `google_email` labels and Slack email. Granola notes are
-    /// matched by these.
-    pub emails: Vec<String>,
+    /// Subjects of the live Granola credentials granted directly to the
+    /// principal, the Granola accounts whose notes it can already read
+    /// through the proxy.
+    pub granola_subjects: Vec<String>,
 }
 
 impl ConsoleCredentials {
@@ -432,37 +430,25 @@ impl ConsoleCredentials {
             SELECT NULLIF(BTRIM(p.labels ->> 'google_subject'), '') AS google_subject,
                    NULLIF(BTRIM(p.slack_user_id), '') AS slack_user_id,
                    ARRAY(
-                       SELECT DISTINCT normalized.email
-                       FROM (
-                           SELECT u.email
-                           FROM users u
-                           WHERE p.kind = 'console_user' AND u.id = p.console_user_id
-                           UNION ALL
-                           SELECT i.email
-                           FROM user_identities i
-                           WHERE p.kind = 'console_user'
-                             AND i.user_id = p.console_user_id
-                             AND i.email_verified
-                           UNION ALL
-                           SELECT candidate.email
-                           FROM UNNEST(ARRAY[
-                               p.labels ->> 'email',
-                               p.labels ->> 'google_email',
-                               p.slack_email
-                           ]) AS candidate(email)
-                           WHERE p.kind <> 'console_user'
-                       ) AS emails,
-                       LATERAL (
-                           SELECT LOWER(BTRIM(emails.email, E' \t\n\v\f\r')) AS email
-                       ) AS normalized
-                       WHERE normalized.email <> ''
-                       ORDER BY normalized.email
-                   ) AS emails
+                       SELECT DISTINCT credentials.provider_subject
+                       FROM grants
+                       JOIN static_secrets secrets ON secrets.id = grants.static_secret_id
+                       JOIN broker_credentials credentials
+                         ON credentials.id = secrets.broker_credential_id
+                       JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+                       WHERE grants.principal_id = p.id
+                         AND app.provider = 'granola'
+                         AND app.slug = $2
+                         AND credentials.dead = FALSE
+                         AND credentials.provider_subject <> ''
+                       ORDER BY credentials.provider_subject
+                   ) AS granola_subjects
             FROM principals p
             WHERE p.id = $1
             "#,
         )
         .bind(principal_id)
+        .bind(&self.granola_oauth_app_slug)
         .fetch_optional(&self.pool)
         .await
         .context("load principal from Rails Console")
@@ -505,32 +491,46 @@ mod tests {
     use crate::test_support::TestDatabase;
 
     #[tokio::test]
-    async fn principal_emails_match_credential_reconciliation() {
+    async fn principals_are_known_by_their_granted_granola_credentials() {
         let Ok(database_url) = env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
             eprintln!("skipping: set COMPANY_CONTEXT_TEST_DATABASE_URL to a ParadeDB Postgres URL");
             return;
         };
         let database = TestDatabase::create(&database_url, "principal_identity").await;
         let pool = &database.pool;
-        // The Console tables the identity lookup reads.
+        // The Console tables the identity lookup reads. Ada (1) holds direct
+        // grants for two live Granola credentials, plus a dead one, one from
+        // another app, and a Google one; her email label names Bob's account.
+        // Bob (2) has Granola only through a role grant.
         pool.execute(
             r#"
-            CREATE TABLE users (id bigint PRIMARY KEY, email text NOT NULL);
-            CREATE TABLE user_identities (
-                user_id bigint NOT NULL, email text, email_verified boolean NOT NULL
-            );
             CREATE TABLE principals (
-                id bigint PRIMARY KEY, kind text NOT NULL, console_user_id bigint,
-                labels jsonb NOT NULL DEFAULT '{}', slack_user_id text, slack_email text
+                id bigint PRIMARY KEY, labels jsonb NOT NULL DEFAULT '{}', slack_user_id text
             );
-            INSERT INTO users VALUES (1, 'Ada@Example.com');
-            INSERT INTO user_identities VALUES
-                (1, 'ada@personal.example', true), (1, 'ada@unverified.example', false);
+            CREATE TABLE oauth_apps (id bigint PRIMARY KEY, provider text NOT NULL, slug text NOT NULL);
+            CREATE TABLE broker_credentials (
+                id bigint PRIMARY KEY, oauth_app_id bigint, provider_subject text,
+                provider_email text, dead boolean NOT NULL DEFAULT false
+            );
+            CREATE TABLE static_secrets (id bigint PRIMARY KEY, broker_credential_id bigint);
+            CREATE TABLE grants (principal_id bigint, role_id bigint, static_secret_id bigint);
+
             INSERT INTO principals VALUES
-                (1, 'console_user', 1, '{"email": "label@example.com"}', NULL, 'slack@example.com'),
-                (2, 'slack_dm', 1, '{"email": " Bob@Example.com ", "google_email": "bob@gmail.example", "google_subject": "G-BOB"}',
-                 'U-BOB', 'bob@example.com'),
-                (3, 'slack_dm', NULL, '{"email": ""}', NULL, NULL);
+                (1, '{"google_subject": "G-ADA", "email": "bob@example.com"}', 'U-ADA'),
+                (2, '{}', NULL);
+            INSERT INTO oauth_apps VALUES
+                (1, 'granola', 'granola'), (2, 'granola', 'other'), (3, 'google', 'google');
+            INSERT INTO broker_credentials VALUES
+                (1, 1, 'GR-ADA', 'ada@example.com', false),
+                (2, 1, 'GR-ADA-2', 'ada@example.com', false),
+                (3, 1, 'GR-DEAD', 'ada@example.com', true),
+                (4, 2, 'GR-OTHER-APP', 'ada@example.com', false),
+                (5, 3, 'G-ADA', 'ada@example.com', false),
+                (6, 1, 'GR-BOB', 'bob@example.com', false);
+            INSERT INTO static_secrets SELECT id, id FROM broker_credentials;
+            INSERT INTO grants VALUES
+                (1, NULL, 1), (1, NULL, 2), (1, NULL, 3), (1, NULL, 4), (1, NULL, 5),
+                (NULL, 1, 6);
             "#,
         )
         .await
@@ -538,32 +538,22 @@ mod tests {
         let credentials = ConsoleCredentials {
             pool: pool.clone(),
             encryption: Arc::new(ActiveRecordEncryption::new("primary", "salt")),
-            google_oauth_app_slug: String::new(),
-            granola_oauth_app_slug: String::new(),
-            slack_oauth_app_slug: String::new(),
+            google_oauth_app_slug: "google".to_owned(),
+            granola_oauth_app_slug: "granola".to_owned(),
+            slack_oauth_app_slug: "slack".to_owned(),
             google_user_emails: Vec::new(),
             granola_user_emails: Vec::new(),
             slack_user_ids: Vec::new(),
             slack_conversation_types: Vec::new(),
         };
-        let emails = |id| {
-            let credentials = credentials.clone();
-            async move {
-                credentials
-                    .principal_identity(id)
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .emails
-            }
-        };
 
-        // Console-user principals match only through their Console user.
-        assert_eq!(emails(1).await, ["ada@example.com", "ada@personal.example"]);
-        // Other principals match through their email labels and Slack email.
-        assert_eq!(emails(2).await, ["bob@example.com", "bob@gmail.example"]);
-        assert!(emails(3).await.is_empty());
-        assert!(credentials.principal_identity(4).await.unwrap().is_none());
+        let ada = credentials.principal_identity(1).await.unwrap().unwrap();
+        assert_eq!(ada.google_subject.as_deref(), Some("G-ADA"));
+        assert_eq!(ada.slack_user_id.as_deref(), Some("U-ADA"));
+        assert_eq!(ada.granola_subjects, ["GR-ADA", "GR-ADA-2"]);
+        let bob = credentials.principal_identity(2).await.unwrap().unwrap();
+        assert!(bob.granola_subjects.is_empty());
+        assert!(credentials.principal_identity(3).await.unwrap().is_none());
 
         database.drop().await;
     }
