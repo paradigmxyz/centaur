@@ -166,7 +166,7 @@ pub(crate) async fn record_shares(
 ) -> Result<()> {
     sqlx::query(
         r#"
-        DELETE FROM company_context_system.slack_file_shares shares
+        DELETE FROM company_context_data.slack_file_shares shares
         USING company_context_system.slack_messages messages
         WHERE shares.conversation_id = $1
           AND messages.conversation_id = shares.conversation_id
@@ -303,7 +303,7 @@ pub(crate) async fn record_shares(
     .await?;
     sqlx::query(
         r#"
-        INSERT INTO company_context_system.slack_file_shares
+        INSERT INTO company_context_data.slack_file_shares
             (file_id, conversation_id, message_ts)
         SELECT file_id, $3, message_ts
         FROM unnest($1::text[], $2::text[]) AS shared(file_id, message_ts)
@@ -356,7 +356,7 @@ async fn due_files(pool: &PgPool, conversation_id: &str) -> Result<Vec<DueFile>>
           )
           AND EXISTS (
               SELECT 1
-              FROM company_context_system.slack_file_shares shares
+              FROM company_context_data.slack_file_shares shares
               WHERE shares.file_id = files.file_id
                 AND shares.conversation_id = $1
           )
@@ -1146,7 +1146,7 @@ pub(crate) async fn remove_unshared(tx: &mut Transaction<'_, Postgres>) -> Resul
         FROM company_context_system.slack_files files
         WHERE NOT EXISTS (
             SELECT 1
-            FROM company_context_system.slack_file_shares shares
+            FROM company_context_data.slack_file_shares shares
             WHERE shares.file_id = files.file_id
         )
         ORDER BY files.file_id
@@ -1163,7 +1163,7 @@ pub(crate) async fn remove_unshared(tx: &mut Transaction<'_, Postgres>) -> Resul
         WHERE files.file_id = ANY($1::text[])
           AND NOT EXISTS (
               SELECT 1
-              FROM company_context_system.slack_file_shares shares
+              FROM company_context_data.slack_file_shares shares
               WHERE shares.file_id = files.file_id
           )
         "#,

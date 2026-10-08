@@ -182,7 +182,7 @@ impl DataType {
                    ) AS metadata"#,
                 visible: r#"d.file_id IN (
                        SELECT s.file_id
-                       FROM company_context_system.slack_file_shares s
+                       FROM company_context_data.slack_file_shares s
                        JOIN company_context_data.slack_broker_observations o
                          ON o.conversation_id = s.conversation_id
                        WHERE o.active AND o.provider_subject = $2
@@ -194,7 +194,7 @@ impl DataType {
                 in_channels: Some(
                     r#"d.file_id IN (
                        SELECT s.file_id
-                       FROM company_context_system.slack_file_shares s
+                       FROM company_context_data.slack_file_shares s
                        JOIN company_context_data.slack_broker_observations o
                          ON o.conversation_id = s.conversation_id
                        WHERE o.active AND o.provider_subject = $2
@@ -918,7 +918,7 @@ mod tests {
                    ('C3', '3.0', 'deck', now(), '{}');
             INSERT INTO company_context_system.slack_files (file_id, source_version, extraction_status)
             VALUES ('SF1', 'v1', 'completed'), ('SF2', 'v1', 'completed');
-            INSERT INTO company_context_system.slack_file_shares (file_id, conversation_id, message_ts)
+            INSERT INTO company_context_data.slack_file_shares (file_id, conversation_id, message_ts)
             VALUES ('SF1', 'C1', '1.0'), ('SF2', 'C2', '2.0'), ('SF2', 'C3', '3.0');
             INSERT INTO company_context_data.slack_file_documents
                 (document_id, file_id, chunk_id, title, body, source_created_at, content_hash)

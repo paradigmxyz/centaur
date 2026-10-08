@@ -15,7 +15,7 @@ Slack limits each Web API method per workspace per app, and every token the app 
 The service owns these Postgres schemas:
 
 - `company_context_system`: private cursors, staging (including Slack messages and users), and processing state.
-- `company_context_data`: retrieval-facing Drive documents, Granola notes, Slack channel and file documents, access observations (including Slack identities and channel memberships), and embeddings.
+- `company_context_data`: retrieval-facing Drive documents, Granola notes, Slack channel and file documents, access observations (including Slack identities, channel memberships, and the conversations each Slack file is shared in), and embeddings. The query endpoints read only this schema.
 
 The `centaur_company_context_reader` role used by the company-context tool can read `google_drive_documents` and `google_drive_document_embeddings`. Row-level security limits each reader to files that a live broker credential with the same Google subject (`centaur.google_subject`) still observes; `google_drive_broker_observations` is the only source of that access. The reader cannot query the observations or the system schema directly. The reader has no access to Granola notes yet. The Helm deployment is gated by `experimentalCompanyContext.enabled` until it is ready for production.
 
