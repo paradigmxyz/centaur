@@ -214,11 +214,13 @@ module ApplicationHelper
     end
   end
 
-  # The brand logo for an OAuth provider as an inline SVG, or nil when we have
+  # The brand logo for an OAuth provider as inline markup, or nil when we have
   # no logo for it -- callers fall back to showing the provider name as text.
   # Official brand marks keep their own colors (Google's G, Slack's pinwheel);
   # GitHub's mark uses currentColor so it follows the theme.
   def oauth_provider_logo(provider, classes: "size-6")
+    return content_tag(:span, "🌐", class: "#{classes} inline-flex items-center justify-center text-2xl", aria: { hidden: true }) if provider.to_s == "mercator"
+
     paths =
       case provider.to_s
       when "google"
