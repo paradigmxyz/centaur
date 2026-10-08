@@ -40,7 +40,7 @@ module Console
         registration = registration_client_factory.call.register(
           endpoint: provider.registration_endpoint,
           redirect_uri: oauth_callback_redirect_uri(preset.fetch(:slug)),
-          scope: preset.fetch(:allowed_scopes).join(provider.scope_separator),
+          scope: preset.fetch(:allowed_scopes).join(" "),
           auth_method: provider.respond_to?(:token_endpoint_auth_method) ? provider.token_endpoint_auth_method : "client_secret_post"
         )
         begin

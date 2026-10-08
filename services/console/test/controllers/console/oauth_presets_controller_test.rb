@@ -34,6 +34,21 @@ class Console::OauthPresetsControllerTest < ActionDispatch::IntegrationTest
     assert_select "form[action*='/presets/mercator']", count: 0
   end
 
+  test "registration scopes use spaces even when consent scopes use commas" do
+    provider = Oauth::Providers.fetch("mercator")
+    preset = provider.preset.merge(allowed_scopes: %w[read write])
+    registration_client do |**request|
+      assert_equal "read write", JSON.parse(request[:body])["scope"]
+      HttpClient::Response.new(status: 201, body: { client_id: "id", client_secret: "synthetic" }.to_json)
+    end
+    provider.stub(:preset, preset) do
+      provider.stub(:scope_separator, ",") do
+        post console_oauth_app_preset_path(provider: "mercator")
+      end
+    end
+    assert_redirected_to oauth_start_path(slug: "mercator")
+  end
+
   test "preset reuses the winner of a concurrent unique slug conflict" do
     provider = Oauth::Providers::Mercator.new
     winner = OauthApp.create!(provider.preset.merge(provider: "mercator", client_id: "winner", client_secret: "synthetic", created_by: @admin))
