@@ -1,5 +1,6 @@
-//! `POST /query`: hybrid retrieval over the published corpora on behalf of the
-//! Console principal named by the request's API JWT.
+//! `POST /query` and `GET /documents/{document_id}`: hybrid retrieval and
+//! document reads over the published corpora on behalf of the Console
+//! principal named by the request's API JWT.
 //!
 //! Access mirrors the reader role's row-level security: a principal sees a
 //! document only while an active broker observation for its Google subject or
@@ -14,10 +15,10 @@ use std::{
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
-    extract::{State, rejection::JsonRejection},
+    extract::{Path, State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
 };
 use chrono::{DateTime, Utc};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
@@ -37,6 +38,7 @@ use crate::{
 const DEFAULT_LIMIT: usize = 10;
 const MAX_LIMIT: usize = 50;
 const MAX_QUERY_CHARS: usize = 2_000;
+const MAX_FILTER_IDS: usize = 100;
 /// Candidates each lane contributes to rank fusion.
 const MIN_CANDIDATES: usize = 20;
 const RRF_K: f64 = 60.0;
@@ -53,7 +55,8 @@ pub struct QueryState {
 
 pub fn router(state: QueryState) -> Router {
     Router::new()
-        .route("/query", post(handle))
+        .route("/query", post(handle_query))
+        .route("/documents/{document_id}", get(handle_document))
         .with_state(state)
 }
 
@@ -72,6 +75,17 @@ pub struct Filters {
     /// Data types to search; empty searches every type.
     #[serde(default)]
     pub types: Vec<DataType>,
+    /// Inclusive lower bound on when a document's content occurred.
+    pub occurred_after: Option<DateTime<Utc>>,
+    /// Exclusive upper bound on when a document's content occurred.
+    pub occurred_before: Option<DateTime<Utc>>,
+    /// Slack conversation IDs. Limits the search to Slack messages in, and
+    /// Slack files shared in, these conversations.
+    #[serde(default)]
+    pub channel_ids: Vec<String>,
+    /// Slack or Drive file IDs. Limits the search to these files' documents.
+    #[serde(default)]
+    pub file_ids: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -80,6 +94,43 @@ pub enum DataType {
     SlackMessage,
     SlackFile,
     DriveDoc,
+}
+
+/// How one data type's documents are selected. Queries bind the principal's
+/// subject to `$2` and the filters to `$4` through `$7`.
+struct Source {
+    documents: &'static str,
+    embeddings: &'static str,
+    columns: &'static str,
+    /// Documents visible to subject `$2`.
+    visible: &'static str,
+    /// Expressions for when the document's content starts and ends.
+    starts_at: &'static str,
+    ends_at: &'static str,
+    /// Documents in the conversations `$6`, or `None` if the type has none.
+    in_channels: Option<&'static str>,
+    /// The type's file ID column, or `None` if it has none.
+    file_id: Option<&'static str>,
+}
+
+impl Source {
+    /// The filter predicate. A filter the type cannot apply excludes the type
+    /// before it is queried, so it only needs to accept an unset filter here.
+    fn filters(&self) -> String {
+        let in_channels = self.in_channels.unwrap_or("FALSE");
+        let in_files = self
+            .file_id
+            .map(|column| format!("{column} = ANY($7)"))
+            .unwrap_or_else(|| "FALSE".to_owned());
+        format!(
+            r#"($4::timestamptz IS NULL OR {ends_at} >= $4)
+               AND ($5::timestamptz IS NULL OR {starts_at} < $5)
+               AND ($6::text[] IS NULL OR {in_channels})
+               AND ($7::text[] IS NULL OR {in_files})"#,
+            ends_at = self.ends_at,
+            starts_at = self.starts_at,
+        )
+    }
 }
 
 impl DataType {
@@ -92,14 +143,12 @@ impl DataType {
         }
     }
 
-    /// The document and embedding tables, the selected columns, and the
-    /// visibility predicate for subject `$2`.
-    fn source(self) -> (&'static str, &'static str, &'static str, &'static str) {
+    fn source(self) -> Source {
         match self {
-            Self::SlackMessage => (
-                "company_context_data.slack_documents",
-                "company_context_data.slack_document_embeddings",
-                r#"d.document_id, d.title, d.body, NULL::text AS url,
+            Self::SlackMessage => Source {
+                documents: "company_context_data.slack_documents",
+                embeddings: "company_context_data.slack_document_embeddings",
+                columns: r#"d.document_id, d.title, d.body, NULL::text AS url,
                    d.first_message_at AS occurred_at,
                    jsonb_build_object(
                        'conversation_id', d.conversation_id,
@@ -109,16 +158,21 @@ impl DataType {
                        'first_message_at', d.first_message_at,
                        'last_message_at', d.last_message_at
                    ) AS metadata"#,
-                r#"d.conversation_id IN (
+                visible: r#"d.conversation_id IN (
                        SELECT o.conversation_id
                        FROM company_context_data.slack_broker_observations o
                        WHERE o.active AND o.provider_subject = $2
                    )"#,
-            ),
-            Self::SlackFile => (
-                "company_context_data.slack_file_documents",
-                "company_context_data.slack_file_document_embeddings",
-                r#"d.document_id, d.title, d.body, NULLIF(d.url, '') AS url,
+                // A channel day chunk matches a window its messages overlap.
+                starts_at: "d.first_message_at",
+                ends_at: "d.last_message_at",
+                in_channels: Some("d.conversation_id = ANY($6)"),
+                file_id: None,
+            },
+            Self::SlackFile => Source {
+                documents: "company_context_data.slack_file_documents",
+                embeddings: "company_context_data.slack_file_document_embeddings",
+                columns: r#"d.document_id, d.title, d.body, NULLIF(d.url, '') AS url,
                    d.source_created_at AS occurred_at,
                    jsonb_build_object(
                        'file_id', d.file_id,
@@ -126,18 +180,33 @@ impl DataType {
                        'filetype', d.filetype,
                        'author_id', d.author_id
                    ) AS metadata"#,
-                r#"d.file_id IN (
+                visible: r#"d.file_id IN (
                        SELECT s.file_id
                        FROM company_context_system.slack_file_shares s
                        JOIN company_context_data.slack_broker_observations o
                          ON o.conversation_id = s.conversation_id
                        WHERE o.active AND o.provider_subject = $2
                    )"#,
-            ),
-            Self::DriveDoc => (
-                "company_context_data.google_drive_documents",
-                "company_context_data.google_drive_document_embeddings",
-                r#"d.document_id, d.title, d.body, NULLIF(d.url, '') AS url,
+                starts_at: "d.source_created_at",
+                ends_at: "d.source_created_at",
+                // Only shares the subject can see count, so a filter does not
+                // reveal where else a file was shared.
+                in_channels: Some(
+                    r#"d.file_id IN (
+                       SELECT s.file_id
+                       FROM company_context_system.slack_file_shares s
+                       JOIN company_context_data.slack_broker_observations o
+                         ON o.conversation_id = s.conversation_id
+                       WHERE o.active AND o.provider_subject = $2
+                         AND s.conversation_id = ANY($6)
+                   )"#,
+                ),
+                file_id: Some("d.file_id"),
+            },
+            Self::DriveDoc => Source {
+                documents: "company_context_data.google_drive_documents",
+                embeddings: "company_context_data.google_drive_document_embeddings",
+                columns: r#"d.document_id, d.title, d.body, NULLIF(d.url, '') AS url,
                    COALESCE(d.source_modified_at, d.source_created_at) AS occurred_at,
                    jsonb_build_object(
                        'file_id', d.file_id,
@@ -147,13 +216,24 @@ impl DataType {
                        'page_start', d.page_start,
                        'page_end', d.page_end
                    ) AS metadata"#,
-                r#"d.file_id IN (
+                visible: r#"d.file_id IN (
                        SELECT o.file_id
                        FROM company_context_data.google_drive_broker_observations o
                        WHERE o.active AND o.provider_subject = $2
                    )"#,
-            ),
+                starts_at: "COALESCE(d.source_modified_at, d.source_created_at)",
+                ends_at: "COALESCE(d.source_modified_at, d.source_created_at)",
+                in_channels: None,
+                file_id: Some("d.file_id"),
+            },
         }
+    }
+
+    /// Whether the type can satisfy every set filter.
+    fn supports(self, filters: &Filters) -> bool {
+        let source = self.source();
+        (filters.channel_ids.is_empty() || source.in_channels.is_some())
+            && (filters.file_ids.is_empty() || source.file_id.is_some())
     }
 }
 
@@ -164,6 +244,13 @@ pub struct QueryResponse {
 
 #[derive(Debug, Serialize)]
 pub struct QueryResult {
+    #[serde(flatten)]
+    pub document: Document,
+    pub score: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Document {
     pub document_id: String,
     #[serde(rename = "type")]
     pub data_type: DataType,
@@ -171,7 +258,6 @@ pub struct QueryResult {
     pub url: Option<String>,
     pub text: String,
     pub occurred_at: Option<DateTime<Utc>>,
-    pub score: f64,
     pub metadata: Value,
 }
 
@@ -185,11 +271,26 @@ struct Row {
     metadata: SqlJson<Value>,
 }
 
+impl Row {
+    fn into_document(self, data_type: DataType) -> Document {
+        Document {
+            document_id: self.document_id,
+            data_type,
+            title: self.title,
+            url: self.url,
+            text: self.body,
+            occurred_at: self.occurred_at,
+            metadata: self.metadata.0,
+        }
+    }
+}
+
 #[derive(Debug)]
 enum ApiError {
     BadRequest(String),
     Unauthorized,
     Forbidden,
+    NotFound,
     Internal,
 }
 
@@ -199,23 +300,25 @@ impl IntoResponse for ApiError {
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "invalid bearer token".to_owned()),
             Self::Forbidden => (StatusCode::FORBIDDEN, "unknown principal".to_owned()),
-            Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "query failed".to_owned()),
+            Self::NotFound => (StatusCode::NOT_FOUND, "document not found".to_owned()),
+            Self::Internal => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "request failed".to_owned(),
+            ),
         };
         (status, Json(json!({ "error": message }))).into_response()
     }
 }
 
-async fn handle(
-    State(state): State<QueryState>,
-    headers: HeaderMap,
-    request: Result<Json<QueryRequest>, JsonRejection>,
-) -> Result<Json<QueryResponse>, ApiError> {
-    // Authenticate before looking at the body.
-    let principal_id = bearer_token(&headers)
+/// The identity of the principal named by the request's API JWT.
+async fn authenticate(
+    state: &QueryState,
+    headers: &HeaderMap,
+) -> Result<PrincipalIdentity, ApiError> {
+    let principal_id = bearer_token(headers)
         .and_then(|token| state.jwt.principal_id(token))
         .ok_or(ApiError::Unauthorized)?;
-    let Json(request) = request.map_err(|rejection| ApiError::BadRequest(rejection.body_text()))?;
-    let identity = state
+    state
         .credentials
         .principal_identity(principal_id)
         .await
@@ -223,17 +326,44 @@ async fn handle(
             error!(event = "company_context_query_principal_failed", error = %format!("{error:#}"));
             ApiError::Internal
         })?
-        .ok_or(ApiError::Forbidden)?;
+        .ok_or(ApiError::Forbidden)
+}
+
+fn internal(event: &'static str) -> impl FnOnce(anyhow::Error) -> ApiError {
+    move |error| match error.downcast::<InvalidQuery>() {
+        Ok(InvalidQuery(message)) => ApiError::BadRequest(message),
+        Err(error) => {
+            error!(event, error = %format!("{error:#}"));
+            ApiError::Internal
+        }
+    }
+}
+
+async fn handle_query(
+    State(state): State<QueryState>,
+    headers: HeaderMap,
+    request: Result<Json<QueryRequest>, JsonRejection>,
+) -> Result<Json<QueryResponse>, ApiError> {
+    // Authenticate before looking at the body.
+    let identity = authenticate(&state, &headers).await?;
+    let Json(request) = request.map_err(|rejection| ApiError::BadRequest(rejection.body_text()))?;
     let results = search(&state.pool, Some(&state.embeddings), &identity, &request)
         .await
-        .map_err(|error| match error.downcast::<InvalidQuery>() {
-            Ok(InvalidQuery(message)) => ApiError::BadRequest(message),
-            Err(error) => {
-                error!(event = "company_context_query_failed", error = %format!("{error:#}"));
-                ApiError::Internal
-            }
-        })?;
+        .map_err(internal("company_context_query_failed"))?;
     Ok(Json(QueryResponse { results }))
+}
+
+async fn handle_document(
+    State(state): State<QueryState>,
+    headers: HeaderMap,
+    Path(document_id): Path<String>,
+) -> Result<Json<Document>, ApiError> {
+    let identity = authenticate(&state, &headers).await?;
+    document(&state.pool, &identity, &document_id)
+        .await
+        .map_err(internal("company_context_document_failed"))?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
 }
 
 #[derive(Debug)]
@@ -247,6 +377,47 @@ impl std::fmt::Display for InvalidQuery {
 
 impl std::error::Error for InvalidQuery {}
 
+fn invalid(message: impl Into<String>) -> anyhow::Error {
+    InvalidQuery(message.into()).into()
+}
+
+/// Bound filter parameters `$4` through `$7`.
+struct FilterParams {
+    occurred_after: Option<DateTime<Utc>>,
+    occurred_before: Option<DateTime<Utc>>,
+    channel_ids: Option<Vec<String>>,
+    file_ids: Option<Vec<String>>,
+}
+
+impl FilterParams {
+    fn new(filters: &Filters) -> Result<Self> {
+        if let (Some(after), Some(before)) = (filters.occurred_after, filters.occurred_before)
+            && after >= before
+        {
+            return Err(invalid("occurred_after must be before occurred_before"));
+        }
+        Ok(Self {
+            occurred_after: filters.occurred_after,
+            occurred_before: filters.occurred_before,
+            channel_ids: ids(&filters.channel_ids, "channel_ids")?,
+            file_ids: ids(&filters.file_ids, "file_ids")?,
+        })
+    }
+}
+
+fn ids(values: &[String], name: &str) -> Result<Option<Vec<String>>> {
+    if values.len() > MAX_FILTER_IDS {
+        return Err(invalid(format!(
+            "{name} must have at most {MAX_FILTER_IDS} entries"
+        )));
+    }
+    let ids: Vec<String> = values.iter().map(|id| id.trim().to_owned()).collect();
+    if ids.iter().any(String::is_empty) {
+        return Err(invalid(format!("{name} must not contain empty IDs")));
+    }
+    Ok((!ids.is_empty()).then_some(ids))
+}
+
 /// Searches the requested data types visible to `identity`, fusing keyword and
 /// vector ranks. Without embeddings, or when embedding the query fails, only
 /// keyword ranks are used.
@@ -258,26 +429,29 @@ pub async fn search(
 ) -> Result<Vec<QueryResult>> {
     let query = request.query.trim();
     if query.is_empty() {
-        return Err(InvalidQuery("query must not be empty".to_owned()).into());
+        return Err(invalid("query must not be empty"));
     }
     if query.chars().count() > MAX_QUERY_CHARS {
-        return Err(InvalidQuery(format!(
+        return Err(invalid(format!(
             "query must be at most {MAX_QUERY_CHARS} characters"
-        ))
-        .into());
+        )));
     }
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
     if !(1..=MAX_LIMIT).contains(&limit) {
-        return Err(InvalidQuery(format!("limit must be between 1 and {MAX_LIMIT}")).into());
+        return Err(invalid(format!("limit must be between 1 and {MAX_LIMIT}")));
     }
-    let types = if request.filters.types.is_empty() {
-        &DataType::ALL[..]
-    } else {
-        &request.filters.types[..]
-    };
-    let searches: Vec<(DataType, &str)> = DataType::ALL
+    let filters = &request.filters;
+    let params = FilterParams::new(filters)?;
+    let types: Vec<DataType> = DataType::ALL
         .into_iter()
-        .filter(|data_type| types.contains(data_type))
+        .filter(|data_type| filters.types.is_empty() || filters.types.contains(data_type))
+        .filter(|data_type| data_type.supports(filters))
+        .collect();
+    if types.is_empty() {
+        return Err(invalid("no requested type supports every filter"));
+    }
+    let searches: Vec<(DataType, &str)> = types
+        .into_iter()
         .filter_map(|data_type| Some((data_type, data_type.subject(identity)?)))
         .collect();
     if searches.is_empty() {
@@ -289,13 +463,7 @@ pub async fn search(
         None => None,
     };
     let candidates = limit.max(MIN_CANDIDATES) as i64;
-    let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION READ ONLY")
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("SET LOCAL statement_timeout = '10s'")
-        .execute(&mut *tx)
-        .await?;
+    let mut tx = read_only(pool).await?;
     // ParadeDB cannot evaluate a parameterized `|||` in the generic plan
     // Postgres switches cached statements to after five executions.
     sqlx::query("SET LOCAL plan_cache_mode = force_custom_plan")
@@ -309,19 +477,102 @@ pub async fn search(
 
     let mut lanes = Vec::new();
     for (data_type, subject) in searches {
-        lanes.push((
-            data_type,
-            keyword_lane(&mut tx, data_type, query, subject, candidates).await?,
-        ));
+        let source = data_type.source();
+        let keyword = format!(
+            r#"
+            SELECT {columns}
+            FROM {documents} d
+            WHERE (d.title ||| $1::text::pdb.boost(2) OR d.body ||| $1::text)
+              AND {visible}
+              AND {filters}
+            ORDER BY paradedb.score(d.document_id) DESC, d.document_id
+            LIMIT $3
+            "#,
+            columns = source.columns,
+            documents = source.documents,
+            visible = source.visible,
+            filters = source.filters(),
+        );
+        let rows = lane(&mut tx, &keyword, query, None, subject, candidates, &params)
+            .await
+            .with_context(|| format!("keyword search {data_type:?}"))?;
+        lanes.push((data_type, rows));
+
         if let Some((model, vector)) = &vector {
-            lanes.push((
-                data_type,
-                vector_lane(&mut tx, data_type, vector, model, subject, candidates).await?,
-            ));
+            let semantic = format!(
+                r#"
+                SELECT {columns}
+                FROM {embeddings} e
+                JOIN {documents} d ON d.document_id = e.document_id
+                WHERE e.model = $8
+                  AND {visible}
+                  AND {filters}
+                ORDER BY e.embedding <=> $1::text::vector, d.document_id
+                LIMIT $3
+                "#,
+                columns = source.columns,
+                embeddings = source.embeddings,
+                documents = source.documents,
+                visible = source.visible,
+                filters = source.filters(),
+            );
+            let rows = lane(
+                &mut tx,
+                &semantic,
+                vector,
+                Some(model),
+                subject,
+                candidates,
+                &params,
+            )
+            .await
+            .with_context(|| format!("vector search {data_type:?}"))?;
+            lanes.push((data_type, rows));
         }
     }
     tx.commit().await?;
     Ok(fuse(lanes, limit))
+}
+
+/// Returns the document with `document_id` if it is visible to `identity`.
+pub async fn document(
+    pool: &PgPool,
+    identity: &PrincipalIdentity,
+    document_id: &str,
+) -> Result<Option<Document>> {
+    let mut tx = read_only(pool).await?;
+    for data_type in DataType::ALL {
+        let Some(subject) = data_type.subject(identity) else {
+            continue;
+        };
+        let source = data_type.source();
+        let row: Option<Row> = sqlx::query_as(&format!(
+            "SELECT {columns} FROM {documents} d WHERE d.document_id = $1 AND {visible}",
+            columns = source.columns,
+            documents = source.documents,
+            visible = source.visible,
+        ))
+        .bind(document_id)
+        .bind(subject)
+        .fetch_optional(&mut *tx)
+        .await
+        .with_context(|| format!("read {data_type:?} document"))?;
+        if let Some(row) = row {
+            return Ok(Some(row.into_document(data_type)));
+        }
+    }
+    Ok(None)
+}
+
+async fn read_only(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SET LOCAL statement_timeout = '10s'")
+        .execute(&mut *tx)
+        .await?;
+    Ok(tx)
 }
 
 async fn query_vector(embeddings: &EmbeddingsClient, query: &str) -> Option<(String, String)> {
@@ -342,59 +593,29 @@ async fn query_vector(embeddings: &EmbeddingsClient, query: &str) -> Option<(Str
     }
 }
 
-async fn keyword_lane(
+/// Runs one ranked lane: `$1` is the query text or vector, `$2` the subject,
+/// `$3` the limit, `$4`..`$7` the filters, and `$8` the embedding model.
+async fn lane(
     tx: &mut Transaction<'_, Postgres>,
-    data_type: DataType,
-    query: &str,
+    sql: &str,
+    input: &str,
+    model: Option<&str>,
     subject: &str,
     limit: i64,
+    params: &FilterParams,
 ) -> Result<Vec<Row>> {
-    let (documents, _, columns, visible) = data_type.source();
-    sqlx::query_as(&format!(
-        r#"
-        SELECT {columns}
-        FROM {documents} d
-        WHERE (d.title ||| $1::text::pdb.boost(2) OR d.body ||| $1::text)
-          AND {visible}
-        ORDER BY paradedb.score(d.document_id) DESC, d.document_id
-        LIMIT $3
-        "#
-    ))
-    .bind(query)
-    .bind(subject)
-    .bind(limit)
-    .fetch_all(&mut **tx)
-    .await
-    .with_context(|| format!("keyword search {data_type:?}"))
-}
-
-async fn vector_lane(
-    tx: &mut Transaction<'_, Postgres>,
-    data_type: DataType,
-    vector: &str,
-    model: &str,
-    subject: &str,
-    limit: i64,
-) -> Result<Vec<Row>> {
-    let (documents, embeddings, columns, visible) = data_type.source();
-    sqlx::query_as(&format!(
-        r#"
-        SELECT {columns}
-        FROM {embeddings} e
-        JOIN {documents} d ON d.document_id = e.document_id
-        WHERE e.model = $4
-          AND {visible}
-        ORDER BY e.embedding <=> $1::text::vector, d.document_id
-        LIMIT $3
-        "#
-    ))
-    .bind(vector)
-    .bind(subject)
-    .bind(limit)
-    .bind(model)
-    .fetch_all(&mut **tx)
-    .await
-    .with_context(|| format!("vector search {data_type:?}"))
+    let mut query = sqlx::query_as(sql)
+        .bind(input)
+        .bind(subject)
+        .bind(limit)
+        .bind(params.occurred_after)
+        .bind(params.occurred_before)
+        .bind(params.channel_ids.as_deref())
+        .bind(params.file_ids.as_deref());
+    if let Some(model) = model {
+        query = query.bind(model);
+    }
+    Ok(query.fetch_all(&mut **tx).await?)
 }
 
 /// Reciprocal rank fusion across every lane of every data type.
@@ -407,14 +628,8 @@ fn fuse(lanes: Vec<(DataType, Vec<Row>)>, limit: usize) -> Vec<QueryResult> {
                 .entry(row.document_id.clone())
                 .and_modify(|result| result.score += score)
                 .or_insert_with(|| QueryResult {
-                    document_id: row.document_id,
-                    data_type,
-                    title: row.title,
-                    url: row.url,
-                    text: row.body,
-                    occurred_at: row.occurred_at,
+                    document: row.into_document(data_type),
                     score,
-                    metadata: row.metadata.0,
                 });
         }
     }
@@ -422,7 +637,7 @@ fn fuse(lanes: Vec<(DataType, Vec<Row>)>, limit: usize) -> Vec<QueryResult> {
     results.sort_by(|a, b| {
         b.score
             .total_cmp(&a.score)
-            .then_with(|| a.document_id.cmp(&b.document_id))
+            .then_with(|| a.document.document_id.cmp(&b.document.document_id))
     });
     results.truncate(limit);
     results
@@ -621,96 +836,147 @@ mod tests {
         }
     }
 
-    fn request(query: &str, types: &[DataType]) -> QueryRequest {
-        QueryRequest {
-            query: query.to_owned(),
-            filters: Filters {
-                types: types.to_vec(),
-            },
-            limit: None,
-        }
+    fn request(body: Value) -> QueryRequest {
+        serde_json::from_value(body).unwrap()
     }
 
     async fn ids(
         pool: &PgPool,
         embeddings: Option<&EmbeddingsClient>,
         identity: &PrincipalIdentity,
-        request: QueryRequest,
+        body: Value,
     ) -> Vec<String> {
-        let mut ids: Vec<_> = search(pool, embeddings, identity, &request)
+        let mut ids: Vec<_> = search(pool, embeddings, identity, &request(body))
             .await
             .unwrap()
             .into_iter()
-            .map(|result| result.document_id)
+            .map(|result| result.document.document_id)
             .collect();
         ids.sort();
         ids
     }
 
+    fn ada() -> PrincipalIdentity {
+        PrincipalIdentity {
+            google_subject: Some("G-ADA".to_owned()),
+            slack_user_id: Some("U-ADA".to_owned()),
+        }
+    }
+
+    /// Bob has no Google identity.
+    fn bob() -> PrincipalIdentity {
+        PrincipalIdentity {
+            google_subject: None,
+            slack_user_id: Some("U-BOB".to_owned()),
+        }
+    }
+
+    /// Ada observes Drive files F1 and F4 (not F3, whose observation is
+    /// inactive) and Slack conversations C1 and C3; Bob observes C2. Slack
+    /// file SF1 is shared in C1 and SF2 in both C2 and C3.
+    async fn seed(pool: &PgPool) {
+        pool.execute(
+            r#"
+            INSERT INTO company_context_data.google_drive_broker_observations
+                (broker_credential_id, file_id, provider_subject, active)
+            VALUES (1, 'F1', 'G-ADA', true), (2, 'F2', 'G-BOB', true),
+                   (3, 'F3', 'G-ADA', false), (4, 'F4', 'G-ADA', true);
+            INSERT INTO company_context_data.google_drive_documents
+                (document_id, file_id, chunk_id, document_type, mime_type, title, body,
+                 source_modified_at, content_hash)
+            VALUES
+                ('drive:F1', 'F1', '0', 'google_doc', 'text/plain', 'Roadmap', 'launch plan for falcon', '2024-01-10Z', 'hash'),
+                ('drive:F2', 'F2', '0', 'google_doc', 'text/plain', 'Roadmap', 'launch plan for falcon', '2024-01-10Z', 'hash'),
+                ('drive:F3', 'F3', '0', 'google_doc', 'text/plain', 'Roadmap', 'launch plan for falcon', '2024-01-10Z', 'hash'),
+                ('drive:F4', 'F4', '0', 'pdf', 'application/pdf', 'Retro', 'falcon launch retro', '2024-03-01Z', 'hash');
+
+            INSERT INTO company_context_system.slack_conversations (conversation_id, team_id, kind, name)
+            VALUES ('C1', 'T1', 'public_channel', 'general'),
+                   ('C2', 'T1', 'private_channel', 'secret'),
+                   ('C3', 'T1', 'public_channel', 'launch');
+            INSERT INTO company_context_data.slack_broker_observations
+                (broker_credential_id, conversation_id, provider_subject, active)
+            VALUES (10, 'C1', 'U-ADA', true), (10, 'C3', 'U-ADA', true), (11, 'C2', 'U-BOB', true);
+            INSERT INTO company_context_system.slack_channel_days
+                (conversation_id, day, projection_version, content_hash, rendered_at)
+            VALUES ('C1', '2024-01-02', 1, 'hash', now()), ('C2', '2024-01-02', 1, 'hash', now()),
+                   ('C3', '2024-02-01', 1, 'hash', now());
+            INSERT INTO company_context_data.slack_documents
+                (document_id, conversation_id, day, chunk_id, title, body, channel_name,
+                 conversation_kind, first_message_at, last_message_at, content_hash)
+            VALUES
+                ('slack:C1', 'C1', '2024-01-02', '0', '#general', 'falcon launch is friday', 'general', 'public_channel',
+                 '2024-01-02T09:00Z', '2024-01-02T17:00Z', 'hash'),
+                ('slack:C2', 'C2', '2024-01-02', '0', '#secret', 'falcon launch is friday', 'secret', 'private_channel',
+                 '2024-01-02T09:00Z', '2024-01-02T17:00Z', 'hash'),
+                ('slack:C3', 'C3', '2024-02-01', '0', '#launch', 'falcon launch went well', 'launch', 'public_channel',
+                 '2024-02-01T09:00Z', '2024-02-01T10:00Z', 'hash');
+
+            INSERT INTO company_context_system.slack_messages
+                (conversation_id, message_ts, text, occurred_at, raw_payload)
+            VALUES ('C1', '1.0', 'deck', now(), '{}'), ('C2', '2.0', 'deck', now(), '{}'),
+                   ('C3', '3.0', 'deck', now(), '{}');
+            INSERT INTO company_context_system.slack_files (file_id, source_version, extraction_status)
+            VALUES ('SF1', 'v1', 'completed'), ('SF2', 'v1', 'completed');
+            INSERT INTO company_context_system.slack_file_shares (file_id, conversation_id, message_ts)
+            VALUES ('SF1', 'C1', '1.0'), ('SF2', 'C2', '2.0'), ('SF2', 'C3', '3.0');
+            INSERT INTO company_context_data.slack_file_documents
+                (document_id, file_id, chunk_id, title, body, source_created_at, content_hash)
+            VALUES ('file:SF1', 'SF1', '0', 'falcon.pdf', 'falcon launch deck', '2024-01-02Z', 'hash'),
+                   ('file:SF2', 'SF2', '0', 'falcon-retro.pdf', 'falcon launch retro deck', '2024-02-01Z', 'hash');
+            "#,
+        )
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
-    async fn search_returns_only_requested_types_the_principal_observes() {
+    async fn search_returns_only_matching_documents_the_principal_observes() {
         let Ok(database_url) = env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
             eprintln!("skipping: set COMPANY_CONTEXT_TEST_DATABASE_URL to a ParadeDB Postgres URL");
             return;
         };
         let database = TestDatabase::create(&database_url, "query").await;
         let pool = &database.pool;
-        pool.execute(
-            r#"
-            INSERT INTO company_context_data.google_drive_broker_observations
-                (broker_credential_id, file_id, provider_subject, active)
-            VALUES (1, 'F1', 'G-ADA', true), (2, 'F2', 'G-BOB', true), (3, 'F3', 'G-ADA', false);
-            INSERT INTO company_context_data.google_drive_documents
-                (document_id, file_id, chunk_id, document_type, mime_type, title, body, content_hash)
-            SELECT 'drive:' || id, id, '0', 'google_doc', 'text/plain', 'Roadmap ' || id,
-                   'launch plan for falcon', 'hash'
-            FROM unnest(ARRAY['F1', 'F2', 'F3']) AS id;
+        seed(pool).await;
+        let (ada, bob) = (ada(), bob());
 
-            INSERT INTO company_context_system.slack_conversations (conversation_id, team_id, kind, name)
-            VALUES ('C1', 'T1', 'public_channel', 'general'), ('C2', 'T1', 'private_channel', 'secret');
-            INSERT INTO company_context_data.slack_broker_observations
-                (broker_credential_id, conversation_id, provider_subject, active)
-            VALUES (10, 'C1', 'U-ADA', true), (11, 'C2', 'U-BOB', true);
-            INSERT INTO company_context_system.slack_channel_days
-                (conversation_id, day, projection_version, content_hash, rendered_at)
-            VALUES ('C1', '2024-01-02', 1, 'hash', now()), ('C2', '2024-01-02', 1, 'hash', now());
-            INSERT INTO company_context_data.slack_documents
-                (document_id, conversation_id, day, chunk_id, title, body, conversation_kind,
-                 first_message_at, last_message_at, content_hash)
-            SELECT 'slack:' || id, id, '2024-01-02', '0', '#' || id, 'falcon launch is friday',
-                   'public_channel', now(), now(), 'hash'
-            FROM unnest(ARRAY['C1', 'C2']) AS id;
-
-            INSERT INTO company_context_system.slack_messages
-                (conversation_id, message_ts, text, occurred_at, raw_payload)
-            VALUES ('C1', '1.0', 'deck', now(), '{}'), ('C2', '2.0', 'deck', now(), '{}');
-            INSERT INTO company_context_system.slack_files (file_id, source_version, extraction_status)
-            VALUES ('SF1', 'v1', 'completed'), ('SF2', 'v1', 'completed');
-            INSERT INTO company_context_system.slack_file_shares (file_id, conversation_id, message_ts)
-            VALUES ('SF1', 'C1', '1.0'), ('SF2', 'C2', '2.0');
-            INSERT INTO company_context_data.slack_file_documents
-                (document_id, file_id, chunk_id, title, body, content_hash)
-            SELECT 'file:' || id, id, '0', 'falcon.pdf', 'falcon launch deck', 'hash'
-            FROM unnest(ARRAY['SF1', 'SF2']) AS id;
-            "#,
-        )
-        .await
-        .unwrap();
-
-        let ada = PrincipalIdentity {
-            google_subject: Some("G-ADA".to_owned()),
-            slack_user_id: Some("U-ADA".to_owned()),
-        };
         assert_eq!(
-            ids(pool, None, &ada, request("Falcon launch?", &[])).await,
-            ["drive:F1", "file:SF1", "slack:C1"]
+            ids(pool, None, &ada, json!({ "query": "Falcon launch?" })).await,
+            [
+                "drive:F1", "drive:F4", "file:SF1", "file:SF2", "slack:C1", "slack:C3"
+            ]
         );
         assert_eq!(
             ids(
                 pool,
                 None,
                 &ada,
-                request("falcon", &[DataType::SlackMessage])
+                json!({ "query": "falcon", "filters": { "types": ["slack_message"] } })
+            )
+            .await,
+            ["slack:C1", "slack:C3"]
+        );
+        assert!(
+            ids(pool, None, &ada, json!({ "query": "unrelated" }))
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            ids(pool, None, &bob, json!({ "query": "falcon" })).await,
+            ["file:SF2", "slack:C2"]
+        );
+
+        // Channel days match windows their messages overlap.
+        assert_eq!(
+            ids(
+                pool,
+                None,
+                &ada,
+                json!({ "query": "falcon", "filters": {
+                    "occurred_after": "2024-01-02T12:00:00Z",
+                    "occurred_before": "2024-01-03T00:00:00Z",
+                } })
             )
             .await,
             ["slack:C1"]
@@ -720,28 +986,55 @@ mod tests {
                 pool,
                 None,
                 &ada,
-                request("falcon", &[DataType::DriveDoc, DataType::SlackFile])
+                json!({ "query": "falcon", "filters": { "occurred_after": "2024-02-01T00:00:00Z" } })
             )
             .await,
-            ["drive:F1", "file:SF1"]
+            ["drive:F4", "file:SF2", "slack:C3"]
+        );
+
+        // Channel filters search Slack only, through visible shares only.
+        let channels = |channel_ids: Value| json!({ "query": "falcon", "filters": { "channel_ids": channel_ids } });
+        assert_eq!(
+            ids(pool, None, &ada, channels(json!(["C1"]))).await,
+            ["file:SF1", "slack:C1"]
         );
         assert!(
-            ids(pool, None, &ada, request("unrelated", &[]))
+            ids(pool, None, &ada, channels(json!(["C2"])))
                 .await
                 .is_empty()
         );
-
-        // A principal without a Google identity sees no Drive documents.
-        let slack_only = PrincipalIdentity {
-            google_subject: None,
-            slack_user_id: Some("U-BOB".to_owned()),
-        };
         assert_eq!(
-            ids(pool, None, &slack_only, request("falcon", &[])).await,
-            ["file:SF2", "slack:C2"]
+            ids(pool, None, &ada, channels(json!(["C3"]))).await,
+            ["file:SF2", "slack:C3"]
+        );
+        assert_eq!(
+            ids(
+                pool,
+                None,
+                &ada,
+                json!({ "query": "falcon", "filters": { "file_ids": ["F4", "SF1", "F2"] } })
+            )
+            .await,
+            ["drive:F4", "file:SF1"]
         );
 
-        // Semantic matches are limited to the same visible documents.
+        for invalid in [
+            json!({ "query": "  " }),
+            json!({ "query": "falcon", "limit": 0 }),
+            json!({ "query": "falcon", "filters": { "types": ["drive_doc"], "channel_ids": ["C1"] } }),
+            json!({ "query": "falcon", "filters": { "file_ids": [" "] } }),
+            json!({ "query": "falcon", "filters": {
+                "occurred_after": "2024-02-01T00:00:00Z",
+                "occurred_before": "2024-01-01T00:00:00Z",
+            } }),
+        ] {
+            let error = search(pool, None, &ada, &request(invalid.clone()))
+                .await
+                .unwrap_err();
+            assert!(error.is::<InvalidQuery>(), "{invalid}");
+        }
+
+        // Semantic matches are limited to the same visible, filtered documents.
         pool.execute(
             r#"
             INSERT INTO company_context_data.google_drive_document_embeddings
@@ -767,16 +1060,70 @@ mod tests {
         let base_url = format!("http://{address}");
         let embeddings = EmbeddingsClient::new(&config(&["--openai-base-url", &base_url])).unwrap();
         assert_eq!(
-            ids(pool, Some(&embeddings), &ada, request("unrelated", &[])).await,
-            ["drive:F1", "file:SF1", "slack:C1"]
+            ids(
+                pool,
+                Some(&embeddings),
+                &ada,
+                json!({ "query": "unrelated" })
+            )
+            .await,
+            [
+                "drive:F1", "drive:F4", "file:SF1", "file:SF2", "slack:C1", "slack:C3"
+            ]
+        );
+        assert_eq!(
+            ids(
+                pool,
+                Some(&embeddings),
+                &ada,
+                json!({ "query": "unrelated", "filters": { "channel_ids": ["C3"] } })
+            )
+            .await,
+            ["file:SF2", "slack:C3"]
         );
 
-        let invalid = search(pool, None, &ada, &request("  ", &[]))
-            .await
-            .unwrap_err();
-        assert!(invalid.is::<InvalidQuery>());
-
         server.abort();
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    async fn documents_are_returned_only_to_principals_that_observe_them() {
+        let Ok(database_url) = env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
+            eprintln!("skipping: set COMPANY_CONTEXT_TEST_DATABASE_URL to a ParadeDB Postgres URL");
+            return;
+        };
+        let database = TestDatabase::create(&database_url, "query_document").await;
+        let pool = &database.pool;
+        seed(pool).await;
+        let (ada, bob) = (ada(), bob());
+
+        let drive = document(pool, &ada, "drive:F4").await.unwrap().unwrap();
+        assert_eq!(drive.data_type, DataType::DriveDoc);
+        assert_eq!(drive.text, "falcon launch retro");
+        assert_eq!(drive.metadata["document_type"], "pdf");
+        let file = document(pool, &ada, "file:SF2").await.unwrap().unwrap();
+        assert_eq!(file.data_type, DataType::SlackFile);
+        let message = document(pool, &bob, "slack:C2").await.unwrap().unwrap();
+        assert_eq!(message.data_type, DataType::SlackMessage);
+        assert_eq!(message.metadata["channel_name"], "secret");
+
+        for (identity, document_id) in [
+            (&ada, "drive:F2"),
+            (&ada, "drive:F3"),
+            (&ada, "slack:C2"),
+            (&ada, "missing"),
+            (&bob, "drive:F1"),
+            (&bob, "file:SF1"),
+        ] {
+            assert!(
+                document(pool, identity, document_id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{document_id}"
+            );
+        }
+
         database.drop().await;
     }
 }
