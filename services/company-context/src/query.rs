@@ -296,6 +296,11 @@ pub async fn search(
     sqlx::query("SET LOCAL statement_timeout = '10s'")
         .execute(&mut *tx)
         .await?;
+    // ParadeDB cannot evaluate a parameterized `|||` in the generic plan
+    // Postgres switches cached statements to after five executions.
+    sqlx::query("SET LOCAL plan_cache_mode = force_custom_plan")
+        .execute(&mut *tx)
+        .await?;
     // Keep scanning the HNSW index until enough visible rows are found,
     // instead of filtering a fixed candidate set down to few or none.
     sqlx::query("SET LOCAL hnsw.iterative_scan = strict_order")
