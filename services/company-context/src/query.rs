@@ -49,7 +49,7 @@ const RRF_K: f64 = 60.0;
 const JWT_LEEWAY_SECONDS: u64 = 30;
 const EMBEDDING_TIMEOUT: Duration = Duration::from_secs(10);
 /// Database role with read-only access to `company_context_data` only.
-const QUERY_ROLE: &str = "centaur_company_context_query";
+const QUERY_ROLE: &str = "centaur_company_context_v2_query";
 
 #[derive(Clone)]
 pub struct QueryState {
