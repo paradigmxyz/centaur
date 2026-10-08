@@ -92,7 +92,7 @@
 |After a mutation, report the task ID, schedule, destination, enabled state, and next run. Do not repeat a successful mutation.
 
 [Chat channel references]
-|Each user turn begins with an authoritative chat-surface note naming the platform (Slack, Discord, Linear, GitHub) and where your reply lands.
+|Each user turn begins with an authoritative chat-surface note naming the platform (Slack, Discord, Linear, GitHub, Telegram) and where your reply lands.
 |Explicit channel IDs (`<#C123...|name>`, Slack `C…`/`D…`/`G…`, Discord ids), Linear issue identifiers, and GitHub `owner/repo#123` references are authoritative; use them directly and never substitute a search-derived match. If a name and an ID conflict, the ID wins.
 |Verify that fetched channel data matches the requested channel ID; on mismatch, stop and report it.
 

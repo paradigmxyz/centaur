@@ -816,6 +816,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_context_exposes_telegram_chat_and_topic() {
+        let pool =
+            PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
+        let app = build_router_with_runtime(
+            PgSessionStore::new(pool),
+            SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/session/telegram%3A-1001234%3A55")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["thread_key"], "telegram:-1001234:55");
+        assert_eq!(body["platform"], "telegram");
+        assert_eq!(body["telegram"]["chat_id"], "-1001234");
+        assert_eq!(body["telegram"]["topic_id"], "55");
+        assert!(body.get("slack").is_none());
+        assert!(body.get("discord").is_none());
+    }
+
+    #[tokio::test]
     async fn session_context_exposes_discord_guild_channel_and_thread() {
         let pool =
             PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();

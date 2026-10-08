@@ -117,7 +117,7 @@ fn validate_thread_key(value: &str) -> Result<(), ThreadKeyError> {
 
 /// The chat surface a thread is delivered to, parsed from its thread key.
 ///
-/// Slack, Discord, Linear, and GitHub all encode the destination — where a reply
+/// Slack, Discord, Linear, GitHub, and Telegram all encode the destination — where a reply
 /// (and, where the surface supports it, an uploaded file) lands — directly in the
 /// key. Resolving it in one place lets the API session context, the per-turn
 /// context line the agent reads, and any caller that needs a posting destination
@@ -153,6 +153,13 @@ pub enum ChatDestination {
         kind: GithubThreadKind,
         review_comment_id: Option<u64>,
     },
+    /// A Telegram chat, optionally narrowed to a forum topic. A private chat's
+    /// id is the user's own (positive) id; group and supergroup ids are
+    /// negative. Telegrambot renders replies as text and has no upload path.
+    Telegram {
+        chat_id: String,
+        topic_id: Option<String>,
+    },
 }
 
 /// Whether a GitHub thread maps to an issue or a pull request.
@@ -173,13 +180,14 @@ impl GithubThreadKind {
 
 impl ChatDestination {
     /// The platform identifier surfaced to the agent (`slack` / `discord` /
-    /// `linear` / `github`).
+    /// `linear` / `github` / `telegram`).
     pub fn platform(&self) -> &'static str {
         match self {
             Self::Slack { .. } => "slack",
             Self::Discord { .. } => "discord",
             Self::Linear { .. } => "linear",
             Self::Github { .. } => "github",
+            Self::Telegram { .. } => "telegram",
         }
     }
 
@@ -257,6 +265,22 @@ impl ChatDestination {
                      GitHub replies are markdown comments with no file-upload surface; share artifacts inline or as a link.]"
                 )
             }
+            Self::Telegram { chat_id, topic_id } => {
+                let place = if chat_id.starts_with('-') {
+                    let topic = topic_id
+                        .as_deref()
+                        .map(|id| format!(" · topic {id}"))
+                        .unwrap_or_default();
+                    format!("Telegram group · chat {chat_id}{topic}")
+                } else {
+                    format!("Telegram DM · chat {chat_id}")
+                };
+                format!(
+                    "[chat surface: {place}. \
+                     Centaur delivers your reply to this chat automatically — do not repost it with the telegram tool. \
+                     Telegram replies are text messages with no file-upload surface; share artifacts inline or as a link.]"
+                )
+            }
         }
     }
 }
@@ -274,7 +298,10 @@ impl ThreadKey {
     /// linearbot chat-SDK `encodeThreadId` shape), and GitHub keys are
     /// `github:<owner>/<repo>:<pr>[:rc:<review_comment>]` or
     /// `github:<owner>/<repo>:issue:<issue>` (mirroring githubbot's
-    /// `parseGithubThreadKey`).
+    /// `parseGithubThreadKey`), and Telegram keys are
+    /// `telegram:<chat_id>[:<topic_id>]` (the Chat SDK Telegram adapter's
+    /// shape). A malformed `telegram:` key resolves to `None` rather than
+    /// reaching the Slack parser.
     pub fn chat_destination(&self) -> Option<ChatDestination> {
         let key = self.as_str();
         if let Some(rest) = key.strip_prefix("github:") {
@@ -301,6 +328,29 @@ impl ThreadKey {
                 number,
                 kind,
                 review_comment_id,
+            });
+        }
+        if let Some(rest) = key.strip_prefix("telegram:") {
+            let mut segments = rest.split(':');
+            let chat_id = segments.next().filter(|chat| {
+                let digits = chat.strip_prefix('-').unwrap_or(chat);
+                !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+            })?;
+            let topic_id = match segments.next() {
+                None => None,
+                Some(topic)
+                    if !topic.is_empty() && topic.bytes().all(|byte| byte.is_ascii_digit()) =>
+                {
+                    Some(topic.to_owned())
+                }
+                Some(_) => return None,
+            };
+            if segments.next().is_some() {
+                return None;
+            }
+            return Some(ChatDestination::Telegram {
+                chat_id: chat_id.to_owned(),
+                topic_id,
             });
         }
         if let Some(rest) = key.strip_prefix("discord:") {
@@ -740,6 +790,34 @@ mod tests {
     }
 
     #[test]
+    fn chat_destination_resolves_telegram_keys() {
+        let dm = ThreadKey::parse("telegram:351238732")
+            .unwrap()
+            .chat_destination()
+            .unwrap();
+        assert_eq!(
+            dm,
+            ChatDestination::Telegram {
+                chat_id: "351238732".to_owned(),
+                topic_id: None,
+            }
+        );
+        assert_eq!(dm.platform(), "telegram");
+
+        let topic = ThreadKey::parse("telegram:-1001234:55")
+            .unwrap()
+            .chat_destination()
+            .unwrap();
+        assert_eq!(
+            topic,
+            ChatDestination::Telegram {
+                chat_id: "-1001234".to_owned(),
+                topic_id: Some("55".to_owned()),
+            }
+        );
+    }
+
+    #[test]
     fn chat_destination_is_none_for_unaddressable_keys() {
         // No channel id → not a postable Discord destination.
         assert!(
@@ -783,6 +861,20 @@ mod tests {
                 .chat_destination()
                 .is_none()
         );
+        // Malformed Telegram keys resolve to nothing; they never fall through
+        // to the Slack parser.
+        for key in [
+            "telegram:C123:123.456",
+            "telegram:abc",
+            "telegram:-",
+            "telegram:-100:x",
+            "telegram:1:2:3",
+        ] {
+            assert!(
+                ThreadKey::parse(key).unwrap().chat_destination().is_none(),
+                "{key}"
+            );
+        }
         // Non-platform namespaces resolve to nothing.
         assert!(
             ThreadKey::parse("api:abc123")
@@ -843,6 +935,21 @@ mod tests {
         assert!(github.contains("review comment 99"));
         // GitHub has no upload command either.
         assert!(!github.contains("github upload"));
+
+        let telegram_dm = ThreadKey::parse("telegram:351238732")
+            .unwrap()
+            .chat_destination()
+            .unwrap()
+            .context_line();
+        assert!(telegram_dm.contains("Telegram DM · chat 351238732"));
+        assert!(telegram_dm.contains("do not repost it with the telegram tool"));
+
+        let telegram_topic = ThreadKey::parse("telegram:-1001234:55")
+            .unwrap()
+            .chat_destination()
+            .unwrap()
+            .context_line();
+        assert!(telegram_topic.contains("Telegram group · chat -1001234 · topic 55"));
 
         let github_issue = ThreadKey::parse("github:0xSplits/centaur:issue:12")
             .unwrap()

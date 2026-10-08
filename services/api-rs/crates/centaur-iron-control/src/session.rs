@@ -45,6 +45,7 @@ impl<'a> SessionPrincipalMetadata<'a> {
                 .or_else(|| metadata.get("discord_conversation_name"))
                 .or_else(|| metadata.get("linear_conversation_name"))
                 .or_else(|| metadata.get("teams_conversation_name"))
+                .or_else(|| metadata.get("telegram_conversation_name"))
                 .and_then(Value::as_str),
         }
     }
@@ -401,6 +402,17 @@ mod tests {
             })))
             .conversation_name,
             Some("Casey Harper")
+        );
+    }
+
+    #[test]
+    fn session_principal_metadata_accepts_telegram_name() {
+        assert_eq!(
+            SessionPrincipalMetadata::from_session_metadata(Some(&json!({
+                "telegram_conversation_name": "Engineering"
+            })))
+            .conversation_name,
+            Some("Engineering")
         );
     }
 

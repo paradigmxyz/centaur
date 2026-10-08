@@ -6799,6 +6799,14 @@ fn session_context_for_thread(thread_key: &ThreadKey) -> Option<serde_json::Map<
             }
             ("github", github)
         }
+        ChatDestination::Telegram { chat_id, topic_id } => {
+            let mut telegram = serde_json::Map::new();
+            telegram.insert("chat_id".to_owned(), Value::String(chat_id));
+            if let Some(topic_id) = topic_id {
+                telegram.insert("topic_id".to_owned(), Value::String(topic_id));
+            }
+            ("telegram", telegram)
+        }
     };
     context.insert(platform_key.to_owned(), Value::Object(block));
     Some(context)
@@ -8752,6 +8760,44 @@ mod tests {
         assert_eq!(value["session_context"]["discord"]["channel_id"], "222");
         assert_eq!(value["session_context"]["discord"]["thread_id"], "333");
         assert!(value["session_context"].get("slack").is_none());
+    }
+
+    #[test]
+    fn input_line_with_session_context_adds_telegram_chat_context() {
+        let thread_key = ThreadKey::parse("telegram:351238732").unwrap();
+        let trace = SessionTraceContext::new(None, None);
+
+        let line = input_line_with_session_context(&thread_key, &trace, r#"{"type":"user"}"#);
+        let value: Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(value["session_context"]["platform"], "telegram");
+        assert_eq!(value["session_context"]["telegram"]["chat_id"], "351238732");
+        assert!(
+            value["session_context"]["telegram"]
+                .get("topic_id")
+                .is_none()
+        );
+        assert!(value["session_context"].get("slack").is_none());
+    }
+
+    #[test]
+    fn input_line_prepends_telegram_chat_surface_note_to_user_content() {
+        let thread_key = ThreadKey::parse("telegram:351238732").unwrap();
+        let trace = SessionTraceContext::new(None, None);
+
+        let line = input_line_with_session_context(
+            &thread_key,
+            &trace,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
+        );
+        let value: Value = serde_json::from_str(&line).unwrap();
+        let content = value["message"]["content"].as_array().unwrap();
+
+        assert_eq!(content.len(), 2);
+        let note = content[0]["text"].as_str().unwrap();
+        assert!(note.contains("Telegram DM"));
+        assert!(note.contains("351238732"));
+        assert_eq!(content[1]["text"], "hi");
     }
 
     #[test]

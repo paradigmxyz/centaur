@@ -1,0 +1,29 @@
+{
+  "name": "telegrambot",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot --watch src/server.ts",
+    "start": "bun src/server.ts",
+    "test": "bun test test",
+    "check:types": "bun tsgo --project tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@centaur/harness-events": "workspace:*",
+    "@centaur/rendering": "workspace:*",
+    "@chat-adapter/state-pg": "4.41.1",
+    "@chat-adapter/telegram": "4.41.1",
+    "chat": "4.41.1",
+    "hono": "^4.13.12",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@chat-adapter/state-memory": "4.41.1",
+    "@types/pg": "^8.23.1",
+    "@types/bun": "^1.4.2",
+    "@types/node": "^26.6.4",
+    "@typescript/native-preview": "^7.0.0-dev.20260707.2",
+    "typescript": "^7.0.2"
+  }
+}

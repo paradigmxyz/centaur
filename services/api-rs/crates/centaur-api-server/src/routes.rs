@@ -56,7 +56,7 @@ use crate::{
         ExecuteSessionResponse, GithubThreadContext, InterruptSessionExecutionRequest,
         InterruptSessionExecutionResponse, LinearThreadContext, ListWorkflowRunsQuery,
         OnHarnessConflict, SessionContextResponse, SessionSseEvent, SlackThreadContext,
-        stream_error_sse,
+        TelegramThreadContext, stream_error_sse,
     },
 };
 
@@ -599,6 +599,13 @@ async fn get_session_context(
         .map(ChatDestination::platform)
         .unwrap_or("unknown")
         .to_owned();
+    let telegram = match &destination {
+        Some(ChatDestination::Telegram { chat_id, topic_id }) => Some(TelegramThreadContext {
+            chat_id: chat_id.clone(),
+            topic_id: topic_id.clone(),
+        }),
+        _ => None,
+    };
     let (slack, discord, linear, github) = match destination {
         Some(ChatDestination::Slack {
             channel_id,
@@ -658,7 +665,7 @@ async fn get_session_context(
                 review_comment_id,
             }),
         ),
-        None => (None, None, None, None),
+        Some(ChatDestination::Telegram { .. }) | None => (None, None, None, None),
     };
     let title = match runtime.session_title(&thread_key).await {
         Ok(title) => title,
@@ -679,6 +686,7 @@ async fn get_session_context(
         discord,
         linear,
         github,
+        telegram,
     }))
 }
 
