@@ -31,8 +31,9 @@ async fn company_context_reader_sees_only_drive_documents_observed_for_its_subje
         result
     }
     .await;
+    // Terminates pg_search background mergers still connected to it.
     admin
-        .execute(format!(r#"drop database if exists "{name}""#).as_str())
+        .execute(format!(r#"drop database if exists "{name}" with (force)"#).as_str())
         .await?;
     result
 }

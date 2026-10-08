@@ -39,8 +39,11 @@ impl TestDatabase {
 
     pub async fn drop(mut self) {
         self.pool.close().await;
+        // pg_search starts background mergers connected to the database after
+        // index writes, and a plain DROP DATABASE fails if one outlives its
+        // five-second wait.
         self.admin
-            .execute(format!(r#"drop database if exists "{}""#, self.name).as_str())
+            .execute(format!(r#"drop database if exists "{}" with (force)"#, self.name).as_str())
             .await
             .unwrap();
     }
