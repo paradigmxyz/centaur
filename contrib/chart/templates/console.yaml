@@ -276,12 +276,6 @@ spec:
               value: "1"
             - name: RAILS_SERVE_STATIC_FILES
               value: "1"
-{{- if .Values.experimentalCompanyContext.enabled }}
-            # Proxies inject the principal API JWT into requests to these hosts
-            # in addition to CENTAUR_API_URL's.
-            - name: CENTAUR_API_SERVER_PROXY_HOSTS
-              value: {{ include "centaur.componentName" (dict "root" . "component" "company-context") | quote }}
-{{- end }}
 {{- if .Values.apiRs.enabled }}
             - name: CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
