@@ -23,10 +23,10 @@
             <div class="text-[11px] uppercase tracking-wide text-zinc-500"><%= app.provider %></div>
           </div>
         </div>
-        <% if app.description.present? %>
+        <% if app.description.present? && !app.shared? %>
           <p class="line-clamp-2 text-xs text-zinc-500" title="<%= app.description %>"><%= app.description %></p>
         <% end %>
-        <p class="text-xs text-zinc-500"><%= app.shared? ? "Shared account. Agent access is managed through roles." : app.always_available? ? "Used automatically whenever you ask the bot." : "Used only in your DMs with the bot." %></p>
+        <p class="text-xs text-zinc-500"><%= app.shared? ? "Shared with your agents." : app.always_available? ? "Used automatically whenever you ask the bot." : "Used only in your DMs with the bot." %></p>
         <div class="mt-auto flex items-center justify-between gap-3 pt-1">
           <% credential = @credentials_by_app_id[app.id] %>
           <% if credential %>

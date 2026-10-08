@@ -19,7 +19,7 @@ module Oauth
         [ { host: "mercator.sh", http_methods: [ "POST" ], paths: [ "/mcp/auth" ] } ]
       end
       def preset
-        { slug: KEY, description: "A shared wallet for agents to discover and pay for external tools and services.",
+        { slug: KEY, description: "Shared with your agents.",
           allowed_scopes: [ SCOPE ], shared: true }
       end
       def authorization_scope_param = "scope"
