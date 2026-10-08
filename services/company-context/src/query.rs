@@ -2,11 +2,10 @@
 //! document reads over the published corpora on behalf of the Console
 //! principal named by the request's API JWT.
 //!
-//! Access mirrors the reader role's row-level security: a principal sees a
-//! document only while an active broker observation for its Google subject,
-//! Slack user ID, or the Granola subject of a credential granted to it still
-//! reaches the document's file, conversation, or Granola note. Queries run as [`QUERY_ROLE`], which can only
-//! read `company_context_data`.
+//! A principal sees a document only while an active broker observation for its
+//! Slack user ID, or for the subject of a Google or Granola credential granted
+//! to it, still reaches the document's file, conversation, or Granola note.
+//! Queries run as [`QUERY_ROLE`], which can only read `company_context_data`.
 
 use std::{
     collections::HashMap,
@@ -157,7 +156,11 @@ impl DataType {
             Self::SlackMessage | Self::SlackFile => {
                 identity.slack_user_id.as_deref().into_iter().collect()
             }
-            Self::DriveDoc => identity.google_subject.as_deref().into_iter().collect(),
+            Self::DriveDoc => identity
+                .google_subjects
+                .iter()
+                .map(String::as_str)
+                .collect(),
             Self::GranolaNote => identity
                 .granola_subjects
                 .iter()
@@ -920,8 +923,8 @@ mod tests {
 
     fn ada() -> PrincipalIdentity {
         PrincipalIdentity {
-            google_subject: Some("G-ADA".to_owned()),
             slack_user_id: Some("U-ADA".to_owned()),
+            google_subjects: vec!["G-ADA".to_owned()],
             granola_subjects: vec!["GR-ADA".to_owned()],
         }
     }
@@ -929,8 +932,8 @@ mod tests {
     /// Bob has no Google identity.
     fn bob() -> PrincipalIdentity {
         PrincipalIdentity {
-            google_subject: None,
             slack_user_id: Some("U-BOB".to_owned()),
+            google_subjects: Vec::new(),
             granola_subjects: vec!["GR-BOB".to_owned(), "GR-BOB-2".to_owned()],
         }
     }

@@ -54,15 +54,14 @@ pub struct GoogleCredential {
     pub revision: String,
 }
 
-/// The provider identities a Console principal is known by, the same ones the
-/// reader role's row-level security settings were derived from.
+/// The provider identities a Console principal is known by. Google and
+/// Granola identities are the subjects of the live broker credentials granted
+/// directly to the principal, the accounts it can already use through the
+/// proxy; principal labels are not trusted.
 #[derive(Clone, Debug, Default, sqlx::FromRow)]
 pub struct PrincipalIdentity {
-    pub google_subject: Option<String>,
     pub slack_user_id: Option<String>,
-    /// Subjects of the live Granola credentials granted directly to the
-    /// principal, the Granola accounts whose notes it can already read
-    /// through the proxy.
+    pub google_subjects: Vec<String>,
     pub granola_subjects: Vec<String>,
 }
 
@@ -427,27 +426,34 @@ impl ConsoleCredentials {
     pub async fn principal_identity(&self, principal_id: i64) -> Result<Option<PrincipalIdentity>> {
         sqlx::query_as(
             r#"
-            SELECT NULLIF(BTRIM(p.labels ->> 'google_subject'), '') AS google_subject,
-                   NULLIF(BTRIM(p.slack_user_id), '') AS slack_user_id,
+            WITH granted AS (
+                SELECT app.provider, app.slug, credentials.provider_subject
+                FROM grants
+                JOIN static_secrets secrets ON secrets.id = grants.static_secret_id
+                JOIN broker_credentials credentials
+                  ON credentials.id = secrets.broker_credential_id
+                JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+                WHERE grants.principal_id = $1
+                  AND credentials.dead = FALSE
+                  AND credentials.provider_subject <> ''
+            )
+            SELECT NULLIF(BTRIM(p.slack_user_id), '') AS slack_user_id,
                    ARRAY(
-                       SELECT DISTINCT credentials.provider_subject
-                       FROM grants
-                       JOIN static_secrets secrets ON secrets.id = grants.static_secret_id
-                       JOIN broker_credentials credentials
-                         ON credentials.id = secrets.broker_credential_id
-                       JOIN oauth_apps app ON app.id = credentials.oauth_app_id
-                       WHERE grants.principal_id = p.id
-                         AND app.provider = 'granola'
-                         AND app.slug = $2
-                         AND credentials.dead = FALSE
-                         AND credentials.provider_subject <> ''
-                       ORDER BY credentials.provider_subject
+                       SELECT DISTINCT provider_subject FROM granted
+                       WHERE provider = 'google' AND slug = $2
+                       ORDER BY provider_subject
+                   ) AS google_subjects,
+                   ARRAY(
+                       SELECT DISTINCT provider_subject FROM granted
+                       WHERE provider = 'granola' AND slug = $3
+                       ORDER BY provider_subject
                    ) AS granola_subjects
             FROM principals p
             WHERE p.id = $1
             "#,
         )
         .bind(principal_id)
+        .bind(&self.google_oauth_app_slug)
         .bind(&self.granola_oauth_app_slug)
         .fetch_optional(&self.pool)
         .await
@@ -491,7 +497,7 @@ mod tests {
     use crate::test_support::TestDatabase;
 
     #[tokio::test]
-    async fn principals_are_known_by_their_granted_granola_credentials() {
+    async fn principals_are_known_by_their_granted_credentials() {
         let Ok(database_url) = env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
             eprintln!("skipping: set COMPANY_CONTEXT_TEST_DATABASE_URL to a ParadeDB Postgres URL");
             return;
@@ -499,9 +505,9 @@ mod tests {
         let database = TestDatabase::create(&database_url, "principal_identity").await;
         let pool = &database.pool;
         // The Console tables the identity lookup reads. Ada (1) holds direct
-        // grants for two live Granola credentials, plus a dead one, one from
-        // another app, and a Google one; her email label names Bob's account.
-        // Bob (2) has Granola only through a role grant.
+        // grants for a Google credential and two live Granola credentials,
+        // plus a dead one and one from another app. Bob (2) has Granola only
+        // through a role grant, and a Google subject only as a label.
         pool.execute(
             r#"
             CREATE TABLE principals (
@@ -516,8 +522,8 @@ mod tests {
             CREATE TABLE grants (principal_id bigint, role_id bigint, static_secret_id bigint);
 
             INSERT INTO principals VALUES
-                (1, '{"google_subject": "G-ADA", "email": "bob@example.com"}', 'U-ADA'),
-                (2, '{}', NULL);
+                (1, '{}', 'U-ADA'),
+                (2, '{"google_subject": "G-BOB"}', NULL);
             INSERT INTO oauth_apps VALUES
                 (1, 'granola', 'granola'), (2, 'granola', 'other'), (3, 'google', 'google');
             INSERT INTO broker_credentials VALUES
@@ -548,10 +554,11 @@ mod tests {
         };
 
         let ada = credentials.principal_identity(1).await.unwrap().unwrap();
-        assert_eq!(ada.google_subject.as_deref(), Some("G-ADA"));
         assert_eq!(ada.slack_user_id.as_deref(), Some("U-ADA"));
+        assert_eq!(ada.google_subjects, ["G-ADA"]);
         assert_eq!(ada.granola_subjects, ["GR-ADA", "GR-ADA-2"]);
         let bob = credentials.principal_identity(2).await.unwrap().unwrap();
+        assert!(bob.google_subjects.is_empty());
         assert!(bob.granola_subjects.is_empty());
         assert!(credentials.principal_identity(3).await.unwrap().is_none());
 
