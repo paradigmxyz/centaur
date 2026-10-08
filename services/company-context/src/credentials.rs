@@ -60,10 +60,12 @@ pub struct GoogleCredential {
 pub struct PrincipalIdentity {
     pub google_subject: Option<String>,
     pub slack_user_id: Option<String>,
-    /// The principal's lowercased Slack email, which Slackbot supplies only
-    /// for users of its home workspace. Granola notes are matched by email,
-    /// like the reader role's Granola policy.
-    pub email: Option<String>,
+    /// The principal's lowercased emails, the ones Console credential
+    /// reconciliation matches the principal's credentials by: a Console-user
+    /// principal's user email and verified identity emails, otherwise its
+    /// `email` and `google_email` labels and Slack email. Granola notes are
+    /// matched by these.
+    pub emails: Vec<String>,
 }
 
 impl ConsoleCredentials {
@@ -427,11 +429,37 @@ impl ConsoleCredentials {
     pub async fn principal_identity(&self, principal_id: i64) -> Result<Option<PrincipalIdentity>> {
         sqlx::query_as(
             r#"
-            SELECT NULLIF(BTRIM(labels ->> 'google_subject'), '') AS google_subject,
-                   NULLIF(BTRIM(slack_user_id), '') AS slack_user_id,
-                   NULLIF(LOWER(BTRIM(slack_email)), '') AS email
-            FROM principals
-            WHERE id = $1
+            SELECT NULLIF(BTRIM(p.labels ->> 'google_subject'), '') AS google_subject,
+                   NULLIF(BTRIM(p.slack_user_id), '') AS slack_user_id,
+                   ARRAY(
+                       SELECT DISTINCT normalized.email
+                       FROM (
+                           SELECT u.email
+                           FROM users u
+                           WHERE p.kind = 'console_user' AND u.id = p.console_user_id
+                           UNION ALL
+                           SELECT i.email
+                           FROM user_identities i
+                           WHERE p.kind = 'console_user'
+                             AND i.user_id = p.console_user_id
+                             AND i.email_verified
+                           UNION ALL
+                           SELECT candidate.email
+                           FROM UNNEST(ARRAY[
+                               p.labels ->> 'email',
+                               p.labels ->> 'google_email',
+                               p.slack_email
+                           ]) AS candidate(email)
+                           WHERE p.kind <> 'console_user'
+                       ) AS emails,
+                       LATERAL (
+                           SELECT LOWER(BTRIM(emails.email, E' \t\n\v\f\r')) AS email
+                       ) AS normalized
+                       WHERE normalized.email <> ''
+                       ORDER BY normalized.email
+                   ) AS emails
+            FROM principals p
+            WHERE p.id = $1
             "#,
         )
         .bind(principal_id)
@@ -464,5 +492,79 @@ impl ConsoleCredentials {
             bail!("{description} is empty");
         }
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+
+    use sqlx::Executor;
+
+    use super::*;
+    use crate::test_support::TestDatabase;
+
+    #[tokio::test]
+    async fn principal_emails_match_credential_reconciliation() {
+        let Ok(database_url) = env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
+            eprintln!("skipping: set COMPANY_CONTEXT_TEST_DATABASE_URL to a ParadeDB Postgres URL");
+            return;
+        };
+        let database = TestDatabase::create(&database_url, "principal_identity").await;
+        let pool = &database.pool;
+        // The Console tables the identity lookup reads.
+        pool.execute(
+            r#"
+            CREATE TABLE users (id bigint PRIMARY KEY, email text NOT NULL);
+            CREATE TABLE user_identities (
+                user_id bigint NOT NULL, email text, email_verified boolean NOT NULL
+            );
+            CREATE TABLE principals (
+                id bigint PRIMARY KEY, kind text NOT NULL, console_user_id bigint,
+                labels jsonb NOT NULL DEFAULT '{}', slack_user_id text, slack_email text
+            );
+            INSERT INTO users VALUES (1, 'Ada@Example.com');
+            INSERT INTO user_identities VALUES
+                (1, 'ada@personal.example', true), (1, 'ada@unverified.example', false);
+            INSERT INTO principals VALUES
+                (1, 'console_user', 1, '{"email": "label@example.com"}', NULL, 'slack@example.com'),
+                (2, 'slack_dm', 1, '{"email": " Bob@Example.com ", "google_email": "bob@gmail.example", "google_subject": "G-BOB"}',
+                 'U-BOB', 'bob@example.com'),
+                (3, 'slack_dm', NULL, '{"email": ""}', NULL, NULL);
+            "#,
+        )
+        .await
+        .unwrap();
+        let credentials = ConsoleCredentials {
+            pool: pool.clone(),
+            encryption: Arc::new(ActiveRecordEncryption::new("primary", "salt")),
+            google_oauth_app_slug: String::new(),
+            granola_oauth_app_slug: String::new(),
+            slack_oauth_app_slug: String::new(),
+            google_user_emails: Vec::new(),
+            granola_user_emails: Vec::new(),
+            slack_user_ids: Vec::new(),
+            slack_conversation_types: Vec::new(),
+        };
+        let emails = |id| {
+            let credentials = credentials.clone();
+            async move {
+                credentials
+                    .principal_identity(id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .emails
+            }
+        };
+
+        // Console-user principals match only through their Console user.
+        assert_eq!(emails(1).await, ["ada@example.com", "ada@personal.example"]);
+        // Other principals match through their email labels and Slack email.
+        assert_eq!(emails(2).await, ["bob@example.com", "bob@gmail.example"]);
+        assert!(emails(3).await.is_empty());
+        assert!(credentials.principal_identity(4).await.unwrap().is_none());
+
+        database.drop().await;
     }
 }

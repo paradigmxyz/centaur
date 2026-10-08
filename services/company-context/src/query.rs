@@ -4,9 +4,9 @@
 //!
 //! Access mirrors the reader role's row-level security: a principal sees a
 //! document only while an active broker observation for its Google subject,
-//! Slack user ID, or email still reaches the document's file, conversation, or
-//! Granola note. Queries
-//! run as [`QUERY_ROLE`], which can only read `company_context_data`.
+//! Slack user ID, or one of its emails still reaches the document's file,
+//! conversation, or Granola note. Queries run as [`QUERY_ROLE`], which can only
+//! read `company_context_data`.
 
 use std::{
     collections::HashMap,
@@ -105,14 +105,14 @@ pub enum DataType {
 }
 
 /// How one data type's documents are selected. Queries bind the principal's
-/// subject to `$2` and the filters to `$4` through `$7`.
+/// subjects to `$2` and the filters to `$4` through `$7`.
 struct Source {
     /// Prefix of the type's document IDs.
     id_prefix: &'static str,
     documents: &'static str,
     embeddings: &'static str,
     columns: &'static str,
-    /// Documents visible to subject `$2`.
+    /// Documents visible to any subject in `$2`.
     visible: &'static str,
     /// Expressions for when the document's content starts and ends.
     starts_at: &'static str,
@@ -151,11 +151,14 @@ impl DataType {
         Self::GranolaNote,
     ];
 
-    fn subject(self, identity: &PrincipalIdentity) -> Option<&str> {
+    /// The principal's identities the type's observations are keyed by.
+    fn subjects(self, identity: &PrincipalIdentity) -> Vec<&str> {
         match self {
-            Self::SlackMessage | Self::SlackFile => identity.slack_user_id.as_deref(),
-            Self::DriveDoc => identity.google_subject.as_deref(),
-            Self::GranolaNote => identity.email.as_deref(),
+            Self::SlackMessage | Self::SlackFile => {
+                identity.slack_user_id.as_deref().into_iter().collect()
+            }
+            Self::DriveDoc => identity.google_subject.as_deref().into_iter().collect(),
+            Self::GranolaNote => identity.emails.iter().map(String::as_str).collect(),
         }
     }
 
@@ -178,7 +181,7 @@ impl DataType {
                 visible: r#"d.conversation_id IN (
                        SELECT o.conversation_id
                        FROM company_context_data.slack_broker_observations o
-                       WHERE o.active AND o.provider_subject = $2
+                       WHERE o.active AND o.provider_subject = ANY($2)
                    )"#,
                 // A channel day chunk matches a window its messages overlap.
                 starts_at: "d.first_message_at",
@@ -203,7 +206,7 @@ impl DataType {
                        FROM company_context_data.slack_file_shares s
                        JOIN company_context_data.slack_broker_observations o
                          ON o.conversation_id = s.conversation_id
-                       WHERE o.active AND o.provider_subject = $2
+                       WHERE o.active AND o.provider_subject = ANY($2)
                    )"#,
                 starts_at: "d.source_created_at",
                 ends_at: "d.source_created_at",
@@ -215,7 +218,7 @@ impl DataType {
                        FROM company_context_data.slack_file_shares s
                        JOIN company_context_data.slack_broker_observations o
                          ON o.conversation_id = s.conversation_id
-                       WHERE o.active AND o.provider_subject = $2
+                       WHERE o.active AND o.provider_subject = ANY($2)
                          AND s.conversation_id = ANY($6)
                    )"#,
                 ),
@@ -238,7 +241,7 @@ impl DataType {
                 visible: r#"d.file_id IN (
                        SELECT o.file_id
                        FROM company_context_data.google_drive_broker_observations o
-                       WHERE o.active AND o.provider_subject = $2
+                       WHERE o.active AND o.provider_subject = ANY($2)
                    )"#,
                 starts_at: "COALESCE(d.source_modified_at, d.source_created_at)",
                 ends_at: "COALESCE(d.source_modified_at, d.source_created_at)",
@@ -261,7 +264,7 @@ impl DataType {
                 visible: r#"d.note_id IN (
                        SELECT o.note_id
                        FROM company_context_data.granola_broker_observations o
-                       WHERE o.active AND o.provider_email = $2
+                       WHERE o.active AND o.provider_email = ANY($2)
                    )"#,
                 starts_at: "d.occurred_at",
                 ends_at: "d.occurred_at",
@@ -499,9 +502,10 @@ pub async fn search(
     if types.is_empty() {
         return Err(invalid("no requested type supports every filter"));
     }
-    let searches: Vec<(DataType, &str)> = types
+    let searches: Vec<(DataType, Vec<&str>)> = types
         .into_iter()
-        .filter_map(|data_type| Some((data_type, data_type.subject(identity)?)))
+        .map(|data_type| (data_type, data_type.subjects(identity)))
+        .filter(|(_, subjects)| !subjects.is_empty())
         .collect();
     if searches.is_empty() {
         return Ok(Vec::new());
@@ -525,7 +529,7 @@ pub async fn search(
         .await?;
 
     let mut lanes = Vec::new();
-    for (data_type, subject) in searches {
+    for (data_type, subjects) in searches {
         let source = data_type.source();
         let keyword = format!(
             r#"
@@ -542,9 +546,11 @@ pub async fn search(
             visible = source.visible,
             filters = source.filters(),
         );
-        let rows = lane(&mut tx, &keyword, query, None, subject, candidates, &params)
-            .await
-            .with_context(|| format!("keyword search {data_type:?}"))?;
+        let rows = lane(
+            &mut tx, &keyword, query, None, &subjects, candidates, &params,
+        )
+        .await
+        .with_context(|| format!("keyword search {data_type:?}"))?;
         lanes.push((data_type, rows));
 
         if let Some((model, vector)) = &vector {
@@ -570,7 +576,7 @@ pub async fn search(
                 &semantic,
                 vector,
                 Some(model),
-                subject,
+                &subjects,
                 candidates,
                 &params,
             )
@@ -592,9 +598,10 @@ pub async fn document(
     let Some(data_type) = DataType::of_document(document_id) else {
         return Ok(None);
     };
-    let Some(subject) = data_type.subject(identity) else {
+    let subjects = data_type.subjects(identity);
+    if subjects.is_empty() {
         return Ok(None);
-    };
+    }
     let source = data_type.source();
     let mut tx = read_only(pool).await?;
     let row: Option<Row> = sqlx::query_as(&format!(
@@ -604,7 +611,7 @@ pub async fn document(
         visible = source.visible,
     ))
     .bind(document_id)
-    .bind(subject)
+    .bind(&subjects)
     .fetch_optional(&mut *tx)
     .await
     .with_context(|| format!("read {data_type:?} document"))?;
@@ -645,20 +652,20 @@ async fn query_vector(embeddings: &EmbeddingsClient, query: &str) -> Option<(Str
     }
 }
 
-/// Runs one ranked lane: `$1` is the query text or vector, `$2` the subject,
+/// Runs one ranked lane: `$1` is the query text or vector, `$2` the subjects,
 /// `$3` the limit, `$4`..`$7` the filters, and `$8` the embedding model.
 async fn lane(
     tx: &mut Transaction<'_, Postgres>,
     sql: &str,
     input: &str,
     model: Option<&str>,
-    subject: &str,
+    subjects: &[&str],
     limit: i64,
     params: &FilterParams,
 ) -> Result<Vec<Row>> {
     let mut query = sqlx::query_as(sql)
         .bind(input)
-        .bind(subject)
+        .bind(subjects)
         .bind(limit)
         .bind(params.occurred_after)
         .bind(params.occurred_before)
@@ -912,7 +919,7 @@ mod tests {
         PrincipalIdentity {
             google_subject: Some("G-ADA".to_owned()),
             slack_user_id: Some("U-ADA".to_owned()),
-            email: Some("ada@example.com".to_owned()),
+            emails: vec!["ada@example.com".to_owned()],
         }
     }
 
@@ -921,7 +928,10 @@ mod tests {
         PrincipalIdentity {
             google_subject: None,
             slack_user_id: Some("U-BOB".to_owned()),
-            email: Some("bob@example.com".to_owned()),
+            emails: vec![
+                "bob@example.com".to_owned(),
+                "bob@personal.example".to_owned(),
+            ],
         }
     }
 
@@ -929,7 +939,7 @@ mod tests {
     /// inactive) and Slack conversations C1 and C3; Bob observes C2. Slack
     /// file SF1 is shared in C1 and SF2 in both C2 and C3. Ada's Granola
     /// account observes note N1 (not N3, whose observation is inactive); Bob's
-    /// observes N2.
+    /// observes N2 under his second email.
     async fn seed(pool: &PgPool) {
         pool.execute(
             r#"
@@ -983,7 +993,7 @@ mod tests {
 
             INSERT INTO company_context_data.granola_broker_observations
                 (broker_credential_id, note_id, provider_email, active)
-            VALUES (20, 'N1', 'ada@example.com', true), (21, 'N2', 'bob@example.com', true),
+            VALUES (20, 'N1', 'ada@example.com', true), (21, 'N2', 'bob@personal.example', true),
                    (20, 'N3', 'ada@example.com', false);
             INSERT INTO company_context_data.granola_documents
                 (document_id, note_id, chunk_id, title, body, owner_email, occurred_at, content_hash)
