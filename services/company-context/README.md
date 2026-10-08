@@ -6,7 +6,7 @@ It also indexes Granola meeting notes (title, summary, owner, and attendees) thr
 
 It also discovers the public and private Slack channels (and, when enabled, direct messages) each user belongs to, through the same per-user Slack broker credentials the Rails Console Slack DM sync uses. Each discovery records the credential's Slack identity and its channel memberships; channels that no live Slack credential still observes are removed, along with their messages. The first discovery each cycle to list a conversation syncs its message history. A sync reads the conversation's configured history days (`COMPANY_CONTEXT_SLACK_HISTORY_DAYS`, overridden per conversation by `COMPANY_CONTEXT_SLACK_CHANNEL_HISTORY_DAYS`) whenever part of that span has not been synchronized yet, so raising a value backfills the older history; lowering one keeps messages already synchronized. Otherwise it reads from its previous sync, always rereading the last 72 hours so edits within that window are picked up. Threads are synced whenever a parent message read this way shows a new reply; replies to threads started more than 72 hours earlier are not picked up. Only one sync reads a conversation at a time. Messages are stored privately in the system schema. Each discovery cycle also lists the workspace users through the app's bot token (`SLACK_BOT_TOKEN`), so documents show names instead of user IDs; the bot token needs the `users:read` scope and belongs to the same Slack app, so it shares the same rate-limit schedule. Users are removed once no live credential in their workspace remains. Slack tasks run on their own `company_context_slack` queue and worker.
 
-After each sync, the conversation's history is projected into documents on the main queue. Each channel's UTC day is rendered as a transcript in which thread replies follow their parent, in the day the thread started. Joins, topic changes, and similar system messages are left out. The transcript is split into chunks of at most `COMPANY_CONTEXT_CHUNK_CHARS` characters that together cover the whole day: chunks break between messages, a thread split across chunks repeats the start of its parent, and only a single message longer than a chunk is split. Each chunk starts with its channel, date, and time range, and is published as its own document with its own embedding. A day is rendered again when its messages, its channel's name, or the name of a user it mentions changes, and republished only when its content changes; vectors are reused for chunks whose text is unchanged. Slack documents are not yet exposed to retrieval.
+After each sync, the conversation's history is projected into documents on the main queue. Each channel's UTC day is rendered as a transcript in which thread replies follow their parent, in the day the thread started. Joins, topic changes, and similar system messages are left out. The transcript is split into chunks of at most `COMPANY_CONTEXT_CHUNK_CHARS` characters that together cover the whole day: chunks break between messages, a thread split across chunks repeats the start of its parent, and only a single message longer than a chunk is split. Each chunk starts with its channel, date, and time range, and is published as its own document with its own embedding. A day is rendered again when its messages, its channel's name, or the name of a user it mentions changes, and republished only when its content changes; vectors are reused for chunks whose text is unchanged. Slack documents are exposed to retrieval only through `POST /query`.
 
 Files attached to projected messages are indexed as their own documents, not in the channel day transcripts, which only name them. Projection records which messages share each file, so a file shared in several channels is extracted once. Each file is downloaded with a live credential observing one of its conversations whose scopes include `files:read`; without one, files wait until such a credential syncs. A credential Slack refuses a file to is not used for that file again until the file changes. Files whose extraction or publication has not finished within an hour are enqueued again by their conversation's next projection. PDFs are extracted with `pdftotext`; Word, PowerPoint, and Excel files (`docx`, `pptx`, `xlsx`), OpenDocument text, RTF, and EPUB with sandboxed `pandoc`; and snippets and other text files directly. Legacy binary Office formats, images, canvases, and external files such as Google Docs links are not indexed. Downloaded bytes are discarded after extraction, and only the extracted text, chunked like Drive documents, is stored. A file is extracted again when Slack reports different content for it, and keeps its published text until the new version replaces it; a version that cannot be indexed removes it. Its documents are also removed when Slack reports it deleted, and the file is removed once no stored message shares it.
 
@@ -42,6 +42,7 @@ Required:
 - `IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT`
 - `OPENAI_API_KEY`
 - `SLACK_BOT_TOKEN`: the Slack app's bot token, used to list workspace users (requires `users:read`)
+- `CENTAUR_JWT_SIGNING_SECRET`: the secret the Console signs principal API JWTs with, used to authenticate `POST /query`
 
 The service discovers live per-user broker credentials belonging to the Google
 OAuth app selected by `COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG` (default
@@ -79,6 +80,7 @@ users or conversations still observed.
 Common optional settings:
 
 - `IRON_CONTROL_DATABASE_NAME`
+- `CENTAUR_API_JWT_AUDIENCE` (default `centaur-api`) and `CENTAUR_API_JWT_ISSUER` (default `centaur-console`): must match the Console's API JWT settings
 - `COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG` (default `google`)
 - `COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG` (default `granola`)
 - `COMPANY_CONTEXT_SLACK_OAUTH_APP_SLUG` (default `slack`)
@@ -125,6 +127,57 @@ indexed PDFs are not downloaded again.
 - `GET /healthz`
 - `GET /readyz`
 - `GET /metrics`
+- `POST /query`
+
+### `POST /query`
+
+Searches the published Slack channel documents, Slack file documents, and
+Drive documents visible to a Console principal. The request is authenticated
+with the same principal API JWT the Console mints for api-rs
+(`Authorization: Bearer <jwt>`); iron-proxy injects it into sandbox requests to
+this service. The token's subject names the principal, whose Google subject
+(`google_subject` label) and Slack user ID are looked up in the Rails Console
+database. A document is returned only while an active broker observation for
+one of those identities still reaches its Drive file or Slack conversation (for
+Slack files, any conversation the file is shared in). A principal without one
+of those identities gets no results of the corresponding types.
+
+```json
+{
+  "query": "falcon launch plan",
+  "filters": { "types": ["slack_message", "slack_file", "drive_doc"] },
+  "limit": 10
+}
+```
+
+`filters` and `limit` are optional. An absent or empty `types` searches every
+type; `limit` defaults to 10 and is at most 50. Unknown fields are rejected.
+Keyword (BM25) and embedding similarity ranks are combined with reciprocal rank
+fusion; if the query cannot be embedded, keyword ranks alone are used.
+
+```json
+{
+  "results": [
+    {
+      "document_id": "slack:C0123456789:2024-01-02:000000",
+      "type": "slack_message",
+      "title": "#general — 2024-01-02",
+      "url": null,
+      "text": "#general · 2024-01-02 · 09:00–09:30 UTC\n\n[09:00] Ada: ...",
+      "occurred_at": "2024-01-02T09:00:00Z",
+      "score": 0.0325,
+      "metadata": { "conversation_id": "C0123456789", "channel_name": "general" }
+    }
+  ]
+}
+```
+
+`text` is the full document chunk. `metadata` holds type-specific fields:
+conversation, channel, and message times for `slack_message`; file ID and file
+type for `slack_file`; file ID, document type, MIME type, and pages for
+`drive_doc`. Errors return `{"error": "..."}` with status 400 for an invalid
+request, 401 for a missing or invalid token, and 403 for a principal unknown to
+the Console.
 
 ## Development
 

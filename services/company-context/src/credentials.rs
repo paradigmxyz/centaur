@@ -54,6 +54,14 @@ pub struct GoogleCredential {
     pub revision: String,
 }
 
+/// The provider identities a Console principal is known by, the same ones the
+/// reader role's row-level security settings were derived from.
+#[derive(Clone, Debug, Default, sqlx::FromRow)]
+pub struct PrincipalIdentity {
+    pub google_subject: Option<String>,
+    pub slack_user_id: Option<String>,
+}
+
 impl ConsoleCredentials {
     pub async fn connect(config: &Config) -> Result<Self> {
         let mut options = PgConnectOptions::from_str(&config.console_database_url)
@@ -410,6 +418,21 @@ impl ConsoleCredentials {
             conversation_types: conversation_types(&scopes, &self.slack_conversation_types),
             can_read_files: scopes.iter().any(|scope| scope == "files:read"),
         })
+    }
+
+    pub async fn principal_identity(&self, principal_id: i64) -> Result<Option<PrincipalIdentity>> {
+        sqlx::query_as(
+            r#"
+            SELECT NULLIF(BTRIM(labels ->> 'google_subject'), '') AS google_subject,
+                   NULLIF(BTRIM(slack_user_id), '') AS slack_user_id
+            FROM principals
+            WHERE id = $1
+            "#,
+        )
+        .bind(principal_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("load principal from Rails Console")
     }
 
     pub async fn ready(&self) -> bool {

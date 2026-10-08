@@ -1384,6 +1384,8 @@ mod tests {
             &base_url,
             "--slack-bot-token",
             "xoxb-test",
+            "--jwt-signing-secret",
+            "jwt-secret",
             "--slack-files-base-url",
             &base_url,
         ])

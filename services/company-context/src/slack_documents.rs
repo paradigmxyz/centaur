@@ -1038,6 +1038,8 @@ mod tests {
             &format!("http://{address}"),
             "--slack-bot-token",
             "xoxb-test",
+            "--jwt-signing-secret",
+            "jwt-secret",
         ])
         .unwrap();
         let embeddings = EmbeddingsClient::new(&config).unwrap();

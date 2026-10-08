@@ -7,6 +7,7 @@ mod errors;
 mod extraction;
 mod granola;
 mod granola_tasks;
+mod query;
 mod sampler;
 mod scheduler;
 mod slack;
@@ -95,6 +96,12 @@ async fn main() -> Result<()> {
     let drive = DriveClient::new(&config, credentials.clone())?;
     let granola = GranolaClient::new(&config)?;
     let embeddings = EmbeddingsClient::new(&config)?;
+    let query_state = query::QueryState {
+        pool: pool.clone(),
+        credentials: credentials.clone(),
+        embeddings: embeddings.clone(),
+        jwt: Arc::new(query::JwtVerifier::new(&config)),
+    };
     let slack = SlackClient::new(&config)?;
     tasks::register(TaskState {
         config: config.clone(),
@@ -138,7 +145,8 @@ async fn main() -> Result<()> {
         .route("/healthz", get(|| async { StatusCode::OK }))
         .route("/readyz", get(ready))
         .route("/metrics", get(render_metrics))
-        .with_state(http_state);
+        .with_state(http_state)
+        .merge(query::router(query_state));
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
 
     telemetry::worker_concurrency(QUEUE_NAME, config.worker_concurrency);

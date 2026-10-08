@@ -146,6 +146,29 @@ pub struct Config {
         hide_env_values = true
     )]
     pub slack_bot_token: String,
+    /// Secret the Console signs principal API JWTs with. `POST /query`
+    /// accepts the same tokens as api-rs.
+    #[arg(
+        long,
+        env = "CENTAUR_JWT_SIGNING_SECRET",
+        value_parser = nonempty,
+        hide_env_values = true
+    )]
+    pub jwt_signing_secret: String,
+    #[arg(
+        long,
+        env = "CENTAUR_API_JWT_AUDIENCE",
+        default_value = "centaur-api",
+        value_parser = nonempty
+    )]
+    pub jwt_audience: String,
+    #[arg(
+        long,
+        env = "CENTAUR_API_JWT_ISSUER",
+        default_value = "centaur-console",
+        value_parser = nonempty
+    )]
+    pub jwt_issuer: String,
     #[arg(long, env = "BIND_ADDR", default_value = "0.0.0.0:8080")]
     pub bind_addr: SocketAddr,
     #[arg(
@@ -437,6 +460,8 @@ mod tests {
             "test-key",
             "--slack-bot-token",
             "xoxb-test",
+            "--jwt-signing-secret",
+            "jwt-secret",
         ]
     }
 
