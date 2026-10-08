@@ -142,7 +142,13 @@ and principal labels do not count. A document is visible only while an active
 broker observation for one of those identities still reaches its Drive file,
 Slack conversation (for Slack files, any conversation the file is shared in),
 or Granola note. A principal without one of those identities sees no documents
-of the corresponding types.
+of the corresponding types. Disabling an OAuth app in the Console removes the
+corresponding identity, so its documents stop being returned without being
+removed from the index.
+
+Granola does not report notes that are unshared or deleted, so a note stays
+visible to the principals whose credentials once observed it until those
+credentials are dead or deleted.
 
 Errors return `{"error": "..."}` with status 400 for an invalid request, 401
 for a missing or invalid token, 403 for a principal unknown to the Console, and

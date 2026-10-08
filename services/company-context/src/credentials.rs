@@ -434,10 +434,14 @@ impl ConsoleCredentials {
                   ON credentials.id = secrets.broker_credential_id
                 JOIN oauth_apps app ON app.id = credentials.oauth_app_id
                 WHERE grants.principal_id = $1
+                  AND app.enabled = TRUE
                   AND credentials.dead = FALSE
                   AND credentials.provider_subject <> ''
             )
-            SELECT NULLIF(BTRIM(p.slack_user_id), '') AS slack_user_id,
+            SELECT CASE WHEN EXISTS (
+                       SELECT 1 FROM oauth_apps app
+                       WHERE app.provider = 'slack' AND app.slug = $4 AND app.enabled = TRUE
+                   ) THEN NULLIF(BTRIM(p.slack_user_id), '') END AS slack_user_id,
                    ARRAY(
                        SELECT DISTINCT provider_subject FROM granted
                        WHERE provider = 'google' AND slug = $2
@@ -455,6 +459,7 @@ impl ConsoleCredentials {
         .bind(principal_id)
         .bind(&self.google_oauth_app_slug)
         .bind(&self.granola_oauth_app_slug)
+        .bind(&self.slack_oauth_app_slug)
         .fetch_optional(&self.pool)
         .await
         .context("load principal from Rails Console")
@@ -513,7 +518,10 @@ mod tests {
             CREATE TABLE principals (
                 id bigint PRIMARY KEY, labels jsonb NOT NULL DEFAULT '{}', slack_user_id text
             );
-            CREATE TABLE oauth_apps (id bigint PRIMARY KEY, provider text NOT NULL, slug text NOT NULL);
+            CREATE TABLE oauth_apps (
+                id bigint PRIMARY KEY, provider text NOT NULL, slug text NOT NULL,
+                enabled boolean NOT NULL DEFAULT true
+            );
             CREATE TABLE broker_credentials (
                 id bigint PRIMARY KEY, oauth_app_id bigint, provider_subject text,
                 provider_email text, dead boolean NOT NULL DEFAULT false
@@ -525,7 +533,8 @@ mod tests {
                 (1, '{}', 'U-ADA'),
                 (2, '{"google_subject": "G-BOB"}', NULL);
             INSERT INTO oauth_apps VALUES
-                (1, 'granola', 'granola'), (2, 'granola', 'other'), (3, 'google', 'google');
+                (1, 'granola', 'granola'), (2, 'granola', 'other'), (3, 'google', 'google'),
+                (4, 'slack', 'slack');
             INSERT INTO broker_credentials VALUES
                 (1, 1, 'GR-ADA', 'ada@example.com', false),
                 (2, 1, 'GR-ADA-2', 'ada@example.com', false),
@@ -561,6 +570,15 @@ mod tests {
         assert!(bob.google_subjects.is_empty());
         assert!(bob.granola_subjects.is_empty());
         assert!(credentials.principal_identity(3).await.unwrap().is_none());
+
+        // Disabling an app hides the identities that reach its documents.
+        pool.execute("UPDATE oauth_apps SET enabled = false WHERE provider IN ('google', 'slack')")
+            .await
+            .unwrap();
+        let ada = credentials.principal_identity(1).await.unwrap().unwrap();
+        assert!(ada.slack_user_id.is_none());
+        assert!(ada.google_subjects.is_empty());
+        assert_eq!(ada.granola_subjects, ["GR-ADA", "GR-ADA-2"]);
 
         database.drop().await;
     }
