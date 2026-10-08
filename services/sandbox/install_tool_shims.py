@@ -480,7 +480,7 @@ def load():
 
 
 def usage():
-    print("usage: centaur-tools [list|json|refresh|which <name>|run <name> [args...]|call <name> <method> [json]]", file=sys.stderr)
+    print("usage: centaur-tools [list|json|refresh|which <name>|run <name> [args...]|call <name> <method> [json|-]]", file=sys.stderr)
     return 2
 
 
@@ -511,7 +511,7 @@ from centaur_sdk.tool_sdk import ToolContext, reset_tool_context, set_tool_conte
 project_dir = Path(sys.argv[1])
 client_module = sys.argv[2]
 method = sys.argv[3]
-payload = json.loads(sys.argv[4])
+payload = json.load(sys.stdin)
 
 module_path = project_dir / client_module
 package_name = project_dir.name.replace("-", "_")
@@ -737,8 +737,8 @@ def call_tool(tool, method, payload):
                 str(project_dir),
                 client_module,
                 method,
-                json.dumps(payload, separators=(",", ":")),
             ],
+            input=json.dumps(payload, separators=(",", ":")),
             check=False,
             text=True,
             capture_output=True,
@@ -797,7 +797,10 @@ def main(argv):
                 print(f"unknown tool: {{name}}", file=sys.stderr)
                 return 1
             try:
-                payload = json.loads(argv[4]) if len(argv) >= 5 else {{}}
+                if len(argv) >= 5 and argv[4] == "-":
+                    payload = json.load(sys.stdin)
+                else:
+                    payload = json.loads(argv[4]) if len(argv) >= 5 else {{}}
                 result = call_tool(by_name[name], method, payload)
                 if result.stdout:
                     print(result.stdout, end="")

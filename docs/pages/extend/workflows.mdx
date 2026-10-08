@@ -91,6 +91,12 @@ disabled.
 The handler may re-execute after a restart. Put external side effects behind
 `ctx.step(...)` so completed work is not repeated.
 
+Sandboxed Python tool calls stream their JSON arguments over stdin through
+`centaur-tools call <tool> <method> -` and the tool runner. Large tables do not
+need to be split merely to fit operating-system command-line limits. Inline
+JSON remains supported for smaller manual calls. Deploy the matching workflow
+host and generated tool shims together; both are packaged in the sandbox image.
+
 These primitives compose into larger automations:
 
 - **Scheduled operations**: run a daily digest, weekly cleanup, periodic sync,

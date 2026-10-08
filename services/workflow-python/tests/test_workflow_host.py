@@ -13,7 +13,7 @@ import types
 import unittest
 from collections.abc import Iterator
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 def load_workflow_host():
@@ -263,6 +263,84 @@ class WorkflowHostTests(unittest.TestCase):
             result,
             {"tool": "demo", "method": "method", "args": {"x": 1}, "via": "rpc"},
         )
+
+    def test_tool_shim_streams_large_arguments_over_stdin(self) -> None:
+        load_workflow_host()
+        from api import app as workflow_app
+
+        payload = {"values": [["revenue" * 100] for _ in range(1000)]}
+        process = AsyncMock()
+        process.communicate.return_value = (b'{"updated_rows":1000}', b"")
+        process.returncode = 0
+        with patch.object(
+            workflow_app.asyncio, "create_subprocess_exec", return_value=process
+        ) as create_process:
+            result = asyncio.run(
+                workflow_app.call_tool_shim("centaur-tools", "demo", "update", payload)
+            )
+
+        self.assertEqual(result, {"updated_rows": 1000})
+        create_process.assert_awaited_once_with(
+            "centaur-tools",
+            "call",
+            "demo",
+            "update",
+            "-",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        process.communicate.assert_awaited_once_with(
+            json.dumps(payload, separators=(",", ":"), default=str).encode()
+        )
+
+    def test_tool_shim_serializes_before_starting_a_process(self) -> None:
+        load_workflow_host()
+        from api import app as workflow_app
+
+        payload = {}
+        payload["cycle"] = payload
+        with patch.object(
+            workflow_app.asyncio, "create_subprocess_exec"
+        ) as create_process:
+            with self.assertRaisesRegex(ValueError, "Circular reference detected"):
+                asyncio.run(
+                    workflow_app.call_tool_shim("centaur-tools", "demo", "update", payload)
+                )
+        create_process.assert_not_called()
+
+    def test_tool_shim_preserves_error_and_empty_result_handling(self) -> None:
+        load_workflow_host()
+        from api import app as workflow_app
+
+        for returncode, stdout, stderr, expected in (
+            (0, b"", b"", None),
+            (1, b"", b"write failed", "write failed"),
+            (1, b"write failed", b"", "write failed"),
+            (1, b"", b"", "exit code 1"),
+        ):
+            with self.subTest(returncode=returncode, stdout=stdout, stderr=stderr):
+                process = AsyncMock()
+                process.communicate.return_value = (stdout, stderr)
+                process.returncode = returncode
+                with patch.object(
+                    workflow_app.asyncio, "create_subprocess_exec", return_value=process
+                ):
+                    if returncode:
+                        with self.assertRaisesRegex(RuntimeError, expected):
+                            asyncio.run(
+                                workflow_app.call_tool_shim(
+                                    "centaur-tools", "demo", "update", {}
+                                )
+                            )
+                    else:
+                        self.assertIsNone(
+                            asyncio.run(
+                                workflow_app.call_tool_shim(
+                                    "centaur-tools", "demo", "update", {}
+                                )
+                            )
+                        )
 
     def test_run_agent_accepts_positional_step_name_with_text(self) -> None:
         host = load_workflow_host()

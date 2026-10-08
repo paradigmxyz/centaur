@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import importlib.util
 import io
 import json
 import os
@@ -441,6 +443,85 @@ class GeneratedShimTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout), "package-loaded:ok")
+
+
+    def test_large_tool_payload_crosses_both_subprocess_boundaries(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        app_path = repo_root / "services" / "workflow-python" / "api" / "app.py"
+        spec = importlib.util.spec_from_file_location("workflow_app_under_test", app_path)
+        assert spec is not None
+        assert spec.loader is not None
+        workflow_app = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(workflow_app)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            project_dir = root / "demo"
+            bin_dir.mkdir()
+            project_dir.mkdir()
+            (project_dir / "client.py").write_text(
+                "def echo(values=None):\n"
+                "    return values\n"
+                "\n"
+                "def fail():\n"
+                "    raise RuntimeError('write failed')\n"
+            )
+            index_path = bin_dir / ".centaur-tools.json"
+            index_path.write_text(
+                json.dumps([{"name": "demo", "project_dir": str(project_dir)}])
+            )
+            shim_path = bin_dir / "centaur-tools"
+            install_tool_shims._write_catalog(shim_path, index_path, str(repo_root))
+            fake_uvx = bin_dir / "uvx"
+            fake_uvx.write_text(
+                f"#!{sys.executable}\n"
+                "import os\n"
+                "import sys\n"
+                "os.execv(sys.executable, [sys.executable, *sys.argv[4:]])\n"
+            )
+            fake_uvx.chmod(0o755)
+            payload = {
+                "values": [
+                    ["收入", index, 1.25, None, *["x" * 64] * 4]
+                    for index in range(1000)
+                ]
+            }
+            serialized = json.dumps(payload)
+            self.assertGreater(len(serialized.encode()), 131072)
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "CENTAUR_TOOL_ANALYTICS_LOG_PATH": "off",
+                },
+            ):
+                result = asyncio.run(
+                    workflow_app.call_tool_shim(str(shim_path), "demo", "echo", payload)
+                )
+                self.assertEqual(result, payload["values"])
+
+                for arguments, stdin, expected in (
+                    ([json.dumps({"values": [1, None, "收入"]})], None, [1, None, "收入"]),
+                    ([], None, None),
+                    (["-"], serialized, payload["values"]),
+                ):
+                    with self.subTest(arguments=arguments[:1]):
+                        response = subprocess.run(
+                            [str(shim_path), "call", "demo", "echo", *arguments],
+                            input=stdin,
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+                        self.assertEqual(response.returncode, 0, response.stderr)
+                        self.assertEqual(json.loads(response.stdout), expected)
+
+                with self.assertRaisesRegex(RuntimeError, "write failed"):
+                    asyncio.run(
+                        workflow_app.call_tool_shim(str(shim_path), "demo", "fail", {})
+                    )
 
 
 class RefreshInstallTest(unittest.TestCase):
