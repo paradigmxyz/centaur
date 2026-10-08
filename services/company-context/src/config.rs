@@ -36,6 +36,10 @@ pub const SLACK_CHANNEL_DAY_EMBED_TASK: &str = "slack.channel_day.embed";
 /// run on the main queue too.
 pub const SLACK_FILE_EXTRACT_TASK: &str = "slack.file.extract";
 pub const SLACK_FILE_EMBED_TASK: &str = "slack.file.embed";
+/// Document ID prefixes, which identify each published document's type.
+pub const GOOGLE_DRIVE_DOCUMENT_ID_PREFIX: &str = "google-drive:";
+pub const SLACK_DOCUMENT_ID_PREFIX: &str = "slack:";
+pub const SLACK_FILE_DOCUMENT_ID_PREFIX: &str = "slack-file:";
 /// Slack conversation types that can be synchronized.
 pub const SLACK_CONVERSATION_TYPES: [&str; 3] = ["public_channel", "private_channel", "im"];
 

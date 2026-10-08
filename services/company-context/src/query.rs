@@ -30,7 +30,10 @@ use sqlx::{PgPool, Postgres, Transaction, types::Json as SqlJson};
 use tracing::{error, warn};
 
 use crate::{
-    config::Config,
+    config::{
+        Config, GOOGLE_DRIVE_DOCUMENT_ID_PREFIX, SLACK_DOCUMENT_ID_PREFIX,
+        SLACK_FILE_DOCUMENT_ID_PREFIX,
+    },
     credentials::{ConsoleCredentials, PrincipalIdentity},
     embeddings::EmbeddingsClient,
 };
@@ -99,6 +102,8 @@ pub enum DataType {
 /// How one data type's documents are selected. Queries bind the principal's
 /// subject to `$2` and the filters to `$4` through `$7`.
 struct Source {
+    /// Prefix of the type's document IDs.
+    id_prefix: &'static str,
     documents: &'static str,
     embeddings: &'static str,
     columns: &'static str,
@@ -146,6 +151,7 @@ impl DataType {
     fn source(self) -> Source {
         match self {
             Self::SlackMessage => Source {
+                id_prefix: SLACK_DOCUMENT_ID_PREFIX,
                 documents: "company_context_data.slack_documents",
                 embeddings: "company_context_data.slack_document_embeddings",
                 columns: r#"d.document_id, d.title, d.body, NULL::text AS url,
@@ -170,6 +176,7 @@ impl DataType {
                 file_id: None,
             },
             Self::SlackFile => Source {
+                id_prefix: SLACK_FILE_DOCUMENT_ID_PREFIX,
                 documents: "company_context_data.slack_file_documents",
                 embeddings: "company_context_data.slack_file_document_embeddings",
                 columns: r#"d.document_id, d.title, d.body, NULLIF(d.url, '') AS url,
@@ -204,6 +211,7 @@ impl DataType {
                 file_id: Some("d.file_id"),
             },
             Self::DriveDoc => Source {
+                id_prefix: GOOGLE_DRIVE_DOCUMENT_ID_PREFIX,
                 documents: "company_context_data.google_drive_documents",
                 embeddings: "company_context_data.google_drive_document_embeddings",
                 columns: r#"d.document_id, d.title, d.body, NULLIF(d.url, '') AS url,
@@ -227,6 +235,13 @@ impl DataType {
                 file_id: Some("d.file_id"),
             },
         }
+    }
+
+    /// The type of the document with `document_id`, by its prefix.
+    fn of_document(document_id: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|data_type| document_id.starts_with(data_type.source().id_prefix))
     }
 
     /// Whether the type can satisfy every set filter.
@@ -540,28 +555,27 @@ pub async fn document(
     identity: &PrincipalIdentity,
     document_id: &str,
 ) -> Result<Option<Document>> {
+    let Some(data_type) = DataType::of_document(document_id) else {
+        return Ok(None);
+    };
+    let Some(subject) = data_type.subject(identity) else {
+        return Ok(None);
+    };
+    let source = data_type.source();
     let mut tx = read_only(pool).await?;
-    for data_type in DataType::ALL {
-        let Some(subject) = data_type.subject(identity) else {
-            continue;
-        };
-        let source = data_type.source();
-        let row: Option<Row> = sqlx::query_as(&format!(
-            "SELECT {columns} FROM {documents} d WHERE d.document_id = $1 AND {visible}",
-            columns = source.columns,
-            documents = source.documents,
-            visible = source.visible,
-        ))
-        .bind(document_id)
-        .bind(subject)
-        .fetch_optional(&mut *tx)
-        .await
-        .with_context(|| format!("read {data_type:?} document"))?;
-        if let Some(row) = row {
-            return Ok(Some(row.into_document(data_type)));
-        }
-    }
-    Ok(None)
+    let row: Option<Row> = sqlx::query_as(&format!(
+        "SELECT {columns} FROM {documents} d WHERE d.document_id = $1 AND {visible}",
+        columns = source.columns,
+        documents = source.documents,
+        visible = source.visible,
+    ))
+    .bind(document_id)
+    .bind(subject)
+    .fetch_optional(&mut *tx)
+    .await
+    .with_context(|| format!("read {data_type:?} document"))?;
+    tx.commit().await?;
+    Ok(row.map(|row| row.into_document(data_type)))
 }
 
 async fn read_only(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
@@ -885,10 +899,10 @@ mod tests {
                 (document_id, file_id, chunk_id, document_type, mime_type, title, body,
                  source_modified_at, content_hash)
             VALUES
-                ('drive:F1', 'F1', '0', 'google_doc', 'text/plain', 'Roadmap', 'launch plan for falcon', '2024-01-10Z', 'hash'),
-                ('drive:F2', 'F2', '0', 'google_doc', 'text/plain', 'Roadmap', 'launch plan for falcon', '2024-01-10Z', 'hash'),
-                ('drive:F3', 'F3', '0', 'google_doc', 'text/plain', 'Roadmap', 'launch plan for falcon', '2024-01-10Z', 'hash'),
-                ('drive:F4', 'F4', '0', 'pdf', 'application/pdf', 'Retro', 'falcon launch retro', '2024-03-01Z', 'hash');
+                ('google-drive:F1', 'F1', '0', 'google_doc', 'text/plain', 'Roadmap', 'launch plan for falcon', '2024-01-10Z', 'hash'),
+                ('google-drive:F2', 'F2', '0', 'google_doc', 'text/plain', 'Roadmap', 'launch plan for falcon', '2024-01-10Z', 'hash'),
+                ('google-drive:F3', 'F3', '0', 'google_doc', 'text/plain', 'Roadmap', 'launch plan for falcon', '2024-01-10Z', 'hash'),
+                ('google-drive:F4', 'F4', '0', 'pdf', 'application/pdf', 'Retro', 'falcon launch retro', '2024-03-01Z', 'hash');
 
             INSERT INTO company_context_system.slack_conversations (conversation_id, team_id, kind, name)
             VALUES ('C1', 'T1', 'public_channel', 'general'),
@@ -905,11 +919,11 @@ mod tests {
                 (document_id, conversation_id, day, chunk_id, title, body, channel_name,
                  conversation_kind, first_message_at, last_message_at, content_hash)
             VALUES
-                ('slack:C1', 'C1', '2024-01-02', '0', '#general', 'falcon launch is friday', 'general', 'public_channel',
+                ('slack:C1:2024-01-02:000000', 'C1', '2024-01-02', '0', '#general', 'falcon launch is friday', 'general', 'public_channel',
                  '2024-01-02T09:00Z', '2024-01-02T17:00Z', 'hash'),
-                ('slack:C2', 'C2', '2024-01-02', '0', '#secret', 'falcon launch is friday', 'secret', 'private_channel',
+                ('slack:C2:2024-01-02:000000', 'C2', '2024-01-02', '0', '#secret', 'falcon launch is friday', 'secret', 'private_channel',
                  '2024-01-02T09:00Z', '2024-01-02T17:00Z', 'hash'),
-                ('slack:C3', 'C3', '2024-02-01', '0', '#launch', 'falcon launch went well', 'launch', 'public_channel',
+                ('slack:C3:2024-02-01:000000', 'C3', '2024-02-01', '0', '#launch', 'falcon launch went well', 'launch', 'public_channel',
                  '2024-02-01T09:00Z', '2024-02-01T10:00Z', 'hash');
 
             INSERT INTO company_context_system.slack_messages
@@ -922,8 +936,8 @@ mod tests {
             VALUES ('SF1', 'C1', '1.0'), ('SF2', 'C2', '2.0'), ('SF2', 'C3', '3.0');
             INSERT INTO company_context_data.slack_file_documents
                 (document_id, file_id, chunk_id, title, body, source_created_at, content_hash)
-            VALUES ('file:SF1', 'SF1', '0', 'falcon.pdf', 'falcon launch deck', '2024-01-02Z', 'hash'),
-                   ('file:SF2', 'SF2', '0', 'falcon-retro.pdf', 'falcon launch retro deck', '2024-02-01Z', 'hash');
+            VALUES ('slack-file:SF1', 'SF1', '0', 'falcon.pdf', 'falcon launch deck', '2024-01-02Z', 'hash'),
+                   ('slack-file:SF2', 'SF2', '0', 'falcon-retro.pdf', 'falcon launch retro deck', '2024-02-01Z', 'hash');
             "#,
         )
         .await
@@ -944,7 +958,12 @@ mod tests {
         assert_eq!(
             ids(pool, None, &ada, json!({ "query": "Falcon launch?" })).await,
             [
-                "drive:F1", "drive:F4", "file:SF1", "file:SF2", "slack:C1", "slack:C3"
+                "google-drive:F1",
+                "google-drive:F4",
+                "slack-file:SF1",
+                "slack-file:SF2",
+                "slack:C1:2024-01-02:000000",
+                "slack:C3:2024-02-01:000000"
             ]
         );
         assert_eq!(
@@ -955,7 +974,7 @@ mod tests {
                 json!({ "query": "falcon", "filters": { "types": ["slack_message"] } })
             )
             .await,
-            ["slack:C1", "slack:C3"]
+            ["slack:C1:2024-01-02:000000", "slack:C3:2024-02-01:000000"]
         );
         assert!(
             ids(pool, None, &ada, json!({ "query": "unrelated" }))
@@ -964,7 +983,7 @@ mod tests {
         );
         assert_eq!(
             ids(pool, None, &bob, json!({ "query": "falcon" })).await,
-            ["file:SF2", "slack:C2"]
+            ["slack-file:SF2", "slack:C2:2024-01-02:000000"]
         );
 
         // Channel days match windows their messages overlap.
@@ -979,7 +998,7 @@ mod tests {
                 } })
             )
             .await,
-            ["slack:C1"]
+            ["slack:C1:2024-01-02:000000"]
         );
         assert_eq!(
             ids(
@@ -989,14 +1008,14 @@ mod tests {
                 json!({ "query": "falcon", "filters": { "occurred_after": "2024-02-01T00:00:00Z" } })
             )
             .await,
-            ["drive:F4", "file:SF2", "slack:C3"]
+            ["google-drive:F4", "slack-file:SF2", "slack:C3:2024-02-01:000000"]
         );
 
         // Channel filters search Slack only, through visible shares only.
         let channels = |channel_ids: Value| json!({ "query": "falcon", "filters": { "channel_ids": channel_ids } });
         assert_eq!(
             ids(pool, None, &ada, channels(json!(["C1"]))).await,
-            ["file:SF1", "slack:C1"]
+            ["slack-file:SF1", "slack:C1:2024-01-02:000000"]
         );
         assert!(
             ids(pool, None, &ada, channels(json!(["C2"])))
@@ -1005,7 +1024,7 @@ mod tests {
         );
         assert_eq!(
             ids(pool, None, &ada, channels(json!(["C3"]))).await,
-            ["file:SF2", "slack:C3"]
+            ["slack-file:SF2", "slack:C3:2024-02-01:000000"]
         );
         assert_eq!(
             ids(
@@ -1015,7 +1034,7 @@ mod tests {
                 json!({ "query": "falcon", "filters": { "file_ids": ["F4", "SF1", "F2"] } })
             )
             .await,
-            ["drive:F4", "file:SF1"]
+            ["google-drive:F4", "slack-file:SF1"]
         );
 
         for invalid in [
@@ -1068,7 +1087,12 @@ mod tests {
             )
             .await,
             [
-                "drive:F1", "drive:F4", "file:SF1", "file:SF2", "slack:C1", "slack:C3"
+                "google-drive:F1",
+                "google-drive:F4",
+                "slack-file:SF1",
+                "slack-file:SF2",
+                "slack:C1:2024-01-02:000000",
+                "slack:C3:2024-02-01:000000"
             ]
         );
         assert_eq!(
@@ -1079,7 +1103,7 @@ mod tests {
                 json!({ "query": "unrelated", "filters": { "channel_ids": ["C3"] } })
             )
             .await,
-            ["file:SF2", "slack:C3"]
+            ["slack-file:SF2", "slack:C3:2024-02-01:000000"]
         );
 
         server.abort();
@@ -1097,23 +1121,32 @@ mod tests {
         seed(pool).await;
         let (ada, bob) = (ada(), bob());
 
-        let drive = document(pool, &ada, "drive:F4").await.unwrap().unwrap();
+        let drive = document(pool, &ada, "google-drive:F4")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(drive.data_type, DataType::DriveDoc);
         assert_eq!(drive.text, "falcon launch retro");
         assert_eq!(drive.metadata["document_type"], "pdf");
-        let file = document(pool, &ada, "file:SF2").await.unwrap().unwrap();
+        let file = document(pool, &ada, "slack-file:SF2")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(file.data_type, DataType::SlackFile);
-        let message = document(pool, &bob, "slack:C2").await.unwrap().unwrap();
+        let message = document(pool, &bob, "slack:C2:2024-01-02:000000")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(message.data_type, DataType::SlackMessage);
         assert_eq!(message.metadata["channel_name"], "secret");
 
         for (identity, document_id) in [
-            (&ada, "drive:F2"),
-            (&ada, "drive:F3"),
-            (&ada, "slack:C2"),
+            (&ada, "google-drive:F2"),
+            (&ada, "google-drive:F3"),
+            (&ada, "slack:C2:2024-01-02:000000"),
             (&ada, "missing"),
-            (&bob, "drive:F1"),
-            (&bob, "file:SF1"),
+            (&bob, "google-drive:F1"),
+            (&bob, "slack-file:SF1"),
         ] {
             assert!(
                 document(pool, identity, document_id)

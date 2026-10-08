@@ -15,7 +15,10 @@ use sqlx::{PgPool, Postgres, Row, Transaction, types::Json};
 use tracing::{error, info, warn};
 
 use crate::{
-    config::{Config, PDF_MIME_TYPE, SLACK_FILE_EMBED_TASK, SLACK_FILE_EXTRACT_TASK},
+    config::{
+        Config, PDF_MIME_TYPE, SLACK_FILE_DOCUMENT_ID_PREFIX, SLACK_FILE_EMBED_TASK,
+        SLACK_FILE_EXTRACT_TASK,
+    },
     embeddings::EmbeddingsClient,
     errors::{is_denied, is_rejected, rejected},
     extraction::{
@@ -882,7 +885,10 @@ async fn embed_file(
                 format!("{title}\n\n{body}")
             };
             (
-                format!("slack-file:{}:{chunk_id}", params.file_id),
+                format!(
+                    "{SLACK_FILE_DOCUMENT_ID_PREFIX}{}:{chunk_id}",
+                    params.file_id
+                ),
                 chunk_id,
                 body,
                 hex_sha256(input.as_bytes()),

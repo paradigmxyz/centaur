@@ -16,8 +16,9 @@ use tracing::{error, info, warn};
 use crate::{
     config::{
         Config, DOCUMENT_DELETE_TASK, DOCUMENT_EMBED_TASK, DOCUMENT_EXTRACT_TASK,
-        DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK, GOOGLE_DOC_MIME_TYPE, PDF_MIME_TYPE,
-        SHARED_DRIVE_SCAN_TASK, SHARED_DRIVES_DISCOVER_TASK, SHARED_FOLDERS_BATCH_TASK,
+        DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK, GOOGLE_DOC_MIME_TYPE,
+        GOOGLE_DRIVE_DOCUMENT_ID_PREFIX, PDF_MIME_TYPE, SHARED_DRIVE_SCAN_TASK,
+        SHARED_DRIVES_DISCOVER_TASK, SHARED_FOLDERS_BATCH_TASK,
     },
     credentials::{ConsoleCredentials, GoogleCredential},
     drive::{DriveChange, DriveClient, DriveFile},
@@ -1272,7 +1273,7 @@ async fn embed_document(
         let chunk_id: String = chunk.try_get("chunk_id")?;
         let body: String = chunk.try_get("body")?;
         let content_hash = hex_sha256(format!("{}\n\n{}", file.name, body).as_bytes());
-        let document_id = format!("google-drive:{}:{chunk_id}", file.id);
+        let document_id = format!("{GOOGLE_DRIVE_DOCUMENT_ID_PREFIX}{}:{chunk_id}", file.id);
         chunks.push((document_id, chunk_id, body, content_hash));
     }
     // Drive versions change for metadata-only edits; reuse vectors for unchanged chunk text.
