@@ -60,6 +60,10 @@ pub struct GoogleCredential {
 pub struct PrincipalIdentity {
     pub google_subject: Option<String>,
     pub slack_user_id: Option<String>,
+    /// The principal's lowercased Slack email, which Slackbot supplies only
+    /// for users of its home workspace. Granola notes are matched by email,
+    /// like the reader role's Granola policy.
+    pub email: Option<String>,
 }
 
 impl ConsoleCredentials {
@@ -424,7 +428,8 @@ impl ConsoleCredentials {
         sqlx::query_as(
             r#"
             SELECT NULLIF(BTRIM(labels ->> 'google_subject'), '') AS google_subject,
-                   NULLIF(BTRIM(slack_user_id), '') AS slack_user_id
+                   NULLIF(BTRIM(slack_user_id), '') AS slack_user_id,
+                   NULLIF(LOWER(BTRIM(slack_email)), '') AS email
             FROM principals
             WHERE id = $1
             "#,

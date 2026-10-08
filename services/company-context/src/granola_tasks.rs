@@ -10,8 +10,8 @@ use tracing::{error, info, warn};
 
 use crate::{
     config::{
-        GRANOLA_CREDENTIALS_RECONCILE_TASK, GRANOLA_NOTE_EMBED_TASK, GRANOLA_NOTES_FETCH_TASK,
-        GRANOLA_SYNC_TASK,
+        GRANOLA_CREDENTIALS_RECONCILE_TASK, GRANOLA_DOCUMENT_ID_PREFIX, GRANOLA_NOTE_EMBED_TASK,
+        GRANOLA_NOTES_FETCH_TASK, GRANOLA_SYNC_TASK,
     },
     credentials::GranolaCredential,
     errors::{is_rejected, rejected},
@@ -545,7 +545,10 @@ async fn embed_note(
     let chunks = chunk_text(&content_text, state.config.chunk_chars)
         .into_iter()
         .map(|chunk| {
-            let document_id = format!("granola:{}:{}", params.note_id, chunk.chunk_id);
+            let document_id = format!(
+                "{GRANOLA_DOCUMENT_ID_PREFIX}{}:{}",
+                params.note_id, chunk.chunk_id
+            );
             let content_hash = hex_sha256(format!("{title}\n\n{}", chunk.body).as_bytes());
             (document_id, chunk.chunk_id, chunk.body, content_hash)
         })

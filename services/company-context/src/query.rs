@@ -3,8 +3,9 @@
 //! principal named by the request's API JWT.
 //!
 //! Access mirrors the reader role's row-level security: a principal sees a
-//! document only while an active broker observation for its Google subject or
-//! Slack user ID still reaches the document's file or conversation. Queries
+//! document only while an active broker observation for its Google subject,
+//! Slack user ID, or email still reaches the document's file, conversation, or
+//! Granola note. Queries
 //! run as [`QUERY_ROLE`], which can only read `company_context_data`.
 
 use std::{
@@ -32,8 +33,8 @@ use tracing::{error, warn};
 
 use crate::{
     config::{
-        Config, GOOGLE_DRIVE_DOCUMENT_ID_PREFIX, SLACK_DOCUMENT_ID_PREFIX,
-        SLACK_FILE_DOCUMENT_ID_PREFIX,
+        Config, GOOGLE_DRIVE_DOCUMENT_ID_PREFIX, GRANOLA_DOCUMENT_ID_PREFIX,
+        SLACK_DOCUMENT_ID_PREFIX, SLACK_FILE_DOCUMENT_ID_PREFIX,
     },
     credentials::{ConsoleCredentials, PrincipalIdentity},
     embeddings::EmbeddingsClient,
@@ -100,6 +101,7 @@ pub enum DataType {
     SlackMessage,
     SlackFile,
     DriveDoc,
+    GranolaNote,
 }
 
 /// How one data type's documents are selected. Queries bind the principal's
@@ -142,12 +144,18 @@ impl Source {
 }
 
 impl DataType {
-    const ALL: [Self; 3] = [Self::SlackMessage, Self::SlackFile, Self::DriveDoc];
+    const ALL: [Self; 4] = [
+        Self::SlackMessage,
+        Self::SlackFile,
+        Self::DriveDoc,
+        Self::GranolaNote,
+    ];
 
     fn subject(self, identity: &PrincipalIdentity) -> Option<&str> {
         match self {
             Self::SlackMessage | Self::SlackFile => identity.slack_user_id.as_deref(),
             Self::DriveDoc => identity.google_subject.as_deref(),
+            Self::GranolaNote => identity.email.as_deref(),
         }
     }
 
@@ -236,6 +244,29 @@ impl DataType {
                 ends_at: "COALESCE(d.source_modified_at, d.source_created_at)",
                 in_channels: None,
                 file_id: Some("d.file_id"),
+            },
+            // Granola observations record the account's lowercased email.
+            Self::GranolaNote => Source {
+                id_prefix: GRANOLA_DOCUMENT_ID_PREFIX,
+                documents: "company_context_data.granola_documents",
+                embeddings: "company_context_data.granola_document_embeddings",
+                columns: r#"d.document_id, d.title, d.body, NULL::text AS url,
+                   d.occurred_at,
+                   jsonb_build_object(
+                       'note_id', d.note_id,
+                       'owner_email', d.owner_email,
+                       'owner_name', d.owner_name,
+                       'attendees', d.attendees
+                   ) AS metadata"#,
+                visible: r#"d.note_id IN (
+                       SELECT o.note_id
+                       FROM company_context_data.granola_broker_observations o
+                       WHERE o.active AND o.provider_email = $2
+                   )"#,
+                starts_at: "d.occurred_at",
+                ends_at: "d.occurred_at",
+                in_channels: None,
+                file_id: None,
             },
         }
     }
@@ -881,6 +912,7 @@ mod tests {
         PrincipalIdentity {
             google_subject: Some("G-ADA".to_owned()),
             slack_user_id: Some("U-ADA".to_owned()),
+            email: Some("ada@example.com".to_owned()),
         }
     }
 
@@ -889,12 +921,15 @@ mod tests {
         PrincipalIdentity {
             google_subject: None,
             slack_user_id: Some("U-BOB".to_owned()),
+            email: Some("bob@example.com".to_owned()),
         }
     }
 
     /// Ada observes Drive files F1 and F4 (not F3, whose observation is
     /// inactive) and Slack conversations C1 and C3; Bob observes C2. Slack
-    /// file SF1 is shared in C1 and SF2 in both C2 and C3.
+    /// file SF1 is shared in C1 and SF2 in both C2 and C3. Ada's Granola
+    /// account observes note N1 (not N3, whose observation is inactive); Bob's
+    /// observes N2.
     async fn seed(pool: &PgPool) {
         pool.execute(
             r#"
@@ -945,6 +980,17 @@ mod tests {
                 (document_id, file_id, chunk_id, title, body, source_created_at, content_hash)
             VALUES ('slack-file:SF1', 'SF1', '0', 'falcon.pdf', 'falcon launch deck', '2024-01-02Z', 'hash'),
                    ('slack-file:SF2', 'SF2', '0', 'falcon-retro.pdf', 'falcon launch retro deck', '2024-02-01Z', 'hash');
+
+            INSERT INTO company_context_data.granola_broker_observations
+                (broker_credential_id, note_id, provider_email, active)
+            VALUES (20, 'N1', 'ada@example.com', true), (21, 'N2', 'bob@example.com', true),
+                   (20, 'N3', 'ada@example.com', false);
+            INSERT INTO company_context_data.granola_documents
+                (document_id, note_id, chunk_id, title, body, owner_email, occurred_at, content_hash)
+            VALUES
+                ('granola:N1:000000', 'N1', '000000', 'Falcon sync', 'falcon launch timeline', 'ada@example.com', '2024-01-05Z', 'hash'),
+                ('granola:N2:000000', 'N2', '000000', 'Falcon sync', 'falcon launch timeline', 'bob@example.com', '2024-01-05Z', 'hash'),
+                ('granola:N3:000000', 'N3', '000000', 'Falcon sync', 'falcon launch timeline', 'carol@example.com', '2024-01-05Z', 'hash');
             "#,
         )
         .await
@@ -967,6 +1013,7 @@ mod tests {
             [
                 "google-drive:F1",
                 "google-drive:F4",
+                "granola:N1:000000",
                 "slack-file:SF1",
                 "slack-file:SF2",
                 "slack:C1:2024-01-02:000000",
@@ -990,7 +1037,11 @@ mod tests {
         );
         assert_eq!(
             ids(pool, None, &bob, json!({ "query": "falcon" })).await,
-            ["slack-file:SF2", "slack:C2:2024-01-02:000000"]
+            [
+                "granola:N2:000000",
+                "slack-file:SF2",
+                "slack:C2:2024-01-02:000000"
+            ]
         );
 
         // Channel days match windows their messages overlap.
@@ -1075,6 +1126,10 @@ mod tests {
                 (document_id, model, dimensions, content_hash, embedding)
             SELECT document_id, 'text-embedding-3-small', 1536, 'hash', array_fill(0.5, ARRAY[1536])::vector
             FROM company_context_data.slack_file_documents;
+            INSERT INTO company_context_data.granola_document_embeddings
+                (document_id, model, dimensions, content_hash, embedding)
+            SELECT document_id, 'text-embedding-3-small', 1536, 'hash', array_fill(0.5, ARRAY[1536])::vector
+            FROM company_context_data.granola_documents;
             "#,
         )
         .await
@@ -1096,6 +1151,7 @@ mod tests {
             [
                 "google-drive:F1",
                 "google-drive:F4",
+                "granola:N1:000000",
                 "slack-file:SF1",
                 "slack-file:SF2",
                 "slack:C1:2024-01-02:000000",
@@ -1196,14 +1252,23 @@ mod tests {
             .unwrap();
         assert_eq!(message.data_type, DataType::SlackMessage);
         assert_eq!(message.metadata["channel_name"], "secret");
+        let note = document(pool, &ada, "granola:N1:000000")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(note.data_type, DataType::GranolaNote);
+        assert_eq!(note.metadata["note_id"], "N1");
 
         for (identity, document_id) in [
             (&ada, "google-drive:F2"),
             (&ada, "google-drive:F3"),
             (&ada, "slack:C2:2024-01-02:000000"),
+            (&ada, "granola:N2:000000"),
+            (&ada, "granola:N3:000000"),
             (&ada, "missing"),
             (&bob, "google-drive:F1"),
             (&bob, "slack-file:SF1"),
+            (&bob, "granola:N1:000000"),
         ] {
             assert!(
                 document(pool, identity, document_id)

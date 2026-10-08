@@ -17,7 +17,7 @@ The service owns these Postgres schemas:
 - `company_context_system`: private cursors, staging (including Slack messages and users), and processing state.
 - `company_context_data`: retrieval-facing Drive documents, Granola notes, Slack channel and file documents, access observations (including Slack identities, channel memberships, and the conversations each Slack file is shared in), and embeddings. The query endpoints read only this schema, as the `centaur_company_context_v2_query` role, which can only select from it; the service switches to that role for each query transaction, so its login role must be able to grant itself membership (`CREATEROLE` or superuser).
 
-The `centaur_company_context_reader` role used by the company-context tool can read `google_drive_documents` and `google_drive_document_embeddings`. Row-level security limits each reader to files that a live broker credential with the same Google subject (`centaur.google_subject`) still observes; `google_drive_broker_observations` is the only source of that access. The reader cannot query the observations or the system schema directly. The reader has no access to Granola notes yet. The Helm deployment is gated by `experimentalCompanyContext.enabled` until it is ready for production.
+The `centaur_company_context_reader` role used by the company-context tool can read `google_drive_documents` and `google_drive_document_embeddings`. Row-level security limits each reader to files that a live broker credential with the same Google subject (`centaur.google_subject`) still observes; `google_drive_broker_observations` is the only source of that access. The reader cannot query the observations or the system schema directly. The reader has no access to Granola notes; they are exposed only through the query endpoints. The Helm deployment is gated by `experimentalCompanyContext.enabled` until it is ready for production.
 
 ## Required infrastructure
 
@@ -133,12 +133,14 @@ indexed PDFs are not downloaded again.
 Both query endpoints are authenticated with the same principal API JWT the
 Console mints for api-rs (`Authorization: Bearer <jwt>`); iron-proxy injects it
 into sandbox requests to this service. The token's subject names the principal,
-whose Google subject (`google_subject` label) and Slack user ID are looked up
-in the Rails Console database. A document is visible only while an active
-broker observation for one of those identities still reaches its Drive file or
-Slack conversation (for Slack files, any conversation the file is shared in). A
-principal without one of those identities sees no documents of the
-corresponding types.
+whose Google subject (`google_subject` label), Slack user ID, and Slack email
+are looked up in the Rails Console database. A document is visible only while
+an active broker observation for one of those identities still reaches its
+Drive file, Slack conversation (for Slack files, any conversation the file is
+shared in), or Granola note. Granola notes are matched by email: the
+principal's Slack email, compared case-insensitively with the email of the
+Granola account that observes the note. A principal without one of those
+identities sees no documents of the corresponding types.
 
 Errors return `{"error": "..."}` with status 400 for an invalid request, 401
 for a missing or invalid token, 403 for a principal unknown to the Console, and
@@ -146,14 +148,14 @@ for a missing or invalid token, 403 for a principal unknown to the Console, and
 
 ### `POST /query`
 
-Searches the visible Slack channel documents, Slack file documents, and Drive
-documents.
+Searches the visible Slack channel documents, Slack file documents, Drive
+documents, and Granola notes.
 
 ```json
 {
   "query": "falcon launch plan",
   "filters": {
-    "types": ["slack_message", "slack_file", "drive_doc"],
+    "types": ["slack_message", "slack_file", "drive_doc", "granola_note"],
     "occurred_after": "2024-01-01T00:00:00Z",
     "occurred_before": "2024-02-01T00:00:00Z",
     "channel_ids": ["C0123456789"],
@@ -169,9 +171,9 @@ Filters combine with AND:
 - `types`: the data types to search. Absent or empty searches every type.
 - `occurred_after` (inclusive) and `occurred_before` (exclusive): RFC 3339
   timestamps. A Slack channel document matches when its messages overlap the
-  window; a Slack file matches by when it was created, and a Drive document by
-  when it was last modified. Documents without a timestamp do not match a
-  window.
+  window; a Slack file matches by when it was created, a Drive document by
+  when it was last modified, and a Granola note by when its meeting occurred.
+  Documents without a timestamp do not match a window.
 - `channel_ids`: Slack conversation IDs, at most 100. Searches only Slack
   messages in these conversations and Slack files shared in them; a file
   matches only through a conversation the principal can see.
@@ -205,7 +207,7 @@ result's `score` is its fused rank score, comparable only within one response.
 `text` is the full document chunk. `metadata` holds type-specific fields:
 conversation, channel, and message times for `slack_message`; file ID and file
 type for `slack_file`; file ID, document type, MIME type, and pages for
-`drive_doc`.
+`drive_doc`; note ID, owner, and attendees for `granola_note`.
 
 ### `GET /documents/{document_id}`
 
