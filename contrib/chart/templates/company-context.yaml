@@ -116,6 +116,12 @@ spec:
 {{- end }}
 {{- end }}
 {{- end }}
+            # POST /query accepts the principal API JWTs the Console mints.
+            - name: CENTAUR_JWT_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" $prefix }}
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:

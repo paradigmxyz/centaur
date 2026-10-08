@@ -86,6 +86,12 @@ spec:
                   key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" $prefix }}
             - name: CENTAUR_CONSOLE_URL
               value: {{ include "centaur.consoleUrl" . | quote }}
+{{- if .Values.experimentalCompanyContext.enabled }}
+            # Proxies inject the principal API JWT into requests to these hosts
+            # in addition to CENTAUR_API_URL's.
+            - name: CENTAUR_API_SERVER_PROXY_HOSTS
+              value: {{ include "centaur.componentName" (dict "root" . "component" "company-context") | quote }}
+{{- end }}
 {{- if .Values.apiRs.enabled }}
             - name: CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
