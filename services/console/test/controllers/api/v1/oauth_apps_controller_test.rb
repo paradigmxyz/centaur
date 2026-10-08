@@ -25,6 +25,8 @@ module Api
         app = OauthApp.find_by!(slug: "api-google")
         patch api_v1_oauth_app_url(app.oid), params: { data: { always_available: true } }.to_json, headers: auth_headers
         assert_response :unprocessable_entity
+        patch api_v1_oauth_app_url(app.oid), params: { data: { shared: false } }.to_json, headers: auth_headers
+        assert_response :unprocessable_entity
         assert app.reload.shared?
         refute app.always_available?
       end

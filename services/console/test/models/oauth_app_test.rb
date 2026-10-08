@@ -16,13 +16,17 @@ class OauthAppTest < ActiveSupport::TestCase
     assert build_app(shared: true).valid?
   end
 
-  test "an app with multiple accounts cannot become shared" do
-    app = build_app
-    app.save!
-    2.times { |i| BrokerCredential.create!(oauth_app: app, provider_subject: "account-#{i}", token_endpoint: app.provider_strategy.token_endpoint) }
-    refute app.update(shared: true)
-    assert app.errors[:shared].any?
-    refute app.reload.shared?
+  test "shared cannot change after creation" do
+    personal = build_app
+    personal.save!
+    refute personal.update(shared: true)
+    assert personal.errors[:shared].any?
+    refute personal.reload.shared?
+
+    shared = build_app(slug: "shared-app", shared: true)
+    shared.save!
+    refute shared.update(shared: false)
+    assert shared.reload.shared?
   end
 
   # --- validations ----------------------------------------------------------

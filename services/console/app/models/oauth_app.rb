@@ -65,12 +65,8 @@ class OauthApp < ApplicationRecord
   private
 
   def shared_configuration_valid
-    return unless shared?
-
-    errors.add(:shared, "cannot be always available to the connecting user") if always_available?
-    if will_save_change_to_shared? && broker_credentials.limit(2).count > 1
-      errors.add(:shared, "requires at most one existing credential")
-    end
+    errors.add(:shared, "cannot be changed after creation") if persisted? && will_save_change_to_shared?
+    errors.add(:shared, "cannot be always available to the connecting user") if shared? && always_available?
   end
 
   def slug_does_not_shadow_oid

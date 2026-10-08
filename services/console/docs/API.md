@@ -1009,7 +1009,7 @@ Google and Slack are supported providers in this release. The `provider` field i
 | `client_secret`        | required on create | OAuth client secret. Write-only and encrypted at rest; on update it is only changed when supplied. Never returned. |
 | `allowed_scopes`       | required    | Non-empty array of scope strings the start endpoint requests. A flow's optional `scopes` param must be a subset; omitting it requests all of these. |
 | `enabled`              | optional    | Defaults to `true`. A disabled app rejects new consent flows; existing credentials keep refreshing. |
-| `shared`               | optional    | Defaults to `false`. One admin-connected account, excluded from personal onboarding and automatic credential assignment. Cannot be combined with `always_available` or enabled while the app has multiple credentials. Existing grants are preserved. |
+| `shared`               | optional    | Defaults to `false`. One admin-connected account, excluded from personal onboarding and automatic credential assignment. Set only on create; changing it on update returns `422`. Cannot be combined with `always_available`. |
 
 The `client_secret` is required and write-only: it is accepted on writes but never returned in any response.
 

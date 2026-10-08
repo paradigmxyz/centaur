@@ -177,9 +177,10 @@ module Oauth
     end
 
     test "shared account reconnect preserves grants and rejects a different subject" do
-      @app.update!(shared: true)
+      @app = @app.dup
+      @app.update!(slug: "shared-google", shared: true)
       sign_in users(:acme_admin)
-      state = start_flow
+      state = start_flow(slug: @app.slug)
       stub_exchange(status: 200, body: token_body)
       get oauth_callback_url(slug: @app.slug), params: { state: state, code: "first" }
       assert_redirected_to console_oauth_app_path(@app.oid)
@@ -187,7 +188,7 @@ module Oauth
       secret = credential.static_secret
       role = roles(:acme_infra)
       grant = Grant.create!(role: role, static_secret: secret, created_by: users(:acme_admin))
-      state = start_flow
+      state = start_flow(slug: @app.slug)
       stub_exchange(status: 200, body: token_body)
       assert_no_difference("BrokerCredential.count") do
         get oauth_callback_url(slug: @app.slug), params: { state: state, code: "reconnect" }
@@ -195,7 +196,7 @@ module Oauth
       assert_redirected_to console_oauth_app_path(@app.oid)
       assert_equal secret.id, credential.reload.static_secret.id
       assert Grant.exists?(grant.id)
-      state = start_flow
+      state = start_flow(slug: @app.slug)
       stub_exchange(status: 200, body: token_body(sub: "different"))
       assert_no_difference("BrokerCredential.count") do
         get oauth_callback_url(slug: @app.slug), params: { state: state, code: "different" }

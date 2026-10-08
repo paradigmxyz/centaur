@@ -11,13 +11,21 @@ module Console
       post login_url, params: { email: @operator.email, password: "password123456" }
     end
 
-    test "form exposes and persists shared mode" do
-      app = oauth_apps(:acme_google)
+    test "shared mode is set on create and kept on edit" do
+      template = oauth_apps(:acme_google)
+      post console_oauth_app_forms_url, params: { oauth_app: {
+        slug: "shared-google", provider: template.provider, client_id: template.client_id,
+        client_secret: "synthetic", enabled: "1", shared: "1", allowed_scopes: template.allowed_scopes.join("\n")
+      } }
+      app = OauthApp.find_by!(slug: "shared-google")
+      assert_redirected_to console_oauth_app_path(app.oid)
+      assert app.shared?
+
       get edit_console_oauth_app_form_url(app.oid)
-      assert_select "input[name='oauth_app[shared]']"
+      assert_select "input[name='oauth_app[shared]'][disabled]"
       patch console_oauth_app_form_url(app.oid), params: { oauth_app: {
         slug: app.slug, provider: app.provider, client_id: app.client_id,
-        client_secret: "synthetic", enabled: "1", shared: "1", allowed_scopes: app.allowed_scopes.join("\n")
+        enabled: "1", allowed_scopes: app.allowed_scopes.join("\n")
       } }
       assert_redirected_to console_oauth_app_path(app.oid)
       assert app.reload.shared?
