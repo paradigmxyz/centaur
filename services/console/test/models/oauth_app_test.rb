@@ -10,6 +10,21 @@ class OauthAppTest < ActiveSupport::TestCase
     }.merge(overrides))
   end
 
+  test "shared apps default off and cannot be always available" do
+    refute build_app.shared?
+    refute build_app(shared: true, always_available: true).valid?
+    assert build_app(shared: true).valid?
+  end
+
+  test "an app with multiple accounts cannot become shared" do
+    app = build_app
+    app.save!
+    2.times { |i| BrokerCredential.create!(oauth_app: app, provider_subject: "account-#{i}", token_endpoint: app.provider_strategy.token_endpoint) }
+    refute app.update(shared: true)
+    assert app.errors[:shared].any?
+    refute app.reload.shared?
+  end
+
   # --- validations ----------------------------------------------------------
 
   test "valid with all required fields" do

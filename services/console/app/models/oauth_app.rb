@@ -41,6 +41,7 @@ class OauthApp < ApplicationRecord
   validates :client_secret, presence: true
   validate :labels_is_a_hash
   validate :allowed_scopes_valid
+  validate :shared_configuration_valid
 
   # The provider strategy backing this app, or nil if the provider column somehow
   # holds an unknown key (the inclusion validation normally prevents that).
@@ -62,6 +63,15 @@ class OauthApp < ApplicationRecord
   end
 
   private
+
+  def shared_configuration_valid
+    return unless shared?
+
+    errors.add(:shared, "cannot be always available to the connecting user") if always_available?
+    if will_save_change_to_shared? && broker_credentials.limit(2).count > 1
+      errors.add(:shared, "requires at most one existing credential")
+    end
+  end
 
   def slug_does_not_shadow_oid
     return if slug.blank?

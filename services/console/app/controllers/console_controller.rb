@@ -161,6 +161,20 @@ class ConsoleController < ApplicationController
   def oauth_app
     @oauth_app = OauthApp.find_by_oid!(params[:id])
     @minted_credentials = @oauth_app.broker_credentials.order(created_at: :asc, id: :asc)
+    @provider_details = {}
+    @provider_credential = @minted_credentials.first if @oauth_app.shared?
+    provider = @oauth_app.provider_strategy
+    if provider.respond_to?(:details_for) && @provider_credential && !@provider_credential.dead? &&
+        @provider_credential.access_token.present? && (@provider_credential.expires_at.nil? || @provider_credential.expires_at.future?)
+      begin
+        @provider_details = provider.details_for(@provider_credential,
+          http_client: HttpClient.new(open_timeout: 2, read_timeout: 2, write_timeout: 2, max_body_bytes: 128 * 1024))
+        @provider_details = {} unless @provider_details.is_a?(Hash)
+      rescue StandardError
+        # Optional provider details must never prevent credential management.
+        @provider_details = {}
+      end
+    end
   end
 
   # Where a secret's value is resolved from, as a list of segments. Each segment

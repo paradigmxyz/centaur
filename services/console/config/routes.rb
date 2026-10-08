@@ -115,6 +115,7 @@ Rails.application.routes.draw do
     resources :broker_credentials, only: %i[new create edit update destroy], path: "credentials"
   end
   get "console/credentials/:id", to: "console#credential", as: :console_credential
+  post "console/oauth_apps/presets/:provider", to: "console/oauth_apps#preset", as: :console_oauth_app_preset
   get "console/oauth_apps", to: "console#oauth_apps", as: :console_oauth_apps
   # User-facing list of enabled OAuth apps and their consent start links. Not
   # admin-gated: any signed-in team member connects integrations from here.

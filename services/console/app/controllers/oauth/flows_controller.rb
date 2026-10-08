@@ -34,6 +34,7 @@ module Oauth
     class_attribute :identity_http_client_factory, default: -> { HttpClient.new }
 
     before_action :set_app
+    before_action -> { require_admin if @app.shared? }
 
     # GET /oauth/:slug/start?scopes=
     def start
@@ -97,7 +98,7 @@ module Oauth
       # Back to the Integrations page the user started from; failures below
       # still render the standalone result page, which offers a retry link.
       connected_as = " as #{identity[:email]}" if identity[:email].present?
-      redirect_to console_integrations_path, notice: "#{@app.slug} connected#{connected_as}."
+      redirect_to(@app.shared? ? console_oauth_app_path(@app.oid) : console_integrations_path, notice: "#{@app.slug} connected#{connected_as}.")
     rescue Broker::ExchangeError => e
       render_result(:error, message: "Connecting the integration failed (#{e.reason}).")
     rescue ActiveRecord::RecordInvalid => e
@@ -178,6 +179,13 @@ module Oauth
     # credential.
     def upsert_credential(state, result, identity)
       BrokerCredential.transaction do
+        if @app.shared?
+          @app.lock!
+          existing = @app.broker_credentials.first
+          if existing && existing.provider_subject != identity[:subject]
+            raise Broker::ExchangeError.new("Reconnect the same shared account", stage: "oauth", code: "account_mismatch")
+          end
+        end
         credential = BrokerCredential.find_or_initialize_by(oauth_app: @app, provider_subject: identity[:subject])
         # Remember which user connected this account. The Integrations page
         # matches on it, so the card flips to "Connected" even when the provider
@@ -286,9 +294,12 @@ module Oauth
       secret.assign_attributes(wrapping_secret_config) if secret.kind == CredentialProfiles::Registry::CUSTOM_KIND
       secret.source = SecretSource.new(source_type: "token_broker", config: { "credential_id" => credential.oid })
       rules = if secret.kind == CredentialProfiles::Registry::CUSTOM_KIND
-        Array(@provider.api_hosts).each_with_index.map do |host, position|
-          RequestRule.new(host: host, http_methods: [], paths: [], position: position)
+        attributes = if @provider.respond_to?(:credential_request_rules)
+          @provider.credential_request_rules
+        else
+          Array(@provider.api_hosts).map { |host| { host: host, http_methods: [], paths: [] } }
         end
+        attributes.each_with_index.map { |rule, position| RequestRule.new(rule.merge(position: position)) }
       else
         []
       end

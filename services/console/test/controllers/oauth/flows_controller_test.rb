@@ -166,6 +166,75 @@ module Oauth
       URI.decode_www_form(query).to_h.fetch("state")
     end
 
+    test "shared app gates both OAuth actions without affecting personal apps of the same provider" do
+      shared = @app.dup
+      shared.update!(slug: "shared-google", shared: true)
+      get oauth_start_url(slug: shared.slug)
+      assert_redirected_to console_integrations_path
+      get oauth_callback_url(slug: shared.slug), params: { state: "invalid", code: "unused" }
+      assert_redirected_to console_integrations_path
+      assert start_flow.present?
+    end
+
+    test "shared account reconnect preserves grants and rejects a different subject" do
+      @app.update!(shared: true)
+      sign_in users(:acme_admin)
+      state = start_flow
+      stub_exchange(status: 200, body: token_body)
+      get oauth_callback_url(slug: @app.slug), params: { state: state, code: "first" }
+      assert_redirected_to console_oauth_app_path(@app.oid)
+      credential = @app.broker_credentials.sole
+      secret = credential.static_secret
+      role = roles(:acme_infra)
+      grant = Grant.create!(role: role, static_secret: secret, created_by: users(:acme_admin))
+      state = start_flow
+      stub_exchange(status: 200, body: token_body)
+      assert_no_difference("BrokerCredential.count") do
+        get oauth_callback_url(slug: @app.slug), params: { state: state, code: "reconnect" }
+      end
+      assert_redirected_to console_oauth_app_path(@app.oid)
+      assert_equal secret.id, credential.reload.static_secret.id
+      assert Grant.exists?(grant.id)
+      state = start_flow
+      stub_exchange(status: 200, body: token_body(sub: "different"))
+      assert_no_difference("BrokerCredential.count") do
+        get oauth_callback_url(slug: @app.slug), params: { state: state, code: "different" }
+      end
+      assert_response :unprocessable_entity
+      assert_equal "google-sub-1", credential.reload.provider_subject
+    end
+
+    test "Mercator shared consent creates a narrowly scoped secret and refresh preserves role access" do
+      provider = Oauth::Providers.fetch("mercator")
+      app = OauthApp.create!(provider.preset.merge(provider: provider.key, client_id: "mercator-client", client_secret: "synthetic", created_by: users(:acme_admin)))
+      sign_in users(:acme_admin)
+      state = start_flow(slug: app.slug)
+      query = URI.decode_www_form(URI.parse(response.location).query).to_h
+      assert_equal "https://mercator.sh/mcp/auth", query["resource"]
+      assert_equal "S256", query["code_challenge_method"]
+      stub_exchange(status: 200, body: { access_token: "synthetic", refresh_token: "synthetic-refresh", expires_in: 3600, scope: "mercator:tools" }.to_json)
+      stub_identity(body: { result: { structuredContent: { oauthAuthenticated: true, account: { walletAddress: "0x#{'ab' * 20}" } } } }.to_json)
+      assert_no_difference("Grant.count") do
+        get oauth_callback_url(slug: app.slug), params: { state: state, code: "synthetic" }
+      end
+      assert_redirected_to console_oauth_app_path(app.oid)
+      credential = app.broker_credentials.sole
+      secret = credential.static_secret
+      assert_equal [ { "host" => "mercator.sh", "methods" => [ "POST" ], "paths" => [ "/mcp/auth" ] } ], secret.rules.map(&:to_proxy_rule)
+      assert_empty secret.labels
+      assert_empty secret.grants
+      grant = Grant.create!(role: roles(:acme_infra), static_secret: secret, created_by: users(:acme_admin))
+      credential.update!(next_attempt_at: 1.minute.ago)
+      credential.refresh_client = Broker::RefreshClient.new(http: ->(**request) {
+        assert_equal "mercator-client", request[:form]["client_id"]
+        HttpClient::Response.new(status: 200, body: { access_token: "rotated-synthetic", refresh_token: "rotated-refresh", expires_in: 3600 }.to_json)
+      })
+      credential.refresh!
+      assert_not credential.dead?
+      assert_equal "rotated-synthetic", credential.static_secret.source.to_proxy_source["value"]
+      assert Grant.exists?(grant.id)
+    end
+
     # --- start ----------------------------------------------------------------
 
     test "start redirects to Attio with dashboard-configured scopes" do
