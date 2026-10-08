@@ -4,7 +4,8 @@
 //!
 //! Access mirrors the reader role's row-level security: a principal sees a
 //! document only while an active broker observation for its Google subject or
-//! Slack user ID still reaches the document's file or conversation.
+//! Slack user ID still reaches the document's file or conversation. Queries
+//! run as [`QUERY_ROLE`], which can only read `company_context_data`.
 
 use std::{
     collections::HashMap,
@@ -47,6 +48,8 @@ const MIN_CANDIDATES: usize = 20;
 const RRF_K: f64 = 60.0;
 const JWT_LEEWAY_SECONDS: u64 = 30;
 const EMBEDDING_TIMEOUT: Duration = Duration::from_secs(10);
+/// Database role with read-only access to `company_context_data` only.
+const QUERY_ROLE: &str = "centaur_company_context_query";
 
 #[derive(Clone)]
 pub struct QueryState {
@@ -578,9 +581,13 @@ pub async fn document(
     Ok(row.map(|row| row.into_document(data_type)))
 }
 
+/// Begins a read-only transaction running as [`QUERY_ROLE`].
 async fn read_only(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(&format!("SET LOCAL ROLE {QUERY_ROLE}"))
         .execute(&mut *tx)
         .await?;
     sqlx::query("SET LOCAL statement_timeout = '10s'")
@@ -1107,6 +1114,56 @@ mod tests {
         );
 
         server.abort();
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    async fn queries_can_only_read_the_data_schema() {
+        let Ok(database_url) = env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
+            eprintln!("skipping: set COMPANY_CONTEXT_TEST_DATABASE_URL to a ParadeDB Postgres URL");
+            return;
+        };
+        let database = TestDatabase::create(&database_url, "query_role").await;
+        let pool = &database.pool;
+
+        let privileges: Vec<(String, String, bool, bool)> = sqlx::query_as(
+            r#"
+            SELECT n.nspname::text, c.relname::text,
+                   has_table_privilege($1, c.oid, 'SELECT'),
+                   has_table_privilege($1, c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE')
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname IN ('company_context_data', 'company_context_system')
+              AND c.relkind IN ('r', 'p', 'v', 'm')
+            "#,
+        )
+        .bind(QUERY_ROLE)
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        assert!(
+            privileges
+                .iter()
+                .any(|(schema, ..)| schema == "company_context_system")
+        );
+        for (schema, table, select, write) in privileges {
+            assert_eq!(select, schema == "company_context_data", "{schema}.{table}");
+            assert!(!write, "{schema}.{table}");
+        }
+
+        let mut tx = read_only(pool).await.unwrap();
+        let role: String = sqlx::query_scalar("SELECT current_user::text")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(role, QUERY_ROLE);
+        let error = sqlx::query("SELECT 1 FROM company_context_system.slack_messages")
+            .execute(&mut *tx)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("permission denied"), "{error}");
+        drop(tx);
+
         database.drop().await;
     }
 
