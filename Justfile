@@ -30,7 +30,7 @@ build:
       just _build-all-sequential
     else
       pids=()
-      for recipe in _build-api-rs _build-company-context _build-proxy-sync _build-iron-proxy _build-slackbotv2 _build-linearbot _build-discordbot _build-githubbot _build-teamsbot _build-agent _build-console; do
+      for recipe in _build-api-rs _build-company-context _build-proxy-sync _build-iron-proxy _build-slackbotv2 _build-linearbot _build-discordbot _build-githubbot _build-teamsbot _build-telegrambot _build-agent _build-console; do
         just "$recipe" &
         pids+=("$!")
       done
@@ -51,6 +51,7 @@ _build-all-sequential:
     just _build-discordbot
     just _build-githubbot
     just _build-teamsbot
+    just _build-telegrambot
     just _build-agent
     just _build-console
 
@@ -67,6 +68,7 @@ build-one service:
       discordbot) just _build-discordbot ;;
       githubbot) just _build-githubbot ;;
       teamsbot) just _build-teamsbot ;;
+      telegrambot) just _build-telegrambot ;;
       agent|sandbox) just _build-agent ;;
       workflow-python) just _build-workflow-python ;;
       console) just _build-console ;;
@@ -100,6 +102,9 @@ _build-githubbot:
 _build-teamsbot:
     docker build -t centaur-teamsbot:latest -f services/teamsbot/Dockerfile .
 
+_build-telegrambot:
+    docker build -t centaur-telegrambot:latest -f services/telegrambot/Dockerfile .
+
 _build-agent:
     docker build --target "{{agent_build_target}}" -t "{{agent_image}}" -f "{{agent_dockerfile}}" .
 
@@ -119,7 +124,7 @@ _build-console:
 _push-registry:
     #!/usr/bin/env bash
     set -euo pipefail
-    for img in centaur-api-rs centaur-company-context centaur-proxy-sync centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-agent centaur-console; do
+    for img in centaur-api-rs centaur-company-context centaur-proxy-sync centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-telegrambot centaur-agent centaur-console; do
       target="{{registry}}/library/${img}:latest"
       echo "pushing ${img}:latest -> ${target}..."
       docker tag "${img}:latest" "${target}"
@@ -132,7 +137,7 @@ _push-registry:
 _import-k3s:
     #!/usr/bin/env bash
     set -euo pipefail
-    for img in centaur-api-rs centaur-company-context centaur-proxy-sync centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-agent centaur-console; do
+    for img in centaur-api-rs centaur-company-context centaur-proxy-sync centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-telegrambot centaur-agent centaur-console; do
       echo "importing ${img}:latest into k3s containerd..."
       docker save "${img}:latest" | {{k3s_ctr}} images import -
     done
@@ -158,6 +163,7 @@ deploy:
           --set discordbot.image.repository=ghcr.io/paradigmxyz/centaur/centaur-discordbot
           --set githubbot.image.repository=ghcr.io/paradigmxyz/centaur/centaur-githubbot
           --set teamsbot.image.repository=ghcr.io/paradigmxyz/centaur/centaur-teamsbot
+          --set telegrambot.image.repository=ghcr.io/paradigmxyz/centaur/centaur-telegrambot
           --set sandbox.image.repository=ghcr.io/paradigmxyz/centaur/centaur-agent
           --set console.image.repository=ghcr.io/paradigmxyz/centaur/centaur-console
         )

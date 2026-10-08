@@ -31,6 +31,7 @@ jobs:
       discordbot_checks: ${{ steps.filter.outputs.discordbot_checks }}
       githubbot_checks: ${{ steps.filter.outputs.githubbot_checks }}
       teamsbot_checks: ${{ steps.filter.outputs.teamsbot_checks }}
+      telegrambot_checks: ${{ steps.filter.outputs.telegrambot_checks }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -176,6 +177,12 @@ jobs:
             '^\.github/workflows/ci\.yml$'
           set_output teamsbot_checks \
             '^services/teamsbot/' \
+            '^package\.json$' \
+            '^pnpm-lock\.yaml$' \
+            '^pnpm-workspace\.yaml$' \
+            '^\.github/workflows/ci\.yml$'
+          set_output telegrambot_checks \
+            '^services/telegrambot/' \
             '^package\.json$' \
             '^pnpm-lock\.yaml$' \
             '^pnpm-workspace\.yaml$' \
@@ -615,6 +622,40 @@ jobs:
         working-directory: services/discordbot
         run: bun run test
 
+  telegrambot-checks:
+    name: Telegrambot typecheck and tests
+    runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.telegrambot_checks == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10.28.1
+          run_install: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      # Workspace-root install: telegrambot links @centaur/* workspace packages
+      # and relies on the root pnpm patches.
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck Telegrambot
+        working-directory: services/telegrambot
+        run: bun run check:types
+
+      - name: Telegrambot tests
+        working-directory: services/telegrambot
+        run: bun run test
+
   githubbot-checks:
     name: Githubbot typecheck and tests
     runs-on: depot-ubuntu-24.04-16
@@ -700,10 +741,11 @@ jobs:
       - discordbot-checks
       - githubbot-checks
       - teamsbot-checks
+      - telegrambot-checks
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
-          allowed-skips: migration-order, harness-server-checks, company-context-checks, proxy-sync-checks, rust-api, rust-api-postgres, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
+          allowed-skips: migration-order, harness-server-checks, company-context-checks, proxy-sync-checks, rust-api, rust-api-postgres, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks, telegrambot-checks
           jobs: ${{ toJSON(needs) }}

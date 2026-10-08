@@ -1182,7 +1182,8 @@ system-managed `infra` role.
 
 Known kinds are `unknown`, `user`, `console_user`, `workflow`,
 `slack_channel`, `slack_dm`, `discord_channel`, `linear_issue`, `teams_user`,
-and `teams_conversation`. Use one of these values for the `kind` field.
+`teams_conversation`, `telegram_user`, and `telegram_chat`. Use one of these
+values for the `kind` field.
 
 ### Operations
 

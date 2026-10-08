@@ -338,6 +338,12 @@ const INGRESS_SPECS: &[IngressSpec] = &[
         platform_prefixes: &["teams:"],
         workflow_events: false,
     },
+    IngressSpec {
+        env_var: "TELEGRAMBOT_API_KEY",
+        identity: "telegrambot",
+        platform_prefixes: &["telegram:"],
+        workflow_events: false,
+    },
 ];
 
 struct IngressSpec {
@@ -569,6 +575,28 @@ mod tests {
         for thread_key in ["slack:C123:1.2", "githubx:acme/repo:7"] {
             assert!(
                 !thread_key_matches_platform(githubbot.platform_prefixes, thread_key),
+                "{thread_key}"
+            );
+        }
+    }
+
+    #[test]
+    fn telegrambot_ingress_admits_only_telegram_thread_keys() {
+        // The Chat SDK Telegram adapter mints `telegram:<chat>[:<topic>]`.
+        let telegrambot = INGRESS_SPECS
+            .iter()
+            .find(|spec| spec.identity == "telegrambot")
+            .expect("telegrambot ingress spec");
+
+        for thread_key in ["telegram:5551234", "telegram:-1001234567890:42"] {
+            assert!(
+                thread_key_matches_platform(telegrambot.platform_prefixes, thread_key),
+                "{thread_key}"
+            );
+        }
+        for thread_key in ["slack:C123:1.2", "discord:1:2:3", "telegramx:1"] {
+            assert!(
+                !thread_key_matches_platform(telegrambot.platform_prefixes, thread_key),
                 "{thread_key}"
             );
         }
