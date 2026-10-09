@@ -4,7 +4,9 @@
 //! sandboxes whose sessions never go idle still need a restart-surviving
 //! backstop. The reaper sweeps the backend's observed sandboxes and stops any
 //! that exceed the configured max lifetime, releasing the sandbox, its proxy
-//! resources, and its node pod slots. Each sweep also deletes iron-proxy
+//! resources, and its node pod slots. That includes sandboxes whose agent
+//! exited (`Stopped`): sessions replace rather than reuse them, so nothing
+//! else ever releases their backend resources. Each sweep also deletes iron-proxy
 //! resources whose sandbox no longer has a live Sandbox, the orphan class no
 //! observed-sandbox path can reach.
 
@@ -13,8 +15,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use centaur_sandbox_core::ObservedSandbox;
-use centaur_sandbox_core::SandboxResult;
+use centaur_sandbox_core::{ObservedSandbox, SandboxResult, SandboxStatus};
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{info, warn};
 
@@ -112,7 +113,7 @@ fn reap_reason(
     now: SystemTime,
     config: &SandboxReaperConfig,
 ) -> Option<&'static str> {
-    if observed.status.is_terminal() {
+    if observed.status == SandboxStatus::Gone {
         return None;
     }
     if let (Some(max_lifetime), Some(created_at)) = (config.max_lifetime, observed.created_at)
@@ -176,7 +177,18 @@ mod tests {
     }
 
     #[test]
-    fn ignores_terminal_sandboxes() {
+    fn reaps_stopped_sandbox_past_max_lifetime() {
+        let now = SystemTime::now();
+        let sandbox = observed(centaur_sandbox_core::SandboxStatus::Stopped)
+            .with_created_at(Some(now - Duration::from_secs(100_000)));
+
+        let reason = reap_reason(&sandbox, now, &config(Some(Duration::from_secs(86_400))));
+
+        assert_eq!(reason, Some("max_lifetime"));
+    }
+
+    #[test]
+    fn ignores_gone_sandboxes() {
         let now = SystemTime::now();
         let sandbox = observed(centaur_sandbox_core::SandboxStatus::Gone)
             .with_created_at(Some(now - Duration::from_secs(100_000)));
