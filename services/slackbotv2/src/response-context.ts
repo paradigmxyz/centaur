@@ -72,6 +72,18 @@ const CLAUDE_REASONING_EFFORTS_BY_MODEL: Record<string, ReadonlySet<string>> = {
   'claude-sonnet-4-5': NO_REASONING_EFFORTS,
   'claude-sonnet-4-6': CLAUDE_NO_XHIGH_REASONING_EFFORTS
 }
+// Every effort any Codex model accepts. Models absent from the table below
+// (custom `model_providers.*` models pointing Codex at an OpenAI-compatible
+// endpoint) are validated against this canonical set instead of being
+// rejected outright.
+const ALL_CODEX_REASONING_EFFORTS = new Set([
+  ...STANDARD_CODEX_REASONING_EFFORTS,
+  ...PRO_CODEX_REASONING_EFFORTS,
+  ...CODEX_MODEL_REASONING_EFFORTS,
+  ...GPT_5_6_REASONING_EFFORTS,
+  ...GPT_6_ULTRA_REASONING_EFFORTS,
+  'minimal'
+])
 const CODEX_REASONING_EFFORTS_BY_MODEL: Record<string, ReadonlySet<string>> = {
   'gpt-5.2': STANDARD_CODEX_REASONING_EFFORTS,
   'gpt-5.2-codex': CODEX_MODEL_REASONING_EFFORTS,
@@ -234,7 +246,16 @@ export function reasoningForModel(
   const supported = Object.entries(CODEX_REASONING_EFFORTS_BY_MODEL).find(
     ([modelId]) => selectedModel === modelId || selectedModel.startsWith(`${modelId}-20`)
   )?.[1]
-  return supported?.has(effectiveEffort) ? effort : undefined
+  // A model the table doesn't know is a custom-provider model (a
+  // `model_providers.*` entry pointing Codex at an OpenAI-compatible
+  // endpoint), whose supported efforts this table cannot know. Forward any
+  // canonical effort rather than silently dropping the user's explicit
+  // request - the provider is the authority on its own models and rejects
+  // unsupported efforts itself.
+  if (!supported) {
+    return ALL_CODEX_REASONING_EFFORTS.has(effectiveEffort) ? effort : undefined
+  }
+  return supported.has(effectiveEffort) ? effort : undefined
 }
 
 // Claude model IDs: family, dash-separated version, optional variant words,
