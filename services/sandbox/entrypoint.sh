@@ -408,17 +408,18 @@ mkdir -p "$HOME_DIR/uploads"
 WORKSPACE_DIR="$WORKSPACE_DIR" install-tool-shims --refresh-skills \
     || echo "warning: failed to reload Centaur skills" >&2
 
-# ── Background: refresh repo-cache-backed tools/skills in running sandboxes ───
+# ── Background: refresh repo-cache-backed tools/skills and recompose the
+# ── system prompt in running sandboxes ───────────────────────────────────────
 case "${CENTAUR_TOOLS_AUTO_RELOAD:-true}" in
     0|false|False|FALSE|no|No|NO|off|Off|OFF) _centaur_tools_auto_reload=0 ;;
     *) _centaur_tools_auto_reload=1 ;;
 esac
 if [ "$_centaur_tools_auto_reload" = "1" ] \
     && [ "${CENTAUR_SANDBOX_REPO_CACHE_ENABLED:-true}" != "false" ] \
-    && [ -n "${TOOL_DIRS:-}" ]; then
+    && { [ -n "${TOOL_DIRS:-}" ] || [ -d "$HOME_DIR/github" ]; }; then
     (
         WORKSPACE_DIR="$WORKSPACE_DIR" repo-cache-watch \
-            || echo "warning: Centaur tool auto-reload watcher stopped" >&2
+            || echo "warning: Centaur auto-reload watcher stopped" >&2
     ) &
 fi
 unset _centaur_tools_auto_reload
