@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto'
+import { createHmac, randomUUID } from 'node:crypto'
 import {
   createServer,
   request as httpRequest,
@@ -7,7 +7,8 @@ import {
   type ServerResponse
 } from 'node:http'
 import { connect } from 'node:net'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
+import pg from 'pg'
 import { WebClient } from '@slack/web-api'
 import { createEmulator, type Emulator } from 'emulate'
 import { createMemoryState } from '@chat-adapter/state-memory'
@@ -5720,6 +5721,80 @@ async function isPortOpen(port: number): Promise<boolean> {
 // Bun's global fetch cap (BUN_CONFIG_MAX_HTTP_REQUESTS, default 256) every
 // outbound fetch queued forever and all handoffs failed. parseSseEvents now
 // cancels the reader when the consumer stops, so connections are released.
+// A database initialized with the Absurd schema (api-rs migrations 0007-0009).
+const inboxPostgresUrl = process.env.SLACKBOTV2_TEST_DATABASE_URL
+
+describe.skipIf(!inboxPostgresUrl)('slackbotv2 Slack inbox', () => {
+  const cleanups: Array<() => Promise<void>> = []
+
+  afterEach(async () => {
+    for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
+  })
+
+  /** A bot with a Slack inbox queue of its own, or `namespace`'s when given. */
+  function createInboxBot(
+    namespace: string,
+    overrides: Partial<Parameters<typeof createSlackbotV2>[0]> = {}
+  ): { instance: SlackbotV2; pool: pg.Pool } {
+    const pool = new pg.Pool({ connectionString: inboxPostgresUrl })
+    const instance = createTestBot({ inboxPool: pool, stateKeyPrefix: namespace, ...overrides })
+    cleanups.push(async () => {
+      await instance.close()
+      await pool.end().catch(() => undefined)
+    })
+    return { instance, pool }
+  }
+
+  const testNamespace = () => `slackbotv2_test_${randomUUID().replaceAll('-', '')}`
+
+  it('acknowledges a mention before its session handoff finishes', async () => {
+    bot = createInboxBot(testNamespace()).instance
+    const releaseExecute = codexApi.holdNextExecute()
+
+    const parent = await postUserMessage('Context before the slow run.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> start soon`, { threadTs: parent.ts })
+    expect(mention.response.status).toBe(200)
+
+    await waitFor(() => codexApi.executes.length === 1, 5000)
+    releaseExecute()
+    await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 1.'), 5000)
+  })
+
+  it('redelivers a mention whose process died before the execution was committed', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    const namespace = testNamespace()
+    let killExecute = (_error: Error) => {}
+    const first = createInboxBot(namespace, {
+      messageDedupeTtlMs: 25,
+      // The first process dies mid-execute: its request never returns.
+      fetch: async (input, init) =>
+        String(input).endsWith('/execute')
+          ? new Promise<Response>((_, reject) => {
+              killExecute = reject
+            })
+          : fetch(input, init),
+      handoffRetryDelaysMs: [],
+      state: sharedState
+    })
+    bot = first.instance
+
+    const parent = await postUserMessage('Context before the crash.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> survive a crash`, { threadTs: parent.ts })
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.appends.length === 1, 5000)
+    // Its database goes with it, so its inbox lease is never extended.
+    await first.pool.end()
+
+    createInboxBot(namespace, { messageDedupeTtlMs: 25, state: sharedState })
+
+    await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 1.'), 5000)
+    expect(codexApi.executes.map(execute => execute.body.idempotency_key)).toEqual([mention.ts])
+    expect(codexApi.appends).toHaveLength(1)
+    killExecute(new Error('process exited'))
+  })
+})
+
 describe('session event stream connection lifecycle', () => {
   function openEventStreamGauge(): number {
     const match = /^slackbotv2_session_event_streams_open (\d+)$/m.exec(slackbotMetrics.expose())

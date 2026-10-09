@@ -157,6 +157,8 @@ jobs:
             '^\.github/workflows/ci\.yml$'
           set_output slackbotv2_tests \
             '^services/slackbotv2/' \
+            '^\.github/scripts/start-test-postgres\.sh$' \
+            '^services/api-rs/crates/centaur-session-sqlx/migrations/000[789]_absurd_' \
             '^package\.json$' \
             '^pnpm-lock\.yaml$' \
             '^pnpm-workspace\.yaml$' \
@@ -547,8 +549,20 @@ jobs:
       - name: Install Node dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Start Test Postgres
+        run: .github/scripts/start-test-postgres.sh slackbotv2-test-postgres 5432 postgres pgvector
+
+      - name: Install Absurd schema
+        run: |
+          for migration in services/api-rs/crates/centaur-session-sqlx/migrations/000{7,8,9}_absurd_*.sql; do
+            docker exec -i slackbotv2-test-postgres \
+              psql -v ON_ERROR_STOP=1 -U postgres -d postgres < "$migration"
+          done
+
       - name: Slackbot v2 tests
         working-directory: services/slackbotv2
+        env:
+          SLACKBOTV2_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: bun test test
 
   linearbot-tests:
