@@ -15,6 +15,7 @@ module Oauth
     ATTIO_CLIENT_ID = "acme-attio-client-id".freeze
     LINEAR_CLIENT_ID = "acme-linear-client-id".freeze
     ZOOM_CLIENT_ID = "acme-zoom-client-id".freeze
+    MICROSOFT_CLIENT_ID = "acme-microsoft-client-id".freeze
 
     setup do
       @exchange_http_mocks = []
@@ -26,6 +27,7 @@ module Oauth
       oauth_apps(:acme_attio).update!(client_secret: "attio-secret")
       oauth_apps(:acme_linear).update!(client_secret: "linear-secret")
       oauth_apps(:acme_zoom).update!(client_secret: "zoom-secret")
+      oauth_apps(:acme_microsoft).update!(client_secret: "microsoft-secret")
       @user = users(:member_user)
       sign_in @user
       clear_enqueued_jobs
@@ -146,6 +148,19 @@ module Oauth
         token_type: "bearer",
         expires_in: 3600,
         scope: scope
+      }.merge(overrides).to_json
+    end
+
+    def microsoft_token_body(scope: "Mail.Read Calendars.Read", **overrides)
+      {
+        access_token: "ms-access-token", refresh_token: "ms-refresh-token", token_type: "Bearer",
+        expires_in: 3600, scope: scope,
+        id_token: id_token({
+          "aud" => MICROSOFT_CLIENT_ID,
+          "iss" => "https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0",
+          "oid" => "0c6b8a4e-1a2b-4c3d-9e8f-123456789abc", "sub" => "pairwise-sub",
+          "preferred_username" => "mailbox@example.com", "name" => "Mailbox Owner"
+        })
       }.merge(overrides).to_json
     end
 
@@ -346,6 +361,19 @@ module Oauth
       assert_equal "code", q["response_type"]
       assert_equal "S256", q["code_challenge_method"]
       assert_equal %w[meeting:write user:read:user], q["scope"].split
+    end
+
+    test "start redirects to Microsoft with the identity and offline_access scopes" do
+      get oauth_start_url(slug: "microsoft"), params: { scopes: "Mail.Read" }
+      assert_response :redirect
+      uri = URI.parse(response.location)
+      assert_equal "login.microsoftonline.com", uri.host
+      assert_equal "/common/oauth2/v2.0/authorize", uri.path
+      q = URI.decode_www_form(uri.query).to_h
+      assert_equal MICROSOFT_CLIENT_ID, q["client_id"]
+      assert_equal "http://www.example.com/oauth/microsoft/callback", q["redirect_uri"]
+      assert_equal "select_account", q["prompt"]
+      assert_equal %w[Mail.Read openid email profile offline_access], q["scope"].split
     end
 
     test "start redirects signed-out users to login" do
@@ -647,6 +675,33 @@ module Oauth
       assert_equal "zoom-refresh-token", cred.refresh_token
       assert cred.next_attempt_at.present?
       assert_equal [ "api.zoom.us" ], cred.static_secret.rules.map(&:host)
+    end
+
+    test "callback happy path supports Microsoft OAuth app tokens" do
+      state = start_flow(slug: "microsoft")
+      stub_exchange(status: 200, body: microsoft_token_body) do |request|
+        assert_equal Oauth::Providers::Microsoft::TOKEN_ENDPOINT, request[:url]
+        assert_equal MICROSOFT_CLIENT_ID, request[:form]["client_id"]
+        assert_equal "microsoft-secret", request[:form]["client_secret"]
+      end
+
+      assert_difference -> { BrokerCredential.count } => 1 do
+        get oauth_callback_url(slug: "microsoft"), params: { state: state, code: "auth-code" }
+      end
+      assert_redirected_to console_integrations_path
+      assert_equal "microsoft connected as mailbox@example.com.", flash[:notice]
+
+      app = oauth_apps(:acme_microsoft)
+      cred = BrokerCredential.find_by!(oauth_app: app, provider_subject: "0c6b8a4e-1a2b-4c3d-9e8f-123456789abc")
+      assert_equal "microsoft-microsoft-0c6b8a4e-1a2b-4c3d-9e8f-123456789abc", cred.foreign_id
+      assert_equal "Microsoft – Mailbox Owner", cred.name
+      assert_equal Oauth::Providers::Microsoft::TOKEN_ENDPOINT, cred.token_endpoint
+      assert_equal "mailbox@example.com", cred.provider_email
+      assert_equal %w[Mail.Read Calendars.Read], cred.scopes
+      assert_equal "ms-access-token", cred.access_token
+      assert_equal "ms-refresh-token", cred.refresh_token
+      assert cred.next_attempt_at.present?
+      assert_equal [ "graph.microsoft.com" ], cred.static_secret.rules.map(&:host)
     end
 
     test "GitHub re-consent updates the existing credential synchronously" do
