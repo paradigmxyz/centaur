@@ -1137,7 +1137,6 @@ fn workflow_queue_class(workflow_name: &str) -> WorkflowQueueClass {
         | "linear_sync"
         | "company_context_documents"
         | "company_context_embeddings"
-        | "memory_generation"
         | "slack_retention"
         | "chief_of_staff_daily" => WorkflowQueueClass::Etl,
         _ => WorkflowQueueClass::Standard,
