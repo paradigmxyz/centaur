@@ -931,9 +931,9 @@ fn real_slack_tool_parses_and_translates() {
     );
     assert!(
         out.inputs.iter().any(
-            |i| matches!(i, SecretInput::Static(s) if s.foreign_id == "tool-slack-slack-bot-token")
+            |i| matches!(i, SecretInput::Static(s) if s.foreign_id == "tool-slack-slack-search-token")
         ),
-        "expected the SLACK_BOT_TOKEN static secret"
+        "expected the SLACK_SEARCH_TOKEN static secret"
     );
 }
 
