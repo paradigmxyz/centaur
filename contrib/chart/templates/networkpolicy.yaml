@@ -89,16 +89,18 @@ spec:
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "proxy-sync") | nindent 14 }}
+{{- if .Values.experimentalCompanyContext.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "company-context") | nindent 14 }}
+{{- end }}
         # console Solid Queue worker (bin/jobs) reaches the app + queue DBs.
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}
-{{- if $console.sqlExporter.enabled }}
-        # The Console SQL Exporter reads queue state from the bundled Postgres.
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-sql-exporter") | nindent 14 }}
-{{- end }}
         # iron-proxy pods forward the tool-server sidecar's pool to Postgres
         # (the sidecar reaches the core DB through the per-sandbox proxy, not
         # directly), so the proxy must be allowed to connect.
@@ -131,15 +133,7 @@ spec:
   policyTypes:
     - Egress
   egress:
-{{- if .Values.postgres.enabled }}
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: 5432
-{{- end }}
+    {{- include "centaur.postgresEgress" . | nindent 4 }}
     # Trusted workflow code may make direct outbound HTTPS calls (mirrors api-rs).
     - ports:
         - protocol: TCP
@@ -229,6 +223,13 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "proxy-sync") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.proxySync.port }}
 ---
 {{- if .Values.networkPolicy.observabilityEgress.enabled }}
 {{- if not .Values.networkPolicy.observabilityEgress.destinations }}
@@ -312,15 +313,7 @@ spec:
   policyTypes:
     - Egress
   egress:
-{{- if .Values.postgres.enabled }}
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: 5432
-{{- end }}
+    {{- include "centaur.postgresEgress" . | nindent 4 }}
     # Per-sandbox iron-proxy listeners (HTTP proxy + postgres + management API).
     - to:
         - podSelector:
@@ -386,15 +379,7 @@ spec:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
 {{- end }}
-{{- if .Values.postgres.enabled }}
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: 5432
-{{- end }}
+    {{- include "centaur.postgresEgress" . | nindent 4 }}
     # Slack API egress (direct HTTPS; slackbotv2 does not use the firewall proxy).
     - ports:
         - protocol: TCP
@@ -435,15 +420,7 @@ spec:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
 {{- end }}
-{{- if .Values.postgres.enabled }}
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: 5432
-{{- end }}
+    {{- include "centaur.postgresEgress" . | nindent 4 }}
     # Linear GraphQL API egress (direct HTTPS; linearbot does not use the firewall proxy).
     - ports:
         - protocol: TCP
@@ -484,15 +461,7 @@ spec:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
 {{- end }}
-{{- if .Values.postgres.enabled }}
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: 5432
-{{- end }}
+    {{- include "centaur.postgresEgress" . | nindent 4 }}
     # GitHub REST API egress (direct HTTPS; githubbot does not use the firewall proxy).
     - ports:
         - protocol: TCP
@@ -534,15 +503,7 @@ spec:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
 {{- end }}
-{{- if .Values.postgres.enabled }}
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: 5432
-{{- end }}
+    {{- include "centaur.postgresEgress" . | nindent 4 }}
     # Discord Gateway (wss), REST, and CDN all need direct HTTPS egress. The Gateway cannot be
     # proxied (discord.js ignores HTTPS_PROXY), so this rule is load-bearing.
     - ports:
@@ -584,15 +545,7 @@ spec:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
 {{- end }}
-{{- if .Values.postgres.enabled }}
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: 5432
-{{- end }}
+    {{- include "centaur.postgresEgress" . | nindent 4 }}
     # Teams Bot Framework, Graph, SharePoint, and proactive activity delivery use direct HTTPS.
     - ports:
         - protocol: TCP

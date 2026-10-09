@@ -1,7 +1,7 @@
 # Operator console: a lightweight, server-rendered HTML view over principals,
 # their effective grants, and secrets. Read-only; gated behind a console session
 # (ApplicationController#require_login) and restricted to admins (require_admin),
-# like every Control/Data Sync page. Distinct from the JSON API.
+# like every Control page. Distinct from the JSON API.
 class ConsoleController < ApplicationController
   include SecretKinds
   include Console::SlackChannelPermissionManagement
@@ -12,6 +12,7 @@ class ConsoleController < ApplicationController
 
   PRINCIPALS_PER_PAGE = 50
   PRINCIPAL_DETAIL_PER_PAGE = 50
+  SECRETS_PER_PAGE = 50
 
   # Friendly labels for the source backend (and the gcp_auth credentials_provider
   # type). The secrets table shows only this -- the full reference lives on the
@@ -100,13 +101,27 @@ class ConsoleController < ApplicationController
   end
 
   def secrets
-    @secrets_by_kind = SECRET_KINDS.transform_values do |cfg|
-      rel = cfg[:model].includes(cfg[:includes]).order(created_at: :asc, id: :asc)
+    @search_query = params[:q].to_s.strip
+    @selected_secret_type = params[:type].to_s if SECRET_KINDS.key?(params[:type].to_s)
+    @total_secrets = SECRET_KINDS.sum { |_kind, cfg| cfg[:model].count }
+
+    kinds = @selected_secret_type ? SECRET_KINDS.slice(@selected_secret_type) : SECRET_KINDS
+    @secrets = kinds.flat_map do |kind, cfg|
+      rel = cfg[:model].includes(cfg[:includes])
+      if @search_query.present?
+        pattern = "%#{cfg[:model].sanitize_sql_like(@search_query)}%"
+        rel = rel.where("name ILIKE ?", pattern)
+      end
       # Static secrets may wrap a broker credential (the "managed" badge); eager
       # load the credential and its app so the list doesn't fan out per row.
       rel = rel.includes(broker_credential: :oauth_app) if cfg[:model] == StaticSecret
-      rel
+      rel.map { |secret| [ kind, secret ] }
     end
+    @secrets.sort_by! { |_kind, secret| [ secret.name.to_s.downcase, secret.created_at, secret.id ] }
+    @total_count = @secrets.size
+    @total_pages = total_pages(@total_count, SECRETS_PER_PAGE)
+    @page = bounded_page(params[:page], @total_pages)
+    @secrets = @secrets.slice((@page - 1) * SECRETS_PER_PAGE, SECRETS_PER_PAGE) || []
   end
 
   def secret
@@ -146,6 +161,20 @@ class ConsoleController < ApplicationController
   def oauth_app
     @oauth_app = OauthApp.find_by_oid!(params[:id])
     @minted_credentials = @oauth_app.broker_credentials.order(created_at: :asc, id: :asc)
+    @provider_details = {}
+    @provider_credential = @minted_credentials.first if @oauth_app.shared?
+    provider = @oauth_app.provider_strategy
+    if provider.respond_to?(:details_for) && @provider_credential && !@provider_credential.dead? &&
+        @provider_credential.access_token.present? && (@provider_credential.expires_at.nil? || @provider_credential.expires_at.future?)
+      begin
+        @provider_details = provider.details_for(@provider_credential,
+          http_client: HttpClient.new(open_timeout: 2, read_timeout: 2, write_timeout: 2, max_body_bytes: 128 * 1024))
+        @provider_details = {} unless @provider_details.is_a?(Hash)
+      rescue StandardError
+        # Optional provider details must never prevent credential management.
+        @provider_details = {}
+      end
+    end
   end
 
   # Where a secret's value is resolved from, as a list of segments. Each segment

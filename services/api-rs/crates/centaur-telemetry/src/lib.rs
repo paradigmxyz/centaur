@@ -65,30 +65,12 @@ pub const ETL_BACKFILL_JOBS: &str = "etl_backfill_jobs";
 pub const ETL_BACKFILL_JOB_AGE_SECONDS: &str = "etl_backfill_job_age_seconds";
 pub const COMPANY_CONTEXT_DOCUMENTS_CHANGED_TOTAL: &str = "company_context_documents_changed_total";
 pub const COMPANY_CONTEXT_PROJECTION_LAG_SECONDS: &str = "company_context_projection_lag_seconds";
+pub const WORKFLOW_RUNS_TOTAL: &str = "workflow_runs_total";
 pub const WORKFLOW_QUEUE_TASKS: &str = "workflow_queue_tasks";
 pub const WORKFLOW_QUEUE_TASKS_BY_WORKFLOW: &str = "workflow_queue_tasks_by_workflow";
 pub const WORKFLOW_QUEUE_OLDEST_TASK_AGE_SECONDS: &str = "workflow_queue_oldest_task_age_seconds";
 pub const WORKFLOW_QUEUE_OLDEST_TASK_AGE_BY_WORKFLOW_SECONDS: &str =
     "workflow_queue_oldest_task_age_by_workflow_seconds";
-pub const SLACK_ARCHIVE_IMPORT_RUNS_TOTAL: &str = "slack_archive_import_runs_total";
-pub const SLACK_ARCHIVE_IMPORT_DURATION_SECONDS: &str = "slack_archive_import_duration_seconds";
-pub const SLACK_ARCHIVE_IMPORT_BYTES_TOTAL: &str = "slack_archive_import_bytes_total";
-pub const SLACK_ARCHIVE_IMPORT_CHANNELS_TOTAL: &str = "slack_archive_import_channels_total";
-pub const SLACK_ARCHIVE_IMPORT_USERS_TOTAL: &str = "slack_archive_import_users_total";
-pub const SLACK_ARCHIVE_IMPORT_MESSAGES_TOTAL: &str = "slack_archive_import_messages_total";
-pub const SLACK_ARCHIVE_IMPORT_MESSAGE_FILES_TOTAL: &str =
-    "slack_archive_import_message_files_total";
-pub const SLACK_ARCHIVE_IMPORT_ATTACHMENTS_TOTAL: &str = "slack_archive_import_attachments_total";
-pub const SLACK_ARCHIVE_IMPORT_BATCH_DURATION_SECONDS: &str =
-    "slack_archive_import_batch_duration_seconds";
-pub const SLACK_ARCHIVE_IMPORT_BATCH_SIZE: &str = "slack_archive_import_batch_size";
-pub const SLACK_ARCHIVE_IMPORT_FAILURES_TOTAL: &str = "slack_archive_import_failures_total";
-pub const SLACK_ARCHIVE_IMPORT_SKIPPED_ITEMS_TOTAL: &str =
-    "slack_archive_import_skipped_items_total";
-pub const SLACK_ARCHIVE_IMPORT_BATCH_FAILURES_TOTAL: &str =
-    "slack_archive_import_batch_failures_total";
-pub const SLACK_ARCHIVE_IMPORT_LAST_FAILURE_TIMESTAMP_SECONDS: &str =
-    "slack_archive_import_last_failure_timestamp_seconds";
 pub const SLACK_RETENTION_RUNS_TOTAL: &str = "slack_retention_runs_total";
 pub const SLACK_RETENTION_RUN_DURATION_SECONDS: &str = "slack_retention_run_duration_seconds";
 pub const SLACK_RETENTION_MESSAGES_PROCESSED_TOTAL: &str =
@@ -117,11 +99,6 @@ const SESSION_FIRST_TOKEN_LATENCY_BUCKETS: &[f64] = &[
 ];
 const SANDBOX_STARTUP_DURATION_BUCKETS: &[f64] =
     &[0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0];
-const SLACK_ARCHIVE_IMPORT_DURATION_BUCKETS: &[f64] = &[
-    1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1_200.0, 3_600.0,
-];
-const SLACK_ARCHIVE_IMPORT_BATCH_SIZE_BUCKETS: &[f64] =
-    &[1.0, 10.0, 100.0, 500.0, 1_000.0, 5_000.0, 10_000.0];
 const SLACK_RETENTION_DURATION_BUCKETS: &[f64] =
     &[1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1_200.0];
 
@@ -250,18 +227,6 @@ pub fn prometheus_handle() -> Result<PrometheusHandle, TelemetryError> {
         .set_buckets_for_metric(
             Matcher::Full(SANDBOX_STARTUP_DURATION_SECONDS.to_owned()),
             SANDBOX_STARTUP_DURATION_BUCKETS,
-        )?
-        .set_buckets_for_metric(
-            Matcher::Full(SLACK_ARCHIVE_IMPORT_DURATION_SECONDS.to_owned()),
-            SLACK_ARCHIVE_IMPORT_DURATION_BUCKETS,
-        )?
-        .set_buckets_for_metric(
-            Matcher::Full(SLACK_ARCHIVE_IMPORT_BATCH_DURATION_SECONDS.to_owned()),
-            SLACK_ARCHIVE_IMPORT_DURATION_BUCKETS,
-        )?
-        .set_buckets_for_metric(
-            Matcher::Full(SLACK_ARCHIVE_IMPORT_BATCH_SIZE.to_owned()),
-            SLACK_ARCHIVE_IMPORT_BATCH_SIZE_BUCKETS,
         )?
         .set_buckets_for_metric(
             Matcher::Full(SLACK_RETENTION_RUN_DURATION_SECONDS.to_owned()),
@@ -398,6 +363,16 @@ pub fn record_workflow_histogram(name: &str, labels: &[(String, String)], value:
         return;
     }
     metrics::histogram!(name.to_owned(), workflow_metric_labels(labels)).record(value);
+}
+
+pub fn record_workflow_run(queue: &str, workflow_name: &str, status: &'static str) {
+    metrics::counter!(
+        WORKFLOW_RUNS_TOTAL,
+        "queue" => queue.to_owned(),
+        "workflow_name" => workflow_name.to_owned(),
+        "status" => status,
+    )
+    .increment(1);
 }
 
 pub fn set_workflow_queue_tasks(queue: &str, state: &str, value: f64) {
@@ -666,6 +641,10 @@ fn describe_metrics() {
         metrics::Unit::Seconds,
         "Company context projection lag in seconds."
     );
+    metrics::describe_counter!(
+        WORKFLOW_RUNS_TOTAL,
+        "Workflow runs by queue, workflow name, and terminal status."
+    );
     metrics::describe_gauge!(
         WORKFLOW_QUEUE_TASKS,
         "Current non-terminal workflow task count by queue and state."
@@ -683,65 +662,6 @@ fn describe_metrics() {
         WORKFLOW_QUEUE_OLDEST_TASK_AGE_BY_WORKFLOW_SECONDS,
         metrics::Unit::Seconds,
         "Oldest non-terminal workflow task age in seconds by queue, state, and workflow name."
-    );
-    metrics::describe_counter!(
-        SLACK_ARCHIVE_IMPORT_RUNS_TOTAL,
-        "Slack archive import lifecycle events by status and reason."
-    );
-    metrics::describe_histogram!(
-        SLACK_ARCHIVE_IMPORT_DURATION_SECONDS,
-        metrics::Unit::Seconds,
-        "Slack archive import run duration in seconds by status."
-    );
-    metrics::describe_counter!(
-        SLACK_ARCHIVE_IMPORT_BYTES_TOTAL,
-        "Slack archive import zip bytes processed."
-    );
-    metrics::describe_counter!(
-        SLACK_ARCHIVE_IMPORT_CHANNELS_TOTAL,
-        "Slack archive import channel rows by result."
-    );
-    metrics::describe_counter!(
-        SLACK_ARCHIVE_IMPORT_USERS_TOTAL,
-        "Slack archive import user rows by result."
-    );
-    metrics::describe_counter!(
-        SLACK_ARCHIVE_IMPORT_MESSAGES_TOTAL,
-        "Slack archive import message rows by result."
-    );
-    metrics::describe_counter!(
-        SLACK_ARCHIVE_IMPORT_MESSAGE_FILES_TOTAL,
-        "Slack archive import message files by result."
-    );
-    metrics::describe_counter!(
-        SLACK_ARCHIVE_IMPORT_ATTACHMENTS_TOTAL,
-        "Slack archive import attachment rows by result."
-    );
-    metrics::describe_histogram!(
-        SLACK_ARCHIVE_IMPORT_BATCH_DURATION_SECONDS,
-        metrics::Unit::Seconds,
-        "Slack archive import batch write duration in seconds by entity."
-    );
-    metrics::describe_histogram!(
-        SLACK_ARCHIVE_IMPORT_BATCH_SIZE,
-        "Slack archive import batch size by entity."
-    );
-    metrics::describe_counter!(
-        SLACK_ARCHIVE_IMPORT_FAILURES_TOTAL,
-        "Slack archive import failures by stage and reason."
-    );
-    metrics::describe_counter!(
-        SLACK_ARCHIVE_IMPORT_SKIPPED_ITEMS_TOTAL,
-        "Slack archive import skipped items by type and reason."
-    );
-    metrics::describe_counter!(
-        SLACK_ARCHIVE_IMPORT_BATCH_FAILURES_TOTAL,
-        "Slack archive import batch failures by entity and reason."
-    );
-    metrics::describe_gauge!(
-        SLACK_ARCHIVE_IMPORT_LAST_FAILURE_TIMESTAMP_SECONDS,
-        metrics::Unit::Seconds,
-        "Unix timestamp of the most recent Slack archive import failure."
     );
     metrics::describe_counter!(
         SLACK_RETENTION_RUNS_TOTAL,
@@ -1007,6 +927,7 @@ mod tests {
         record_sandbox_operation("local", "create", "success");
         record_sandbox_startup_duration("local", "success", Duration::from_secs(4));
         record_sandbox_warm_pool_claim("hit");
+        record_workflow_run("centaur_workflows", "example", "failed");
 
         let metrics = render_metrics().unwrap();
 
@@ -1036,6 +957,9 @@ mod tests {
             r#"centaur_sandbox_startup_duration_seconds_count{backend="local",status="success"}"#
         ));
         assert!(metrics.contains(r#"centaur_sandbox_warm_pool_claims_total{result="hit"}"#));
+        assert!(metrics.contains(
+            r#"workflow_runs_total{queue="centaur_workflows",workflow_name="example",status="failed"} 1"#
+        ));
     }
 
     #[test]

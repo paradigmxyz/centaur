@@ -80,6 +80,8 @@ spec:
               value: {{ .Values.apiRs.activitySummary.enabled | quote }}
             - name: SLACKBOTV2_AUTO_JOIN_CREATED_CHANNELS
               value: {{ .Values.slackbotv2.autoJoinCreatedChannels | quote }}
+            - name: SLACKBOTV2_AGENT_VIEW_ENABLED
+              value: {{ .Values.slackbotv2.agentViewEnabled | quote }}
             - name: SLACKBOTV2_STEERING_REACTION_ENABLED
               value: {{ .Values.slackbotv2.steeringReactionEnabled | quote }}
             - name: SLACKBOTV2_STEERING_REACTION
@@ -98,13 +100,6 @@ spec:
               value: {{ .Values.slackbotv2.messageOverridesStrategy.timeoutMs | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_MAX_OUTPUT_TOKENS
               value: {{ .Values.slackbotv2.messageOverridesStrategy.maxOutputTokens | quote }}
-{{- if $console.publicUrl }}
-            # Public origin of the Console UI (matches the Console's own
-            # CENTAUR_CONSOLE_PUBLIC_URL). When set, the first assistant message
-            # in a Slack thread gets an "Open session in Console" link.
-            - name: CENTAUR_CONSOLE_PUBLIC_URL
-              value: {{ $console.publicUrl | quote }}
-{{- end }}
 {{- if .Values.slackbotv2.assistantStatus }}
             - name: SLACKBOTV2_ASSISTANT_STATUS
               value: {{ .Values.slackbotv2.assistantStatus | quote }}
@@ -131,7 +126,7 @@ spec:
             - name: CODEX_CUSTOM_PROVIDERS
               value: {{ .Values.codex.customProviders | toJson | quote }}
 {{- end }}
-{{- range $name := tuple "CLAUDE_MODEL" "CODEX_MODEL" "CODEX_MODEL_REASONING_EFFORT" }}
+{{- range $name := tuple "CLAUDE_MODEL" "CODEX_MODEL" "CODEX_MODEL_REASONING_EFFORT" "CENTAUR_PI_MODEL" }}
 {{- if and (hasKey $.Values.sandbox.extraEnv $name) (not (hasKey $.Values.slackbotv2.extraEnv $name)) }}
             # Mirror the deployer's harness default override (sandbox.extraEnv)
             # so the Slack Console-link line names the model/reasoning policy

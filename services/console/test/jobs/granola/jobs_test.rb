@@ -44,5 +44,54 @@ module Granola
         .map { |job| job[:args].first }
       assert_equal [ expected.id ], enqueued_ids
     end
+
+    test "poll and sync jobs do nothing while company context v1 is disabled" do
+      app = create_granola_app
+      credential = create_credential(app: app)
+      sync_factory = ->(_credential) { flunk "disabled Granola sync should not sync credentials" }
+
+      with_env("CENTAUR_CONSOLE_COMPANY_CONTEXT_V1_ENABLED" => "false") do
+        Granola::SyncCredential.stub(:new, sync_factory) do
+          PollSyncJob.perform_now(app.slug)
+          SyncCredentialJob.perform_now(credential.id)
+        end
+      end
+
+      assert_no_enqueued_jobs
+    end
+
+    test "sync job retries when the Centaur API refuses the connection" do
+      app = create_granola_app
+      credential = create_credential(app: app)
+      sync = Object.new
+      sync.define_singleton_method(:call) { raise Errno::ECONNREFUSED }
+      sync_factory = ->(_credential) { sync }
+
+      Granola::SyncCredential.stub(:syncable?, true) do
+        Granola::SyncCredential.stub(:new, sync_factory) do
+          assert_enqueued_with(job: SyncCredentialJob, args: [ credential.id ]) do
+            SyncCredentialJob.perform_now(credential.id)
+          end
+        end
+      end
+    end
+
+    test "sync job retries transient Granola API errors" do
+      app = create_granola_app
+      credential = create_credential(app: app)
+      sync = Object.new
+      sync.define_singleton_method(:call) do
+        raise SyncCredential::TransientGranolaApiError, "Granola MCP returned HTTP 503"
+      end
+      sync_factory = ->(_credential) { sync }
+
+      Granola::SyncCredential.stub(:syncable?, true) do
+        Granola::SyncCredential.stub(:new, sync_factory) do
+          assert_enqueued_with(job: SyncCredentialJob, args: [ credential.id ]) do
+            SyncCredentialJob.perform_now(credential.id)
+          end
+        end
+      end
+    end
   end
 end

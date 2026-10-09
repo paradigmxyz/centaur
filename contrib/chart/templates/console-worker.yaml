@@ -39,6 +39,7 @@ spec:
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
       {{- end }}
+{{- include "centaur.podScheduling" (dict "values" $console.worker "indent" 6) }}
       initContainers:
         # Wait for the Solid Queue database (created by the web pod's Rails
         # db:prepare) so a cold start does not crash-loop before it exists.
@@ -172,6 +173,8 @@ spec:
 {{- end }}
             - name: CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED
               value: {{ $console.googleDocsSync.enabled | quote }}
+            - name: CENTAUR_CONSOLE_COMPANY_CONTEXT_V1_ENABLED
+              value: {{ .Values.companyContextV1.enabled | quote }}
             - name: RAILS_LOG_TO_STDOUT
               value: "1"
 {{- if .Values.apiRs.enabled }}
@@ -206,15 +209,7 @@ spec:
     - Egress
   # No ingress rules: the worker serves no traffic, so all inbound is denied.
   egress:
-{{- if .Values.postgres.enabled }}
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: 5432
-{{- end }}
+    {{- include "centaur.postgresEgress" . | nindent 4 }}
 {{- if .Values.apiRs.enabled }}
     - to:
         - podSelector:

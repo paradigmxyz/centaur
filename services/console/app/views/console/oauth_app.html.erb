@@ -28,6 +28,11 @@
   <% end %>
 </div>
 
+<% provider_partial = "console/oauth_apps/providers/#{@oauth_app.provider}" %>
+<% if lookup_context.exists?(provider_partial, [], true) %>
+  <%= render provider_partial, app: @oauth_app, credential: @provider_credential, details: @provider_details %>
+<% end %>
+
 <%
   def_section = ->(heading, rows) do
     content_tag(:section, class: "mb-8") do
@@ -63,7 +68,7 @@
   [ "Redirect URI", redirect_uri ],
   [ "Start URL", start_url ]
 ]) %>
-<p class="-mt-6 mb-8 text-xs text-zinc-600">Register the redirect URI with the provider. Share the start URL with a team member to connect the integration.</p>
+<p class="-mt-6 mb-8 text-xs text-zinc-600">Register the redirect URI with the provider. <%= @oauth_app.shared? ? "An admin must connect this shared account." : "Share the start URL with a team member to connect the integration." %></p>
 
 <section class="mb-8">
   <h2 class="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">Minted Credentials</h2>

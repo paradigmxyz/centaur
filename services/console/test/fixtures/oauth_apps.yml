@@ -67,3 +67,15 @@ acme_linear:
     - write
   enabled: true
   created_by: acme_admin
+
+acme_zoom:
+  slug: zoom
+  description: Acme Zoom integration
+  provider: zoom
+  client_id: acme-zoom-client-id
+  allowed_scopes:
+    - user:read:user
+    - meeting:write
+    - recording:read
+  enabled: true
+  created_by: acme_admin

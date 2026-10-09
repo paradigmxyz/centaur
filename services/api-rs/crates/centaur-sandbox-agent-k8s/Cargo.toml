@@ -14,7 +14,7 @@ centaur-sandbox-core.workspace = true
 clap.workspace = true
 jiff.workspace = true
 k8s-openapi.workspace = true
-kube = { workspace = true, features = ["derive", "ws"] }
+kube = { workspace = true, features = ["derive", "jsonpatch", "ws"] }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

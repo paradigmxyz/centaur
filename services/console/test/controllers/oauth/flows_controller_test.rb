@@ -14,6 +14,7 @@ module Oauth
     GITHUB_CLIENT_ID = "acme-github-client-id".freeze
     ATTIO_CLIENT_ID = "acme-attio-client-id".freeze
     LINEAR_CLIENT_ID = "acme-linear-client-id".freeze
+    ZOOM_CLIENT_ID = "acme-zoom-client-id".freeze
 
     setup do
       @exchange_http_mocks = []
@@ -24,6 +25,7 @@ module Oauth
       oauth_apps(:acme_github).update!(client_secret: "github-secret")
       oauth_apps(:acme_attio).update!(client_secret: "attio-secret")
       oauth_apps(:acme_linear).update!(client_secret: "linear-secret")
+      oauth_apps(:acme_zoom).update!(client_secret: "zoom-secret")
       @user = users(:member_user)
       sign_in @user
       clear_enqueued_jobs
@@ -37,9 +39,9 @@ module Oauth
       @identity_http_mocks.each(&:verify)
     end
 
-    def stub_exchange(status:, body:, expected: true)
+    def stub_exchange(status:, body:, expected: true, &assert_request)
       http = Minitest::Mock.new
-      expect_http_call(http, status: status, body: body) if expected
+      expect_http_call(http, status: status, body: body, &assert_request) if expected
       @exchange_http_mocks << http
       FlowsController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new(http: http) }
     end
@@ -137,6 +139,16 @@ module Oauth
       }.merge(overrides).to_json
     end
 
+    def zoom_token_body(scope: "user:read:user meeting:write recording:read", **overrides)
+      {
+        access_token: "zoom-access-token",
+        refresh_token: "zoom-refresh-token",
+        token_type: "bearer",
+        expires_in: 3600,
+        scope: scope
+      }.merge(overrides).to_json
+    end
+
     def sign_in(user)
       post login_url, params: { email: user.email, password: "password123456" }
     end
@@ -152,6 +164,76 @@ module Oauth
       assert_response :redirect
       query = URI.parse(response.location).query
       URI.decode_www_form(query).to_h.fetch("state")
+    end
+
+    test "shared app gates both OAuth actions without affecting personal apps of the same provider" do
+      shared = @app.dup
+      shared.update!(slug: "shared-google", shared: true)
+      get oauth_start_url(slug: shared.slug)
+      assert_redirected_to console_integrations_path
+      get oauth_callback_url(slug: shared.slug), params: { state: "invalid", code: "unused" }
+      assert_redirected_to console_integrations_path
+      assert start_flow.present?
+    end
+
+    test "shared account reconnect preserves grants and rejects a different subject" do
+      @app = @app.dup
+      @app.update!(slug: "shared-google", shared: true)
+      sign_in users(:acme_admin)
+      state = start_flow(slug: @app.slug)
+      stub_exchange(status: 200, body: token_body)
+      get oauth_callback_url(slug: @app.slug), params: { state: state, code: "first" }
+      assert_redirected_to console_oauth_app_path(@app.oid)
+      credential = @app.broker_credentials.sole
+      secret = credential.static_secret
+      role = roles(:acme_infra)
+      grant = Grant.create!(role: role, static_secret: secret, created_by: users(:acme_admin))
+      state = start_flow(slug: @app.slug)
+      stub_exchange(status: 200, body: token_body)
+      assert_no_difference("BrokerCredential.count") do
+        get oauth_callback_url(slug: @app.slug), params: { state: state, code: "reconnect" }
+      end
+      assert_redirected_to console_oauth_app_path(@app.oid)
+      assert_equal secret.id, credential.reload.static_secret.id
+      assert Grant.exists?(grant.id)
+      state = start_flow(slug: @app.slug)
+      stub_exchange(status: 200, body: token_body(sub: "different"))
+      assert_no_difference("BrokerCredential.count") do
+        get oauth_callback_url(slug: @app.slug), params: { state: state, code: "different" }
+      end
+      assert_response :unprocessable_entity
+      assert_equal "google-sub-1", credential.reload.provider_subject
+    end
+
+    test "Mercator shared consent creates a narrowly scoped secret and refresh preserves role access" do
+      provider = Oauth::Providers.fetch("mercator")
+      app = OauthApp.create!(provider.preset.merge(provider: provider.key, client_id: "mercator-client", client_secret: "synthetic", created_by: users(:acme_admin)))
+      sign_in users(:acme_admin)
+      state = start_flow(slug: app.slug)
+      query = URI.decode_www_form(URI.parse(response.location).query).to_h
+      assert_equal "https://mercator.sh/mcp/auth", query["resource"]
+      assert_equal "S256", query["code_challenge_method"]
+      stub_exchange(status: 200, body: { access_token: "synthetic", refresh_token: "synthetic-refresh", expires_in: 3600, scope: "mercator:tools" }.to_json)
+      stub_identity(body: { result: { structuredContent: { oauthAuthenticated: true, account: { walletAddress: "0x#{'ab' * 20}" } } } }.to_json)
+      assert_no_difference("Grant.count") do
+        get oauth_callback_url(slug: app.slug), params: { state: state, code: "synthetic" }
+      end
+      assert_redirected_to console_oauth_app_path(app.oid)
+      credential = app.broker_credentials.sole
+      secret = credential.static_secret
+      assert_equal [ { "host" => "mercator.sh", "methods" => [ "POST" ], "paths" => [ "/mcp/auth" ] } ], secret.rules.map(&:to_proxy_rule)
+      assert_empty secret.labels
+      assert_empty secret.grants
+      grant = Grant.create!(role: roles(:acme_infra), static_secret: secret, created_by: users(:acme_admin))
+      credential.update!(next_attempt_at: 1.minute.ago)
+      credential.refresh_client = Broker::RefreshClient.new(http: ->(**request) {
+        assert_equal "mercator-client", request[:form]["client_id"]
+        HttpClient::Response.new(status: 200, body: { access_token: "rotated-synthetic", refresh_token: "rotated-refresh", expires_in: 3600 }.to_json)
+      })
+      credential.refresh!
+      assert_not credential.dead?
+      assert_equal "rotated-synthetic", credential.static_secret.source.to_proxy_source["value"]
+      assert Grant.exists?(grant.id)
     end
 
     # --- start ----------------------------------------------------------------
@@ -250,6 +332,20 @@ module Oauth
       scopes = q["scope"].split(",")
       assert_includes scopes, "read"
       assert_includes scopes, "write"
+    end
+
+    test "start redirects to Zoom with its required identity scope" do
+      get oauth_start_url(slug: "zoom"), params: { scopes: "meeting:write" }
+      assert_response :redirect
+      uri = URI.parse(response.location)
+      assert_equal "zoom.us", uri.host
+      assert_equal "/oauth/authorize", uri.path
+      q = URI.decode_www_form(uri.query).to_h
+      assert_equal ZOOM_CLIENT_ID, q["client_id"]
+      assert_equal "http://www.example.com/oauth/zoom/callback", q["redirect_uri"]
+      assert_equal "code", q["response_type"]
+      assert_equal "S256", q["code_challenge_method"]
+      assert_equal %w[meeting:write user:read:user], q["scope"].split
     end
 
     test "start redirects signed-out users to login" do
@@ -512,6 +608,45 @@ module Oauth
       assert cred.next_attempt_at.present?
       assert_equal [ "api.linear.app" ], cred.static_secret.rules.map(&:host)
       assert_equal "Linear – Ada Lovelace token", cred.static_secret.name
+    end
+
+    test "callback happy path supports Zoom OAuth app tokens" do
+      state = start_flow(slug: "zoom")
+      stub_exchange(status: 200, body: zoom_token_body) do |request|
+        expected = Base64.strict_encode64("#{ZOOM_CLIENT_ID}:zoom-secret")
+        assert_equal "Basic #{expected}", request.dig(:headers, "Authorization")
+        assert_nil request[:form]["client_id"]
+        assert_nil request[:form]["client_secret"]
+      end
+      stub_identity(
+        body: {
+          id: "ZoomUser_ID",
+          email: "scheduler@example.com",
+          display_name: "Scheduler"
+        }.to_json
+      ) do |request|
+        assert_equal :get, request[:method]
+        assert_equal Oauth::Providers::Zoom::SELF_ENDPOINT, request[:url]
+        assert_equal "Bearer zoom-access-token", request[:headers]["Authorization"]
+      end
+
+      assert_difference -> { BrokerCredential.count } => 1 do
+        get oauth_callback_url(slug: "zoom"), params: { state: state, code: "auth-code" }
+      end
+      assert_redirected_to console_integrations_path
+      assert_equal "zoom connected as scheduler@example.com.", flash[:notice]
+
+      app = oauth_apps(:acme_zoom)
+      cred = BrokerCredential.find_by!(oauth_app: app, provider_subject: "ZoomUser_ID")
+      assert_equal "zoom-zoom-ZoomUser_ID", cred.foreign_id
+      assert_equal "Zoom – Scheduler", cred.name
+      assert_equal Oauth::Providers::Zoom::TOKEN_ENDPOINT, cred.token_endpoint
+      assert_equal "scheduler@example.com", cred.provider_email
+      assert_equal %w[user:read:user meeting:write recording:read], cred.scopes
+      assert_equal "zoom-access-token", cred.access_token
+      assert_equal "zoom-refresh-token", cred.refresh_token
+      assert cred.next_attempt_at.present?
+      assert_equal [ "api.zoom.us" ], cred.static_secret.rules.map(&:host)
     end
 
     test "GitHub re-consent updates the existing credential synchronously" do

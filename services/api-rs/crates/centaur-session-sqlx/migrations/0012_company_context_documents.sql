@@ -1,5 +1,3 @@
-create extension if not exists pg_search;
-
 create table if not exists company_context_documents (
     document_id text primary key,
     source text not null,
@@ -36,27 +34,3 @@ create index if not exists idx_company_context_documents_updated
 
 create index if not exists idx_company_context_documents_metadata
     on company_context_documents using gin (metadata);
-
-drop index if exists idx_company_context_documents_bm25;
-
-create index idx_company_context_documents_bm25
-    on company_context_documents
-    using bm25 (
-        document_id,
-        title,
-        body,
-        source,
-        source_type,
-        access_scope,
-        occurred_at,
-        source_updated_at,
-        metadata
-    )
-    with (
-        key_field = 'document_id',
-        text_fields = '{
-            "document_id": {
-                "tokenizer": {"type": "keyword"}
-            }
-        }'
-    );

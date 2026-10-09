@@ -166,17 +166,6 @@ postgres:
 }
 
 #[test]
-fn access_token_fragment_carries_no_broker_credentials_block() {
-    // Broker credentials now live in iron-control, not the proxy fragment. The
-    // access-token fragment still references the credential via a token_broker
-    // source, but the unknown `broker_credentials:` key (if any) is ignored.
-    let codex = harness_auth_fragment("codex", "access_token")
-        .unwrap()
-        .unwrap();
-    assert!(!codex.top_level.contains_key("broker_credentials"));
-}
-
-#[test]
 fn shipped_proxy_allowlist_preserves_integration_headers() {
     let config: serde_yaml::Value =
         serde_yaml::from_str(include_str!("../../../../iron-proxy/iron-proxy.yaml")).unwrap();

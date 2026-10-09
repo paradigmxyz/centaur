@@ -1,5 +1,6 @@
 import { createSlackbotV2, type SlackbotV2Options } from './index'
 import { parseChannelDefaults } from './channel-defaults'
+import { isHarnessEnabled, parseEnabledHarnesses } from './overrides'
 import { resolveSlackHomeTeamId } from './session-api'
 import { resolveSlackBotUserId } from './slack-user'
 import {
@@ -13,6 +14,11 @@ const botToken = requiredEnv('SLACK_BOT_TOKEN')
 const signingSecret = requiredEnv('SLACK_SIGNING_SECRET')
 const slackApiUrl = optionalEnv('SLACK_API_URL')
 const slackApiTimeoutMs = optionalNumberEnv('SLACKBOTV2_SLACK_API_TIMEOUT_MS')
+const enabledHarnesses = parseEnabledHarnesses(process.env.SLACKBOTV2_ENABLED_HARNESSES)
+const defaultHarnessType = stringEnv('SLACKBOTV2_DEFAULT_HARNESS', 'codex')
+if (!isHarnessEnabled(defaultHarnessType, enabledHarnesses)) {
+  throw new Error('SLACKBOTV2_DEFAULT_HARNESS must be enabled in SLACKBOTV2_ENABLED_HARNESSES')
+}
 const botUserId = await resolveSlackBotUserId({
   botToken,
   configuredBotUserId: optionalEnv('SLACK_BOT_USER_ID'),
@@ -46,6 +52,7 @@ const consoleLogger = {
 
 const options: SlackbotV2Options = {
   apiUrl,
+  agentViewEnabled: booleanEnv('SLACKBOTV2_AGENT_VIEW_ENABLED', false),
   apiKey: optionalEnv('SLACKBOT_API_KEY'),
   assistantStatus: optionalEnv('SLACKBOTV2_ASSISTANT_STATUS'),
   activitySummaryStatusEnabled: booleanEnv('SLACKBOTV2_ACTIVITY_SUMMARY_STATUS_ENABLED', false),
@@ -59,10 +66,10 @@ const options: SlackbotV2Options = {
     'SLACKBOTV2_CODEX_NANOCODEX_ROLLOUT_PERCENT',
     0
   ),
-  consolePublicUrl: optionalEnv('CENTAUR_CONSOLE_PUBLIC_URL'),
   responseMetadataMode: responseMetadataModeEnv('SLACKBOTV2_RESPONSE_METADATA_MODE'),
   responseServiceTierEnabled: booleanEnv('SLACKBOTV2_RESPONSE_SERVICE_TIER_ENABLED', false),
-  defaultHarnessType: optionalEnv('SLACKBOTV2_DEFAULT_HARNESS'),
+  defaultHarnessType,
+  enabledHarnesses,
   // Same env vars deployers use to override the sandbox harness model
   // (sandbox.extraEnv); the chart mirrors them here so displayed defaults
   // track the deployment instead of the baked harness config.
@@ -70,7 +77,8 @@ const options: SlackbotV2Options = {
     ...(optionalEnv('CLAUDE_MODEL') ? { claudecode: optionalEnv('CLAUDE_MODEL')! } : {}),
     ...(optionalEnv('CODEX_MODEL')
       ? { codex: optionalEnv('CODEX_MODEL')!, nanocodex: optionalEnv('CODEX_MODEL')! }
-      : {})
+      : {}),
+    ...(optionalEnv('CENTAUR_PI_MODEL') ? { pi: optionalEnv('CENTAUR_PI_MODEL')! } : {})
   },
   harnessDefaultReasoning: optionalEnv('CODEX_MODEL_REASONING_EFFORT')
     ? {
@@ -115,9 +123,11 @@ console.log(
     level: 'info',
     event: 'slackbotv2_started',
     service: 'slackbotv2',
+    agent_view_enabled: options.agentViewEnabled,
     activity_summary_status_enabled: options.activitySummaryStatusEnabled,
     auto_join_created_channels_enabled: options.autoJoinCreatedChannels,
     message_overrides_strategy: messageOverridesStrategyMode,
+    enabled_harnesses: enabledHarnesses,
     message_overrides_strategy_enabled:
       messageOverridesStrategyMode !== 'llm' || Boolean(messageOverridesStrategyApiKey),
     response_metadata_mode: options.responseMetadataMode,

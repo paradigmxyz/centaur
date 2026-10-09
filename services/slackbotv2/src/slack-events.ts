@@ -153,6 +153,22 @@ export async function isAllowedSlackMessage(
   return true
 }
 
+/**
+ * Slack's `chat.startStream` only accepts a `U...`/`W...` member id as
+ * `recipient_user_id`. A bot-authored message without `user` or
+ * `bot_profile.user_id` carries the bot's `B...` id instead, so resolve the
+ * bot's member id from the `bots.info` lookup the allowlist gate caches.
+ */
+export async function slackStreamRecipientUserId(
+  author: { isBot: boolean | 'unknown'; userId: string },
+  options: SlackbotV2Options,
+  logger: Logger
+): Promise<string> {
+  if (author.isBot !== true || isSlackMemberId(author.userId)) return author.userId
+  const identity = await resolveTriggerBotIdentity(author.userId, options, logger)
+  return identity?.userId && isSlackMemberId(identity.userId) ? identity.userId : author.userId
+}
+
 function externalSlackTeamId(event: RawSlackEvent): string | undefined {
   return externalSlackTeamIdForHome(stringValue(event.team_id), event)
 }

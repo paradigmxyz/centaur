@@ -46,12 +46,6 @@ Rails.application.routes.draw do
   end
   get "console/principals/:id", to: "console#principal", as: :console_principal
   namespace :console do
-    resources :threads, only: %i[index create]
-    post "threads/share", to: "threads#share", as: :thread_share
-    # Single-panel transcript refresh polled by thread_poller_controller.js
-    # while a turn is running. thread_key rides as a query param: keys carry
-    # colons and dots a path segment would mangle.
-    get "threads/panel", to: "threads#panel", as: :thread_panel
     resources :workflows, only: %i[index show] do
       member do
         post :run, action: :force_start
@@ -73,10 +67,6 @@ Rails.application.routes.draw do
         post :unshare
       end
     end
-    # Lazily-loaded sidebar thread list (Turbo Frame src). Kept off the main
-    # page render so the unindexed cross-database sessions query does not block
-    # every console page. See ApplicationController#load_console_sidebar_threads.
-    get "sidebar_threads", to: "threads#sidebar", as: :sidebar_threads
   end
   namespace :console do
     resources :roles, only: %i[index show new create edit update] do
@@ -125,25 +115,11 @@ Rails.application.routes.draw do
     resources :broker_credentials, only: %i[new create edit update destroy], path: "credentials"
   end
   get "console/credentials/:id", to: "console#credential", as: :console_credential
+  post "console/oauth_apps/presets/:provider", to: "console/oauth_apps#preset", as: :console_oauth_app_preset
   get "console/oauth_apps", to: "console#oauth_apps", as: :console_oauth_apps
   # User-facing list of enabled OAuth apps and their consent start links. Not
   # admin-gated: any signed-in team member connects integrations from here.
   get "console/integrations", to: "console/integrations#index", as: :console_integrations
-  get "console/etls", to: "console/etls#index", as: :console_etls
-  namespace :console do
-    post "etls/slack_archive_imports",
-         to: "etls#create_slack_archive_import",
-         as: :slack_archive_imports
-    post "etls/slack_archive_imports/:import_id/start",
-         to: "etls#start_slack_archive_import",
-         as: :start_slack_archive_import
-    post "etls/slack_archive_imports/:import_id/retry",
-         to: "etls#retry_slack_archive_import",
-         as: :retry_slack_archive_import
-    delete "etls/slack_archive_imports/:import_id",
-           to: "etls#delete_slack_archive_import",
-           as: :delete_slack_archive_import
-  end
   # Create/edit forms for OAuth apps. Declared before the show route so
   # /console/oauth_apps/new wins over the generic `:id` match. Named
   # `*_oauth_app_form*` so the form helpers don't collide with the read
@@ -250,6 +226,7 @@ Rails.application.routes.draw do
       resources :grants, only: %i[show create destroy]
       resources :api_keys, only: %i[index show create destroy]
       resources :proxies, only: %i[index show create update destroy]
+      resources :scheduled_tasks, only: %i[show]
       # Operator-managed broker credentials (ApiKey auth). CRUD + lookup; the
       # rotating token blob is never serialized back.
       resources :broker_credentials, only: %i[index show create update destroy] do

@@ -16,7 +16,7 @@ module Console
     test "an active non-admin is forbidden" do
       sign_in users(:member_user)
       get console_users_url
-      assert_redirected_to console_threads_path
+      assert_redirected_to console_integrations_path
       assert_nil flash[:alert]
     end
 
@@ -146,12 +146,12 @@ module Console
       sign_in users(:member_user)
       target = users(:pending_user)
       post approve_console_user_url(target.oid)
-      assert_redirected_to console_threads_path
+      assert_redirected_to console_integrations_path
       assert target.reload.pending?
 
       admin = users(:globex_admin)
       post demote_console_user_url(admin.oid)
-      assert_redirected_to console_threads_path
+      assert_redirected_to console_integrations_path
       assert admin.reload.admin?
     end
   end

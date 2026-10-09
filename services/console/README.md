@@ -28,65 +28,32 @@ Operators manage credentials, principals, roles, and grants through the API or t
 
 ## Local Development
 
-Console requires ParadeDB with the `pg_search` extension. A vanilla Postgres
-server cannot run the Console schema or skill search. Install Docker, Ruby using
-the version in `.ruby-version`, and Overmind or Foreman, then run:
+Console runs on stock PostgreSQL 16, including managed services such as RDS
+and Cloud SQL. Install Docker, Ruby using the version in `.ruby-version`, and
+Overmind or Foreman, then run:
 
 ```bash
 just dev
 ```
 
-This starts a persistent `paradedb/paradedb:0.23.0-pg16` container named
-`centaur-console-paradedb`, exposes it on `127.0.0.1:55432`, prepares the Rails
+This starts a persistent `postgres:16` container named
+`centaur-console-postgres`, exposes it on `127.0.0.1:55432`, prepares the Rails
 database, and starts the web and CSS processes. Database files are retained in
-the `centaur-console-paradedb-data` Docker volume between runs.
+the `centaur-console-postgres-data` Docker volume between runs.
 
-To use an existing ParadeDB installation instead, set
+To use an existing PostgreSQL server instead, set
 `CENTAUR_CONSOLE_DB_HOST`, `CENTAUR_CONSOLE_DB_PORT`,
 `CENTAUR_CONSOLE_DB_USERNAME`, and `CENTAUR_CONSOLE_DB_PASSWORD`, then set
-`CENTAUR_CONSOLE_MANAGE_PARADEDB=false` so `just dev` does not start Docker. The
-server must have `pg_search` installed and available to the Console database.
+`CENTAUR_CONSOLE_MANAGE_POSTGRES=false` so `just dev` does not start Docker.
 
 ## Environment Variables
 
 All of the console's environment variables use the `CENTAUR_CONSOLE_` prefix. For backwards compatibility, every variable also resolves from the legacy `IRON_CONTROL_` name when the `CENTAUR_CONSOLE_` one is unset, so existing deployments keep working until they migrate. The `CENTAUR_CONSOLE_` name wins when both are set.
 
-The Threads tab reads api-rs session rows from the Centaur API database. Set
-`CENTAUR_CONSOLE_CENTAUR_DATABASE_URL` to that database URL when it differs from
-the console's primary database. In the Helm chart this is sourced from the
-shared `DATABASE_URL` secret key.
-
 For local development, sign in through the normal login form at
 `http://localhost:3000/login` with the seeded initial user's
 `CENTAUR_CONSOLE_INITIAL_USER_EMAIL` / `CENTAUR_CONSOLE_INITIAL_USER_PASSWORD`
 credentials, the same as every other environment.
-
-To build the Threads UX against production-shaped data without connecting the
-Console to production, create a bounded local snapshot:
-
-```bash
-export CENTAUR_PROD_DATABASE_URL=postgresql://readonly:...@.../ai_v2
-scripts/mirror-prod-threads-snapshot.sh all
-```
-
-The script exports recent `sessions`, `session_messages`,
-`session_executions`, terminal `session_events` plus reasoning
-`session.output.line` events (capped by `THINKING_EVENT_LIMIT_PER_THREAD`,
-default 200 per thread), and referenced `slack_sync_users` rows with the source
-connection forced read-only, then imports them into the local `ai_v2` database
-used by the Console dev container. The Console never writes directly to those
-session tables; starting and continuing accessible chats goes through api-rs.
-
-Threads extras beyond the Slack surface:
-
-- Thinking traces: reasoning items the harness streamed over stdout are
-  persisted by api-rs as `session.output.line` events; the transcript renders
-  each completed reasoning block as a collapsed "Thinking" disclosure.
-- Split view: Cmd/Ctrl-click a sidebar thread to open it alongside the current
-  one, up to four threads in a grid. The `thread` param carries the open keys
-  comma-separated (`?thread=<primary>,<key2>,<key3>,<key4>`), primary first.
-  All keys resolve through the same owner scope as a single thread, and each
-  panel has a close control.
 
 ## First Boot
 
@@ -106,9 +73,9 @@ Behavior:
 
 When deploying to Kubernetes, source these values from a `Secret`, not from a `ConfigMap`.
 
-## Google And Slack Authentication
+## Google, Slack, And Okta Authentication
 
-The operator console always supports email and password sign-in. To add Google or Slack SSO buttons to the login page, configure an OAuth/OIDC client with the provider and set the matching client credentials in the environment. A provider is shown only when both its client ID and client secret are present.
+The operator console supports email and password sign-in by default. To add Google, Slack, or Okta SSO buttons to the login page, configure an OAuth/OIDC client with the provider and set the matching client credentials in the environment. Okta also requires its issuer URL. A provider is shown only when all of its required settings are present.
 
 | Variable                              | Required | Description                                                                                 |
 | ------------------------------------- | -------- | ------------------------------------------------------------------------------------------- |
@@ -117,17 +84,23 @@ The operator console always supports email and password sign-in. To add Google o
 | `CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET`   | for Google | Google OAuth client secret for console login.                                                |
 | `CENTAUR_CONSOLE_SLACK_CLIENT_ID`        | for Slack | Slack OpenID Connect client ID for console login.                                            |
 | `CENTAUR_CONSOLE_SLACK_CLIENT_SECRET`    | for Slack | Slack OpenID Connect client secret for console login.                                        |
+| `CENTAUR_CONSOLE_OKTA_ISSUER`            | for Okta  | Okta OIDC issuer URL, such as `https://id.example.com` or a custom authorization-server issuer. |
+| `CENTAUR_CONSOLE_OKTA_CLIENT_ID`         | for Okta  | Okta OIDC web application client ID for console login.                                       |
+| `CENTAUR_CONSOLE_OKTA_CLIENT_SECRET`     | for Okta  | Okta OIDC web application client secret for console login.                                   |
+| `CENTAUR_CONSOLE_OKTA_TOKEN_ENDPOINT_AUTH_METHOD` | no | Okta token-endpoint client authentication method. Must match the app registration: `client_secret_basic` (default) or `client_secret_post`. |
 | `CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS`      | recommended for public exposure | Comma- or whitespace-separated domain allowlist for SSO users, for example `acme.com example.org`. Empty allows any IdP-authenticated email. |
 | `CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED` | no       | Set to `false` to disable email and password sign-in. Defaults to enabled.                    |
-| `CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED` | no | Set to `true` to let every authenticated Console user browse public Slack channel conversations. Requires the Slack ETL channel catalog; access fails closed when it is unavailable. Private channels and DMs remain owner-only. Defaults to disabled. |
 | `CENTAUR_CONSOLE_BOOTSTRAP_ADMINS`       | no       | Comma- or whitespace-separated email allowlist. Matching users become active admins on first SSO login. Other accepted SSO users become active non-admin operators and land on the console directly. |
 
 Register these callback URLs with the provider:
 
 - Google: `<CENTAUR_CONSOLE_PUBLIC_URL>/auth/google/callback`
 - Slack: `<CENTAUR_CONSOLE_PUBLIC_URL>/auth/slack/callback`
+- Okta: `<CENTAUR_CONSOLE_PUBLIC_URL>/auth/okta/callback`
 
-Both providers request the `openid`, `email`, and `profile` scopes. Client credentials may also be stored in Rails credentials under `console_auth.<provider>.client_id` and `console_auth.<provider>.client_secret`, but environment variables take precedence.
+The Okta application must use the authorization-code flow with PKCE and the RS256 ID-token signing algorithm; request the `openid`, `email`, and `profile` scopes. The Console discovers the authorization, token, UserInfo, and JWKS endpoints from the issuer. It verifies each ID token's signature, issuer, audience, expiry, issued-at time, and nonce, then requires UserInfo to return the same subject and a verified email before signing a user in.
+
+All three providers request the `openid`, `email`, and `profile` scopes. Client credentials may also be stored in Rails credentials under `console_auth.<provider>.client_id` and `console_auth.<provider>.client_secret`, but environment variables take precedence. Okta's issuer and token-endpoint authentication method may likewise be stored at `console_auth.okta.issuer` and `console_auth.okta.token_endpoint_auth_method`.
 
 Google OAuth consent apps for broker credentials are configured separately in the console under **OAuth Apps**. Those app callbacks use `/oauth/<slug>/callback` and currently support Google only; Slack support here applies to operator console sign-in.
 
@@ -137,6 +110,13 @@ Google Docs metadata and document-content ETL is disabled by default. Set
 `CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED=true` to enable the recurring poller
 and queued Google Docs sync jobs. This switch does not affect Google OAuth,
 credential refresh, or previously indexed content.
+
+## Company Context v1 Sync
+
+`CENTAUR_CONSOLE_COMPANY_CONTEXT_V1_ENABLED=false` stops the Slack DM, Google
+Docs, and Granola sync jobs, including jobs already queued, without deleting
+synced data. It defaults to enabled; Google Docs sync also still requires
+`CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED`.
 
 ## Encryption Keys
 

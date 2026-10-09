@@ -12,20 +12,20 @@ module Console
     test "a non-admin cannot descope" do
       sign_in users(:member_user)
       post console_descope_url
-      assert_redirected_to console_threads_path
+      assert_redirected_to console_integrations_path
       assert_nil flash[:alert]
     end
 
     test "a descoped admin loses admin pages and chrome, and sees the banner" do
       sign_in users(:acme_admin)
       post console_descope_url
-      assert_redirected_to console_threads_path
+      assert_redirected_to console_integrations_path
 
       get console_users_url
-      assert_redirected_to console_threads_path
+      assert_redirected_to console_integrations_path
       assert_nil flash[:alert]
 
-      get console_threads_url
+      get console_integrations_url
       assert_response :ok
       assert_select ".console-descope-banner", /Admin permissions paused/
       assert_select ".console-nav-link", text: "Control", count: 0
@@ -52,7 +52,7 @@ module Console
       post console_descope_url
 
       admin.update!(admin: false)
-      get console_threads_url
+      get console_integrations_url
       assert_response :ok
       assert_select ".console-descope-banner", count: 0
     end
@@ -65,11 +65,11 @@ module Console
 
     test "the account menu offers descope only to acting admins" do
       sign_in users(:acme_admin)
-      get console_threads_url
+      get console_integrations_url
       assert_select ".console-signout-label", text: "View as operator"
 
       sign_in users(:member_user)
-      get console_threads_url
+      get console_integrations_url
       assert_select ".console-signout-label", text: "View as operator", count: 0
     end
   end

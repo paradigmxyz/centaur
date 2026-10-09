@@ -22,7 +22,7 @@ describe('parseChannelDefaults', () => {
     )
     expect(parsed).toEqual({
       // `claude` -> wire harness, `opus` -> full model id.
-      C0ENG: { harnessType: 'claudecode', model: 'claude-opus-4-8', reasoning: 'high' },
+      C0ENG: { harnessType: 'claudecode', model: 'claude-opus-5-5', reasoning: 'high' },
       C0TRIAGE: { harnessType: 'codex', reasoning: 'low' },
       // A provider shortcut implies its harness, mirroring `--bedrock`.
       C0BEDROCK: { harnessType: 'codex', model: 'gpt-5.2', provider: 'amazon-bedrock' }
@@ -33,6 +33,22 @@ describe('parseChannelDefaults', () => {
     expect(parseChannelDefaults(JSON.stringify({ C0TRIAGE: { reasoning: 'low' } }))).toEqual({
       C0TRIAGE: { reasoning: 'low' }
     })
+  })
+
+  test('accepts a persona alone and reports an invalid persona id', () => {
+    const reasons: string[] = []
+    const parsed = parseChannelDefaults(
+      JSON.stringify({
+        C0INVEST: { persona: ' invest ' },
+        C0BAD: { persona: 'not a persona', harness: 'codex' }
+      }),
+      reason => reasons.push(reason)
+    )
+    expect(parsed).toEqual({
+      C0INVEST: { personaId: 'invest' },
+      C0BAD: { harnessType: 'codex' }
+    })
+    expect(reasons.some(r => r.includes('C0BAD') && r.includes('invalid persona'))).toBe(true)
   })
 
   test('expands a model alias but leaves the harness to the explicit field', () => {
@@ -47,7 +63,7 @@ describe('parseChannelDefaults', () => {
         })
       )
     ).toEqual({
-      C0A: { model: 'claude-opus-4-8' },
+      C0A: { model: 'claude-opus-5-5' },
       C0B: { model: 'gpt-5.2' }
     })
   })

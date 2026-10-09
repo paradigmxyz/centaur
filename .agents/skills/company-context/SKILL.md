@@ -13,7 +13,13 @@ For aggregation, grouping, joins, or fields that the search surface does not exp
 company_context query "SELECT source, count(*) FROM company_context_documents GROUP BY source" --limit 100 --json
 ```
 
-Use one row-returning query. The command runs it inside a read-only transaction with a bounded timeout, so writes and multiple statements are rejected.
+Use one row-returning query. The command runs it inside a read-only transaction with a bounded timeout, so writes and multiple statements are rejected. For exact or not-yet-projected Slack results, query `company_context_slack_messages` and `company_context_slack_users`. These security-invoker views expose normalized fields while preserving channel RLS; users are limited to authors visible through that scope, and raw payloads remain inaccessible. Bound message queries by channel and/or time when possible:
+
+```bash
+company_context query "SELECT m.occurred_at, u.display_name, m.text, m.permalink FROM company_context_slack_messages m LEFT JOIN company_context_slack_users u ON u.user_id = m.user_id WHERE m.channel_id = 'CHANNEL_ID' AND m.occurred_at >= now() - interval '7 days' ORDER BY m.occurred_at DESC" --limit 100 --json
+```
+
+When the company-context service is deployed, the preview `company_context v2 search` and `company_context v2 read DOCUMENT_ID` commands query its API, which returns only documents visible to the requester: Slack channel days and files, Google Docs and PDFs, and Granola notes. Narrow searches with repeatable `--type` (`slack_message`, `slack_file`, `drive_doc`, `granola_note`), `--channel-id`, and `--file-id`, and with RFC 3339 `--after`/`--before`; `--limit` is at most 50 and there is no pagination. The commands report an error when `COMPANY_CONTEXT_API_URL` is unset, meaning the service is not deployed.
 
 ## Default Workflow
 

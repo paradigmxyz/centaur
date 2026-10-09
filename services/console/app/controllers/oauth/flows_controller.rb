@@ -34,6 +34,7 @@ module Oauth
     class_attribute :identity_http_client_factory, default: -> { HttpClient.new }
 
     before_action :set_app
+    before_action -> { require_admin if @app.shared? }
 
     # GET /oauth/:slug/start?scopes=
     def start
@@ -97,7 +98,7 @@ module Oauth
       # Back to the Integrations page the user started from; failures below
       # still render the standalone result page, which offers a retry link.
       connected_as = " as #{identity[:email]}" if identity[:email].present?
-      redirect_to console_integrations_path, notice: "#{@app.slug} connected#{connected_as}."
+      redirect_to(@app.shared? ? console_oauth_app_path(@app.oid) : console_integrations_path, notice: "#{@app.slug} connected#{connected_as}.")
     rescue Broker::ExchangeError => e
       render_result(:error, message: "Connecting the integration failed (#{e.reason}).")
     rescue ActiveRecord::RecordInvalid => e
@@ -160,8 +161,15 @@ module Oauth
         code: code.to_s,
         redirect_uri: oauth_callback_redirect_uri(@app.slug),
         code_verifier: code_verifier.to_s,
-        require_refresh_token: provider_requires_refresh_token?
+        require_refresh_token: provider_requires_refresh_token?,
+        client_auth_method: provider_token_endpoint_auth_method
       )
+    end
+
+    def provider_token_endpoint_auth_method
+      return @provider.token_endpoint_auth_method if @provider.respond_to?(:token_endpoint_auth_method)
+
+      "client_secret_post"
     end
 
     # Upserts one credential per (app, provider account). A new record gets its
@@ -171,6 +179,13 @@ module Oauth
     # credential.
     def upsert_credential(state, result, identity)
       BrokerCredential.transaction do
+        if @app.shared?
+          @app.lock!
+          existing = @app.broker_credentials.first
+          if existing && existing.provider_subject != identity[:subject]
+            raise Broker::ExchangeError.new("Reconnect the same shared account", stage: "oauth", code: "account_mismatch")
+          end
+        end
         credential = BrokerCredential.find_or_initialize_by(oauth_app: @app, provider_subject: identity[:subject])
         # Remember which user connected this account. The Integrations page
         # matches on it, so the card flips to "Connected" even when the provider
@@ -178,7 +193,7 @@ module Oauth
         # overwritten: the first linked user keeps the credential.
         credential.created_by ||= current_user
         if credential.new_record?
-          credential.foreign_id = "#{@app.provider}-#{@app.slug}-#{identity[:subject].downcase}"
+          credential.foreign_id = "#{@app.provider}-#{@app.slug}-#{foreign_id_subject(identity[:subject])}"
           credential.name = "#{@provider.display_name} – #{identity_display_name(identity)}"
           credential.token_endpoint = @provider.token_endpoint
           credential.external_user_key = SecureRandom.urlsafe_base64(16)
@@ -240,6 +255,12 @@ module Oauth
       labels.merge("slack_team_id" => identity[:team_id])
     end
 
+    def foreign_id_subject(subject)
+      return @provider.foreign_id_subject(subject) if @provider.respond_to?(:foreign_id_subject)
+
+      subject.to_s.downcase
+    end
+
     def identity_display_name(identity)
       identity[:name].presence || identity[:email].presence || identity[:subject]
     end
@@ -273,9 +294,12 @@ module Oauth
       secret.assign_attributes(wrapping_secret_config) if secret.kind == CredentialProfiles::Registry::CUSTOM_KIND
       secret.source = SecretSource.new(source_type: "token_broker", config: { "credential_id" => credential.oid })
       rules = if secret.kind == CredentialProfiles::Registry::CUSTOM_KIND
-        Array(@provider.api_hosts).each_with_index.map do |host, position|
-          RequestRule.new(host: host, http_methods: [], paths: [], position: position)
+        attributes = if @provider.respond_to?(:credential_request_rules)
+          @provider.credential_request_rules
+        else
+          Array(@provider.api_hosts).map { |host| { host: host, http_methods: [], paths: [] } }
         end
+        attributes.each_with_index.map { |rule, position| RequestRule.new(rule.merge(position: position)) }
       else
         []
       end

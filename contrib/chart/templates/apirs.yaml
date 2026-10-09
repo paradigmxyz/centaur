@@ -70,10 +70,12 @@
 {{- $apiRsMetricsAnnotations = mergeOverwrite $apiRsMetricsAnnotations (.Values.apiRs.metrics.annotations | default dict) -}}
 {{- end -}}
 {{- $apiRsEtl := .Values.apiRs.etl | default dict -}}
+{{- $companyContextV1Enabled := .Values.companyContextV1.enabled -}}
 {{- $companyContextEmbeddingsEnabled := dig "companyContextEmbeddings" "enabled" false $apiRsEtl -}}
 {{- $companyContextEmbeddingsModel := dig "companyContextEmbeddings" "model" "text-embedding-3-small" $apiRsEtl -}}
+{{- $companyContextEmbeddingsDimensions := dig "companyContextEmbeddings" "dimensions" 1536 $apiRsEtl -}}
 {{- $apiRsEtlEnv := list
-  (dict "name" "SLACK_ETL_ENABLED" "value" (dig "slack" "enabled" false $apiRsEtl))
+  (dict "name" "SLACK_ETL_ENABLED" "value" (and $companyContextV1Enabled (dig "slack" "enabled" false $apiRsEtl)))
   (dict "name" "SLACK_SYNC_INTERVAL_SECONDS" "value" (dig "slack" "syncIntervalSeconds" 3600 $apiRsEtl))
   (dict "name" "SLACK_SYNC_BACKFILL_LOOKBACK_DAYS" "value" (dig "slack" "syncBackfillLookbackDays" 30 $apiRsEtl))
   (dict "name" "SLACK_SYNC_THREAD_LOOKBACK_DAYS" "value" (dig "slack" "syncThreadLookbackDays" 3 $apiRsEtl))
@@ -85,7 +87,7 @@
   (dict "name" "SLACK_BACKFILL_INTERVAL_SECONDS" "value" (dig "slack" "backfill" "intervalSeconds" 600 $apiRsEtl))
   (dict "name" "SLACK_BACKFILL_CHANNEL_BATCH_LIMIT" "value" (dig "slack" "backfill" "channelBatchLimit" 50 $apiRsEtl))
   (dict "name" "SLACK_BACKFILL_CHANNEL_PAGES_PER_JOB" "value" (dig "slack" "backfill" "channelPagesPerJob" 5 $apiRsEtl))
-  (dict "name" "SLACK_RETENTION_ENABLED" "value" (dig "slack" "retention" "enabled" true $apiRsEtl))
+  (dict "name" "SLACK_RETENTION_ENABLED" "value" (and $companyContextV1Enabled (dig "slack" "retention" "enabled" true $apiRsEtl)))
   (dict "name" "SLACK_RETENTION_INTERVAL_MINUTES" "value" (dig "slack" "retention" "intervalMinutes" 60 $apiRsEtl))
   (dict "name" "SLACK_ETL_RETENTION_DAYS" "value" (dig "slack" "retention" "etlDays" 0 $apiRsEtl))
   (dict "name" "SLACK_DM_RETENTION_DAYS" "value" (dig "slack" "retention" "dmDays" 0 $apiRsEtl))
@@ -104,6 +106,7 @@
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_BATCH_SIZE" "value" (dig "companyContextEmbeddings" "batchSize" 250 $apiRsEtl))
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MAX_INPUT_CHARS" "value" (dig "companyContextEmbeddings" "maxInputChars" 8192 $apiRsEtl))
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MODEL" "value" $companyContextEmbeddingsModel)
+  (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS" "value" $companyContextEmbeddingsDimensions)
 -}}
 {{- $apiRsEtlPassthroughNames := list -}}
 {{- range $env := $apiRsEtlEnv -}}
@@ -210,6 +213,7 @@ spec:
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
       {{- end }}
+{{- include "centaur.podScheduling" (dict "values" .Values.apiRs "indent" 6) }}
       containers:
         - name: api-rs
           image: {{ printf "%s:%s" .Values.apiRs.image.repository .Values.apiRs.image.tag | quote }}
@@ -258,6 +262,18 @@ spec:
 {{- end }}
             - name: RUN_MIGRATIONS
               value: {{ .Values.apiRs.runMigrations | quote }}
+{{- if not (hasKey .Values.apiRs.extraEnv "DATABASE_TEXT_SEARCH") }}
+            - name: DATABASE_TEXT_SEARCH
+              value: {{ ternary "paradedb" (default "postgres" .Values.externalDatabase.textSearch) .Values.postgres.enabled | quote }}
+{{- end }}
+{{- if not (hasKey .Values.apiRs.extraEnv "CENTAUR_SESSION_PRINCIPAL_ADMISSION") }}
+            - name: CENTAUR_SESSION_PRINCIPAL_ADMISSION
+              value: {{ .Values.apiRs.sessionPrincipalAdmission | quote }}
+{{- end }}
+{{- if not (hasKey .Values.apiRs.extraEnv "CENTAUR_MCP_V2_ENABLED") }}
+            - name: CENTAUR_MCP_V2_ENABLED
+              value: {{ .Values.apiRs.mcpV2Enabled | quote }}
+{{- end }}
             - name: IRON_CONTROL_SYNC_INFRA_SECRETS
               value: {{ .Values.apiRs.syncInfraSecrets | quote }}
             - name: RUST_LOG
@@ -305,10 +321,6 @@ spec:
             - name: CENTAUR_OVERLAY_DIR
               value: {{ .Values.overlay.mountPath | quote }}
 {{- end }}
-            - name: SESSION_SANDBOX_BACKEND
-              value: {{ .Values.apiRs.sandboxBackend | quote }}
-            - name: SESSION_SANDBOX_WORKLOAD
-              value: {{ .Values.apiRs.sandboxWorkload | quote }}
             # Default harness for warm sandboxes. Per-session sandboxes run
             # their session's harness regardless (pinned via container args).
             - name: SESSION_SANDBOX_HARNESS
@@ -321,12 +333,16 @@ spec:
               value: {{ .Values.apiRs.sandboxWarmPoolReplenishIntervalSecs | quote }}
             - name: SESSION_SANDBOX_RUNNING_LIMIT
               value: {{ .Values.apiRs.sandboxRunningLimit | quote }}
-            - name: SESSION_SANDBOX_HOT_IDLE_GRACE_SECS
-              value: {{ .Values.apiRs.sandboxHotIdleGraceSecs | quote }}
             - name: SESSION_SANDBOX_MAX_LIFETIME_SECS
               value: {{ .Values.apiRs.sandboxMaxLifetimeSecs | quote }}
             - name: SESSION_SANDBOX_REAP_INTERVAL_SECS
               value: {{ .Values.apiRs.sandboxReapIntervalSecs | quote }}
+            - name: SESSION_EVENTS_RETENTION_DAYS
+              value: {{ .Values.apiRs.sessionEventsRetentionDays | default 0 | quote }}
+            - name: SESSION_EVENTS_RETENTION_SWEEP_INTERVAL_SECS
+              value: {{ .Values.apiRs.sessionEventsRetentionSweepIntervalSecs | quote }}
+            - name: SESSION_SANDBOX_ORPHAN_SWEEP_GRACE_SECS
+              value: {{ .Values.apiRs.sandboxOrphanSweepGraceSecs | quote }}
             - name: SESSION_SANDBOX_CLEANUP_INTERVAL_SECS
               value: {{ .Values.apiRs.sandboxCleanupIntervalSecs | quote }}
             - name: SESSION_SANDBOX_IDLE_CLEANUP_BACKSTOP_SECS
@@ -346,6 +362,8 @@ spec:
               value: {{ .Values.apiRs.activitySummary.maxFacts | quote }}
             - name: SESSION_ACTIVITY_SUMMARY_MAX_OUTPUT_TOKENS
               value: {{ .Values.apiRs.activitySummary.maxOutputTokens | quote }}
+            - name: SESSION_ACTIVITY_SUMMARY_REASONING_EFFORT
+              value: {{ .Values.apiRs.activitySummary.reasoningEffort | default "" | quote }}
 {{- end }}
             - name: SESSION_SANDBOX_K8S_NAMESPACE
               value: {{ .Release.Namespace | quote }}
@@ -353,6 +371,18 @@ spec:
               value: {{ printf "%s:%s" .Values.sandbox.image.repository .Values.sandbox.image.tag | quote }}
             - name: SESSION_SANDBOX_IMAGE_PULL_POLICY
               value: {{ .Values.sandbox.image.pullPolicy | quote }}
+{{- if .Values.sandbox.stateVolume.enabled }}
+            - name: SESSION_SANDBOX_STATE_VOLUME_ENABLED
+              value: "true"
+{{- if and .Values.sandbox.stateVolume.size (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_STATE_VOLUME_SIZE")) }}
+            - name: SESSION_SANDBOX_STATE_VOLUME_SIZE
+              value: {{ .Values.sandbox.stateVolume.size | quote }}
+{{- end }}
+{{- if and .Values.sandbox.stateVolume.storageClassName (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_STATE_VOLUME_STORAGE_CLASS_NAME")) }}
+            - name: SESSION_SANDBOX_STATE_VOLUME_STORAGE_CLASS_NAME
+              value: {{ .Values.sandbox.stateVolume.storageClassName | quote }}
+{{- end }}
+{{- end }}
 {{- if and .Values.sandbox.resources (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_RESOURCES")) }}
             - name: SESSION_SANDBOX_RESOURCES
               value: {{ toJson .Values.sandbox.resources | quote }}
@@ -367,6 +397,10 @@ spec:
 {{- if and .Values.sandbox.nodeSelector (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_NODE_SELECTOR")) }}
             - name: SESSION_SANDBOX_NODE_SELECTOR
               value: {{ toJson .Values.sandbox.nodeSelector | quote }}
+{{- end }}
+{{- if and .Values.sandbox.podAnnotations (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_POD_ANNOTATIONS")) }}
+            - name: SESSION_SANDBOX_POD_ANNOTATIONS
+              value: {{ toJson .Values.sandbox.podAnnotations | quote }}
 {{- end }}
 {{- if and .Values.sandbox.tolerations (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_TOLERATIONS")) }}
             - name: SESSION_SANDBOX_TOLERATIONS
@@ -401,6 +435,14 @@ spec:
               value: {{ .Values.ironProxy.image.pullPolicy | quote }}
             - name: KUBERNETES_IRON_PROXY_UPSTREAM_DENY_CIDRS
               value: {{ join "," .Values.ironProxy.upstreamDenyCidrs | quote }}
+{{- if and (not .Values.postgres.enabled) .Values.externalDatabase.cidrs }}
+            # Per-sandbox iron-proxies forward the tool-server sidecar's pool to
+            # the core database; allow them to reach the external database.
+            - name: KUBERNETES_IRON_PROXY_DATABASE_CIDRS
+              value: {{ join "," .Values.externalDatabase.cidrs | quote }}
+            - name: KUBERNETES_IRON_PROXY_DATABASE_PORT
+              value: {{ .Values.externalDatabase.port | quote }}
+{{- end }}
 {{- if and .Values.ironProxy.resources (not (hasKey .Values.apiRs.extraEnv "KUBERNETES_IRON_PROXY_RESOURCES")) }}
             - name: KUBERNETES_IRON_PROXY_RESOURCES
               value: {{ toJson .Values.ironProxy.resources | quote }}
@@ -409,6 +451,10 @@ spec:
               value: {{ include "centaur.trustedCaSecretName" . | quote }}
             - name: KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME
               value: {{ include "centaur.trustedCaKeySecretName" . | quote }}
+            - name: KUBERNETES_FIREWALL_CA_SECRET_KEY
+              value: {{ .Values.firewall.existingCaSecretKey | default "ca-cert.pem" | quote }}
+            - name: KUBERNETES_FIREWALL_CA_KEY_SECRET_KEY
+              value: {{ .Values.firewall.existingCaKeySecretKey | default "ca-key.pem" | quote }}
             - name: KUBERNETES_SECRET_ENV_NAME
               value: {{ include "centaur.secretEnvName" . | quote }}
 {{- if .Values.secrets.bootstrapSecretName }}
@@ -419,6 +465,15 @@ spec:
             # plane's pods (callback + postgres-listener access).
             - name: KUBERNETES_API_POD_LABEL_SELECTOR
               value: {{ printf "app.kubernetes.io/name=%s,app.kubernetes.io/instance=%s,app.kubernetes.io/component=api-rs" (include "centaur.name" .) .Release.Name | quote }}
+            - name: KUBERNETES_IRON_PROXY_SYNC_POD_LABEL_SELECTOR
+              value: {{ printf "app.kubernetes.io/name=%s,app.kubernetes.io/instance=%s,app.kubernetes.io/component=proxy-sync" (include "centaur.name" .) .Release.Name | quote }}
+{{- if .Values.experimentalCompanyContext.enabled }}
+            # Sandboxes call the company-context query API through their proxy.
+            - name: KUBERNETES_IRON_PROXY_COMPANY_CONTEXT_URL
+              value: {{ printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "company-context")) .Values.experimentalCompanyContext.port | quote }}
+            - name: KUBERNETES_IRON_PROXY_COMPANY_CONTEXT_POD_LABEL_SELECTOR
+              value: {{ printf "app.kubernetes.io/name=%s,app.kubernetes.io/instance=%s,app.kubernetes.io/component=company-context" (include "centaur.name" .) .Release.Name | quote }}
+{{- end }}
             - name: FIREWALL_MANAGER_SECRET_SOURCE
               value: {{ .Values.ironProxy.secretSource | quote }}
             - name: FIREWALL_MANAGER_SECRET_TTL
@@ -463,6 +518,13 @@ spec:
 {{- if not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_EMBEDDINGS_MODEL") }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MODEL" "value" $companyContextEmbeddingsModel) }}
 {{- end }}
+{{- if not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS") }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS" "value" ($companyContextEmbeddingsDimensions | toString)) }}
+{{- end }}
+{{- if and .Values.experimentalCompanyContext.enabled (not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_API_URL")) }}
+{{- /* The company_context tool's v2 commands call this query API through the proxy. */}}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "COMPANY_CONTEXT_API_URL" "value" (printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "company-context")) .Values.experimentalCompanyContext.port)) }}
+{{- end }}
 {{- if .Values.codex.customProviders }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CODEX_CUSTOM_PROVIDERS" "value" (.Values.codex.customProviders | toJson)) }}
 {{- end }}
@@ -482,10 +544,12 @@ spec:
             - name: SESSION_SANDBOX_EXTRA_ENV
               value: {{ $sandboxEnvList | toJson | quote }}
 {{- end }}
-            # console control plane: principals/roles/grants + per-sandbox
-            # proxy sync.
+            # console control plane: principals/roles/grants. Per-sandbox
+            # proxies sync their config from proxy-sync.
             - name: IRON_CONTROL_URL
               value: {{ include "centaur.consoleUrl" . | quote }}
+            - name: IRON_CONTROL_PROXY_SYNC_URL
+              value: {{ include "centaur.proxySyncUrl" . | quote }}
             - name: IRON_CONTROL_API_KEY
               valueFrom:
                 secretKeyRef:

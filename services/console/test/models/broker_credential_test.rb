@@ -47,6 +47,15 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert build_credential.valid?
   end
 
+  test "foreign_id cannot be changed once set" do
+    credential = create_credential
+    original_foreign_id = credential.foreign_id
+
+    assert_not credential.update(foreign_id: "renamed-#{SecureRandom.hex(4)}")
+    assert_includes credential.errors[:foreign_id], "cannot be changed once set"
+    assert_equal original_foreign_id, credential.reload.foreign_id
+  end
+
   test "at most one wrapping static secret per credential" do
     cred = create_credential
     StaticSecret.create!(name: "wrapper", broker_credential: cred,
@@ -161,6 +170,40 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     bc = create_credential(client_id: nil, client_secret: nil, oauth_app: app,
                            provider_subject: "U123", created_by: nil, refresh_token: "rt",
                            scopes: %w[chat:write openid])
+    bc.refresh_client = client
+    bc.refresh!
+    client.verify
+  end
+
+  test "refresh uses HTTP Basic authentication when required by the provider" do
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result) do |request|
+      assert_equal "Basic YXBwLWNpZDphcHAtc2VjcmV0", request[:headers]["Authorization"]
+      assert_nil request[:form]["client_id"]
+      assert_nil request[:form]["client_secret"]
+      refute request[:form].key?("scope")
+    end
+    app = build_app(provider: "zoom", client_id: "app-cid", client_secret: "app-secret",
+                    allowed_scopes: %w[meeting:write])
+    bc = create_credential(client_id: nil, client_secret: nil, oauth_app: app,
+                           provider_subject: "zoom-user", created_by: nil, refresh_token: "rt",
+                           scopes: %w[meeting:write])
+    bc.refresh_client = client
+    bc.refresh!
+    client.verify
+  end
+
+  test "refresh percent-encodes HTTP Basic client credentials" do
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result) do |request|
+      expected = Base64.strict_encode64("app%3Aid:secret%2Bvalue")
+      assert_equal "Basic #{expected}", request[:headers]["Authorization"]
+    end
+    app = build_app(provider: "zoom", client_id: "app:id", client_secret: "secret+value",
+                    allowed_scopes: %w[meeting:write])
+    bc = create_credential(client_id: nil, client_secret: nil, oauth_app: app,
+                           provider_subject: "zoom-user-special", created_by: nil,
+                           refresh_token: "rt")
     bc.refresh_client = client
     bc.refresh!
     client.verify

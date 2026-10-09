@@ -327,7 +327,7 @@ module Api
         body = {
           data: {
             database: existing.database,
-            role: "centaur_readonly",
+            role: "analytics_reader",
             dsn: { source_type: "env", config: { var: "SHARED_DATABASE_DSN" } }
           }
         }

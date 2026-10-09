@@ -234,6 +234,15 @@ export class CodexAppServerRendererEventMapper
       this.emitActivitySummary(out)
     }
 
+    const backgroundAgent = backgroundAgentEvent(event)
+    if (backgroundAgent) {
+      const existing = this.state.taskByUseId.get(String(backgroundAgent.id))
+      const task = backgroundAgentTask(backgroundAgent, String(event?.type ?? ''))
+      const merged = mergeTask(existing, task)
+      this.state.taskByUseId.set(merged.id, merged)
+      this.emitActivitySummary(out)
+    }
+
     const outputDelta = commandOutputDelta(event)
     if (outputDelta && this.includeTaskOutput) {
       const current = this.state.commandOutputById.get(outputDelta.id) ?? ''
@@ -950,6 +959,32 @@ function fileChangeEvent(event: any): Record<string, any> | null {
   const item = event.item
   if (!item || (item.type !== 'fileChange' && item.type !== 'file_change')) return null
   return item
+}
+
+// Claude Code background subagents, projected by harness-server as
+// `BackgroundAgent` dynamic tool items that stay in progress until the agent
+// reports back.
+function backgroundAgentEvent(event: any): Record<string, any> | null {
+  if (event?.type !== 'item.started' && event?.type !== 'item.completed') return null
+  const item = event.item
+  if (item?.type !== 'dynamicToolCall' || item.tool !== 'BackgroundAgent') return null
+  return item
+}
+
+function backgroundAgentTask(item: any, eventType: string): HarnessTask {
+  const description = String(item.arguments?.description ?? '').trim()
+  const summary = (Array.isArray(item.contentItems) ? item.contentItems : [])
+    .map((part: any) => String(part?.text ?? ''))
+    .join('\n')
+    .trim()
+  const failed = item.status === 'failed' || item.success === false
+  return {
+    id: String(item.id),
+    title: description ? `Agent: ${oneLine(description)}` : 'Agent',
+    status: failed ? 'error' : itemStatus(item, eventType),
+    details: [],
+    output: summary ? [section([text(oneLine(summary, 220))])] : []
+  }
 }
 
 function structuredPlanUpdate(event: any): Array<{ step: string; status?: string }> | null {

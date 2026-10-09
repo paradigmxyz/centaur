@@ -199,6 +199,79 @@ fn fake_claude_trailing_result_settles_the_turn_and_does_not_poison_the_next() {
 }
 
 #[test]
+fn fake_claude_background_agent_follow_up_completes_the_turn() {
+    // Claude Code ends the launching turn with its own `result`, then runs a
+    // follow-up turn once the background agent notifies (here after 3s, longer
+    // than the settle window). The follow-up's answer belongs to this turn.
+    let fake_claude = concat!(
+        "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}'; ",
+        "IFS= read -r _; ",
+        "printf '%s\\n' ",
+        "'{\"type\":\"system\",\"subtype\":\"task_started\",\"task_id\":\"a1\",\"description\":\"Research\",\"is_backgrounded\":true,\"task_type\":\"local_agent\"}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"content\":[]}}}' ",
+        "'{\"type\":\"assistant\",\"message\":{\"id\":\"msg_1\",\"content\":[{\"type\":\"text\",\"text\":\"Started research.\"}]}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}}' ",
+        "'{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"Started research.\"}'; ",
+        "sleep 3; printf '%s\\n' ",
+        "'{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"a1\",\"status\":\"completed\",\"summary\":\"found it\"}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"id\":\"msg_2\",\"content\":[]}}}' ",
+        "'{\"type\":\"assistant\",\"message\":{\"id\":\"msg_2\",\"content\":[{\"type\":\"text\",\"text\":\"The answer.\"}]}}' ",
+        "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}}' ",
+        "'{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"The answer.\"}'; ",
+        "sleep 60"
+    );
+
+    let run = run_bridge_turn(BridgeTurnConfig {
+        harness: Harness::ClaudeCode,
+        command_override: Some(fake_claude.to_string()),
+        prompt: "research".to_string(),
+        timeout: Duration::from_secs(15),
+    });
+
+    assert_completed_turn(&run.turn);
+    assert_eq!(run.turn.text_from_deltas, "Started research.The answer.");
+    assert_codex_v2_turn(&run.turn);
+}
+
+#[test]
+fn fake_claude_turn_ending_with_live_background_agent_does_not_poison_the_next() {
+    // An error result ends the turn while a background agent still runs. Its
+    // later follow-up must not be read as the next turn's answer: the process
+    // is stopped and the next turn resumes in a fresh one.
+    let marker = temp_path("fake-claude-respawned");
+    let fake_claude = format!(
+        concat!(
+            "printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}}'; ",
+            "IFS= read -r _; ",
+            "if [ -e {marker} ]; then printf '%s\\n' ",
+            "'{{\"type\":\"assistant\",\"is_partial\":false,\"message\":{{\"id\":\"msg_3\",\"content\":[{{\"type\":\"text\",\"text\":\"second answer\"}}]}}}}' ",
+            "'{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"second answer\"}}'; sleep 60; fi; ",
+            "touch {marker}; printf '%s\\n' ",
+            "'{{\"type\":\"system\",\"subtype\":\"task_started\",\"task_id\":\"a1\",\"is_backgrounded\":true,\"task_type\":\"local_agent\"}}' ",
+            "'{{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true}}'; ",
+            "sleep 1; printf '%s\\n' ",
+            "'{{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"a1\",\"status\":\"completed\"}}' ",
+            "'{{\"type\":\"assistant\",\"is_partial\":false,\"message\":{{\"id\":\"msg_2\",\"content\":[{{\"type\":\"text\",\"text\":\"stale follow-up\"}}]}}}}' ",
+            "'{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"stale follow-up\"}}'; ",
+            "sleep 60"
+        ),
+        marker = shell_quote(&marker),
+    );
+
+    let run = run_bridge_two_turns(BridgeTwoTurnConfig {
+        harness: Harness::ClaudeCode,
+        command_override: Some(fake_claude),
+        first_prompt: "first".to_string(),
+        second_prompt: "second".to_string(),
+        timeout: Duration::from_secs(10),
+    });
+    let _ = std::fs::remove_file(&marker);
+
+    assert_completed_turn(&run.turns[1]);
+    assert_eq!(run.turns[1].text_from_deltas, "second answer");
+}
+
+#[test]
 fn fake_claude_subagent_sidechain_stop_does_not_complete_the_turn() {
     // A Task subagent's sidechain messages end with their own end_turn while
     // the parent turn keeps running (here: 3s of quiet before the main chain
@@ -290,6 +363,13 @@ fn fake_codex_blocks_mode_uses_openrouter_provider_when_model_is_configured() {
             .and_then(Value::as_str),
         Some("openrouter")
     );
+    assert_eq!(
+        thread_start
+            .pointer("/params/model")
+            .and_then(Value::as_str),
+        Some("openrouter/auto"),
+        "the thread must start on the turn's model, not switch to it on the first turn"
+    );
     let turn_start = requests
         .iter()
         .find(|value| value.get("method").and_then(Value::as_str) == Some("turn/start"))
@@ -348,6 +428,13 @@ fn fake_codex_blocks_mode_uses_openrouter_provider_for_explicit_model_slug() {
             .and_then(Value::as_str),
         Some("openrouter")
     );
+    assert_eq!(
+        thread_start
+            .pointer("/params/model")
+            .and_then(Value::as_str),
+        Some("anthropic/claude-fable-5"),
+        "the thread must start on the turn's model, not switch to it on the first turn"
+    );
     let turn_start = requests
         .iter()
         .find(|value| value.get("method").and_then(Value::as_str) == Some("turn/start"))
@@ -355,6 +442,65 @@ fn fake_codex_blocks_mode_uses_openrouter_provider_for_explicit_model_slug() {
     assert_eq!(
         turn_start.pointer("/params/model").and_then(Value::as_str),
         Some("anthropic/claude-fable-5")
+    );
+
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(fake_codex_log);
+}
+
+#[test]
+fn fake_codex_blocks_mode_resumes_thread_on_the_configured_model() {
+    let fake_codex = temp_path("fake-resume-model-codex.sh");
+    let fake_codex_log = temp_path("fake-resume-model-codex-requests.jsonl");
+    let script = fake_codex_app_server_script(&fake_codex_log);
+    std::fs::write(&fake_codex, script).expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex)
+        .expect("fake codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
+        Harness::Codex,
+        None,
+        Some((
+            "CODEX_BIN",
+            fake_codex.to_str().expect("utf-8 fake codex path"),
+        )),
+        &[
+            ("CODEX_CONTINUE_THREAD_ID", "thread-1"),
+            ("CODEX_MODEL", "gpt-test-model"),
+        ],
+    );
+    let turn = bridge.run_blocks_user_turn("say resumed blocks", Duration::from_secs(10));
+    bridge.finish_successfully();
+
+    assert_completed_turn(&turn);
+    assert_codex_v2_turn(&turn);
+
+    let requests = std::fs::read_to_string(&fake_codex_log).expect("read fake codex request log");
+    let requests: Vec<Value> = requests
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("fake codex request JSON"))
+        .collect();
+    let thread_resume = requests
+        .iter()
+        .find(|value| value.get("method").and_then(Value::as_str) == Some("thread/resume"))
+        .unwrap_or_else(|| panic!("blocks mode did not send thread/resume; requests={requests:?}"));
+    assert_eq!(
+        thread_resume
+            .pointer("/params/model")
+            .and_then(Value::as_str),
+        Some("gpt-test-model"),
+        "the resumed thread must run on the turn's model, not switch to it on the first turn"
+    );
+    let turn_start = requests
+        .iter()
+        .find(|value| value.get("method").and_then(Value::as_str) == Some("turn/start"))
+        .unwrap_or_else(|| panic!("blocks mode did not send turn/start; requests={requests:?}"));
+    assert_eq!(
+        turn_start.pointer("/params/model").and_then(Value::as_str),
+        Some("gpt-test-model")
     );
 
     let _ = std::fs::remove_file(fake_codex);
@@ -481,6 +627,79 @@ fn fake_claude_blocks_mode_accepts_user_blocks_by_default() {
 }
 
 #[test]
+fn fake_claude_blocks_mode_applies_reasoning_effort_per_turn() {
+    // Claude Code outlives each turn, so the blocks `reasoning` field reaches it
+    // in-band as an `apply_flag_settings` control request ahead of the user
+    // message. A turn without reasoning restores the configured default once.
+    let stdin_log = temp_path("fake-claude-effort-stdin.jsonl");
+    let fake_claude = format!(
+        concat!(
+            "printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}}'; ",
+            "while IFS= read -r line; do ",
+            "printf '%s\\n' \"$line\" >> '{log}'; ",
+            "case \"$line\" in ",
+            "*'\"type\":\"control_request\"'*) ",
+            "printf '%s\\n' '{{\"type\":\"control_response\",\"response\":{{\"subtype\":\"success\"}}}}' ;; ",
+            "*) printf '%s\\n' ",
+            "'{{\"type\":\"assistant\",\"is_partial\":false,\"message\":{{\"id\":\"msg_1\",\"content\":[{{\"type\":\"text\",\"text\":\"effort\"}}]}}}}' ",
+            "'{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"effort\"}}' ;; ",
+            "esac; done"
+        ),
+        log = stdin_log.display()
+    );
+
+    let mut bridge =
+        BridgeProcess::spawn_harness_blocks(Harness::ClaudeCode, Some(fake_claude), None);
+    for (text, reasoning) in [
+        ("think hard", Some("MAX")),
+        ("default", None),
+        ("again", None),
+    ] {
+        let mut user_line = json!({
+            "type": "user",
+            "thread_key": "slack:C123:123.456",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": text}],
+            },
+        });
+        if let Some(reasoning) = reasoning {
+            user_line["reasoning"] = json!(reasoning);
+        }
+        let turn = bridge.run_blocks_user_line(user_line, Duration::from_secs(10));
+        assert_completed_turn(&turn);
+        assert_eq!(turn.text_from_deltas, "effort");
+    }
+    bridge.finish_successfully();
+
+    let stdin = std::fs::read_to_string(&stdin_log).expect("read fake claude stdin log");
+    let lines: Vec<Value> = stdin
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("fake claude stdin JSON"))
+        .collect();
+    let summary: Vec<Value> = lines
+        .iter()
+        .map(|line| match line["type"].as_str() {
+            Some("control_request") => line["request"].clone(),
+            _ => line["message"]["content"][0]["text"].clone(),
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": "max"}}),
+            json!("think hard"),
+            json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": null}}),
+            json!("default"),
+            json!("again"),
+        ],
+        "stdin={stdin}"
+    );
+
+    let _ = std::fs::remove_file(stdin_log);
+}
+
+#[test]
 fn fake_amp_blocks_mode_accepts_user_blocks_by_default() {
     let fake_amp = concat!(
         "printf '%s\\n' ",
@@ -598,6 +817,74 @@ fn fake_codex_blocks_mode_spawns_app_server_and_translates_user_blocks() {
 }
 
 #[test]
+fn fake_codex_blocks_mode_queues_active_turns_in_order() {
+    let fake_codex = temp_path("fake-queued-codex.sh");
+    let fake_codex_log = temp_path("fake-queued-codex-requests.jsonl");
+    let script = fake_codex_app_server_script(&fake_codex_log);
+    std::fs::write(&fake_codex, script).expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex)
+        .expect("fake codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
+        Harness::Codex,
+        None,
+        Some((
+            "CODEX_BIN",
+            fake_codex.to_str().expect("utf-8 fake codex path"),
+        )),
+        &[("FAKE_CODEX_TURN_DELAY", "0.2")],
+    );
+    for prompt in ["first queued turn", "second queued turn"] {
+        bridge.send(json!({
+            "type": "user",
+            "thread_key": "slack:C123:123.456",
+            "trace_metadata": {
+                "source": "slackbotv2",
+                "action": "execute"
+            },
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}],
+            },
+        }));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let first = bridge.read_blocks_turn(deadline);
+    let second = bridge.read_blocks_turn(deadline);
+    bridge.finish_successfully();
+
+    assert_completed_turn(&first);
+    assert_completed_turn(&second);
+
+    let requests = std::fs::read_to_string(&fake_codex_log).expect("read fake codex request log");
+    let turn_starts: Vec<Value> = requests
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("fake codex request JSON"))
+        .filter(|value: &Value| value.get("method").and_then(Value::as_str) == Some("turn/start"))
+        .collect();
+    assert_eq!(turn_starts.len(), 2, "both queued turns must execute");
+    assert_eq!(
+        turn_starts[0]
+            .pointer("/params/input/0/text")
+            .and_then(Value::as_str),
+        Some("first queued turn")
+    );
+    assert_eq!(
+        turn_starts[1]
+            .pointer("/params/input/0/text")
+            .and_then(Value::as_str),
+        Some("second queued turn")
+    );
+
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(fake_codex_log);
+}
+
+#[test]
 fn fake_codex_blocks_mode_interrupts_active_turn() {
     let fake_codex = temp_path("fake-interruptible-codex.sh");
     let fake_codex_log = temp_path("fake-interruptible-codex-requests.jsonl");
@@ -658,6 +945,75 @@ fn fake_codex_blocks_mode_interrupts_active_turn() {
     assert_eq!(
         interrupt.pointer("/params/turnId").and_then(Value::as_str),
         Some("turn-1")
+    );
+
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(fake_codex_log);
+}
+
+#[test]
+fn fake_codex_blocks_mode_steers_active_turn() {
+    let fake_codex = temp_path("fake-steerable-codex.sh");
+    let fake_codex_log = temp_path("fake-steerable-codex-requests.jsonl");
+    let script = fake_codex_app_server_script(&fake_codex_log);
+    std::fs::write(&fake_codex, script).expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex)
+        .expect("fake codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
+        Harness::Codex,
+        None,
+        Some((
+            "CODEX_BIN",
+            fake_codex.to_str().expect("utf-8 fake codex path"),
+        )),
+        &[("FAKE_CODEX_WAIT_FOR_STEER", "1")],
+    );
+    let turn = bridge.run_blocks_steered_turn(
+        "start a long turn",
+        "use this steering update",
+        Duration::from_secs(10),
+    );
+    bridge.finish_successfully();
+
+    assert_completed_turn(&turn);
+    assert_eq!(turn.text_from_deltas, "steered");
+
+    let requests = std::fs::read_to_string(&fake_codex_log).expect("read fake codex request log");
+    let requests: Vec<Value> = requests
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("fake codex request JSON"))
+        .collect();
+    let turn_starts = requests
+        .iter()
+        .filter(|value| value.get("method").and_then(Value::as_str) == Some("turn/start"))
+        .count();
+    let steers: Vec<&Value> = requests
+        .iter()
+        .filter(|value| value.get("method").and_then(Value::as_str) == Some("turn/steer"))
+        .collect();
+    assert_eq!(turn_starts, 1, "steering must not start a second turn");
+    assert_eq!(steers.len(), 1, "expected one native turn/steer request");
+    assert_eq!(
+        steers[0]
+            .pointer("/params/expectedTurnId")
+            .and_then(Value::as_str),
+        Some("turn-1")
+    );
+    assert_eq!(
+        steers[0]
+            .pointer("/params/input/0/text")
+            .and_then(Value::as_str),
+        Some("use this steering update")
+    );
+    assert_eq!(
+        steers[0]
+            .pointer("/params/clientUserMessageId")
+            .and_then(Value::as_str),
+        Some("steer-message-1")
     );
 
     let _ = std::fs::remove_file(fake_codex);
@@ -1275,6 +1631,8 @@ impl BridgeProcess {
             "CENTAUR_AMP_APP_BRIDGE_COMMAND",
             "CODEX_MODEL",
             "CODEX_MODEL_PROVIDER",
+            "FAKE_CODEX_TURN_DELAY",
+            "FAKE_CODEX_WAIT_FOR_STEER",
             "OPENROUTER_MODEL",
         ] {
             command.env_remove(env_key);
@@ -1678,8 +2036,10 @@ impl BridgeProcess {
 
     fn run_blocks_user_line(&mut self, user_line: Value, timeout: Duration) -> TurnCapture {
         self.send(user_line);
+        self.read_blocks_turn(Instant::now() + timeout)
+    }
 
-        let deadline = Instant::now() + timeout;
+    fn read_blocks_turn(&mut self, deadline: Instant) -> TurnCapture {
         let mut capture = TurnCapture::default();
 
         loop {
@@ -1750,6 +2110,62 @@ impl BridgeProcess {
             }
         }
 
+        capture
+    }
+
+    fn run_blocks_steered_turn(
+        &mut self,
+        prompt: &str,
+        steer_prompt: &str,
+        timeout: Duration,
+    ) -> TurnCapture {
+        self.send(json!({
+            "type": "user",
+            "thread_key": "slack:C123:123.456",
+            "trace_metadata": {
+                "source": "slackbotv2",
+                "action": "execute"
+            },
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}],
+            },
+        }));
+        self.send(json!({
+            "type": "user",
+            "thread_key": "slack:C123:123.456",
+            "trace_metadata": {
+                "source": "session.append_messages",
+                "action": "steer_active_execution"
+            },
+            "client_user_message_id": "steer-message-1",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": steer_prompt}],
+            },
+        }));
+
+        let deadline = Instant::now() + timeout;
+        let mut capture = TurnCapture::default();
+        loop {
+            let value = self.read_json(deadline);
+            assert!(
+                response_id(&value).is_none(),
+                "blocks mode emitted JSON-RPC response: {value}"
+            );
+            if let Some(method) = value.get("method").and_then(Value::as_str) {
+                capture.consume_notification(method, &value);
+                if method == "turn/started"
+                    && capture.turn_id.is_empty()
+                    && let Some(turn_id) = value.pointer("/params/turn/id").and_then(Value::as_str)
+                {
+                    capture.turn_id = turn_id.to_string();
+                }
+                if method == "turn/completed" {
+                    break;
+                }
+            }
+        }
         capture
     }
 
@@ -2235,6 +2651,106 @@ fn codex_bin() -> String {
     "codex".to_string()
 }
 
+#[test]
+fn fake_codex_handles_resolved_and_unresolved_citations_in_both_modes() {
+    let raw = "é [source](https://example.com)citeturn0search0 andcite:ship:turn1search2:walking: done";
+    for (blocks, with_sources) in [(false, false), (false, true), (true, false), (true, true)] {
+        let expected = if with_sources {
+            "é [source](https://example.com) [1](https://example.com/native) and [2](https://example.com/other) done"
+        } else {
+            "é [source](https://example.com) and done"
+        };
+        let fake_codex = temp_path("fake-citation-codex.sh");
+        let log = temp_path("fake-citation-codex-requests.jsonl");
+        let delta = json!({"method": "item/agentMessage/delta", "params": {
+            "threadId": "thread-1", "turnId": "turn-1", "itemId": "answer-1", "delta": "codex blocks",
+        }});
+        let scripted_delta = "{\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"thread-1\",\"turnId\":\"turn-1\",\"itemId\":\"answer-1\",\"delta\":\"codex blocks\"}}";
+        let mut chunks = raw
+            .chars()
+            .map(|character| {
+                let mut delta = delta.clone();
+                delta["params"]["delta"] = character.to_string().into();
+                format!("printf '%s\\n' '{delta}'")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let sources = json!({"type": "webSearch", "id": "search-1", "query": "query", "action": {
+            "type": "search", "query": "query", "queries": null,
+        }, "results": [
+            {"type": "text_result", "ref_id": "turn0search0", "url": "https://example.com/native", "title": "Native"},
+            {"type": "text_result", "ref_id": "turn1search2", "url": "https://example.com/other", "title": "Other"},
+        ]});
+        if with_sources {
+            let mut started_item = sources.clone();
+            started_item["results"] = Value::Null;
+            let started = json!({"method": "item/started", "params": {
+                "threadId": "thread-1", "turnId": "turn-1", "item": started_item, "startedAtMs": 1,
+            }});
+            let completed = json!({"method": "item/completed", "params": {
+                "threadId": "thread-1", "turnId": "turn-1", "item": sources, "completedAtMs": 2,
+            }});
+            chunks = format!("printf '%s\\n' '{started}' '{completed}'\n{chunks}");
+        }
+        let mut script = fake_codex_app_server_script(&log)
+            .replace(&format!("printf '%s\\n' '{scripted_delta}'"), &chunks)
+            .replace("codex blocks", raw);
+        if with_sources {
+            script = script.replace(
+                "\"items\":[{\"type\":\"agentMessage\"",
+                &format!("\"items\":[{sources},{{\"type\":\"agentMessage\""),
+            );
+        }
+        std::fs::write(&fake_codex, script).expect("write fake codex script");
+        let mut permissions = std::fs::metadata(&fake_codex).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_codex, permissions).unwrap();
+        let extra_env = Some(("CODEX_BIN", fake_codex.to_str().unwrap()));
+        let mut bridge = if blocks {
+            BridgeProcess::spawn_harness_blocks(Harness::Codex, None, extra_env)
+        } else {
+            BridgeProcess::spawn_harness(Harness::Codex, None, extra_env)
+        };
+        let timeout = Duration::from_secs(10);
+        let thread_id = if blocks {
+            None
+        } else {
+            Some(bridge.initialize_and_start_thread(Harness::Codex, timeout))
+        };
+        for request_id in [3, 4] {
+            let turn = if let Some(thread_id) = &thread_id {
+                bridge.run_turn(thread_id, request_id, "say hello", None, timeout)
+            } else {
+                bridge.run_blocks_user_turn("say hello", timeout)
+            };
+            assert_completed_turn(&turn);
+            assert_codex_v2_turn(&turn);
+            assert_eq!(turn.text_from_deltas, expected);
+            assert_eq!(turn.completed_agent_items["answer-1"], expected);
+        }
+        let lines = bridge.finish_successfully();
+        let terminals = lines
+            .iter()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|value| value["method"] == "turn/completed")
+            .collect::<Vec<_>>();
+        assert_eq!(terminals.len(), 2);
+        for terminal in terminals {
+            let items = terminal["params"]["turn"]["items"].as_array().unwrap();
+            let answer = items
+                .iter()
+                .find(|item| item["type"] == "agentMessage")
+                .unwrap();
+            assert_eq!(answer["text"], expected);
+            if with_sources {
+                assert_eq!(items[0], sources);
+            }
+        }
+        std::fs::remove_file(fake_codex).unwrap();
+        std::fs::remove_file(log).unwrap();
+    }
+}
+
 fn fake_codex_app_server_script(log_path: &Path) -> String {
     let mut script = String::new();
     script.push_str("#!/bin/sh\n");
@@ -2275,9 +2791,21 @@ while IFS= read -r line; do
       id=$(request_id "$line")
       printf '{"id":%s,"result":{"turn":{"id":"turn-1"}}}\n' "$id"
       printf '%s\n' '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[],"itemsView":"full","status":"inProgress","error":null,"startedAt":1,"completedAt":null,"durationMs":null}}}'
-      printf '%s\n' '{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"answer-1","delta":"codex blocks"}}'
-      printf '%s\n' '{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"agentMessage","id":"answer-1","text":"codex blocks","phase":null,"memoryCitation":null},"completedAtMs":2}}'
-      printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[{"type":"agentMessage","id":"answer-1","text":"codex blocks","phase":null,"memoryCitation":null}],"itemsView":"full","status":"completed","error":null,"startedAt":1,"completedAt":2,"durationMs":1}}}'
+      if [ -n "${FAKE_CODEX_TURN_DELAY:-}" ]; then
+        sleep "$FAKE_CODEX_TURN_DELAY"
+      fi
+      if [ "${FAKE_CODEX_WAIT_FOR_STEER:-}" != "1" ]; then
+        printf '%s\n' '{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"answer-1","delta":"codex blocks"}}'
+        printf '%s\n' '{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"agentMessage","id":"answer-1","text":"codex blocks","phase":null,"memoryCitation":null},"completedAtMs":2}}'
+        printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[{"type":"agentMessage","id":"answer-1","text":"codex blocks","phase":null,"memoryCitation":null}],"itemsView":"full","status":"completed","error":null,"startedAt":1,"completedAt":2,"durationMs":1}}}'
+      fi
+      ;;
+    *'"method":"turn/steer"'*)
+      id=$(request_id "$line")
+      printf '{"id":%s,"result":{"turnId":"turn-1"}}\n' "$id"
+      printf '%s\n' '{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"answer-1","delta":"steered"}}'
+      printf '%s\n' '{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"agentMessage","id":"answer-1","text":"steered","phase":null,"memoryCitation":null},"completedAtMs":2}}'
+      printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[{"type":"agentMessage","id":"answer-1","text":"steered","phase":null,"memoryCitation":null}],"itemsView":"full","status":"completed","error":null,"startedAt":1,"completedAt":2,"durationMs":1}}}'
       ;;
     *)
       printf '%s\n' "unexpected request: $line" >&2

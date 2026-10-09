@@ -14,7 +14,8 @@ Important crate boundaries:
 - `centaur-session-runtime`: orchestration, execution, recovery, and lifecycle.
 - `centaur-session-sqlx`: persistence and embedded SQLx migrations.
 - `centaur-sandbox-*`: backend-neutral sandbox contract and implementations.
-- `centaur-workflows` and `absurd-sdk`: durable workflow scheduling and state.
+- `centaur-workflows`: durable workflow scheduling and state, built on the
+  shared `crates/absurd-sdk` library.
 - `centaur-iron-control`, `centaur-iron-proxy`, and `centaur-perms`: credential
   control-plane integration and authorization resources.
 - `centaur-telemetry`: shared tracing and metrics support.
@@ -46,13 +47,30 @@ the binary and tests. Add the next numbered SQL file; never edit or reorder an
 applied migration. Update SQLx repository code and add database-backed coverage
 for upgrade, read/write, and recovery behavior.
 
+Core migrations must run on stock PostgreSQL with pgvector. Keyword-search
+indexes belong to exactly one text-search backend per database, under
+`crates/centaur-session-sqlx/search-migrations/{paradedb,postgres}`. Backend
+migrations share the core version sequence and are merged into it by version.
+Every backend migration needs a counterpart with the same version in each
+backend directory; add a no-op migration where a backend has nothing to change.
+`.github/scripts/check-migration-order.sh` enforces the numbering, and
+`tests/migrations.rs` covers fresh installs and legacy BM25 databases.
+
 Database-backed tests skip when their URL is absent. Point these variables at a
 disposable Postgres as required by the packages you run:
 
 - `SESSION_RUNTIME_TEST_DATABASE_URL`: session SQLx, runtime, and warm-pool
   tests; the SQLx RLS integration tests also accept it as a fallback.
 - `SESSION_SQLX_TEST_DATABASE_URL`: SQLx RLS integration tests specifically.
-- `ABSURD_TEST_DATABASE_URL`: `absurd-sdk` database tests.
+- `ABSURD_TEST_DATABASE_URL`: top-level `crates/absurd-sdk` database tests;
+  initialize the database with the Absurd schema before running them.
+
+Tests that share `SESSION_RUNTIME_TEST_DATABASE_URL` migrate it with the
+`postgres` text-search backend, which works on stock PostgreSQL with pgvector.
+A database first migrated with ParadeDB BM25 indexes (including one from before
+the backends split) fails with `Bm25IndexesPresent`; recreate it. SQLx tests
+that create their own databases also exercise `paradedb` when `pg_search` is
+available.
 
 Do not report full database coverage from `cargo test --workspace` unless the
 relevant variables were set and the database-backed tests actually ran.
@@ -75,19 +93,15 @@ cargo test -p centaur-session-sqlx
 cargo test -p centaur-workflows
 ```
 
-Sandbox backend invariants have a local Kind suite. Prepare the cluster and
-images with the `kind-e2e-*` recipes, then run all integration test binaries
-(the older `e2e-kind` wrapper names a removed test target):
+The shared Absurd SDK is validated separately from the API workspace:
 
 ```bash
-just kind-e2e-up
-just kind-e2e-build-images
-KIND_E2E_FORCE_IMAGE_LOAD=1 just kind-e2e-load-images
-SANDBOX_E2E_IMPLS=all \
-SANDBOX_E2E_K8S_CONTEXT=kind-centaur-api-rs-e2e \
-SANDBOX_E2E_K8S_NAMESPACE=centaur-sandbox-e2e \
-cargo test -p centaur-sandbox-e2e --tests -- --ignored --nocapture
+cargo test --manifest-path ../../crates/absurd-sdk/Cargo.toml
 ```
+
+Sandbox lifecycle, session handoff, and harness selection are covered end to
+end by the repository's `e2e/` suite (`e2e/stack.sh up`, then
+`e2e/stack.sh test`), which runs the chart on a dedicated Kind cluster.
 
 For an API contract or runtime change, also build the API image, deploy to the local
 stack, drive a real session through create/append/execute/events, and verify the

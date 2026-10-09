@@ -42,15 +42,15 @@ module ApplicationHelper
     end
   end
 
-  # Engine names rendered the way the Chats page renders harness types
-  # (Console::ThreadsController#thread_harness_label): known harnesses get
-  # their product names, anything else is capitalized word-wise.
+  # Product names for known workflow harnesses; unknown values are capitalized
+  # word-wise.
   def workflow_engine_label(harness_type)
     case harness_type.to_s
     when "codex" then "Codex"
     when "claudecode" then "Claude Code"
     when "amp" then "Amp"
     when "nanocodex" then "Nanocodex"
+    when "pi" then "Pi"
     when "" then nil
     else harness_type.to_s.tr("_-", " ").squish.split.map(&:capitalize).join(" ")
     end
@@ -113,13 +113,6 @@ module ApplicationHelper
 
   def console_icon(name, classes: "size-4")
     case name
-    when "arrow-up"
-      outline_icon(classes, "M4.5 10.5 12 3m0 0 7.5 7.5M12 3v18")
-    when "database"
-      outline_icon(
-        classes,
-        "M4.5 6.75c0 1.243 3.358 2.25 7.5 2.25s7.5-1.007 7.5-2.25S16.142 4.5 12 4.5 4.5 5.507 4.5 6.75Zm0 0v10.5c0 1.243 3.358 2.25 7.5 2.25s7.5-1.007 7.5-2.25V6.75M4.5 12c0 1.243 3.358 2.25 7.5 2.25s7.5-1.007 7.5-2.25"
-      )
     when "computer"
       outline_icon(
         classes,
@@ -174,38 +167,10 @@ module ApplicationHelper
         classes,
         "m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z"
       )
-    when "message-square"
-      outline_icon(
-        classes,
-        "M6.75 5.25h10.5A2.25 2.25 0 0 1 19.5 7.5v6A2.25 2.25 0 0 1 17.25 15.75H10.5L6 19.5v-3.75A2.25 2.25 0 0 1 3.75 13.5v-6A2.25 2.25 0 0 1 6.75 5.25Z"
-      )
-    when "panel-left"
-      outline_icon(
-        classes,
-        "M4.5 5.25A1.5 1.5 0 0 1 6 3.75h12a1.5 1.5 0 0 1 1.5 1.5v13.5a1.5 1.5 0 0 1-1.5 1.5H6a1.5 1.5 0 0 1-1.5-1.5V5.25ZM9 3.75v16.5"
-      )
-    when "panel-right"
-      outline_icon(
-        classes,
-        "M4.5 5.25A1.5 1.5 0 0 1 6 3.75h12a1.5 1.5 0 0 1 1.5 1.5v13.5a1.5 1.5 0 0 1-1.5 1.5H6a1.5 1.5 0 0 1-1.5-1.5V5.25ZM15 3.75v16.5"
-      )
-    when "plus"
-      outline_icon(classes, "M12 4.5v15m7.5-7.5h-15")
-    when "chevron-right"
-      outline_icon(classes, "m8.25 4.5 7.5 7.5-7.5 7.5")
-    when "check"
-      outline_icon(classes, "m4.5 12.75 6 6 9-13.5")
-    when "x-mark"
-      outline_icon(classes, "M6 18 18 6M6 6l12 12")
     when "shield-check"
       outline_icon(
         classes,
         "M12 3.75 19.5 6v5.25c0 4.207-2.765 8.04-7.5 9-4.735-.96-7.5-4.793-7.5-9V6L12 3.75Zm3.75 6-4.5 4.5-2.25-2.25"
-      )
-    when "share"
-      outline_icon(
-        classes,
-        "M12 16.5V3m0 0L7.5 7.5M12 3l4.5 4.5M6.75 10.5h-.75A2.25 2.25 0 0 0 3.75 12.75v6A2.25 2.25 0 0 0 6 21h12a2.25 2.25 0 0 0 2.25-2.25v-6A2.25 2.25 0 0 0 18 10.5h-.75"
       )
     when "trash"
       outline_icon(
@@ -249,11 +214,13 @@ module ApplicationHelper
     end
   end
 
-  # The brand logo for an OAuth provider as an inline SVG, or nil when we have
+  # The brand logo for an OAuth provider as inline markup, or nil when we have
   # no logo for it -- callers fall back to showing the provider name as text.
   # Official brand marks keep their own colors (Google's G, Slack's pinwheel);
   # GitHub's mark uses currentColor so it follows the theme.
   def oauth_provider_logo(provider, classes: "size-6")
+    return content_tag(:span, "🌐", class: "#{classes} inline-flex items-center justify-center text-2xl", aria: { hidden: true }) if provider.to_s == "mercator"
+
     paths =
       case provider.to_s
       when "google"
@@ -313,57 +280,6 @@ module ApplicationHelper
       tags: MARKDOWN_ALLOWED_TAGS,
       attributes: MARKDOWN_ALLOWED_ATTRIBUTES
     )
-  end
-
-  def console_sidebar_thread_title(session, latest_message = nil)
-    # sessions.title is the title api-rs generates on message append; prefer it
-    # over metadata heuristics. Guarded because snapshots mirrored before the
-    # title migration have no such column.
-    stored = session.title.presence if session.respond_to?(:title)
-    return console_sidebar_clip_one_line(stored, 48) if stored
-
-    metadata = session.metadata_hash
-    summary = metadata["summary"]
-    title = metadata["title"].presence ||
-      metadata["generated_title"].presence ||
-      metadata["summary_title"].presence ||
-      metadata["thread_title"].presence ||
-      (metadata["thread"].is_a?(Hash) ? metadata["thread"]["title"] : nil).presence ||
-      (metadata["summary"].is_a?(Hash) ? metadata["summary"]["title"] : nil).presence ||
-      (summary if summary.is_a?(String)).presence ||
-      metadata["subject"].presence ||
-      metadata["issue_title"].presence
-    return console_sidebar_generated_thread_title(title) if title
-
-    generated = console_sidebar_generated_thread_title(console_sidebar_thread_message_text(latest_message))
-    return generated if generated.present?
-
-    truncate_middle(session.thread_key, max: 42)
-  end
-
-  def console_sidebar_thread_message_text(message)
-    return "" unless message
-
-    message.parts_array.filter_map do |part|
-      next unless part.is_a?(Hash)
-
-      case part["type"]
-      when "text" then part["text"].to_s
-      when "image" then "[image]"
-      when "document" then "[document]"
-      end
-    end.join("\n").squish
-  end
-
-  def console_sidebar_generated_thread_title(text)
-    title = text.to_s
-      .gsub(/<@[A-Z0-9]+(?:\|[^>]+)?>/, "")
-      .sub(/\A\s*@?centaur\b[:,]?\s*/i, "")
-      .sub(/\A\s*@?U[A-Z0-9]+\b[:,]?\s*/i, "")
-      .sub(/\A\s*@\S+\s+/, "")
-      .strip
-    title = title.sub(/\A[*_]{1,2}(.+?)[*_]{1,2}\s*/, "\\1 ").squish
-    console_sidebar_clip_one_line(title, 48)
   end
 
   # The broker credential a record wraps when it is an OAuth-flow-managed static
@@ -602,12 +518,5 @@ module ApplicationHelper
 
   def markdown_token(offset)
     "%%MDPH#{offset}%%"
-  end
-
-  def console_sidebar_clip_one_line(value, max)
-    one_line = value.to_s.gsub(/\s+/, " ").strip
-    return one_line if one_line.length <= max
-
-    "#{one_line.slice(0, [ max - 3, 0 ].max).rstrip}..."
   end
 end

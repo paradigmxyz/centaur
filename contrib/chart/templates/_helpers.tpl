@@ -35,6 +35,39 @@ app.kubernetes.io/component: {{ .component }}
 app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
+{{/*
+NetworkPolicy egress rule for Postgres clients. With the bundled Postgres,
+allow only its pod. With an external database (postgres.enabled=false, e.g.
+RDS or Cloud SQL), allow externalDatabase.cidrs on externalDatabase.port.
+NetworkPolicy cannot match hostnames, so the ranges must cover every address
+the database endpoint can resolve to.
+*/}}
+{{- define "centaur.postgresEgress" -}}
+{{- $root := . -}}
+{{- if $root.Values.postgres.enabled -}}
+- to:
+    - podSelector:
+        matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" $root "component" "postgres") | indent 10 }}
+  ports:
+    - protocol: TCP
+      port: 5432
+{{- else -}}
+{{- $external := $root.Values.externalDatabase -}}
+{{- if not $external.cidrs -}}
+{{- fail "externalDatabase.cidrs must list the external database's address ranges when postgres.enabled=false and networkPolicy.enabled=true" -}}
+{{- end -}}
+- to:
+{{- range $external.cidrs }}
+    - ipBlock:
+        cidr: {{ . | quote }}
+{{- end }}
+  ports:
+    - protocol: TCP
+      port: {{ $external.port }}
+{{- end -}}
+{{- end -}}
+
 {{- define "centaur.componentName" -}}
 {{- printf "%s-%s" (include "centaur.fullname" .root) .component | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
@@ -178,6 +211,24 @@ namespace as this release, so a short DNS name is enough.
 {{- end -}}
 
 {{- /*
+Render the standard Kubernetes PodSpec scheduling fields supported by
+chart-managed workloads.
+*/ -}}
+{{- define "centaur.podScheduling" -}}
+{{- $values := .values -}}
+{{- $indent := .indent -}}
+{{- with $values.nodeSelector -}}
+{{- printf "nodeSelector:\n%s" (toYaml . | indent 2) | nindent $indent }}
+{{- end -}}
+{{- with $values.affinity -}}
+{{- printf "affinity:\n%s" (toYaml . | indent 2) | nindent $indent }}
+{{- end -}}
+{{- with $values.tolerations -}}
+{{- printf "tolerations:\n%s" (toYaml . | indent 2) | nindent $indent }}
+{{- end -}}
+{{- end -}}
+
+{{- /*
 console — Rails control plane (formerly "iron-control") for authenticated API
 access and encrypted secret storage. Required in-cluster ClusterIP Service.
 
@@ -212,4 +263,12 @@ IRON_CONTROL_API_KEY (their names are hardcoded in the Rust binaries); the URL
 {{- define "centaur.consoleUrl" -}}
 {{- $console := include "centaur.consoleValues" . | fromYaml -}}
 {{- printf "http://%s:%v" (include "centaur.consoleHost" .) $console.service.httpPort -}}
+{{- end -}}
+
+{{- define "centaur.proxySyncName" -}}
+{{- include "centaur.componentName" (dict "root" . "component" "proxy-sync") -}}
+{{- end -}}
+
+{{- define "centaur.proxySyncUrl" -}}
+{{- printf "http://%s:%v" (include "centaur.proxySyncName" .) .Values.proxySync.port -}}
 {{- end -}}

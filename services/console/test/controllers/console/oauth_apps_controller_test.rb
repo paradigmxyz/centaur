@@ -11,6 +11,26 @@ module Console
       post login_url, params: { email: @operator.email, password: "password123456" }
     end
 
+    test "shared mode is set on create and kept on edit" do
+      template = oauth_apps(:acme_google)
+      post console_oauth_app_forms_url, params: { oauth_app: {
+        slug: "shared-google", provider: template.provider, client_id: template.client_id,
+        client_secret: "synthetic", enabled: "1", shared: "1", allowed_scopes: template.allowed_scopes.join("\n")
+      } }
+      app = OauthApp.find_by!(slug: "shared-google")
+      assert_redirected_to console_oauth_app_path(app.oid)
+      assert app.shared?
+
+      get edit_console_oauth_app_form_url(app.oid)
+      assert_select "input[name='oauth_app[shared]'][disabled]"
+      patch console_oauth_app_form_url(app.oid), params: { oauth_app: {
+        slug: app.slug, provider: app.provider, client_id: app.client_id,
+        enabled: "1", allowed_scopes: app.allowed_scopes.join("\n")
+      } }
+      assert_redirected_to console_oauth_app_path(app.oid)
+      assert app.reload.shared?
+    end
+
     test "redirects to login when not signed in" do
       delete logout_url
       get new_console_oauth_app_form_url

@@ -24,7 +24,7 @@ pub(crate) enum Capability {
     WorkflowsRead,
     WorkflowsWrite,
     WorkflowsEvents,
-    AdminArchive,
+    WorkflowsActions,
     AdminSync,
 }
 
@@ -36,7 +36,7 @@ impl Capability {
         Self::WorkflowsRead,
         Self::WorkflowsWrite,
         Self::WorkflowsEvents,
-        Self::AdminArchive,
+        Self::WorkflowsActions,
         Self::AdminSync,
     ];
 }
@@ -131,6 +131,9 @@ impl ApiAuthConfig {
             if spec.workflow_events {
                 capabilities.push(Capability::WorkflowsEvents);
             }
+            if spec.identity == "slackbot" {
+                capabilities.push(Capability::WorkflowsActions);
+            }
             callers.push(static_caller(
                 spec.identity,
                 CallerClass::Ingress,
@@ -171,6 +174,7 @@ impl ApiAuthConfig {
                 Capability::SessionsRead,
                 Capability::SessionsWrite,
                 Capability::WorkflowsEvents,
+                Capability::WorkflowsActions,
             ],
             Some(&["slack:"]),
         )];
@@ -180,6 +184,14 @@ impl ApiAuthConfig {
             jwt_audience: Arc::from(DEFAULT_API_JWT_AUDIENCE),
             jwt_issuer: Arc::from(DEFAULT_API_JWT_ISSUER),
         }
+    }
+
+    pub(crate) fn verify_workflow_button(
+        &self,
+        request: centaur_workflows::slack_buttons::Invocation,
+    ) -> Result<centaur_workflows::CreateWorkflowRunRequest, ApiError> {
+        centaur_workflows::slack_buttons::verify(request, self.jwt_secret.as_bytes())
+            .map_err(|error| ApiError::Forbidden(error.into()))
     }
 
     pub(crate) fn authenticate(
@@ -387,6 +399,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::routes::thread_key_matches_platform;
 
     #[test]
     fn authenticates_console_service_jwt() {
@@ -532,26 +545,33 @@ mod tests {
     }
 
     #[test]
-    fn githubbot_ingress_covers_every_thread_key_family_it_mints() {
-        // Mirrors services/githubbot/src: chat threads (body-mention.ts), issue
-        // work (issue-manager.ts), owned-PR management (pr-manager.ts) and review
-        // runs (review.ts). githubbot/test/thread-keys.test.ts pins the producer
-        // side; dropping a family here 403s the bot out of its own sessions.
+    fn githubbot_ingress_admits_every_thread_key_family_it_mints() {
+        // The same keys services/githubbot/test/thread-keys.test.ts pins on
+        // the producer side: chat threads (body-mention.ts), issue work
+        // (issue-manager.ts), owned-PR management (pr-manager.ts), and review
+        // runs (review.ts). Dropping a family 403s the bot out of its sessions.
         let githubbot = INGRESS_SPECS
             .iter()
             .find(|spec| spec.identity == "githubbot")
             .expect("githubbot ingress spec");
 
-        assert_eq!(
-            githubbot.platform_prefixes,
-            [
-                "github:",
-                "github-issue:",
-                "github-manage:",
-                "github-review:"
-            ]
-            .as_slice()
-        );
+        for thread_key in [
+            "github:acme/repo:7",
+            "github-issue:acme/repo:7",
+            "github-manage:acme/repo:7",
+            "github-review:acme/repo:7",
+        ] {
+            assert!(
+                thread_key_matches_platform(githubbot.platform_prefixes, thread_key),
+                "{thread_key}"
+            );
+        }
+        for thread_key in ["slack:C123:1.2", "githubx:acme/repo:7"] {
+            assert!(
+                !thread_key_matches_platform(githubbot.platform_prefixes, thread_key),
+                "{thread_key}"
+            );
+        }
     }
 
     #[test]

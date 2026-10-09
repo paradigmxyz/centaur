@@ -10,6 +10,25 @@ class OauthAppTest < ActiveSupport::TestCase
     }.merge(overrides))
   end
 
+  test "shared apps default off and cannot be always available" do
+    refute build_app.shared?
+    refute build_app(shared: true, always_available: true).valid?
+    assert build_app(shared: true).valid?
+  end
+
+  test "shared cannot change after creation" do
+    personal = build_app
+    personal.save!
+    refute personal.update(shared: true)
+    assert personal.errors[:shared].any?
+    refute personal.reload.shared?
+
+    shared = build_app(slug: "shared-app", shared: true)
+    shared.save!
+    refute shared.update(shared: false)
+    assert shared.reload.shared?
+  end
+
   # --- validations ----------------------------------------------------------
 
   test "valid with all required fields" do

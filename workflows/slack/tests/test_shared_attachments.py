@@ -211,6 +211,11 @@ def test_list_etl_channels_preserves_slack_created_timestamp():
                     "created": 1718123000,
                     "is_private": True,
                 },
+                {
+                    "id": "C456",
+                    "name": "unknown-room",
+                    "created": 1718123001,
+                },
             ],
             "response_metadata": {},
         }
@@ -233,6 +238,9 @@ def test_list_etl_channels_preserves_slack_created_timestamp():
             "is_member": True,
         }
     ]
+    # Missing is_private metadata fails closed: the channel is not treated
+    # as public for a public-only listing.
+    assert [channel["id"] for channel in channels] == ["C123"]
 
 
 def test_list_etl_channels_can_include_private_channels():

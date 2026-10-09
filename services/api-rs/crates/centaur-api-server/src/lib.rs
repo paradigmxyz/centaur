@@ -20,6 +20,11 @@ pub use tool_discovery::{
     discover_persona_registry, discover_tool_proxy_fragment,
 };
 
+#[doc(hidden)]
+pub fn warm_slack_public_channel_cache() {
+    slack_proxy::warm_slack_public_channel_cache();
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -106,6 +111,7 @@ mod tests {
             &self,
             _thread_key: &str,
             _metadata: Option<&Value>,
+            _create_if_missing: bool,
         ) -> Result<centaur_iron_control::Principal, centaur_iron_control::IronControlError>
         {
             Ok(test_principal("prn_test"))
@@ -115,6 +121,7 @@ mod tests {
             &self,
             _thread_key: &str,
             _metadata: Option<&Value>,
+            _create_if_missing: bool,
         ) -> Result<Option<centaur_iron_control::Principal>, centaur_iron_control::IronControlError>
         {
             Ok(None)
@@ -149,16 +156,6 @@ mod tests {
             TestSessionPrincipalRegistrar,
             test_auth(),
         )
-    }
-
-    #[tokio::test]
-    async fn router_builds() {
-        let pool =
-            PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
-        let _router = build_router_with_runtime(
-            PgSessionStore::new(pool),
-            SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
-        );
     }
 
     #[tokio::test]
@@ -241,11 +238,12 @@ mod tests {
                 .body(Body::empty())
                 .unwrap(),
             Request::builder()
-                .uri("/api/workflows/runs")
+                .method(Method::POST)
+                .uri("/api/session/slack%3AC123%3A123.456/pause")
                 .body(Body::empty())
                 .unwrap(),
             Request::builder()
-                .uri("/api/admin/slack/archive-imports")
+                .uri("/api/workflows/runs")
                 .body(Body::empty())
                 .unwrap(),
         ] {
@@ -282,6 +280,12 @@ mod tests {
                 .body(Body::empty())
                 .unwrap(),
             Request::builder()
+                .method(Method::POST)
+                .uri("/api/session/slack%3AC123%3A123.456/pause")
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
                 .uri("/api/workflows/runs")
                 .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                 .body(Body::empty())
@@ -292,11 +296,6 @@ mod tests {
                 .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"event_name":"test.event","payload":{}}"#))
-                .unwrap(),
-            Request::builder()
-                .uri("/api/admin/slack/archive-imports")
-                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
-                .body(Body::empty())
                 .unwrap(),
             Request::builder()
                 .uri("/api/admin/slack/dm-sync/checkpoints")
@@ -406,6 +405,15 @@ mod tests {
             ),
             (
                 Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/session/slack%3AC123%3A123.456/pause")
+                    .header(header::AUTHORIZATION, &authorized)
+                    .body(Body::empty())
+                    .unwrap(),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Request::builder()
                     .uri("/api/workflows/runs")
                     .header(header::AUTHORIZATION, &authorized)
                     .body(Body::empty())
@@ -440,7 +448,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn principal_jwt_is_capability_scoped_and_archive_exception_is_subject_scoped() {
+    async fn workflow_actions_require_trusted_ingress_capability() {
+        let mut message = json!({"channel": "C1", "blocks": [{"type": "actions", "elements": [{
+            "type": "button", "action_id": "centaur.workflow.action:00000000-0000-0000-0000-000000000001:approve",
+            "value": json!({"workflow_name": "review", "input": {"release_id": "r1"}}).to_string(),
+        }]}]});
+        centaur_workflows::slack_buttons::sign_message(&mut message, b"test-secret").unwrap();
+        let signed = message["blocks"][0]["elements"][0]["value"]
+            .as_str()
+            .unwrap();
+        for (token, button, expected) in [
+            (
+                "test-slackbot-key".to_owned(),
+                signed,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                "test-slackbot-key".to_owned(),
+                r#"{"workflow_name":"review","input":{}}"#,
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                principal_token("prn_sandbox"),
+                signed,
+                StatusCode::FORBIDDEN,
+            ),
+        ] {
+            let request = json!({"button": button, "idempotency_key": "click-1", "click": {
+                "id": "00000000-0000-0000-0000-000000000001", "action": "approve", "channel_id": "C1", "user_id": "U1",
+            }});
+            let response = build_router_with_app_state(AppState::unready(test_auth_with_slack()))
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/api/workflows/actions/invoke")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(request.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn principal_jwt_is_capability_scoped() {
         let principal = principal_token("prn_sandbox");
         let write_response = build_router_with_app_state(AppState::unready(test_auth()))
             .oneshot(
@@ -468,47 +522,6 @@ mod tests {
             .unwrap();
         assert_ne!(slack_response.status(), StatusCode::UNAUTHORIZED);
         assert_ne!(slack_response.status(), StatusCode::FORBIDDEN);
-
-        let pool =
-            PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
-        let state = AppState::unready(test_auth());
-        state.mark_ready_with_workflow_host(
-            centaur_session_runtime::SessionRuntime::new(
-                PgSessionStore::new(pool),
-                SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
-                TestSessionPrincipalRegistrar,
-            ),
-            None,
-            None,
-            "prn_workflow_host".to_owned(),
-        );
-
-        let other_response = build_router_with_app_state(state.clone())
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/api/admin/slack/archive-imports/import-1/download-url")
-                    .header(header::AUTHORIZATION, format!("Bearer {principal}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(other_response.status(), StatusCode::FORBIDDEN);
-
-        let workflow_host = principal_token("prn_workflow_host");
-        let host_response = build_router_with_app_state(state)
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/api/admin/slack/archive-imports/import-1/download-url")
-                    .header(header::AUTHORIZATION, format!("Bearer {workflow_host}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(host_response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -694,89 +707,81 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn mcp_requires_bearer_before_runtime_is_ready() {
-        let app = build_router_with_app_state(AppState::unready(test_auth()));
+    #[test]
+    fn mcp_requires_bearer_before_runtime_is_ready() {
+        // MCP tests vary public URL configuration through process environment.
+        let _lock = crate::mcp::MCP_ENV_LOCK.lock().unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let app = build_router_with_app_state(AppState::unready(test_auth()));
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/mcp")
-                    .header(header::HOST, "centaur.local")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .method(Method::POST)
+                            .uri("/mcp")
+                            .header(header::HOST, "centaur.local")
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(Body::from(
+                                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+                            ))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
 
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let challenge = response
-            .headers()
-            .get(header::WWW_AUTHENTICATE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap();
-        assert!(challenge.contains("Bearer"));
-        assert!(challenge.contains(
-            "resource_metadata=\"http://centaur.local/.well-known/oauth-protected-resource/mcp\""
-        ));
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+                let challenge = response
+                    .headers()
+                    .get(header::WWW_AUTHENTICATE)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap();
+                assert!(challenge.contains("Bearer"));
+                assert!(challenge.contains(
+                    "resource_metadata=\"http://centaur.local/.well-known/oauth-protected-resource/mcp\""
+                ));
+            });
     }
 
+    /// Messages and executes carry attachments and long transcripts, so these
+    /// routes must read bodies past axum's 2 MiB default limit.
     #[tokio::test]
-    async fn append_messages_does_not_apply_a_session_body_limit() {
+    async fn session_writes_accept_bodies_over_the_default_limit() {
         let pool =
             PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
         let app = build_router_with_runtime(
             PgSessionStore::new(pool),
             SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
         );
+        let padding = "x".repeat(3 * 1024 * 1024);
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/session/slack%3AC123%3A123.456/messages")
-                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .header(header::CONTENT_LENGTH, (256 * 1024 * 1024 + 1).to_string())
-                    .body(Body::from(r#"{"messages":"not-an-array"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        for (route, field) in [("messages", "messages"), ("execute", "input_lines")] {
+            // A well-formed body with the wrong shape: rejecting it as 422 proves
+            // the whole body was read and parsed rather than refused as too large.
+            let body = json!({ field: padding }).to_string();
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/session/slack%3AC123%3A123.456/{route}"))
+                        .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
 
-        assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    #[tokio::test]
-    async fn execute_does_not_apply_a_session_body_limit() {
-        let pool =
-            PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
-        let app = build_router_with_runtime(
-            PgSessionStore::new(pool),
-            SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
-        );
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/session/slack%3AC123%3A123.456/execute")
-                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .header(header::CONTENT_LENGTH, (256 * 1024 * 1024 + 1).to_string())
-                    .body(Body::from(r#"{"input_lines":"not-an-array"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{route}"
+            );
+        }
     }
 
     #[tokio::test]

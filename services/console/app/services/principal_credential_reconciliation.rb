@@ -199,7 +199,7 @@ class PrincipalCredentialReconciliation
     BrokerCredential
       .joins(:oauth_app)
       .includes(:oauth_app, :static_secret)
-      .where(oauth_apps: { provider: provider })
+      .where(oauth_apps: { provider: provider, shared: false })
       .order(:id)
       .to_a
   end
@@ -385,7 +385,7 @@ class PrincipalCredentialReconciliation
   end
 
   def supported_provider?(credential)
-    providers.include?(credential.oauth_app&.provider)
+    !credential.oauth_app&.shared? && providers.include?(credential.oauth_app&.provider)
   end
 
   # Slack user ids are workspace-scoped. If either side carries a team identity,

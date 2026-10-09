@@ -13,7 +13,7 @@ defaults:
 jobs:
   console_changes:
     name: Detect Console CI changes
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     outputs:
       relevant: ${{ steps.filter.outputs.relevant }}
     defaults:
@@ -46,7 +46,7 @@ jobs:
           fi
 
   scan_ruby:
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: depot-ubuntu-24.04
     needs: console_changes
     if: needs.console_changes.outputs.relevant == 'true'
 
@@ -55,16 +55,23 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Ruby
-        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
         with:
           working-directory: services/console
           bundler-cache: true
 
       - name: Scan for common Rails security vulnerabilities using static analysis
-        run: bin/brakeman --no-pager
+        run: |
+          # --ensure-latest (added by bin/brakeman) fails on new upstream releases;
+          # enforce it only on pushes to main so PRs and the merge queue aren't blocked.
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            bin/brakeman --no-pager
+          else
+            bundle exec brakeman --no-pager
+          fi
 
   scan_js:
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: depot-ubuntu-24.04
     needs: console_changes
     if: needs.console_changes.outputs.relevant == 'true'
 
@@ -73,7 +80,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Ruby
-        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
         with:
           working-directory: services/console
           bundler-cache: true
@@ -92,7 +99,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Ruby
-        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
         with:
           working-directory: services/console
           bundler-cache: true
@@ -117,7 +124,7 @@ jobs:
 
     services:
       postgres:
-        image: paradedb/paradedb:0.23.0-pg16
+        image: postgres:16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -132,7 +139,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
 
       - name: Set up Ruby
-        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
         with:
           working-directory: services/console
           bundler-cache: true
@@ -160,7 +167,7 @@ jobs:
 
   console-ci-success:
     name: Console CI success
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     if: always()
     needs:
       - console_changes
@@ -174,7 +181,7 @@ jobs:
         working-directory: .
     steps:
       - name: Decide whether the needed jobs succeeded or failed
-        uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
+        uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
           allowed-skips: scan_ruby, scan_js, lint, test
           jobs: ${{ toJSON(needs) }}

@@ -14,7 +14,7 @@ class PwaTest < ActionDispatch::IntegrationTest
     assert manifest["icons"].any? { |icon| icon["sizes"] == "512x512" }
     assert_equal "/", manifest.dig("file_handlers", 0, "action")
     assert_equal "web+centaur", manifest.dig("protocol_handlers", 0, "protocol")
-    assert_equal %w[/console/threads /console/workflows /console/integrations],
+    assert_equal %w[/console/workflows /console/integrations],
                  manifest["shortcuts"].map { |shortcut| shortcut["url"] }
   end
 
@@ -30,7 +30,7 @@ class PwaTest < ActionDispatch::IntegrationTest
       "console/workflows",
       "",
       "web+centaur://../etc/passwd",
-      "web+centaur://console/threads?x=1",
+      "web+centaur://console/workflows?x=1",
       "web+centaur:////evil.example"
     ].each do |target|
       get launch_url(target: target)
@@ -39,7 +39,7 @@ class PwaTest < ActionDispatch::IntegrationTest
   end
 
   test "launch requires a console session" do
-    get launch_url(target: "web+centaur://console/threads")
+    get launch_url(target: "web+centaur://console/integrations")
     assert_redirected_to login_path
   end
 

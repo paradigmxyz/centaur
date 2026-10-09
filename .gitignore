@@ -49,6 +49,9 @@ services/sandbox/repos/
 # Agent / AI IDE config
 .agents/*
 !.agents/skills/
+!.agents/plugins/
+.agents/plugins/*
+!.agents/plugins/marketplace.json
 .amp/
 .claude/
 .cursor/
@@ -56,7 +59,6 @@ services/sandbox/repos/
 skills-lock.json
 
 # Output artifacts
-dogfood-output/
 tool-qa-output/
 
 # OS

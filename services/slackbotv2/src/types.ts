@@ -76,6 +76,8 @@ export type SlackbotV2CreateSessionRequest = {
   metadata: JsonObject
   /** 'restart': switch the thread to harness_type if it's pinned to another harness. */
   on_harness_conflict?: 'reject' | 'restart'
+  /** Persona requested when the thread is created; the API pins the first persisted value. */
+  persona_id?: string
 }
 
 export type SlackbotV2HarnessAssignment = {
@@ -110,6 +112,7 @@ export type SlackbotV2InterruptSessionResponse = {
 export type SlackbotV2Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
 export type SlackbotV2BlockActionPayload = {
+  workflow_message?: JsonObject
   action_id: string
   action_ts?: string
   block_id?: string
@@ -129,6 +132,8 @@ export type SlackbotV2Options = {
   allowedExternalTeamIds?: readonly string[]
   apiKey?: string
   apiUrl: string
+  /** Enable Slack's Agent messaging experience. Must match the app manifest. */
+  agentViewEnabled?: boolean
   assistantStatus?: string
   /**
    * When enabled, session.activity_summary events update Slack's assistant
@@ -139,19 +144,12 @@ export type SlackbotV2Options = {
   autoJoinCreatedChannels?: boolean
   botToken: string
   botUserId?: string
-  /**
-   * Public origin of the Console UI (same value the Console itself uses,
-   * `CENTAUR_CONSOLE_PUBLIC_URL`). When set, the first assistant message in a
-   * Slack thread gets an "Open chat in Console" context link. Unset skips the
-   * link; response metadata renders independently according to its configured mode.
-   */
-  consolePublicUrl?: string
   /** Controls whether response metadata renders on the first, every, or no live responses. */
   responseMetadataMode?: 'first' | 'always' | 'never'
   /** Include the Codex service tier in response metadata footers when they render. */
   responseServiceTierEnabled?: boolean
   /**
-   * Per-channel default harness/model/provider/reasoning, keyed by Slack
+   * Per-channel default persona/harness/model/provider/reasoning, keyed by Slack
    * conversation id (SLACKBOTV2_CHANNEL_DEFAULTS). See channel-defaults.ts.
    */
   channelDefaults?: ChannelDefaults
@@ -163,13 +161,15 @@ export type SlackbotV2Options = {
    * nanocodex | hermes). Defaults to codex.
    */
   defaultHarnessType?: string
+  enabledHarnesses?: readonly string[]
   fetch?: SlackbotV2Fetch
   /**
    * Deployment-configured default model per harness wire value (claudecode |
-   * codex), from the CLAUDE_MODEL / CODEX_MODEL env vars the chart mirrors
+   * codex | nanocodex | pi), from the CLAUDE_MODEL / CODEX_MODEL /
+   * CENTAUR_PI_MODEL env vars the chart mirrors
    * out of sandbox.extraEnv. Display/metadata only — never forwarded to the
    * harness. Unset harnesses fall back to the models pinned in this repo's
-   * harness config files (see console-session-link.ts).
+   * harness config files (see response-context.ts).
    */
   harnessDefaultModels?: Record<string, string>
   /**
@@ -219,9 +219,7 @@ export type SlackbotV2Options = {
   mapper?: CodexAppServerToChatStreamOptions
 }
 
-export type MessageOverridesStrategyInput = {
-  text: string
-}
+export type MessageOverridesStrategyInput = { text: string }
 
 export type MessageOverridesStrategyResult = {
   cleanedText?: string
@@ -247,6 +245,8 @@ export type SlackbotV2ThreadState = {
   lastEventId?: number
   /** Last thread-level model selected by Slack flags. Null clears persisted state. */
   model?: string | null
+  /** Persona pinned by the session API. Null means the thread is pinned without a persona. */
+  personaId?: string | null
   /** Last thread-level model provider selected by Slack flags. Null clears persisted state. */
   provider?: string | null
   renderObligation?: SlackbotV2RenderObligation | null
@@ -293,14 +293,16 @@ export type ForwardSessionInput = {
   /** Effective model selected by sticky thread flags (--model/--opus/...). */
   model?: string
   /**
-   * Model recorded in execute metadata for readers like the Console: the
+   * Model recorded in execute metadata for downstream readers: the
    * explicit override when one is set, else the configured/baked harness
    * default. Metadata only — never forwarded to the harness (that is `model`).
    */
   metadataModel?: string
+  /** Effective persona selected by a sticky --persona=<id> flag. */
+  personaId?: string
   /** Effective model provider selected by sticky thread flags (--bedrock); codex only. */
   provider?: string
-  /** Per-turn reasoning effort parsed from the `-rsn` flag (Codex/Nanocodex). */
+  /** Per-turn reasoning effort parsed from the `-rsn` flag (Codex/Nanocodex/Claude Code). */
   reasoning?: string
   /** Whether an explicit Slack override may restart a thread on harness conflict. */
   restartOnHarnessConflict?: boolean

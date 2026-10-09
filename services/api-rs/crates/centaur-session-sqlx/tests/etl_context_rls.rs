@@ -5,9 +5,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use centaur_session_sqlx::{TextSearchBackend, migrate};
 use sqlx::{Connection, Executor, PgConnection, Row, postgres::PgConnectOptions};
 
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 static RLS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Debug, PartialEq, Eq)]
@@ -43,6 +43,8 @@ struct CompanyContextSearchRows {
 #[derive(Debug, PartialEq, Eq)]
 struct CompanyContextReaderRows {
     slack_channels: Vec<String>,
+    slack_users: Vec<String>,
+    slack_messages: Vec<String>,
     company_context_docs: Vec<String>,
     google_docs_observations: Vec<String>,
     google_docs: Vec<String>,
@@ -58,7 +60,7 @@ struct CompanyContextReaderSettings<'a> {
     slack_include_public: Option<bool>,
     slack_team_id: Option<&'a str>,
     slack_user_id: Option<&'a str>,
-    user_email: Option<&'a str>,
+    user_email_override: Option<&'a str>,
     google_email: Option<&'a str>,
     google_subject: Option<&'a str>,
 }
@@ -107,21 +109,27 @@ async fn company_context_reader_preserves_scoped_search_behavior() -> Result<(),
 #[tokio::test]
 async fn company_context_reader_scores_multiterm_granola_keyword_results()
 -> Result<(), Box<dyn Error>> {
-    let Some(mut fixture) = RlsTestFixture::create().await? else {
-        return Ok(());
-    };
-    let result = assert_multiterm_granola_keyword_score(&mut fixture.conn).await;
-    fixture.finish(result).await
+    for backend in available_text_search_backends().await? {
+        let Some(mut fixture) = RlsTestFixture::create_with(backend).await? else {
+            return Ok(());
+        };
+        let result = assert_multiterm_granola_keyword_score(&mut fixture.conn, backend).await;
+        fixture.finish(result).await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]
 async fn company_context_reader_scopes_multiterm_granola_keyword_results()
 -> Result<(), Box<dyn Error>> {
-    let Some(mut fixture) = RlsTestFixture::create().await? else {
-        return Ok(());
-    };
-    let result = assert_multiterm_granola_keyword_scope(&mut fixture.conn).await;
-    fixture.finish(result).await
+    for backend in available_text_search_backends().await? {
+        let Some(mut fixture) = RlsTestFixture::create_with(backend).await? else {
+            return Ok(());
+        };
+        let result = assert_multiterm_granola_keyword_scope(&mut fixture.conn, backend).await;
+        fixture.finish(result).await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -142,6 +150,18 @@ async fn company_context_reader_accepts_only_explicit_channel_grants() -> Result
         return Ok(());
     };
     let result = assert_company_context_reader_channel_grants(&mut fixture.conn)
+        .await
+        .map_err(Into::into);
+    fixture.finish(result).await
+}
+
+#[tokio::test]
+async fn company_context_reader_scopes_public_messages_and_mixed_visibility_authors()
+-> Result<(), Box<dyn Error>> {
+    let Some(mut fixture) = RlsTestFixture::create().await? else {
+        return Ok(());
+    };
+    let result = assert_company_context_reader_public_message_visibility(&mut fixture.conn)
         .await
         .map_err(Into::into);
     fixture.finish(result).await
@@ -243,13 +263,6 @@ async fn assert_channel_visibility(conn: &mut PgConnection) -> Result<(), Box<dy
         }
     );
 
-    let readonly_role = visible_rows(conn, "centaur_readonly", None).await?;
-    assert_eq!(readonly_role, public_visible_rows());
-
-    let readonly_private_channel =
-        visible_rows(conn, "centaur_readonly", Some("G_PRIVATE")).await?;
-    assert_eq!(readonly_private_channel, public_and_private_visible_rows());
-
     Ok(())
 }
 
@@ -314,18 +327,23 @@ async fn assert_company_context_reader_search_behavior(
 
 async fn assert_multiterm_granola_keyword_score(
     conn: &mut PgConnection,
+    backend: TextSearchBackend,
 ) -> Result<(), Box<dyn Error>> {
-    let rows = granola_keyword_search_rows(conn, "viewer@example.com").await?;
+    let rows = granola_keyword_search_rows(conn, backend, "U_PRIVATE").await?;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].0, "granola:note:granola_note");
-    assert!(rows[0].1 > 0.0, "matching document must have a BM25 score");
+    assert!(
+        rows[0].1 > 0.0,
+        "matching document must have a {backend} keyword score"
+    );
     Ok(())
 }
 
 async fn assert_multiterm_granola_keyword_scope(
     conn: &mut PgConnection,
+    backend: TextSearchBackend,
 ) -> Result<(), Box<dyn Error>> {
-    let viewer_rows = granola_keyword_search_rows(conn, "viewer@example.com").await?;
+    let viewer_rows = granola_keyword_search_rows(conn, backend, "U_PRIVATE").await?;
     assert_eq!(
         viewer_rows
             .iter()
@@ -334,7 +352,7 @@ async fn assert_multiterm_granola_keyword_scope(
         vec!["granola:note:granola_note"]
     );
 
-    let other_rows = granola_keyword_search_rows(conn, "other@example.com").await?;
+    let other_rows = granola_keyword_search_rows(conn, backend, "U_OTHER").await?;
     assert_eq!(
         other_rows
             .iter()
@@ -370,6 +388,10 @@ struct RlsTestFixture {
 
 impl RlsTestFixture {
     async fn create() -> Result<Option<Self>, Box<dyn Error>> {
+        Self::create_with(TextSearchBackend::Postgres).await
+    }
+
+    async fn create_with(backend: TextSearchBackend) -> Result<Option<Self>, Box<dyn Error>> {
         let Some(database_url) = test_database_url() else {
             return Ok(None);
         };
@@ -385,7 +407,7 @@ impl RlsTestFixture {
         };
 
         let setup_result = async {
-            MIGRATOR.run(&mut conn).await?;
+            migrate(&mut conn, backend).await?;
             insert_fixture_rows(&mut conn).await?;
             Ok::<(), Box<dyn Error>>(())
         }
@@ -508,13 +530,11 @@ fn expected_policies() -> Vec<(String, String)> {
         ),
         (
             "company_context_documents",
-            "centaur_readonly_company_context_documents_select",
-        ),
-        (
-            "company_context_documents",
             "centaur_cc_reader_documents_select",
         ),
         ("slack_sync_channels", "centaur_cc_reader_channels_select"),
+        ("slack_sync_messages", "centaur_cc_reader_messages_select"),
+        ("slack_sync_users", "centaur_cc_reader_users_select"),
         (
             "granola_context_documents",
             "centaur_cc_reader_granola_documents_select",
@@ -544,106 +564,42 @@ fn expected_policies() -> Vec<(String, String)> {
             "centaur_google_drive_runs_reader_select",
         ),
         (
-            "google_drive_sync_runs",
-            "centaur_readonly_google_drive_sync_runs_select",
-        ),
-        (
             "google_drive_sync_files",
             "centaur_google_drive_files_reader_select",
-        ),
-        (
-            "google_drive_sync_files",
-            "centaur_readonly_google_drive_sync_files_select",
         ),
         (
             "google_drive_sync_checkpoints",
             "centaur_google_drive_checkpoints_reader_select",
         ),
         (
-            "google_drive_sync_checkpoints",
-            "centaur_readonly_google_drive_sync_checkpoints_select",
-        ),
-        (
             "google_calendar_sync_runs",
             "centaur_google_calendar_runs_reader_select",
-        ),
-        (
-            "google_calendar_sync_runs",
-            "centaur_readonly_google_calendar_sync_runs_select",
         ),
         (
             "google_calendar_sync_calendars",
             "centaur_google_calendar_calendars_reader_select",
         ),
         (
-            "google_calendar_sync_calendars",
-            "centaur_readonly_google_calendar_sync_calendars_select",
-        ),
-        (
             "google_calendar_sync_events",
             "centaur_google_calendar_events_reader_select",
-        ),
-        (
-            "google_calendar_sync_events",
-            "centaur_readonly_google_calendar_sync_events_select",
         ),
         (
             "google_calendar_sync_checkpoints",
             "centaur_google_calendar_checkpoints_reader_select",
         ),
-        (
-            "google_calendar_sync_checkpoints",
-            "centaur_readonly_google_calendar_sync_checkpoints_select",
-        ),
         ("linear_sync_runs", "centaur_linear_runs_reader_select"),
-        (
-            "linear_sync_runs",
-            "centaur_readonly_linear_sync_runs_select",
-        ),
         (
             "linear_sync_projects",
             "centaur_linear_projects_reader_select",
         ),
-        (
-            "linear_sync_projects",
-            "centaur_readonly_linear_sync_projects_select",
-        ),
         ("linear_sync_issues", "centaur_linear_issues_reader_select"),
-        (
-            "linear_sync_issues",
-            "centaur_readonly_linear_sync_issues_select",
-        ),
         (
             "linear_sync_comments",
             "centaur_linear_comments_reader_select",
         ),
         (
-            "linear_sync_comments",
-            "centaur_readonly_linear_sync_comments_select",
-        ),
-        (
             "linear_sync_checkpoints",
             "centaur_linear_checkpoints_reader_select",
-        ),
-        (
-            "linear_sync_checkpoints",
-            "centaur_readonly_linear_sync_checkpoints_select",
-        ),
-        (
-            "slack_sync_channels",
-            "centaur_readonly_slack_sync_channels_select",
-        ),
-        (
-            "slack_sync_users",
-            "centaur_readonly_slack_sync_users_select",
-        ),
-        (
-            "slack_sync_messages",
-            "centaur_readonly_slack_sync_messages_select",
-        ),
-        (
-            "slack_sync_message_attachments",
-            "centaur_readonly_slack_sync_message_attachments_select",
         ),
     ]
     .into_iter()
@@ -749,15 +705,95 @@ async fn assert_company_context_reader_role_security(
         vec![
             "company_context_document_embeddings".to_owned(),
             "company_context_documents".to_owned(),
+            "company_context_slack_messages".to_owned(),
+            "company_context_slack_users".to_owned(),
             "google_docs_context_documents".to_owned(),
             "google_docs_sync_file_observations".to_owned(),
             "granola_context_documents".to_owned(),
             "slack_private_context_documents".to_owned(),
             "slack_private_conversation_context_documents".to_owned(),
             "slack_sync_channels".to_owned(),
+            "slack_sync_messages".to_owned(),
+            "slack_sync_users".to_owned(),
         ],
         "company context reader gained effective access to an unexpected application table or view"
     );
+
+    let slack_view_security: Vec<(String, bool)> = sqlx::query_as(
+        r#"
+        select relations.relname,
+               coalesce(relations.reloptions @> array['security_invoker=true'], false)
+        from pg_class relations
+        join pg_namespace schemas on schemas.oid = relations.relnamespace
+        where schemas.nspname = 'public'
+          and relations.relname in (
+              'company_context_slack_messages',
+              'company_context_slack_users'
+          )
+        order by relations.relname
+        "#,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    assert_eq!(
+        slack_view_security,
+        vec![
+            ("company_context_slack_messages".to_owned(), true),
+            ("company_context_slack_users".to_owned(), true),
+        ],
+        "company context Slack views must enforce the invoking reader's RLS policies"
+    );
+
+    let slack_table_privileges: Vec<(String, bool)> = sqlx::query_as(
+        r#"
+        select relation, has_table_privilege(
+            'centaur_company_context_reader',
+            'public.' || relation,
+            'SELECT'
+        )
+        from unnest(array['slack_sync_messages', 'slack_sync_users']) relation
+        order by relation
+        "#,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    assert_eq!(
+        slack_table_privileges,
+        vec![
+            ("slack_sync_messages".to_owned(), false),
+            ("slack_sync_users".to_owned(), false),
+        ],
+        "Slack source rows must be exposed through column grants, not table-wide SELECT"
+    );
+
+    let sensitive_slack_column_privileges: Vec<(String, String, bool)> = sqlx::query_as(
+        r#"
+        select relation, column_name, has_column_privilege(
+            'centaur_company_context_reader',
+            'public.' || relation,
+            column_name,
+            'SELECT'
+        )
+        from (values
+            ('slack_sync_messages', 'raw_payload'),
+            ('slack_sync_messages', 'source_run_id'),
+            ('slack_sync_users', 'raw_payload')
+        ) columns(relation, column_name)
+        order by relation, column_name
+        "#,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    assert!(
+        sensitive_slack_column_privileges
+            .iter()
+            .all(|(_, _, allowed)| !allowed),
+        "company context reader gained access to sensitive Slack source columns: {sensitive_slack_column_privileges:?}"
+    );
+    assert_company_context_reader_query_denied(conn, "select raw_payload from slack_sync_messages")
+        .await?;
+    assert_company_context_reader_query_denied(conn, "select raw_payload from slack_sync_users")
+        .await?;
 
     let tables_without_rls: Vec<String> = sqlx::query_scalar(
         r#"
@@ -766,6 +802,7 @@ async fn assert_company_context_reader_role_security(
         join pg_namespace schemas on schemas.oid = tables.relnamespace
         where schemas.nspname = 'public'
           and tables.relname = any($1::text[])
+          and tables.relkind in ('r', 'p')
           and not tables.relrowsecurity
         order by tables.relname
         "#,
@@ -824,6 +861,31 @@ async fn assert_company_context_reader_role_security(
     assert!(
         writable_relations.is_empty(),
         "company context reader gained an effective write privilege: {writable_relations:?}"
+    );
+    Ok(())
+}
+
+async fn assert_company_context_reader_query_denied(
+    conn: &mut PgConnection,
+    query: &str,
+) -> Result<(), sqlx::Error> {
+    let mut tx = conn.begin().await?;
+    tx.execute("set local search_path to public").await?;
+    tx.execute("set role centaur_company_context_reader")
+        .await?;
+    let error = sqlx::query(query)
+        .fetch_all(&mut *tx)
+        .await
+        .expect_err("sensitive Slack source column query must be denied");
+    tx.rollback().await?;
+
+    let sqlx::Error::Database(error) = error else {
+        panic!("expected a database permission error, got {error}");
+    };
+    assert_eq!(
+        error.code().as_deref(),
+        Some("42501"),
+        "sensitive Slack source column query failed for an unexpected reason"
     );
     Ok(())
 }
@@ -903,6 +965,8 @@ async fn assert_company_context_reader_denies_unauthorized_rows(
         missing_identity,
         CompanyContextReaderRows {
             slack_channels: Vec::new(),
+            slack_users: Vec::new(),
+            slack_messages: Vec::new(),
             company_context_docs: Vec::new(),
             google_docs_observations: Vec::new(),
             google_docs: Vec::new(),
@@ -929,6 +993,8 @@ async fn assert_company_context_reader_denies_unauthorized_rows(
         viewer,
         CompanyContextReaderRows {
             slack_channels: vec!["G_PRIVATE".to_owned()],
+            slack_users: vec!["U_PRIVATE".to_owned()],
+            slack_messages: vec!["G_PRIVATE:1000.000003".to_owned()],
             company_context_docs: vec!["doc_slack_private".to_owned()],
             google_docs_observations: vec!["gdocs_observed_file".to_owned()],
             google_docs: vec!["gdocs_doc".to_owned()],
@@ -952,7 +1018,6 @@ async fn assert_company_context_reader_denies_unauthorized_rows(
             slack_include_public: Some(false),
             slack_team_id: Some("T_HOME"),
             slack_user_id: Some("U_OTHER"),
-            user_email: Some("other@example.com"),
             google_subject: Some("google_subject_other"),
             ..Default::default()
         },
@@ -962,6 +1027,8 @@ async fn assert_company_context_reader_denies_unauthorized_rows(
         other_user,
         CompanyContextReaderRows {
             slack_channels: vec!["G_PRIVATE_OTHER".to_owned()],
+            slack_users: Vec::new(),
+            slack_messages: Vec::new(),
             company_context_docs: vec!["doc_slack_private_other".to_owned()],
             google_docs_observations: vec!["gdocs_observed_other".to_owned()],
             google_docs: vec!["gdocs_doc_other".to_owned()],
@@ -990,6 +1057,8 @@ async fn assert_company_context_reader_denies_unauthorized_rows(
         wrong_team,
         CompanyContextReaderRows {
             slack_channels: vec!["G_PRIVATE_CROSS_TEAM".to_owned()],
+            slack_users: Vec::new(),
+            slack_messages: Vec::new(),
             company_context_docs: vec!["doc_slack_private_cross_team".to_owned()],
             google_docs_observations: Vec::new(),
             google_docs: Vec::new(),
@@ -1018,20 +1087,28 @@ async fn assert_company_context_reader_denies_unauthorized_rows(
     assert!(google_email_only.google_docs.is_empty());
     assert!(google_email_only.google_docs_observations.is_empty());
 
-    let slack_email_only = company_context_reader_rows(
+    let untrusted_email_override = company_context_reader_rows(
         conn,
         CompanyContextReaderSettings {
             slack_history_channel_ids: Some("[]"),
             slack_include_public: Some(false),
             slack_team_id: Some("T_HOME"),
             slack_user_id: Some("U_PRIVATE"),
-            user_email: Some("viewer@example.com"),
+            user_email_override: Some("other@example.com"),
             ..Default::default()
         },
     )
     .await?;
-    assert!(slack_email_only.google_docs.is_empty());
-    assert!(slack_email_only.google_docs_observations.is_empty());
+    assert_eq!(
+        untrusted_email_override.granola_docs,
+        vec![
+            "granola:note:granola_note".to_owned(),
+            "granola:note:granola_note_old".to_owned(),
+        ],
+        "centaur.user_email must not override the Slack identity used for Granola access"
+    );
+    assert!(untrusted_email_override.google_docs.is_empty());
+    assert!(untrusted_email_override.google_docs_observations.is_empty());
 
     Ok(())
 }
@@ -1053,6 +1130,8 @@ async fn assert_company_context_reader_channel_grants(
         channel_grants_only,
         CompanyContextReaderRows {
             slack_channels: vec!["C_ALPHA".to_owned(), "G_PRIVATE_OTHER".to_owned()],
+            slack_users: vec!["U_ALPHA".to_owned()],
+            slack_messages: vec!["C_ALPHA:1000.000001".to_owned()],
             company_context_docs: vec![
                 "doc_slack_alpha".to_owned(),
                 "doc_slack_private_other".to_owned(),
@@ -1064,6 +1143,57 @@ async fn assert_company_context_reader_channel_grants(
             slack_private_conversation_docs: Vec::new(),
         },
         "channel-only grants must expose exactly the granted channels without user-scoped data"
+    );
+    Ok(())
+}
+
+async fn assert_company_context_reader_public_message_visibility(
+    conn: &mut PgConnection,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        insert into slack_sync_messages (channel_id, message_ts, user_id, text)
+        values ('C_ALPHA', '1000.000004', 'U_PRIVATE', 'mixed visibility author message')
+        "#,
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    let public_rows = company_context_reader_rows(
+        conn,
+        CompanyContextReaderSettings {
+            slack_history_channel_ids: Some("[]"),
+            slack_include_public: Some(true),
+            ..Default::default()
+        },
+    )
+    .await?;
+    assert_eq!(
+        public_rows,
+        CompanyContextReaderRows {
+            slack_channels: vec![
+                "C_ADMIN".to_owned(),
+                "C_ALPHA".to_owned(),
+                "C_BETA".to_owned(),
+            ],
+            slack_users: vec![
+                "U_ALPHA".to_owned(),
+                "U_BETA".to_owned(),
+                "U_PRIVATE".to_owned(),
+            ],
+            slack_messages: vec![
+                "C_ALPHA:1000.000001".to_owned(),
+                "C_ALPHA:1000.000004".to_owned(),
+                "C_BETA:1000.000002".to_owned(),
+            ],
+            company_context_docs: vec!["doc_slack_alpha".to_owned(), "doc_slack_beta".to_owned(),],
+            google_docs_observations: Vec::new(),
+            google_docs: Vec::new(),
+            granola_docs: Vec::new(),
+            slack_private_docs: Vec::new(),
+            slack_private_conversation_docs: Vec::new(),
+        },
+        "public Slack access must expose public messages and their authors without leaking private messages"
     );
     Ok(())
 }
@@ -1146,7 +1276,8 @@ async fn insert_fixture_rows(conn: &mut PgConnection) -> Result<(), sqlx::Error>
         insert into slack_sync_users (user_id, user_name, team_id, raw_payload) values
             ('U_ALPHA', 'alpha user', '', '{}'),
             ('U_BETA', 'beta user', '', '{}'),
-            ('U_PRIVATE', 'private user', 'T_HOME', '{"profile": {"email": "viewer@example.com"}}');
+            ('U_PRIVATE', 'private user', 'T_HOME', '{"profile": {"email": "viewer@example.com"}}'),
+            ('U_OTHER', 'other user', 'T_HOME', '{"profile": {"email": "other@example.com"}}');
 
         insert into slack_sync_messages (channel_id, message_ts, user_id, text) values
             ('C_ALPHA', '1000.000001', 'U_ALPHA', 'alpha channel message'),
@@ -1359,16 +1490,85 @@ async fn company_context_docs(
     Ok(rows)
 }
 
+async fn available_text_search_backends() -> Result<Vec<TextSearchBackend>, Box<dyn Error>> {
+    let Some(database_url) = test_database_url() else {
+        return Ok(Vec::new());
+    };
+    let mut conn = PgConnection::connect(&database_url).await?;
+    let pg_search: bool = sqlx::query_scalar(
+        "select exists (select 1 from pg_available_extensions where name = 'pg_search')",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+    conn.close().await?;
+    Ok(TextSearchBackend::ALL
+        .into_iter()
+        .filter(|backend| pg_search || *backend != TextSearchBackend::Paradedb)
+        .collect())
+}
+
+/// Mirrors the company-context tool's multi-term keyword query per backend.
+fn granola_keyword_search_sql(backend: TextSearchBackend) -> &'static str {
+    match backend {
+        TextSearchBackend::Paradedb => {
+            r#"
+            select document_id, paradedb.score(document_id) as score
+            from granola_context_documents
+            where (
+                (title ||| $1::text::pdb.boost(8) or body ||| $1::text::pdb.boost(2))
+                or (title ||| $2::text::pdb.boost(4) or body ||| $2::text)
+                or (title ||| $3::text::pdb.boost(4) or body ||| $3::text)
+            )
+            and ($4::timestamptz is null or occurred_at >= $4)
+            and ($5::timestamptz is null or occurred_at < $5)
+            order by paradedb.score(document_id) desc
+            limit $6
+            "#
+        }
+        TextSearchBackend::Postgres => {
+            r#"
+            select
+                document_id,
+                (
+                    ts_rank(
+                        '{0.25, 0, 0, 1}',
+                        search_vector,
+                        replace(plainto_tsquery('english', $1)::text, ' & ', ' | ')::tsquery,
+                        1
+                    )
+                    + ts_rank(
+                        '{0.25, 0, 0, 1}',
+                        search_vector,
+                        phraseto_tsquery('english', $1),
+                        1
+                    )
+                )::real as score
+            from granola_context_documents
+            where search_vector
+                @@ replace(plainto_tsquery('english', $1)::text, ' & ', ' | ')::tsquery
+            and ($2::timestamptz is null or occurred_at >= $2)
+            and ($3::timestamptz is null or occurred_at < $3)
+            order by score desc
+            limit $4
+            "#
+        }
+    }
+}
+
 async fn granola_keyword_search_rows(
     conn: &mut PgConnection,
-    user_email: &str,
+    backend: TextSearchBackend,
+    slack_user_id: &str,
 ) -> Result<Vec<(String, f32)>, sqlx::Error> {
     let mut tx = conn.begin().await?;
     tx.execute("set local search_path to public").await?;
     tx.execute("set role centaur_company_context_reader")
         .await?;
-    sqlx::query("select set_config('centaur.user_email', $1, true)")
-        .bind(user_email)
+    sqlx::query("select set_config('centaur.slack_team_id', 'T_HOME', true)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("select set_config('centaur.slack_user_id', $1, true)")
+        .bind(slack_user_id)
         .execute(&mut *tx)
         .await?;
     let occurred_after = time::Date::from_calendar_date(2026, time::Month::May, 1)
@@ -1380,29 +1580,17 @@ async fn granola_keyword_search_rows(
         .midnight()
         .assume_utc();
 
-    let rows = sqlx::query_as(
-        r#"
-        select document_id, paradedb.score(document_id) as score
-        from granola_context_documents
-        where (
-            (title ||| $1::text::pdb.boost(8) or body ||| $1::text::pdb.boost(2))
-            or (title ||| $2::text::pdb.boost(4) or body ||| $2::text)
-            or (title ||| $3::text::pdb.boost(4) or body ||| $3::text)
-        )
-        and ($4::timestamptz is null or occurred_at >= $4)
-        and ($5::timestamptz is null or occurred_at < $5)
-        order by paradedb.score(document_id) desc
-        limit $6
-        "#,
-    )
-    .bind("project planning")
-    .bind("project")
-    .bind("planning")
-    .bind(occurred_after)
-    .bind(occurred_before)
-    .bind(10_i64)
-    .fetch_all(&mut *tx)
-    .await?;
+    let query = sqlx::query_as(granola_keyword_search_sql(backend)).bind("project planning");
+    let query = match backend {
+        TextSearchBackend::Paradedb => query.bind("project").bind("planning"),
+        TextSearchBackend::Postgres => query,
+    };
+    let rows = query
+        .bind(occurred_after)
+        .bind(occurred_before)
+        .bind(10_i64)
+        .fetch_all(&mut *tx)
+        .await?;
 
     tx.execute("reset role").await?;
     tx.rollback().await?;
@@ -1430,9 +1618,6 @@ async fn company_context_search_rows(
         .execute(&mut *tx)
         .await?;
     sqlx::query("select set_config('centaur.slack_user_id', 'U_PRIVATE', true)")
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("select set_config('centaur.user_email', 'viewer@example.com', true)")
         .execute(&mut *tx)
         .await?;
     sqlx::query("select set_config('centaur.google_subject', 'google_subject', true)")
@@ -1489,7 +1674,7 @@ async fn company_context_reader_rows(
         ),
         ("centaur.slack_team_id", settings.slack_team_id),
         ("centaur.slack_user_id", settings.slack_user_id),
-        ("centaur.user_email", settings.user_email),
+        ("centaur.user_email", settings.user_email_override),
         ("centaur.google_email", settings.google_email),
         ("centaur.google_subject", settings.google_subject),
     ] {
@@ -1512,6 +1697,16 @@ async fn company_context_reader_rows(
         slack_channels: text_array(
             &mut tx,
             "select coalesce(array_agg(channel_id order by channel_id), '{}') from slack_sync_channels",
+        )
+        .await?,
+        slack_users: text_array(
+            &mut tx,
+            "select coalesce(array_agg(user_id order by user_id), '{}') from (select * from company_context_slack_users) users",
+        )
+        .await?,
+        slack_messages: text_array(
+            &mut tx,
+            "select coalesce(array_agg(channel_id || ':' || message_ts order by channel_id, message_ts), '{}') from (select * from company_context_slack_messages) messages",
         )
         .await?,
         company_context_docs: text_array(
@@ -1587,56 +1782,4 @@ fn empty_visible_rows() -> VisibleRows {
         linear_comments: 0,
         linear_checkpoints: 0,
     }
-}
-
-fn public_visible_rows() -> VisibleRows {
-    VisibleRows {
-        slack_channels: vec![
-            "C_ADMIN".to_owned(),
-            "C_ALPHA".to_owned(),
-            "C_BETA".to_owned(),
-        ],
-        slack_users: vec![
-            "U_ALPHA".to_owned(),
-            "U_BETA".to_owned(),
-            "U_PRIVATE".to_owned(),
-        ],
-        slack_messages: vec![
-            "C_ALPHA:1000.000001".to_owned(),
-            "C_BETA:1000.000002".to_owned(),
-        ],
-        slack_attachments: vec![
-            "C_ALPHA:1000.000001:F_ALPHA".to_owned(),
-            "C_BETA:1000.000002:F_BETA".to_owned(),
-        ],
-        context_docs: vec![
-            "doc_gcal".to_owned(),
-            "doc_gdrive".to_owned(),
-            "doc_linear".to_owned(),
-            "doc_slack_alpha".to_owned(),
-            "doc_slack_beta".to_owned(),
-        ],
-        google_drive_runs: 1,
-        google_drive_files: 1,
-        google_drive_checkpoints: 1,
-        google_calendar_runs: 1,
-        google_calendar_calendars: 1,
-        google_calendar_events: 1,
-        google_calendar_checkpoints: 1,
-        linear_runs: 1,
-        linear_projects: 1,
-        linear_issues: 1,
-        linear_comments: 1,
-        linear_checkpoints: 1,
-    }
-}
-
-fn public_and_private_visible_rows() -> VisibleRows {
-    let mut rows = public_visible_rows();
-    rows.slack_channels.push("G_PRIVATE".to_owned());
-    rows.slack_messages.push("G_PRIVATE:1000.000003".to_owned());
-    rows.slack_attachments
-        .push("G_PRIVATE:1000.000003:F_PRIVATE".to_owned());
-    rows.context_docs.push("doc_slack_private".to_owned());
-    rows
 }

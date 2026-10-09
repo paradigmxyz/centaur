@@ -60,6 +60,12 @@
         </div>
         <p class="form-hint -mt-2">A disabled app rejects new consent flows; existing credentials keep refreshing.</p>
         <div class="flex items-center gap-2">
+          <%= check_box_tag "oauth_app[shared]", "1", app.shared, id: "oauth_app_shared", class: "h-4 w-4", disabled: app.persisted? %>
+          <label class="form-label mb-0" for="oauth_app_shared">Shared: one admin-connected account; agents get access through roles.</label>
+        </div>
+        <%= field_error(app, :shared) %>
+        <p class="form-hint -mt-2">Cannot be changed after the app is created.</p>
+        <div class="flex items-center gap-2">
           <%= check_box_tag "oauth_app[always_available]", "1", app.always_available, id: "oauth_app_always_available", class: "h-4 w-4" %>
           <label class="form-label mb-0" for="oauth_app_always_available">Always available to the connecting user</label>
         </div>

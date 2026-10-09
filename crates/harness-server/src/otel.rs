@@ -27,8 +27,15 @@ const TRANSCRIPT_CAPTURE_ENV: &str = "CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS";
 static TELEMETRY: OnceLock<Option<TelemetryRuntime>> = OnceLock::new();
 
 struct TelemetryRuntime {
-    _provider: SdkTracerProvider,
+    provider: SdkTracerProvider,
     tracer: SdkTracer,
+}
+
+/// Exports spans the batch processor still holds, e.g. before the process exits.
+pub fn flush_telemetry() {
+    if let Some(Some(runtime)) = TELEMETRY.get() {
+        let _ = runtime.provider.force_flush();
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -341,14 +348,10 @@ impl TurnTelemetry {
             }
         }
         attributes.push(KeyValue::new("lmnr.span.input", span_input.to_string()));
-        let span = SpanBuilder::from_name(format!(
-            "{}.tool.{}",
-            harness_name(self.harness),
-            labels.name
-        ))
-        .with_kind(SpanKind::Internal)
-        .with_attributes(attributes)
-        .start_with_context(tracer, parent);
+        let span = SpanBuilder::from_name(tool_span_name(self.harness, &labels))
+            .with_kind(SpanKind::Internal)
+            .with_attributes(attributes)
+            .start_with_context(tracer, parent);
         self.tools.insert(id, ActiveTool { span });
     }
 
@@ -522,10 +525,7 @@ fn build_telemetry_runtime() -> Result<Option<TelemetryRuntime>, String> {
         .with_batch_exporter(exporter)
         .build();
     let tracer = provider.tracer("centaur.harness-server");
-    Ok(Some(TelemetryRuntime {
-        _provider: provider,
-        tracer,
-    }))
+    Ok(Some(TelemetryRuntime { provider, tracer }))
 }
 
 fn traces_export_disabled() -> bool {
@@ -776,21 +776,50 @@ fn centaur_tool_labels(item: &Value, centaur_tool_names: &BTreeSet<String>) -> O
     let words = unwrap_shell_words(&command)?;
     let executable = executable_name(words.first()?);
 
-    let (name, method) = if executable == "centaur-tools" {
-        match words.get(1).map(String::as_str) {
-            Some("call") => (words.get(2)?, words.get(3).map_or("call", String::as_str)),
-            Some("run") => (words.get(2)?, "cli"),
-            _ => return None,
-        }
-    } else {
-        (words.first()?, "cli")
-    };
-    let name = executable_name(name);
-    if !centaur_tool_names.contains(name) {
-        return None;
+    if executable == "centaur-tools" {
+        return match words.get(1).map(String::as_str) {
+            Some(method @ ("list" | "json" | "refresh" | "which")) => Some(ToolLabels {
+                kind: "centaur".to_owned(),
+                name: "centaur-tools".to_owned(),
+                method: method.to_owned(),
+            }),
+            Some("call") => centaur_catalog_tool_labels(
+                words.get(2)?,
+                words.get(3).map_or("call", String::as_str),
+                centaur_tool_names,
+            ),
+            Some("run") => centaur_catalog_tool_labels(
+                words.get(2)?,
+                words.get(3).map_or("cli", String::as_str),
+                centaur_tool_names,
+            ),
+            _ => None,
+        };
     }
+    centaur_catalog_tool_labels(
+        words.first()?,
+        words.get(1).map_or("cli", String::as_str),
+        centaur_tool_names,
+    )
+}
 
-    Some(ToolLabels {
+fn tool_span_name(harness: HarnessKind, labels: &ToolLabels) -> String {
+    let tool_name =
+        if labels.kind == "centaur" && labels.name != "centaur-tools" && labels.method != "cli" {
+            format!("{} {}", labels.name, labels.method)
+        } else {
+            labels.name.clone()
+        };
+    format!("{}.tool.{tool_name}", harness_name(harness))
+}
+
+fn centaur_catalog_tool_labels(
+    name: &str,
+    method: &str,
+    centaur_tool_names: &BTreeSet<String>,
+) -> Option<ToolLabels> {
+    let name = executable_name(name);
+    centaur_tool_names.contains(name).then(|| ToolLabels {
         kind: "centaur".to_owned(),
         name: name.to_owned(),
         method: method.to_owned(),
@@ -1022,6 +1051,7 @@ fn harness_name(kind: HarnessKind) -> &'static str {
         HarnessKind::Codex => "codex",
         HarnessKind::ClaudeCode => "claude",
         HarnessKind::Amp => "amp",
+        HarnessKind::Pi => "pi",
     }
 }
 
@@ -1112,7 +1142,26 @@ fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
             source: "centaur_estimate:anthropic:fable-mythos-5:5m-cache-write",
         });
     }
-    if model.contains("opus-4-8")
+    if model.contains("opus-5-5") {
+        return Some(TokenPricing {
+            input_per_mtok: 4.0,
+            cache_creation_per_mtok: 5.0,
+            cache_read_per_mtok: 0.2,
+            output_per_mtok: 20.0,
+            source: "centaur_estimate:anthropic:opus-5-5:5m-cache-write",
+        });
+    }
+    if model.contains("opus-5-fast") {
+        return Some(TokenPricing {
+            input_per_mtok: 10.0,
+            cache_creation_per_mtok: 12.5,
+            cache_read_per_mtok: 1.0,
+            output_per_mtok: 50.0,
+            source: "centaur_estimate:anthropic:opus-5-fast:5m-cache-write",
+        });
+    }
+    if model.contains("opus-5")
+        || model.contains("opus-4-8")
         || model.contains("opus-4-7")
         || model.contains("opus-4-6")
         || model.contains("opus-4-5")
@@ -1132,6 +1181,15 @@ fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
             cache_read_per_mtok: 1.5,
             output_per_mtok: 75.0,
             source: "centaur_estimate:anthropic:opus-4-deprecated:5m-cache-write",
+        });
+    }
+    if model.contains("sonnet-5") {
+        return Some(TokenPricing {
+            input_per_mtok: 2.0,
+            cache_creation_per_mtok: 2.5,
+            cache_read_per_mtok: 0.2,
+            output_per_mtok: 10.0,
+            source: "centaur_estimate:anthropic:sonnet-5:5m-cache-write",
         });
     }
     if model.contains("sonnet-4-6") || model.contains("sonnet-4-5") || model.contains("sonnet-4") {
@@ -1156,6 +1214,46 @@ fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
 }
 
 fn openai_pricing(model: &str) -> Option<TokenPricing> {
+    // Standard rates for <=272K input tokens, verified against the model pages:
+    // https://developers.openai.com/api/docs/models/gpt-6.1-sol
+    // https://developers.openai.com/api/docs/models/gpt-6-sol
+    // https://developers.openai.com/api/docs/models/gpt-6-luna
+    if model.contains("gpt-6-1-sol") {
+        return Some(TokenPricing {
+            input_per_mtok: 2.0,
+            cache_creation_per_mtok: 2.5,
+            cache_read_per_mtok: 0.1,
+            output_per_mtok: 10.0,
+            source: "centaur_estimate:openai:gpt-6.1-sol:standard-short-context",
+        });
+    }
+    if model.contains("gpt-6-sol") {
+        return Some(TokenPricing {
+            input_per_mtok: 2.0,
+            cache_creation_per_mtok: 2.5,
+            cache_read_per_mtok: 0.2,
+            output_per_mtok: 10.0,
+            source: "centaur_estimate:openai:gpt-6-sol:standard-short-context",
+        });
+    }
+    if model.contains("gpt-6-luna") {
+        return Some(TokenPricing {
+            input_per_mtok: 0.1,
+            cache_creation_per_mtok: 0.125,
+            cache_read_per_mtok: 0.01,
+            output_per_mtok: 0.5,
+            source: "centaur_estimate:openai:gpt-6-luna:standard-short-context",
+        });
+    }
+    if model.contains("gpt-6-astra") {
+        return Some(TokenPricing {
+            input_per_mtok: 10.0,
+            cache_creation_per_mtok: 12.5,
+            cache_read_per_mtok: 1.0,
+            output_per_mtok: 60.0,
+            source: "centaur_estimate:openai:gpt-6-astra:standard-short-context",
+        });
+    }
     if model.contains("gpt-5-6-sol") {
         return Some(TokenPricing {
             input_per_mtok: 5.0,
@@ -1415,16 +1513,16 @@ mod tests {
     }
 
     #[test]
-    fn centaur_cli_command_exports_the_catalog_tool_name() {
+    fn centaur_cli_command_exports_the_tool_subcommand() {
         let (exporter, provider, tracer) = test_telemetry();
-        let mut turn = test_turn_with_centaur_tools(tracer, ["websearch"]);
+        let mut turn = test_turn_with_centaur_tools(tracer, ["gsuite"]);
         for method in ["item/started", "item/completed"] {
             turn.observe_wire_value(&json!({
                 "method": method,
                 "params": {"item": {
                     "id": "tool-1",
                     "type": "commandExecution",
-                    "command": "/bin/bash -lc 'websearch search --query secret-value'",
+                    "command": "/bin/bash -lc 'gsuite docs read secret-value'",
                     "exitCode": 0
                 }}
             }));
@@ -1434,13 +1532,13 @@ mod tests {
         let spans = exporter.get_finished_spans().expect("spans");
         assert_eq!(spans.len(), 1);
         let tool = &spans[0];
-        assert_eq!(tool.name, "codex.tool.websearch");
+        assert_eq!(tool.name, "codex.tool.gsuite docs");
         assert_eq!(attribute(tool, "tool.kind").as_deref(), Some("centaur"));
-        assert_eq!(attribute(tool, "tool.name").as_deref(), Some("websearch"));
-        assert_eq!(attribute(tool, "tool.method").as_deref(), Some("cli"));
+        assert_eq!(attribute(tool, "tool.name").as_deref(), Some("gsuite"));
+        assert_eq!(attribute(tool, "tool.method").as_deref(), Some("docs"));
         assert_eq!(
             attribute(tool, "tool.executable").as_deref(),
-            Some("websearch")
+            Some("gsuite")
         );
         assert_eq!(attribute(tool, "tool.command"), None);
         assert_eq!(attribute(tool, "tool.cwd"), None);
@@ -1490,6 +1588,39 @@ mod tests {
 
         assert!(bounded.ends_with(TRUNCATION_SUFFIX));
         assert!(bounded.len() <= MAX_TOOL_COMMAND_BYTES);
+    }
+
+    #[test]
+    fn centaur_tools_list_exports_catalog_tool_span() {
+        let (exporter, provider, tracer) = test_telemetry();
+        let mut turn = test_turn(tracer);
+        for method in ["item/started", "item/completed"] {
+            turn.observe_wire_value(&json!({
+                "method": method,
+                "params": {"item": {
+                    "id": "tool-1",
+                    "type": "commandExecution",
+                    "command": "centaur-tools list",
+                    "exitCode": 0
+                }}
+            }));
+        }
+        provider.force_flush().expect("flush");
+
+        let spans = exporter.get_finished_spans().expect("spans");
+        assert_eq!(spans.len(), 1);
+        let tool = &spans[0];
+        assert_eq!(tool.name, "codex.tool.centaur-tools");
+        assert_eq!(attribute(tool, "tool.kind").as_deref(), Some("centaur"));
+        assert_eq!(
+            attribute(tool, "tool.name").as_deref(),
+            Some("centaur-tools")
+        );
+        assert_eq!(attribute(tool, "tool.method").as_deref(), Some("list"));
+        assert_eq!(
+            attribute(tool, "tool.executable").as_deref(),
+            Some("centaur-tools")
+        );
     }
 
     #[test]
@@ -1752,7 +1883,33 @@ mod tests {
     }
 
     #[test]
-    fn gpt_5_6_family_cost_uses_standard_short_context_pricing() {
+    fn openai_models_resolve_to_their_own_pricing_rows() {
+        let usage = NormalizedTokenUsage {
+            input_tokens: Some(1_000_000),
+            output_tokens: Some(100_000),
+            ..Default::default()
+        };
+
+        for model in [
+            "gpt-6-astra",
+            "gpt-6.1-sol",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+        ] {
+            let cost =
+                estimate_usage_cost(HarnessKind::Codex, "openai", model, &usage).expect("cost");
+            assert_eq!(
+                cost.source,
+                format!("centaur_estimate:openai:{model}:standard-short-context")
+            );
+        }
+    }
+
+    #[test]
+    fn opus_5_5_cost_is_not_billed_as_opus_5() {
         let usage = NormalizedTokenUsage {
             input_tokens: Some(1_000_000),
             cache_creation_input_tokens: Some(100_000),
@@ -1763,33 +1920,22 @@ mod tests {
 
         for (model, input_cost, output_cost, source) in [
             (
-                "gpt-5.6-sol",
+                "claude-opus-5-5",
+                3.34,
+                2.0,
+                "centaur_estimate:anthropic:opus-5-5:5m-cache-write",
+            ),
+            (
+                "claude-opus-5",
                 4.225,
-                3.0,
-                "centaur_estimate:openai:gpt-5.6-sol:standard-short-context",
-            ),
-            (
-                "gpt-5.6-terra",
-                1.69,
-                1.2,
-                "centaur_estimate:openai:gpt-5.6-terra:standard-short-context",
-            ),
-            (
-                "gpt-5.6-luna",
-                0.169,
-                0.12,
-                "centaur_estimate:openai:gpt-5.6-luna:standard-short-context",
+                2.5,
+                "centaur_estimate:anthropic:opus-4.5-plus:5m-cache-write",
             ),
         ] {
-            let cost =
-                estimate_usage_cost(HarnessKind::Codex, "openai", model, &usage).expect("cost");
-
+            let cost = estimate_usage_cost(HarnessKind::ClaudeCode, "anthropic", model, &usage)
+                .expect("cost");
             assert!((cost.input_cost - input_cost).abs() < 1e-9, "{model}");
             assert!((cost.output_cost - output_cost).abs() < 1e-9, "{model}");
-            assert!(
-                (cost.total_cost() - input_cost - output_cost).abs() < 1e-9,
-                "{model}"
-            );
             assert_eq!(cost.source, source);
         }
     }

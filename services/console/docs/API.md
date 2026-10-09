@@ -1009,6 +1009,7 @@ Google and Slack are supported providers in this release. The `provider` field i
 | `client_secret`        | required on create | OAuth client secret. Write-only and encrypted at rest; on update it is only changed when supplied. Never returned. |
 | `allowed_scopes`       | required    | Non-empty array of scope strings the start endpoint requests. A flow's optional `scopes` param must be a subset; omitting it requests all of these. |
 | `enabled`              | optional    | Defaults to `true`. A disabled app rejects new consent flows; existing credentials keep refreshing. |
+| `shared`               | optional    | Defaults to `false`. One admin-connected account with role-granted access. Create-only; changes return `422`. Incompatible with `always_available`. |
 
 The `client_secret` is required and write-only: it is accepted on writes but never returned in any response.
 
@@ -1062,7 +1063,7 @@ Returns `201`. The `client_secret` is never echoed back:
 
 `GET /api/v1/sandbox/oauth_apps`
 
-Returns enabled OAuth apps and the console URLs a sandbox user can open to start consent. Authenticate with the same sandbox entitlement JWT as `GET /api/v1/sandbox/permissions`. The token signature, issuer, audience, and expiry are verified. Proxy and principal claims are not checked because these URLs are not sensitive.
+Returns enabled non-shared OAuth apps and the console URLs a sandbox user can open to start consent. Authenticate with the same sandbox entitlement JWT as `GET /api/v1/sandbox/permissions`. The token signature, issuer, audience, and expiry are verified. Proxy and principal claims are not checked because these URLs are not sensitive.
 
 ```json
 {
@@ -1084,11 +1085,12 @@ Returns enabled OAuth apps and the console URLs a sandbox user can open to start
 
 `GET /api/v1/sandbox/permissions`
 
-The sandbox permissions response includes an `oauth_credentials` array with non-secret metadata for OAuth-flow credentials currently granted to the sandbox principal. Use it to confirm that a user completed consent for the expected app and personal email.
+The sandbox permissions response includes an `oauth_credentials` array with non-secret metadata for OAuth-flow credentials currently granted to the sandbox principal. Use it to confirm that a user completed consent for the expected app and personal email. It also includes a sorted `connected_tools` array derived from the `centaur-tool` labels on credentials granted directly or through roles.
 
 ```json
 {
   "data": {
+    "connected_tools": ["gsuite"],
     "oauth_credentials": [
       {
         "id": "bcr_...",
@@ -1440,7 +1442,7 @@ Returns `201`. The plaintext `token` is included **only** in this create respons
 
 ## Scheduled Tasks
 
-Scheduled tasks run one agent prompt on a five-field cron schedule in Pacific Time and deliver the result to Slack. Task IDs use the `tsk_` prefix. The `delivery_channel` can be a Slack channel ID available to the task author, or the special value `dm`, which resolves to the linked user's Slack direct message when the task is created or updated.
+Tasks run one agent prompt and deliver the result to Slack. A task may have a five-field cron schedule in Pacific Time; omitting `cron_expression` or sending `null` or an empty string makes it manual-only. Task IDs use the `tsk_` prefix. The `delivery_channel` can be a Slack channel ID available to the task author, or the special value `dm`, which resolves to the linked user's Slack direct message when the task is created or updated.
 
 These endpoints use the sandbox entitlement JWT injected by `iron-proxy`. Every operation requires an active Console user linked to the sandbox principal and is scoped to tasks owned by that user. A task owned by another user returns `404`.
 
@@ -1448,12 +1450,14 @@ These endpoints use the sandbox entitlement JWT injected by `iron-proxy`. Every 
 | ------ | ---- | ----- |
 | `GET` | `/api/v1/sandbox/scheduled_tasks` | List the linked user's tasks. |
 | `GET` | `/api/v1/sandbox/scheduled_tasks/:id` | Read one owned task by `tsk_...` OID. |
-| `POST` | `/api/v1/sandbox/scheduled_tasks` | Create a task from `data.name`, `data.prompt`, `data.cron_expression`, `data.delivery_channel`, and optional `data.enabled`. |
-| `PUT`/`PATCH` | `/api/v1/sandbox/scheduled_tasks/:id` | Update any supplied task fields. |
+| `POST` | `/api/v1/sandbox/scheduled_tasks` | Create a task from `data.name`, `data.prompt`, `data.delivery_channel`, and optional `data.cron_expression` and `data.enabled`. |
+| `PUT`/`PATCH` | `/api/v1/sandbox/scheduled_tasks/:id` | Update any supplied task fields. Set `data.cron_expression` to `null` or an empty string to make the task manual-only. |
 | `DELETE` | `/api/v1/sandbox/scheduled_tasks/:id` | Delete an owned task. Returns `204`. |
-| `POST` | `/api/v1/sandbox/scheduled_tasks/:id/run` | Queue an immediate run. Returns `202`. |
+| `POST` | `/api/v1/sandbox/scheduled_tasks/:id/run` | Queue an immediate run. Returns `202`; disabled tasks return `422`. |
 
-Responses include the task's cron expression, fixed timezone, human-readable schedule, enabled state, next run time, and latest run metadata. The `centaur-console` CLI exposes the same operations through `tasks`, `task`, `create-task`, `update-task`, `delete-task`, and `run-task`.
+The admin API also exposes `GET /api/v1/scheduled_tasks/:id` for scheduled workflows to read the task's current ID, enabled state, and delivery channel. It requires an active admin API key, returns `404` for deleted tasks, and sets `Cache-Control: no-store`.
+
+Responses include the task's optional cron expression, fixed timezone, human-readable schedule, enabled state, next run time, and latest run metadata. The `centaur-console` CLI exposes the same operations through `tasks`, `task`, `create-task`, `update-task`, `delete-task`, and `run-task`. Omit `--cron` when creating a manual-only task, or pass `update-task --cron ""` to remove an existing recurring schedule.
 
 ## Skills
 

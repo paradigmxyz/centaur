@@ -514,22 +514,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_dirs_point_at_bootstrapped_tools() {
-        assert_eq!(agent_tool_dirs(), "/app/tools");
-    }
-
-    #[test]
-    fn baked_base_tool_dirs_point_at_image_tools() {
-        assert_eq!(baked_base_tool_dirs(), "/opt/centaur/tools");
-    }
-
-    #[test]
-    fn agent_env_sets_tool_dirs() {
-        let env = agent_env(None);
-        assert_eq!(env, vec![("TOOL_DIRS".to_owned(), "/app/tools".to_owned())]);
-    }
-
-    #[test]
     fn agent_env_sets_auto_reload_from_tools_config() {
         let mut tools = ToolsConfig::new("paradigmxyz/centaur", "centaur-agent:test");
         tools.auto_reload = false;
@@ -538,14 +522,6 @@ mod tests {
 
         assert!(env.contains(&("TOOL_DIRS".to_owned(), "/app/tools".to_owned())));
         assert!(env.contains(&("CENTAUR_TOOLS_AUTO_RELOAD".to_owned(), "false".to_owned())));
-    }
-
-    #[test]
-    fn baked_base_agent_env_sets_baked_tool_dirs() {
-        assert_eq!(
-            baked_base_agent_env(),
-            vec![("TOOL_DIRS".to_owned(), "/opt/centaur/tools".to_owned())]
-        );
     }
 
     #[test]

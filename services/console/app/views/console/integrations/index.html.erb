@@ -4,7 +4,7 @@
            title: "Integrations",
            subtitle: "Connect your accounts so Centaur can act on your behalf." %>
 
-<% if @oauth_apps.empty? %>
+<% if @oauth_apps.empty? && @presets.empty? %>
   <p class="empty-state">No integrations available yet.</p>
 <% else %>
   <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -23,15 +23,18 @@
             <div class="text-[11px] uppercase tracking-wide text-zinc-500"><%= app.provider %></div>
           </div>
         </div>
-        <% if app.description.present? %>
+        <% if app.description.present? && !app.shared? %>
           <p class="line-clamp-2 text-xs text-zinc-500" title="<%= app.description %>"><%= app.description %></p>
         <% end %>
-        <p class="text-xs text-zinc-500"><%= app.always_available? ? "Used automatically whenever you ask the bot." : "Used only in your DMs with the bot." %></p>
+        <p class="text-xs text-zinc-500"><%= app.shared? ? "Shared with your agents." : app.always_available? ? "Used automatically whenever you ask the bot." : "Used only in your DMs with the bot." %></p>
         <div class="mt-auto flex items-center justify-between gap-3 pt-1">
           <% credential = @credentials_by_app_id[app.id] %>
           <% if credential %>
             <% needs_reconnect = app.credential_needs_reconnect?(credential) %>
-            <a href="<%= start_url %>" class="btn-secondary inline-block">Reconnect</a>
+            <div class="flex flex-wrap gap-2">
+              <%= link_to "Manage", console_oauth_app_path(app.oid), class: "btn-secondary" if app.shared? %>
+              <a href="<%= start_url %>" class="btn-secondary inline-block">Reconnect</a>
+            </div>
             <span class="flex items-center gap-1.5 text-xs <%= needs_reconnect ? "text-amber-300" : "text-emerald-300" %>">
               <span class="size-1.5 rounded-full <%= needs_reconnect ? "bg-amber-400" : "bg-emerald-400" %>"></span>
               <%= needs_reconnect ? "Needs reconnecting" : "Connected" %>
@@ -40,6 +43,18 @@
             <a href="<%= start_url %>" class="btn-primary inline-block">Connect</a>
           <% end %>
         </div>
+      </div>
+    <% end %>
+    <% @presets.each do |provider| %>
+      <div class="console-panel flex flex-col gap-3 p-5">
+        <div class="flex items-center gap-3">
+          <% if (logo = oauth_provider_logo(provider.key, classes: "size-8 shrink-0")) %>
+            <span class="flex size-10 shrink-0 items-center justify-center rounded-lg bg-ink-700 text-zinc-200"><%= logo %></span>
+          <% end %>
+          <h2 class="font-mono text-sm font-semibold text-zinc-100"><%= provider.display_name %></h2>
+        </div>
+        <p class="text-xs text-zinc-500"><%= provider.preset[:description] %></p>
+        <%= button_to "Connect", console_oauth_app_preset_path(provider: provider.key), class: "btn-primary", form: { data: { turbo: false } } %>
       </div>
     <% end %>
   </div>

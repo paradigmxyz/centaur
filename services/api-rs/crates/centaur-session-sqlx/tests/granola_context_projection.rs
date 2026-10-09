@@ -28,7 +28,7 @@ async fn run_assertions(conn: &mut PgConnection, schema: &str) -> Result<(), Box
     set_search_path(conn, schema).await?;
     create_roles(conn).await?;
     create_slack_identity_helpers(conn).await?;
-    execute_migration(conn, &granola_sync_without_bm25()).await?;
+    execute_migration(conn, GRANOLA_SYNC_SQL).await?;
     sqlx::raw_sql(
         r#"
         insert into granola_sync_notes (
@@ -246,6 +246,12 @@ async fn create_roles(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
             if not exists (select 1 from pg_roles where rolname = 'centaur_slack_reader') then
                 create role centaur_slack_reader nologin;
             end if;
+            -- Migration 0040 creates policies for centaur_readonly. Full
+            -- migrations create it in 0019 and drop it in 0059, so this test
+            -- creates it before running 0040 in isolation.
+            if not exists (select 1 from pg_roles where rolname = 'centaur_readonly') then
+                create role centaur_readonly nologin;
+            end if;
         end
         $$;
         "#,
@@ -329,19 +335,4 @@ async fn grant_schema_usage(conn: &mut PgConnection, schema: &str) -> Result<(),
 async fn execute_migration(conn: &mut PgConnection, sql: &str) -> Result<(), sqlx::Error> {
     sqlx::raw_sql(sql).execute(&mut *conn).await?;
     Ok(())
-}
-
-fn granola_sync_without_bm25() -> String {
-    let sql = GRANOLA_SYNC_SQL.replace(
-        "create extension if not exists pg_search;",
-        "-- search extension unavailable in this test database",
-    );
-    let (before_bm25, rest) = sql
-        .split_once("drop index if exists idx_granola_context_documents_bm25;")
-        .expect("Granola migration should contain BM25 index block");
-    let (_, after_bm25) = rest
-        .split_once("create table if not exists granola_sync_checkpoints")
-        .expect("Granola migration should create sync checkpoints after the BM25 index");
-
-    format!("{before_bm25}create table if not exists granola_sync_checkpoints{after_bm25}")
 }

@@ -4,6 +4,7 @@ description = "Search Slack messages, channels, threads, users"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
+    "asyncpg>=0.30.0",
     "slack-sdk>=3.27.0",
     "typer>=0.12.0",
     "python-dotenv>=1.0.0",

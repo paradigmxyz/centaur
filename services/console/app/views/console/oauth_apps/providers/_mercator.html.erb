@@ -1,0 +1,18 @@
+<% if credential %>
+  <section class="console-panel mb-8 space-y-4 p-5" aria-label="Mercator wallet">
+    <h2 class="text-sm font-semibold text-zinc-100">Shared wallet</h2>
+    <%= link_to "#{credential.provider_subject.to_s.first(6)}…#{credential.provider_subject.to_s.last(4)} ↗",
+          "https://explore.tempo.xyz/address/#{ERB::Util.url_encode(credential.provider_subject.to_s)}",
+          class: "console-link font-mono text-sm", title: credential.provider_subject, target: "_blank", rel: "noopener noreferrer" %>
+    <div class="flex flex-wrap gap-3">
+      <%= link_to "Manage wallet ↗", "https://mercator.sh/account", class: "btn-secondary", target: "_blank", rel: "noopener noreferrer" %>
+      <% if details[:claimed] == true %>
+        <button type="button" class="btn-primary disabled:opacity-50" disabled>MACH already claimed</button>
+      <% else %>
+        <%= link_to "Claim MACH", "https://mercator.sh/slack-claim?#{URI.encode_www_form(wallet: credential.provider_subject)}",
+              class: "btn-primary", target: "_blank", rel: "noopener noreferrer" %>
+      <% end %>
+      <%= link_to "Agent access", console_secret_path("static", credential.static_secret.oid, anchor: "roles"), class: "btn-secondary" if credential.static_secret %>
+    </div>
+  </section>
+<% end %>

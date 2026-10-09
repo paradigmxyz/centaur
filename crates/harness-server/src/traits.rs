@@ -15,6 +15,7 @@ pub enum HarnessKind {
     Codex,
     ClaudeCode,
     Amp,
+    Pi,
 }
 
 pub struct ThreadState {
@@ -23,7 +24,12 @@ pub struct ThreadState {
     pub model: String,
     pub model_provider: String,
     pub service_tier: Option<String>,
+    /// Reasoning effort for the current turn, normalized by the harness;
+    /// `None` runs the harness's configured default.
+    pub reasoning_effort: Option<String>,
     pub harness_session_id: Option<String>,
+    /// Centaur thread key from the blocks input, when known.
+    pub thread_key: Option<String>,
     pub completed_turns: Vec<Turn>,
     pub process: Option<HarnessChild>,
     pub thread_started_sent: bool,
@@ -33,6 +39,10 @@ pub struct HarnessChild {
     pub child: Child,
     pub stdin: ChildStdin,
     pub stdout: Receiver<io::Result<String>>,
+    /// Model the process was started with.
+    pub model: String,
+    /// Reasoning effort last applied in-band; a fresh process runs its default.
+    pub reasoning_effort: Option<String>,
 }
 
 impl Drop for HarnessChild {
@@ -62,9 +72,31 @@ pub trait HarnessServer {
     fn default_model(&self) -> String;
     fn default_model_provider(&self) -> &'static str;
     fn command_for_turn(&self, state: &ThreadState) -> ProcessCommand;
+    /// Whether a turn whose model differs from the running process's restarts
+    /// the process with the new model. Off by default: the process keeps the
+    /// model it started with.
+    fn restart_on_model_change(&self) -> bool {
+        false
+    }
+    /// Checks a non-empty model before a process starts with it, returning a
+    /// user-facing reason when the harness cannot run it. Accepts all models
+    /// by default.
+    fn validate_model(&self, _model: &str) -> std::result::Result<(), String> {
+        Ok(())
+    }
     fn stdin_for_turn(&self, input: &[UserInput]) -> Result<Vec<u8>>;
     fn stdin_for_steer(&self, input: &[UserInput]) -> Result<Vec<u8>> {
         self.stdin_for_turn(input)
+    }
+    /// Normalizes a requested reasoning effort to a level this harness applies
+    /// per turn, or `None` to run its configured default. No control by default.
+    fn reasoning_effort(&self, _requested: &str) -> Option<String> {
+        None
+    }
+    /// Stdin that switches the running process to `effort` before a turn's
+    /// input; `None` restores the configured default.
+    fn stdin_for_reasoning_effort(&self, _effort: Option<&str>) -> Result<Vec<u8>> {
+        Ok(Vec::new())
     }
     fn parse_stdout_line(&self, line: &str) -> Result<Self::Event>;
     fn normalize_events(
@@ -84,6 +116,11 @@ pub trait HarnessServer {
     fn terminal_assistant_stop_settle(&self) -> Option<Duration> {
         None
     }
+    /// Whether the harness still owes this turn output from background work
+    /// after its own turn ended. Nothing outstanding by default.
+    fn turn_hold(&self, _normalizer: &Self::EventNormalizer) -> TurnHold {
+        TurnHold::Released
+    }
 
     fn thread_state(&self, params: &ThreadStartParams, cwd: PathBuf) -> ThreadState {
         let model = params.model.clone().unwrap_or_else(|| self.default_model());
@@ -97,12 +134,26 @@ pub trait HarnessServer {
             model,
             model_provider,
             service_tier: params.service_tier.clone().flatten(),
+            reasoning_effort: None,
             harness_session_id: None,
+            thread_key: None,
             completed_turns: Vec::new(),
             process: None,
             thread_started_sent: false,
         }
     }
+}
+
+/// Background work a harness keeps a turn open for past its native result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnHold {
+    /// Nothing outstanding: the turn ends on its native terminal event.
+    Released,
+    /// Background work is still live; its output belongs to this turn.
+    Waiting,
+    /// Background work has finished but its follow-up has not started. If the
+    /// stream stays quiet this long, the follow-up is not coming.
+    Idle(Duration),
 }
 
 #[derive(Debug, Clone)]

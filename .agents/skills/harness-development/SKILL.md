@@ -1,113 +1,125 @@
 ---
 name: harness-development
-description: "Add, modify, or debug Centaur harness-server backends in crates/harness-server. Use when adding support for a new harness CLI, changing Codex App Server V2 normalization, investigating Claude Code/Amp/Codex streaming or steering behavior, removing Python/TypeScript harness normalizers, or differentially testing real harness stdout/stderr against the shared App Server protocol."
+description: "Add, modify, or debug Centaur harness-server backends in crates/harness-server. Use when adding a new harness CLI, changing how Codex, Claude Code, Amp, Pi, Nanocodex, or Hermes output is normalized, or investigating harness streaming, interrupt, resume, model, or reasoning-effort behavior."
 ---
 
 # Harness Development
 
-## Overview
+## Shape of the crate
 
-Work in `crates/harness-server`. The Rust binary is the only normalization layer for sandbox harness output; do not add Python or TypeScript normalizers, and do not reintroduce per-client protocol shims outside this crate.
+`crates/harness-server` is the only layer that translates harness output. It is
+built into the sandbox image and is the sandbox's PID 1: api-rs launches
+`harness-server <subcommand>` (`harness_server_subcommand` in
+`services/api-rs/crates/centaur-session-runtime/src/lib.rs`). Don't add harness
+output parsing in Python, TypeScript, api-rs, or the ingresses.
 
-The target wire protocol is OpenAI Codex App Server V2. Prefer the pinned `codex-app-server-protocol` Rust types already in `Cargo.toml`; if a type is missing, add a small typed wrapper in Rust rather than passing unstructured JSON through the system.
+- **Input:** By default (`--mode blocks`) stdin carries Centaur blocks NDJSON:
+  `user` (text or content blocks, with optional `model`, `provider`,
+  `reasoning`, and trace context), `attachment.chunk`, and `interrupt`. See
+  `parse_blocks_line_with_state` in `src/server.rs`. `--mode jsonrpc` accepts
+  Codex App Server requests instead, including `turn/steer`. It is used for
+  protocol testing.
+- **Output:** stdout carries only Codex App Server V2 notifications, typed with
+  the pinned `codex-app-server-protocol` crate (`thread/started`,
+  `item/*`, `turn/completed`, `error`). Harness stderr may be logged, but
+  nothing else may reach stdout.
 
-## Implementation Workflow
+Backends:
 
-1. Observe the native harness CLI before changing the wrapper. Run the real CLI with streaming stdin/stdout, feed hand-written NDJSON, and capture both stdout and stderr.
-2. Identify the real process contract: startup args, stdin message shape, stdout event types, terminal event, session id, resume flag or id, multi-turn behavior, tool-use/tool-result shape, and steering behavior.
-3. Add one module under `src/` for the backend, such as `src/<harness>.rs`, and implement `HarnessServer` from `src/traits.rs`.
-4. Keep conversions inside that harness implementation. Prefer typed `serde` event enums plus explicit `From`/conversion helpers into `NormalizedEvent`; avoid generic `serde_json::Value` plumbing unless it is only at the parser boundary.
-5. Wire the subcommand in `src/main.rs` and the dispatch in `src/lib.rs`/`src/server.rs`. The public CLI shape should stay `harness-server codex|claude-code|amp|<new-harness>`.
-6. Add unit tests for stdin generation, steering generation, parser behavior, and representative event conversion. Add or extend ignored real-binary cargo tests when native behavior can only be proven with the CLI.
+- `codex.rs`: runs `codex app-server` and passes its native protocol through.
+- `claude.rs`, `amp.rs`, `pi.rs`: implement `HarnessServer` (`src/traits.rs`)
+  on the shared runner in `server.rs`. Each one builds the process command and
+  stdin lines, parses stdout lines into typed events, and normalizes them into
+  `NormalizedEvent`. `CodexTurnNormalizer` (`turn.rs`) turns those into App
+  Server items.
+- `nanocodex.rs`, `hermes.rs`: their own blocks servers (an in-process library
+  and a long-lived JSON-RPC gateway). They also feed `CodexTurnNormalizer`.
 
-## Protocol Invariants
+## Adding or changing a backend
 
-- The wrapper process stays alive across turns. Do not spawn the underlying harness once per user turn unless the native harness cannot support a live streaming process.
-- `turn/start` and `turn/steer` must emit Codex V2 `userMessage` item started and completed events, then include those user-message items in the final `turn/completed` item list.
-- Complete a turn only at the harness's real completion boundary. Claude Code completes on its `result` event. Amp's streaming process may not emit `result` until stdin closes, so complete live turns on assistant `end_turn` when that is the observed terminal boundary.
-- Do not map steering to interruption. Steering appends a new user message to the active turn; interruption is cancellation and has different semantics.
-- Claude Code steering uses another streaming user input message. Amp steering uses a streaming user input message with top-level `steer: true`. Codex uses App Server `turn/steer` natively.
-- Resume must preserve the native session id or native resume token and must not silently create a fresh conversation when the caller expects continuity.
-- Stdout from `harness-server` must be JSON-RPC/App Server JSON only. Harness stderr can be logged, but raw non-protocol lines must not leak on stdout.
+1. **Observe the native CLI first.** Start from the args in the backend's
+   `command_for_turn` (or the vendor docs for a new harness). Feed it
+   hand-written stdin, and save every stdin, stdout, and stderr line to a
+   temp directory. Establish the real contract: startup args, input shape,
+   event types, terminal event, session id and resume, tool-call and tool-result
+   shape, interrupt, model switching, and reasoning controls.
+2. **Implement `HarnessServer`** in one module, `src/<harness>.rs`. Use typed
+   `serde` event enums. Use `serde_json::Value` only at the parser boundary.
+   Override the trait hooks only when the harness needs them:
+   `terminal_assistant_stop_settle`, `turn_hold`, `restart_on_model_change`,
+   `validate_model`, `reasoning_effort`, and `stdin_for_reasoning_effort`.
+3. **Wire it up.** Add the subcommand in `src/main.rs`, the `HarnessKind`
+   variant, and dispatch in `src/server.rs`. The binary path should be
+   overridable through an env var (`CLAUDE_BIN`, `AMP_BIN`, `CENTAUR_PI_BIN`)
+   so tests can substitute a fake. Namespace new settings as `CENTAUR_<HARNESS>_*`.
+4. **For a new harness, update the rest of the path.** `src/pi.rs` and commit
+   `8814c7f8` are the reference:
+   - api-rs `HarnessType` (`centaur-session-core`), the subcommand mapping, and
+     auth mode / proxy wiring (`centaur-api-server/src/args.rs`).
+   - Install the CLI and persist its state in `services/sandbox/Dockerfile` and
+     `entrypoint.sh`.
+   - Add the selector in the ingresses (`services/slackbotv2/src/overrides.ts`
+     and `response-context.ts`) and in the Console harness list.
+   - Add a page under `docs/pages/extend/` and update
+     `docs/pages/reference/configuration.mdx`.
 
-## Native Probing
+## Invariants
 
-Use direct native probes when behavior is unclear. Save every stdin line and stdout/stderr line to a temp directory so the wrapped behavior can be compared later.
+- Keep one harness process per thread across turns, and resume it with the
+  native session id (`--resume`, `threads continue`, `--session-id`). Never
+  silently start a fresh conversation when the caller expects continuity.
+- Every turn emits the `userMessage` item started and completed events and ends
+  with exactly one `turn/completed` that includes all of the turn's items.
+- Complete a turn only at the harness's real terminal boundary: Claude Code's
+  `result`, Pi's `agent_settled`, or Amp's terminal assistant stop, since Amp may
+  not emit `result` while stdin is open. Use `terminal_assistant_stop_settle`
+  rather than ad hoc timers.
+- Interrupt is cancellation, and it is distinct from steering. Codex sends
+  `turn/interrupt` to the app server. The shared runner kills the harness
+  process and finishes the turn as interrupted, and the next turn respawns the
+  process and resumes the session.
+- Reject an unsupported model with a turn error worded "unsupported model".
+  Slack keys on that wording to clear the thread's sticky model.
+- Never log or emit credentials. Sandboxes see iron-proxy placeholders. Don't
+  inject real keys in harness-server.
 
-Claude Code streaming:
+## Tests
+
+From `crates/harness-server`, run what CI runs:
 
 ```bash
-claude --print \
-  --input-format stream-json \
-  --output-format stream-json \
-  --verbose \
-  --include-partial-messages \
-  --dangerously-skip-permissions \
-  --permission-mode bypassPermissions \
-  --model "${CENTAUR_REAL_CLAUDE_MODEL:-sonnet}" \
-  --session-id "$(uuidgen | tr 'A-Z' 'a-z')"
+cargo fmt --all --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
 ```
 
-Amp streaming:
-
-```bash
-amp --no-ide \
-  --no-notifications \
-  --no-color \
-  --dangerously-allow-all \
-  --execute \
-  --stream-json \
-  --stream-json-input \
-  --stream-json-thinking \
-  --mode "${AMP_MODE:-smart}"
-```
-
-For steering probes, start a long-running tool call, then send the native steering line before the tool finishes. Claude Code should receive a second `{"type":"user","message":...}` line. Amp should receive the same shape with top-level `"steer":true`.
-
-## Differential Test Commands
-
-Run Rust tests first:
-
-```bash
-cargo test --manifest-path crates/harness-server/Cargo.toml
-```
-
-Run real-harness comparisons through ignored cargo tests from the repo root. These tests spawn the actual harness binaries and may make network/auth calls.
+- **Unit tests** in each module: stdin generation, stdout parsing, and event
+  normalization for representative recorded lines.
+- **Stdio integration tests** (`tests/app_server_stdio.rs`, `tests/pi_stdio.rs`):
+  run the real `harness-server` binary against a scripted fake harness that
+  replays recorded native output from `tests/fixtures/<harness>/*.jsonl`. Record
+  fixtures from the real CLI and note the CLI version in the test. Assert on the
+  emitted App Server stream: item order, phases, `turn/completed`, interrupt,
+  resume args, and model switches.
+- **Real-binary tests** are `#[ignore]` tests that spawn installed harnesses
+  and make network calls. Run them when native behavior is the question:
 
 ```bash
 cargo test --manifest-path crates/harness-server/Cargo.toml \
-  real_claude_code_long_streaming_is_anchored_to_native_cli \
-  -- --ignored --nocapture
+  real_harnesses_basic_steer_and_resume -- --ignored --nocapture
 ```
 
-```bash
-cargo test --manifest-path crates/harness-server/Cargo.toml \
-  real_amp_long_streaming_is_anchored_to_native_cli \
-  -- --ignored --nocapture
-```
+Other real tests in `tests/app_server_stdio.rs` include
+`real_claude_code_long_streaming_is_anchored_to_native_cli`,
+`real_amp_long_streaming_is_anchored_to_native_cli`, and
+`real_codex_long_streaming_uses_native_app_server_chunks`. Read the
+`--nocapture` output, not just the summary. Look for non-JSON stdout, missing
+`item/completed`, duplicate or stale assistant text, wrong thread or turn ids,
+and lost session continuity.
 
-```bash
-cargo test --manifest-path crates/harness-server/Cargo.toml \
-  real_codex_long_streaming_uses_native_app_server_chunks \
-  -- --ignored --nocapture
-```
+For changes that affect the deployed path, also build the sandbox image and run
+a real turn through the local stack. `e2e/stack.sh test` covers the Slack path
+with scripted model providers.
 
-Run steering and resume coverage across all real harnesses with:
-
-```bash
-cargo test --manifest-path crates/harness-server/Cargo.toml \
-  real_harnesses_basic_steer_and_resume \
-  -- --ignored --nocapture
-```
-
-Inspect the `--nocapture` stdout, not only the cargo summary. Look for non-JSON stdout, missing `item/completed`, stale final answers after steering, wrong thread or turn ids, lost session continuity on resume, duplicate assistant text, queued steer messages, and process restarts between turns.
-
-## Done Criteria
-
-Consider a harness change done only when:
-
-- Unit tests pass.
-- Real Claude Code, Amp, and Codex pass the ignored real-binary cargo tests for long streaming, steering, and multi-turn/resume unless the change is explicitly scoped to fewer harnesses.
-- The logs show the exact stdout JSON-RPC stream and the native harness stderr/stdout observations explain any harness-specific branch.
-- Python and TypeScript contain no custom harness output normalization for the changed path.
-- Any native quirk is captured in the harness module or tests, not as tribal knowledge in the final response.
+Record any native quirk in the backend module or its tests, not only in the PR
+description.

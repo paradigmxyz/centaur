@@ -199,10 +199,13 @@ principal while workflow-host sandboxing is disabled.
 `ctx.agent_turn(...)` accepts optional `model`, `provider`, and `reasoning`
 kwargs. They ride the turn exactly like the Slack `--model` / `--bedrock` /
 `-rsn` flags: `model` selects the model within the harness, `reasoning` sets the
-codex reasoning effort (`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`),
-and `provider` selects the codex model provider. `provider` and `reasoning` only
-affect the codex harness; claude and amp ignore them. `reasoning` also accepts
-the `reasoning_effort` and `effort` aliases. When a kwarg is omitted the
+reasoning effort (codex: `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`;
+claude: `low`/`medium`/`high`/`xhigh`/`max`), and `provider` selects the codex
+model provider. `provider` only affects the codex harness, and amp ignores
+`reasoning`. A `reasoning` value the harness does not support is ignored. On
+claude, `reasoning` applies to that turn only; a turn without it runs the
+configured default. `reasoning` also accepts the `reasoning_effort` and
+`effort` aliases. When a kwarg is omitted the
 deployment/baked harness default stands — dispatched turns are no longer pinned
 to the deployment default.
 

@@ -10,10 +10,9 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
+ActiveRecord::Schema[8.1].define(version: 2026_10_08_004411) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
-  enable_extension "pg_search"
 
   create_table "api_keys", force: :cascade do |t|
     t.datetime "created_at", null: false
@@ -234,6 +233,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
     t.boolean "enabled", default: true, null: false
     t.jsonb "labels", default: {}, null: false
     t.string "provider", null: false
+    t.boolean "shared", default: false, null: false
     t.string "slug", null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_oauth_apps_on_created_by_id"
@@ -383,7 +383,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
   create_table "scheduled_tasks", force: :cascade do |t|
     t.bigint "author_id", null: false
     t.datetime "created_at", null: false
-    t.string "cron_expression", null: false
+    t.string "cron_expression"
     t.string "delivery_channel", null: false
     t.boolean "enabled", default: true, null: false
     t.datetime "last_enqueued_at"
@@ -402,6 +402,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
 
   create_table "secret_sources", force: :cascade do |t|
     t.bigint "aws_auth_secret_id"
+    t.bigint "broker_credential_id"
     t.jsonb "config", default: {}, null: false
     t.datetime "created_at", null: false
     t.bigint "gcp_auth_secret_id"
@@ -417,6 +418,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
     t.datetime "updated_at", null: false
     t.index ["aws_auth_secret_id", "role", "role_kind"], name: "index_secret_sources_on_aws_owner_and_role", unique: true
     t.index ["aws_auth_secret_id"], name: "index_secret_sources_on_aws_auth_secret_id"
+    t.index ["broker_credential_id"], name: "index_secret_sources_on_broker_credential_id"
     t.index ["gcp_auth_secret_id"], name: "index_secret_sources_on_gcp_auth_secret_id", unique: true
     t.index ["gcp_id_token_secret_id"], name: "index_secret_sources_on_gcp_id_token_secret_id", unique: true
     t.index ["hmac_secret_id", "role", "role_kind"], name: "index_secret_sources_on_hmac_owner_and_role", unique: true
@@ -426,6 +428,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
     t.index ["pg_dsn_secret_id"], name: "index_secret_sources_on_pg_dsn_secret_id", unique: true
     t.index ["source_type"], name: "index_secret_sources_on_source_type"
     t.index ["static_secret_id"], name: "index_secret_sources_on_static_secret_id", unique: true
+    t.check_constraint "broker_credential_id IS NULL OR source_type::text = 'token_broker'::text", name: "secret_sources_broker_credential_requires_token_broker"
   end
 
   create_table "skill_editors", force: :cascade do |t|
@@ -445,11 +448,13 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
     t.text "description", null: false
     t.integer "lock_version", default: 0, null: false
     t.string "name", null: false
+    t.virtual "search_vector", type: :tsvector, as: "((setweight(to_tsvector('english'::regconfig, (name)::text), 'A'::\"char\") || setweight(to_tsvector('english'::regconfig, description), 'B'::\"char\")) || setweight(to_tsvector('english'::regconfig, content), 'C'::\"char\"))", stored: true
     t.datetime "shared_at"
     t.datetime "updated_at", null: false
     t.bigint "user_id", null: false
     t.string "visibility", default: "shared", null: false
     t.index ["name"], name: "index_active_skills_on_name", unique: true, where: "(archived_at IS NULL)"
+    t.index ["search_vector"], name: "index_skills_on_search_vector", using: :gin
     t.index ["user_id"], name: "index_skills_on_user_id"
     t.index ["visibility", "updated_at"], name: "index_active_skills_for_catalog", where: "(archived_at IS NULL)"
   end
@@ -608,6 +613,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
   add_foreign_key "roles", "users", column: "created_by_id"
   add_foreign_key "scheduled_tasks", "users", column: "author_id"
   add_foreign_key "secret_sources", "aws_auth_secrets"
+  add_foreign_key "secret_sources", "broker_credentials"
   add_foreign_key "secret_sources", "gcp_auth_secrets"
   add_foreign_key "secret_sources", "gcp_id_token_secrets"
   add_foreign_key "secret_sources", "hmac_secrets"
@@ -624,6 +630,4 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
   add_foreign_key "thread_shares", "users", column: "created_by_id"
   add_foreign_key "user_identities", "users"
   add_foreign_key "users", "users", column: "approved_by_id"
-
-  add_bm25_index :skills, fields: { id: {}, name: {}, description: {}, content: {} }, key_field: :id, name: "index_skills_on_search_document"
 end
