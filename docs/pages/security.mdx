@@ -137,6 +137,30 @@ Other typed variants extend the same boundary in different ways:
 
 See [Creating Tools](/extend/tools) for the full schema.
 
+### Slack access
+
+Sandboxes never hold the Slack app's bot token. Slack access takes one of two
+paths:
+
+- **Channels go through the Centaur API.** The Slack tool's proxied methods
+  call `/api/slack/*` on the API server, which uses the bot token server-side.
+  iron-proxy injects the principal's Console-issued token on those requests.
+  The API allows a channel only if it is public and the Slack app is a member,
+  or if the principal or one of its roles has the matching **History**,
+  **Upload**, or **Download** Slack channel permission in the Console. Files
+  are served only when they are shared in an allowed channel.
+- **Direct messages use the user's own token.** Each user connects their Slack
+  account through the `slack` [OAuth app](/secrets/oauth-apps), and the
+  resulting user token is granted to their DM principal. That token sees only
+  what the user can see in Slack. In DMs the agent is told to use the Slack
+  tool's `-direct` methods.
+
+Do not grant `SLACK_BOT_TOKEN`, or any other Slack bot token, to a principal
+or role. The bot token reaches every conversation the Slack app belongs to, so
+a sandbox that holds it is no longer limited by the channel permissions above.
+Grant channel access with Slack channel permissions and per-user access with
+Slack OAuth instead.
+
 ### Audit trail
 
 Every agent turn (user input, sandbox assignment, execution,
