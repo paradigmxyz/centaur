@@ -29,6 +29,8 @@ const TOOLS: &str = "read,bash,edit,write,codemode";
 const DEFAULT_THINKING_LEVEL: &str = "medium";
 /// Models Centaur supports on Pi, matching the Claude and GPT models the chat
 /// ingresses offer. Each needs its provider's `api_key` credential.
+/// `CENTAUR_PI_EXTRA_MODELS` adds models from providers declared in Pi's
+/// `models.json`; see [`extra_models_from_env`].
 const MODELS: &[(&str, &str)] = &[
     ("anthropic", "claude-fable-5"),
     ("anthropic", "claude-haiku-4-5"),
@@ -234,13 +236,27 @@ fn session_id(state: &ThreadState) -> String {
     )
 }
 
-/// Accepts `provider/id` or a bare `id` from [`MODELS`]. Pi itself also
-/// fuzzy-matches, which would make a typo silently run some other model.
-fn check_model(model: &str) -> std::result::Result<(), String> {
-    if MODELS
-        .iter()
-        .any(|(provider, id)| model == *id || model == format!("{provider}/{id}"))
-    {
+/// Parses `CENTAUR_PI_EXTRA_MODELS`: comma-separated `provider/id` entries,
+/// whitespace-trimmed. Empty entries and ones missing either part are skipped.
+fn extra_models_from_env(value: &str) -> Vec<(String, String)> {
+    value
+        .split(',')
+        .filter_map(|entry| entry.trim().split_once('/'))
+        .filter(|(provider, id)| !provider.is_empty() && !id.is_empty())
+        .map(|(provider, id)| (provider.to_string(), id.to_string()))
+        .collect()
+}
+
+/// Accepts `provider/id` or a bare `id` from [`MODELS`] or from `extra`, the
+/// `CENTAUR_PI_EXTRA_MODELS` entries. Pi itself also fuzzy-matches, which
+/// would make a typo silently run some other model.
+fn check_model(model: &str, extra: &[(String, String)]) -> std::result::Result<(), String> {
+    let mut known = MODELS.iter().copied().chain(
+        extra
+            .iter()
+            .map(|(provider, id)| (provider.as_str(), id.as_str())),
+    );
+    if known.any(|(provider, id)| model == id || model == format!("{provider}/{id}")) {
         return Ok(());
     }
     // "unsupported model" is one of the phrases Slack clears a thread's sticky
@@ -307,7 +323,8 @@ impl HarnessServer for PiHarness {
     }
 
     fn validate_model(&self, model: &str) -> std::result::Result<(), String> {
-        check_model(model)
+        let extra = extra_models_from_env(&env::var("CENTAUR_PI_EXTRA_MODELS").unwrap_or_default());
+        check_model(model, &extra)
     }
 
     fn stdin_for_turn(&self, input: &[UserInput]) -> Result<Vec<u8>> {
@@ -354,7 +371,7 @@ impl HarnessServer for PiHarness {
 mod tests {
     use serde_json::json;
 
-    use super::{PiEventNormalizer, check_model};
+    use super::{PiEventNormalizer, check_model, extra_models_from_env};
     use crate::NormalizedEvent;
 
     #[test]
@@ -364,7 +381,7 @@ mod tests {
             "claude-sonnet-5",
             "openai/gpt-5.5",
         ] {
-            assert_eq!(check_model(model), Ok(()), "{model}");
+            assert_eq!(check_model(model, &[]), Ok(()), "{model}");
         }
         for model in [
             "anthropic/sonnet-5",
@@ -372,7 +389,35 @@ mod tests {
             "openai/o3",
             "openai/gpt-5.5:high",
         ] {
-            assert!(check_model(model).is_err(), "{model}");
+            assert!(check_model(model, &[]).is_err(), "{model}");
+        }
+    }
+
+    #[test]
+    fn extra_models_parse_as_provider_id_entries() {
+        assert_eq!(
+            extra_models_from_env(" pareto/pareto ,, openai/gpt-5.5,bare,/no-provider,no-id/ "),
+            vec![
+                ("pareto".to_string(), "pareto".to_string()),
+                ("openai".to_string(), "gpt-5.5".to_string()),
+            ]
+        );
+        assert!(extra_models_from_env("").is_empty());
+    }
+
+    #[test]
+    fn extra_models_are_accepted_exactly() {
+        let extra = extra_models_from_env("pareto/pareto");
+        for model in ["pareto/pareto", "pareto", "anthropic/claude-sonnet-5"] {
+            assert_eq!(check_model(model, &extra), Ok(()), "{model}");
+        }
+        for model in [
+            "pareto/other",
+            "openai/pareto",
+            "pareto/pareto:high",
+            "openai/o3",
+        ] {
+            assert!(check_model(model, &extra).is_err(), "{model}");
         }
     }
 

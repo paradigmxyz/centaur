@@ -373,6 +373,33 @@ case "$CLAUDE_CODE_AUTH_MODE" in
         ;;
 esac
 
+# ── Pi config ────────────────────────────────────────────────────────────────
+# PI_MODELS_JSON: operator-supplied Pi model catalog written to Pi's config
+# dir (providers/models incl. custom OpenAI- or Anthropic-compatible
+# endpoints; API keys stay env-var references like "$MY_PROVIDER_API_KEY", so
+# no secret material lands on disk). Unset is a no-op; invalid JSON is ignored
+# rather than written. Runs after the persistent-state symlinks above so the
+# file lands in the state dir. The pi harness (crates/harness-server/src/pi.rs)
+# reads CENTAUR_PI_MODEL for its default model and admits the catalog's models
+# through CENTAUR_PI_EXTRA_MODELS (comma-separated provider/id).
+if [ -n "${PI_MODELS_JSON:-}" ]; then
+    PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME_DIR/.pi/agent}" python3 - <<'PYEOF'
+import json
+import os
+import sys
+from pathlib import Path
+
+try:
+    parsed = json.loads(os.environ["PI_MODELS_JSON"])
+except json.JSONDecodeError as exc:
+    print(f"ignoring invalid PI_MODELS_JSON: {exc}", file=sys.stderr)
+    sys.exit(0)
+path = Path(os.environ["PI_AGENT_DIR"]) / "models.json"
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(parsed, indent=2) + "\n")
+PYEOF
+fi
+
 # ── Per-session workspace clone (no shared worktree metadata) ────────────────
 if [ "${CENTAUR_PERSISTENT_STATE:-0}" = "1" ]; then
     WORKSPACE_DIR="$STATE_DIR/workspace"
