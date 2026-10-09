@@ -587,7 +587,10 @@ impl PgSessionStore {
             )
             .bind(execution_id)
             .fetch_one(&self.pool)
-            .await?;
+            .await
+            .map_err(|_| SessionStoreError::ExecutionNotFound {
+                execution_id: execution_id.to_owned(),
+            })?;
             return Ok(ClaimExecutionResult {
                 execution: row.try_into()?,
                 claimed: false,
