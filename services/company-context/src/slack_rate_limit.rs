@@ -4,9 +4,9 @@
 //! quota, only a 429 with Retry-After. Every token the app issues in a
 //! workspace, including bot tokens used by other services, shares one budget
 //! per method. Workers therefore reserve send slots from a shared schedule in
-//! Postgres, spaced by a configured share of the method's documented tier.
-//! A rate limit blocks the method for every worker until Retry-After passes
-//! and widens the spacing, which relaxes again while no rate limits occur.
+//! Postgres, spaced by a configured share of the method's documented tier, and
+//! wait for them in place, so only running calls hold slots. A rate limit
+//! blocks the method for every worker until Retry-After passes.
 
 use std::time::Duration;
 
@@ -15,10 +15,6 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
 use crate::{slack::SlackMethod, telemetry};
-
-const MAX_BACKOFF: f64 = 16.0;
-/// How long a method must go without a rate limit before its backoff halves.
-const BACKOFF_RECOVERY: chrono::Duration = chrono::Duration::minutes(10);
 
 #[derive(Clone)]
 pub struct RateLimiter {
@@ -31,23 +27,19 @@ pub struct RateLimiter {
 struct Bucket {
     next_slot_at: DateTime<Utc>,
     blocked_until: Option<DateTime<Utc>>,
-    backoff: f64,
-    backoff_adjusted_at: DateTime<Utc>,
 }
 
 impl Bucket {
     /// Grants the earliest send slot at `now`, returning it with the bucket
     /// state after the grant.
     fn grant(&self, now: DateTime<Utc>, interval: chrono::Duration) -> (DateTime<Utc>, Self) {
-        let mut next = self.clone();
-        if next.backoff > 1.0 && now - next.backoff_adjusted_at >= BACKOFF_RECOVERY {
-            next.backoff = (next.backoff / 2.0).max(1.0);
-            next.backoff_adjusted_at = now;
-        }
         let slot = now
             .max(self.next_slot_at)
             .max(self.blocked_until.unwrap_or(now));
-        next.next_slot_at = slot + scale(interval, next.backoff);
+        let next = Self {
+            next_slot_at: slot + interval,
+            blocked_until: self.blocked_until,
+        };
         (slot, next)
     }
 
@@ -59,16 +51,8 @@ impl Bucket {
                 self.blocked_until
                     .map_or(blocked_until, |current| current.max(blocked_until)),
             ),
-            backoff: (self.backoff * 2.0).min(MAX_BACKOFF),
-            backoff_adjusted_at: now,
         }
     }
-}
-
-fn scale(interval: chrono::Duration, factor: f64) -> chrono::Duration {
-    chrono::Duration::microseconds(
-        (interval.num_microseconds().unwrap_or(i64::MAX) as f64 * factor) as i64,
-    )
 }
 
 impl RateLimiter {
@@ -141,8 +125,7 @@ impl RateLimiter {
         .await?;
         let row = sqlx::query(
             r#"
-            SELECT next_slot_at, blocked_until, backoff, backoff_adjusted_at,
-                   clock_timestamp() AS now
+            SELECT next_slot_at, blocked_until, clock_timestamp() AS now
             FROM company_context_system.slack_rate_limits
             WHERE app_slug = $1 AND team_id = $2 AND method = $3
             FOR UPDATE
@@ -157,8 +140,6 @@ impl RateLimiter {
             Bucket {
                 next_slot_at: row.try_get("next_slot_at")?,
                 blocked_until: row.try_get("blocked_until")?,
-                backoff: row.try_get("backoff")?,
-                backoff_adjusted_at: row.try_get("backoff_adjusted_at")?,
             },
             row.try_get("now")?,
         ))
@@ -177,9 +158,7 @@ impl RateLimiter {
             UPDATE company_context_system.slack_rate_limits
             SET next_slot_at = $4,
                 blocked_until = $5,
-                backoff = $6,
-                backoff_adjusted_at = $7,
-                last_rate_limited_at = CASE WHEN $8 THEN NOW() ELSE last_rate_limited_at END,
+                last_rate_limited_at = CASE WHEN $6 THEN NOW() ELSE last_rate_limited_at END,
                 updated_at = NOW()
             WHERE app_slug = $1 AND team_id = $2 AND method = $3
             "#,
@@ -189,8 +168,6 @@ impl RateLimiter {
         .bind(method.name())
         .bind(bucket.next_slot_at)
         .bind(bucket.blocked_until)
-        .bind(bucket.backoff)
-        .bind(bucket.backoff_adjusted_at)
         .bind(rate_limited)
         .execute(&mut **tx)
         .await?;
@@ -215,8 +192,6 @@ mod tests {
         Bucket {
             next_slot_at: at(0),
             blocked_until: None,
-            backoff: 1.0,
-            backoff_adjusted_at: at(0),
         }
     }
 
@@ -233,31 +208,17 @@ mod tests {
     }
 
     #[test]
-    fn rate_limits_block_widen_and_then_relax() {
+    fn rate_limits_block_until_retry_after() {
         let interval = chrono::Duration::seconds(4);
         let limited = bucket().rate_limited(at(10), chrono::Duration::seconds(30));
-        assert_eq!(limited.blocked_until, Some(at(40)));
-        assert_eq!(limited.backoff, 2.0);
-
         let (slot, next) = limited.grant(at(11), interval);
         assert_eq!(slot, at(40));
-        assert_eq!(next.next_slot_at, at(48));
+        // Spacing resumes at the configured interval once the block passes.
+        assert_eq!(next.next_slot_at, at(44));
 
         // A shorter Retry-After never shortens an existing block.
         let again = limited.rate_limited(at(12), chrono::Duration::seconds(5));
-        assert_eq!(again.blocked_until, Some(at(40)));
-        assert_eq!(again.backoff, 4.0);
-
-        let quiet = at(12) + BACKOFF_RECOVERY;
-        let (_, relaxed) = again.grant(quiet, interval);
-        assert_eq!(relaxed.backoff, 2.0);
-        assert_eq!(relaxed.next_slot_at, quiet + chrono::Duration::seconds(8));
-
-        let mut capped = bucket();
-        for _ in 0..10 {
-            capped = capped.rate_limited(at(0), chrono::Duration::seconds(1));
-        }
-        assert_eq!(capped.backoff, MAX_BACKOFF);
+        assert_eq!(again.grant(at(13), interval).0, at(40));
     }
 
     #[tokio::test]

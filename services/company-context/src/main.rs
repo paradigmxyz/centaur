@@ -38,7 +38,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use crate::{
-    config::{Config, QUEUE_NAME, SLACK_QUEUE_NAME},
+    config::{Config, QUEUE_NAME, SLACK_QUEUE_NAME, SLACK_THREAD_QUEUE_NAME},
     credentials::ConsoleCredentials,
     drive::DriveClient,
     embeddings::EmbeddingsClient,
@@ -92,6 +92,19 @@ async fn main() -> Result<()> {
         .create_queue(None, CreateQueueOptions::default())
         .await
         .context("create company context Slack Absurd queue")?;
+    let slack_thread_absurd = Client::from_pool_with_options(
+        pool.clone(),
+        ClientOptions {
+            pool: Some(pool.clone()),
+            queue_name: SLACK_THREAD_QUEUE_NAME.to_owned(),
+            hooks: telemetry::task_hooks(),
+            ..ClientOptions::default()
+        },
+    )?;
+    slack_thread_absurd
+        .create_queue(None, CreateQueueOptions::default())
+        .await
+        .context("create company context Slack thread Absurd queue")?;
 
     let drive = DriveClient::new(&config, credentials.clone())?;
     let granola = GranolaClient::new(&config)?;
@@ -118,6 +131,7 @@ async fn main() -> Result<()> {
         SlackTaskState {
             pool: pool.clone(),
             absurd: slack_absurd.clone(),
+            threads: slack_thread_absurd.clone(),
             credentials: credentials.clone(),
             slack,
             limiter: RateLimiter::new(
@@ -151,6 +165,10 @@ async fn main() -> Result<()> {
 
     telemetry::worker_concurrency(QUEUE_NAME, config.worker_concurrency);
     telemetry::worker_concurrency(SLACK_QUEUE_NAME, config.slack_worker_concurrency);
+    telemetry::worker_concurrency(
+        SLACK_THREAD_QUEUE_NAME,
+        config.slack_thread_worker_concurrency,
+    );
     let worker = absurd.start_worker(WorkerOptions {
         worker_id: Some(format!("company-context-{}", Uuid::new_v4())),
         concurrency: config.worker_concurrency,
@@ -168,6 +186,17 @@ async fn main() -> Result<()> {
             concurrency: config.slack_worker_concurrency,
             on_error: Some(Arc::new(
                 |error| error!(event = "company_context_slack_worker_error", error = %error),
+            )),
+            on_task_terminal: Some(telemetry::task_terminal_hook()),
+            ..WorkerOptions::default()
+        })
+    });
+    let slack_thread_worker = config.slack_enabled.then(|| {
+        slack_thread_absurd.start_worker(WorkerOptions {
+            worker_id: Some(format!("company-context-slack-threads-{}", Uuid::new_v4())),
+            concurrency: config.slack_thread_worker_concurrency,
+            on_error: Some(Arc::new(
+                |error| error!(event = "company_context_slack_thread_worker_error", error = %error),
             )),
             on_task_terminal: Some(telemetry::task_terminal_hook()),
             ..WorkerOptions::default()
@@ -225,6 +254,9 @@ async fn main() -> Result<()> {
     worker.close().await?;
     if let Some(slack_worker) = slack_worker {
         slack_worker.close().await?;
+    }
+    if let Some(slack_thread_worker) = slack_thread_worker {
+        slack_thread_worker.close().await?;
     }
     server.await.context("join HTTP server")??;
     credentials.close().await;

@@ -502,6 +502,8 @@ experimentalCompanyContext:
   # The rest is left for other services calling Slack as the same app.
   slackRateLimitShare: 0.3
   slackWorkerConcurrency: 4
+  # Thread syncs run in order on their own queue; per replica.
+  slackThreadWorkerConcurrency: 1
   # Days of Slack message history to sync, at most 36500. Raising a value
   # backfills the older history on the next sync; lowering one keeps messages
   # already synced.

@@ -27,8 +27,9 @@ use crate::{
     tasks::{bounded_error, run_task},
 };
 
-/// Waits up to this long for a rate-limit slot without releasing the worker.
-const INLINE_WAIT: Duration = Duration::from_secs(5);
+/// A wait for a rate-limit slot longer than this extends the task's lease
+/// first, so the claim does not expire while the worker sleeps.
+const LEASE_EXTENSION_WAIT: Duration = Duration::from_secs(30);
 /// Rate-limited attempts at one request before the task fails and retries.
 const RATE_LIMITED_ATTEMPTS: u32 = 5;
 /// Slack requires `users.conversations` page sizes below 1000.
@@ -49,6 +50,8 @@ const HISTORY_SYNC_LEASE: &str = "1 hour";
 pub struct SlackTaskState {
     pub pool: PgPool,
     pub absurd: AbsurdClient,
+    /// Spawns thread syncs onto their own queue.
+    pub threads: AbsurdClient,
     pub credentials: Arc<ConsoleCredentials>,
     pub slack: SlackClient,
     pub limiter: RateLimiter,
@@ -156,14 +159,18 @@ pub fn register(absurd: &AbsurdClient, state: SlackTaskState) -> Result<()> {
         },
     )?;
 
-    let thread_state = state.clone();
-    absurd.register_task(
-        SLACK_THREAD_SYNC_TASK,
-        move |params: ThreadSyncParams, ctx| {
-            let state = thread_state.clone();
-            async move { run_task(&ctx, sync_thread(&state, params, &ctx)).await }
-        },
-    )?;
+    // Thread syncs queued on the Slack queue by earlier versions still run
+    // there; new ones are spawned onto the thread queue.
+    for client in [absurd, &state.threads] {
+        let thread_state = state.clone();
+        client.register_task(
+            SLACK_THREAD_SYNC_TASK,
+            move |params: ThreadSyncParams, ctx| {
+                let state = thread_state.clone();
+                async move { run_task(&ctx, sync_thread(&state, params, &ctx)).await }
+            },
+        )?;
+    }
 
     absurd.register_task(
         SLACK_USERS_SYNC_TASK,
@@ -370,7 +377,7 @@ async fn sync_conversation(
                 // only when it has a reply it did not have before.
                 if let Some(latest_reply) = message["latest_reply"].as_str() {
                     state
-                        .absurd
+                        .threads
                         .spawn(
                             SLACK_THREAD_SYNC_TASK,
                             ThreadSyncParams {
@@ -611,8 +618,9 @@ fn history_window(
 }
 
 /// Calls a paced Slack method as a durable step. The response is checkpointed
-/// so a resumed run does not repeat the request, and each reserved slot is
-/// checkpointed so a run resumed after waiting for it does not reserve another.
+/// so a resumed run does not repeat the request. Each attempt waits for its
+/// slot in place, holding the worker, so only running calls hold slots and a
+/// rate-limited call retries before tasks queued behind it.
 #[allow(clippy::too_many_arguments)]
 async fn paced_call<T>(
     slack: &SlackClient,
@@ -633,15 +641,12 @@ where
             .state
             .with_context(|| format!("{step} checkpoint is empty"));
     }
-    for attempt in 1..=RATE_LIMITED_ATTEMPTS {
-        wait_for_slot(
-            limiter,
-            ctx,
-            &format!("{step}.slot.{attempt}"),
-            team_id,
-            method,
-        )
-        .await?;
+    for _ in 0..RATE_LIMITED_ATTEMPTS {
+        let wait = limiter.reserve(team_id, method).await?;
+        if wait > LEASE_EXTENSION_WAIT {
+            ctx.heartbeat(Some(wait + LEASE_EXTENSION_WAIT)).await?;
+        }
+        sleep(wait).await;
         match slack.call(method.name(), access_token, params).await? {
             SlackReply::Ok(body) => {
                 let value = serde_json::from_value(body)
@@ -663,33 +668,6 @@ where
         "Slack rate limited {} {RATE_LIMITED_ATTEMPTS} times",
         method.name()
     )
-}
-
-/// Waits for a reserved send slot. Short waits sleep in place; longer ones
-/// suspend the task so the worker can run other tasks meanwhile.
-async fn wait_for_slot(
-    limiter: &RateLimiter,
-    ctx: &TaskContext,
-    step: &str,
-    team_id: &str,
-    method: SlackMethod,
-) -> Result<()> {
-    let handle = ctx.begin_step::<DateTime<Utc>>(step).await?;
-    let send_at = match handle.state {
-        Some(send_at) if handle.done => send_at,
-        _ => {
-            let wait = limiter.reserve(team_id, method).await?;
-            let send_at = Utc::now() + chrono::Duration::from_std(wait)?;
-            ctx.complete_step(handle, send_at).await?
-        }
-    };
-    let wait = (send_at - Utc::now()).to_std().unwrap_or_default();
-    if wait <= INLINE_WAIT {
-        sleep(wait).await;
-    } else {
-        ctx.sleep_until(&format!("{step}.wait"), send_at).await?;
-    }
-    Ok(())
 }
 
 /// Replaces a credential's observations with the conversations it listed.

@@ -9,7 +9,7 @@ use tokio::time::{MissedTickBehavior, interval};
 use tracing::warn;
 
 use crate::{
-    config::{QUEUE_NAME, SLACK_QUEUE_NAME},
+    config::{QUEUE_NAME, SLACK_QUEUE_NAME, SLACK_THREAD_QUEUE_NAME},
     credentials::ConsoleCredentials,
     telemetry,
 };
@@ -66,7 +66,7 @@ pub async fn run(pool: PgPool, credentials: Arc<ConsoleCredentials>) {
 
 async fn queue_samples(pool: &PgPool) -> Result<Vec<Sample>> {
     let mut samples = Vec::new();
-    for queue in [QUEUE_NAME, SLACK_QUEUE_NAME] {
+    for queue in [QUEUE_NAME, SLACK_QUEUE_NAME, SLACK_THREAD_QUEUE_NAME] {
         samples.extend(queue_samples_for(pool, queue).await?);
     }
     Ok(samples)
@@ -257,7 +257,7 @@ mod tests {
         let database = TestDatabase::create(&database_url, "sampler").await;
         let pool = &database.pool;
         sqlx::raw_sql(ABSURD_SCHEMA).execute(pool).await.unwrap();
-        for queue in [QUEUE_NAME, SLACK_QUEUE_NAME] {
+        for queue in [QUEUE_NAME, SLACK_QUEUE_NAME, SLACK_THREAD_QUEUE_NAME] {
             let client = Client::from_pool_with_options(
                 pool.clone(),
                 ClientOptions {

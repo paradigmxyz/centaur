@@ -23,6 +23,10 @@ pub const GRANOLA_NOTE_EMBED_TASK: &str = "granola.note.embed";
 /// Slack tasks wait on the Slack app's shared rate limits, so they run on their
 /// own queue and worker instead of delaying Drive and Granola work.
 pub const SLACK_QUEUE_NAME: &str = "company_context_slack";
+/// History syncs spawn a thread sync for every thread with new replies, so
+/// thread syncs run in order on their own queue instead of delaying discovery
+/// and history syncs.
+pub const SLACK_THREAD_QUEUE_NAME: &str = "company_context_slack_threads";
 pub const SLACK_CREDENTIALS_RECONCILE_TASK: &str = "slack.credentials.reconcile";
 pub const SLACK_USER_DISCOVER_TASK: &str = "slack.user.discover";
 pub const SLACK_CONVERSATION_SYNC_TASK: &str = "slack.conversation.sync";
@@ -314,6 +318,13 @@ pub struct Config {
         value_parser = positive_usize
     )]
     pub slack_worker_concurrency: usize,
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_SLACK_THREAD_WORKER_CONCURRENCY",
+        default_value = "1",
+        value_parser = positive_usize
+    )]
+    pub slack_thread_worker_concurrency: usize,
     #[arg(
         long = "drive-page-size",
         env = "COMPANY_CONTEXT_DRIVE_PAGE_SIZE",

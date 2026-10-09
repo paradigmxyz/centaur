@@ -99,6 +99,8 @@ spec:
               value: {{ $companyContext.slackRateLimitShare | quote }}
             - name: COMPANY_CONTEXT_SLACK_WORKER_CONCURRENCY
               value: {{ $companyContext.slackWorkerConcurrency | quote }}
+            - name: COMPANY_CONTEXT_SLACK_THREAD_WORKER_CONCURRENCY
+              value: {{ $companyContext.slackThreadWorkerConcurrency | quote }}
             - name: COMPANY_CONTEXT_SLACK_HISTORY_DAYS
               value: {{ $companyContext.slackHistoryDays | quote }}
             - name: SLACK_BOT_TOKEN
