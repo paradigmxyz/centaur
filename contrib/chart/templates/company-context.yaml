@@ -79,6 +79,12 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sIRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT" $prefix }}
+            - name: COMPANY_CONTEXT_DRIVE_ENABLED
+              value: {{ $companyContext.indexers.drive.enabled | quote }}
+            - name: COMPANY_CONTEXT_GRANOLA_ENABLED
+              value: {{ $companyContext.indexers.granola.enabled | quote }}
+            - name: COMPANY_CONTEXT_SLACK_ENABLED
+              value: {{ $companyContext.indexers.slack.enabled | quote }}
             - name: COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG
               value: {{ $companyContext.googleOauthAppSlug | quote }}
             - name: COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG

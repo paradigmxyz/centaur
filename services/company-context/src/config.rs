@@ -93,6 +93,33 @@ pub struct Config {
         value_parser = nonempty
     )]
     pub slack_oauth_app_slug: String,
+    /// Schedules Google Drive sync. Disabling it pauses ingestion and keeps
+    /// indexed documents searchable.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_DRIVE_ENABLED",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub drive_enabled: bool,
+    /// Schedules Granola sync. Disabling it pauses ingestion and keeps indexed
+    /// notes searchable.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_GRANOLA_ENABLED",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub granola_enabled: bool,
+    /// Schedules Slack sync and runs the Slack worker. Disabling it pauses
+    /// ingestion and keeps indexed documents searchable.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_SLACK_ENABLED",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub slack_enabled: bool,
     /// Limits Google Drive sync to these credential emails. Unset syncs every user.
     #[arg(
         long,
@@ -478,6 +505,17 @@ mod tests {
         assert_eq!(config.openai_base_url, "http://localhost:8080/v1");
         assert_eq!(config.scan_interval, Duration::from_secs(300));
         assert_eq!(config.slack_rate_limit_share, 0.3);
+        assert!(config.drive_enabled && config.granola_enabled && config.slack_enabled);
+    }
+
+    #[test]
+    fn parses_indexer_switches() {
+        let mut args = required_args();
+        args.extend(["--granola-enabled", "false", "--drive-enabled", "false"]);
+        let config = Config::try_parse_from(args).unwrap();
+        assert!(!config.drive_enabled);
+        assert!(!config.granola_enabled);
+        assert!(config.slack_enabled);
     }
 
     #[test]

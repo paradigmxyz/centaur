@@ -160,30 +160,41 @@ async fn main() -> Result<()> {
         on_task_terminal: Some(telemetry::task_terminal_hook()),
         ..WorkerOptions::default()
     });
-    let slack_worker = slack_absurd.start_worker(WorkerOptions {
-        worker_id: Some(format!("company-context-slack-{}", Uuid::new_v4())),
-        concurrency: config.slack_worker_concurrency,
-        on_error: Some(Arc::new(
-            |error| error!(event = "company_context_slack_worker_error", error = %error),
-        )),
-        on_task_terminal: Some(telemetry::task_terminal_hook()),
-        ..WorkerOptions::default()
+    // A disabled Slack indexer leaves its queued tasks in place until it is
+    // enabled again.
+    let slack_worker = config.slack_enabled.then(|| {
+        slack_absurd.start_worker(WorkerOptions {
+            worker_id: Some(format!("company-context-slack-{}", Uuid::new_v4())),
+            concurrency: config.slack_worker_concurrency,
+            on_error: Some(Arc::new(
+                |error| error!(event = "company_context_slack_worker_error", error = %error),
+            )),
+            on_task_terminal: Some(telemetry::task_terminal_hook()),
+            ..WorkerOptions::default()
+        })
     });
-    let scheduler = tokio::spawn(scheduler::run(
-        config.clone(),
-        absurd.clone(),
-        credentials.clone(),
-    ));
-    let granola_scheduler = tokio::spawn(scheduler::run_granola(
-        config.clone(),
-        absurd,
-        credentials.clone(),
-    ));
-    let slack_scheduler = tokio::spawn(scheduler::run_slack(
-        config.clone(),
-        slack_absurd,
-        credentials.clone(),
-    ));
+    let mut schedulers = Vec::new();
+    if config.drive_enabled {
+        schedulers.push(tokio::spawn(scheduler::run(
+            config.clone(),
+            absurd.clone(),
+            credentials.clone(),
+        )));
+    }
+    if config.granola_enabled {
+        schedulers.push(tokio::spawn(scheduler::run_granola(
+            config.clone(),
+            absurd,
+            credentials.clone(),
+        )));
+    }
+    if config.slack_enabled {
+        schedulers.push(tokio::spawn(scheduler::run_slack(
+            config.clone(),
+            slack_absurd,
+            credentials.clone(),
+        )));
+    }
     let sampler = tokio::spawn(sampler::run(pool.clone(), credentials.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let server_shutdown = shutdown_rx.clone();
@@ -196,16 +207,25 @@ async fn main() -> Result<()> {
             .await
     });
 
-    info!(event = "company_context_started", bind = %config.bind_addr, queue = QUEUE_NAME);
+    info!(
+        event = "company_context_started",
+        bind = %config.bind_addr,
+        queue = QUEUE_NAME,
+        drive_enabled = config.drive_enabled,
+        granola_enabled = config.granola_enabled,
+        slack_enabled = config.slack_enabled
+    );
     tokio::signal::ctrl_c().await?;
     info!(event = "company_context_shutdown_started");
     let _ = shutdown_tx.send(true);
-    scheduler.abort();
-    granola_scheduler.abort();
-    slack_scheduler.abort();
+    for scheduler in schedulers {
+        scheduler.abort();
+    }
     sampler.abort();
     worker.close().await?;
-    slack_worker.close().await?;
+    if let Some(slack_worker) = slack_worker {
+        slack_worker.close().await?;
+    }
     server.await.context("join HTTP server")??;
     credentials.close().await;
     pool.close().await;

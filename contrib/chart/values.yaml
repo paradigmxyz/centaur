@@ -474,6 +474,16 @@ experimentalCompanyContext:
     tag: latest
     pullPolicy: Always
   port: 8080
+  # Indexers to schedule. Disabling one pauses its ingestion; documents it
+  # already indexed stay searchable, and enabling it again resumes from its
+  # checkpoints.
+  indexers:
+    drive:
+      enabled: true
+    granola:
+      enabled: true
+    slack:
+      enabled: true
   # Rails Console OAuth app whose live per-user Google broker credentials are
   # synchronized. The embeddings API key comes from OPENAI_API_KEY in the
   # shared Kubernetes Secret.

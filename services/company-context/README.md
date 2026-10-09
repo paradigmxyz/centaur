@@ -65,6 +65,18 @@ folders' children in a single Drive search and spawns batches for the
 subfolders. The Helm deployment reads
 `OPENAI_API_KEY` directly from the shared Kubernetes Secret.
 
+Indexer switches (default `true`):
+
+- `COMPANY_CONTEXT_DRIVE_ENABLED`: schedule Google Drive sync.
+- `COMPANY_CONTEXT_GRANOLA_ENABLED`: schedule Granola sync.
+- `COMPANY_CONTEXT_SLACK_ENABLED`: schedule Slack sync and run the Slack queue worker.
+
+Disabling an indexer pauses it without removing anything: no new sync or
+reconciliation is scheduled, already indexed documents stay searchable, and
+enabling it again resumes from the stored checkpoints. Tasks already queued on
+the main queue still finish; queued Slack tasks wait until Slack is enabled
+again. Every required setting, including `SLACK_BOT_TOKEN`, is still required.
+
 Rollout limits (unset means no limit; values are comma-separated):
 
 - `COMPANY_CONTEXT_GOOGLE_DRIVE_USER_EMAILS`: sync only these Google credential emails.
