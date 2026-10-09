@@ -47,21 +47,33 @@ describe("normalizeReasoningEffort", () => {
 
 describe("reasoningEffortFor", () => {
   it("resolves each turn type independently", () => {
-    const policy = { assignment: "xhigh", comment: "low" };
+    const policy = {
+      assignment: "xhigh",
+      "ci-fix": "low",
+      comment: "medium",
+      management: "medium",
+      review: "high",
+    };
     expect(reasoningEffortFor(policy, "assignment")).toBe("xhigh");
-    expect(reasoningEffortFor(policy, "comment")).toBe("low");
+    expect(reasoningEffortFor(policy, "ci-fix")).toBe("low");
+    expect(reasoningEffortFor(policy, "comment")).toBe("medium");
+    expect(reasoningEffortFor(policy, "management")).toBe("medium");
+    expect(reasoningEffortFor(policy, "review")).toBe("high");
   });
 
-  it("leaves a turn type unset when only the other is configured", () => {
-    // Setting one must not imply the other: a deployment that wants deep
-    // assignment turns has not thereby asked for deep comment replies.
+  it("leaves a turn type unset when only others are configured", () => {
+    // Setting one must not imply the others: a deployment that wants deep
+    // issue-work turns has not thereby asked for deep CI fixes.
     const policy = { assignment: "high" };
     expect(reasoningEffortFor(policy, "assignment")).toBe("high");
+    expect(reasoningEffortFor(policy, "ci-fix")).toBeUndefined();
     expect(reasoningEffortFor(policy, "comment")).toBeUndefined();
+    expect(reasoningEffortFor(policy, "management")).toBeUndefined();
+    expect(reasoningEffortFor(policy, "review")).toBeUndefined();
   });
 
   it("falls back to the harness default when unconfigured", () => {
     expect(reasoningEffortFor(undefined, "assignment")).toBeUndefined();
-    expect(reasoningEffortFor({}, "comment")).toBeUndefined();
+    expect(reasoningEffortFor({}, "review")).toBeUndefined();
   });
 });

@@ -32,6 +32,7 @@ import {
   type PrManagerContext,
 } from "./pr-manager";
 import { handleReviewRequest } from "./review";
+import { reasoningEffortFor } from "./reasoning-effort";
 import {
   forwardToSessionApi,
   isRetryableSessionApiError,
@@ -306,6 +307,11 @@ async function handleMessage(
           harnessType: overrides.harnessType,
           model: overrides.model,
           provider: overrides.provider,
+          // An explicit -rsn flag in the mention wins over the configured
+          // per-turn-type default.
+          reasoning:
+            overrides.reasoning ??
+            reasoningEffortFor(options.reasoningEffort, "comment"),
         },
         reactMessageId: message.id,
         sessionThreadKey,
