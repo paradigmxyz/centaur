@@ -481,7 +481,16 @@ async fn sync_thread(
     .await;
 
     match result {
-        Ok(messages) => Ok(MessagesSummary::new("completed", messages)),
+        Ok(messages) => {
+            info!(
+                event = "company_context_slack_thread_synced",
+                task_id = ctx.task_id(),
+                conversation_id = params.conversation_id,
+                thread_ts = params.thread_ts,
+                messages
+            );
+            Ok(MessagesSummary::new("completed", messages))
+        }
         Err(error) if is_rejected(&error) => {
             warn!(
                 event = "company_context_slack_thread_rejected",
