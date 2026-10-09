@@ -3126,6 +3126,200 @@ describe('slackbotv2', () => {
     expect(text).not.toContain('Thinking')
   })
 
+  // A rolling deploy: the old pod took a message after the new pod's startup
+  // scan, then died mid-render. Its lease lapses; the thread state still says
+  // activeExecution. Without recovery every later message on the thread is
+  // steered into the dead execution and the bot goes silent.
+  async function seedOrphanedRender(
+    sharedState: ReturnType<typeof createMemoryState>,
+    parentTs: string,
+    executionId: string,
+    answer: string
+  ): Promise<string> {
+    const orphanText = `<@${BOT_USER_ID}> run something the old pod never finished`
+    const orphan = await postUserMessage(orphanText, parentTs)
+    const key = threadKey(parentTs)
+    const message = apiMessageFromSlackEvent({
+      isMention: true,
+      text: orphanText,
+      threadId: key,
+      ts: orphan.ts
+    })
+    await sharedState.set(`thread-state:${key}`, {
+      activeExecution: true,
+      executedMessageIds: [orphan.ts],
+      forwardedMessageIds: [orphan.ts],
+      historyForwarded: true,
+      lastEventId: 0,
+      renderObligation: { afterEventId: 0, executionId, message }
+    })
+    await sharedState.appendToList('slackbotv2:render:index', key)
+    codexApi.emitOutputLines(key, sampleCodexOutputLines(answer), executionId)
+    return key
+  }
+
+  it('recovers an orphaned render inline when a message arrives and the lease is gone, then runs the message', async () => {
+    const logs: CapturedLog[] = []
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    const parent = await postUserMessage('Context before a deploy.')
+    const key = await seedOrphanedRender(sharedState, parent.ts, 'exe-orphan', 'Answer the old pod never posted.')
+    // No startup scan and no sweep: isolate the inline path.
+    bot = createTestBot({
+      logger: captureLogger(logs),
+      recoverRenderObligationsOnStart: false,
+      renderRecoveryIntervalMs: 0,
+      state: sharedState
+    })
+
+    const followUpText = `<@${BOT_USER_ID}> what's up?`
+    const followUp = await postUserMessage(followUpText, parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-inline-recovery',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: followUp.ts,
+          thread_ts: parent.ts,
+          text: followUpText
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    // The orphaned render is replayed first, then the new message executes.
+    expect(codexApi.eventRequests[0]).toEqual({ afterEventId: 0, executionId: 'exe-orphan', threadKey: key })
+    expect(codexApi.executes).toHaveLength(1)
+    expect(await threadText(parent.ts)).toContain('Answer the old pod never posted.')
+    expect(logData(logs, 'slackbotv2_render_recovery_inline_finished')).toEqual(
+      expect.objectContaining({ outcome: 'recovered' })
+    )
+    const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+    expect(threadState).toEqual(expect.objectContaining({ activeExecution: false, renderObligation: null }))
+  })
+
+  it('leaves a thread alone when its render lease is live: the message is steered, not recovered', async () => {
+    const logs: CapturedLog[] = []
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    const parent = await postUserMessage('Context during a live render.')
+    const key = await seedOrphanedRender(sharedState, parent.ts, 'exe-live', 'Still streaming elsewhere.')
+    await sharedState.set(`slackbotv2:render:lease:${key}`, 'another-pod', 60_000)
+    bot = createTestBot({
+      logger: captureLogger(logs),
+      recoverRenderObligationsOnStart: false,
+      renderRecoveryIntervalMs: 0,
+      state: sharedState
+    })
+
+    const followUpText = `<@${BOT_USER_ID}> also do this`
+    const followUp = await postUserMessage(followUpText, parent.ts)
+    const waits: Promise<unknown>[] = []
+    await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-live-lease',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: followUp.ts,
+          thread_ts: parent.ts,
+          text: followUpText
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    await Promise.all(waits)
+
+    expect(codexApi.eventRequests).toHaveLength(0)
+    expect(codexApi.executes).toHaveLength(0)
+    expect(logs.map(log => log.event)).not.toContain('slackbotv2_render_recovery_inline_started')
+    expect(logData(logs, 'slackbotv2_forward_started')).toEqual(expect.objectContaining({ active_execution: true }))
+  })
+
+  it('defers inline recovery when the session API is unavailable and leaves the thread for the sweep', async () => {
+    const logs: CapturedLog[] = []
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    const parent = await postUserMessage('Context during an API blip.')
+    const key = await seedOrphanedRender(sharedState, parent.ts, 'exe-deferred', 'Comes back later.')
+    codexApi.failNextEvents = true
+    bot = createTestBot({
+      logger: captureLogger(logs),
+      recoverRenderObligationsOnStart: false,
+      renderRecoveryIntervalMs: 0,
+      state: sharedState
+    })
+
+    const followUpText = `<@${BOT_USER_ID}> still there?`
+    const followUp = await postUserMessage(followUpText, parent.ts)
+    const waits: Promise<unknown>[] = []
+    await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-inline-deferred',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: followUp.ts,
+          thread_ts: parent.ts,
+          text: followUpText
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    await Promise.all(waits)
+
+    expect(logData(logs, 'slackbotv2_render_recovery_inline_finished')).toEqual(
+      expect.objectContaining({ outcome: 'deferred' })
+    )
+    // Not unwedged: no new execution, obligation kept for the sweep, lease released.
+    expect(codexApi.executes).toHaveLength(0)
+    const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+    expect(threadState).toEqual(expect.objectContaining({ activeExecution: true }))
+    expect((threadState?.renderObligation as Record<string, unknown>)?.executionId).toBe('exe-deferred')
+    expect(await sharedState.get<string>(`slackbotv2:render:lease:${key}`)).toBeFalsy()
+  })
+
+  it('sweeps for orphaned render obligations periodically, not only at startup', async () => {
+    const logs: CapturedLog[] = []
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({
+      logger: captureLogger(logs),
+      recoverRenderObligationsOnStart: false,
+      renderRecoveryIntervalMs: 50,
+      state: sharedState
+    })
+    // Indexed after this pod started, by a pod that then died.
+    const parent = await postUserMessage('Context before the sweep.')
+    const key = await seedOrphanedRender(sharedState, parent.ts, 'exe-swept', 'Swept up.')
+
+    await waitFor(() => codexApi.eventRequests.length === 1, 3000)
+    await waitFor(() => slackApi.calls.some(call => call.method === 'chat.stopStream'), 3000)
+    expect(codexApi.eventRequests).toEqual([{ afterEventId: 0, executionId: 'exe-swept', threadKey: key }])
+    expect(codexApi.executes).toHaveLength(0)
+    expect(await threadText(parent.ts)).toContain('Swept up.')
+    await waitFor(async () => {
+      const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+      return threadState?.activeExecution === false
+    }, 3000)
+  })
+
   it('skips stale render obligations from Chat SDK state on startup', async () => {
     const logs: CapturedLog[] = []
     const sharedState = createMemoryState()

@@ -163,6 +163,12 @@ const RENDER_OBLIGATION_INDEX_KEY = 'slackbotv2:render:index'
 const RENDER_OBLIGATION_INDEX_MAX_LENGTH = 2000
 const RENDER_INDEX_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const RENDER_RECOVERY_LEASE_TTL_MS = 2 * 60 * 1000
+const RENDER_RECOVERY_INTERVAL_MS = 60 * 1000
+const RENDER_RECOVERY_SWEEP_LEASE_KEY = 'slackbotv2:render:sweep'
+// Shared by the startup scan, the sweep and inline recovery so a thread that
+// keeps failing is abandoned after RENDER_RECOVERY_MAX_THREAD_FAILURES no
+// matter which path retried it.
+const renderRecoveryFailureCounts = new Map<string, number>()
 const RENDER_LEASE_REFRESH_INTERVAL_MS = 60 * 1000
 const RENDER_RECOVERY_MAX_OBLIGATION_AGE_MS = 24 * 60 * 60 * 1000
 const RENDER_RECOVERY_THREAD_TIMEOUT_MS = 2 * 60 * 1000
@@ -633,6 +639,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   if (options.recoverRenderObligationsOnStart !== false) {
     scheduleRenderObligationRecovery(chat, state, options, stateConnected)
   }
+  scheduleRenderObligationSweep(chat, state, options, stateConnected)
 
   return { app, chat }
 }
@@ -1179,7 +1186,21 @@ async function syncThreadMessageToSession(
   input: SyncThreadMessageInput
 ): Promise<void> {
   const traceStartedAtMs = nowMs()
-  const state = (await thread.state) ?? {}
+  let state = (await thread.state) ?? {}
+  if (input.mode === 'execute' && state.activeExecution === true && state.renderObligation) {
+    // The thread says an execution is still running. If its render lease has
+    // lapsed, the pod that owned it died mid-render (a rolling deploy):
+    // recover that render now and treat this message as a new execution,
+    // instead of steering it into a dead one and going silent.
+    const recovered = await recoverOrphanedRenderObligation(
+      thread,
+      input.state,
+      input.options,
+      state.renderObligation,
+      { includeContext: false, messageId: message.id, mode: input.mode, openStream: false, startedAtMs: traceStartedAtMs, threadId: thread.id }
+    )
+    if (recovered) state = (await thread.state) ?? {}
+  }
   const messageIds = new Set(state.forwardedMessageIds ?? [])
   const executedMessageIds = new Set(state.executedMessageIds ?? [])
   const shouldStartExecution =
@@ -2173,6 +2194,47 @@ function scheduleRenderObligationRecovery(
   )
 }
 
+function scheduleRenderObligationSweep(
+  chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
+  state: StateAdapter,
+  options: SlackbotV2Options,
+  stateConnected: Promise<void>
+): void {
+  const intervalMs = options.renderRecoveryIntervalMs ?? RENDER_RECOVERY_INTERVAL_MS
+  if (intervalMs <= 0) return
+  // During a rolling deploy the old pod keeps taking messages after the new
+  // pod's startup scan has run; an obligation it indexes and then dies on is
+  // never recovered until the next restart. Sweep periodically as well. Live
+  // renders hold a refreshed lease and are skipped, as at startup.
+  // One pod sweeps per interval: the tick that wins the sweep lease scans,
+  // the others skip, so the scan cost does not scale with replica count.
+  const sweeperToken = randomUUID()
+  let sweeping = false
+  setInterval(() => {
+    if (sweeping) return
+    sweeping = true
+    backgroundWaitUntil(
+      stateConnected
+        .then(() => state.setIfNotExists(RENDER_RECOVERY_SWEEP_LEASE_KEY, sweeperToken, intervalMs))
+        .then(elected =>
+          elected ? recoverRenderObligations(chat, state, options, renderRecoveryFailureCounts) : 0
+        )
+        .catch(error =>
+          traceLog(
+            options,
+            'slackbotv2_render_recovery_sweep_failed',
+            undefined,
+            { error: errorMessage(error) },
+            'error'
+          )
+        )
+        .finally(() => {
+          sweeping = false
+        })
+    )
+  }, intervalMs).unref()
+}
+
 async function recoverRenderObligationsWithRetry(
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
   state: StateAdapter,
@@ -2181,7 +2243,7 @@ async function recoverRenderObligationsWithRetry(
 ): Promise<void> {
   // Wait for the startup Postgres connection before scanning for obligations.
   await stateConnected
-  const failureCounts = new Map<string, number>()
+  const failureCounts = renderRecoveryFailureCounts
   let attempt = 0
   while (true) {
     try {
@@ -2289,13 +2351,8 @@ async function recoverRenderObligations(
         continue
       }
 
-      const leaseToken = randomUUID()
-      const leaseAcquired = await state.setIfNotExists(
-        renderRecoveryLeaseKey(threadId),
-        leaseToken,
-        RENDER_RECOVERY_LEASE_TTL_MS
-      )
-      if (!leaseAcquired) {
+      const releaseLease = await claimRecoveryLease(state, threadId)
+      if (!releaseLease) {
         // Another holder (or a lease from a crashed pass, pending TTL expiry)
         // owns this thread. Count it as deferred so the retry loop keeps
         // running until the obligation is actually resolved.
@@ -2307,17 +2364,12 @@ async function recoverRenderObligations(
         })
         continue
       }
-      const releaseLease = async (): Promise<void> => {
-        const activeLeaseToken = await state.get<string>(renderRecoveryLeaseKey(threadId))
-        if (activeLeaseToken === leaseToken) await state.delete(renderRecoveryLeaseKey(threadId))
-      }
-
       // A single hung recovery (for example an event stream that never
       // produces a chunk) must not block every obligation queued behind it.
       // Race a deadline; on timeout move on and leave the attempt running
       // detached - it may still finish and clear the obligation, which is why
       // the lease is kept so a later pass does not start a duplicate render.
-      const recovery = recoverRenderObligation(chat, state, options, threadId, obligation)
+      const recovery = recoverRenderObligation(thread, state, options, obligation)
       let outcome: { timedOut: true } | { timedOut: false; deferred: boolean }
       try {
         outcome = await Promise.race([
@@ -2329,7 +2381,9 @@ async function recoverRenderObligations(
         throw error
       }
       if (outcome.timedOut) {
-        void recovery.catch(() => undefined)
+        // Keep the lease refreshed until the detached attempt settles so a
+        // later pass cannot start a duplicate render meanwhile.
+        void recovery.catch(() => undefined).finally(() => void releaseLease())
         deferredCount += 1
         timedOutCount += 1
         // Count timeouts toward the abandonment budget: an obligation whose
@@ -2404,12 +2458,12 @@ async function recoverRenderObligations(
 }
 
 async function recoverRenderObligation(
-  chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
+  thread: Thread<SlackbotV2ThreadState>,
   state: StateAdapter,
   options: SlackbotV2Options,
-  threadId: string,
   obligation: SlackbotV2RenderObligation
 ): Promise<boolean> {
+  const threadId = thread.id
   const trace: SlackbotV2Trace = {
     includeContext: false,
     messageId: obligation.message.id,
@@ -2418,7 +2472,6 @@ async function recoverRenderObligation(
     startedAtMs: nowMs(),
     threadId
   }
-  const thread = chat.thread(threadId)
   // Replay from the obligation's starting position, not the thread's
   // lastEventId: the failed render may have consumed events (including the
   // terminal result) past which a resumed stream would never see the final
@@ -2576,6 +2629,82 @@ async function recoverRenderObligation(
     recordRenderAttempt('recovery', renderOutcome, renderStartedAtMs)
   }
   return false
+}
+
+// Claims the thread's render lease the way the sweep does; a live render on
+// any pod holds a refreshed lease, so this only ever runs for an orphan.
+// Returns true when the thread is unwedged (recovered, or given up on) and the
+// caller may start a new execution; false when a live render owns it or the
+// recovery is still running past its deadline (the lease is kept so the sweep
+// does not start a duplicate).
+async function recoverOrphanedRenderObligation(
+  thread: Thread<SlackbotV2ThreadState>,
+  state: StateAdapter,
+  options: SlackbotV2Options,
+  obligation: SlackbotV2RenderObligation,
+  trace: SlackbotV2Trace
+): Promise<boolean> {
+  // Stale or repeatedly failing obligations are the sweep's to clear or
+  // abandon; retrying them inline would only stall every new message.
+  const maxObligationAgeMs =
+    options.renderRecoveryMaxObligationAgeMs ?? RENDER_RECOVERY_MAX_OBLIGATION_AGE_MS
+  const obligationAgeMs = renderObligationAgeMs(obligation)
+  if (obligationAgeMs !== undefined && obligationAgeMs > maxObligationAgeMs) return false
+  if ((renderRecoveryFailureCounts.get(thread.id) ?? 0) >= RENDER_RECOVERY_MAX_THREAD_FAILURES) return false
+  const releaseLease = await claimRecoveryLease(state, thread.id)
+  if (!releaseLease) return false
+  traceLog(options, 'slackbotv2_render_recovery_inline_started', trace, renderObligationFields(obligation))
+  const timeoutMs = options.renderRecoveryThreadTimeoutMs ?? RENDER_RECOVERY_THREAD_TIMEOUT_MS
+  const recovery = recoverRenderObligation(thread, state, options, obligation)
+  const settled = recovery.then(
+    deferred => (deferred ? ('deferred' as const) : ('recovered' as const)),
+    () => 'failed' as const
+  )
+  const outcome = await Promise.race([settled, sleep(timeoutMs).then(() => 'timed_out' as const)])
+  if (outcome === 'timed_out') {
+    // Keep the lease refreshed until the detached attempt settles so the
+    // sweep cannot start a duplicate render meanwhile.
+    void settled.finally(() => void releaseLease())
+  } else {
+    await releaseLease()
+  }
+  if (outcome === 'failed' || outcome === 'timed_out') {
+    renderRecoveryFailureCounts.set(thread.id, (renderRecoveryFailureCounts.get(thread.id) ?? 0) + 1)
+  }
+  traceLog(options, 'slackbotv2_render_recovery_inline_finished', trace, { outcome })
+  // Only a resolved recovery unwedges the thread here; deferred and failed
+  // attempts leave the obligation for the sweep to retry or abandon.
+  return outcome === 'recovered'
+}
+
+// Claims the per-thread recovery lease and keeps it refreshed until released,
+// so a recovery that outlives one TTL (a long replay) is not re-claimed by
+// another pass. Returns null when someone else holds the lease.
+async function claimRecoveryLease(
+  state: StateAdapter,
+  threadId: string
+): Promise<(() => Promise<void>) | null> {
+  const key = renderRecoveryLeaseKey(threadId)
+  const token = randomUUID()
+  if (!(await state.setIfNotExists(key, token, RENDER_RECOVERY_LEASE_TTL_MS))) return null
+  const refresh = setInterval(() => {
+    void state
+      .get<string>(key)
+      .then(current =>
+        current === token ? state.set(key, token, RENDER_RECOVERY_LEASE_TTL_MS) : undefined
+      )
+      .catch(() => undefined)
+  }, RENDER_LEASE_REFRESH_INTERVAL_MS)
+  refresh.unref()
+  return async () => {
+    clearInterval(refresh)
+    try {
+      const current = await state.get<string>(key)
+      if (current === token) await state.delete(key)
+    } catch {
+      // Best effort: TTL expiry is the backstop.
+    }
+  }
 }
 
 async function indexRenderObligation(
