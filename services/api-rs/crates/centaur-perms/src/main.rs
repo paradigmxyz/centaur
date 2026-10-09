@@ -38,7 +38,7 @@ struct Cli {
     iron_control_url: String,
 
     /// iron-control admin API key (`iak_…`).
-    #[arg(long, env = "IRON_CONTROL_API_KEY")]
+    #[arg(long, env = "IRON_CONTROL_API_KEY", hide_env_values = true)]
     iron_control_api_key: String,
 
     /// Tool directory to search for `--tool` names. Repeatable; later
