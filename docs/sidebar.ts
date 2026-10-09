@@ -38,6 +38,7 @@ export const sidebar = [
     items: [
       { text: 'How is Centaur securing my secrets?', link: '/security' },
       { text: '1Password', link: '/secrets/onepassword' },
+      { text: 'HashiCorp Vault', link: '/secrets/hashicorp-vault' },
       { text: 'Environment Variables', link: '/secrets/environment' },
       { text: 'Advanced Permissioning', link: '/secrets/advanced-permissioning' },
       { text: 'OAuth Apps', link: '/secrets/oauth-apps' },

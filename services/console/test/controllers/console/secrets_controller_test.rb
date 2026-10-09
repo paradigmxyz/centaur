@@ -72,6 +72,40 @@ module Console
       assert_equal %w[GET POST], secret.rules.order(:position).first.http_methods
     end
 
+    test "POST create builds a vault_kv source with mount and path" do
+      assert_difference -> { StaticSecret.count } => 1,
+                        -> { SecretSource.count } => 1 do
+        post console_static_secrets_url, params: {
+          secret: { name: "ui-vault", foreign_id: "ui-vault" },
+          static: { mode: "inject", header: "Authorization", formatter: "Bearer {{ .Value }}" },
+          source: { source_type: "vault_kv", reference: "prod/app/api-key", mount: "secret", json_key: "credential" },
+          rules: { "0" => { host: "api.example.com", http_methods: "get", paths: "/v1/*" } }
+        }
+      end
+
+      secret = StaticSecret.find_by!(foreign_id: "ui-vault")
+      assert_equal "vault_kv", secret.source.source_type
+      assert_equal({ "mount" => "secret", "path" => "prod/app/api-key", "json_key" => "credential" },
+                   secret.source.config)
+    end
+
+    test "new static secret form offers the vault backend and its mount input" do
+      get new_console_static_secret_url
+      assert_response :ok
+      assert_select "select[name='source[source_type]'] option[value=vault_kv]", count: 1
+      assert_select "input[name='source[mount]']", count: 1
+      # The Stimulus controller only reveals the mount input for the types in
+      # this value, so a rename here would silently hide the field.
+      assert_select "[data-controller='source-fields'][data-source-fields-mount-types-value]", count: 1
+    end
+
+    test "editing a vault_kv secret pre-fills its mount and path" do
+      get edit_console_static_secret_url(static_secrets(:acme_vault_api_key).oid)
+      assert_response :ok
+      assert_select "input[name='source[mount]'][value=?]", "secret", count: 1
+      assert_select "input[name='source[reference]'][value=?]", "prod/app/api-key", count: 1
+    end
+
     test "POST create with no inject or replace is rejected without writing" do
       assert_no_difference [ "StaticSecret.count", "SecretSource.count", "RequestRule.count" ] do
         post console_static_secrets_url, params: {
