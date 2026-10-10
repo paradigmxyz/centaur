@@ -16,7 +16,7 @@ COPY patches/ patches/
 COPY packages/ packages/
 COPY services/slackbotv2/package.json services/slackbotv2/package.json
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
-    pnpm install --filter slackbotv2 --prod --frozen-lockfile
+    pnpm install --filter slackbotv2... --prod --frozen-lockfile
 
 COPY services/slackbotv2/ services/slackbotv2/
 # Harness config files: response-context.ts imports the baked default models

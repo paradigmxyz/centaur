@@ -15,7 +15,7 @@ COPY patches/ patches/
 COPY packages/ packages/
 COPY services/discordbot/package.json services/discordbot/package.json
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
-    pnpm install --filter discordbot --prod --frozen-lockfile
+    pnpm install --filter discordbot... --prod --frozen-lockfile
 
 COPY services/discordbot/ services/discordbot/
 WORKDIR /repo/services/discordbot

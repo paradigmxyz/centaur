@@ -15,7 +15,7 @@ COPY patches/ patches/
 COPY packages/ packages/
 COPY services/githubbot/package.json services/githubbot/package.json
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
-    pnpm install --filter githubbot --prod --frozen-lockfile
+    pnpm install --filter githubbot... --prod --frozen-lockfile
 
 COPY services/githubbot/ services/githubbot/
 WORKDIR /repo/services/githubbot
