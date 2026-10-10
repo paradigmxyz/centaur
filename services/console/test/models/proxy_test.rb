@@ -1,13 +1,7 @@
 require "test_helper"
 
 class ProxyTest < ActiveSupport::TestCase
-  include ActiveJob::TestHelper
   include ActiveSupport::Testing::TimeHelpers
-
-  teardown do
-    clear_enqueued_jobs
-    clear_performed_jobs
-  end
 
   def valid_attrs(overrides = {})
     {
@@ -92,7 +86,7 @@ class ProxyTest < ActiveSupport::TestCase
 
   test "an unassigned proxy delivers an empty config" do
     proxy = Proxy.create!(name: "idle", principal: nil)
-    config = proxy.sync_config_snapshot.fetch(:config)
+    config = proxy.sync_config.fetch(:config)
     assert_empty config["secrets"]
     assert_empty config["transforms"]
     assert_empty config["postgres"]
@@ -156,7 +150,7 @@ class ProxyTest < ActiveSupport::TestCase
 
   # --- config_hash --------------------------------------------------------
   # Grant resolution and sync-payload assembly are tested on
-  # PrincipalSyncConfigSnapshot; here we cover only how the proxy's hash reacts
+  # PrincipalSyncConfig; here we cover only how the proxy's hash reacts
   # to changes.
 
   test "config_hash changes when a pg_dsn grant is added" do
@@ -165,11 +159,6 @@ class ProxyTest < ActiveSupport::TestCase
     Grant.create!(principal: proxy.principal, pg_dsn_secret: pg_dsn_secrets(:acme_analytics_pg),
                   created_by: users(:globex_admin))
 
-    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ proxy.principal.id ]) do
-      assert_equal before, proxy.reload.config_hash
-    end
-
-    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     refute_equal before, proxy.reload.config_hash
   end
 
@@ -179,11 +168,6 @@ class ProxyTest < ActiveSupport::TestCase
     Grant.create!(principal: proxy.principal, gcp_auth_secret: gcp_auth_secrets(:acme_bigquery),
                   created_by: users(:globex_admin))
 
-    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ proxy.principal.id ]) do
-      assert_equal before, proxy.reload.config_hash
-    end
-
-    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     refute_equal before, proxy.reload.config_hash
   end
 
@@ -195,11 +179,6 @@ class ProxyTest < ActiveSupport::TestCase
                   created_by: users(:acme_admin))
     principals(:acme_channel).principal_roles.create!(role: role)
 
-    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ proxy.principal.id ]) do
-      assert_equal before, proxy.reload.config_hash
-    end
-
-    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     refute_equal before, proxy.reload.config_hash
   end
 
@@ -251,7 +230,7 @@ class ProxyTest < ActiveSupport::TestCase
     assert_equal base, proxy.config_hash
   end
 
-  test "config_hash reacts to requester hoistable grant changes without a warm job" do
+  test "config_hash reacts to requester hoistable grant changes" do
     requester = build_requester
     proxy = Proxy.create!(name: "requester-grants", principal: principals(:acme_channel),
                           requester_principal: requester)
@@ -259,10 +238,7 @@ class ProxyTest < ActiveSupport::TestCase
     before = proxy.config_hash
 
     grant = Grant.create!(principal: requester, static_secret: secret, created_by: users(:acme_admin))
-    granted = nil
-    assert_no_enqueued_jobs only: PrincipalSyncConfigSnapshotWarmJob do
-      granted = proxy.reload.config_hash
-    end
+    granted = proxy.reload.config_hash
     refute_equal before, granted
 
     grant.destroy!

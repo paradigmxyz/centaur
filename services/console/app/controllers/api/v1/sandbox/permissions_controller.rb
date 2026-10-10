@@ -8,11 +8,7 @@ module Api
             return render_error(status: :unauthorized, message: "sandbox token is no longer assigned")
           end
 
-          # Redacting the cached snapshot stores the unredacted config but skips
-          # the expensive per-request grant rebuild, under the same freshness
-          # model the proxy sync path accepts.
-          snapshot = PrincipalSyncConfigSnapshot.fetch_for(principal)
-          permissions = Principal.redact_live_secrets(snapshot.config)
+          permissions = PrincipalSyncConfig.redacted_config_for(principal)
           body = {
             data: {
               sandbox_id: sandbox_claims.fetch("sandbox_id"),

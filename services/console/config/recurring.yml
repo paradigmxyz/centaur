@@ -34,9 +34,6 @@ production:
   granola_poll_sync:
     class: "Granola::PollSyncJob"
     schedule: every 30 minutes
-  prune_principal_sync_config_snapshots:
-    class: "PrunePrincipalSyncConfigSnapshotsJob"
-    schedule: every 10 minutes
   scheduled_task_scheduler:
     class: "ScheduledTaskSchedulerJob"
     schedule: every minute

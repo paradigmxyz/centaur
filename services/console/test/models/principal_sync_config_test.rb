@@ -1,26 +1,8 @@
 require "test_helper"
 
-class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
-  include ActiveJob::TestHelper
-  include ActiveSupport::Testing::TimeHelpers
-
+class PrincipalSyncConfigTest < ActiveSupport::TestCase
   setup do
     @principal = principals(:acme_channel)
-  end
-
-  teardown do
-    clear_enqueued_jobs
-    clear_performed_jobs
-  end
-
-  def without_live_sync_postgres
-    original = PrincipalSyncConfigSnapshot.method(:sync_postgres_for)
-    PrincipalSyncConfigSnapshot.define_singleton_method(:sync_postgres_for) do |*_args|
-      raise "live sync_postgres should not be called"
-    end
-    yield
-  ensure
-    PrincipalSyncConfigSnapshot.define_singleton_method(:sync_postgres_for, original)
   end
 
   def principal_with_grants(*grantables)
@@ -92,17 +74,6 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     secret
   end
 
-  def without_live_union_config
-    original = PrincipalSyncConfigSnapshot.method(:live_union_config_for_proxy)
-    PrincipalSyncConfigSnapshot.define_singleton_method(:live_union_config_for_proxy) do |*_args|
-      raise "the union should not be assembled live without a requester"
-    end
-    yield
-  ensure
-    PrincipalSyncConfigSnapshot.define_singleton_method(:live_union_config_for_proxy, original)
-    PrincipalSyncConfigSnapshot.private_class_method(:live_union_config_for_proxy)
-  end
-
   def build_requester
     Principal.create!(foreign_id: "requester-#{SecureRandom.hex(4)}",
                       kind: "user", created_by: users(:globex_admin))
@@ -163,7 +134,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
         history_enabled: false
       )
 
-      config = PrincipalSyncConfigSnapshot.config_for(principal)
+      config = PrincipalSyncConfig.config_for(principal)
       entry = config.fetch("secrets").find do |secret|
         secret.dig("inject", "header") == "Authorization" &&
           secret.dig("source", "type") == "control_plane"
@@ -197,7 +168,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     ) do
       principal = principals(:acme_channel)
 
-      config = PrincipalSyncConfigSnapshot.config_for(principal)
+      config = PrincipalSyncConfig.config_for(principal)
       entry = config.fetch("secrets").find do |secret|
         secret.dig("inject", "header") == "Authorization" &&
           secret.dig("source", "type") == "control_plane"
@@ -226,28 +197,28 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     principal = principal_with_grants(secret)
 
     # Bootstrapping (no token yet) -> the secret is omitted from sync entirely.
-    assert_empty PrincipalSyncConfigSnapshot.sync_secrets_for(principal)
+    assert_empty PrincipalSyncConfig.sync_secrets_for(principal)
 
     # Once control mints a token, it is delivered inline like a control_plane value.
     cred.update!(access_token: "live-token", expires_at: 1.hour.from_now, last_refresh: Time.current)
-    secrets = PrincipalSyncConfigSnapshot.sync_secrets_for(principal)
+    secrets = PrincipalSyncConfig.sync_secrets_for(principal)
     assert_equal 1, secrets.length
     assert_equal({ "type" => "control_plane", "value" => "live-token" }, secrets.first["source"])
 
     # ...and redacted in the operator inspection view (no special-casing needed).
-    redacted = PrincipalSyncConfigSnapshot.redacted_config_for(principal)
+    redacted = PrincipalSyncConfig.redacted_config_for(principal)
     assert_equal "[redacted]", redacted.dig("secrets", 0, "source", "value")
   end
 
   test "sync_transforms emits a gcp_auth transform per granted GcpAuthSecret" do
-    transforms = PrincipalSyncConfigSnapshot.sync_transforms_for(principal_with_grants(gcp_auth_secrets(:acme_bigquery)))
+    transforms = PrincipalSyncConfig.sync_transforms_for(principal_with_grants(gcp_auth_secrets(:acme_bigquery)))
     assert_equal 1, transforms.length
     assert_equal "gcp_auth", transforms.first["name"]
     assert_equal({ "type" => "workload_identity" }, transforms.first.dig("config", "credentials_provider"))
   end
 
   test "sync_transforms emits a gcp_id_token transform per granted GcpIdTokenSecret" do
-    transforms = PrincipalSyncConfigSnapshot.sync_transforms_for(principal_with_grants(gcp_id_token_secrets(:acme_cloud_run)))
+    transforms = PrincipalSyncConfig.sync_transforms_for(principal_with_grants(gcp_id_token_secrets(:acme_cloud_run)))
     assert_equal 1, transforms.length
     transform = transforms.first
     assert_equal "gcp_id_token", transform["name"]
@@ -257,7 +228,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
   end
 
   test "sync_transforms emits an aws_auth transform per granted AwsAuthSecret" do
-    transforms = PrincipalSyncConfigSnapshot.sync_transforms_for(principal_with_grants(aws_auth_secrets(:acme_cloudwatch_aws)))
+    transforms = PrincipalSyncConfig.sync_transforms_for(principal_with_grants(aws_auth_secrets(:acme_cloudwatch_aws)))
     aws = transforms.find { |t| t["name"] == "aws_auth" }
     refute_nil aws
     assert_equal({ "type" => "env", "var" => "AWS_ACCESS_KEY_ID" }, aws.dig("config", "access_key_id"))
@@ -267,7 +238,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
   end
 
   test "sync_transforms bundles all granted oauth tokens into one transform" do
-    transforms = PrincipalSyncConfigSnapshot.sync_transforms_for(principal_with_grants(oauth_token_secrets(:acme_gmail_oauth)))
+    transforms = PrincipalSyncConfig.sync_transforms_for(principal_with_grants(oauth_token_secrets(:acme_gmail_oauth)))
     oauth = transforms.find { |t| t["name"] == "oauth_token" }
     refute_nil oauth
     tokens = oauth.dig("config", "tokens")
@@ -276,11 +247,11 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
   end
 
   test "sync_transforms is empty without transform grants" do
-    assert_empty PrincipalSyncConfigSnapshot.sync_transforms_for(principals(:globex_user))
+    assert_empty PrincipalSyncConfig.sync_transforms_for(principals(:globex_user))
   end
 
   test "sync_postgres emits a DSN entry per granted PgDsnSecret with foreign_id" do
-    entries = PrincipalSyncConfigSnapshot.sync_postgres_for(principal_with_grants(pg_dsn_secrets(:acme_analytics_pg)))
+    entries = PrincipalSyncConfig.sync_postgres_for(principal_with_grants(pg_dsn_secrets(:acme_analytics_pg)))
     assert_equal 1, entries.length
     assert_equal pg_dsn_secrets(:acme_analytics_pg).foreign_id, entries.first["foreign_id"]
     assert_equal({ "type" => "env", "var" => "PG_ANALYTICS_DSN" }, entries.first["dsn"])
@@ -299,7 +270,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     ])
     Grant.create!(principal: principal, pg_dsn_secret: pg, created_by: users(:globex_admin))
 
-    entry = PrincipalSyncConfigSnapshot.sync_postgres_for(principal).fetch(0)
+    entry = PrincipalSyncConfig.sync_postgres_for(principal).fetch(0)
     assert_equal(
       [
         { "name" => "centaur.slack_channel_id", "value" => "C9999999999" },
@@ -325,14 +296,14 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     Grant.create!(principal: principal, pg_dsn_secret: low, created_by: users(:acme_admin), priority: 0)
     Grant.create!(principal: principal, pg_dsn_secret: high, created_by: users(:acme_admin), priority: 100)
 
-    entries = PrincipalSyncConfigSnapshot.sync_postgres_for(principal)
+    entries = PrincipalSyncConfig.sync_postgres_for(principal)
     assert_equal 1, entries.length
     assert_equal "pg-analytics-privileged", entries.first["foreign_id"]
     assert_equal "PG_PRIVILEGED_DSN", entries.first.dig("dsn", "var")
   end
 
   test "sync_postgres is empty without pg_dsn grants" do
-    assert_empty PrincipalSyncConfigSnapshot.sync_postgres_for(principals(:globex_user))
+    assert_empty PrincipalSyncConfig.sync_postgres_for(principals(:globex_user))
   end
 
   test "a direct static secret suppresses a role-granted transform on the same host and header" do
@@ -340,8 +311,8 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     grant_role_gcp(host: "api.test.com")
     principal = principals(:globex_user)
 
-    assert_equal 1, PrincipalSyncConfigSnapshot.sync_secrets_for(principal).length
-    assert_empty PrincipalSyncConfigSnapshot.sync_transforms_for(principal), "the lower-priority role gcp_auth should be withheld"
+    assert_equal 1, PrincipalSyncConfig.sync_secrets_for(principal).length
+    assert_empty PrincipalSyncConfig.sync_transforms_for(principal), "the lower-priority role gcp_auth should be withheld"
   end
 
   test "a directly linked Slack user token suppresses the MCP role bot token" do
@@ -363,7 +334,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     Grant.create!(role: role, static_secret: bot_secret, created_by: users(:globex_admin))
 
     user_secret = grant_direct_static(host: "slack.com", header: "Authorization")
-    served = PrincipalSyncConfigSnapshot.sync_secrets_for(principal)
+    served = PrincipalSyncConfig.sync_secrets_for(principal)
 
     assert_equal 1, served.length
     assert_equal "direct-token", served.first.dig("source", "value")
@@ -377,8 +348,8 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     grant_role_gcp(host: "api.test.com")
     principal = principals(:globex_user)
 
-    assert_equal 1, PrincipalSyncConfigSnapshot.sync_secrets_for(principal).length
-    assert_equal 1, PrincipalSyncConfigSnapshot.sync_transforms_for(principal).count { |t| t["name"] == "gcp_auth" }
+    assert_equal 1, PrincipalSyncConfig.sync_secrets_for(principal).length
+    assert_equal 1, PrincipalSyncConfig.sync_transforms_for(principal).count { |t| t["name"] == "gcp_auth" }
   end
 
   test "credentials writing the same header on different hosts both serve" do
@@ -386,8 +357,8 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     grant_role_gcp(host: "other.test.com")
     principal = principals(:globex_user)
 
-    assert_equal 1, PrincipalSyncConfigSnapshot.sync_secrets_for(principal).length
-    assert_equal 1, PrincipalSyncConfigSnapshot.sync_transforms_for(principal).count { |t| t["name"] == "gcp_auth" }
+    assert_equal 1, PrincipalSyncConfig.sync_secrets_for(principal).length
+    assert_equal 1, PrincipalSyncConfig.sync_transforms_for(principal).count { |t| t["name"] == "gcp_auth" }
   end
 
   test "same-priority credentials writing the same header on the same host both serve" do
@@ -395,8 +366,8 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     grant_direct_gcp(host: "api.test.com")
     principal = principals(:globex_user)
 
-    assert_equal 1, PrincipalSyncConfigSnapshot.sync_secrets_for(principal).length
-    assert_equal 1, PrincipalSyncConfigSnapshot.sync_transforms_for(principal).count { |t| t["name"] == "gcp_auth" }
+    assert_equal 1, PrincipalSyncConfig.sync_secrets_for(principal).length
+    assert_equal 1, PrincipalSyncConfig.sync_transforms_for(principal).count { |t| t["name"] == "gcp_auth" }
   end
 
   test "a wildcard static secret suppresses a role-granted transform on a matching exact host" do
@@ -404,8 +375,8 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     grant_role_gcp(host: "api.test.com")
     principal = principals(:globex_user)
 
-    assert_equal 1, PrincipalSyncConfigSnapshot.sync_secrets_for(principal).length
-    assert_empty PrincipalSyncConfigSnapshot.sync_transforms_for(principal), "the lower-priority role gcp_auth should be withheld"
+    assert_equal 1, PrincipalSyncConfig.sync_secrets_for(principal).length
+    assert_empty PrincipalSyncConfig.sync_transforms_for(principal), "the lower-priority role gcp_auth should be withheld"
   end
 
   test "a wildcard googleapis static secret suppresses oauth token entries on matching exact hosts" do
@@ -413,8 +384,8 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     grant_role_oauth
     principal = principals(:globex_user)
 
-    assert_equal 1, PrincipalSyncConfigSnapshot.sync_secrets_for(principal).length
-    assert_empty PrincipalSyncConfigSnapshot.sync_transforms_for(principal), "the lower-priority google oauth_token should be withheld"
+    assert_equal 1, PrincipalSyncConfig.sync_secrets_for(principal).length
+    assert_empty PrincipalSyncConfig.sync_transforms_for(principal), "the lower-priority google oauth_token should be withheld"
   end
 
   test "a higher-priority wildcard googleapis static secret suppresses all google auth transforms" do
@@ -424,8 +395,8 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     grant_role_gcp(host: "*.googleapis.com")
     principal = principals(:globex_user)
 
-    assert_equal 1, PrincipalSyncConfigSnapshot.sync_secrets_for(principal).length
-    assert_empty PrincipalSyncConfigSnapshot.sync_transforms_for(principal), "lower-priority google auth transforms should be withheld"
+    assert_equal 1, PrincipalSyncConfig.sync_secrets_for(principal).length
+    assert_empty PrincipalSyncConfig.sync_transforms_for(principal), "lower-priority google auth transforms should be withheld"
   end
 
   test "equal-priority google auth transforms all serve without a stronger wildcard static secret" do
@@ -434,7 +405,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     grant_role_gcp(host: "*.googleapis.com")
     principal = principals(:globex_user)
 
-    transforms = PrincipalSyncConfigSnapshot.sync_transforms_for(principal)
+    transforms = PrincipalSyncConfig.sync_transforms_for(principal)
     assert_equal 2, transforms.count { |t| t["name"] == "gcp_auth" }
     assert_equal 1, transforms.count { |t| t["name"] == "oauth_token" }
     assert_equal 1, transforms.find { |t| t["name"] == "oauth_token" }.dig("config", "tokens").length
@@ -448,35 +419,25 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     Grant.find_by!(gcp_auth_secret: gcp).update!(priority: 900)
     principal = principals(:globex_user)
 
-    assert_empty PrincipalSyncConfigSnapshot.sync_secrets_for(principal), "the now-lower-priority direct static secret should be withheld"
-    assert_equal 1, PrincipalSyncConfigSnapshot.sync_transforms_for(principal).count { |t| t["name"] == "gcp_auth" }
+    assert_empty PrincipalSyncConfig.sync_secrets_for(principal), "the now-lower-priority direct static secret should be withheld"
+    assert_equal 1, PrincipalSyncConfig.sync_transforms_for(principal).count { |t| t["name"] == "gcp_auth" }
   end
 
-  test "snapshot config can redact inline control_plane values" do
+  test "redacted config hides inline control_plane values" do
     principal = principals(:acme_channel)
     SecretSource.create!(source_type: "control_plane", secret: "s3cr3t",
                          static_secret: static_secrets(:db_password_replace))
 
-    redacted_config = PrincipalSyncConfigSnapshot.redacted_config_for(principal)
+    redacted_config = PrincipalSyncConfig.redacted_config_for(principal)
     redacted = redacted_config.fetch("secrets").find { |s| s.dig("source", "type") == "control_plane" }
     assert_equal "[redacted]", redacted.dig("source", "value")
 
-    live = PrincipalSyncConfigSnapshot.config_for(principal)
+    live = PrincipalSyncConfig.config_for(principal)
                     .fetch("secrets").find { |s| s.dig("source", "type") == "control_plane" }
     assert_equal "s3cr3t", live.dig("source", "value")
   end
 
-  test "fetch_for builds a snapshot on cold start" do
-    assert_difference -> { PrincipalSyncConfigSnapshot.count }, 1 do
-      snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-      assert_equal @principal.sync_config_cache_version, snapshot.principal_cache_version
-      assert_equal PrincipalSyncConfigSnapshot.payload_for(@principal), snapshot.payload
-      assert_equal PrincipalSyncConfigSnapshot.config_for(@principal), snapshot.config
-      assert_equal({}, snapshot.postgres_setting_templates)
-    end
-  end
-
-  test "proxy sync renders proxy labels from the snapshot without recomputing postgres" do
+  test "proxy config renders proxy label postgres settings" do
     pg = pg_dsn_secrets(:acme_analytics_pg)
     pg.update!(settings: [
       { "name" => "centaur.principal", "value_from" => { "principal_field" => "foreign_id" } },
@@ -484,116 +445,18 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     ])
     proxy = proxies(:acme_proxy)
     proxy.update!(labels: { "centaur.slack_user_id" => "U0123456789" })
-    cached = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-    assert cached.postgres_setting_templates.key?(pg.oid)
-    refute cached.config.key?("postgres_setting_templates")
 
-    without_live_sync_postgres do
-      snapshot = proxy.reload.sync_config_snapshot
-      entry = snapshot.fetch(:config).fetch("postgres").find { |item| item["foreign_id"] == pg.foreign_id }
-
-      assert_equal(
-        [
-          { "name" => "centaur.principal", "value" => @principal.foreign_id },
-          { "name" => "centaur.slack_user_id", "value" => "U0123456789" }
-        ],
-        entry.fetch("settings")
-      )
-    end
+    entry = proxy.reload.sync_config.fetch(:config).fetch("postgres").find { |item| item["foreign_id"] == pg.foreign_id }
+    assert_equal(
+      [
+        { "name" => "centaur.principal", "value" => @principal.foreign_id },
+        { "name" => "centaur.slack_user_id", "value" => "U0123456789" }
+      ],
+      entry.fetch("settings")
+    )
   end
 
-  test "snapshot accessors read flat payloads created before the snapshot envelope" do
-    config = { "secrets" => [], "transforms" => [], "postgres" => [] }
-    snapshot = PrincipalSyncConfigSnapshot.new(payload: config)
-
-    assert_equal config, snapshot.config
-    assert_empty snapshot.postgres_setting_templates
-  end
-
-  test "fetch_for returns the fresh snapshot without rebuilding" do
-    snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-
-    assert_no_difference -> { PrincipalSyncConfigSnapshot.count } do
-      assert_equal snapshot, PrincipalSyncConfigSnapshot.fetch_for(@principal)
-    end
-    assert_equal snapshot.updated_at, snapshot.reload.updated_at
-  end
-
-  test "fetch_for serves a snapshot stale past TTL" do
-    snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-    stale_time = (PrincipalSyncConfigSnapshot::TTL + 1.minute).ago
-    snapshot.update_columns(updated_at: stale_time)
-
-    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @principal.id ]) do
-      assert_no_changes -> { snapshot.reload.updated_at } do
-        served = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-        assert_equal snapshot.id, served.id
-        refute served.fresh?
-      end
-    end
-  end
-
-  test "warm job rebuilds a snapshot stale past TTL" do
-    snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-    stale_time = (PrincipalSyncConfigSnapshot::TTL + 1.minute).ago
-    snapshot.update_columns(updated_at: stale_time)
-
-    PrincipalSyncConfigSnapshotWarmJob.perform_now(@principal.id)
-
-    assert_equal snapshot.id, snapshot.reload.id
-    assert snapshot.fresh?
-  end
-
-  test "warm job rebuilds api server JWT snapshots when the jwt window advances" do
-    with_env(
-      "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
-      "CENTAUR_API_URL" => "http://api.internal:8080"
-    ) do
-      boundary = 1_700_001_000 + ApiServer::Jwt.rotation_offset(@principal)
-      current_time = Time.zone.at(boundary + 60)
-      previous_window_time = Time.zone.at(boundary - 60)
-      proxy = proxies(:acme_proxy)
-
-      snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-      original_hash = proxy.sync_config_snapshot.fetch(:config_hash)
-      original_token = snapshot.config.fetch("secrets").find do |secret|
-        secret.dig("inject", "header") == "Authorization"
-      end.dig("source", "value")
-      snapshot.update_columns(updated_at: previous_window_time)
-      clear_enqueued_jobs
-
-      travel_to current_time do
-        assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @principal.id ]) do
-          served = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-          assert_equal snapshot.id, served.id
-          refute served.fresh_for?(@principal)
-        end
-
-        PrincipalSyncConfigSnapshotWarmJob.perform_now(@principal.id)
-        refreshed = snapshot.reload
-        refreshed_token = refreshed.config.fetch("secrets").find do |secret|
-          secret.dig("inject", "header") == "Authorization"
-        end.dig("source", "value")
-
-        assert_equal snapshot.id, refreshed.id
-        assert refreshed.fresh_for?(@principal)
-        refute_equal original_token, refreshed_token
-        refute_equal original_hash, proxy.reload.sync_config_snapshot.fetch(:config_hash)
-      end
-    end
-  end
-
-  test "cache version bump does not enqueue a snapshot warm job" do
-    version = @principal.sync_config_cache_version
-
-    assert_no_enqueued_jobs only: PrincipalSyncConfigSnapshotWarmJob do
-      Principal.bump_sync_config_cache_versions(@principal.id)
-    end
-
-    assert_equal version + 1, @principal.reload.sync_config_cache_version
-  end
-
-  test "relation cache version bump updates direct and role grantees without warm jobs" do
+  test "relation cache version bump updates direct and role grantees" do
     secret = static_secrets(:acme_prod_api_key)
     Grant.create!(
       principal: principals(:acme_user_bob),
@@ -607,11 +470,8 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     ]
     unaffected = principals(:globex_user)
     versions = Principal.where(id: (affected + [ unaffected ]).map(&:id)).pluck(:id, :sync_config_cache_version).to_h
-    clear_enqueued_jobs
 
-    assert_no_enqueued_jobs only: PrincipalSyncConfigSnapshotWarmJob do
-      Principal.bump_sync_config_cache_versions(Principal.effective_grantees_for_grantable(secret))
-    end
+    Principal.bump_sync_config_cache_versions(Principal.effective_grantees_for_grantable(secret))
 
     affected.each do |principal|
       assert_equal versions.fetch(principal.id) + 1, principal.reload.sync_config_cache_version
@@ -619,39 +479,11 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     assert_equal versions.fetch(unaffected.id), unaffected.reload.sync_config_cache_version
   end
 
-  test "fetch_for serves the previous-version snapshot after a cache version bump" do
-    old = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-    Principal.bump_sync_config_cache_versions(@principal.id)
-    @principal.reload
-    clear_enqueued_jobs
-
-    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @principal.id ]) do
-      assert_no_difference -> { PrincipalSyncConfigSnapshot.count } do
-        served = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-        assert_equal old.id, served.id
-        refute_equal @principal.sync_config_cache_version, served.principal_cache_version
-      end
-    end
-  end
-
-  test "warm job builds a new snapshot after a cache version bump" do
-    old = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-    Principal.bump_sync_config_cache_versions(@principal.id)
-    @principal.reload
-
-    assert_difference -> { PrincipalSyncConfigSnapshot.count }, 1 do
-      PrincipalSyncConfigSnapshotWarmJob.perform_now(@principal.id)
-    end
-    fresh = PrincipalSyncConfigSnapshot.find_by!(principal: @principal, principal_cache_version: @principal.sync_config_cache_version)
-    refute_equal old.id, fresh.id
-  end
-
-  test "role Slack permission changes rebuild snapshots with inherited JWT claims" do
+  test "role Slack permission changes bump versions and reach inherited JWT claims" do
     with_env(
       "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
       "CENTAUR_API_URL" => "http://api.internal:8080"
     ) do
-      old = PrincipalSyncConfigSnapshot.fetch_for(@principal)
       old_version = @principal.sync_config_cache_version
 
       roles(:acme_infra).slack_channel_permissions.create!(
@@ -660,22 +492,14 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
         history_enabled: true
       )
 
-      @principal.reload
-      assert_operator @principal.sync_config_cache_version, :>, old_version
-
-      PrincipalSyncConfigSnapshotWarmJob.perform_now(@principal.id)
-      fresh = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-      refute_equal old.id, fresh.id
-      token = fresh.config.fetch("secrets").find do |secret|
-        secret.dig("inject", "header") == "Authorization"
-      end.dig("source", "value")
-      claims = jwt_payload(token)
+      assert_operator @principal.reload.sync_config_cache_version, :>, old_version
+      claims = jwt_payload(api_server_token(PrincipalSyncConfig.config_for(@principal)))
       assert_equal [ "C0123456789" ], claims.dig("slack", "upload_channels")
       assert_equal [ "C0123456789" ], claims.dig("slack", "history_channels")
     end
   end
 
-  test "role assignment and removal rebuild snapshots with changed inherited access" do
+  test "role assignment and removal change inherited JWT claims" do
     with_env(
       "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
       "CENTAUR_API_URL" => "http://api.internal:8080"
@@ -685,63 +509,31 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
         channel_id: "G9876543210",
         download_enabled: true
       )
-      old = PrincipalSyncConfigSnapshot.fetch_for(@principal)
 
       assignment = @principal.principal_roles.create!(role: role)
-      PrincipalSyncConfigSnapshotWarmJob.perform_now(@principal.id)
-      assigned = PrincipalSyncConfigSnapshot.fetch_for(@principal.reload)
-      refute_equal old.id, assigned.id
-      token = assigned.config.fetch("secrets").find do |secret|
-        secret.dig("inject", "header") == "Authorization"
-      end.dig("source", "value")
-      assert_equal [ "G9876543210" ], jwt_payload(token).dig("slack", "download_channels")
+      claims = jwt_payload(api_server_token(PrincipalSyncConfig.config_for(Principal.find(@principal.id))))
+      assert_equal [ "G9876543210" ], claims.dig("slack", "download_channels")
 
       assignment.destroy!
-      PrincipalSyncConfigSnapshotWarmJob.perform_now(@principal.id)
-      removed = PrincipalSyncConfigSnapshot.fetch_for(@principal.reload)
-      refute_equal assigned.id, removed.id
-      api_server_secrets = removed.config.fetch("secrets").select do |secret|
-        secret.dig("inject", "header") == "Authorization"
-      end
-      assert_equal 1, api_server_secrets.length
-      claims = jwt_payload(api_server_secrets.first.dig("source", "value"))
+      claims = jwt_payload(api_server_token(PrincipalSyncConfig.config_for(Principal.find(@principal.id))))
       assert_empty claims.dig("slack", "upload_channels")
       assert_empty claims.dig("slack", "download_channels")
       assert_empty claims.dig("slack", "history_channels")
     end
   end
 
-  test "fetch_for falls back to a blocking build on cold start" do
-    assert_difference -> { PrincipalSyncConfigSnapshot.count }, 1 do
-      snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-      assert_equal @principal.sync_config_cache_version, snapshot.principal_cache_version
-    end
-  end
-
   # --- requester principal union ------------------------------------------
-
-  test "a proxy without a requester renders identically without assembling the union live" do
-    grant_direct_static(host: "api.test.com", header: "Authorization")
-    proxy = Proxy.create!(name: "no-requester", principal: principals(:globex_user))
-    expected = proxy.sync_config_snapshot
-
-    without_live_union_config do
-      actual = proxy.reload.sync_config_snapshot
-      assert_equal expected.fetch(:config), actual.fetch(:config)
-      assert_equal expected.fetch(:config_hash), actual.fetch(:config_hash)
-    end
-  end
 
   test "a requester's always_available wrapper joins the union alongside conversation grants" do
     grant_direct_static(host: "conv.test.com", header: "Authorization")
     baseline = Proxy.create!(name: "baseline", principal: principals(:globex_user))
-                    .sync_config_snapshot.fetch(:config)
+                    .sync_config.fetch(:config)
 
     requester = build_requester
     build_hoistable_wrapper(granted_to: requester, host: "github.com")
     proxy = Proxy.create!(name: "union", principal: principals(:globex_user), requester_principal: requester)
 
-    config = proxy.sync_config_snapshot.fetch(:config)
+    config = proxy.sync_config.fetch(:config)
     hoisted = config.fetch("secrets").find { |s| s.dig("source", "value") == "hoisted-token" }
     refute_nil hoisted
     assert_equal({ "type" => "control_plane", "value" => "hoisted-token" }, hoisted["source"])
@@ -755,7 +547,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     build_hoistable_wrapper(granted_to: requester, host: "github.com", always_available: false)
     proxy = Proxy.create!(name: "not-whitelisted", principal: principals(:globex_user), requester_principal: requester)
 
-    assert_empty proxy.sync_config_snapshot.fetch(:config).fetch("secrets")
+    assert_empty proxy.sync_config.fetch(:config).fetch("secrets")
   end
 
   test "a wrapper granted to the requester through a role does not hoist" do
@@ -763,7 +555,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     build_hoistable_wrapper(granted_to: requester, host: "github.com", via_role: roles(:globex_infra))
     proxy = Proxy.create!(name: "role-granted", principal: principals(:globex_user), requester_principal: requester)
 
-    assert_empty proxy.sync_config_snapshot.fetch(:config).fetch("secrets")
+    assert_empty proxy.sync_config.fetch(:config).fetch("secrets")
   end
 
   test "non-static secret kinds granted directly to the requester do not hoist" do
@@ -774,7 +566,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     Grant.create!(principal: requester, pg_dsn_secret: pg_dsn_secrets(:acme_analytics_pg), created_by: admin)
     proxy = Proxy.create!(name: "other-kinds", principal: principals(:globex_user), requester_principal: requester)
 
-    config = proxy.sync_config_snapshot.fetch(:config)
+    config = proxy.sync_config.fetch(:config)
     assert_empty config.fetch("secrets")
     assert_empty config.fetch("transforms")
     assert_empty config.fetch("postgres")
@@ -785,7 +577,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     build_hoistable_wrapper(granted_to: requester, host: "github.com", minted: false)
     proxy = Proxy.create!(name: "bootstrapping", principal: principals(:globex_user), requester_principal: requester)
 
-    assert_empty proxy.sync_config_snapshot.fetch(:config).fetch("secrets")
+    assert_empty proxy.sync_config.fetch(:config).fetch("secrets")
   end
 
   test "a plain static secret directly granted to the requester does not hoist" do
@@ -801,7 +593,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     Grant.create!(principal: requester, static_secret: secret, created_by: users(:globex_admin))
     proxy = Proxy.create!(name: "plain-static", principal: principals(:globex_user), requester_principal: requester)
 
-    assert_empty proxy.sync_config_snapshot.fetch(:config).fetch("secrets")
+    assert_empty proxy.sync_config.fetch(:config).fetch("secrets")
   end
 
   test "a wrapper whose source points at a different credential does not hoist" do
@@ -816,7 +608,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     secret.source.update!(config: { "credential_id" => other.oid })
     proxy = Proxy.create!(name: "mismatched-source", principal: principals(:globex_user), requester_principal: requester)
 
-    assert_empty proxy.sync_config_snapshot.fetch(:config).fetch("secrets")
+    assert_empty proxy.sync_config.fetch(:config).fetch("secrets")
   end
 
   test "a requester wrapper suppresses a conversation role-granted transform on the same host and header" do
@@ -825,12 +617,12 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     build_hoistable_wrapper(granted_to: requester, host: "api.github.com", header: "Authorization")
     proxy = Proxy.create!(name: "suppression", principal: principals(:globex_user), requester_principal: requester)
 
-    config = proxy.sync_config_snapshot.fetch(:config)
+    config = proxy.sync_config.fetch(:config)
     assert_equal 1, config.fetch("secrets").length
     assert_empty config.fetch("transforms"), "the lower-priority role gcp_auth should be withheld"
 
     proxy.update!(requester_principal: nil)
-    config = proxy.reload.sync_config_snapshot.fetch(:config)
+    config = proxy.reload.sync_config.fetch(:config)
     assert_empty config.fetch("secrets")
     assert_equal 1, config.fetch("transforms").count { |t| t["name"] == "gcp_auth" }
   end
@@ -844,7 +636,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     Grant.find_by!(gcp_auth_secret: gcp).update!(priority: 50)
     proxy = Proxy.create!(name: "both-pools", principal: principals(:globex_user), requester_principal: requester)
 
-    config = proxy.sync_config_snapshot.fetch(:config)
+    config = proxy.sync_config.fetch(:config)
     assert_equal 1, config.fetch("secrets").length
     assert_empty config.fetch("transforms"),
                  "the wrapper should carry the requester's direct priority, beating the promoted role grant"
@@ -853,14 +645,14 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
   test "config_hash distinguishes requester identity even when configs coincide" do
     proxy = Proxy.create!(name: "hash-identity", principal: principals(:globex_user),
                           requester_principal: build_requester)
-    hash_a = proxy.sync_config_snapshot.fetch(:config_hash)
+    hash_a = proxy.sync_config.fetch(:config_hash)
 
     proxy.update!(requester_principal: build_requester)
-    hash_b = proxy.sync_config_snapshot.fetch(:config_hash)
+    hash_b = proxy.sync_config.fetch(:config_hash)
     refute_equal hash_a, hash_b
 
     proxy.update!(requester_principal: nil)
-    refute_equal hash_b, proxy.sync_config_snapshot.fetch(:config_hash)
+    refute_equal hash_b, proxy.sync_config.fetch(:config_hash)
   end
 
   test "a requester on an unassigned proxy still renders the empty config" do
@@ -868,10 +660,16 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     build_hoistable_wrapper(granted_to: requester, host: "github.com")
     proxy = Proxy.create!(name: "unassigned-with-requester", principal: nil, requester_principal: requester)
 
-    config = proxy.sync_config_snapshot.fetch(:config)
+    config = proxy.sync_config.fetch(:config)
     assert_empty config.fetch("secrets")
     assert_empty config.fetch("transforms")
     assert_empty config.fetch("postgres")
+  end
+
+  def api_server_token(config)
+    secrets = config.fetch("secrets").select { |secret| secret.dig("inject", "header") == "Authorization" }
+    assert_equal 1, secrets.length
+    secrets.first.dig("source", "value")
   end
 
   def jwt_payload(token)

@@ -13,7 +13,7 @@ class Proxy < ApplicationRecord
   belongs_to :principal, optional: true
   # Optional second principal: the human whose turn is currently running.
   # When set, the rendered config unions in their always-available direct
-  # credential grants (see PrincipalSyncConfigSnapshot).
+  # credential grants (see PrincipalSyncConfig).
   belongs_to :requester_principal, class_name: "Principal", optional: true
 
   validates :name, presence: true
@@ -45,14 +45,13 @@ class Proxy < ApplicationRecord
     Digest::SHA256.hexdigest(plaintext)
   end
 
-  def sync_config_snapshot(sandbox_entitlements_hosts: self.class.sandbox_entitlements_hosts)
-    PrincipalSyncConfigSnapshot.sync_config_for_proxy(self, sandbox_entitlements_hosts: sandbox_entitlements_hosts)
+  def sync_config(sandbox_entitlements_hosts: self.class.sandbox_entitlements_hosts)
+    PrincipalSyncConfig.sync_config_for_proxy(self, sandbox_entitlements_hosts: sandbox_entitlements_hosts)
   end
 
-  # Opaque, deterministic fingerprint of the exact config delivered by the
-  # proxy sync endpoint.
+  # Opaque, deterministic fingerprint of the exact config proxy-sync delivers.
   def config_hash
-    sync_config_snapshot.fetch(:config_hash)
+    sync_config.fetch(:config_hash)
   end
 
   def self.sandbox_entitlements_hosts
