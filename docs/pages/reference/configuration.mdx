@@ -53,6 +53,9 @@ Optional required-by-mode variables:
 | `OP_CONNECT_TOKEN` | Secret or local bootstrap shell env. | Token used by iron-proxy when `ironProxy.secretSource=onepassword-connect`. |
 | `TEAMS_BOT_APP_ID`, `TEAMS_BOT_APP_PASSWORD`, `TEAMS_BOT_APP_TENANT_ID` | Local shell before `just bootstrap-secrets`; production Secret. | Required by Teamsbot when `teamsbot.enabled=true`. |
 | `TEAMSBOT_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it when Teams credentials are present and it is omitted. | Static API key used by Teamsbot. |
+| `TELEGRAM_BOT_TOKEN` | Local shell before `just bootstrap-secrets`; production Secret. | Required by Telegrambot when `telegrambot.enabled=true`. |
+| `TELEGRAM_WEBHOOK_SECRET_TOKEN` | Local shell before `just bootstrap-secrets`; production Secret. | Required by Telegrambot when `telegrambot.mode=webhook`. |
+| `TELEGRAMBOT_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it when a Telegram token is present and it is omitted. | Static API key used by Telegrambot, scoped to `telegram:` sessions. |
 | `CENTAUR_APIRS_ADMIN_API_KEY` | `secretManager.existingSecretName` or the api-rs environment. | Optional static bearer token with every api-rs capability. Generate a distinct value with `openssl rand -hex 32`. |
 
 ## Console and Permission Control Plane
@@ -203,6 +206,23 @@ Execution tuning:
 | `TEAMS_DOWNLOAD_ATTACHMENTS` | `teamsbot.downloadAttachments`. | Enables allowed Teams attachment downloads into base64 payloads; defaults to `false`. |
 | `TEAMS_ATTACHMENT_MAX_BYTES`, `TEAMS_ATTACHMENT_ALLOWED_HOSTS` | Runtime env. | Attachment download size cap and HTTPS host allowlist. |
 | `TEAMS_GRAPH_BEARER_TOKEN`, `TEAMS_GRAPH_TOKEN_SCOPE` | Runtime env or Secret. | Optional Graph auth fallback for Graph/SharePoint-backed attachment URLs. |
+
+## Telegrambot
+
+| Env var | Set from | Controls |
+| --- | --- | --- |
+| `PORT` | Runtime env. | Telegrambot HTTP port; defaults to `3001`. |
+| `CENTAUR_API_URL` | Chart-rendered API service URL. | API base URL used by Telegrambot; local default is `http://127.0.0.1:8080`. |
+| `TELEGRAMBOT_API_KEY` | `secretManager.existingSecretName`. | Dedicated API key used by Telegrambot to call api-rs. |
+| `TELEGRAMBOT_DATABASE_URL`, `DATABASE_URL`, `POSTGRES_URL` | Secret. | Chat SDK state: polling checkpoint, dedupe, locks, and render obligations. The service refuses to boot without one. |
+| `TELEGRAM_BOT_TOKEN` | Secret. | Bot token from BotFather. |
+| `TELEGRAMBOT_MODE` | `telegrambot.mode`. | `polling` (default, outbound only) or `webhook`. |
+| `TELEGRAM_WEBHOOK_SECRET_TOKEN` | Secret. | Webhook secret token; required in webhook mode, where the service exposes `POST /api/webhooks/telegram`. |
+| `TELEGRAMBOT_USER_ALLOWLIST`, `TELEGRAMBOT_CHAT_ALLOWLIST` | `telegrambot.userAllowlist`, `telegrambot.chatAllowlist`. | Comma-separated Telegram user ids allowed to use the bot and group chat ids where it answers; in groups the sender must be on both lists. Both empty means Telegrambot ignores all messages. |
+| `TELEGRAM_BOT_USERNAME` | `telegrambot.botUserName`. | Bot username; resolved from `getMe` when unset. |
+| `TELEGRAM_API_BASE_URL` | `telegrambot.extraEnv`. | Bot API base URL override for a self-hosted Bot API server. |
+| `TELEGRAMBOT_POLL_TIMEOUT_SECONDS`, `TELEGRAMBOT_ANSWER_EDIT_INTERVAL_MS`, `TELEGRAMBOT_ACTIVE_EXECUTION_TTL_MS`, `TELEGRAMBOT_STATE_KEY_PREFIX` | `telegrambot.extraEnv`. | Long-poll timeout, answer edit floor, stale-run timeout, and state key prefix (`centaur-telegrambot`). |
+| `SESSION_IDLE_TIMEOUT_MS`, `SESSION_MAX_DURATION_MS` | Runtime env. | Forwarded to api-rs execute. |
 
 ## Sandbox
 

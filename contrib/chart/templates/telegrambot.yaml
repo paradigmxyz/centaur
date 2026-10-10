@@ -1,0 +1,125 @@
+{{- if .Values.telegrambot.enabled }}
+{{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
+{{- $mode := .Values.telegrambot.mode | default "polling" -}}
+{{- if not (has $mode (list "polling" "webhook")) }}
+{{- fail "telegrambot.mode must be \"polling\" or \"webhook\"" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "telegrambot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "telegrambot") | nindent 4 }}
+spec:
+  # Exactly one replica: Telegram allows a single getUpdates consumer per bot token (a second one
+  # gets 409 Conflict), and render recovery assumes one process. Recreate stops the old pod before
+  # the new one starts polling. Do NOT add an HPA.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "telegrambot") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "telegrambot") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      # Long-poll requests last up to the poll timeout; let in-flight handlers settle on SIGTERM.
+      terminationGracePeriodSeconds: 45
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: telegrambot
+          image: {{ printf "%s:%s" .Values.telegrambot.image.repository .Values.telegrambot.image.tag | quote }}
+          imagePullPolicy: {{ .Values.telegrambot.image.pullPolicy }}
+          env:
+            - name: PORT
+              value: "3001"
+            - name: CENTAUR_API_URL
+              value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+            - name: TELEGRAMBOT_MODE
+              value: {{ $mode | quote }}
+            - name: TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sTELEGRAM_BOT_TOKEN" .Values.secretManager.envPrefix }}
+{{- if eq $mode "webhook" }}
+            - name: TELEGRAM_WEBHOOK_SECRET_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sTELEGRAM_WEBHOOK_SECRET_TOKEN" .Values.secretManager.envPrefix }}
+{{- end }}
+            - name: TELEGRAMBOT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sTELEGRAMBOT_API_KEY" .Values.secretManager.envPrefix }}
+            - name: TELEGRAMBOT_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+            - name: TELEGRAMBOT_CHAT_ALLOWLIST
+              value: {{ .Values.telegrambot.chatAllowlist | quote }}
+            - name: TELEGRAMBOT_USER_ALLOWLIST
+              value: {{ .Values.telegrambot.userAllowlist | quote }}
+{{- if .Values.telegrambot.botUserName }}
+            - name: TELEGRAM_BOT_USERNAME
+              value: {{ .Values.telegrambot.botUserName | quote }}
+{{- end }}
+{{- range $name, $value := .Values.telegrambot.extraEnv }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+{{- end }}
+          ports:
+            - containerPort: 3001
+              name: http
+          # /health is 503 in polling mode when the getUpdates loop is not running. Startup exits
+          # non-zero when getMe fails, so a bad token crash-loops instead of idling.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            periodSeconds: 5
+            failureThreshold: 12
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            periodSeconds: 15
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+            # The oven/bun runtime image ships the `bun` user (uid/gid 1000); the Dockerfile drops
+            # to it, so enforce non-root here too.
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          resources:
+{{ toYaml .Values.telegrambot.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "telegrambot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "telegrambot") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "telegrambot") | nindent 4 }}
+  ports:
+    - name: http
+      port: 3001
+      targetPort: 3001
+{{- end }}

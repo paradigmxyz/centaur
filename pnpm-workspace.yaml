@@ -5,6 +5,7 @@ packages:
   - services/discordbot
   - services/teamsbot
   - services/githubbot
+  - services/telegrambot
 
 patchedDependencies:
   '@chat-adapter/linear@4.31.0': patches/@chat-adapter__linear@4.31.0.patch

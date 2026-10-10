@@ -873,6 +873,35 @@ discordbot:
   extraEnv: {}
   resources: {}
 
+# Telegram chat ingress — Chat SDK Telegram adapter, forwards to the api-rs control plane (:8080).
+# Off by default; needs a BotFather token and at least one allowlist. Polling mode (default) needs
+# no public endpoint. Always exactly one replica (one getUpdates consumer per token).
+telegrambot:
+  enabled: false
+  image:
+    repository: centaur-telegrambot
+    tag: latest
+    pullPolicy: Always
+  # "polling" (default, outbound only) or "webhook" (needs TELEGRAM_WEBHOOK_SECRET_TOKEN in the
+  # secret and a public route to /api/webhooks/telegram; see ingress below).
+  mode: polling
+  # Comma/space-separated group/supergroup chat ids (negative numbers) where the bot answers.
+  chatAllowlist: ""
+  # Comma/space-separated Telegram user ids allowed to use the bot, in DMs and (together with
+  # chatAllowlist) in groups. With both lists empty the bot is INERT (ignores all messages).
+  userAllowlist: ""
+  # Bot username without "@"; resolved from getMe when empty.
+  botUserName: ""
+  # Webhook mode only: route Telegram's webhook calls to the service.
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    host: ""
+    tls: []
+  extraEnv: {}
+  resources: {}
+
 # Microsoft Teams chat ingress. Forwards Teams Bot Framework activities to the
 # api-rs control plane (:8080) and renders session events back to Teams. Off by
 # default; needs a Teams app registration and Bot Framework endpoint routing.

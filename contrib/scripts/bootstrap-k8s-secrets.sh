@@ -69,6 +69,15 @@ Optional Teams ingress bootstrap (consumed when teamsbot.enabled=true):
   TEAMSBOT_API_KEY             bearer the bot sends to api-rs; auto-generated
                                once when absent (never rotated in place)
 
+Optional Telegram ingress bootstrap (consumed when telegrambot.enabled=true):
+  TELEGRAM_BOT_TOKEN           when set, seeds the telegrambot keys. Overwritten
+                               on every run so it rotates.
+  TELEGRAM_WEBHOOK_SECRET_TOKEN
+                               webhook secret token; only needed when
+                               telegrambot.mode=webhook. Overwritten when set.
+  TELEGRAMBOT_API_KEY          bearer the bot sends to api-rs; auto-generated
+                               once when absent (never rotated in place)
+
 Console bootstrap:
   IRON_CONTROL_DATABASE_URL    overrides the derived DSN (default points at the
                                bundled Postgres server with no database path, so
@@ -226,6 +235,18 @@ if secret_exists centaur-infra-env; then
       patch_data+=("\"TEAMSBOT_API_KEY\":\"$(printf '%s' "${TEAMSBOT_API_KEY:-$(rand_hex)}" | base64 | tr -d '\n')\"")
     fi
   fi
+  # Telegram ingress (telegrambot) keys: added when TELEGRAM_BOT_TOKEN is in the env. The token
+  # and optional webhook secret are overwritten on each run; TELEGRAMBOT_API_KEY is generated
+  # once if absent.
+  if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+    patch_data+=("\"TELEGRAM_BOT_TOKEN\":\"$(printf '%s' "$TELEGRAM_BOT_TOKEN" | base64 | tr -d '\n')\"")
+    if [[ -n "${TELEGRAM_WEBHOOK_SECRET_TOKEN:-}" ]]; then
+      patch_data+=("\"TELEGRAM_WEBHOOK_SECRET_TOKEN\":\"$(printf '%s' "$TELEGRAM_WEBHOOK_SECRET_TOKEN" | base64 | tr -d '\n')\"")
+    fi
+    if ! secret_key_present TELEGRAMBOT_API_KEY; then
+      patch_data+=("\"TELEGRAMBOT_API_KEY\":\"$(printf '%s' "${TELEGRAMBOT_API_KEY:-$(rand_hex)}" | base64 | tr -d '\n')\"")
+    fi
+  fi
   # iron-control keys: top up only when absent so we never rotate them out from
   # under a running pod (its ActiveRecord-encrypted data would become
   # undecryptable). Generated values mirror the create path.
@@ -339,6 +360,15 @@ else
       --from-literal=TEAMS_BOT_APP_TENANT_ID="$TEAMS_BOT_APP_TENANT_ID"
       --from-literal=TEAMSBOT_API_KEY="${TEAMSBOT_API_KEY:-$(rand_hex)}"
     )
+  fi
+  if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+    secret_args+=(
+      --from-literal=TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN"
+      --from-literal=TELEGRAMBOT_API_KEY="${TELEGRAMBOT_API_KEY:-$(rand_hex)}"
+    )
+    if [[ -n "${TELEGRAM_WEBHOOK_SECRET_TOKEN:-}" ]]; then
+      secret_args+=(--from-literal=TELEGRAM_WEBHOOK_SECRET_TOKEN="$TELEGRAM_WEBHOOK_SECRET_TOKEN")
+    fi
   fi
   if [[ -n "${OP_CONNECT_TOKEN:-}" ]]; then
     secret_args+=(--from-literal=OP_CONNECT_TOKEN="$OP_CONNECT_TOKEN")

@@ -86,6 +86,11 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "teamsbot") | nindent 14 }}
 {{- end }}
+{{- if .Values.telegrambot.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "telegrambot") | nindent 14 }}
+{{- end }}
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
@@ -177,6 +182,11 @@ spec:
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "teamsbot") | nindent 14 }}
+{{- end }}
+{{- if .Values.telegrambot.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "telegrambot") | nindent 14 }}
 {{- end }}
         # Console pages call api-rs for admin-backed views such as ETLs.
         - podSelector:
@@ -547,6 +557,50 @@ spec:
 {{- end }}
     {{- include "centaur.postgresEgress" . | nindent 4 }}
     # Teams Bot Framework, Graph, SharePoint, and proactive activity delivery use direct HTTPS.
+    - ports:
+        - protocol: TCP
+          port: 443
+---
+{{- end }}
+{{- if .Values.telegrambot.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "telegrambot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "telegrambot") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "telegrambot") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Health probes, plus Telegram's webhook calls via the ingress controller in webhook mode.
+    # Polling mode is outbound only.
+    - from:
+{{- range $ingressSourceNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+{{- end }}
+      ports:
+        - protocol: TCP
+          port: 3001
+  egress:
+{{- if .Values.apiRs.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.apiRs.port }}
+{{- end }}
+    {{- include "centaur.postgresEgress" . | nindent 4 }}
+    # Telegram Bot API (api.telegram.org, or TELEGRAM_API_BASE_URL) over direct HTTPS:
+    # getUpdates, sends, edits, reactions, and file downloads.
     - ports:
         - protocol: TCP
           port: 443
