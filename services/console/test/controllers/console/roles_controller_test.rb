@@ -2,8 +2,6 @@ require "test_helper"
 
 module Console
   class RolesControllerTest < ActionDispatch::IntegrationTest
-    include ActiveJob::TestHelper
-
     setup do
       @operator = users(:acme_admin)
       post login_url, params: { email: @operator.email, password: "password123456" }
@@ -138,38 +136,35 @@ module Console
       assert_equal "C0123456789", permission.reload.channel_id
     end
 
-    test "update_slack_channel_permissions bumps versions without warm jobs" do
+    test "update_slack_channel_permissions bumps versions" do
       role = roles(:acme_infra)
       first = role.slack_channel_permissions.create!(channel_id: "C0123456789", upload_enabled: true)
       second = role.slack_channel_permissions.create!(channel_id: "G9876543210", download_enabled: true)
       versions = Principal.where(id: role.principal_ids).pluck(:id, :sync_config_cache_version).to_h
-      clear_enqueued_jobs
 
-      assert_no_enqueued_jobs only: PrincipalSyncConfigSnapshotWarmJob do
-        patch slack_channel_permissions_console_role_url(role.oid),
-              params: {
-                role: {
-                  slack_channel_permissions_attributes: {
-                    "0" => {
-                      id: first.id,
-                      upload_enabled: "0",
-                      download_enabled: "1",
-                      history_enabled: "0"
-                    },
-                    "1" => {
-                      id: second.id,
-                      _destroy: "1"
-                    },
-                    "2" => {
-                      channel_id: "C2222222222",
-                      upload_enabled: "1",
-                      download_enabled: "0",
-                      history_enabled: "1"
-                    }
+      patch slack_channel_permissions_console_role_url(role.oid),
+            params: {
+              role: {
+                slack_channel_permissions_attributes: {
+                  "0" => {
+                    id: first.id,
+                    upload_enabled: "0",
+                    download_enabled: "1",
+                    history_enabled: "0"
+                  },
+                  "1" => {
+                    id: second.id,
+                    _destroy: "1"
+                  },
+                  "2" => {
+                    channel_id: "C2222222222",
+                    upload_enabled: "1",
+                    download_enabled: "0",
+                    history_enabled: "1"
                   }
                 }
               }
-      end
+            }
 
       assert_redirected_to console_role_path(role.oid)
       assert_equal %w[C0123456789 C2222222222], role.slack_channel_permissions.reload.pluck(:channel_id).sort
@@ -182,23 +177,20 @@ module Console
       role = roles(:acme_infra)
       permission = role.slack_channel_permissions.create!(channel_id: "C0123456789", upload_enabled: true)
       versions = Principal.where(id: role.principal_ids).pluck(:id, :sync_config_cache_version).to_h
-      clear_enqueued_jobs
 
-      assert_no_enqueued_jobs only: PrincipalSyncConfigSnapshotWarmJob do
-        patch slack_channel_permissions_console_role_url(role.oid),
-              params: {
-                role: {
-                  slack_channel_permissions_attributes: {
-                    "0" => {
-                      id: permission.id,
-                      upload_enabled: "1",
-                      download_enabled: "0",
-                      history_enabled: "0"
-                    }
+      patch slack_channel_permissions_console_role_url(role.oid),
+            params: {
+              role: {
+                slack_channel_permissions_attributes: {
+                  "0" => {
+                    id: permission.id,
+                    upload_enabled: "1",
+                    download_enabled: "0",
+                    history_enabled: "0"
                   }
                 }
               }
-      end
+            }
 
       assert_redirected_to console_role_path(role.oid)
       assert_equal "Updated Slack channel permissions.", flash[:notice]

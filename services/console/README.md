@@ -9,17 +9,19 @@ It is a Rails application backed by Postgres. It provides a JSON API, an operato
 - **Stores credentials.** Each secret is a typed record. The value is either kept inline and encrypted, or pulled from an external store such as AWS Secrets Manager, AWS SSM, 1Password, or an environment variable. The supported kinds are static secrets, GCP service-account auth, AWS SigV4 auth, OAuth tokens, Postgres connection strings, and HMAC signing keys.
 - **Controls who can use them.** A **principal** is an identity that a proxy runs as. A **role** groups credentials so they can be assigned together. A **grant** gives one credential to a principal or a role. A principal can use its own grants plus the grants of every role it has.
 - **Limits where they apply.** Each grant has request rules for host, methods, and paths, so a credential is only added to the requests it is meant for.
-- **Configures proxies.** A **proxy** registers with `iron-control`, gets assigned a principal, and calls `POST /api/v1/proxy/sync` to fetch its configuration. The response includes a config hash that works like an ETag, so a proxy that already has the current config gets an empty response.
+- **Configures proxies.** A **proxy** registers with `iron-control`, gets assigned a principal, and calls `POST /api/v1/proxy/sync` on the `proxy-sync` service, which reads `iron-control`'s database, to fetch its configuration. The response includes a config hash that works like an ETag, so a proxy that already has the current config gets an empty response.
 - **Issues short-lived tokens.** For `token_broker` credentials, `iron-control` mints and rotates the access token itself and sends only the token to the proxy. The underlying credential never leaves the control plane.
 
 ## How It Fits Together
 
 ```
   operator ──▶ console / JSON API ──▶ iron-control ──▶ Postgres (encrypted secrets)
-                                           ▲
-                                           │ POST /api/v1/proxy/sync (iprx_ token)
-                                           │
-  application ──▶ iron-proxy ──────────────┘
+                                                             ▲
+                                                         proxy-sync
+                                                             ▲
+                                           POST /api/v1/proxy/sync (iprx_ token)
+                                                             │
+  application ──▶ iron-proxy ────────────────────────────────┘
                      │
                      └──▶ upstream APIs (credentials added per request rules)
 ```
@@ -134,6 +136,6 @@ Rotating any of these keys makes previously encrypted data unreadable. Treat the
 
 ## API
 
-`iron-control` exposes a JSON API under `/api/v1`. All resource endpoints authenticate with an API key sent as a bearer token (`Authorization: Bearer iak_...`); the one exception is `POST /api/v1/proxy/sync`, which `iron-proxy` instances call with a proxy bearer token.
+`iron-control` exposes a JSON API under `/api/v1`. All resource endpoints authenticate with an API key sent as a bearer token (`Authorization: Bearer iak_...`). `iron-proxy` instances fetch their configuration from the separate `proxy-sync` service with a proxy bearer token.
 
 See [docs/API.md](docs/API.md) for the full reference: authentication, request/response conventions, pagination, error formats, the shared secret-source and request-rule shapes, and detailed payloads for every endpoint (static secrets, GCP auth secrets, OAuth token secrets, principals, roles, grants, API keys, proxies, and proxy sync).
