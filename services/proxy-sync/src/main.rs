@@ -3,6 +3,8 @@ mod config;
 mod conflicts;
 mod database;
 mod identifiers;
+#[cfg(test)]
+mod integration_tests;
 mod models;
 mod telemetry;
 mod tokens;
@@ -135,12 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sync_cache: Arc::new(SyncCache::default()),
         metrics: metrics_handle,
     };
-    let app = Router::new()
-        .route("/healthz", get(|| async { StatusCode::OK }))
-        .route("/metrics", get(metrics))
-        .route("/api/v1/proxy/sync", post(sync))
-        .layer(middleware::from_fn(log_request))
-        .with_state(state);
+    let app = router(state);
     let bind: SocketAddr = env::var("BIND_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:8080".to_owned())
         .parse()?;
@@ -150,6 +147,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_graceful_shutdown(shutdown())
         .await?;
     Ok(())
+}
+
+fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/healthz", get(|| async { StatusCode::OK }))
+        .route("/metrics", get(metrics))
+        .route("/api/v1/proxy/sync", post(sync))
+        .layer(middleware::from_fn(log_request))
+        .with_state(state)
 }
 
 async fn shutdown() {
