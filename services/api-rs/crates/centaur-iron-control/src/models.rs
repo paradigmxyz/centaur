@@ -708,8 +708,6 @@ pub struct Proxy {
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
     #[serde(default)]
-    pub config_hash: Option<String>,
-    #[serde(default)]
     pub token: Option<String>,
 }
 

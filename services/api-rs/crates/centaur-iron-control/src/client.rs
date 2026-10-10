@@ -423,7 +423,7 @@ impl IronControlClient {
 
     /// Reassign a proxy to a different principal. The ``iprx_`` token is
     /// unchanged; the proxy picks up the new principal's grants on its next
-    /// `/proxy/sync` (the config hash changes). This is how a warm-pool proxy,
+    /// sync from proxy-sync (the config hash changes). This is how a warm-pool proxy,
     /// booted under a bootstrap principal, is bound to a session's principal at
     /// checkout without a restart or token swap. The requester principal is
     /// re-bound (or cleared) on every assignment.
