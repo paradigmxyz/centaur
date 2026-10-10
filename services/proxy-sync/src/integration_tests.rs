@@ -188,13 +188,20 @@ impl Fixture {
         .unwrap();
     }
 
-    async fn static_secret_row(&self, label: &str, header: &str, broker: Option<i64>) -> i64 {
+    async fn static_secret_row(
+        &self,
+        label: &str,
+        inject: Option<Value>,
+        replace: Option<Value>,
+        broker: Option<i64>,
+    ) -> i64 {
         sqlx::query_scalar(
-            "INSERT INTO static_secrets (foreign_id, inject_config, broker_credential_id, created_by_id, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, now(), now()) RETURNING id",
+            "INSERT INTO static_secrets (foreign_id, inject_config, replace_config, broker_credential_id, created_by_id, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, now(), now()) RETURNING id",
         )
         .bind(self.name(label))
-        .bind(json!({ "header": header }))
+        .bind(inject)
+        .bind(replace)
         .bind(broker)
         .bind(self.admin)
         .fetch_one(&self.pool)
@@ -204,7 +211,9 @@ impl Fixture {
 
     /// A static secret injecting `header` on `host` from an env source.
     async fn static_secret(&self, label: &str, header: &str, host: &str) -> i64 {
-        let secret = self.static_secret_row(label, header, None).await;
+        let secret = self
+            .static_secret_row(label, Some(json!({ "header": header })), None, None)
+            .await;
         self.source(
             "static_secret_id",
             secret,
@@ -248,7 +257,12 @@ impl Fixture {
     /// credential whose OAuth app gates requester hoisting).
     async fn wrapper_secret(&self, label: &str, linked: i64, served_by: i64, host: &str) -> i64 {
         let secret = self
-            .static_secret_row(label, "Authorization", Some(linked))
+            .static_secret_row(
+                label,
+                Some(json!({ "header": "Authorization" })),
+                None,
+                Some(linked),
+            )
             .await;
         self.source(
             "static_secret_id",
@@ -259,6 +273,62 @@ impl Fixture {
         )
         .await;
         self.rule("static_secret_id", secret, host).await;
+        secret
+    }
+
+    /// A replace secret swapping `proxy_value` in `match_header` on `host`.
+    async fn replace_secret(
+        &self,
+        label: &str,
+        proxy_value: &str,
+        match_header: &str,
+        host: &str,
+    ) -> i64 {
+        let replace = json!({ "proxy_value": proxy_value, "match_headers": [match_header] });
+        let secret = self
+            .static_secret_row(label, None, Some(replace), None)
+            .await;
+        self.source(
+            "static_secret_id",
+            secret,
+            "env",
+            json!({ "var": label }),
+            None,
+        )
+        .await;
+        self.rule("static_secret_id", secret, host).await;
+        secret
+    }
+
+    async fn oauth_token(&self, label: &str, header: Option<&str>, host: &str) -> i64 {
+        let secret = sqlx::query_scalar(
+            "INSERT INTO oauth_token_secrets (foreign_id, \"grant\", token_endpoint, header, scopes, created_by_id, created_at, updated_at) \
+             VALUES ($1, 'refresh_token', 'https://oauth2.example/token', $2, $3, $4, now(), now()) RETURNING id",
+        )
+        .bind(self.name(label))
+        .bind(header)
+        .bind(json!(["read"]))
+        .bind(self.admin)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap();
+        // Console requires these credential fields for the refresh_token grant.
+        for (field, var) in [
+            ("refresh_token", "CONFLICT_REFRESH"),
+            ("client_id", "CONFLICT_CLIENT"),
+        ] {
+            sqlx::query(
+                "INSERT INTO secret_sources (oauth_token_secret_id, source_type, config, role, role_kind, created_at, updated_at) \
+                 VALUES ($1, 'env', $2, $3, 'credential_field', now(), now())",
+            )
+            .bind(secret)
+            .bind(json!({ "var": var }))
+            .bind(field)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        }
+        self.rule("oauth_token_secret_id", secret, host).await;
         secret
     }
 
@@ -400,6 +470,43 @@ fn secret_hosts(body: &Value) -> Vec<String> {
         .collect()
 }
 
+/// The credentials a sync serves on `*.conflict.test` hosts, as sorted
+/// "kind host header" lines, so conflict outcomes compare without depending on
+/// payload order.
+fn served_conflict_credentials(body: &Value) -> Vec<String> {
+    let host = |rules: &Value| rules[0]["host"].as_str().unwrap_or("").to_owned();
+    let mut served: Vec<String> = body["secrets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|secret| {
+            let header = secret["inject"]["header"]
+                .as_str()
+                .or_else(|| secret["replace"]["match_headers"][0].as_str())
+                .unwrap_or("");
+            format!("static {} {header}", host(&secret["rules"]))
+        })
+        .collect();
+    for transform in body["transforms"].as_array().unwrap() {
+        let name = transform["name"].as_str().unwrap();
+        if name == "oauth_token" {
+            for token in transform["config"]["tokens"].as_array().unwrap() {
+                let header = token["header"].as_str().unwrap_or("Authorization");
+                served.push(format!("oauth_token {} {header}", host(&token["rules"])));
+            }
+        } else {
+            served.push(format!("{name} {}", host(&transform["config"]["rules"])));
+        }
+    }
+    served.retain(|line| {
+        line.split(' ')
+            .nth(1)
+            .is_some_and(|host| host.ends_with(".conflict.test"))
+    });
+    served.sort();
+    served
+}
+
 fn transform_names(body: &Value) -> Vec<String> {
     body["transforms"]
         .as_array()
@@ -450,6 +557,81 @@ async fn role_and_direct_grants_resolve_to_the_strongest_priority() {
     let body = f.sync(&token).await;
     assert!(secret_hosts(&body).is_empty());
     assert_eq!(transform_names(&body), vec!["gcp_auth"]);
+}
+
+// The same scenario runs in tests/rails_parity_test.rb, which checks that
+// Console resolves it identically while the Rails resolver still exists.
+#[tokio::test]
+async fn conflicting_credentials_resolve_like_console() {
+    let Some(f) = Fixture::new().await else {
+        return;
+    };
+    let principal = f.principal("principal").await;
+    let role = f.role("role", principal).await;
+    let direct = Grantee::Principal(principal);
+    let via_role = Grantee::Role(role);
+
+    // A direct static secret beats a role transform on the same host and
+    // header. An OAuth token on a custom header does not conflict with it,
+    // but beats a weaker static secret writing that custom header.
+    let api = "api.conflict.test";
+    let s = f.static_secret("direct-auth", "Authorization", api).await;
+    f.grant(direct, "static_secret_id", s, DIRECT).await;
+    let s = f.gcp_auth("role-gcp", api).await;
+    f.grant(via_role, "gcp_auth_secret_id", s, ROLE).await;
+    let s = f
+        .oauth_token("custom-oauth", Some("X-Api-Token"), api)
+        .await;
+    f.grant(direct, "oauth_token_secret_id", s, DIRECT).await;
+    let s = f.static_secret("role-custom", "X-Api-Token", api).await;
+    f.grant(via_role, "static_secret_id", s, ROLE).await;
+
+    // A wildcard host conflicts with a matching exact host.
+    let s = f
+        .static_secret("wildcard", "Authorization", "*.wild.conflict.test")
+        .await;
+    f.grant(direct, "static_secret_id", s, DIRECT).await;
+    let s = f.gcp_auth("wild-gcp", "bq.wild.conflict.test").await;
+    f.grant(via_role, "gcp_auth_secret_id", s, ROLE).await;
+
+    // A promoted role grant beats a direct grant.
+    let promoted = "promoted.conflict.test";
+    let s = f.static_secret("demoted", "Authorization", promoted).await;
+    f.grant(direct, "static_secret_id", s, DIRECT).await;
+    let s = f.gcp_auth("promoted-gcp", promoted).await;
+    f.grant(via_role, "gcp_auth_secret_id", s, 900).await;
+
+    // A replace secret claims its match headers.
+    let slack = "slack.conflict.test";
+    let s = f
+        .replace_secret("bot-token", "SLACK_BOT_TOKEN", "Authorization", slack)
+        .await;
+    f.grant(via_role, "static_secret_id", s, ROLE).await;
+    let s = f.static_secret("user-token", "Authorization", slack).await;
+    f.grant(direct, "static_secret_id", s, DIRECT).await;
+
+    // Equal priorities are left to the proxy.
+    let equal = "equal.conflict.test";
+    let s = f
+        .static_secret("equal-static", "Authorization", equal)
+        .await;
+    f.grant(direct, "static_secret_id", s, DIRECT).await;
+    let s = f.gcp_auth("equal-gcp", equal).await;
+    f.grant(direct, "gcp_auth_secret_id", s, DIRECT).await;
+
+    let token = f.proxy(Some(principal), None, json!({})).await;
+    assert_eq!(
+        served_conflict_credentials(&f.sync(&token).await),
+        vec![
+            "gcp_auth equal.conflict.test",
+            "gcp_auth promoted.conflict.test",
+            "oauth_token api.conflict.test X-Api-Token",
+            "static *.wild.conflict.test Authorization",
+            "static api.conflict.test Authorization",
+            "static equal.conflict.test Authorization",
+            "static slack.conflict.test Authorization",
+        ]
+    );
 }
 
 #[tokio::test]

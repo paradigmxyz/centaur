@@ -8,6 +8,10 @@ class RailsParityTest < ActionDispatch::IntegrationTest
   self.use_transactional_tests = false
   parallelize(workers: 1)
 
+  # Rails sync leaves snapshot rows behind; drop them so the next fixture
+  # load can delete principals created during a test.
+  teardown { PrincipalSyncConfigSnapshot.delete_all }
+
   test "Rust sync matches Rails for populated and hash-only configurations" do
     with_sync_services do
       populate_credentials
@@ -44,7 +48,110 @@ class RailsParityTest < ActionDispatch::IntegrationTest
     end
   end
 
+  # The same scenario runs in proxy-sync's
+  # conflicting_credentials_resolve_like_console integration test. Rails
+  # agreeing with Rust here confirms that test's expectations match Console.
+  test "Rust sync matches Rails for conflicting credentials" do
+    with_sync_services do
+      token = populate_conflicts
+      body = compare(token)
+      assert_equal [
+        "gcp_auth equal.conflict.test",
+        "gcp_auth promoted.conflict.test",
+        "oauth_token api.conflict.test X-Api-Token",
+        "static *.wild.conflict.test Authorization",
+        "static api.conflict.test Authorization",
+        "static equal.conflict.test Authorization",
+        "static slack.conflict.test Authorization"
+      ], served_conflict_credentials(body)
+      compare(token, { config_hash: body.fetch("config_hash") })
+    end
+  end
+
   private
+
+  def populate_conflicts
+    admin = principals(:acme_channel).created_by
+    principal = Principal.create!(foreign_id: "conflicts-#{SecureRandom.hex(4)}", kind: "user", created_by: admin)
+    role = Role.create!(foreign_id: "conflicts-#{SecureRandom.hex(4)}", created_by: admin)
+    principal.principal_roles.create!(role: role)
+    grant = lambda do |secret, association, grantee, priority|
+      target = grantee == :direct ? { principal: principal } : { role: role }
+      Grant.create!(**target, association => secret, created_by: admin, priority: priority)
+    end
+    static = lambda do |host, inject: nil, replace: nil|
+      secret = StaticSecret.new(foreign_id: "conflict-#{SecureRandom.hex(4)}", created_by: admin,
+                                inject_config: inject, replace_config: replace)
+      secret.build_source(source_type: "env", config: { "var" => "CONFLICT_#{SecureRandom.hex(2).upcase}" })
+      secret.rules.build(host: host)
+      secret.save!
+      secret
+    end
+    gcp = lambda do |host|
+      secret = GcpAuthSecret.new(foreign_id: "conflict-#{SecureRandom.hex(4)}", created_by: admin,
+                                 credentials_provider: { "type" => "workload_identity" },
+                                 scopes: [ "https://www.googleapis.com/auth/cloud-platform" ])
+      secret.rules.build(host: host)
+      secret.save!
+      secret
+    end
+    auth = { "header" => "Authorization" }
+
+    # A direct static secret beats a role transform on the same host and
+    # header. An OAuth token on a custom header does not conflict with it,
+    # but beats a weaker static secret writing that custom header.
+    grant.(static.("api.conflict.test", inject: auth), :static_secret, :direct, 100)
+    grant.(gcp.("api.conflict.test"), :gcp_auth_secret, :role, 0)
+    oauth = OauthTokenSecret.new(foreign_id: "conflict-#{SecureRandom.hex(4)}", name: "custom", grant: "refresh_token",
+                                 token_endpoint: "https://oauth2.example/token", scopes: [ "read" ],
+                                 header: "X-Api-Token", created_by: admin)
+    { "refresh_token" => "CONFLICT_REFRESH", "client_id" => "CONFLICT_CLIENT" }.each do |field, var|
+      oauth.sources.build(source_type: "env", config: { "var" => var }, role: field, role_kind: "credential_field")
+    end
+    oauth.rules.build(host: "api.conflict.test")
+    oauth.save!
+    grant.(oauth, :oauth_token_secret, :direct, 100)
+    grant.(static.("api.conflict.test", inject: { "header" => "X-Api-Token" }), :static_secret, :role, 0)
+
+    # A wildcard host conflicts with a matching exact host.
+    grant.(static.("*.wild.conflict.test", inject: auth), :static_secret, :direct, 100)
+    grant.(gcp.("bq.wild.conflict.test"), :gcp_auth_secret, :role, 0)
+
+    # A promoted role grant beats a direct grant.
+    grant.(static.("promoted.conflict.test", inject: auth), :static_secret, :direct, 100)
+    grant.(gcp.("promoted.conflict.test"), :gcp_auth_secret, :role, 900)
+
+    # A replace secret claims its match headers.
+    replace = { "proxy_value" => "SLACK_BOT_TOKEN", "match_headers" => [ "Authorization" ] }
+    grant.(static.("slack.conflict.test", replace: replace), :static_secret, :role, 0)
+    grant.(static.("slack.conflict.test", inject: auth), :static_secret, :direct, 100)
+
+    # Equal priorities are left to the proxy.
+    grant.(static.("equal.conflict.test", inject: auth), :static_secret, :direct, 100)
+    grant.(gcp.("equal.conflict.test"), :gcp_auth_secret, :direct, 100)
+
+    proxy = Proxy.create!(name: "conflicts-#{SecureRandom.hex(4)}", principal: principal)
+    proxy.token
+  end
+
+  # Mirrors served_conflict_credentials in proxy-sync's integration tests.
+  def served_conflict_credentials(body)
+    host = ->(rules) { rules.dig(0, "host").to_s }
+    served = body.fetch("secrets").map do |secret|
+      header = secret.dig("inject", "header") || secret.dig("replace", "match_headers", 0)
+      "static #{host.(secret["rules"])} #{header}"
+    end
+    body.fetch("transforms").each do |transform|
+      if transform["name"] == "oauth_token"
+        transform.dig("config", "tokens").each do |token|
+          served << "oauth_token #{host.(token["rules"])} #{token["header"] || "Authorization"}"
+        end
+      else
+        served << "#{transform["name"]} #{host.(transform.dig("config", "rules"))}"
+      end
+    end
+    served.select { |line| line.split(" ")[1].end_with?(".conflict.test") }.sort
+  end
 
   def with_sync_services
     binary = File.expand_path(ENV.fetch("PROXY_SYNC_BINARY"))
