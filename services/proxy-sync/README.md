@@ -1,7 +1,6 @@
 # Proxy Sync
 
-`centaur-proxy-sync` is the Rust implementation of Console's
-`POST /api/v1/proxy/sync` endpoint. It authenticates proxy bearer tokens and
+`centaur-proxy-sync` serves `POST /api/v1/proxy/sync` for iron-proxy. It authenticates proxy bearer tokens and
 builds effective proxy configuration directly from Console's PostgreSQL schema.
 Console remains responsible for credential administration and token refresh.
 
