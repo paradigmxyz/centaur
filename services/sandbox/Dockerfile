@@ -205,7 +205,8 @@ ENV PATH="/home/agent/.cargo/bin:/home/agent/.local/bin:/home/agent/.foundry/bin
 ARG FOUNDRY_VERSION=v1.7.0
 ARG AMP_CLI_VERSION=0.0.1774529752-g94f44d
 ARG MANIM_VERSION=0.20.1
-ARG BUN_VERSION=bun-v1.3.13
+ARG BUN_VERSION=bun-v1.3.14
+ARG OMP_VERSION=18.8.6
 
 # ── Agent-scoped toolchains ─────────────────────────────────────────────────
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -225,6 +226,8 @@ RUN --mount=type=cache,target=/home/agent/.cargo/registry,uid=1001,gid=1001,shar
     && kache --version
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 RUN curl -fsSL https://bun.sh/install | bash -s "${BUN_VERSION}"
+RUN bun install -g "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" \
+    && omp --version | grep -Fx "omp/${OMP_VERSION}"
 RUN --mount=type=cache,target=/home/agent/.cache/uv,uid=1001,gid=1001,sharing=locked \
     uv tool install "manim==${MANIM_VERSION}" \
     && manim --version

@@ -8,7 +8,7 @@ const sessionPath = (suffix: string) =>
   `/api/session/${encodeURIComponent(`e2e-api:${randomUUID()}:${suffix}`)}`
 
 test('each harness wire value creates a session on that harness', async () => {
-  for (const harness of ['codex', 'amp', 'claudecode', 'nanocodex', 'hermes', 'pi']) {
+  for (const harness of ['codex', 'amp', 'claudecode', 'nanocodex', 'hermes', 'pi', 'omp']) {
     const session = await api.ok('POST', sessionPath(harness), { harness_type: harness })
     expect({ harness, created: session.harness_type, status: session.status })
       .toEqual({ harness, created: harness, status: 'idle' })

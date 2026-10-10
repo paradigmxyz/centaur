@@ -19,6 +19,7 @@ describe('harnessDisplayName', () => {
     expect(harnessDisplayName('nanocodex')).toBe('Nanocodex')
     expect(harnessDisplayName('claudecode')).toBe('Claude Code')
     expect(harnessDisplayName('amp')).toBe('Amp')
+    expect(harnessDisplayName('omp')).toBe('OMP')
   })
 
   test('is case-insensitive and trims', () => {
@@ -116,10 +117,12 @@ describe('reasoningForModel', () => {
   })
 
   test('forwards Pi thinking levels for any model and rejects Codex-only efforts', () => {
-    for (const effort of ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
-      expect(reasoningForModel('pi', undefined, effort)).toBe(effort)
+    for (const harness of ['pi', 'omp']) {
+      for (const effort of ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
+        expect(reasoningForModel(harness, undefined, effort)).toBe(effort)
+      }
+      expect(reasoningForModel(harness, 'openai/gpt-5.5', 'ultra')).toBeUndefined()
     }
-    expect(reasoningForModel('pi', 'openai/gpt-5.5', 'ultra')).toBeUndefined()
   })
 
   test('rejects efforts for harnesses without an effort control', () => {
@@ -144,6 +147,12 @@ describe('defaultModelForHarness', () => {
     expect(defaultModelForHarness('claudecode', configured)).toBe('claude-fable-5')
     expect(defaultModelForHarness('codex', configured)).toBe(bakedCodexModel)
     expect(defaultModelForHarness('claudecode', { claudecode: '   ' })).toBe(bakedClaudeModel)
+    for (const harness of ['pi', 'omp']) {
+      expect(defaultModelForHarness(harness, { [harness]: 'anthropic/claude-opus-4-8' })).toBe(
+        'anthropic/claude-opus-4-8'
+      )
+      expect(defaultModelForHarness(harness)).toBeUndefined()
+    }
   })
 
   test('is case-insensitive and trims', () => {
@@ -181,6 +190,8 @@ describe('defaultReasoningForHarness', () => {
     expect(effectiveReasoningForHarness('nanocodex', 'minimal')).toBe('low')
     expect(effectiveReasoningForHarness('claudecode', 'high')).toBe('high')
     expect(effectiveReasoningForHarness('claudecode', undefined)).toBeUndefined()
+    expect(effectiveReasoningForHarness('omp', 'max')).toBe('max')
+    expect(effectiveReasoningForHarness('omp', undefined)).toBeUndefined()
     expect(effectiveReasoningForHarness('amp', 'high')).toBeUndefined()
   })
 })

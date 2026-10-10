@@ -13,7 +13,7 @@ const SYSTEM_PROMPT = [
   'Decide whether the Slack message asks to use a specific AI harness, model, provider, or reasoning effort.',
   'Return only canonical override values from the schema.',
   'Use null for every field when the message does not ask to change model selection.',
-  'Allowed harness values: codex, claudecode, amp, nanocodex, pi.',
+  'Allowed harness values: codex, claudecode, amp, nanocodex, pi, omp.',
   'Allowed provider values: responses, amazon-bedrock, openrouter.',
   'Allowed reasoning values: none, minimal, low, medium, high, xhigh, max, ultra.',
   'Treat inline flags such as "--claude", "--claude --model=fable", and "--fable" as model selection requests.',
@@ -34,7 +34,7 @@ const SYSTEM_PROMPT = [
 // lookarounds keep version suffixes ("gpt5", "opus-4.7") and plurals matching
 // while ignoring longer words such as "solve" or "terraform".
 const SELECTOR_TERM_PATTERN =
-  /(?<![a-z])(?:claude|claudecode|codex|amp|nanocodex|opus|sonnet|haiku|fable|gpt|astra|sol|luna|terra|model|harness|provider|reasoning|effort|mode|bedrock|openrouter|think|thinking)(?:s|es)?(?![a-z])/i
+  /(?<![a-z])(?:claude|claudecode|codex|amp|nanocodex|omp|opus|sonnet|haiku|fable|gpt|astra|sol|luna|terra|model|harness|provider|reasoning|effort|mode|bedrock|openrouter|think|thinking)(?:s|es)?(?![a-z])/i
 
 const MODEL_VALUES = [
   'claude-fable-5',
@@ -68,7 +68,7 @@ const MESSAGE_OVERRIDES_SCHEMA = {
   additionalProperties: false,
   properties: {
     harness: {
-      enum: ['codex', 'claudecode', 'amp', 'nanocodex', 'pi', null],
+      enum: ['codex', 'claudecode', 'amp', 'nanocodex', 'pi', 'omp', null],
       type: ['string', 'null']
     },
     model: {

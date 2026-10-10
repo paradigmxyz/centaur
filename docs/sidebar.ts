@@ -30,6 +30,7 @@ export const sidebar = [
       { text: 'Workflows v2 Migration', link: '/extend/workflows-v2' },
       { text: 'Using the Hermes Harness', link: '/extend/hermes-harness' },
       { text: 'Using the Pi Harness', link: '/extend/pi-harness' },
+      { text: 'Using the OMP Harness', link: '/extend/omp-harness' },
       { text: '🚧 Creating Apps', link: '/extend/apps' },
     ],
   },
