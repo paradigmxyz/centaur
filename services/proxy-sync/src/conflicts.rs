@@ -210,6 +210,7 @@ fn present(value: &serde_json::Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use rand::{Rng, SeedableRng, rngs::StdRng};
     use serde_json::{Value, json};
 
     use super::suppress;
@@ -659,13 +660,9 @@ mod tests {
             "*.*.com",
         ];
         const HEADERS: &[&str] = &["Authorization", "X-Api-Token", "x-api-token", "X-Signature"];
-        let mut seed: u64 = 0x5eed;
-        let mut next = |bound: usize| {
-            seed = seed
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            (seed >> 33) as usize % bound
-        };
+        // A fixed seed keeps failures reproducible.
+        let mut rng = StdRng::seed_from_u64(0x5eed);
+        let mut next = |bound: usize| rng.random_range(0..bound);
         for round in 0..500 {
             let credentials: Vec<Credential> = (0..1 + next(30))
                 .map(|id| {
