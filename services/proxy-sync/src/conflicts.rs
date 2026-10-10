@@ -7,21 +7,23 @@ use crate::models::{Credential, CredentialData};
 /// Credentials are claimed strongest first, and a withheld credential claims
 /// nothing, so it cannot withhold others.
 pub(crate) fn suppress(credentials: &mut Vec<Credential>) {
+    // Equal priorities never withhold each other, so their order is irrelevant.
     let mut indexes: Vec<usize> = (0..credentials.len()).collect();
-    indexes.sort_by_key(|&index| (-credentials[index].priority, -credentials[index].id));
-    let mut claimed = Claimed::default();
+    indexes.sort_by_key(|&index| std::cmp::Reverse(credentials[index].priority));
+    let mut claimed: HashMap<String, Claimed> = HashMap::new();
     let mut suppressed = vec![false; credentials.len()];
     for index in indexes {
         let priority = credentials[index].priority;
         let claims = claims(&credentials[index]);
-        if claims
-            .iter()
-            .any(|(scope, target)| claimed.stronger(scope, target, priority))
-        {
+        if claims.iter().any(|(scope, target)| {
+            claimed
+                .get(target)
+                .is_some_and(|claimed| claimed.stronger(scope, priority))
+        }) {
             suppressed[index] = true;
         } else {
             for (scope, target) in claims {
-                claimed.insert(scope, target, priority);
+                claimed.entry(target).or_default().insert(scope, priority);
             }
         }
     }
@@ -39,66 +41,45 @@ enum Scope {
     Cidr(String),
 }
 
-/// Claims indexed by target so a lookup touches only claims that can overlap:
-/// exact hosts and CIDRs by value, wildcard hosts in a short per-target list.
-/// Claims arrive strongest first, so the first priority recorded for a key is
-/// its highest, which is all a lookup needs.
+/// The claims accepted for one target. Exact hosts and CIDRs are looked up by
+/// value; wildcard hosts, which are rare, are scanned. Claims arrive strongest
+/// first, so the first priority recorded for a scope is its highest.
 #[derive(Default)]
 struct Claimed {
-    exact: HashMap<(String, Scope), i32>,
-    /// Exact hosts per (target, label count), for wildcard lookups.
-    exact_hosts: HashMap<(String, usize), Vec<(String, i32)>>,
-    wildcards: HashMap<String, Vec<(String, i32)>>,
-    /// Highest priority of any host claim per target, for `*` lookups.
-    any_host: HashMap<String, i32>,
+    exact: HashMap<Scope, i32>,
+    wildcards: Vec<(String, i32)>,
 }
 
 impl Claimed {
-    fn stronger(&self, scope: &Scope, target: &str, priority: i32) -> bool {
-        let above = |claimed: i32| claimed > priority;
-        let key = (target.to_owned(), scope.clone());
-        if self.exact.get(&key).copied().is_some_and(above) {
-            return true;
-        }
-        let Scope::Host(host) = scope else {
-            return false;
-        };
-        if host == "*" {
-            return self.any_host.get(target).copied().is_some_and(above);
-        }
-        let wildcard_overlap = self.wildcards.get(target).is_some_and(|wildcards| {
-            wildcards
+    fn stronger(&self, scope: &Scope, priority: i32) -> bool {
+        let above = |claimed: &i32| *claimed > priority;
+        let overlapping_wildcard = |host: &str| {
+            self.wildcards
                 .iter()
-                .any(|(pattern, claimed)| above(*claimed) && hosts_overlap(pattern, host))
-        });
-        wildcard_overlap
-            || (is_wildcard(host)
-                && self
-                    .exact_hosts
-                    .get(&(target.to_owned(), label_count(host)))
-                    .is_some_and(|hosts| {
-                        hosts
-                            .iter()
-                            .any(|(exact, claimed)| above(*claimed) && hosts_overlap(host, exact))
-                    }))
+                .any(|(pattern, claimed)| above(claimed) && hosts_overlap(pattern, host))
+        };
+        match scope {
+            Scope::Host(host) if is_wildcard(host) => {
+                overlapping_wildcard(host)
+                    || self.exact.iter().any(|(other, claimed)| {
+                        above(claimed)
+                            && matches!(other, Scope::Host(exact) if hosts_overlap(host, exact))
+                    })
+            }
+            Scope::Host(host) => {
+                self.exact.get(scope).is_some_and(above) || overlapping_wildcard(host)
+            }
+            Scope::Cidr(_) => self.exact.get(scope).is_some_and(above),
+        }
     }
 
-    fn insert(&mut self, scope: Scope, target: String, priority: i32) {
-        if let Scope::Host(host) = &scope {
-            self.any_host.entry(target.clone()).or_insert(priority);
-            if is_wildcard(host) {
-                self.wildcards
-                    .entry(target)
-                    .or_default()
-                    .push((host.clone(), priority));
-                return;
+    fn insert(&mut self, scope: Scope, priority: i32) {
+        match scope {
+            Scope::Host(host) if is_wildcard(&host) => self.wildcards.push((host, priority)),
+            scope => {
+                self.exact.entry(scope).or_insert(priority);
             }
-            self.exact_hosts
-                .entry((target.clone(), label_count(host)))
-                .or_default()
-                .push((host.clone(), priority));
         }
-        self.exact.entry((target, scope)).or_insert(priority);
     }
 }
 
@@ -306,174 +287,37 @@ mod tests {
         )
     }
 
-    fn served(mut credentials: Vec<Credential>) -> Vec<(CredentialKind, i64)> {
-        suppress(&mut credentials);
-        credentials
-            .iter()
-            .map(|credential| (credential.kind, credential.id))
-            .collect()
+    fn gcp_id_token(id: i64, priority: i32, header: Option<&str>, hosts: &[&str]) -> Credential {
+        credential(
+            CredentialKind::GcpIdToken,
+            id,
+            priority,
+            CredentialData::GcpIdToken(GcpIdTokenData {
+                audience: "https://run.example".to_owned(),
+                header: header.map(str::to_owned),
+            }),
+            hosts,
+        )
     }
 
-    #[test]
-    fn higher_priority_conflict_suppresses_lower_priority() {
-        assert_eq!(
-            served(vec![
-                gcp(1, ROLE, &["api.example.com"]),
-                inject(2, DIRECT, "Authorization", &["api.example.com"]),
-            ]),
-            vec![(CredentialKind::Static, 2)]
-        );
-    }
-
-    #[test]
-    fn promoted_role_transform_suppresses_lower_direct_static() {
-        assert_eq!(
-            served(vec![
-                inject(1, DIRECT, "Authorization", &["api.example.com"]),
-                gcp(2, 900, &["api.example.com"]),
-            ]),
-            vec![(CredentialKind::GcpAuth, 2)]
-        );
-    }
-
-    #[test]
-    fn different_headers_on_the_same_host_both_serve() {
-        assert_eq!(
-            served(vec![
-                inject(1, DIRECT, "X-Api-Key", &["api.example.com"]),
-                gcp(2, ROLE, &["api.example.com"]),
-            ])
-            .len(),
-            2
-        );
-    }
-
-    #[test]
-    fn same_header_on_different_hosts_both_serve() {
-        assert_eq!(
-            served(vec![
-                inject(1, DIRECT, "Authorization", &["api.example.com"]),
-                gcp(2, ROLE, &["other.example.com"]),
-            ])
-            .len(),
-            2
-        );
-    }
-
-    #[test]
-    fn equal_priority_conflicts_are_left_to_the_proxy() {
-        assert_eq!(
-            served(vec![
-                inject(1, DIRECT, "Authorization", &["api.example.com"]),
-                gcp(2, DIRECT, &["api.example.com"]),
-            ])
-            .len(),
-            2
-        );
-    }
-
-    #[test]
-    fn header_and_host_matching_ignore_case_and_trailing_dots() {
-        assert_eq!(
-            served(vec![
-                inject(1, DIRECT, "AUTHORIZATION", &["API.Example.com."]),
-                gcp(2, ROLE, &["api.example.com"]),
-            ]),
-            vec![(CredentialKind::Static, 1)]
-        );
-    }
-
-    #[test]
-    fn wildcard_hosts_conflict_with_matching_exact_hosts_only() {
-        assert_eq!(
-            served(vec![
-                inject(1, DIRECT, "Authorization", &["*.googleapis.com"]),
-                gcp(2, ROLE, &["bigquery.googleapis.com"]),
-                oauth(3, ROLE, None, &["gmail.googleapis.com"]),
-                gcp(4, ROLE, &["googleapis.com"]),
-                gcp(5, ROLE, &["a.b.googleapis.com"]),
-            ]),
-            vec![
-                (CredentialKind::Static, 1),
-                (CredentialKind::GcpAuth, 4),
-                (CredentialKind::GcpAuth, 5),
-            ]
-        );
-        assert_eq!(
-            served(vec![
-                inject(1, DIRECT, "Authorization", &["*"]),
-                gcp(2, ROLE, &["anything.example.com"]),
-            ]),
-            vec![(CredentialKind::Static, 1)]
-        );
-    }
-
-    #[test]
-    fn oauth_tokens_claim_their_configured_header() {
-        assert_eq!(
-            served(vec![
-                inject(1, DIRECT, "Authorization", &["api.example.com"]),
-                oauth(2, ROLE, Some("X-Goog-Api-Token"), &["api.example.com"]),
-            ])
-            .len(),
-            2
-        );
-        assert_eq!(
-            served(vec![
-                inject(1, DIRECT, "x-goog-api-token", &["api.example.com"]),
-                oauth(2, ROLE, Some("X-Goog-Api-Token"), &["api.example.com"]),
-            ]),
-            vec![(CredentialKind::Static, 1)]
-        );
-        assert_eq!(
-            served(vec![
-                inject(1, DIRECT, "Authorization", &["api.example.com"]),
-                oauth(2, ROLE, Some(""), &["api.example.com"]),
-            ]),
-            vec![(CredentialKind::Static, 1)]
-        );
-    }
-
-    #[test]
-    fn gcp_id_tokens_claim_their_configured_header() {
-        let id_token = |id, header: Option<&str>| {
-            credential(
-                CredentialKind::GcpIdToken,
-                id,
-                ROLE,
-                CredentialData::GcpIdToken(GcpIdTokenData {
-                    audience: "https://run.example".to_owned(),
-                    header: header.map(str::to_owned),
-                }),
-                &["run.example.com"],
-            )
-        };
-        assert_eq!(
-            served(vec![
-                inject(1, DIRECT, "Authorization", &["run.example.com"]),
-                id_token(2, Some("x-serverless-authorization")),
-                id_token(3, None),
-            ]),
-            vec![(CredentialKind::Static, 1), (CredentialKind::GcpIdToken, 2)]
-        );
-    }
-
-    #[test]
-    fn aws_and_hmac_claim_their_headers() {
-        let aws = credential(
+    fn aws(id: i64, priority: i32, hosts: &[&str]) -> Credential {
+        credential(
             CredentialKind::AwsAuth,
-            2,
-            ROLE,
+            id,
+            priority,
             CredentialData::AwsAuth(AwsAuthData {
                 allowed_regions: vec![],
                 allowed_services: vec![],
             }),
-            &["logs.amazonaws.com"],
-        );
-        let hmac = credential(
+            hosts,
+        )
+    }
+
+    fn hmac(id: i64, priority: i32, header: &str, hosts: &[&str]) -> Credential {
+        credential(
             CredentialKind::Hmac,
-            3,
-            ROLE,
+            id,
+            priority,
             CredentialData::Hmac(HmacData {
                 timestamp_format: "unix".to_owned(),
                 signature_algorithm: "sha256".to_owned(),
@@ -481,132 +325,210 @@ mod tests {
                 signature_output_encoding: "hex".to_owned(),
                 signature_message: "{{ .Body }}".to_owned(),
                 headers: vec![HmacHeader {
-                    name: "X-Signature".to_owned(),
+                    name: header.to_owned(),
                     value: "{{ .Signature }}".to_owned(),
                 }],
                 allow_chunked_body: false,
             }),
-            &["hooks.example.com"],
-        );
-        assert_eq!(
-            served(vec![
-                inject(1, DIRECT, "Authorization", &["logs.amazonaws.com"]),
-                aws,
-                hmac,
-                inject(4, DIRECT, "x-signature", &["hooks.example.com"]),
-            ]),
-            vec![(CredentialKind::Static, 1), (CredentialKind::Static, 4)]
-        );
+            hosts,
+        )
     }
 
-    #[test]
-    fn replace_secrets_claim_their_match_headers() {
-        let bot_token = static_with(
-            1,
-            ROLE,
+    fn replace(id: i64, priority: i32, match_headers: Value, hosts: &[&str]) -> Credential {
+        let config = json!({ "proxy_value": "PLACEHOLDER", "match_headers": match_headers });
+        static_with(id, priority, None, Some(config), hosts)
+    }
+
+    fn query(id: i64, priority: i32, param: &str, hosts: &[&str]) -> Credential {
+        static_with(
+            id,
+            priority,
+            Some(json!({ "query_param": param })),
             None,
-            Some(json!({ "proxy_value": "SLACK_BOT_TOKEN", "match_headers": ["Authorization"] })),
-            &["slack.com"],
-        );
-        let body_replace = static_with(
-            2,
-            ROLE,
-            None,
-            Some(json!({ "proxy_value": "BODY_TOKEN" })),
-            &["slack.com"],
-        );
-        assert_eq!(
-            served(vec![
-                bot_token,
-                body_replace,
-                inject(3, DIRECT, "Authorization", &["slack.com"]),
-            ]),
-            vec![(CredentialKind::Static, 2), (CredentialKind::Static, 3)]
-        );
+            hosts,
+        )
+    }
+
+    fn cidr(id: i64, priority: i32, cidr: &str) -> Credential {
+        let mut credential = inject(id, priority, "Authorization", &[]);
+        credential.rules = vec![RequestRule {
+            host: None,
+            cidr: Some(cidr.to_owned()),
+            http_methods: vec![],
+            paths: vec![],
+        }];
+        credential
     }
 
     #[test]
-    fn query_params_and_cidrs_are_matched_exactly() {
-        let query = |id, priority, param: &str| {
-            static_with(
-                id,
-                priority,
-                Some(json!({ "query_param": param })),
-                None,
-                &["api.example.com"],
-            )
-        };
-        assert_eq!(
-            served(vec![
-                query(1, DIRECT, "key"),
-                query(2, ROLE, "key"),
-                query(3, ROLE, "KEY")
-            ]),
-            vec![(CredentialKind::Static, 1), (CredentialKind::Static, 3)]
-        );
-
-        let cidr = |id, priority, cidr: &str| {
-            let mut credential = inject(id, priority, "Authorization", &[]);
-            credential.rules = vec![RequestRule {
-                host: None,
-                cidr: Some(cidr.to_owned()),
-                http_methods: vec![],
-                paths: vec![],
-            }];
-            credential
-        };
-        assert_eq!(
-            served(vec![
-                cidr(1, DIRECT, "10.0.0.0/8"),
-                cidr(2, ROLE, "10.0.0.0/8"),
-                cidr(3, ROLE, "10.1.0.0/16"),
-            ]),
-            vec![(CredentialKind::Static, 1), (CredentialKind::Static, 3)]
-        );
-    }
-
-    #[test]
-    fn suppressed_credentials_do_not_claim_their_other_scopes() {
-        assert_eq!(
-            served(vec![
-                inject(1, 200, "Authorization", &["a.example.com"]),
-                gcp(2, DIRECT, &["a.example.com", "b.example.com"]),
-                inject(3, ROLE, "Authorization", &["b.example.com"]),
-            ]),
-            vec![(CredentialKind::Static, 1), (CredentialKind::Static, 3)]
-        );
-    }
-
-    #[test]
-    fn credentials_without_scopes_or_targets_never_conflict() {
-        let postgres = credential(
-            CredentialKind::PgDsn,
-            2,
-            ROLE,
-            CredentialData::PgDsn(PgDsnData {
-                foreign_id: "analytics".to_owned(),
-                database: "analytics".to_owned(),
-                role: None,
-                settings: vec![],
-            }),
-            &[],
-        );
-        assert_eq!(
-            served(vec![
-                inject(1, DIRECT, "Authorization", &[]),
-                postgres,
-                static_with(
-                    3,
-                    ROLE,
-                    Some(json!({ "header": "" })),
-                    None,
-                    &["api.example.com"]
-                ),
-                gcp(4, ROLE, &["api.example.com"]),
-            ])
-            .len(),
-            4
-        );
+    fn resolves_conflicts() {
+        const API: &[&str] = &["api.example.com"];
+        let cases: Vec<(&str, Vec<Credential>, Vec<i64>)> = vec![
+            (
+                "a direct static secret beats a role transform",
+                vec![gcp(1, ROLE, API), inject(2, DIRECT, "Authorization", API)],
+                vec![2],
+            ),
+            (
+                "a promoted role transform beats a direct static secret",
+                vec![inject(1, DIRECT, "Authorization", API), gcp(2, 900, API)],
+                vec![2],
+            ),
+            (
+                "different headers on the same host both serve",
+                vec![inject(1, DIRECT, "X-Api-Key", API), gcp(2, ROLE, API)],
+                vec![1, 2],
+            ),
+            (
+                "the same header on different hosts both serve",
+                vec![
+                    inject(1, DIRECT, "Authorization", API),
+                    gcp(2, ROLE, &["other.example.com"]),
+                ],
+                vec![1, 2],
+            ),
+            (
+                "equal priorities are left to the proxy",
+                vec![inject(1, DIRECT, "Authorization", API), gcp(2, DIRECT, API)],
+                vec![1, 2],
+            ),
+            (
+                "header and host matching ignore case and trailing dots",
+                vec![
+                    inject(1, DIRECT, "AUTHORIZATION", &["API.Example.com."]),
+                    gcp(2, ROLE, API),
+                ],
+                vec![1],
+            ),
+            (
+                "a wildcard conflicts with one-label subdomains only",
+                vec![
+                    inject(1, DIRECT, "Authorization", &["*.googleapis.com"]),
+                    gcp(2, ROLE, &["bigquery.googleapis.com"]),
+                    oauth(3, ROLE, None, &["gmail.googleapis.com"]),
+                    gcp(4, ROLE, &["googleapis.com"]),
+                    gcp(5, ROLE, &["a.b.googleapis.com"]),
+                ],
+                vec![1, 4, 5],
+            ),
+            (
+                "a bare * conflicts with every host",
+                vec![
+                    inject(1, DIRECT, "Authorization", &["*"]),
+                    gcp(2, ROLE, &["any.example.com"]),
+                ],
+                vec![1],
+            ),
+            (
+                "an OAuth token on a custom header does not claim Authorization",
+                vec![
+                    inject(1, DIRECT, "Authorization", API),
+                    oauth(2, ROLE, Some("X-Goog-Api-Token"), API),
+                ],
+                vec![1, 2],
+            ),
+            (
+                "an OAuth token claims its custom header",
+                vec![
+                    inject(1, DIRECT, "x-goog-api-token", API),
+                    oauth(2, ROLE, Some("X-Goog-Api-Token"), API),
+                ],
+                vec![1],
+            ),
+            (
+                "an OAuth token with a blank header claims Authorization",
+                vec![
+                    inject(1, DIRECT, "Authorization", API),
+                    oauth(2, ROLE, Some(""), API),
+                ],
+                vec![1],
+            ),
+            (
+                "GCP ID tokens claim their configured header or Authorization",
+                vec![
+                    inject(1, DIRECT, "Authorization", API),
+                    gcp_id_token(2, ROLE, Some("x-serverless-authorization"), API),
+                    gcp_id_token(3, ROLE, None, API),
+                ],
+                vec![1, 2],
+            ),
+            (
+                "AWS claims Authorization",
+                vec![inject(1, DIRECT, "Authorization", API), aws(2, ROLE, API)],
+                vec![1],
+            ),
+            (
+                "HMAC claims its signature headers",
+                vec![
+                    inject(1, DIRECT, "x-signature", API),
+                    hmac(2, ROLE, "X-Signature", API),
+                    hmac(3, ROLE, "X-Other-Signature", API),
+                ],
+                vec![1, 3],
+            ),
+            (
+                "replace secrets claim only their match headers",
+                vec![
+                    replace(1, ROLE, json!(["Authorization"]), API),
+                    replace(2, ROLE, json!([]), API),
+                    inject(3, DIRECT, "Authorization", API),
+                ],
+                vec![2, 3],
+            ),
+            (
+                "query params match exactly, including case",
+                vec![
+                    query(1, DIRECT, "key", API),
+                    query(2, ROLE, "key", API),
+                    query(3, ROLE, "KEY", API),
+                ],
+                vec![1, 3],
+            ),
+            (
+                "CIDRs conflict only when identical",
+                vec![
+                    cidr(1, DIRECT, "10.0.0.0/8"),
+                    cidr(2, ROLE, "10.0.0.0/8"),
+                    cidr(3, ROLE, "10.1.0.0/16"),
+                ],
+                vec![1, 3],
+            ),
+            (
+                "a withheld credential does not claim its other hosts",
+                vec![
+                    inject(1, 200, "Authorization", &["a.example.com"]),
+                    gcp(2, DIRECT, &["a.example.com", "b.example.com"]),
+                    inject(3, ROLE, "Authorization", &["b.example.com"]),
+                ],
+                vec![1, 3],
+            ),
+            (
+                "credentials without scopes or targets never conflict",
+                vec![
+                    inject(1, DIRECT, "Authorization", &[]),
+                    static_with(2, DIRECT, Some(json!({ "header": "" })), None, API),
+                    gcp(3, ROLE, API),
+                    credential(
+                        CredentialKind::PgDsn,
+                        4,
+                        DIRECT,
+                        CredentialData::PgDsn(PgDsnData {
+                            foreign_id: "analytics".to_owned(),
+                            database: "analytics".to_owned(),
+                            role: None,
+                            settings: vec![],
+                        }),
+                        API,
+                    ),
+                ],
+                vec![1, 2, 3, 4],
+            ),
+        ];
+        for (name, mut credentials, expected) in cases {
+            suppress(&mut credentials);
+            let served: Vec<i64> = credentials.iter().map(|credential| credential.id).collect();
+            assert_eq!(served, expected, "{name}");
+        }
     }
 
     /// The straightforward quadratic resolver `suppress` replaced: compare each
