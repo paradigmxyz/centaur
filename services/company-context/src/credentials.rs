@@ -9,7 +9,12 @@ use sqlx::{
     types::Json,
 };
 
-use crate::{config::Config, slack::conversation_types};
+use tokio::sync::OnceCell;
+
+use crate::{
+    config::Config,
+    slack::{AuthTest, SlackClient, SlackReply, conversation_types},
+};
 
 const DRIVE_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/drive.readonly";
 /// The credential ID the Slack app's bot token syncs under. Rails assigns
@@ -27,6 +32,9 @@ pub struct ConsoleCredentials {
     granola_oauth_app_slug: String,
     slack_oauth_app_slug: String,
     slack_bot_token: String,
+    /// Resolves the bot's Slack user ID, needed only to match a user limit.
+    slack: SlackClient,
+    slack_bot_user_id: Arc<OnceCell<String>>,
     /// Sync limits; an empty list allows every credential.
     google_user_emails: Vec<String>,
     granola_user_emails: Vec<String>,
@@ -94,6 +102,8 @@ impl ConsoleCredentials {
             granola_oauth_app_slug: config.granola_oauth_app_slug.clone(),
             slack_oauth_app_slug: config.slack_oauth_app_slug.clone(),
             slack_bot_token: config.slack_bot_token.clone(),
+            slack: SlackClient::new(config)?,
+            slack_bot_user_id: Arc::new(OnceCell::new()),
             google_user_emails: config.google_drive_user_emails.clone(),
             granola_user_emails: config.granola_user_emails.clone(),
             slack_user_ids: config.slack_user_ids.clone(),
@@ -354,7 +364,7 @@ impl ConsoleCredentials {
         .context("list Slack broker credentials from Rails Console")?;
 
         let mut ids = Vec::new();
-        if self.slack_bot_syncs() {
+        if self.slack_bot_syncs().await? {
             ids.push(SLACK_BOT_CREDENTIAL_ID);
         }
         for row in rows {
@@ -392,17 +402,37 @@ impl ConsoleCredentials {
         .fetch_all(&self.pool)
         .await
         .context("list retained Slack broker credentials from Rails Console")?;
-        if self.slack_bot_syncs() {
+        if self.slack_bot_syncs().await? {
             ids.insert(0, SLACK_BOT_CREDENTIAL_ID);
         }
         Ok(ids)
     }
 
-    /// The bot token syncs like a user credential unless sync is limited to
-    /// particular Slack users, and only while its conversation types are
-    /// ingested.
-    fn slack_bot_syncs(&self) -> bool {
-        self.slack_user_ids.is_empty() && !self.slack_bot_conversation_types().is_empty()
+    /// The bot token syncs like a user credential while its conversation
+    /// types are ingested and any Slack user limit includes the bot's user ID.
+    async fn slack_bot_syncs(&self) -> Result<bool> {
+        if self.slack_bot_conversation_types().is_empty() {
+            return Ok(false);
+        }
+        if self.slack_user_ids.is_empty() {
+            return Ok(true);
+        }
+        let user_id = self
+            .slack_bot_user_id
+            .get_or_try_init(|| async {
+                let SlackReply::Ok(body) = self
+                    .slack
+                    .call("auth.test", &self.slack_bot_token, &[])
+                    .await?
+                else {
+                    bail!("Slack rate limited auth.test for the bot token");
+                };
+                let identity: AuthTest = serde_json::from_value(body)
+                    .context("decode Slack auth.test response for the bot token")?;
+                Ok(identity.user_id)
+            })
+            .await?;
+        Ok(self.slack_user_ids.contains(user_id))
     }
 
     fn slack_bot_conversation_types(&self) -> Vec<&'static str> {
@@ -418,7 +448,7 @@ impl ConsoleCredentials {
 
     pub async fn slack_credential(&self, credential_id: i64) -> Result<SlackCredential> {
         if credential_id == SLACK_BOT_CREDENTIAL_ID {
-            if !self.slack_bot_syncs() {
+            if !self.slack_bot_syncs().await? {
                 bail!("Slack bot token is not syncable");
             }
             // The bot's scopes are not recorded; a call it lacks a scope for
@@ -543,10 +573,50 @@ impl ConsoleCredentials {
 mod tests {
     use std::env;
 
+    use axum::{Json as AxumJson, Router, routing::post};
+    use clap::Parser;
+    use serde_json::{Value, json};
     use sqlx::Executor;
 
     use super::*;
     use crate::test_support::TestDatabase;
+
+    fn test_credentials(pool: &PgPool, slack_api_base_url: &str) -> ConsoleCredentials {
+        let config = Config::try_parse_from([
+            "centaur-company-context",
+            "--database-url",
+            "postgresql://context",
+            "--console-database-url",
+            "postgresql://console",
+            "--active-record-primary-key",
+            "primary",
+            "--active-record-key-derivation-salt",
+            "salt",
+            "--openai-api-key",
+            "test-key",
+            "--slack-bot-token",
+            "xoxb-test",
+            "--jwt-signing-secret",
+            "jwt-secret",
+            "--slack-api-base-url",
+            slack_api_base_url,
+        ])
+        .unwrap();
+        ConsoleCredentials {
+            pool: pool.clone(),
+            encryption: Arc::new(ActiveRecordEncryption::new("primary", "salt")),
+            google_oauth_app_slug: "google".to_owned(),
+            granola_oauth_app_slug: "granola".to_owned(),
+            slack_oauth_app_slug: "slack".to_owned(),
+            slack_bot_token: config.slack_bot_token.clone(),
+            slack: SlackClient::new(&config).unwrap(),
+            slack_bot_user_id: Arc::new(OnceCell::new()),
+            google_user_emails: Vec::new(),
+            granola_user_emails: Vec::new(),
+            slack_user_ids: Vec::new(),
+            slack_conversation_types: Vec::new(),
+        }
+    }
 
     #[tokio::test]
     async fn principals_are_known_by_their_granted_credentials() {
@@ -597,18 +667,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let credentials = ConsoleCredentials {
-            pool: pool.clone(),
-            encryption: Arc::new(ActiveRecordEncryption::new("primary", "salt")),
-            google_oauth_app_slug: "google".to_owned(),
-            granola_oauth_app_slug: "granola".to_owned(),
-            slack_oauth_app_slug: "slack".to_owned(),
-            slack_bot_token: "xoxb-test".to_owned(),
-            google_user_emails: Vec::new(),
-            granola_user_emails: Vec::new(),
-            slack_user_ids: Vec::new(),
-            slack_conversation_types: Vec::new(),
-        };
+        let credentials = test_credentials(pool, "http://127.0.0.1:9");
 
         let ada = credentials.principal_identity(1).await.unwrap().unwrap();
         assert_eq!(ada.slack_user_id.as_deref(), Some("U-ADA"));
@@ -657,18 +716,18 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut credentials = ConsoleCredentials {
-            pool: pool.clone(),
-            encryption: Arc::new(ActiveRecordEncryption::new("primary", "salt")),
-            google_oauth_app_slug: "google".to_owned(),
-            granola_oauth_app_slug: "granola".to_owned(),
-            slack_oauth_app_slug: "slack".to_owned(),
-            slack_bot_token: "xoxb-test".to_owned(),
-            google_user_emails: Vec::new(),
-            granola_user_emails: Vec::new(),
-            slack_user_ids: Vec::new(),
-            slack_conversation_types: vec!["im".to_owned(), "public_channel".to_owned()],
-        };
+        // Slack identifies the bot token as the bot's user.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route(
+            "/auth.test",
+            post(|| async {
+                AxumJson::<Value>(json!({ "ok": true, "team_id": "T1", "user_id": "U-BOT" }))
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let mut credentials = test_credentials(pool, &format!("http://{address}"));
+        credentials.slack_conversation_types = vec!["im".to_owned(), "public_channel".to_owned()];
 
         assert_eq!(credentials.slack_credential_ids().await.unwrap(), [0, 7]);
         assert_eq!(
@@ -682,7 +741,7 @@ mod tests {
         assert_eq!(bot.access_token, "xoxb-test");
         assert_eq!(bot.conversation_types, ["public_channel"]);
 
-        // Limiting sync to particular users leaves the bot out.
+        // A Slack user limit includes the bot only by its user ID.
         credentials.slack_user_ids = vec!["U-ADA".to_owned()];
         assert_eq!(credentials.slack_credential_ids().await.unwrap(), [7]);
         assert_eq!(
@@ -695,7 +754,14 @@ mod tests {
                 .await
                 .is_err()
         );
+        credentials.slack_user_ids = vec!["U-BOT".to_owned()];
+        assert_eq!(credentials.slack_credential_ids().await.unwrap(), [0]);
+        assert_eq!(
+            credentials.retained_slack_credential_ids().await.unwrap(),
+            [0]
+        );
 
+        server.abort();
         database.drop().await;
     }
 }
