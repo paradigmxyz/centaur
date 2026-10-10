@@ -1,6 +1,6 @@
 # iron-control API
 
-`iron-control` exposes a JSON API under `/api/v1`. Resource endpoints require API key authentication. `POST /api/v1/proxy/sync` uses proxy bearer authentication, and sandbox read endpoints use the sandbox entitlement JWT injected by `iron-proxy`.
+`iron-control` exposes a JSON API under `/api/v1`. Resource endpoints require API key authentication, and sandbox read endpoints use the sandbox entitlement JWT injected by `iron-proxy`.
 
 - [Authentication](#authentication)
 - [Conventions](#conventions)
@@ -40,7 +40,7 @@ A missing or invalid token returns `401`:
 { "error": { "message": "invalid or missing API key" } }
 ```
 
-`iron-proxy` instances authenticate to [`POST /api/v1/proxy/sync`](#proxy-sync) with their own token (`iprx_` followed by 64 lowercase hex characters), issued once when the proxy is created. An invalid proxy token returns `401` with `"invalid or missing proxy token"`.
+`iron-proxy` instances authenticate to [proxy sync](#proxy-sync), served by the separate `proxy-sync` service, with their own token (`iprx_` followed by 64 lowercase hex characters), issued once when the proxy is created. An invalid proxy token returns `401` with `"invalid or missing proxy token"`.
 
 Sandbox skill catalog endpoints use the existing sandbox entitlement JWT injected by `iron-proxy`.
 
@@ -1555,6 +1555,8 @@ Deleting a principal does not delete its proxies: they become unassigned and can
 ## Proxy sync
 
 `POST /api/v1/proxy/sync`
+
+This endpoint is served by the separate `proxy-sync` service (`services/proxy-sync`), which reads iron-control's database directly; iron-control itself does not route it. The payload is documented here because it is assembled from the resources above.
 
 Called by `iron-proxy` instances to fetch their configuration. **Authentication is the proxy bearer token** (`Authorization: Bearer iprx_...`), not an API key.
 

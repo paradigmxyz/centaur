@@ -2,7 +2,6 @@ require "test_helper"
 
 class ProxiesControllerTest < ActionDispatch::IntegrationTest
   ACME_TOKEN = "iak_acme-ci-token".freeze
-  ACME_PROXY_TOKEN = "iprx_#{'a' * 64}".freeze
 
   def auth_headers(token = ACME_TOKEN)
     { "Authorization" => "Bearer #{token}", "Content-Type" => "application/json" }
@@ -92,9 +91,7 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
       assert_response :created
       data = json_body.fetch("data")
 
-      post api_v1_proxy_sync_url, params: {}.to_json, headers: proxy_auth_headers(data.fetch("token"))
-      assert_response :ok
-      assert_equal data.fetch("config_hash"), json_body.fetch("config_hash")
+      assert_equal Proxy.find_by_oid!(data.fetch("id")).config_hash, data.fetch("config_hash")
     end
   end
 
@@ -186,9 +183,7 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
       assert_response :ok
       mutation_hash = json_body.dig("data", "config_hash")
 
-      post api_v1_proxy_sync_url, params: {}.to_json, headers: proxy_auth_headers(ACME_PROXY_TOKEN)
-      assert_response :ok
-      assert_equal mutation_hash, json_body.fetch("config_hash")
+      assert_equal proxy.reload.config_hash, mutation_hash
     end
   end
 
@@ -301,9 +296,7 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
       assert_response :ok
       mutation_hash = json_body.dig("data", "config_hash")
 
-      post api_v1_proxy_sync_url, params: {}.to_json, headers: proxy_auth_headers(ACME_PROXY_TOKEN)
-      assert_response :ok
-      assert_equal mutation_hash, json_body.fetch("config_hash")
+      assert_equal proxy.reload.config_hash, mutation_hash
     end
   end
 
@@ -375,9 +368,5 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
       delete api_v1_proxy_url(id: proxy.oid), headers: auth_headers
     end
     assert_response :no_content
-  end
-
-  def proxy_auth_headers(token)
-    { "Authorization" => "Bearer #{token}", "Content-Type" => "application/json" }
   end
 end

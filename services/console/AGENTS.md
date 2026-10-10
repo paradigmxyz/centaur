@@ -4,7 +4,7 @@
 
 The console is a Rails application that provides the operator UI and the
 credential-control JSON API. It manages principals, roles, grants, encrypted
-secret records, proxy synchronization, broker credentials, console login, and
+secret records, proxies, broker credentials, console login, and
 MCP OAuth flows.
 
 Use `README.md` and `docs/API.md` for the supported behavior and API shapes.

@@ -5,8 +5,6 @@ module Console
   # detail page: assign/unassign roles and grant/revoke secrets, plus idempotency
   # and the signed-out gate.
   class PrincipalsControllerTest < ActionDispatch::IntegrationTest
-    include ActiveJob::TestHelper
-
     setup do
       @operator = users(:acme_admin)
       post login_url, params: { email: @operator.email, password: "password123456" }
@@ -263,23 +261,20 @@ module Console
         download_enabled: true
       )
       version = principal.reload.sync_config_cache_version
-      clear_enqueued_jobs
 
-      assert_no_enqueued_jobs only: PrincipalSyncConfigSnapshotWarmJob do
-        patch console_principal_slack_channel_permissions_url(principal.oid),
-              params: {
-                principal: {
-                  slack_channel_permissions_attributes: {
-                    "0" => {
-                      id: channel_permission.id,
-                      upload_enabled: "1",
-                      download_enabled: "0",
-                      history_enabled: "0"
-                    }
+      patch console_principal_slack_channel_permissions_url(principal.oid),
+            params: {
+              principal: {
+                slack_channel_permissions_attributes: {
+                  "0" => {
+                    id: channel_permission.id,
+                    upload_enabled: "1",
+                    download_enabled: "0",
+                    history_enabled: "0"
                   }
                 }
               }
-      end
+            }
 
       assert_redirected_to console_principal_path(principal.oid)
       assert_equal "Updated Slack channel permissions.", flash[:notice]

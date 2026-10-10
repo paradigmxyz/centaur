@@ -242,9 +242,6 @@ Rails.application.routes.draw do
         collection { get "lookup/:slug", action: :lookup, as: :lookup }
       end
 
-      # Called by iron-proxy instances (proxy bearer auth, not ApiKey auth).
-      post "proxy/sync", to: "proxy_sync#create"
-
       # Called from inside sandboxes through their assigned iron-proxy. The
       # proxy injects a short-lived sandbox entitlement JWT scoped to these paths.
       namespace :sandbox do

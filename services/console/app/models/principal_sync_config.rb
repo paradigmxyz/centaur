@@ -1,42 +1,14 @@
-class PrincipalSyncConfigSnapshot < ApplicationRecord
-  TTL = 10.minutes
-  RETENTION = 1.hour
-
-  belongs_to :principal
-
-  encrypts :payload
-  serialize :payload, coder: JSON
-
-  validates :principal_cache_version, presence: true
-  validates :principal_id, uniqueness: { scope: :principal_cache_version }
-
-  def config
-    payload.fetch("config", payload)
-  end
-
-  def postgres_setting_templates
-    payload.fetch("postgres_setting_templates", {})
-  end
-
-  def self.payload_for(principal)
-    served = served_credentials_for(principal)
-    postgres, templates = sync_postgres_entries_with_templates_for(principal)
-    {
-      "config" => {
-        "secrets" => proxy_secrets_for(served) + generated_proxy_secrets_for(principal),
-        "transforms" => proxy_transforms_for(served),
-        "postgres" => postgres
-      },
-      "postgres_setting_templates" => templates
-    }
-  end
-
-  def self.config_for(principal)
-    served = served_credentials_for(principal)
+# Assembles the effective proxy config for a principal, in the shape
+# iron-proxy receives from proxy-sync. proxy-sync serves the sync endpoint;
+# Console uses this for operator inspection, sandbox permissions, and the
+# config_hash returned from the proxies API, which must match proxy-sync's.
+module PrincipalSyncConfig
+  def self.config_for(principal, proxy: nil, extra_static: [])
+    served = served_credentials_for(principal, extra_static: extra_static)
     {
       "secrets" => proxy_secrets_for(served) + generated_proxy_secrets_for(principal),
       "transforms" => proxy_transforms_for(served),
-      "postgres" => sync_postgres_for(principal)
+      "postgres" => sync_postgres_for(principal, proxy: proxy)
     }
   end
 
@@ -49,11 +21,18 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
     { config_hash: config_hash_for_proxy(proxy, config), config: config }
   end
 
+  # The conversation principal's full effective grants plus, when a requester
+  # is bound, the requester's always-available direct wrapper grants (RFC
+  # 0005). Postgres and the api-server JWT stay derived from the conversation
+  # principal only.
   def self.config_for_proxy(proxy, sandbox_entitlements_hosts: Proxy.sandbox_entitlements_hosts)
-    config = if proxy.requester_principal_id
-      live_union_config_for_proxy(proxy)
+    principal = proxy.principal
+    # A requester on an unassigned proxy is an invalid transient state; fail
+    # closed with the empty config instead of serving hoisted secrets alone.
+    config = if principal
+      config_for(principal, proxy: proxy, extra_static: requester_hoisted_statics_for(proxy.requester_principal))
     else
-      rendered_principal_config_for_proxy(proxy)
+      Principal::EMPTY_CONFIG.deep_dup
     end
     with_sandbox_entitlements_secret_for_proxy(proxy, config, hosts: sandbox_entitlements_hosts)
   end
@@ -80,7 +59,7 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
       # Merged only when a requester is bound, so every nil-requester hash is
       # bit-identical to before this field existed and the fleet does not
       # re-apply configs on deploy. Requester grant changes need no term here:
-      # the requester part of the config is assembled live on every poll.
+      # the requester part of the config is assembled live.
       payload = payload.merge(
         "requester_principal" => proxy.requester_principal&.oid,
         "requester_principal_assigned_at" => proxy.requester_principal_assigned_at&.utc&.iso8601
@@ -88,102 +67,6 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
     end
     "sha256:#{Digest::SHA256.hexdigest(canonical_json(payload))}"
   end
-
-  # Returns the freshest usable snapshot, stale-while-revalidate style. Config
-  # invalidations only bump the principal cache version; polling requests serve
-  # stale snapshots immediately and enqueue the background rebuild on demand
-  # instead of using request threads and DB connections to rebuild the effective
-  # config.
-  #
-  # Serving a stale snapshot is safe: iron-proxy treats the config hash as an
-  # ETag and re-applies on its next 5s poll once the rebuild lands. Only a
-  # cold start (no snapshot at any version) blocks until the build finishes,
-  # because there is nothing stale to serve.
-  def self.fetch_for(principal)
-    version = principal.sync_config_cache_version
-    snapshot = find_by(principal: principal, principal_cache_version: version)
-    return snapshot if snapshot&.fresh_for?(principal)
-
-    stale = snapshot || latest_for(principal)
-    if stale
-      Principal.enqueue_sync_config_snapshot_warm(principal.id)
-      return stale
-    end
-
-    build_for(principal)
-  end
-
-  def self.prune_expired!
-    where("updated_at < ?", RETENTION.ago).delete_all
-  end
-
-  def fresh?
-    updated_at >= TTL.ago
-  end
-
-  def fresh_for?(principal)
-    fresh? && !api_server_jwt_window_stale?(principal)
-  end
-
-  # Most recent snapshot at any cache version; the stale fallback while
-  # another session rebuilds. Old versions survive until prune_expired!
-  # (RETENTION), which comfortably covers a rebuild.
-  def self.latest_for(principal)
-    where(principal: principal).order(updated_at: :desc).first
-  end
-
-  def self.build_for(principal)
-    principal.with_lock { build_within_lock(principal) }
-  rescue ActiveRecord::RecordNotUnique
-    retry
-  end
-
-  # Assumes the caller holds the principal's row lock and passes the freshly
-  # locked (reloaded) record, so sync_config_cache_version is current.
-  def self.build_within_lock(principal)
-    version = principal.sync_config_cache_version
-    snapshot = find_or_initialize_by(principal: principal, principal_cache_version: version)
-    return snapshot if snapshot.persisted? && snapshot.fresh_for?(principal)
-
-    snapshot.payload = payload_for(principal)
-    if snapshot.changed?
-      snapshot.save!
-    else
-      # A rebuild that yields an identical payload must still restart the TTL,
-      # or the snapshot stays permanently stale and every poll re-runs the
-      # expensive config rebuild.
-      snapshot.touch
-    end
-    snapshot
-  end
-
-  def api_server_jwt_window_stale?(principal)
-    return false if ENV["CENTAUR_JWT_SIGNING_SECRET"].to_s.blank?
-
-    updated_at.to_i < ApiServer::Jwt.window_start_for(principal, Time.current.to_i)
-  end
-
-  # The union config for a proxy with a requester bound: the conversation
-  # principal's full effective grants plus the requester's always-available
-  # direct wrapper grants. Assembled live from grant rows instead of merging
-  # cached snapshots because a snapshot's rendered form drops grant
-  # priorities, so conflict suppression could not compose across principals
-  # (RFC 0005). Postgres, setting templates, and the api-server JWT stay
-  # derived from the conversation principal only.
-  def self.live_union_config_for_proxy(proxy)
-    principal = proxy.principal
-    # A requester on an unassigned proxy is an invalid transient state; fail
-    # closed with the empty config instead of serving hoisted secrets alone.
-    return rendered_principal_config_for_proxy(proxy) unless principal
-
-    served = served_credentials_for(principal, extra_static: requester_hoisted_statics_for(proxy.requester_principal))
-    {
-      "secrets" => proxy_secrets_for(served) + generated_proxy_secrets_for(principal),
-      "transforms" => proxy_transforms_for(served),
-      "postgres" => sync_postgres_for(principal, proxy: proxy)
-    }
-  end
-  private_class_method :live_union_config_for_proxy
 
   # The hoist gate reads the linked credential's app, while the served value
   # resolves from the source; require both to be the same credential so an
@@ -196,63 +79,6 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
     end
   end
   private_class_method :requester_hoisted_statics_for
-
-  def self.rendered_principal_config_for_proxy(proxy)
-    principal = proxy.principal
-    return Principal::EMPTY_CONFIG.deep_dup unless principal
-
-    snapshot = fetch_for(principal)
-    copy = snapshot.config.deep_dup
-    templates = snapshot.postgres_setting_templates
-    copy["postgres"] = proxy_specific_postgres(proxy, copy["postgres"], templates) if templates.any?
-    copy
-  end
-  private_class_method :rendered_principal_config_for_proxy
-
-  def self.proxy_specific_postgres(proxy, postgres, templates)
-    Array(postgres).map do |entry|
-      next entry unless entry.is_a?(Hash)
-
-      template = templates[entry["id"].to_s]
-      next entry unless template
-
-      rendered_settings = proxy_specific_postgres_settings(proxy, entry["settings"], template)
-      entry.merge("settings" => rendered_settings)
-    end
-  end
-  private_class_method :proxy_specific_postgres
-
-  def self.proxy_specific_postgres_settings(proxy, rendered_settings, template_settings)
-    rendered_by_name = Array(rendered_settings).each_with_object({}) do |setting, values|
-      next unless setting.is_a?(Hash)
-
-      name = setting["name"].presence || setting[:name].presence
-      values[name] = setting["value"] || setting[:value] if name.present?
-    end
-
-    Array(template_settings).filter_map do |setting|
-      next unless setting.is_a?(Hash)
-
-      name = setting["name"].presence || setting[:name].presence
-      next if name.blank?
-
-      value = proxy_label_setting_value(proxy, setting)
-      value = rendered_by_name.fetch(name, "") if value.nil?
-      { "name" => name, "value" => value }
-    end
-  end
-  private_class_method :proxy_specific_postgres_settings
-
-  def self.proxy_label_setting_value(proxy, setting)
-    ref = setting["value_from"] || setting[:value_from]
-    return nil unless ref.is_a?(Hash)
-
-    proxy_label = ref["proxy_label"] || ref[:proxy_label]
-    return nil if proxy_label.blank?
-
-    proxy.labels&.fetch(proxy_label.to_s, "").to_s
-  end
-  private_class_method :proxy_label_setting_value
 
   def self.with_sandbox_entitlements_secret_for_proxy(proxy, config, hosts:)
     secret = sandbox_entitlements_secret_for_proxy(proxy, hosts: hosts)
@@ -304,16 +130,6 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
     end
   end
   private_class_method :canonicalize
-
-  def self.sync_postgres_entries_with_templates_for(principal)
-    templates = {}
-    entries = effective_pg_dsn_secrets_for(principal).map do |pg|
-      templates[pg.oid] = pg.settings if pg.proxy_label_settings?
-      pg.to_proxy_dsn(principal: principal)
-    end
-    [ entries, templates ]
-  end
-  private_class_method :sync_postgres_entries_with_templates_for
 
   def self.effective_pg_dsn_secrets_for(principal)
     principal.granted_pg_dsn_secrets.each_with_object({}) do |pg, winners|
