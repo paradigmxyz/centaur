@@ -876,8 +876,18 @@ function recomposeBuffers(state: CodexMapperState): void {
 
 function compose(byItemId: Map<string, string>, trailing: string): string {
   let out = ''
-  for (const value of byItemId.values()) out += value
-  return trailing ? out + trailing : out
+  for (const value of [...byItemId.values(), trailing]) {
+    if (!value) continue
+    if (out) {
+      // Items are separate assistant messages; only deltas within an item
+      // concatenate without a boundary. Preserve any existing newlines.
+      const newlines = (out.match(/\n*$/)?.[0].length ?? 0)
+        + (value.match(/^\n*/)?.[0].length ?? 0)
+      out += '\n'.repeat(Math.max(0, 2 - newlines))
+    }
+    out += value
+  }
+  return out
 }
 
 function extractDeltaText(event: any): string {

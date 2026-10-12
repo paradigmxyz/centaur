@@ -7,6 +7,30 @@ import {
 } from './codex-app-server'
 
 describe('CodexAppServerRendererEventMapper', () => {
+  it.each([
+    ['', ''],
+    ['\n', ''],
+    ['', '\n'],
+    ['\n', '\n'],
+    ['\n\n', ''],
+    ['', '\n\n']
+  ])('separates distinct answer items with a paragraph boundary (%j, %j)', (suffix, prefix) => {
+    const mapper = new CodexAppServerRendererEventMapper({ preStreamGraceMs: 0 })
+    const question = 'Does it stay chopped?\n- Stays chopped\n- Only during animation'
+    const answer = 'Opened draft PR to fix overlapping digits.'
+    const events = [
+      ...mapper.process({ type: 'item.agentMessage.delta', itemId: 'question', delta: question + suffix }),
+      // Token chunks within one item must still concatenate exactly.
+      ...mapper.process({ type: 'item.agentMessage.delta', itemId: 'answer', delta: prefix + 'Opened draft' }),
+      ...mapper.process({ type: 'item.agentMessage.delta', itemId: 'answer', delta: ' PR to fix overlapping digits.' }),
+      ...mapper.process({ type: 'item.completed', item: { id: 'answer', type: 'agentMessage', text: prefix + answer } }),
+      ...mapper.flush()
+    ]
+    const streamed = events.flatMap(event => event.type === 'renderer.message.delta' ? [event.delta] : []).join('')
+    expect(streamed).toBe(question + '\n\n' + answer)
+    expect(events.at(-1)).toMatchObject({ type: 'renderer.done', answerMarkdown: streamed })
+  })
+
   it('maps final answer deltas to generic renderer message deltas after activity exists', () => {
     const mapper = new CodexAppServerRendererEventMapper()
 
@@ -670,7 +694,7 @@ describe('CodexAppServerRendererEventMapper', () => {
   })
 
   it('suppresses the live delta instead of interleaving when the recomposed answer diverges from streamed text', () => {
-    // Two concurrent final-answer items compose as A + B. Growing A (a
+    // Two concurrent final-answer items compose as separate paragraphs. Growing A (a
     // non-trailing component) after B was already streamed shifts B's bytes, so
     // a byte-offset slice would re-read and re-emit B, duplicating it
     // ("Hello world." -> "Hello world.world."). The guard refuses the
@@ -699,7 +723,7 @@ describe('CodexAppServerRendererEventMapper', () => {
     run({ type: 'item.agentMessage.delta', itemId: 'A', delta: 'there ' })
 
     const streamed = deltas.join('')
-    expect(streamed).toBe('Hello world.')
+    expect(streamed).toBe('Hello \n\nworld.')
     expect(streamed).not.toContain('world.world.')
     expect(logs).toContain('codex_renderer_stream_divergence_suppressed')
     // The signal is recorded once per render, not on every subsequent event.

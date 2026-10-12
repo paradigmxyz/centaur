@@ -1707,6 +1707,42 @@ describe('slackbotv2', () => {
     )
   })
 
+  it('separates a clarification list from a later answer in the delivered Slack stream', async () => {
+    codexApi.autoRespond = false
+    const parent = await postUserMessage('Context before two assistant messages.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> fix the formatting`, {
+      threadTs: parent.ts
+    })
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    const key = threadKey(parent.ts)
+    const question = 'Does it stay chopped?\n- Stays chopped\n- Only during animation'
+    const answer = 'Opened draft PR to fix overlapping digits.'
+    for (const [id, text] of [['question', question], ['answer', answer]]) {
+      codexApi.emitOutputLines(key, [
+        JSON.stringify({ type: 'item.started', item: { id, type: 'agentMessage', phase: 'final_answer' } }),
+        JSON.stringify({ type: 'item.agentMessage.delta', itemId: id, delta: text }),
+        JSON.stringify({ type: 'item.completed', item: { id, type: 'agentMessage', phase: 'final_answer', text } })
+      ])
+    }
+    codexApi.emitSessionEvent(key, 'session.execution_completed', {
+      execution_id: 'exe-message-boundaries',
+      status: 'completed',
+      result_text: answer
+    })
+    await mention.finished()
+
+    expect(codexApi.executes).toHaveLength(1)
+    const transcripts = slackStreamTranscripts(slackApi.calls)
+    expect(transcripts).toHaveLength(1)
+    expect(transcripts[0]!.chunks
+      .filter(chunk => chunk.type === 'markdown_text')
+      .map(chunk => chunk.text).join('')).toBe(`${question}\n\n${answer}`)
+    expect(await threadText(parent.ts)).toContain(`${question}\n\n${answer}`)
+  })
+
   it('swaps the streamed message for the durable final answer when the live answer diverges', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
