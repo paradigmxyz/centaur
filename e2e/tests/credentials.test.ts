@@ -2,6 +2,11 @@
 // sandbox's proxy through proxy-sync on its next syncs, without restarting the
 // sandbox: a granted secret that outranks the provider key replaces it, a
 // rotated value is picked up, and revoking the grant restores the provider key.
+//
+// The turns run on Claude Code, which sends each model call as its own HTTP
+// request, so every call is transformed with the proxy's current config.
+// Codex streams its turns over one WebSocket to the Responses API, which keeps
+// the credential its handshake carried until the socket reconnects.
 import { afterAll, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import {
@@ -40,16 +45,16 @@ async function waitForSyncsAfterChange(sandboxId: string): Promise<void> {
   })
 }
 
-// The swap replaces Codex's API key, which only api_key mode sends.
+// The swap replaces Claude Code's API key, which only api_key mode sends.
 test.skipIf(authMode !== 'api_key')(
   'granted, rotated, and revoked credentials reach a running sandbox',
   async () => {
     await removeSwappedSecrets()
-    const thread = await slack.mention('--codex Use the provider key.', model.says('Provider key.'), {
+    const thread = await slack.mention('--claudecode Use the provider key.', model.says('Provider key.'), {
       channel: CREDENTIALS_CHANNEL
     })
     const first = await thread.nextTurn()
-    expect(first.request?.credential).toBe(providerCredentials.openai)
+    expect(first.request?.credential).toBe(providerCredentials.anthropic)
 
     const credentialAfter = async (change: () => Promise<unknown>): Promise<string | undefined> => {
       await change()
@@ -60,10 +65,10 @@ test.skipIf(authMode !== 'api_key')(
       return turn.request?.credential
     }
 
-    // Inject on the hosts the infra role's OpenAI key covers.
+    // Inject on the hosts the infra role's Anthropic key covers.
     const { data: secrets } = await consoleApi.ok('GET', '/api/v1/static_secrets?limit=200')
-    const providerKey = secrets.find((secret: any) => secret.replace_config?.proxy_value === 'OPENAI_API_KEY')
-    if (!providerKey) throw new Error('the console has no OPENAI_API_KEY replace secret')
+    const providerKey = secrets.find((secret: any) => secret.replace_config?.proxy_value === 'ANTHROPIC_API_KEY')
+    if (!providerKey) throw new Error('the console has no ANTHROPIC_API_KEY replace secret')
     const rules = providerKey.rules.map(({ host, cidr, http_methods, paths }: any) =>
       Object.fromEntries(Object.entries({ host, cidr, http_methods, paths }).filter(([, value]) => value != null))
     )
@@ -72,7 +77,7 @@ test.skipIf(authMode !== 'api_key')(
       consoleApi.ok('PUT', `/api/v1/static_secrets/${foreignId}`, {
         data: {
           labels: LABELS,
-          inject_config: { header: 'Authorization', formatter: 'Bearer {{ .Value }}' },
+          inject_config: { header: 'X-Api-Key' },
           source: { source_type: 'control_plane', secret: value, config: {} },
           rules
         }
@@ -93,13 +98,13 @@ test.skipIf(authMode !== 'api_key')(
         data: { principal_id: principalRecord.id, static_secret_id: secret.id }
       })
       grantId = grant.id
-    })).toBe(`Bearer ${granted}`)
+    })).toBe(granted)
 
     const rotated = `sk-e2e-rotated-${randomUUID().slice(0, 8)}`
-    expect(await credentialAfter(() => upsertSecret(rotated))).toBe(`Bearer ${rotated}`)
+    expect(await credentialAfter(() => upsertSecret(rotated))).toBe(rotated)
 
     expect(await credentialAfter(() => consoleApi.ok('DELETE', `/api/v1/grants/${grantId}`)))
-      .toBe(providerCredentials.openai)
+      .toBe(providerCredentials.anthropic)
   },
   8 * turnTimeoutMs
 )
