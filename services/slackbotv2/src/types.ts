@@ -195,6 +195,8 @@ export type SlackbotV2Options = {
   maxDurationMs?: number
   postgresUrl?: string
   recoverRenderObligationsOnStart?: boolean
+  /** Period of the background sweep for orphaned render obligations (ms); 0 disables. Default 60s. */
+  renderRecoveryIntervalMs?: number
   /** Maximum Slack message age eligible for startup render recovery. */
   renderRecoveryMaxObligationAgeMs?: number
   /** Per-thread deadline for one recovery attempt during the startup scan. */
