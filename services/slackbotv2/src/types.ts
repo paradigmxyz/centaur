@@ -2,6 +2,7 @@ import type { RustSessionStreamEvent } from '@centaur/harness-events'
 import type { CodexAppServerToChatStreamOptions } from '@centaur/rendering'
 import type { Attachment, Chat, Logger, StateAdapter } from 'chat'
 import type { Hono } from 'hono'
+import type pg from 'pg'
 import type { ChannelDefaults } from './channel-defaults'
 import type { HarnessOverrides } from './overrides'
 import type { SlackDisplayTextSource } from './slack-display-text'
@@ -189,6 +190,16 @@ export type SlackbotV2Options = {
    * instead and posts a visible error once the delays are exhausted.
    */
   handoffRetryDelaysMs?: readonly number[]
+  /**
+   * Chat SDK duplicate window for a Slack message. A crashed Slack inbox
+   * delivery is fed again only after three windows. Defaults to 10s.
+   */
+  messageDedupeTtlMs?: number
+  /**
+   * Postgres pool holding the Slack inbox's Absurd queue. Defaults to a pool at
+   * `postgresUrl`; without either, message events are handled synchronously.
+   */
+  inboxPool?: pg.Pool
   /** Milliseconds before an idle execution pauses its sandbox. Defaults to up to 3h. */
   idleTimeoutMs?: number
   logger?: Logger
@@ -233,10 +244,14 @@ export type MessageOverridesStrategy = (
 export type SlackbotV2 = {
   app: Hono
   chat: Chat
+  /** Stops taking Slack inbox deliveries and waits for running ones to finish. */
+  close(): Promise<void>
 }
 
 export type SlackbotV2ThreadState = {
   activeExecution?: boolean
+  /** Slack inbox task whose handoff last marked the thread active before starting an execution. */
+  executionStartTaskId?: string | null
   executedMessageIds?: string[]
   forwardedMessageIds?: string[]
   /** Last thread-level harness selected by Slack flags. Null clears persisted state. */
