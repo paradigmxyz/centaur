@@ -45,4 +45,9 @@ export const USERS = [USER, USER_B, EXTERNAL_USER]
 export const CHANNEL = { id: 'CE2E00001', name: 'centaur-e2e' }
 /** A channel with slackbotv2 channel defaults, set in e2e/infra/values.yaml. */
 export const DEFAULTS_CHANNEL = { id: 'CE2E00002', name: 'centaur-e2e-defaults' }
-export const CHANNELS = [CHANNEL, DEFAULTS_CHANNEL]
+/**
+ * A channel whose principal e2e/tests/credentials.test.ts grants credentials
+ * to, so the swaps cannot reach other tests' turns.
+ */
+export const CREDENTIALS_CHANNEL = { id: 'CE2E00003', name: 'centaur-e2e-credentials' }
+export const CHANNELS = [CHANNEL, DEFAULTS_CHANNEL, CREDENTIALS_CHANNEL]

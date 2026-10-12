@@ -13,6 +13,7 @@ import { BOT, CHANNEL, USER, type SlackUser } from '../fakes/slack-fixture'
 
 export {
   CHANNEL,
+  CREDENTIALS_CHANNEL,
   DEFAULTS_CHANNEL,
   EXTERNAL_TEAM,
   EXTERNAL_USER,
@@ -175,6 +176,21 @@ export const cluster = {
     await kubectl({}, 'rollout', 'restart', `deploy/${release}-centaur-${component}`)
     await kubectl({}, 'rollout', 'status', `deploy/${release}-centaur-${component}`, '--timeout=180s')
   },
+  /** What a sandbox's iron-proxy reports applying from proxy-sync, from its management API. */
+  async proxyStatus(sandboxId: string): Promise<{ config_hash: string; principal_id: string; last_sync_at: string }> {
+    const pod = await kubectl(
+      {},
+      'get', 'pods', '-l', `centaur.ai/iron-proxy=true,centaur.ai/sandbox-id=${sandboxId}`,
+      '-o', 'jsonpath={.items[0].metadata.name}'
+    )
+    if (!pod) throw new Error(`sandbox ${sandboxId} has no iron-proxy pod`)
+    const status = await kubectl(
+      {},
+      'exec', pod, '-c', 'iron-proxy', '--', 'sh', '-c',
+      'curl -fsS -H "Authorization: Bearer $IRON_MANAGEMENT_API_KEY" "http://127.0.0.1:${IRON_MANAGEMENT_LISTEN##*:}/v1/status"'
+    )
+    return JSON.parse(status)
+  },
   /** Kubernetes objects api-rs created for a sandbox and has not removed. */
   async sandboxResources(sandboxId: string): Promise<string[]> {
     const out = await kubectl(
@@ -295,6 +311,13 @@ export const ironControl = {
     )
     if (!principal) throw new Error(`proxy for sandbox ${sandboxId} has no principal`)
     return { principal, requester: requester ?? null }
+  },
+  /**
+   * Runs Ruby against the console's models, as an operator's change through
+   * the console would: model callbacks run, so proxy-sync sees the change.
+   */
+  async rails(ruby: string): Promise<string> {
+    return kubectl({}, 'exec', `deploy/${release}-centaur-console`, '--', 'bin/rails', 'runner', ruby)
   },
   /** The principal for a Slack user, if iron-control has one. */
   async slackUser(user: SlackUser): Promise<Principal | undefined> {
