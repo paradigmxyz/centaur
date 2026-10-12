@@ -2307,26 +2307,26 @@ async function recoverRenderObligations(
         })
         continue
       }
-      const releaseLease = async (): Promise<void> => {
-        const activeLeaseToken = await state.get<string>(renderRecoveryLeaseKey(threadId))
-        if (activeLeaseToken === leaseToken) await state.delete(renderRecoveryLeaseKey(threadId))
-      }
+      const releaseLease = renewRenderLease(state, threadId, leaseToken)
 
       // A single hung recovery (for example an event stream that never
       // produces a chunk) must not block every obligation queued behind it.
       // Race a deadline; on timeout move on and leave the attempt running
       // detached - it may still finish and clear the obligation, which is why
-      // the lease is kept so a later pass does not start a duplicate render.
+      // the lease is renewed until the detached attempt actually settles.
       const recovery = recoverRenderObligation(chat, state, options, threadId, obligation)
+        .finally(releaseLease)
       let outcome: { timedOut: true } | { timedOut: false; deferred: boolean }
+      let timeout: ReturnType<typeof setTimeout> | undefined
       try {
         outcome = await Promise.race([
           recovery.then(deferred => ({ timedOut: false as const, deferred })),
-          sleep(timeoutMs).then(() => ({ timedOut: true as const }))
+          new Promise<{ timedOut: true }>(resolve => {
+            timeout = setTimeout(() => resolve({ timedOut: true }), timeoutMs)
+          })
         ])
-      } catch (error) {
-        await releaseLease()
-        throw error
+      } finally {
+        clearTimeout(timeout)
       }
       if (outcome.timedOut) {
         void recovery.catch(() => undefined)
@@ -2352,7 +2352,6 @@ async function recoverRenderObligations(
         )
         continue
       }
-      await releaseLease()
       if (outcome.deferred) {
         deferredCount += 1
         retryableDeferredCount += 1
@@ -2682,6 +2681,16 @@ async function acquireRenderLease(
   const key = renderRecoveryLeaseKey(threadId)
   const token = randomUUID()
   await state.set(key, token, RENDER_RECOVERY_LEASE_TTL_MS)
+  return renewRenderLease(state, threadId, token)
+}
+
+/** Renew an owned lease until the render settles, including after a sweep timeout. */
+function renewRenderLease(
+  state: StateAdapter,
+  threadId: string,
+  token: string
+): () => Promise<void> {
+  const key = renderRecoveryLeaseKey(threadId)
   const refresh = setInterval(() => {
     void state
       .get<string>(key)

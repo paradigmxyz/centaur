@@ -7,7 +7,7 @@ import {
   type ServerResponse
 } from 'node:http'
 import { connect } from 'node:net'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import { WebClient } from '@slack/web-api'
 import { createEmulator, type Emulator } from 'emulate'
 import { createMemoryState } from '@chat-adapter/state-memory'
@@ -3366,6 +3366,87 @@ describe('slackbotv2', () => {
     )
     expect(startsForThread).toHaveLength(1)
     expect(await threadText(parent.ts)).toContain('Single answer despite the sweep.')
+  })
+
+  it('keeps a timed-out recovery leased until it delivers the answer', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    const logs: CapturedLog[] = []
+    const parent = await postUserMessage('Context before a long recovery.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> recover slowly`, parent.ts)
+    const key = threadKey(parent.ts)
+    const leaseKey = `slackbotv2:render:lease:${key}`
+    const message = apiMessageFromSlackEvent({
+      isMention: true,
+      text: `<@${BOT_USER_ID}> recover slowly`,
+      threadId: key,
+      ts: mention.ts
+    })
+    await sharedState.set(`thread-state:${key}`, {
+      activeExecution: true,
+      executedMessageIds: [mention.ts],
+      forwardedMessageIds: [mention.ts],
+      historyForwarded: true,
+      lastEventId: 0,
+      renderObligation: {
+        afterEventId: 0,
+        executionId: 'exe-long-recovery',
+        message
+      }
+    })
+    await sharedState.appendToList('slackbotv2:render:index', key)
+
+    // Compress the two-minute lease and one-minute renewal interval while
+    // retaining real expiry, sweep retries, SSE replay, and Slack delivery.
+    const set = sharedState.set.bind(sharedState)
+    const setIfNotExists = sharedState.setIfNotExists.bind(sharedState)
+    const interval = globalThis.setInterval
+    const setSpy = spyOn(sharedState, 'set').mockImplementation(
+      (stateKey, value, ttlMs) => set(stateKey, value, stateKey === leaseKey ? 120 : ttlMs)
+    )
+    const claimSpy = spyOn(sharedState, 'setIfNotExists').mockImplementation(
+      (stateKey, value, ttlMs) =>
+        setIfNotExists(stateKey, value, stateKey === leaseKey ? 120 : ttlMs)
+    )
+    const intervalSpy = spyOn(globalThis, 'setInterval').mockImplementation(
+      ((...args: Parameters<typeof setInterval>) => {
+        const [handler, ms, ...rest] = args
+        return interval(handler, ms === 60_000 ? 30 : ms, ...rest)
+      }) as typeof setInterval
+    )
+    try {
+      bot = createTestBot({
+        logger: captureLogger(logs),
+        renderRecoveryThreadTimeoutMs: 120,
+        state: sharedState
+      })
+      await waitFor(() => codexApi.eventRequests.some(request => request.threadKey === key))
+      await waitFor(() => hasLog(logs, 'slackbotv2_render_recovery_thread_timeout'))
+      await sleep(1000)
+      expect(codexApi.eventRequests.filter(request => request.threadKey === key)).toHaveLength(1)
+      expect(await sharedState.get(leaseKey)).toBeDefined()
+      expect(hasLog(logs, 'slackbotv2_render_recovery_lease_skipped')).toBe(true)
+
+      codexApi.emitOutputLines(key, sampleCodexOutputLines('One recovered answer.'))
+      await waitFor(async () => {
+        const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+        return threadState?.renderObligation === null && await sharedState.get(leaseKey) === null
+      }, 3000)
+      expect(slackApi.calls.filter(call =>
+        call.method === 'chat.startStream' && call.body.thread_ts === parent.ts
+      )).toHaveLength(1)
+      expect(slackApi.calls.filter(call => call.method === 'chat.stopStream')).toHaveLength(1)
+      expect(await threadText(parent.ts)).toContain('One recovered answer.')
+    } finally {
+      // Also unblock the stream when an assertion fails on the unfixed path.
+      const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+      if (threadState?.renderObligation) {
+        codexApi.emitOutputLines(key, sampleCodexOutputLines('One recovered answer.'))
+      }
+      intervalSpy.mockRestore()
+      claimSpy.mockRestore()
+      setSpy.mockRestore()
+    }
   })
 
   it('abandons an obligation after repeated non-retryable recovery failures', async () => {
