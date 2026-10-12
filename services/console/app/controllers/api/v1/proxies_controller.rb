@@ -31,7 +31,7 @@ module Api
         requester = attrs[:requester_principal_id].present? ? Principal.find_by_oid!(attrs[:requester_principal_id]) : nil
         proxy = ::Proxy.new(name: attrs[:name], principal: principal, requester_principal: requester, labels: labels_param)
         proxy.save!
-        render status: :created, json: { data: record_payload(proxy, include_config_hash: true).merge(token: proxy.token) }
+        render status: :created, json: { data: record_payload(proxy).merge(token: proxy.token) }
       rescue ActiveRecord::RecordInvalid => e
         render_validation_error(e.record)
       end
@@ -53,7 +53,7 @@ module Api
         proxy.name = data_params[:name] if data_params.key?(:name)
         proxy.labels = permitted_labels if data_params.key?(:labels)
         proxy.save!
-        render json: { data: record_payload(proxy, include_config_hash: true) }
+        render json: { data: record_payload(proxy) }
       rescue ActiveRecord::RecordInvalid => e
         render_validation_error(e.record)
       end
@@ -82,8 +82,8 @@ module Api
         labels
       end
 
-      def record_payload(proxy, include_config_hash: false)
-        payload = {
+      def record_payload(proxy)
+        {
           id: proxy.oid,
           name: proxy.name,
           principal_id: proxy.principal&.oid,
@@ -95,8 +95,6 @@ module Api
           created_at: proxy.created_at,
           updated_at: proxy.updated_at
         }
-        payload[:config_hash] = proxy.config_hash if include_config_hash
-        payload
       end
     end
   end

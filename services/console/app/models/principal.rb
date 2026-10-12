@@ -364,7 +364,7 @@ class Principal < ApplicationRecord
   # in ASCENDING priority: the highest-priority grant lands last and becomes
   # authoritative. A secret reachable by several grants (e.g. both directly and
   # via a role) collapses to one row taking the strongest priority among them
-  # (MAX), and the id tiebreak keeps the order deterministic for config_hash.
+  # (MAX), and the id tiebreak keeps the order deterministic.
   # The selected effective_priority also drives cross-type conflict resolution
   # when PrincipalSyncConfig assembles a payload.
   #

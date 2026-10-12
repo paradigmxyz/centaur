@@ -71,17 +71,6 @@ class PgDsnSecret < ApplicationRecord
     end
   end
 
-  def proxy_label_settings?
-    Array(settings).any? do |setting|
-      next false unless setting.is_a?(Hash)
-
-      ref = setting.with_indifferent_access[:value_from]
-      next false unless ref.is_a?(Hash)
-
-      ref[:proxy_label].present?
-    end
-  end
-
   validates :foreign_id, presence: true, uniqueness: true,
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :database, presence: true

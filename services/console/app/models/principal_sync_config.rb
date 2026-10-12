@@ -1,40 +1,19 @@
-# Assembles the effective proxy config for a principal, in the shape
-# iron-proxy receives from proxy-sync. proxy-sync serves the sync endpoint;
-# Console uses this for operator inspection, sandbox permissions, and the
-# config_hash returned from the proxies API, which must match proxy-sync's.
+# Assembles a principal's effective config, in the shape iron-proxy receives
+# from proxy-sync, for operator inspection and sandbox permissions. proxy-sync
+# builds the per-proxy config it serves (requester credentials, proxy labels,
+# sandbox entitlements, and the config hash) itself.
 module PrincipalSyncConfig
-  def self.config_for(principal, proxy: nil, extra_static: [])
-    served = served_credentials_for(principal, extra_static: extra_static)
+  def self.config_for(principal)
+    served = served_credentials_for(principal)
     {
       "secrets" => proxy_secrets_for(served) + generated_proxy_secrets_for(principal),
       "transforms" => proxy_transforms_for(served),
-      "postgres" => sync_postgres_for(principal, proxy: proxy)
+      "postgres" => sync_postgres_for(principal)
     }
   end
 
   def self.redacted_config_for(principal)
     Principal.redact_live_secrets(config_for(principal))
-  end
-
-  def self.sync_config_for_proxy(proxy, sandbox_entitlements_hosts: Proxy.sandbox_entitlements_hosts)
-    config = config_for_proxy(proxy, sandbox_entitlements_hosts: sandbox_entitlements_hosts)
-    { config_hash: config_hash_for_proxy(proxy, config), config: config }
-  end
-
-  # The conversation principal's full effective grants plus, when a requester
-  # is bound, the requester's always-available direct wrapper grants (RFC
-  # 0005). Postgres and the api-server JWT stay derived from the conversation
-  # principal only.
-  def self.config_for_proxy(proxy, sandbox_entitlements_hosts: Proxy.sandbox_entitlements_hosts)
-    principal = proxy.principal
-    # A requester on an unassigned proxy is an invalid transient state; fail
-    # closed with the empty config instead of serving hoisted secrets alone.
-    config = if principal
-      config_for(principal, proxy: proxy, extra_static: requester_hoisted_statics_for(proxy.requester_principal))
-    else
-      Principal::EMPTY_CONFIG.deep_dup
-    end
-    with_sandbox_entitlements_secret_for_proxy(proxy, config, hosts: sandbox_entitlements_hosts)
   end
 
   def self.sync_secrets_for(principal)
@@ -45,91 +24,9 @@ module PrincipalSyncConfig
     proxy_transforms_for(served_credentials_for(principal))
   end
 
-  def self.sync_postgres_for(principal, proxy: nil)
-    effective_pg_dsn_secrets_for(principal).map { |pg| pg.to_proxy_dsn(principal: principal, proxy: proxy) }
+  def self.sync_postgres_for(principal)
+    effective_pg_dsn_secrets_for(principal).map { |pg| pg.to_proxy_dsn(principal: principal) }
   end
-
-  def self.config_hash_for_proxy(proxy, config)
-    payload = config.merge(
-      "principal" => proxy.principal&.oid,
-      "principal_assigned_at" => proxy.principal_assigned_at&.utc&.iso8601,
-      "proxy_labels" => proxy.labels || {}
-    )
-    if proxy.requester_principal_id
-      # Merged only when a requester is bound, so every nil-requester hash is
-      # bit-identical to before this field existed and the fleet does not
-      # re-apply configs on deploy. Requester grant changes need no term here:
-      # the requester part of the config is assembled live.
-      payload = payload.merge(
-        "requester_principal" => proxy.requester_principal&.oid,
-        "requester_principal_assigned_at" => proxy.requester_principal_assigned_at&.utc&.iso8601
-      )
-    end
-    "sha256:#{Digest::SHA256.hexdigest(canonical_json(payload))}"
-  end
-
-  # The hoist gate reads the linked credential's app, while the served value
-  # resolves from the source; require both to be the same credential so an
-  # operator-edited source cannot serve a token the whitelist never covered.
-  def self.requester_hoisted_statics_for(requester)
-    return [] unless requester
-
-    requester.always_available_static_secrets.select do |ss|
-      ss.source&.deliverable? && ss.source.resolves_credential?(ss.broker_credential)
-    end
-  end
-  private_class_method :requester_hoisted_statics_for
-
-  def self.with_sandbox_entitlements_secret_for_proxy(proxy, config, hosts:)
-    secret = sandbox_entitlements_secret_for_proxy(proxy, hosts: hosts)
-    return config unless secret
-
-    config.deep_dup.tap do |copy|
-      copy["secrets"] = Array(copy["secrets"]) + [ secret ]
-    end
-  end
-  private_class_method :with_sandbox_entitlements_secret_for_proxy
-
-  def self.sandbox_entitlements_secret_for_proxy(proxy, hosts:)
-    rules = Principal.normalize_hosts(hosts)
-      .map do |host|
-        {
-          "host" => host,
-          "methods" => %w[GET POST PUT PATCH DELETE],
-          "paths" => [ Proxy::SANDBOX_ENTITLEMENTS_PATH_PATTERN ]
-        }
-      end
-    return nil if rules.empty?
-
-    token = SandboxEntitlements::Jwt.encode_for_proxy(proxy)
-    return nil if token.blank?
-
-    {
-      "source" => { "type" => "control_plane", "value" => token },
-      "inject" => { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
-      "rules" => rules
-    }
-  end
-  private_class_method :sandbox_entitlements_secret_for_proxy
-
-  # Deep key-sorted JSON so the hash is stable regardless of Hash insertion or
-  # jsonb column ordering.
-  def self.canonical_json(value)
-    JSON.generate(canonicalize(value))
-  end
-  private_class_method :canonical_json
-
-  def self.canonicalize(value)
-    case value
-    when Hash
-      value.sort_by { |k, _| k.to_s }.to_h.transform_values { |v| canonicalize(v) }
-    when Array
-      value.map { |v| canonicalize(v) }
-    else
-      value
-    end
-  end
-  private_class_method :canonicalize
 
   def self.effective_pg_dsn_secrets_for(principal)
     principal.granted_pg_dsn_secrets.each_with_object({}) do |pg, winners|
@@ -143,9 +40,8 @@ module PrincipalSyncConfig
   # are dropped first (the proxy can't resolve a value for them) so a
   # non-deliverable winner never suppresses a credential that would otherwise
   # serve.
-  def self.served_credentials_for(principal, extra_static: [])
+  def self.served_credentials_for(principal)
     static = principal.granted_static_secrets.select { |ss| ss.source&.deliverable? }
-    static = merge_static_credentials(static, extra_static) if extra_static.any?
     gcp_auth = principal.granted_gcp_auth_secrets.to_a
     gcp_id_token = principal.granted_gcp_id_token_secrets.to_a
     aws_auth = principal.granted_aws_auth_secrets.to_a
@@ -164,19 +60,6 @@ module PrincipalSyncConfig
     }
   end
   private_class_method :served_credentials_for
-
-  # A secret reachable from both principals collapses to one row taking the
-  # strongest priority (matching granted_secrets_by_priority's MAX), and the
-  # re-sort restores the ascending-priority order iron-proxy's last-wins
-  # application relies on.
-  def self.merge_static_credentials(static, extra_static)
-    merged = (static + extra_static).each_with_object({}) do |candidate, by_id|
-      current = by_id[candidate.id]
-      by_id[candidate.id] = candidate if current.nil? || candidate.effective_priority.to_i > current.effective_priority.to_i
-    end
-    merged.values.sort_by { |ss| [ ss.effective_priority.to_i, ss.id ] }
-  end
-  private_class_method :merge_static_credentials
 
   def self.proxy_secrets_for(served)
     served[:static].map(&:to_proxy_secret)
@@ -232,8 +115,7 @@ module PrincipalSyncConfig
   # processing claimants strongest-first, any credential overlapping a claim a
   # stronger one already took is withheld. Strength is the effective grant
   # priority (direct outranks role). Same-priority conflicts are still emitted
-  # and left to proxy order, with id and class name only keeping config_hash
-  # stable.
+  # and left to proxy order.
   #
   # Host matching follows the proxy's wildcard behavior closely enough for
   # conflict detection: exact hosts collide with matching wildcard hosts (for

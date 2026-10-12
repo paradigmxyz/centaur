@@ -75,26 +75,6 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
     assert_equal({ "centaur.slack_user_id" => "U123" }, data["labels"])
   end
 
-  test "POST returns the sync config hash including sandbox entitlements" do
-    body = {
-      data: {
-        name: "edge-proxy-with-entitlements",
-        principal_id: principals(:acme_channel).oid
-      }
-    }
-
-    with_env(
-      "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
-      "CENTAUR_CONSOLE_URL" => "http://centaur-console:3000"
-    ) do
-      post api_v1_proxies_url, params: body.to_json, headers: auth_headers
-      assert_response :created
-      data = json_body.fetch("data")
-
-      assert_equal Proxy.find_by_oid!(data.fetch("id")).config_hash, data.fetch("config_hash")
-    end
-  end
-
   test "POST with invalid labels returns a validation error" do
     body = { data: { name: "bad-labels", labels: { "slack_user_id" => 123 } } }
     post api_v1_proxies_url, params: body.to_json, headers: auth_headers
@@ -169,22 +149,6 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
     assert_response :ok
     assert_equal({ "centaur.slack_user_id" => "U2" }, json_body.dig("data", "labels"))
     assert_equal({ "centaur.slack_user_id" => "U2" }, proxy.reload.labels)
-  end
-
-  test "PATCH returns the sync config hash including sandbox entitlements" do
-    proxy = proxies(:acme_proxy)
-    body = { data: { labels: { "centaur.slack_user_id" => "U2" } } }
-
-    with_env(
-      "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
-      "CENTAUR_CONSOLE_URL" => "http://centaur-console:3000"
-    ) do
-      patch api_v1_proxy_url(id: proxy.oid), params: body.to_json, headers: auth_headers
-      assert_response :ok
-      mutation_hash = json_body.dig("data", "config_hash")
-
-      assert_equal proxy.reload.config_hash, mutation_hash
-    end
   end
 
   test "PATCH with null labels clears labels" do
@@ -282,22 +246,6 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
     patch api_v1_proxy_url(id: proxy.oid), params: body.to_json, headers: auth_headers
     assert_response :not_found
     assert_nil proxy.reload.requester_principal
-  end
-
-  test "PATCH assigning a requester returns the sync config hash" do
-    proxy = proxies(:acme_proxy)
-    body = { data: { requester_principal_id: principals(:acme_user_alice).oid } }
-
-    with_env(
-      "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
-      "CENTAUR_CONSOLE_URL" => "http://centaur-console:3000"
-    ) do
-      patch api_v1_proxy_url(id: proxy.oid), params: body.to_json, headers: auth_headers
-      assert_response :ok
-      mutation_hash = json_body.dig("data", "config_hash")
-
-      assert_equal proxy.reload.config_hash, mutation_hash
-    end
   end
 
   test "POST accepts an optional requester_principal_id" do
