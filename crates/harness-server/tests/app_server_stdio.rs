@@ -1274,6 +1274,7 @@ fn turn_interrupt_rejects_wrong_thread_and_turn_without_killing_process() {
 
     let interrupted = bridge.run_turn_with_rejected_interrupts(
         &thread_id,
+        &start_log,
         3,
         4,
         5,
@@ -1884,9 +1885,12 @@ impl BridgeProcess {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Interrupts only after the harness has written `started_marker`, so a
+    /// slow spawn cannot be killed before it records its start.
     fn run_turn_with_rejected_interrupts(
         &mut self,
         thread_id: &str,
+        started_marker: &Path,
         request_id: i64,
         wrong_thread_interrupt_request_id: i64,
         wrong_turn_interrupt_request_id: i64,
@@ -1974,6 +1978,14 @@ impl BridgeProcess {
                     && !wrong_thread_interrupt_sent
                     && !capture.turn_id.is_empty()
                 {
+                    while !started_marker.exists() {
+                        assert!(
+                            Instant::now() < deadline,
+                            "harness never wrote {}",
+                            started_marker.display()
+                        );
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
                     self.send(json!({
                         "id": wrong_thread_interrupt_request_id,
                         "method": "turn/interrupt",
