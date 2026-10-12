@@ -30,6 +30,10 @@ apiRs:
 proxySync:
   replicaCount: 1
 
+# The test runner calls the console API through its NodePort (test-access.yaml).
+console:
+  allowedHosts: [127.0.0.1]
+
 slackbotv2:
   extraEnv:
     SLACK_API_URL: http://fake-slack.centaur-e2e-slack.svc.cluster.local:443/api/

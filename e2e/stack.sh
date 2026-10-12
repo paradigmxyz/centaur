@@ -10,7 +10,8 @@
 # slackbotv2, sandboxes, per-sandbox iron-proxies) plus two fakes for the
 # outside world: Slack, and the model providers, which CoreDNS resolves to an
 # in-cluster scripted model server. The test runner reaches the fakes,
-# Postgres, and api-rs on localhost through NodePorts mapped by e2e/infra/kind.yaml.
+# Postgres, api-rs, and the console on localhost through NodePorts mapped by
+# e2e/infra/kind.yaml.
 #
 # Images are built from the working tree and loaded into kind by default. Set
 # CENTAUR_E2E_IMAGE_TAG (e.g. main or sha-abc1234) to pull published images.
@@ -67,7 +68,7 @@ apply_stdin() {
 up() {
   if kind get clusters | grep -qx "$CLUSTER"; then
     use_cluster
-    if ! docker port "${CLUSTER}-control-plane" | grep -q '^30081/tcp'; then
+    if ! docker port "${CLUSTER}-control-plane" | grep -q '^30082/tcp'; then
       echo "cluster $CLUSTER predates e2e/infra/kind.yaml; run e2e/stack.sh down first" >&2
       exit 1
     fi
@@ -156,12 +157,13 @@ up() {
 wait_for_test_access() {
   for _ in $(seq 60); do
     if curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:30081/readyz 2> /dev/null &&
+      curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:30082/up 2> /dev/null &&
       timeout 2 bash -c '< /dev/tcp/127.0.0.1/30432' 2> /dev/null; then
       return 0
     fi
     sleep 1
   done
-  echo "api-rs and Postgres NodePorts did not become reachable" >&2
+  echo "api-rs, console, and Postgres NodePorts did not become reachable" >&2
   return 1
 }
 
@@ -230,6 +232,9 @@ run_tests() {
   # The console names its database after the Rails environment (contrib/chart/templates/console.yaml).
   export E2E_IRON_CONTROL_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:30432/iron_control_production"
   export E2E_API_URL=http://127.0.0.1:30081 E2E_API_KEY="$API_ADMIN_KEY"
+  # The key api-rs administers the console with.
+  E2E_CONSOLE_API_KEY="$(kubectl -n "$NAMESPACE" get secret centaur-infra-env -o jsonpath='{.data.IRON_CONTROL_INITIAL_API_KEY}' | base64 -d)"
+  export E2E_CONSOLE_URL=http://127.0.0.1:30082 E2E_CONSOLE_API_KEY
   # Expect the credentials of the auth mode the stack runs in.
   E2E_AUTH_MODE="$(kubectl -n "$NAMESPACE" get "deploy/${RELEASE}-centaur-api-rs" \
     -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="CODEX_AUTH_MODE")].value}')"

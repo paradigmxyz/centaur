@@ -88,6 +88,8 @@ const db = new SQL(required('E2E_DATABASE_URL'))
 const ironControlDb = new SQL(required('E2E_IRON_CONTROL_DATABASE_URL'))
 const apiUrl = required('E2E_API_URL')
 const apiKey = required('E2E_API_KEY')
+const consoleUrl = required('E2E_CONSOLE_URL')
+const consoleApiKey = required('E2E_CONSOLE_API_KEY')
 const namespace = 'centaur'
 const release = 'centaur'
 
@@ -129,29 +131,38 @@ export const model = {
   }
 }
 
-export const api = {
-  /** Calls api-rs as an operator (the e2e admin key); returns the status and JSON body. */
-  async request(method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> {
-    const response = await fetch(`${apiUrl}${path}`, {
-      method,
-      headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) })
-    })
-    const text = await response.text()
-    let payload: unknown = text
-    try {
-      payload = text ? JSON.parse(text) : undefined
-    } catch {
-      // Rejections from request extractors are plain text.
+/** A JSON API called with an operator's bearer key. */
+function operatorApi(baseUrl: string, key: string) {
+  const client = {
+    /** Calls the API; returns the status and JSON body. */
+    async request(method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> {
+      const response = await fetch(`${baseUrl}${path}`, {
+        method,
+        headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) })
+      })
+      const text = await response.text()
+      let payload: unknown = text
+      try {
+        payload = text ? JSON.parse(text) : undefined
+      } catch {
+        // Rejections from request extractors are plain text.
+      }
+      return { status: response.status, body: payload }
+    },
+    /** Like request, but fails unless the API answers 2xx. */
+    async ok(method: string, path: string, body?: unknown): Promise<any> {
+      const { status, body: payload } = await client.request(method, path, body)
+      if (status < 200 || status > 299) throw new Error(`${method} ${path} failed: ${status} ${JSON.stringify(payload)}`)
+      return payload
     }
-    return { status: response.status, body: payload }
-  },
-  /** Like request, but fails unless api-rs answers 2xx. */
-  async ok(method: string, path: string, body?: unknown): Promise<any> {
-    const { status, body: payload } = await api.request(method, path, body)
-    if (status < 200 || status > 299) throw new Error(`${method} ${path} failed: ${status} ${JSON.stringify(payload)}`)
-    return payload
-  },
+  }
+  return client
+}
+
+/** api-rs, called as an operator with the e2e admin key. */
+export const api = {
+  ...operatorApi(apiUrl, apiKey),
   /** Pauses the thread's sandbox now, as its idle timeout would; returns whether it paused. */
   async pause(thread: Thread): Promise<boolean> {
     const result = await api.ok('POST', `/api/session/${encodeURIComponent(thread.key)}/pause`)
@@ -294,6 +305,8 @@ export type Principal = {
  * sandbox proxy's credentials and grants.
  */
 export const ironControl = {
+  /** The console API, called as an operator with the key api-rs administers it with. */
+  api: operatorApi(consoleUrl, consoleApiKey),
   /** The principals a sandbox's proxy acts for: the conversation, and the requester if one is bound. */
   async proxy(sandboxId: string): Promise<{ principal: Principal; requester: Principal | null }> {
     const [proxy] = await ironControlDb`
@@ -311,13 +324,6 @@ export const ironControl = {
     )
     if (!principal) throw new Error(`proxy for sandbox ${sandboxId} has no principal`)
     return { principal, requester: requester ?? null }
-  },
-  /**
-   * Runs Ruby against the console's models, as an operator's change through
-   * the console would: model callbacks run, so proxy-sync sees the change.
-   */
-  async rails(ruby: string): Promise<string> {
-    return kubectl({}, 'exec', `deploy/${release}-centaur-console`, '--', 'bin/rails', 'runner', ruby)
   },
   /** The principal for a Slack user, if iron-control has one. */
   async slackUser(user: SlackUser): Promise<Principal | undefined> {

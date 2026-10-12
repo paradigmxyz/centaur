@@ -1,4 +1,4 @@
-// Credential changes an operator makes in iron-control reach a running
+// Credential changes an operator makes through the console API reach a running
 // sandbox's proxy through proxy-sync on its next syncs, without restarting the
 // sandbox: a granted secret that outranks the provider key replaces it, a
 // rotated value is picked up, and revoking the grant restores the provider key.
@@ -16,11 +16,14 @@ import {
   turnTimeoutMs
 } from '../lib'
 
-const SECRET_PREFIX = 'e2e-credential-swap-'
+const consoleApi = ironControl.api
+// Marks the secrets this file creates, so they can be found and removed.
+const LABELS = { e2e: 'credential-swap' }
 
-// A failed run must not leave its grant on the shared channel principal.
+// A failed run must not leave its grant on the channel principal.
 async function removeSwappedSecrets(): Promise<void> {
-  await ironControl.rails(`StaticSecret.where("foreign_id LIKE '${SECRET_PREFIX}%'").destroy_all`)
+  const { data } = await consoleApi.ok('GET', '/api/v1/static_secrets?labels[e2e]=credential-swap&limit=200')
+  for (const secret of data) await consoleApi.ok('DELETE', `/api/v1/static_secrets/${secret.id}`)
 }
 
 afterAll(removeSwappedSecrets)
@@ -47,11 +50,9 @@ test.skipIf(authMode !== 'api_key')(
     })
     const first = await thread.nextTurn()
     expect(first.request?.credential).toBe(providerCredentials.openai)
-    const { principal } = await ironControl.proxy(first.sandbox.id)
 
-    const secret = `${SECRET_PREFIX}${randomUUID().slice(0, 8)}`
-    const credentialAfter = async (change: string): Promise<string | undefined> => {
-      await ironControl.rails(change)
+    const credentialAfter = async (change: () => Promise<unknown>): Promise<string | undefined> => {
+      await change()
       await waitForSyncsAfterChange(first.sandbox.id)
       await thread.mention('Call the model again.', model.says('Called.'))
       const turn = await thread.nextTurn()
@@ -59,29 +60,46 @@ test.skipIf(authMode !== 'api_key')(
       return turn.request?.credential
     }
 
-    // A direct grant outranks the infra role's provider key on the same
-    // host and header, so deconfliction withholds the provider key.
+    // Inject on the hosts the infra role's OpenAI key covers.
+    const { data: secrets } = await consoleApi.ok('GET', '/api/v1/static_secrets?limit=200')
+    const providerKey = secrets.find((secret: any) => secret.replace_config?.proxy_value === 'OPENAI_API_KEY')
+    if (!providerKey) throw new Error('the console has no OPENAI_API_KEY replace secret')
+    const rules = providerKey.rules.map(({ host, cidr, http_methods, paths }: any) =>
+      Object.fromEntries(Object.entries({ host, cidr, http_methods, paths }).filter(([, value]) => value != null))
+    )
+    const foreignId = `e2e-credential-swap-${randomUUID().slice(0, 8)}`
+    const upsertSecret = (value: string) =>
+      consoleApi.ok('PUT', `/api/v1/static_secrets/${foreignId}`, {
+        data: {
+          labels: LABELS,
+          inject_config: { header: 'Authorization', formatter: 'Bearer {{ .Value }}' },
+          source: { source_type: 'control_plane', secret: value, config: {} },
+          rules
+        }
+      })
+
+    // A direct grant outranks the infra role's grant on the same host and
+    // header, so deconfliction withholds the provider key.
+    const { principal } = await ironControl.proxy(first.sandbox.id)
+    const { data: principalRecord } = await consoleApi.ok(
+      'GET',
+      `/api/v1/principals/lookup/${encodeURIComponent(principal.foreignId)}`
+    )
     const granted = `sk-e2e-granted-${randomUUID().slice(0, 8)}`
-    expect(await credentialAfter(`
-      principal = Principal.find_by!(foreign_id: ${JSON.stringify(principal.foreignId)})
-      provider_key = StaticSecret.where("replace_config->>'proxy_value' = 'OPENAI_API_KEY'").sole
-      secret = StaticSecret.new(
-        foreign_id: ${JSON.stringify(secret)}, created_by: principal.created_by,
-        inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" })
-      secret.build_source(source_type: "control_plane", secret: ${JSON.stringify(granted)})
-      provider_key.rules.each { |rule| secret.rules.build(host: rule.host, position: rule.position) }
-      secret.save!
-      Grant.create!(principal: principal, static_secret: secret, created_by: principal.created_by)
-    `)).toBe(`Bearer ${granted}`)
+    let grantId = ''
+    expect(await credentialAfter(async () => {
+      const { data: secret } = await upsertSecret(granted)
+      const { data: grant } = await consoleApi.ok('POST', '/api/v1/grants', {
+        data: { principal_id: principalRecord.id, static_secret_id: secret.id }
+      })
+      grantId = grant.id
+    })).toBe(`Bearer ${granted}`)
 
     const rotated = `sk-e2e-rotated-${randomUUID().slice(0, 8)}`
-    expect(await credentialAfter(`
-      StaticSecret.find_by!(foreign_id: ${JSON.stringify(secret)}).source.update!(secret: ${JSON.stringify(rotated)})
-    `)).toBe(`Bearer ${rotated}`)
+    expect(await credentialAfter(() => upsertSecret(rotated))).toBe(`Bearer ${rotated}`)
 
-    expect(await credentialAfter(`
-      StaticSecret.find_by!(foreign_id: ${JSON.stringify(secret)}).destroy!
-    `)).toBe(providerCredentials.openai)
+    expect(await credentialAfter(() => consoleApi.ok('DELETE', `/api/v1/grants/${grantId}`)))
+      .toBe(providerCredentials.openai)
   },
   8 * turnTimeoutMs
 )
