@@ -13,7 +13,6 @@ import { BOT, CHANNEL, USER, type SlackUser } from '../fakes/slack-fixture'
 
 export {
   CHANNEL,
-  CREDENTIALS_CHANNEL,
   DEFAULTS_CHANNEL,
   EXTERNAL_TEAM,
   EXTERNAL_USER,
@@ -27,8 +26,11 @@ export type Channel = { id: string; name: string }
 /** A provider error, as Anthropic's HTTP error or OpenAI's failed response carries it. */
 export type ProviderError = { status: number; type: string; code?: string; message: string }
 
-/** A scripted model answer, matched by a token placed in the user's message. */
-export type Script = { token: string; text: string; delayMs?: number; error?: ProviderError }
+/**
+ * A scripted model answer, matched by a token placed in the user's message.
+ * `run` first has the harness run a shell command through its shell tool.
+ */
+export type Script = { token: string; text: string; delayMs?: number; error?: ProviderError; run?: string }
 
 export type Execution = { execution_id: string; status: string; error: string | null }
 
@@ -116,6 +118,22 @@ export const model = {
    */
   says(text: string, options: { delayMs?: number } = {}): Script {
     return { token: `e2e-${randomUUID().slice(0, 8)}`, text, ...options }
+  },
+  /**
+   * Scripts the model to run a shell command through the harness's shell tool
+   * (OpenAI harnesses), then answer with `text` once the command finishes.
+   */
+  runs(command: string, text = 'Ran it.'): Script {
+    return { token: `e2e-${randomUUID().slice(0, 8)}`, text, run: command }
+  },
+  /**
+   * The X-E2E-Credential header of each request a command made to
+   * https://<provider host>/_e2e/echo/<match>, oldest first.
+   */
+  async echoes(match: string): Promise<Array<string | undefined>> {
+    const response = await fetch(`${modelUrl}/_e2e/echoes?match=${encodeURIComponent(match)}`)
+    const echoes = (await response.json()) as Array<{ credential?: string }>
+    return echoes.map(echo => echo.credential)
   },
   /** Scripts the provider to fail the request instead of answering it. */
   fails(error: ProviderError): Script {
@@ -495,7 +513,9 @@ async function registerScript(script: Script): Promise<void> {
   const response = await fetch(`${modelUrl}/_e2e/replies`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ match: script.token, text: script.text, delayMs: script.delayMs, error: script.error })
+    body: JSON.stringify({
+      match: script.token, text: script.text, delayMs: script.delayMs, error: script.error, run: script.run
+    })
   })
   if (!response.ok) throw new Error(`registering the model script failed: ${response.status}`)
 }

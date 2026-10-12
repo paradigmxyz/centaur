@@ -5,13 +5,20 @@
 // replies keyed by a token they put in their Slack message, and read back
 // every request the harness made.
 //
+// A reply can instead run a shell command first: the model answers with a
+// call to the harness's shell tool, then with its text once the tool's output
+// comes back. Commands can reach /_e2e/echo/<match> on the provider hosts,
+// which records the X-E2E-Credential header iron-proxy injected.
+//
 // Provider traffic: HTTPS on 8443 (cert for the provider hostnames).
 // Test control:     HTTP on 8080 (port-forwarded to the test runner).
 import { randomUUID } from 'node:crypto'
 
 /** A provider error to answer with instead of text: an HTTP error from Anthropic, a failed response from OpenAI. */
 type ProviderError = { status: number; type: string; code?: string; message: string }
-type Reply = { match: string; text: string; delayMs?: number; error?: ProviderError }
+type Reply = { match: string; text: string; delayMs?: number; error?: ProviderError; run?: string }
+/** A request a tool command made to the echo path, and the test credential it carried. */
+type Echo = { at: string; match: string; credential?: string }
 type Recorded = {
   at: string
   provider: 'openai' | 'anthropic'
@@ -42,6 +49,7 @@ const RESPONSES_PATHS = ['/v1/responses', '/backend-api/codex/responses']
 
 const replies: Reply[] = []
 const requests: Recorded[] = []
+const echoes: Echo[] = []
 /** OpenAI response id -> the conversation including that response's answer. */
 const responses = new Map<string, unknown[]>()
 
@@ -53,6 +61,9 @@ Bun.serve({
     if (url.pathname === '/_e2e/replies' && request.method === 'POST') {
       replies.push((await request.json()) as Reply)
       return Response.json({ ok: true })
+    }
+    if (url.pathname === '/_e2e/echoes') {
+      return Response.json(echoes.filter(echo => echo.match === url.searchParams.get('match')))
     }
     if (url.pathname === '/_e2e/requests') {
       const match = url.searchParams.get('match')
@@ -70,6 +81,11 @@ Bun.serve<Caller & { path: string }>({
     const caller = {
       credential: request.headers.get('authorization') ?? request.headers.get('x-api-key'),
       account: request.headers.get('chatgpt-account-id')
+    }
+    if (url.pathname.startsWith('/_e2e/echo/')) {
+      const credential = request.headers.get('x-e2e-credential') ?? undefined
+      echoes.push({ at: new Date().toISOString(), match: url.pathname.slice('/_e2e/echo/'.length), credential })
+      return new Response('echoed\n')
     }
     // Codex's preferred transport: one WebSocket per session, carrying
     // response.create requests and the same events the HTTP stream would.
@@ -124,6 +140,26 @@ function openaiEvents(
   const text = reply?.text ?? 'ok'
   const responseId = `resp_${randomUUID()}`
   const itemId = `msg_${randomUUID()}`
+  const toolCall = reply?.run && !hasToolOutput(body.input) ? shellCall([...(body.tools ?? []), ...declaredTools(conversation)], reply.run) : undefined
+  if (toolCall) {
+    const output = (status: string) => ({
+      id: responseId, object: 'response', model: body.model, status, output: [toolCall],
+      usage: {
+        input_tokens: 0, input_tokens_details: { cached_tokens: 0 },
+        output_tokens: 0, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 0
+      }
+    })
+    responses.set(responseId, [...conversation, toolCall])
+    return {
+      events: [
+        { type: 'response.created', response: { ...output('in_progress'), output: [] } },
+        { type: 'response.output_item.added', output_index: 0, item: toolCall },
+        { type: 'response.output_item.done', output_index: 0, item: toolCall },
+        { type: 'response.completed', response: output('completed') }
+      ].map((event, sequence) => ({ ...event, sequence_number: sequence })),
+      delayMs: 0
+    }
+  }
   const message = (status: string, content: unknown[]) => ({
     type: 'message', id: itemId, role: 'assistant', status, content
   })
@@ -164,6 +200,7 @@ function openaiEvents(
 
 async function anthropicMessage(path: string, caller: Caller, body: any): Promise<Response> {
   const reply = record('anthropic', path, caller, body, body.messages ?? [])
+  if (reply?.run) log('model_server_unmodeled_run', { provider: 'anthropic' })
   const text = reply?.text ?? 'ok'
   await Bun.sleep(reply?.delayMs ?? 0)
   if (reply?.error) {
@@ -208,6 +245,50 @@ function record(
     body
   })
   return reply
+}
+
+/** Whether this request returns the output of a tool call the model made. */
+function hasToolOutput(input: unknown): boolean {
+  return Array.isArray(input) && input.some((item: any) => String(item?.type ?? '').endsWith('_call_output'))
+}
+
+/**
+ * Tools declared in the conversation. Codex's WebSocket transport declares
+ * them once, as an `additional_tools` input item grouped into namespaces.
+ */
+function declaredTools(conversation: unknown[]): any[] {
+  const flatten = (tools: any[]): any[] =>
+    tools.flatMap(tool => (tool?.type === 'namespace' ? flatten(tool.tools ?? []) : [tool]))
+  return flatten(conversation.flatMap((item: any) => (item?.type === 'additional_tools' ? item.tools ?? [] : [])))
+}
+
+/** A call to whichever shell tool the harness offered, running `command`. */
+function shellCall(tools: any[], command: string): Record<string, unknown> {
+  const callId = `call_${randomUUID()}`
+  const names = new Set(tools.map(tool => tool?.name))
+  // Codex's code mode: JavaScript that calls the nested exec_command tool.
+  if (tools.some(tool => tool?.type === 'custom' && tool.name === 'exec')) {
+    return {
+      type: 'custom_tool_call', id: `ctc_${randomUUID()}`, call_id: callId, status: 'completed', name: 'exec',
+      input: `text(await tools.exec_command({ cmd: ${JSON.stringify(command)} }))`
+    }
+  }
+  if (tools.some(tool => tool?.type === 'local_shell')) {
+    return {
+      type: 'local_shell_call', id: `lsh_${randomUUID()}`, call_id: callId, status: 'completed',
+      action: { type: 'exec', command: ['bash', '-lc', command], env: {} }
+    }
+  }
+  const [name, args] = names.has('exec_command')
+    ? ['exec_command', { cmd: command }]
+    : names.has('shell_command')
+      ? ['shell_command', { command }]
+      : ['shell', { command: ['bash', '-lc', command] }]
+  if (!names.has(name)) log('model_server_no_shell_tool', { tools: [...names] })
+  return {
+    type: 'function_call', id: `fc_${randomUUID()}`, call_id: callId, status: 'completed',
+    name, arguments: JSON.stringify(args)
+  }
 }
 
 function sse(events: Array<{ type: string; [field: string]: unknown }>): Response {

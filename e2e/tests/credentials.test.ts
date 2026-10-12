@@ -1,27 +1,24 @@
 // Credential changes an operator makes through the console API reach a running
-// sandbox's proxy through proxy-sync on its next syncs, without restarting the
-// sandbox: a granted secret that outranks the provider key replaces it, a
-// rotated value is picked up, and revoking the grant restores the provider key.
-//
-// The turns run on Claude Code, which sends each model call as its own HTTP
-// request, so every call is transformed with the proxy's current config.
-// Codex streams its turns over one WebSocket to the Responses API, which keeps
-// the credential its handshake carried until the socket reconnects.
+// sandbox through proxy-sync on its next syncs, without restarting it. The
+// sandbox sees them as a tool would: the model has the harness curl an echo
+// path that records the header iron-proxy injected. A granted secret is
+// injected, a rotated value replaces it, and revoking the grant removes it.
 import { afterAll, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import {
-  CREDENTIALS_CHANNEL,
-  authMode,
   cluster,
   eventually,
   ironControl,
   model,
-  providerCredentials,
   slack,
-  turnTimeoutMs
+  turnTimeoutMs,
+  type Script,
+  type Thread
 } from '../lib'
 
 const consoleApi = ironControl.api
+// The model server serves the echo path on the provider hosts.
+const ECHO_HOST = 'api.openai.com'
 // Marks the secrets this file creates, so they can be found and removed.
 const LABELS = { e2e: 'credential-swap' }
 
@@ -45,66 +42,65 @@ async function waitForSyncsAfterChange(sandboxId: string): Promise<void> {
   })
 }
 
-// The swap replaces Claude Code's API key, which only api_key mode sends.
-test.skipIf(authMode !== 'api_key')(
-  'granted, rotated, and revoked credentials reach a running sandbox',
-  async () => {
-    await removeSwappedSecrets()
-    const thread = await slack.mention('--claudecode Use the provider key.', model.says('Provider key.'), {
-      channel: CREDENTIALS_CHANNEL
+test('granted, rotated, and revoked credentials reach a running sandbox', async () => {
+  await removeSwappedSecrets()
+
+  /** Runs a turn whose model curls the echo path; returns the credential it carried. */
+  const echoedCredential = async (send: (script: Script) => Promise<Thread>): Promise<string | undefined> => {
+    const match = randomUUID().slice(0, 8)
+    const script = model.runs(`curl -fsS https://${ECHO_HOST}/_e2e/echo/${match}`, 'Checked.')
+    const turn = await (await send(script)).nextTurn()
+    expect(turn.reply).toBe('Checked.')
+    const echoes = await model.echoes(match)
+    expect(echoes).toHaveLength(1)
+    return echoes[0]
+  }
+
+  let thread: Thread | undefined
+  expect(await echoedCredential(async script => {
+    thread = await slack.mention('--codex Check the credential.', script)
+    return thread
+  })).toBeUndefined()
+  const [sandbox] = await thread!.sandboxes()
+  const credentialAfter = async (change: () => Promise<unknown>): Promise<string | undefined> => {
+    await change()
+    await waitForSyncsAfterChange(sandbox!.id)
+    const credential = await echoedCredential(async script => {
+      await thread!.mention('Check it again.', script)
+      return thread!
     })
-    const first = await thread.nextTurn()
-    expect(first.request?.credential).toBe(providerCredentials.anthropic)
+    expect((await thread!.sandboxes()).map(({ id }) => id)).toEqual([sandbox!.id])
+    return credential
+  }
 
-    const credentialAfter = async (change: () => Promise<unknown>): Promise<string | undefined> => {
-      await change()
-      await waitForSyncsAfterChange(first.sandbox.id)
-      await thread.mention('Call the model again.', model.says('Called.'))
-      const turn = await thread.nextTurn()
-      expect(turn.sandbox.id).toBe(first.sandbox.id)
-      return turn.request?.credential
-    }
+  const foreignId = `e2e-credential-swap-${randomUUID().slice(0, 8)}`
+  const upsertSecret = (value: string) =>
+    consoleApi.ok('PUT', `/api/v1/static_secrets/${foreignId}`, {
+      data: {
+        labels: LABELS,
+        inject_config: { header: 'X-E2E-Credential' },
+        source: { source_type: 'control_plane', secret: value, config: {} },
+        rules: [{ host: ECHO_HOST, paths: ['/_e2e/echo/*'] }]
+      }
+    })
+  const { principal } = await ironControl.proxy(sandbox!.id)
+  const { data: principalRecord } = await consoleApi.ok(
+    'GET',
+    `/api/v1/principals/lookup/${encodeURIComponent(principal.foreignId)}`
+  )
 
-    // Inject on the hosts the infra role's Anthropic key covers.
-    const { data: secrets } = await consoleApi.ok('GET', '/api/v1/static_secrets?limit=200')
-    const providerKey = secrets.find((secret: any) => secret.replace_config?.proxy_value === 'ANTHROPIC_API_KEY')
-    if (!providerKey) throw new Error('the console has no ANTHROPIC_API_KEY replace secret')
-    const rules = providerKey.rules.map(({ host, cidr, http_methods, paths }: any) =>
-      Object.fromEntries(Object.entries({ host, cidr, http_methods, paths }).filter(([, value]) => value != null))
-    )
-    const foreignId = `e2e-credential-swap-${randomUUID().slice(0, 8)}`
-    const upsertSecret = (value: string) =>
-      consoleApi.ok('PUT', `/api/v1/static_secrets/${foreignId}`, {
-        data: {
-          labels: LABELS,
-          inject_config: { header: 'X-Api-Key' },
-          source: { source_type: 'control_plane', secret: value, config: {} },
-          rules
-        }
-      })
+  const granted = `e2e-granted-${randomUUID().slice(0, 8)}`
+  let grantId = ''
+  expect(await credentialAfter(async () => {
+    const { data: secret } = await upsertSecret(granted)
+    const { data: grant } = await consoleApi.ok('POST', '/api/v1/grants', {
+      data: { principal_id: principalRecord.id, static_secret_id: secret.id }
+    })
+    grantId = grant.id
+  })).toBe(granted)
 
-    // A direct grant outranks the infra role's grant on the same host and
-    // header, so deconfliction withholds the provider key.
-    const { principal } = await ironControl.proxy(first.sandbox.id)
-    const { data: principalRecord } = await consoleApi.ok(
-      'GET',
-      `/api/v1/principals/lookup/${encodeURIComponent(principal.foreignId)}`
-    )
-    const granted = `sk-e2e-granted-${randomUUID().slice(0, 8)}`
-    let grantId = ''
-    expect(await credentialAfter(async () => {
-      const { data: secret } = await upsertSecret(granted)
-      const { data: grant } = await consoleApi.ok('POST', '/api/v1/grants', {
-        data: { principal_id: principalRecord.id, static_secret_id: secret.id }
-      })
-      grantId = grant.id
-    })).toBe(granted)
+  const rotated = `e2e-rotated-${randomUUID().slice(0, 8)}`
+  expect(await credentialAfter(() => upsertSecret(rotated))).toBe(rotated)
 
-    const rotated = `sk-e2e-rotated-${randomUUID().slice(0, 8)}`
-    expect(await credentialAfter(() => upsertSecret(rotated))).toBe(rotated)
-
-    expect(await credentialAfter(() => consoleApi.ok('DELETE', `/api/v1/grants/${grantId}`)))
-      .toBe(providerCredentials.anthropic)
-  },
-  8 * turnTimeoutMs
-)
+  expect(await credentialAfter(() => consoleApi.ok('DELETE', `/api/v1/grants/${grantId}`))).toBeUndefined()
+}, 8 * turnTimeoutMs)
