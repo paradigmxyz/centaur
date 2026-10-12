@@ -81,6 +81,13 @@ module GoogleDocs
       assert GoogleDocs::SyncCredential.syncable?(current_credential, oauth_app_slug: app.slug)
       refute GoogleDocs::SyncCredential.syncable?(current_credential, oauth_app_slug: "another-app")
 
+      current_credential.scopes = [ "https://www.googleapis.com/auth/drive" ]
+      assert GoogleDocs::SyncCredential.syncable?(current_credential, oauth_app_slug: app.slug)
+
+      current_credential.scopes = [ "https://www.googleapis.com/auth/drive.file" ]
+      refute GoogleDocs::SyncCredential.syncable?(current_credential, oauth_app_slug: app.slug)
+
+      current_credential.update!(scopes: [ "https://www.googleapis.com/auth/drive" ])
       app.update!(enabled: false)
       refute GoogleDocs::SyncCredential.syncable?(current_credential.reload)
     end

@@ -4,6 +4,7 @@ require "json"
 
 module GoogleDocs
   class SyncCredential
+    DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
     DRIVE_METADATA_SCOPE = "https://www.googleapis.com/auth/drive.metadata.readonly"
     DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
     DOCS_READONLY_SCOPE = "https://www.googleapis.com/auth/documents.readonly"
@@ -47,7 +48,7 @@ module GoogleDocs
 
       def required_scopes_granted?(scopes)
         granted = Array(scopes)
-        granted.include?(DRIVE_READONLY_SCOPE) ||
+        granted.include?(DRIVE_SCOPE) || granted.include?(DRIVE_READONLY_SCOPE) ||
           (granted.include?(DRIVE_METADATA_SCOPE) && granted.include?(DOCS_READONLY_SCOPE))
       end
 

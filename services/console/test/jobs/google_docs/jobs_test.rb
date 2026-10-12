@@ -3,6 +3,7 @@ require "test_helper"
 module GoogleDocs
   class JobsTest < ActiveJob::TestCase
     SYNC_ENABLED_ENV = "CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED"
+    SYNC_APP_ENV = "CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_OAUTH_APP_SLUG"
 
     class FakeApiClient
       attr_accessor :checkpoint, :missing
@@ -38,7 +39,9 @@ module GoogleDocs
 
     setup do
       @previous_sync_enabled = ENV[SYNC_ENABLED_ENV]
+      @previous_sync_app = ENV[SYNC_APP_ENV]
       ENV[SYNC_ENABLED_ENV] = "true"
+      ENV[SYNC_APP_ENV] = "google-docs-job-#{SecureRandom.hex(6)}"
     end
 
     teardown do
@@ -47,12 +50,17 @@ module GoogleDocs
       else
         ENV[SYNC_ENABLED_ENV] = @previous_sync_enabled
       end
+      if @previous_sync_app.nil?
+        ENV.delete(SYNC_APP_ENV)
+      else
+        ENV[SYNC_APP_ENV] = @previous_sync_app
+      end
     end
 
-    def create_google_app
+    def create_google_app(slug: SyncCredential.oauth_app_slug)
       OauthApp.create!(
         provider: "google",
-        slug: "google-docs-job-#{SecureRandom.hex(6)}",
+        slug: slug,
         client_id: "google-client",
         client_secret: "secret",
         allowed_scopes: [ SyncCredential::DRIVE_READONLY_SCOPE ],
@@ -88,6 +96,23 @@ module GoogleDocs
       api_client.checkpoint = checkpoint_for(credential, user_changes_page_token: "change-200")
       CentaurApiClient.stub(:new, api_client) { PollSyncJob.perform_now(app.slug) }
       assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
+    end
+
+    test "queued work ignores credentials outside the configured OAuth app" do
+      credential = create_credential(app: create_google_app(slug: "another-google-app"))
+      api_client = FakeApiClient.new
+      google_http = ->(**) { flunk "excluded credentials should not call Google" }
+
+      with_clients(api_client, google_http) do
+        PollSyncJob.perform_now
+        InitialSyncJob.perform_now(credential.id)
+        IncrementalSyncJob.perform_now(credential.id)
+        FetchDocumentJob.perform_now(credential.id, google_doc)
+      end
+
+      assert_empty api_client.batches
+      assert_nil api_client.checkpoint
+      assert_no_enqueued_jobs
     end
 
     test "sync kill switch prevents polling and queued ETL work" do

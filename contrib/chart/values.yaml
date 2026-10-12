@@ -181,6 +181,9 @@ console:
   # This does not disable Google OAuth or remove previously indexed content.
   googleDocsSync:
     enabled: false
+    # Index credentials from this OAuth app. A dedicated app can limit ingestion
+    # to one shared account without syncing other connected users.
+    oauthAppSlug: google
   service:
     httpPort: 3000
   # Optional Ingress for the console. Bring your own controller — Tailscale

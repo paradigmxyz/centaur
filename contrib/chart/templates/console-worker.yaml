@@ -173,6 +173,10 @@ spec:
 {{- end }}
             - name: CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED
               value: {{ $console.googleDocsSync.enabled | quote }}
+{{- with $console.googleDocsSync.oauthAppSlug }}
+            - name: CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_OAUTH_APP_SLUG
+              value: {{ . | quote }}
+{{- end }}
             - name: CENTAUR_CONSOLE_COMPANY_CONTEXT_V1_ENABLED
               value: {{ .Values.companyContextV1.enabled | quote }}
             - name: RAILS_LOG_TO_STDOUT
