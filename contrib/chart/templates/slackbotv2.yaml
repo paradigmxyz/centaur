@@ -63,11 +63,16 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sSLACKBOT_API_KEY" .Values.secretManager.envPrefix }}
+{{- /* slackbotv2.extraEnv wins if it sets SLACKBOTV2_DATABASE_URL (for example to
+       add driver-specific connection parameters); rendering both would produce a
+       duplicate env entry. */}}
+{{- if not (hasKey .Values.slackbotv2.extraEnv "SLACKBOTV2_DATABASE_URL") }}
             - name: SLACKBOTV2_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+{{- end }}
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
