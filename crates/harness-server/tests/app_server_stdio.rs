@@ -2887,3 +2887,98 @@ fn shell_quote(path: &Path) -> String {
 fn shell_quote_str(raw: &str) -> String {
     format!("'{}'", raw.replace('\'', "'\\''"))
 }
+
+#[test]
+fn fake_codex_blocks_mode_filters_child_and_stale_notifications_across_queued_turns() {
+    // Codex 0.160.1 emits child-agent output on the parent's app-server pipe.
+    // Replay those shapes before the RPC response, during the turn, and after
+    // its completion so they cannot answer or complete a later execution.
+    let fake_codex = temp_path("fake-child-codex.sh");
+    let log = temp_path("fake-child-codex-requests.jsonl");
+    let replay = include_str!("fixtures/codex/child_notifications.jsonl")
+        .lines()
+        .map(|line| format!("printf '%s\\n' '{line}'"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let parent_collab = json!({"method": "item/completed", "params": {
+        "threadId": "thread-1", "turnId": "turn-1", "completedAtMs": 2,
+        "item": {
+            "type": "collabAgentToolCall", "id": "spawn-child", "tool": "spawnAgent",
+            "status": "completed", "senderThreadId": "thread-1", "receiverThreadIds": ["child"],
+            "prompt": "review", "model": null, "reasoningEffort": null, "agentsStates": {},
+        },
+    }});
+    let script = fake_codex_app_server_script(&log)
+        .replace(
+            r#"      printf '{"id":%s,"result":{"turn":{"id":"turn-1"}}}\n' "$id""#,
+            &format!(
+                r#"{replay}
+      printf '{{"id":%s,"result":{{"turn":{{"id":"turn-1"}}}}}}\n' "$id"
+{replay}"#,
+            ),
+        )
+        .replace(
+            "      if [ -n \"${FAKE_CODEX_TURN_DELAY:-}\" ]; then",
+            &format!("{replay}\nprintf '%s\\n' '{parent_collab}'\n      if [ -n \"${{FAKE_CODEX_TURN_DELAY:-}}\" ]; then"),
+        )
+        .replace(
+            "      fi\n      ;;",
+            &format!("      fi\n{replay}\n      ;;"),
+        );
+    std::fs::write(&fake_codex, script).expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).unwrap();
+    let mut bridge = BridgeProcess::spawn_harness_blocks(
+        Harness::Codex,
+        None,
+        Some(("CODEX_BIN", fake_codex.to_str().unwrap())),
+    );
+    for prompt in ["first queued turn", "second queued turn"] {
+        bridge.send(json!({
+            "type": "user", "thread_key": "slack:C123:123.456",
+            "trace_metadata": {"source": "slackbotv2", "action": "execute"},
+            "message": {"role": "user", "content": [{"type": "text", "text": prompt}]},
+        }));
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for _ in 0..2 {
+        let turn = bridge.read_blocks_turn(deadline);
+        assert_completed_turn(&turn);
+        assert_codex_v2_turn(&turn);
+        assert_eq!(turn.text_from_deltas, "codex blocks");
+        assert_eq!(turn.completed_agent_items.len(), 1);
+    }
+    let lines = bridge.finish_successfully();
+    let events = lines
+        .iter()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["method"] == "turn/completed")
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["params"]["item"]["id"] == "spawn-child")
+            .count(),
+        2
+    );
+    for event in events {
+        if let Some(thread) = event.pointer("/params/threadId") {
+            assert_eq!(thread, "thread-1");
+        }
+        if let Some(turn) = event
+            .pointer("/params/turnId")
+            .or_else(|| event.pointer("/params/turn/id"))
+        {
+            assert_eq!(turn, "turn-1");
+        }
+    }
+    std::fs::remove_file(fake_codex).unwrap();
+    std::fs::remove_file(log).unwrap();
+}
