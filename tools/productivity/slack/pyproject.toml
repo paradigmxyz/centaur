@@ -29,5 +29,5 @@ packages = ["."]
 [tool.centaur]
 module = "client.py"
 optional_secrets = [
-    {type = "http", name = "SLACK_SEARCH_TOKEN", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["files.slack.com"]}
+    {type = "http", name = "SLACK_SEARCH_TOKEN", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["slack.com", "files.slack.com"]}
 ]
