@@ -136,6 +136,12 @@ export type SlackbotV2Options = {
   agentViewEnabled?: boolean
   assistantStatus?: string
   /**
+   * Text posted in the thread instead of the internal error when the bot cannot
+   * hand a message to the session API or open its event stream. The full error
+   * is still logged. Unset posts the error itself.
+   */
+  failureMessage?: string
+  /**
    * When enabled, session.activity_summary events update Slack's assistant
    * status and structured task output is hidden from the Slack stream.
    */

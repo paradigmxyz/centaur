@@ -3793,10 +3793,34 @@ describe('slackbotv2', () => {
     await mention.finished()
 
     expect(codexApi.eventRequests).toHaveLength(0)
+    expect(await threadText(parent.ts)).toContain('failed: 503 Service Unavailable')
     const threadState = await bot.chat
       .thread(threadKey(parent.ts))
       .state
     expect(threadState).toEqual(expect.objectContaining({ activeExecution: false }))
+  })
+
+  it('posts the configured failure message instead of the session API error', async () => {
+    bot = createTestBot({
+      handoffRetryDelaysMs: [200],
+      failureMessage: 'The assistant could not answer this. Please try again.'
+    })
+    codexApi.failNextExecute = true
+
+    const parent = await postUserMessage('History before a configured failure.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> fail quietly`, { threadTs: parent.ts })
+    expect(mention.response.status).toBe(200)
+
+    codexApi.failNextExecute = true
+    await waitFor(() => codexApi.executes.length === 2, 3000)
+    await waitFor(
+      async () => (await threadText(parent.ts)).includes('The assistant could not answer this.'),
+      3000
+    )
+    await mention.finished()
+
+    const text = await threadText(parent.ts)
+    expect(text).not.toContain('Service Unavailable')
   })
 
   it('silently ignores a session principal admission denial after clearing deferred status', async () => {
