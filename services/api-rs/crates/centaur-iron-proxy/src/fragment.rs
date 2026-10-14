@@ -210,8 +210,9 @@ fn codex_api_key_fragment_for_base_url(configured_base_url: Option<&str>) -> Res
         })?;
 
     let mut fragment = load_fragment_str(CODEX_API_KEY_FRAGMENT)?;
-    fragment.transforms[0].config.secrets[0].rules[0]["host"] =
-        serde_yaml::Value::String(host.to_owned());
+    let rules = &mut fragment.transforms[0].config.secrets[0].rules;
+    rules[0]["host"] = serde_yaml::Value::String(host.to_owned());
+    rules.dedup();
     Ok(fragment)
 }
 
@@ -341,7 +342,7 @@ transforms:
           replace:
             proxy_value: OPENAI_API_KEY
             match_headers: ["Authorization"]
-          rules: [{ host: OPENAI_API_HOST }]
+          rules: [{ host: OPENAI_API_HOST }, { host: us.api.openai.com }]
 "#;
 
 const OPENROUTER_API_KEY_FRAGMENT: &str = r#"
@@ -541,13 +542,31 @@ mod bedrock_tests {
 mod openai_tests {
     use super::*;
 
+    fn codex_api_key_fragment_hosts(base_url: Option<&str>) -> Vec<String> {
+        codex_api_key_fragment_for_base_url(base_url)
+            .unwrap()
+            .transforms[0]
+            .config
+            .secrets[0]
+            .rules
+            .iter()
+            .map(|rule| rule["host"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
     #[test]
-    fn codex_api_key_fragment_derives_host_from_configured_base_url() {
-        let fragment =
-            codex_api_key_fragment_for_base_url(Some(" https://us.api.openai.com/v1/ ")).unwrap();
+    fn codex_api_key_fragment_injects_configured_host_and_us_regional_host() {
         assert_eq!(
-            fragment.transforms[0].config.secrets[0].rules[0]["host"].as_str(),
-            Some("us.api.openai.com")
+            codex_api_key_fragment_hosts(None),
+            ["api.openai.com", "us.api.openai.com"]
+        );
+        assert_eq!(
+            codex_api_key_fragment_hosts(Some("https://llm.example.com/v1")),
+            ["llm.example.com", "us.api.openai.com"]
+        );
+        assert_eq!(
+            codex_api_key_fragment_hosts(Some(" https://us.api.openai.com/v1/ ")),
+            ["us.api.openai.com"]
         );
     }
 
