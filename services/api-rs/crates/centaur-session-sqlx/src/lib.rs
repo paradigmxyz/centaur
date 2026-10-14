@@ -236,6 +236,35 @@ impl PgSessionStore {
         row.try_into()
     }
 
+    /// Lists sessions whose thread key starts with `prefix` and that are bound
+    /// to `iron_control_principal`, most recently updated first. Callers use a
+    /// principal-scoped namespace prefix so one principal never sees another's
+    /// sessions; the principal predicate is defense in depth.
+    pub async fn list_principal_sessions_with_prefix(
+        &self,
+        prefix: &str,
+        iron_control_principal: &str,
+        limit: i64,
+    ) -> Result<Vec<Session>, SessionStoreError> {
+        let rows = sqlx::query_as::<_, SessionRow>(
+            r#"
+            select thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
+            from sessions
+            where left(thread_key, length($1)) = $1
+              and iron_control_principal = $2
+            order by updated_at desc, thread_key
+            limit $3
+            "#,
+        )
+        .bind(prefix)
+        .bind(iron_control_principal)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
     pub async fn get_session_title(
         &self,
         thread_key: &ThreadKey,

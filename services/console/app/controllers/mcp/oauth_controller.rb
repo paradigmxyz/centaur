@@ -23,7 +23,7 @@ module Mcp
         grant_types_supported: McpOauthClient::DEFAULT_GRANT_TYPES,
         code_challenge_methods_supported: [ "S256" ],
         token_endpoint_auth_methods_supported: [ "none" ],
-        scopes_supported: McpOauthClient::DEFAULT_SCOPES,
+        scopes_supported: McpOauthClient::SUPPORTED_SCOPES,
         resource_parameter_supported: true
       }
     end
@@ -139,7 +139,7 @@ module Mcp
       end
 
       scopes = normalize_scope_param(params[:scope], McpOauthClient::DEFAULT_SCOPES)
-      unsupported = scopes - McpOauthClient::DEFAULT_SCOPES
+      unsupported = scopes - McpOauthClient::SUPPORTED_SCOPES
       if unsupported.any?
         return authorization_request_error(
           client,

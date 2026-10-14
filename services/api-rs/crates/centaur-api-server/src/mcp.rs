@@ -33,6 +33,7 @@ use crate::{
 };
 
 mod search;
+mod sessions;
 
 #[cfg(test)]
 pub(crate) static MCP_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -56,7 +57,7 @@ pub(crate) async fn mcp_protected_resource_metadata(headers: HeaderMap) -> Json<
         "resource": mcp_resource_url(&headers),
         "authorization_servers": authorization_servers,
         "bearer_methods_supported": ["header"],
-        "scopes_supported": ["mcp:tools"],
+        "scopes_supported": mcp_supported_scopes(),
     }))
 }
 
@@ -153,8 +154,12 @@ pub(crate) async fn mcp_post(
             ensure_mcp_scope(&principal.scopes, "mcp:tools")?;
             let policy = mcp_tool_host_call_policy(&state, &principal).await?;
             let filter = parse_sandbox_tool_filter(policy.tool_filter());
+            let mut tools = mcp_tool_entries(&filter)?;
+            if sessions::mcp_session_tools_visible(&principal.scopes) {
+                tools.extend(sessions::mcp_session_tools());
+            }
             json!({
-                "tools": mcp_tool_entries(&filter)?,
+                "tools": tools,
             })
         }
         "tools/call" => {
@@ -163,6 +168,12 @@ pub(crate) async fn mcp_post(
                 .map_err(|error| ApiError::BadRequest(error.to_string()))?;
             if mcp_v2_tool_name(&params.name) && !mcp_v2_enabled() {
                 return Ok(mcp_json_error(id, -32602, "unknown tool"));
+            }
+            if sessions::mcp_session_tool_name(&params.name) {
+                if !sessions::mcp_sessions_enabled() {
+                    return Ok(mcp_json_error(id, -32602, "unknown tool"));
+                }
+                ensure_mcp_scope(&principal.scopes, sessions::MCP_SESSIONS_SCOPE)?;
             }
             let tool = if mcp_builtin_tool_name(&params.name) {
                 None
@@ -233,6 +244,10 @@ async fn mcp_tool_call_result(
                 }
                 "centaur_artifact_get" => {
                     mcp_artifact_get_result(state, principal, params.arguments).await
+                }
+                name if sessions::mcp_session_tool_name(name) => {
+                    sessions::mcp_session_tool_result(state, principal, name, params.arguments)
+                        .await
                 }
                 "centaur_whoami" => mcp_whoami_result(principal, params.arguments).map(|result| {
                     McpToolCallOutcome {
@@ -348,6 +363,14 @@ fn mcp_artifact_get_tool() -> Value {
     })
 }
 
+fn mcp_supported_scopes() -> Vec<&'static str> {
+    let mut scopes = vec!["mcp:tools"];
+    if sessions::mcp_sessions_enabled() {
+        scopes.push(sessions::MCP_SESSIONS_SCOPE);
+    }
+    scopes
+}
+
 fn mcp_initialize_result(params: &Value) -> Value {
     let mut result = json!({
         "protocolVersion": requested_mcp_protocol_version(params),
@@ -414,7 +437,9 @@ fn mcp_v2_tool_name(name: &str) -> bool {
 }
 
 fn mcp_builtin_tool_name(name: &str) -> bool {
-    mcp_v2_tool_name(name) || matches!(name, "centaur_artifact_get" | "centaur_whoami")
+    mcp_v2_tool_name(name)
+        || sessions::mcp_session_tool_name(name)
+        || matches!(name, "centaur_artifact_get" | "centaur_whoami")
 }
 
 fn mcp_v2_tools() -> Vec<Value> {

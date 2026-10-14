@@ -37,6 +37,7 @@ module Mcp
       assert_equal "http://www.example.com/mcp/oauth/token", body.fetch("token_endpoint")
       assert_equal "http://www.example.com/mcp/oauth/register", body.fetch("registration_endpoint")
       assert_includes body.fetch("code_challenge_methods_supported"), "S256"
+      assert_equal %w[mcp:tools mcp:sessions], body.fetch("scopes_supported")
     end
 
     test "dynamic client registration creates a public PKCE client" do
@@ -190,6 +191,30 @@ module Mcp
       assert_equal stored_code.principal.oid, jwt_payload.fetch("principal_id")
       assert_equal @operator.email, jwt_payload.fetch("email")
       assert_equal "mcp:tools", jwt_payload.fetch("scope")
+    end
+
+    test "authorization code exchange grants the sessions scope when requested" do
+      client = create_client
+      code = authorize_code(client, scope: "mcp:tools mcp:sessions")
+
+      exchange_authorization_code(client, code)
+
+      assert_response :ok
+      body = JSON.parse(response.body)
+      assert_equal "mcp:tools mcp:sessions", body.fetch("scope")
+      assert_equal "mcp:tools mcp:sessions", decode_jwt_payload(body.fetch("access_token")).fetch("scope")
+    end
+
+    test "authorize rejects unknown scopes" do
+      client = create_client
+      post login_url, params: { email: @operator.email, password: "password123456" }
+
+      assert_no_difference -> { McpOauthAuthorizationCode.count } do
+        get "/mcp/oauth/authorize", params: authorize_params(client, scope: "mcp:tools mcp:admin")
+      end
+      assert_response :redirect
+      redirect = URI.parse(response.location)
+      assert_equal "invalid_scope", Rack::Utils.parse_nested_query(redirect.query).fetch("error")
     end
 
     test "authorization approval seeds new console principals with the user-mcp role" do
@@ -349,12 +374,12 @@ module Mcp
       )
     end
 
-    def authorize_params(client)
+    def authorize_params(client, scope: "mcp:tools")
       {
         response_type: "code",
         client_id: client.public_client_id,
         redirect_uri: redirect_uri,
-        scope: "mcp:tools",
+        scope: scope,
         state: "state-test",
         resource: "http://localhost:3000/mcp",
         code_challenge: code_challenge,
@@ -362,8 +387,8 @@ module Mcp
       }
     end
 
-    def authorize_code(client)
-      approval_params = authorize_params(client)
+    def authorize_code(client, scope: "mcp:tools")
+      approval_params = authorize_params(client, scope: scope)
       post login_url, params: { email: @operator.email, password: "password123456" }
 
       assert_no_difference -> { McpOauthAuthorizationCode.count } do

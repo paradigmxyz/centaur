@@ -810,6 +810,42 @@ impl SessionRuntime {
         Ok(self.store.get_session(thread_key).await?)
     }
 
+    /// List one principal's sessions within a thread-key namespace prefix,
+    /// most recently updated first.
+    pub async fn list_principal_sessions(
+        &self,
+        thread_key_prefix: &str,
+        iron_control_principal: &str,
+        limit: i64,
+    ) -> Result<Vec<Session>, SessionRuntimeError> {
+        Ok(self
+            .store
+            .list_principal_sessions_with_prefix(thread_key_prefix, iron_control_principal, limit)
+            .await?)
+    }
+
+    /// Load the most recent execution for a thread, whatever its status.
+    pub async fn latest_execution(
+        &self,
+        thread_key: &ThreadKey,
+    ) -> Result<Option<SessionExecution>, SessionRuntimeError> {
+        Ok(self.store.latest_execution_for_thread(thread_key).await?)
+    }
+
+    /// Read one bounded page of durable session events without opening a
+    /// live stream.
+    pub async fn list_events_after(
+        &self,
+        thread_key: &ThreadKey,
+        after_event_id: i64,
+        limit: i64,
+    ) -> Result<Vec<SessionEvent>, SessionRuntimeError> {
+        Ok(self
+            .store
+            .list_events_after(thread_key, after_event_id, None, limit)
+            .await?)
+    }
+
     fn resolve_stored_persona(
         &self,
         persona_id: Option<&str>,

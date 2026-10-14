@@ -418,6 +418,7 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "urlencoding",
+ "uuid",
 ]
 
 [[package]]
