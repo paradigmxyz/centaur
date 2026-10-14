@@ -211,8 +211,11 @@ fn codex_api_key_fragment_for_base_url(configured_base_url: Option<&str>) -> Res
 
     let mut fragment = load_fragment_str(CODEX_API_KEY_FRAGMENT)?;
     let rules = &mut fragment.transforms[0].config.secrets[0].rules;
-    rules[0]["host"] = serde_yaml::Value::String(host.to_owned());
-    rules.dedup();
+    if !rules.iter().any(|rule| rule["host"].as_str() == Some(host)) {
+        let mut rule = rules[0].clone();
+        rule["host"] = serde_yaml::Value::String(host.to_owned());
+        rules.insert(0, rule);
+    }
     Ok(fragment)
 }
 
@@ -342,7 +345,7 @@ transforms:
           replace:
             proxy_value: OPENAI_API_KEY
             match_headers: ["Authorization"]
-          rules: [{ host: OPENAI_API_HOST }, { host: us.api.openai.com }]
+          rules: [{ host: api.openai.com }, { host: us.api.openai.com }]
 "#;
 
 const OPENROUTER_API_KEY_FRAGMENT: &str = r#"
@@ -555,18 +558,18 @@ mod openai_tests {
     }
 
     #[test]
-    fn codex_api_key_fragment_injects_configured_host_and_us_regional_host() {
+    fn codex_api_key_fragment_injects_configured_and_both_openai_hosts() {
         assert_eq!(
             codex_api_key_fragment_hosts(None),
             ["api.openai.com", "us.api.openai.com"]
         );
         assert_eq!(
             codex_api_key_fragment_hosts(Some("https://llm.example.com/v1")),
-            ["llm.example.com", "us.api.openai.com"]
+            ["llm.example.com", "api.openai.com", "us.api.openai.com"]
         );
         assert_eq!(
             codex_api_key_fragment_hosts(Some(" https://us.api.openai.com/v1/ ")),
-            ["us.api.openai.com"]
+            ["api.openai.com", "us.api.openai.com"]
         );
     }
 
