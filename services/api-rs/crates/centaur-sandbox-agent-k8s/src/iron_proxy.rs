@@ -445,7 +445,7 @@ impl AgentSandboxBackend {
         self.wait_for_cold_proxy_principal_applied(
             id,
             &resolved.principal_id,
-            sync.config_hash.as_deref(),
+            cold_barrier_config_hash(sync.config_hash.as_deref()),
         )
         .await;
         Ok(())
@@ -1309,6 +1309,22 @@ fn proxy_fallback_delay_remaining(elapsed: Duration) -> Duration {
 /// management API is probed before concluding the image predates managed
 /// status support; any successful response within the window commits to
 /// waiting out the full `ack_timeout`.
+/// The config hash a cold-created proxy must report before the sandbox starts:
+/// none. A cold-created proxy has never held another principal's config, so the
+/// first config it applies for the requested principal is the one proxy-sync
+/// renders live, and "synced, for this principal" is the readiness proof. The
+/// hash console returns when the proxy is registered comes from its sync-config
+/// snapshot, which is served stale while it rebuilds (stale-while-revalidate,
+/// a TTL and the api-server token window), so for any principal whose config
+/// changed since it was last used -- a credential rotation granted through a
+/// default role is enough -- it never equals what the proxy applied, and every
+/// cold create waited the full PROXY_ACK_TIMEOUT before proceeding anyway. The
+/// warm-pool claim barrier keeps its hash check: a claimed proxy may still hold
+/// the previous principal's config.
+fn cold_barrier_config_hash(_registered_hash: Option<&str>) -> Option<&str> {
+    None
+}
+
 async fn wait_for_proxy_ack(
     client: &reqwest::Client,
     endpoint: &ProxyManagementEndpoint,
@@ -3530,6 +3546,31 @@ mod tests {
         .await;
 
         assert_eq!(ack, ProxyAck::TimedOut);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cold_barrier_accepts_the_live_config_whatever_the_registered_hash() {
+        // The proxy applied proxy-sync's live config for the principal; the hash
+        // console returned at registration came from a stale snapshot.
+        let (base_url, _sync_calls, server) = spawn_management_stub("test-key", 0).await;
+        let endpoint = ProxyManagementEndpoint {
+            base_url,
+            api_key: "test-key".to_owned(),
+        };
+
+        let ack = wait_for_proxy_ack(
+            &barrier_client(),
+            &endpoint,
+            "prin_claimed",
+            cold_barrier_config_hash(Some("sha256:stale-console-snapshot")),
+            Duration::from_millis(400),
+            Duration::from_millis(200),
+            Duration::from_millis(10),
+        )
+        .await;
+
+        assert_eq!(ack, ProxyAck::Applied);
         server.abort();
     }
 
