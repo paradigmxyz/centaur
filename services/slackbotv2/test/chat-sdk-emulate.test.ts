@@ -1598,7 +1598,7 @@ describe('slackbotv2', () => {
   it('replaces the failed stream with the durable final answer when Slack rejects stop as too long', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
-    bot = createTestBot({ state: sharedState })
+    bot = createTestBot({ state: sharedState, slackHomeTeamUrl: 'https://acme.slack.com/' })
     codexApi.autoRespond = false
     // Every stop fails: the streamed message never finalizes, so its content
     // breaks in real Slack. Size-limit failures should be prevented by
@@ -1633,7 +1633,7 @@ describe('slackbotv2', () => {
     codexApi.emitSessionEvent(key, 'session.execution_completed', {
       execution_id: 'exe-msg-too-long-fallback',
       status: 'completed',
-      result_text: 'TOO_LONG_FALLBACK_VISIBLE'
+      result_text: 'TOO_LONG_FALLBACK_VISIBLE [Source](https://slack.com/archives/C1234567890/p1791832707371619)'
     })
 
     await mention.finished()
@@ -1643,6 +1643,10 @@ describe('slackbotv2', () => {
     expect(texts.filter(text =>
       text.includes('TOO_LONG_FALLBACK_VISIBLE')
     )).toHaveLength(1)
+    const replacement = slackApi.calls.find(call => call.method === 'chat.update')
+    expect(replacement?.body.markdown_text).toContain(
+      '[Source](https://acme.slack.com/archives/C1234567890/p1791832707371619)'
+    )
     const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
     expect(threadState).toEqual(
       expect.objectContaining({
@@ -2261,9 +2265,9 @@ describe('slackbotv2', () => {
       }
     })
     await sharedState.appendToList('slackbotv2:render:index', key)
-    codexApi.emitOutputLines(key, sampleCodexOutputLines('Recovered consumed answer.'))
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('Recovered consumed answer. [Source](https://slack.com/archives/C1234567890/p1791832707371619)'))
 
-    bot = createTestBot({ state: sharedState })
+    bot = createTestBot({ state: sharedState, slackHomeTeamUrl: 'https://acme.slack.com/' })
 
     await waitFor(() => codexApi.eventRequests.length === 1, 2000)
     await waitFor(() => slackApi.calls.some(call => call.method === 'chat.stopStream'), 2000)
@@ -2272,6 +2276,10 @@ describe('slackbotv2', () => {
       { afterEventId: 0, executionId: 'exe-recovery-consumed', threadKey: key }
     ])
     expect(await threadText(parent.ts)).toContain('Recovered consumed answer.')
+    const transcripts = slackStreamTranscripts(slackApi.calls)
+    expect(transcripts.flatMap(transcript => transcript.chunks).map(chunkText).join('')).toContain(
+      '[Source](https://acme.slack.com/archives/C1234567890/p1791832707371619)'
+    )
     // Recovery clears the obligation after the Slack stream stops; wait for
     // the state write instead of racing it.
     await waitFor(async () => {
@@ -2667,7 +2675,8 @@ describe('slackbotv2', () => {
   })
 
   for (const plainText of [false, true]) {
-    it(`removes unresolved citations from ${plainText ? 'plain-text terminal replies' : 'streamed answers'}`, async () => {
+    it(`cleans citations and qualifies Slack links in ${plainText ? 'plain-text terminal replies' : 'streamed answers'}`, async () => {
+      bot = createTestBot({ slackHomeTeamUrl: 'https://acme.enterprise.slack.com/' })
       codexApi.autoRespond = false
 
       const parent = await postUserMessage('Context before an answer with citations.')
@@ -2703,7 +2712,8 @@ describe('slackbotv2', () => {
         'te\uE202turn0search8',
         '\uE201 [Docs](https://example.com) ',
         '\uE200cite:ship:turn0search7:walk',
-        'ing: CITATION_END :ship:'
+        'ing: CITATION_END :ship: [Discussion](https://sla',
+        'ck.com/archives/C1234567890/p1791832707371619?thread_ts=1791832000.000001&cid=C1234567890)'
       ]
       codexApi.emitOutputLine(key, JSON.stringify({
         type: 'item.started',
@@ -2726,14 +2736,16 @@ describe('slackbotv2', () => {
       if (plainText) {
         const replies = await threadTexts(parent.ts)
         expect(replies.filter(text => text.startsWith('CITATION_START'))).toEqual([
-          'CITATION_START  [Docs](https://example.com)  CITATION_END :ship:'
+          'CITATION_START  [Docs](https://example.com)  CITATION_END :ship: ' +
+          '[Discussion](https://acme.enterprise.slack.com/archives/C1234567890/p1791832707371619?thread_ts=1791832000.000001&cid=C1234567890)'
         ])
       } else {
         const transcripts = slackStreamTranscripts(slackApi.calls)
         expect(transcripts).toHaveLength(1)
         expect(transcripts[0]!.chunks.filter(chunk => chunk.type === 'markdown_text')
           .map(chunk => chunk.text).join('')).toBe(
-          'CITATION_START  [Docs](https://example.com)  CITATION_END :ship:'
+          'CITATION_START  [Docs](https://example.com)  CITATION_END :ship: ' +
+          '[Discussion](https://acme.enterprise.slack.com/archives/C1234567890/p1791832707371619?thread_ts=1791832000.000001&cid=C1234567890)'
         )
       }
     })

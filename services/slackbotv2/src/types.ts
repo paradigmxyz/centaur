@@ -205,6 +205,8 @@ export type SlackbotV2Options = {
   slackApiUrl?: string
   /** Bot workspace team ID resolved once from Slack's auth.test response. */
   slackHomeTeamId?: string
+  /** Workspace URL from auth.test, used to qualify generic Slack archive links. */
+  slackHomeTeamUrl?: string
   /** Deadline for optional Slack Web API metadata lookups. */
   slackApiTimeoutMs?: number
   state?: StateAdapter

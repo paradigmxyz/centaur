@@ -8,7 +8,7 @@ import {
   interruptSessionExecution,
   isSessionPrincipalAdmissionDenied,
   openSessionEventStream,
-  resolveSlackHomeTeamId,
+  resolveSlackHomeWorkspace,
   SessionApiError,
   serializeAttachment,
   serializeMessage
@@ -165,22 +165,22 @@ function isJsonRecord(value: JsonValue | undefined): value is JsonObject {
 }
 
 describe('Slack home team resolution', () => {
-  test('resolves the home team ID from auth.test', async () => {
+  test('resolves the home team ID and workspace URL from auth.test', async () => {
     const realFetch = globalThis.fetch
     let request: Request | undefined
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       request = new Request(input, init)
-      return Response.json({ ok: true, team_id: 'T_HOME' })
+      return Response.json({ ok: true, team_id: 'T_HOME', url: 'https://acme.slack.com/' })
     }) as typeof fetch
     try {
-      const teamId = await resolveSlackHomeTeamId({
+      const workspace = await resolveSlackHomeWorkspace({
         apiUrl: 'http://api.test',
         botToken: 'xoxb-test',
         signingSecret: 'secret',
         slackApiUrl: 'https://slack.test/api/'
       })
 
-      expect(teamId).toBe('T_HOME')
+      expect(workspace).toEqual({ teamId: 'T_HOME', url: 'https://acme.slack.com/' })
       expect(request?.url).toBe('https://slack.test/api/auth.test')
       expect(request?.method).toBe('GET')
       expect(request?.headers.get('authorization')).toBe('Bearer xoxb-test')
@@ -195,13 +195,29 @@ describe('Slack home team resolution', () => {
       Response.json({ error: 'invalid_auth', ok: false }, { status: 401 })) as typeof fetch
     try {
       await expect(
-        resolveSlackHomeTeamId({
+        resolveSlackHomeWorkspace({
           apiUrl: 'http://api.test',
           botToken: 'xoxb-test',
           signingSecret: 'secret',
           slackApiUrl: 'https://slack.test/api/'
         })
       ).rejects.toThrow('Slack auth.test failed to resolve the bot home team ID')
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  })
+
+  test('retains the home team ID when the workspace URL is absent', async () => {
+    const realFetch = globalThis.fetch
+    globalThis.fetch = (async () =>
+      Response.json({ ok: true, team_id: 'T_HOME' })) as typeof fetch
+    try {
+      expect(await resolveSlackHomeWorkspace({
+        apiUrl: 'http://api.test',
+        botToken: 'xoxb-test',
+        signingSecret: 'secret',
+        slackApiUrl: 'https://slack.test/api/'
+      })).toEqual({ teamId: 'T_HOME', url: undefined })
     } finally {
       globalThis.fetch = realFetch
     }

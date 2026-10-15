@@ -31,6 +31,7 @@ import {
 } from '@centaur/rendering'
 import { conflateChatSdkStream } from './conflate'
 import { CitationTextFilter, stripUnresolvedCitations } from './citation-text'
+import { qualifySlackMessageLinks, SlackLinkTextFilter } from './slack-link-text'
 import { resolveHarnessRollout } from './harness-rollout'
 import { observeSeconds, slackbotMetrics } from './metrics'
 import {
@@ -2100,13 +2101,14 @@ async function renderFallbackFinalAnswer(
         await sleep(renderRetryDelayMs(attempt))
       }
     }
-    const fallback = new SlackRenderFallback()
+    const fallback = new SlackRenderFallback(options.slackHomeTeamUrl)
     const chatStream = fallback.collectChatSdk(
       slackSafeChatSdkStream(
         harnessToChatSdkStream(
           fallback.collectSource(stream),
           fallbackRendererOptions(options)
-        )
+        ),
+        options.slackHomeTeamUrl
       )
     )
     for await (const _chunk of chatStream) {
@@ -2752,7 +2754,8 @@ async function renderExecutionStream(
               rendererOptions(thread, options, capture, trace)
             ),
             taskDisplayMode
-          )
+          ),
+          options.slackHomeTeamUrl
         )
       )
     )
@@ -2806,7 +2809,8 @@ async function renderRecoveredExecutionStream(
               rendererOptions(thread, options, capture, trace)
             ),
             taskDisplayMode
-          )
+          ),
+          options.slackHomeTeamUrl
         )
       )
     )
@@ -2834,7 +2838,7 @@ async function renderPlainTextExecutionStream(
   trace?: SlackbotV2Trace,
   assistantStatusVisible = false
 ): Promise<void> {
-  const fallback = new SlackRenderFallback()
+  const fallback = new SlackRenderFallback(options.slackHomeTeamUrl)
   const titleStartedAtMs = nowMs()
   await setAssistantTitle(
     thread,
@@ -2855,7 +2859,8 @@ async function renderPlainTextExecutionStream(
         harnessToChatSdkStream(
           fallback.collectSource(stream),
           rendererOptions(thread, options, undefined, trace)
-        )
+        ),
+        options.slackHomeTeamUrl
       )
     )
     for await (const _chunk of chatStream) {
@@ -2880,6 +2885,8 @@ class SlackRenderFallback {
   private terminalText = ''
   private interrupted = false
 
+  constructor(private readonly workspaceUrl?: string) {}
+
   async *collectSource(
     stream: AsyncIterable<SlackbotV2RendererSource>
   ): AsyncIterable<SlackbotV2RendererSource> {
@@ -2902,7 +2909,7 @@ class SlackRenderFallback {
     const terminalText = stripUnresolvedCitations(this.terminalText).trim()
     const markdownText = this.markdownText.trim()
     if (this.interrupted && !terminalText && markdownText === EMPTY_FINAL_ANSWER_TEXT) return ''
-    return terminalText || markdownText
+    return qualifySlackMessageLinks(terminalText || markdownText, this.workspaceUrl)
   }
 
   textOrDefault(): string {
@@ -2942,18 +2949,20 @@ class SlackRenderFallback {
 }
 
 async function* slackSafeChatSdkStream(
-  stream: AsyncIterable<ChatSDKStreamChunk>
+  stream: AsyncIterable<ChatSDKStreamChunk>,
+  workspaceUrl?: string
 ): AsyncIterable<ChatSDKStreamChunk> {
+  const links = new SlackLinkTextFilter(workspaceUrl)
   const citations = new CitationTextFilter()
   for await (const chunk of stream) {
     if (chunk.type === 'markdown_text') {
-      const text = citations.append(chunk.text)
+      const text = links.append(citations.append(chunk.text))
       if (text) yield { ...chunk, text }
       continue
     }
     yield slackSafeChatSdkChunk(chunk)
   }
-  const text = citations.finish()
+  const text = links.append(citations.finish()) + links.finish()
   if (text) yield { type: 'markdown_text', text }
 }
 
