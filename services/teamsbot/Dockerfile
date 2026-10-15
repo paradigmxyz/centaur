@@ -16,7 +16,7 @@ COPY patches/ patches/
 COPY packages/ packages/
 COPY services/teamsbot/package.json services/teamsbot/package.json
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
-    pnpm install --filter teamsbot --prod --frozen-lockfile
+    pnpm install --filter teamsbot... --prod --frozen-lockfile
 
 COPY services/teamsbot/ services/teamsbot/
 WORKDIR /repo/services/teamsbot

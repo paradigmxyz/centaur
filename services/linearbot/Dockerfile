@@ -15,7 +15,7 @@ COPY patches/ patches/
 COPY packages/ packages/
 COPY services/linearbot/package.json services/linearbot/package.json
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
-    pnpm install --filter linearbot --prod --frozen-lockfile
+    pnpm install --filter linearbot... --prod --frozen-lockfile
 
 COPY services/linearbot/ services/linearbot/
 WORKDIR /repo/services/linearbot

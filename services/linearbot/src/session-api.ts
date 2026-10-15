@@ -1,3 +1,4 @@
+import { TurnCompletionFilter } from "@centaur/harness-events";
 import type { RustSessionStreamEvent } from "@centaur/harness-events";
 import { isRetryableCodexErrorNotification } from "@centaur/rendering";
 import type { Attachment, Message } from "chat";
@@ -874,6 +875,7 @@ async function* parseSessionEventStream(
   stream: ReadableStream<Uint8Array>,
   onEventId: (eventId: number) => void,
 ): AsyncIterable<LinearbotRendererSource> {
+  const turnFilter = new TurnCompletionFilter();
   for await (const event of parseSseEvents(stream)) {
     if (typeof event.id === "number") onEventId(event.id);
     if (event.event === "session.output.line") {
@@ -883,7 +885,13 @@ async function* parseSessionEventStream(
         eventId: event.id,
         eventKind: event.event,
       } satisfies RustSessionStreamEvent;
-      if (isTerminalCodexOutputLine(event.data)) return;
+      const payload = tryParseOutputLine(event.data);
+      if (payload !== undefined) turnFilter.noteLine(payload);
+      if (
+        isTerminalCodexOutputLine(event.data) &&
+        (payload === undefined || !turnFilter.isChildTurnCompletion(payload))
+      )
+        return;
       continue;
     }
     if (
@@ -1007,6 +1015,14 @@ function parseSseLine(
   }
 
   return { state };
+}
+
+function tryParseOutputLine(line: string): unknown {
+  try {
+    return JSON.parse(line) as unknown;
+  } catch {
+    return undefined;
+  }
 }
 
 function isTerminalCodexOutputLine(line: string): boolean {

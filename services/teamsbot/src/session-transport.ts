@@ -1,3 +1,4 @@
+import { TurnCompletionFilter } from "@centaur/harness-events";
 import { isRetryableCodexErrorNotification } from "@centaur/rendering";
 
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -135,6 +136,7 @@ export async function* parseSessionEventStream(
   stream: ReadableStream<Uint8Array>,
   onEventId: (eventId: number) => void,
 ): AsyncIterable<SessionStreamEvent> {
+  const turnFilter = new TurnCompletionFilter();
   for await (const event of parseSseEvents(stream)) {
     if (typeof event.id === "number") {
       onEventId(event.id);
@@ -146,7 +148,12 @@ export async function* parseSessionEventStream(
         eventId: event.id,
         eventKind: event.event,
       };
-      if (isTerminalCodexOutputLine(event.data)) {
+      const payload = tryParseOutputLine(event.data);
+      if (payload !== undefined) turnFilter.noteLine(payload);
+      if (
+        isTerminalCodexOutputLine(event.data) &&
+        (payload === undefined || !turnFilter.isChildTurnCompletion(payload))
+      ) {
         return;
       }
       continue;
@@ -247,6 +254,14 @@ async function* parseSseEvents(stream: ReadableStream<Uint8Array>): AsyncIterabl
   } finally {
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();
+  }
+}
+
+function tryParseOutputLine(line: string): unknown {
+  try {
+    return JSON.parse(line) as unknown;
+  } catch {
+    return undefined;
   }
 }
 
