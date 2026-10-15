@@ -8,6 +8,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "typer>=0.12.0",
     "httpx>=0.28.0",
+    "openpyxl>=3.1.5",
     "pillow>=12.0.0",
     "playwright==1.62.0",
     "websockets>=17.0",
