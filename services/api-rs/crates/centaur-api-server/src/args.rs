@@ -1358,6 +1358,9 @@ impl SandboxArgs {
     fn workflow_host_env_template(&self) -> Result<Vec<(String, String)>, ServerError> {
         let mut envs = vec![("CENTAUR_API_URL".to_owned(), self.centaur_api_url())];
 
+        if let Some(value) = clean_optional_value(self.iron_control.url.as_deref()) {
+            envs.push(("CENTAUR_CONSOLE_URL".to_owned(), value));
+        }
         if let Some(value) = clean_optional_value(env::var("OPENAI_BASE_URL").ok().as_deref()) {
             envs.push(("OPENAI_BASE_URL".to_owned(), value));
         }
@@ -2991,6 +2994,8 @@ mod tests {
             "postgres://postgres:postgres@localhost/centaur",
             "--session-sandbox-centaur-api-url",
             "http://centaur-api-rs:8080",
+            "--iron-control-url",
+            "http://centaur-console:3000",
         ])
         .unwrap();
 
@@ -3002,6 +3007,13 @@ mod tests {
                 .find(|env| env.name == "CENTAUR_API_URL")
                 .map(|env| env.value.as_str()),
             Some("http://centaur-api-rs:8080")
+        );
+        assert_eq!(
+            spec.env
+                .iter()
+                .find(|env| env.name == "CENTAUR_CONSOLE_URL")
+                .map(|env| env.value.as_str()),
+            Some("http://centaur-console:3000")
         );
         assert_eq!(
             spec.env
