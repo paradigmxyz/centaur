@@ -164,21 +164,22 @@ class RepoCacheSync:
     def _git_env(self) -> dict[str, str]:
         env = os.environ.copy()
         env["GIT_TERMINAL_PROMPT"] = "0"
-        if (
-            self.github_token_file.is_file()
-            and self.github_token_file.stat().st_size > 0
-        ):
-            askpass = Path("/tmp/git-askpass")
-            askpass.write_text(
-                "#!/bin/sh\n"
-                'case "$1" in\n'
-                "  *Username*) printf '%s\\n' x-access-token ;;\n"
-                f"  *Password*) cat {shlex.quote(str(self.github_token_file))} ;;\n"
-                "  *) printf '\\n' ;;\n"
-                "esac\n"
-            )
-            askpass.chmod(0o700)
-            env["GIT_ASKPASS"] = str(askpass)
+        # The env is built once per process, so the token check lives in the
+        # script: a token Secret that is filled or rotated after start is used
+        # on the next fetch without restarting repo-cache.
+        token_file = shlex.quote(str(self.github_token_file))
+        askpass = Path("/tmp/git-askpass")
+        askpass.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            "  *Username*) printf '%s\\n' x-access-token ;;\n"
+            f"  *Password*) if [ -s {token_file} ]; then cat {token_file}; "
+            "else printf '\\n'; fi ;;\n"
+            "  *) printf '\\n' ;;\n"
+            "esac\n"
+        )
+        askpass.chmod(0o700)
+        env["GIT_ASKPASS"] = str(askpass)
         return env
 
     def configure_git(self) -> None:

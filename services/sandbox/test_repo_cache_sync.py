@@ -219,6 +219,33 @@ class RepoCacheSyncTest(unittest.TestCase):
             self.assertEqual(git("-C", str(target), "rev-parse", "HEAD"), head)
             self.assertEqual(git("-C", str(target), "rev-parse", "v1"), head)
 
+    def test_git_askpass_reads_token_written_after_env_is_built(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            token_file = Path(tmp) / "token"
+            sync = repo_cache_sync.RepoCacheSync(
+                cache_dir=Path(tmp) / "cache",
+                repositories=["acme/private"],
+                repository_refs={},
+                repository_visibilities={"acme/private": "private"},
+                sync_interval_seconds=30,
+                github_token_file=token_file,
+            )
+            askpass = sync._git_env()["GIT_ASKPASS"]
+
+            def password() -> str:
+                return subprocess.run(
+                    [askpass, "Password for 'https://x-access-token@github.com': "],
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                ).stdout.strip()
+
+            self.assertEqual(password(), "")
+            token_file.write_text("first-token\n")
+            self.assertEqual(password(), "first-token")
+            token_file.write_text("rotated-token\n")
+            self.assertEqual(password(), "rotated-token")
+
     def test_run_forever_restores_repo_cache_umask(self) -> None:
         class StopAfterUmask(repo_cache_sync.RepoCacheSync):
             def configure_git(self) -> None:
