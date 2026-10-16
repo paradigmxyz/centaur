@@ -73,6 +73,8 @@ pub enum HarnessServerError {
     CodexStdoutUnavailable,
     #[error("Codex stderr was not piped")]
     CodexStderrUnavailable,
+    #[error("Codex app-server transport disconnected: {0}")]
+    CodexTransport(#[source] io::Error),
     #[error("codex app-server exited with status {status}")]
     CodexExited { status: ExitStatus },
 }

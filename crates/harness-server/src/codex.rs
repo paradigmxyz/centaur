@@ -241,6 +241,11 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                 );
                 turn_active.store(true, Ordering::SeqCst);
                 let result = (|| -> Result<()> {
+                    if let Some(child) = codex.as_mut()
+                        && child.child.try_wait()?.is_some()
+                    {
+                        codex = None;
+                    }
                     if codex.is_none() {
                         let mut child = CodexJsonRpcChild::spawn()?;
                         initialize_codex(
@@ -249,6 +254,25 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                             &mut request_id,
                             traceparent.as_deref(),
                         )?;
+                        // A relay/app-server may exit between turns while the
+                        // surrounding sandbox remains healthy. Restore the
+                        // current conversation before sending any new input.
+                        if let Some(resume_id) = thread_id.as_deref() {
+                            let resumed = start_or_resume_thread(
+                                &mut child,
+                                &mut stdout,
+                                &mut request_id,
+                                model.as_deref().or(thread_model.as_deref()),
+                                thread_provider.as_deref().unwrap_or(&model_provider),
+                                Some(resume_id),
+                                traceparent.as_deref(),
+                            )?;
+                            if resumed.id != resume_id {
+                                return Err(HarnessServerError::Protocol(
+                                    "Codex app-server resumed a different thread".to_owned(),
+                                ));
+                            }
+                        }
                         codex = Some(child);
                     }
                     run_codex_user_turn(
@@ -276,6 +300,16 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                 turn_active.store(false, Ordering::SeqCst);
                 drain_codex_active_turn_requests(&active_turn_rx);
                 if let Err(error) = result {
+                    if matches!(
+                        error,
+                        HarnessServerError::CodexTransport(_)
+                            | HarnessServerError::CodexExited { .. }
+                    ) {
+                        // Do not replay this turn: a disconnect can happen
+                        // after the server accepted it or ran tools. The next
+                        // explicit user turn will start a fresh child and resume.
+                        codex = None;
+                    }
                     let fallback_thread_id = thread_id.as_deref().unwrap_or("codex");
                     eprintln!("Codex blocks turn failed: {error:#}");
                     write_blocks_error(&mut stdout, fallback_thread_id, "turn", error.to_string())?;
@@ -368,6 +402,7 @@ fn run_codex_user_turn<W: Write>(
             request_id,
             model.as_deref(),
             &model_provider,
+            None,
             traceparent,
         )?;
         *thread_id = Some(thread.id);
@@ -482,12 +517,14 @@ fn start_or_resume_thread<W: Write>(
     request_id: &mut i64,
     model: Option<&str>,
     model_provider: &str,
+    resume_thread_id: Option<&str>,
     traceparent: Option<&str>,
 ) -> Result<StartedCodexThread> {
     let cwd = env::current_dir()?.display().to_string();
-    let resume = env::var("CODEX_CONTINUE_THREAD_ID")
+    let initial_resume = env::var("CODEX_CONTINUE_THREAD_ID")
         .or_else(|_| env::var("AMP_CONTINUE_THREAD_ID"))
         .unwrap_or_default();
+    let resume = resume_thread_id.unwrap_or(&initial_resume);
     let (method, mut params) = if resume.trim().is_empty() {
         (
             "thread/start",
@@ -635,9 +672,12 @@ impl CodexJsonRpcChild {
     }
 
     fn write_value(&mut self, value: &Value) -> Result<()> {
-        serde_json::to_writer(&mut self.stdin, value)?;
-        self.stdin.write_all(b"\n")?;
-        self.stdin.flush()?;
+        let mut line = serde_json::to_vec(value)?;
+        line.push(b'\n');
+        self.stdin
+            .write_all(&line)
+            .and_then(|()| self.stdin.flush())
+            .map_err(HarnessServerError::CodexTransport)?;
         Ok(())
     }
 
@@ -825,11 +865,8 @@ impl CodexJsonRpcChild {
     fn read_value(&mut self) -> Result<Value> {
         loop {
             let line = match self.stdout.recv() {
-                Ok(line) => line?,
-                Err(_) => {
-                    let status = self.child.wait()?;
-                    return Err(HarnessServerError::CodexExited { status });
-                }
+                Ok(line) => line.map_err(HarnessServerError::CodexTransport)?,
+                Err(_) => return Err(self.disconnected_stdout_error()),
             };
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -842,11 +879,10 @@ impl CodexJsonRpcChild {
     fn read_value_timeout(&mut self, timeout: Duration) -> Result<Option<Value>> {
         loop {
             let line = match self.stdout.recv_timeout(timeout) {
-                Ok(line) => line?,
+                Ok(line) => line.map_err(HarnessServerError::CodexTransport)?,
                 Err(RecvTimeoutError::Timeout) => return Ok(None),
                 Err(RecvTimeoutError::Disconnected) => {
-                    let status = self.child.wait()?;
-                    return Err(HarnessServerError::CodexExited { status });
+                    return Err(self.disconnected_stdout_error());
                 }
             };
             let trimmed = line.trim();
@@ -854,6 +890,19 @@ impl CodexJsonRpcChild {
                 continue;
             }
             return Ok(Some(serde_json::from_str(trimmed)?));
+        }
+    }
+
+    fn disconnected_stdout_error(&mut self) -> HarnessServerError {
+        // EOF does not guarantee process exit. A relay can close its transport
+        // while still running cleanup; waiting here would hang the user turn.
+        match self.child.try_wait() {
+            Ok(Some(status)) => HarnessServerError::CodexExited { status },
+            Ok(None) => HarnessServerError::CodexTransport(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "app-server stdout closed",
+            )),
+            Err(error) => HarnessServerError::CodexTransport(error),
         }
     }
 }
