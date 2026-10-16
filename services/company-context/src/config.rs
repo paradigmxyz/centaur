@@ -40,18 +40,24 @@ pub const SLACK_CHANNEL_DAY_EMBED_TASK: &str = "slack.channel_day.embed";
 /// run on the main queue too.
 pub const SLACK_FILE_EXTRACT_TASK: &str = "slack.file.extract";
 pub const SLACK_FILE_EMBED_TASK: &str = "slack.file.embed";
+/// Telegram messages are written by the Telegram ingress; these tasks only
+/// expire, project, and publish them, so they run on the main queue.
+pub const TELEGRAM_CHATS_PROJECT_TASK: &str = "telegram.chats.project";
+pub const TELEGRAM_CHAT_PROJECT_TASK: &str = "telegram.chat.project";
+pub const TELEGRAM_CHAT_DAY_EMBED_TASK: &str = "telegram.chat_day.embed";
 /// Document ID prefixes, which identify each published document's type.
 pub const GOOGLE_DRIVE_DOCUMENT_ID_PREFIX: &str = "google-drive:";
 pub const SLACK_DOCUMENT_ID_PREFIX: &str = "slack:";
 pub const SLACK_FILE_DOCUMENT_ID_PREFIX: &str = "slack-file:";
 pub const GRANOLA_DOCUMENT_ID_PREFIX: &str = "granola:";
+pub const TELEGRAM_DOCUMENT_ID_PREFIX: &str = "telegram:";
 /// Slack conversation types that can be synchronized.
 pub const SLACK_CONVERSATION_TYPES: [&str; 3] = ["public_channel", "private_channel", "im"];
 
 #[derive(Clone, Debug, Parser)]
 #[command(
     name = "centaur-company-context",
-    about = "Ingest company context from Google Drive, Granola, and Slack"
+    about = "Ingest company context from Google Drive, Granola, Slack, and Telegram"
 )]
 pub struct Config {
     #[arg(long, env = "DATABASE_URL", value_parser = nonempty)]
@@ -124,6 +130,16 @@ pub struct Config {
         action = clap::ArgAction::Set
     )]
     pub slack_enabled: bool,
+    /// Projects the Telegram messages the Telegram ingress stores. Disabling it
+    /// pauses projection and keeps indexed documents searchable; retention
+    /// keeps expiring old messages and documents either way.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_TELEGRAM_ENABLED",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    pub telegram_enabled: bool,
     /// Limits Google Drive sync to these credential emails. Unset syncs every user.
     #[arg(
         long,
@@ -318,6 +334,22 @@ pub struct Config {
         value_parser = positive_usize
     )]
     pub slack_worker_concurrency: usize,
+    #[arg(
+        long = "telegram-project-interval-seconds",
+        env = "COMPANY_CONTEXT_TELEGRAM_PROJECT_INTERVAL_SECONDS",
+        default_value = "300",
+        value_parser = positive_duration
+    )]
+    pub telegram_project_interval: Duration,
+    /// UTC days of Telegram messages kept, today included. Older chat days,
+    /// with their documents and embeddings, are removed.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_TELEGRAM_RETENTION_DAYS",
+        default_value = "90",
+        value_parser = history_days
+    )]
+    pub telegram_retention_days: usize,
     #[arg(
         long,
         env = "COMPANY_CONTEXT_SLACK_THREAD_WORKER_CONCURRENCY",
@@ -517,6 +549,7 @@ mod tests {
         assert_eq!(config.scan_interval, Duration::from_secs(300));
         assert_eq!(config.slack_rate_limit_share, 0.3);
         assert!(config.drive_enabled && config.granola_enabled && config.slack_enabled);
+        assert!(!config.telegram_enabled);
     }
 
     #[test]
@@ -527,6 +560,33 @@ mod tests {
         assert!(!config.drive_enabled);
         assert!(!config.granola_enabled);
         assert!(config.slack_enabled);
+    }
+
+    #[test]
+    fn parses_telegram_settings() {
+        let config = Config::try_parse_from(required_args()).unwrap();
+        assert_eq!(config.telegram_retention_days, 90);
+        assert_eq!(config.telegram_project_interval, Duration::from_secs(300));
+
+        let mut args = required_args();
+        args.extend([
+            "--telegram-enabled",
+            "true",
+            "--telegram-retention-days",
+            "180",
+            "--telegram-project-interval-seconds",
+            "60",
+        ]);
+        let config = Config::try_parse_from(args).unwrap();
+        assert!(config.telegram_enabled);
+        assert_eq!(config.telegram_retention_days, 180);
+        assert_eq!(config.telegram_project_interval, Duration::from_secs(60));
+
+        for invalid in ["0", "36501"] {
+            let mut args = required_args();
+            args.extend(["--telegram-retention-days", invalid]);
+            assert!(Config::try_parse_from(args).is_err(), "{invalid}");
+        }
     }
 
     #[test]

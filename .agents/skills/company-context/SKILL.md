@@ -1,6 +1,6 @@
 ---
 name: company-context
-description: "Use Centaur's indexed company context and scoped read-only SQL together with direct Slack, Linear, Google Docs, Drive, Calendar, or Granola searches when answering internal company-history, prior-decision, project-context, meeting-context, roadmap/status, or cross-source memory questions. Indexed context includes Slack channels, user-visible Slack DMs, Google Docs, Google Calendar, Linear, and user-visible Granola notes. Use for questions like what was discussed, decided, planned, mentioned, or documented internally, especially when the user did not name one exact source."
+description: "Use Centaur's indexed company context and scoped read-only SQL together with direct Slack, Linear, Google Docs, Drive, Calendar, or Granola searches when answering internal company-history, prior-decision, project-context, meeting-context, roadmap/status, or cross-source memory questions. Indexed context includes Slack channels, user-visible Slack DMs, Google Docs, Google Calendar, Linear, user-visible Granola notes, and connected Telegram groups. Use for questions like what was discussed, decided, planned, mentioned, or documented internally, especially when the user did not name one exact source."
 ---
 
 # Company Context
@@ -19,7 +19,9 @@ Use one row-returning query. The command runs it inside a read-only transaction 
 company_context query "SELECT m.occurred_at, u.display_name, m.text, m.permalink FROM company_context_slack_messages m LEFT JOIN company_context_slack_users u ON u.user_id = m.user_id WHERE m.channel_id = 'CHANNEL_ID' AND m.occurred_at >= now() - interval '7 days' ORDER BY m.occurred_at DESC" --limit 100 --json
 ```
 
-When the company-context service is deployed, the preview `company_context v2 search` and `company_context v2 read DOCUMENT_ID` commands query its API, which returns only documents visible to the requester: Slack channel days and files, Google Docs and PDFs, and Granola notes. Narrow searches with repeatable `--type` (`slack_message`, `slack_file`, `drive_doc`, `granola_note`), `--channel-id`, and `--file-id`, and with RFC 3339 `--after`/`--before`; `--limit` is at most 50 and there is no pagination. The commands report an error when `COMPANY_CONTEXT_API_URL` is unset, meaning the service is not deployed.
+When the company-context service is deployed, the preview `company_context v2 search` and `company_context v2 read DOCUMENT_ID` commands query its API, which returns only documents visible to the requester: Slack channel days and files, Google Docs and PDFs, Granola notes, and Telegram chat days. Narrow searches with repeatable `--type` (`slack_message`, `slack_file`, `drive_doc`, `granola_note`, `telegram_message`), `--channel-id`, and `--file-id`, and with RFC 3339 `--after`/`--before`; `--limit` is at most 50 and there is no pagination. The commands report an error when `COMPANY_CONTEXT_API_URL` is unset, meaning the service is not deployed.
+
+When Telegram groups are connected, their messages are searchable company-wide as chunked UTC chat days: `company_context v2 search "QUERY" --type telegram_message` (add `--channel-id CHAT_ID` for one chat), then `company_context v2 read DOCUMENT_ID` on the `telegram:...` IDs it returns. Messages are kept for a configured retention window, edits are not reflected, and deleted messages remain until they expire. Telegram chat history exists only in this index: the `telegram` tool cannot read past messages, so do not pair these results with it. In a session started from Telegram, use only `company_context v2 search` and `v2 read` instead of the default workflow below: the API shows such sessions only Telegram documents, and the top-level commands are not available to them.
 
 ## Default Workflow
 

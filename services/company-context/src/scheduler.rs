@@ -13,11 +13,13 @@ use crate::{
         Config, DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK,
         GRANOLA_CREDENTIALS_RECONCILE_TASK, GRANOLA_SYNC_TASK, SHARED_DRIVES_DISCOVER_TASK,
         SLACK_CREDENTIALS_RECONCILE_TASK, SLACK_USER_DISCOVER_TASK, SLACK_USERS_SYNC_TASK,
+        TELEGRAM_CHATS_PROJECT_TASK,
     },
     credentials::ConsoleCredentials,
     granola_tasks::{GranolaReconcileParams, GranolaSyncParams},
     slack_tasks::{SlackDiscoverParams, SlackReconcileParams, UsersSyncParams},
     tasks::{DiscoverSharedDrivesParams, ReconcileCredentialsParams, ScanParams},
+    telegram_documents::ChatsProjectParams,
     telemetry,
 };
 
@@ -221,6 +223,61 @@ pub async fn run_slack(config: Arc<Config>, client: Client, credentials: Arc<Con
             .await;
         }
     }
+}
+
+/// Enqueues Telegram expiry and projection. While the Telegram indexer is
+/// disabled it still enqueues when Telegram data is stored, so retention keeps
+/// applying (the task then skips projection); a deployment that never stored
+/// Telegram data enqueues nothing. Messages arrive from the Telegram ingress,
+/// so there are no credentials to reconcile or discover.
+pub async fn run_telegram(config: Arc<Config>, client: Client, pool: sqlx::PgPool) {
+    let mut ticker = interval(config.telegram_project_interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let bucket = now / config.telegram_project_interval.as_secs().max(1);
+        if !config.telegram_enabled {
+            match telegram_data_stored(&pool).await {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    telemetry::scheduler_error("telegram", "check_stored");
+                    error!(event = "company_context_telegram_stored_check_failed", error = %error);
+                    continue;
+                }
+            }
+        }
+        match client
+            .spawn(
+                TELEGRAM_CHATS_PROJECT_TASK,
+                ChatsProjectParams { bucket },
+                SpawnOptions {
+                    idempotency_key: Some(format!("telegram.chats.project:{bucket}")),
+                    ..SpawnOptions::default()
+                },
+            )
+            .await
+        {
+            Ok(result) => telemetry::task_enqueued(TELEGRAM_CHATS_PROJECT_TASK, result.created),
+            Err(error) => {
+                telemetry::scheduler_error("telegram", "enqueue");
+                error!(event = "company_context_telegram_project_enqueue_failed", error = %error);
+            }
+        }
+    }
+}
+
+async fn telegram_data_stored(pool: &sqlx::PgPool) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "select exists (select 1 from company_context_system.telegram_messages) \
+         or exists (select 1 from company_context_data.telegram_documents)",
+    )
+    .fetch_one(pool)
+    .await
 }
 
 async fn spawn_credential_task<P: Serialize>(

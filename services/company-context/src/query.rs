@@ -5,6 +5,8 @@
 //! A principal sees a document only while an active broker observation for its
 //! Slack user ID, or for the subject of a Google or Granola credential granted
 //! to it, still reaches the document's file, conversation, or Granola note.
+//! Telegram documents come only from groups connected to company context, which
+//! are company-wide, so every principal sees them.
 //! Queries run as [`QUERY_ROLE`], which can only read `company_context_data`.
 
 use std::{
@@ -33,7 +35,7 @@ use tracing::{error, warn};
 use crate::{
     config::{
         Config, GOOGLE_DRIVE_DOCUMENT_ID_PREFIX, GRANOLA_DOCUMENT_ID_PREFIX,
-        SLACK_DOCUMENT_ID_PREFIX, SLACK_FILE_DOCUMENT_ID_PREFIX,
+        SLACK_DOCUMENT_ID_PREFIX, SLACK_FILE_DOCUMENT_ID_PREFIX, TELEGRAM_DOCUMENT_ID_PREFIX,
     },
     credentials::{ConsoleCredentials, PrincipalIdentity},
     embeddings::EmbeddingsClient,
@@ -85,8 +87,9 @@ pub struct Filters {
     pub occurred_after: Option<DateTime<Utc>>,
     /// Exclusive upper bound on when a document's content occurred.
     pub occurred_before: Option<DateTime<Utc>>,
-    /// Slack conversation IDs. Limits the search to Slack messages in, and
-    /// Slack files shared in, these conversations.
+    /// Slack conversation or Telegram chat IDs. Limits the search to Slack
+    /// messages in, and Slack files shared in, these conversations, and to
+    /// Telegram messages in these chats.
     #[serde(default)]
     pub channel_ids: Vec<String>,
     /// Slack or Drive file IDs. Limits the search to these files' documents.
@@ -101,6 +104,7 @@ pub enum DataType {
     SlackFile,
     DriveDoc,
     GranolaNote,
+    TelegramMessage,
 }
 
 /// How one data type's documents are selected. Queries bind the principal's
@@ -143,11 +147,12 @@ impl Source {
 }
 
 impl DataType {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::SlackMessage,
         Self::SlackFile,
         Self::DriveDoc,
         Self::GranolaNote,
+        Self::TelegramMessage,
     ];
 
     /// The principal's identities the type's observations are keyed by.
@@ -166,6 +171,9 @@ impl DataType {
                 .iter()
                 .map(String::as_str)
                 .collect(),
+            // Every principal sees connected Telegram groups, so the subject
+            // only keeps the type from being skipped; it is not matched.
+            Self::TelegramMessage => vec![identity.kind.as_str()],
         }
     }
 
@@ -275,6 +283,25 @@ impl DataType {
                 starts_at: "d.occurred_at",
                 ends_at: "d.occurred_at",
                 in_channels: None,
+                file_id: None,
+            },
+            Self::TelegramMessage => Source {
+                id_prefix: TELEGRAM_DOCUMENT_ID_PREFIX,
+                documents: "company_context_data.telegram_documents",
+                embeddings: "company_context_data.telegram_document_embeddings",
+                columns: r#"d.document_id, d.title, d.body, NULL::text AS url,
+                   d.first_message_at AS occurred_at,
+                   jsonb_build_object(
+                       'chat_id', d.chat_id::text,
+                       'chat_title', d.chat_title,
+                       'day', d.day,
+                       'first_message_at', d.first_message_at,
+                       'last_message_at', d.last_message_at
+                   ) AS metadata"#,
+                visible: "TRUE",
+                starts_at: "d.first_message_at",
+                ends_at: "d.last_message_at",
+                in_channels: Some("d.chat_id::text = ANY($6)"),
                 file_id: None,
             },
         }
@@ -923,6 +950,7 @@ mod tests {
 
     fn ada() -> PrincipalIdentity {
         PrincipalIdentity {
+            kind: "slack_user".to_owned(),
             slack_user_id: Some("U-ADA".to_owned()),
             google_subjects: vec!["G-ADA".to_owned()],
             granola_subjects: vec!["GR-ADA".to_owned()],
@@ -932,9 +960,18 @@ mod tests {
     /// Bob has no Google identity.
     fn bob() -> PrincipalIdentity {
         PrincipalIdentity {
+            kind: "slack_user".to_owned(),
             slack_user_id: Some("U-BOB".to_owned()),
             google_subjects: Vec::new(),
             granola_subjects: vec!["GR-BOB".to_owned(), "GR-BOB-2".to_owned()],
+        }
+    }
+
+    /// A Telegram chat principal, known by no other identity.
+    fn chat() -> PrincipalIdentity {
+        PrincipalIdentity {
+            kind: "telegram_chat".to_owned(),
+            ..PrincipalIdentity::default()
         }
     }
 
@@ -942,7 +979,8 @@ mod tests {
     /// inactive) and Slack conversations C1 and C3; Bob observes C2. Slack
     /// file SF1 is shared in C1 and SF2 in both C2 and C3. Ada's Granola
     /// account observes note N1 (not N3, whose observation is inactive); Bob's
-    /// second Granola account observes N2.
+    /// second Granola account observes N2. Telegram chat -100 is visible to
+    /// everyone.
     async fn seed(pool: &PgPool) {
         pool.execute(
             r#"
@@ -1004,6 +1042,16 @@ mod tests {
                 ('granola:N1:000000', 'N1', '000000', 'Falcon sync', 'falcon launch timeline', 'ada@example.com', '2024-01-05Z', 'hash'),
                 ('granola:N2:000000', 'N2', '000000', 'Falcon sync', 'falcon launch timeline', 'bob@example.com', '2024-01-05Z', 'hash'),
                 ('granola:N3:000000', 'N3', '000000', 'Falcon sync', 'falcon launch timeline', 'carol@example.com', '2024-01-05Z', 'hash');
+
+            INSERT INTO company_context_system.telegram_chat_days
+                (chat_id, day, projection_version, content_hash, rendered_at)
+            VALUES (-100, '2024-01-03', 1, 'hash', now());
+            INSERT INTO company_context_data.telegram_documents
+                (document_id, chat_id, day, chunk_id, title, body, chat_title,
+                 first_message_at, last_message_at, content_hash)
+            VALUES ('telegram:-100:2024-01-03:000000', -100, '2024-01-03', '000000',
+                    'Ops (Telegram) — 2024-01-03', 'falcon launch slipped', 'Ops',
+                    '2024-01-03T09:00Z', '2024-01-03T10:00Z', 'hash');
             "#,
         )
         .await
@@ -1030,7 +1078,8 @@ mod tests {
                 "slack-file:SF1",
                 "slack-file:SF2",
                 "slack:C1:2024-01-02:000000",
-                "slack:C3:2024-02-01:000000"
+                "slack:C3:2024-02-01:000000",
+                "telegram:-100:2024-01-03:000000"
             ]
         );
         assert_eq!(
@@ -1053,8 +1102,24 @@ mod tests {
             [
                 "granola:N2:000000",
                 "slack-file:SF2",
-                "slack:C2:2024-01-02:000000"
+                "slack:C2:2024-01-02:000000",
+                "telegram:-100:2024-01-03:000000"
             ]
+        );
+        // Telegram principals see only Telegram documents.
+        assert_eq!(
+            ids(pool, None, &chat(), json!({ "query": "falcon" })).await,
+            ["telegram:-100:2024-01-03:000000"]
+        );
+        assert_eq!(
+            ids(
+                pool,
+                None,
+                &bob,
+                json!({ "query": "falcon", "filters": { "types": ["telegram_message"] } })
+            )
+            .await,
+            ["telegram:-100:2024-01-03:000000"]
         );
 
         // Channel days match windows their messages overlap.
@@ -1092,6 +1157,10 @@ mod tests {
             ids(pool, None, &ada, channels(json!(["C2"])))
                 .await
                 .is_empty()
+        );
+        assert_eq!(
+            ids(pool, None, &ada, channels(json!(["-100"]))).await,
+            ["telegram:-100:2024-01-03:000000"]
         );
         assert_eq!(
             ids(pool, None, &ada, channels(json!(["C3"]))).await,
@@ -1143,6 +1212,10 @@ mod tests {
                 (document_id, model, dimensions, content_hash, embedding)
             SELECT document_id, 'text-embedding-3-small', 1536, 'hash', array_fill(0.5, ARRAY[1536])::vector
             FROM company_context_data.granola_documents;
+            INSERT INTO company_context_data.telegram_document_embeddings
+                (document_id, model, dimensions, content_hash, embedding)
+            SELECT document_id, 'text-embedding-3-small', 1536, 'hash', array_fill(0.5, ARRAY[1536])::vector
+            FROM company_context_data.telegram_documents;
             "#,
         )
         .await
@@ -1168,7 +1241,8 @@ mod tests {
                 "slack-file:SF1",
                 "slack-file:SF2",
                 "slack:C1:2024-01-02:000000",
-                "slack:C3:2024-02-01:000000"
+                "slack:C3:2024-02-01:000000",
+                "telegram:-100:2024-01-03:000000"
             ]
         );
         assert_eq!(
@@ -1271,6 +1345,18 @@ mod tests {
             .unwrap();
         assert_eq!(note.data_type, DataType::GranolaNote);
         assert_eq!(note.metadata["note_id"], "N1");
+        let telegram = document(pool, &chat(), "telegram:-100:2024-01-03:000000")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(telegram.data_type, DataType::TelegramMessage);
+        assert_eq!(telegram.metadata["chat_id"], "-100");
+        assert!(
+            document(pool, &bob, "telegram:-100:2024-01-03:000000")
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         for (identity, document_id) in [
             (&ada, "google-drive:F2"),
@@ -1282,6 +1368,9 @@ mod tests {
             (&bob, "google-drive:F1"),
             (&bob, "slack-file:SF1"),
             (&bob, "granola:N1:000000"),
+            (&chat(), "slack:C1:2024-01-02:000000"),
+            (&chat(), "google-drive:F1"),
+            (&chat(), "granola:N1:000000"),
         ] {
             assert!(
                 document(pool, identity, document_id)

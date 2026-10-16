@@ -75,9 +75,25 @@ pub struct GoogleCredential {
 /// proxy; principal labels are not trusted.
 #[derive(Clone, Debug, Default, sqlx::FromRow)]
 pub struct PrincipalIdentity {
+    /// The Console principal kind, such as `slack_user` or `telegram_chat`.
+    pub kind: String,
     pub slack_user_id: Option<String>,
     pub google_subjects: Vec<String>,
     pub granola_subjects: Vec<String>,
+}
+
+impl PrincipalIdentity {
+    /// Telegram principals act for a Telegram chat or user, not for a company
+    /// member's accounts, so they are known by no Slack, Google, or Granola
+    /// identity and see only Telegram documents.
+    fn scoped(mut self) -> Self {
+        if self.kind.starts_with("telegram_") {
+            self.slack_user_id = None;
+            self.google_subjects.clear();
+            self.granola_subjects.clear();
+        }
+        self
+    }
 }
 
 impl ConsoleCredentials {
@@ -515,7 +531,8 @@ impl ConsoleCredentials {
                   AND credentials.dead = FALSE
                   AND credentials.provider_subject <> ''
             )
-            SELECT CASE WHEN EXISTS (
+            SELECT p.kind,
+                   CASE WHEN EXISTS (
                        SELECT 1 FROM oauth_apps app
                        WHERE app.provider = 'slack' AND app.slug = $4 AND app.enabled = TRUE
                    ) THEN NULLIF(BTRIM(p.slack_user_id), '') END AS slack_user_id,
@@ -539,6 +556,7 @@ impl ConsoleCredentials {
         .bind(&self.slack_oauth_app_slug)
         .fetch_optional(&self.pool)
         .await
+        .map(|identity| identity.map(PrincipalIdentity::scoped))
         .context("load principal from Rails Console")
     }
 
@@ -618,6 +636,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn telegram_principals_have_no_other_identity() {
+        let identity = |kind: &str| PrincipalIdentity {
+            kind: kind.to_owned(),
+            slack_user_id: Some("U-ADA".to_owned()),
+            google_subjects: vec!["G-ADA".to_owned()],
+            granola_subjects: vec!["GR-ADA".to_owned()],
+        };
+        for kind in ["telegram_chat", "telegram_user"] {
+            let scoped = identity(kind).scoped();
+            assert!(scoped.slack_user_id.is_none(), "{kind}");
+            assert!(scoped.google_subjects.is_empty(), "{kind}");
+            assert!(scoped.granola_subjects.is_empty(), "{kind}");
+        }
+        let scoped = identity("slack_user").scoped();
+        assert_eq!(scoped.slack_user_id.as_deref(), Some("U-ADA"));
+        assert_eq!(scoped.google_subjects, ["G-ADA"]);
+        assert_eq!(scoped.granola_subjects, ["GR-ADA"]);
+    }
+
     #[tokio::test]
     async fn principals_are_known_by_their_granted_credentials() {
         let Ok(database_url) = env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
@@ -629,11 +667,13 @@ mod tests {
         // The Console tables the identity lookup reads. Ada (1) holds direct
         // grants for a Google credential and two live Granola credentials,
         // plus a dead one and one from another app. Bob (2) has Granola only
-        // through a role grant, and a Google subject only as a label.
+        // through a role grant, and a Google subject only as a label. A
+        // Telegram chat (4) holds Ada's credentials and a Slack user ID.
         pool.execute(
             r#"
             CREATE TABLE principals (
-                id bigint PRIMARY KEY, labels jsonb NOT NULL DEFAULT '{}', slack_user_id text
+                id bigint PRIMARY KEY, labels jsonb NOT NULL DEFAULT '{}', slack_user_id text,
+                kind text NOT NULL
             );
             CREATE TABLE oauth_apps (
                 id bigint PRIMARY KEY, provider text NOT NULL, slug text NOT NULL,
@@ -646,9 +686,10 @@ mod tests {
             CREATE TABLE static_secrets (id bigint PRIMARY KEY, broker_credential_id bigint);
             CREATE TABLE grants (principal_id bigint, role_id bigint, static_secret_id bigint);
 
-            INSERT INTO principals VALUES
-                (1, '{}', 'U-ADA'),
-                (2, '{"google_subject": "G-BOB"}', NULL);
+            INSERT INTO principals (id, labels, slack_user_id, kind) VALUES
+                (1, '{}', 'U-ADA', 'slack_user'),
+                (2, '{"google_subject": "G-BOB"}', NULL, 'slack_user'),
+                (4, '{}', 'U-ADA', 'telegram_chat');
             INSERT INTO oauth_apps VALUES
                 (1, 'granola', 'granola'), (2, 'granola', 'other'), (3, 'google', 'google'),
                 (4, 'slack', 'slack');
@@ -662,7 +703,7 @@ mod tests {
             INSERT INTO static_secrets SELECT id, id FROM broker_credentials;
             INSERT INTO grants VALUES
                 (1, NULL, 1), (1, NULL, 2), (1, NULL, 3), (1, NULL, 4), (1, NULL, 5),
-                (NULL, 1, 6);
+                (NULL, 1, 6), (4, NULL, 1), (4, NULL, 5);
             "#,
         )
         .await
@@ -677,6 +718,14 @@ mod tests {
         assert!(bob.google_subjects.is_empty());
         assert!(bob.granola_subjects.is_empty());
         assert!(credentials.principal_identity(3).await.unwrap().is_none());
+
+        // Telegram principals are known by no Slack, Google, or Granola
+        // identity, whatever they were granted.
+        let chat = credentials.principal_identity(4).await.unwrap().unwrap();
+        assert_eq!(chat.kind, "telegram_chat");
+        assert!(chat.slack_user_id.is_none());
+        assert!(chat.google_subjects.is_empty());
+        assert!(chat.granola_subjects.is_empty());
 
         // Disabling an app hides the identities that reach its documents.
         pool.execute("UPDATE oauth_apps SET enabled = false WHERE provider IN ('google', 'slack')")

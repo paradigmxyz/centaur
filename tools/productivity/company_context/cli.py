@@ -393,7 +393,7 @@ def latest_date(
 
 _V2_TYPES_HELP = (
     "Data type to search; repeat for several: slack_message, slack_file, drive_doc, "
-    "or granola_note. Defaults to every type."
+    "granola_note, or telegram_message. Defaults to every type."
 )
 
 
@@ -411,7 +411,10 @@ def v2_search(
         None, "--before", help="Only documents before this RFC 3339 time."
     ),
     channel_ids: list[str] | None = typer.Option(  # noqa: B008
-        None, "--channel-id", help="Only Slack messages and files in this conversation; repeatable."
+        None,
+        "--channel-id",
+        help="Only Slack messages and files in this conversation, or Telegram messages in this "
+        "chat; repeatable.",
     ),
     file_ids: list[str] | None = typer.Option(  # noqa: B008
         None, "--file-id", help="Only this Slack or Drive file's documents; repeatable."
@@ -422,7 +425,7 @@ def v2_search(
         help="Output JSON (default) or human-readable text.",
     ),
 ) -> None:
-    """Search Slack, Drive, and Granola documents visible to the current user."""
+    """Search Slack, Drive, Granola, and Telegram documents visible to the current user."""
     result = CompanyContextV2Client().search(
         query=query,
         limit=limit,

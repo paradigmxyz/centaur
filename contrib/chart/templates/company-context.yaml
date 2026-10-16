@@ -85,6 +85,12 @@ spec:
               value: {{ $companyContext.indexers.granola.enabled | quote }}
             - name: COMPANY_CONTEXT_SLACK_ENABLED
               value: {{ $companyContext.indexers.slack.enabled | quote }}
+            - name: COMPANY_CONTEXT_TELEGRAM_ENABLED
+              value: {{ $companyContext.indexers.telegram.enabled | quote }}
+            - name: COMPANY_CONTEXT_TELEGRAM_PROJECT_INTERVAL_SECONDS
+              value: {{ $companyContext.telegram.projectIntervalSeconds | quote }}
+            - name: COMPANY_CONTEXT_TELEGRAM_RETENTION_DAYS
+              value: {{ $companyContext.telegram.retentionDays | quote }}
             - name: COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG
               value: {{ $companyContext.googleOauthAppSlug | quote }}
             - name: COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG

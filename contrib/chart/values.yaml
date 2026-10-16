@@ -487,6 +487,17 @@ experimentalCompanyContext:
       enabled: true
     slack:
       enabled: true
+    # Projects the group messages telegrambot stores for
+    # telegrambot.contextChatAllowlist. Connected groups are searchable
+    # company-wide. Disabling it pauses projection only: telegram.retentionDays
+    # keeps expiring stored messages and documents.
+    telegram:
+      enabled: false
+  telegram:
+    projectIntervalSeconds: 300
+    # UTC days of messages kept, today included, at most 36500. Older chat
+    # days are removed with their documents and embeddings.
+    retentionDays: 90
   # Rails Console OAuth app whose live per-user Google broker credentials are
   # synchronized. The embeddings API key comes from OPENAI_API_KEY in the
   # shared Kubernetes Secret.
@@ -873,6 +884,44 @@ discordbot:
   mentionRoleIds: ""
   # Rename auto-created threads to the triggering message; set false to keep generic names.
   nameThreads: true
+  extraEnv: {}
+  resources: {}
+
+# Telegram chat ingress — Chat SDK Telegram adapter, forwards to the api-rs control plane (:8080).
+# Off by default; needs a BotFather token and at least one allowlist. Polling mode (default) needs
+# no public endpoint. Always exactly one replica (one getUpdates consumer per token).
+telegrambot:
+  enabled: false
+  image:
+    repository: centaur-telegrambot
+    tag: latest
+    pullPolicy: Always
+  # "polling" (default, outbound only) or "webhook" (needs TELEGRAM_WEBHOOK_SECRET_TOKEN in the
+  # secret and a public route to /api/webhooks/telegram; see ingress below).
+  mode: polling
+  # Comma/space-separated group/supergroup chat ids (negative numbers) where the bot answers.
+  chatAllowlist: ""
+  # Comma/space-separated Telegram user ids allowed to use the bot, in DMs and (together with
+  # chatAllowlist) in groups. With both lists empty the bot is INERT (ignores all messages).
+  userAllowlist: ""
+  # Bot username without "@"; resolved from getMe when empty.
+  botUserName: ""
+  # Slack-style groups: plain @mentions trigger, and every message in an allowlisted group is kept
+  # so the next trigger carries what the group said since the bot was last addressed. Turn privacy
+  # mode off in BotFather (and re-add the bot to groups) when enabling.
+  observeGroups: false
+  # Comma/space-separated group/supergroup chat ids whose every message is stored for company
+  # context, where it becomes searchable company-wide. Needs
+  # experimentalCompanyContext.indexers.telegram.enabled. Independent of chatAllowlist. Needs
+  # privacy mode off in BotFather to see unaddressed messages.
+  contextChatAllowlist: ""
+  # Webhook mode only: route Telegram's webhook calls to the service.
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    host: ""
+    tls: []
   extraEnv: {}
   resources: {}
 

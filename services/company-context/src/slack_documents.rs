@@ -205,7 +205,7 @@ async fn project_day(
         &channel_name
     };
     let title = format!("#{label} — {day}");
-    let chunks = render_day(label, day, &messages, max_chars);
+    let chunks = render_day(&format!("#{label}"), day, &messages, max_chars);
     let content_hash = hex_sha256(
         json!([PROJECTION_VERSION, title, chunks])
             .to_string()
@@ -291,12 +291,12 @@ async fn project_day(
 
 /// A staged message with its author and text rendered.
 #[derive(Clone, Debug)]
-struct Message {
-    ts: String,
-    thread_ts: Option<String>,
-    occurred_at: DateTime<Utc>,
-    author: String,
-    text: String,
+pub(crate) struct Message {
+    pub(crate) ts: String,
+    pub(crate) thread_ts: Option<String>,
+    pub(crate) occurred_at: DateTime<Utc>,
+    pub(crate) author: String,
+    pub(crate) text: String,
 }
 
 /// A file shared by a message: its timestamp and the file as Slack listed it.
@@ -471,10 +471,10 @@ fn format_text(
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-struct Chunk {
-    body: String,
-    first_message_at: DateTime<Utc>,
-    last_message_at: DateTime<Utc>,
+pub(crate) struct Chunk {
+    pub(crate) body: String,
+    pub(crate) first_message_at: DateTime<Utc>,
+    pub(crate) last_message_at: DateTime<Utc>,
 }
 
 /// Rendered text spanning messages from `first` to `last`.
@@ -497,11 +497,17 @@ fn time_label(day: NaiveDate, at: DateTime<Utc>) -> String {
     }
 }
 
-/// Renders a channel day into chunks of at most `max_chars` characters that
-/// together contain every message. Messages stay whole unless one alone
-/// exceeds a chunk; a thread split across chunks repeats its parent's start.
-fn render_day(channel: &str, day: NaiveDate, messages: &[Message], max_chars: usize) -> Vec<Chunk> {
-    let header = |first: &str, last: &str| format!("#{channel} · {day} · {first}–{last} UTC");
+/// Renders a conversation day into chunks of at most `max_chars` characters
+/// that together contain every message, each headed by `label` (such as
+/// `#general`). Messages stay whole unless one alone exceeds a chunk; a
+/// thread split across chunks repeats its parent's start.
+pub(crate) fn render_day(
+    label: &str,
+    day: NaiveDate,
+    messages: &[Message],
+    max_chars: usize,
+) -> Vec<Chunk> {
+    let header = |first: &str, last: &str| format!("{label} · {day} · {first}–{last} UTC");
     let widest_time = "0000-00-00 00:00";
     let budget = max_chars
         .saturating_sub(char_count(&header(widest_time, widest_time)) + 2)
@@ -933,7 +939,7 @@ mod tests {
         messages.sort_by(|left, right| left.ts.cmp(&right.ts));
 
         let max_chars = 500;
-        let chunks = render_day("general", day, &messages, max_chars);
+        let chunks = render_day("#general", day, &messages, max_chars);
         assert!(chunks.len() > 3);
         for chunk in &chunks {
             assert!(char_count(&chunk.body) <= max_chars, "{}", chunk.body);

@@ -28,7 +28,7 @@ use crate::{
     granola::GranolaClient,
     granola_tasks,
     slack::SlackClient,
-    slack_documents, slack_files,
+    slack_documents, slack_files, telegram_documents,
 };
 
 #[derive(Clone)]
@@ -119,6 +119,7 @@ pub fn register(state: TaskState) -> Result<()> {
     granola_tasks::register(&state)?;
     slack_documents::register(&state)?;
     slack_files::register(&state)?;
+    telegram_documents::register(&state)?;
 
     let reconcile_state = state.clone();
     state.absurd.register_task(

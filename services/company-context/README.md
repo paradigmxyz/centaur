@@ -12,10 +12,12 @@ Files attached to projected messages are indexed as their own documents, not in 
 
 Slack limits each Web API method per workspace per app, and every token the app issues shares that budget, including bot tokens used by other services. Workers therefore reserve request slots from a shared schedule in `company_context_system.slack_rate_limits`, spaced so that ingestion uses only `COMPANY_CONTEXT_SLACK_RATE_LIMIT_SHARE` of each method's documented tier. A task waits for its slot in place, holding its worker, so only running calls hold slots and queued tasks wait their turn on the queue. When Slack rate limits a method, every worker waits out its `Retry-After`, and the rate-limited call retries before tasks queued behind it.
 
+It also indexes Telegram group messages when `COMPANY_CONTEXT_TELEGRAM_ENABLED` is set. Telegram allows one update consumer per bot token and has no history API, so the Telegram ingress (`services/telegrambot`, `TELEGRAMBOT_CONTEXT_CHAT_ALLOWLIST`) writes each message from a connected group to `company_context_system.telegram_messages` as it arrives; this service never calls Telegram. Every `COMPANY_CONTEXT_TELEGRAM_PROJECT_INTERVAL_SECONDS` it keeps only the last `COMPANY_CONTEXT_TELEGRAM_RETENTION_DAYS` (default 90) UTC days, today included, removing older messages and chat days with their documents and embeddings, then renders each chat's UTC days that changed, as Slack channel days are rendered: a transcript split into chunks, each published as its own document with its own embedding. Replies quote the start of the message they answer when it is on the same day. Attachments are named, not downloaded. Each chunk is headed by the chat's current title, so renaming a group renders and embeds its retained days again. Edits are not delivered to the ingress and Telegram does not report deletions to bots, so messages stay as they arrived until they expire. Retention keeps running while the Telegram indexer is disabled, as long as Telegram data is stored; only projection pauses, and a deployment that never stored Telegram data schedules nothing. Connected groups are company-wide, so every principal can read their documents.
+
 The service owns these Postgres schemas:
 
-- `company_context_system`: private cursors, staging (including Slack messages and users), and processing state.
-- `company_context_data`: retrieval-facing Drive documents, Granola notes, Slack channel and file documents, access observations (including Slack identities, channel memberships, and the conversations each Slack file is shared in), and embeddings. The query endpoints read only this schema, as the `centaur_company_context_v2_query` role, which can only select from it; the service switches to that role for each query transaction, so its login role must be able to grant itself membership (`CREATEROLE` or superuser).
+- `company_context_system`: private cursors, staging (including Slack and Telegram messages and Slack users), and processing state.
+- `company_context_data`: retrieval-facing Drive documents, Granola notes, Slack channel and file documents, Telegram chat documents, access observations (including Slack identities, channel memberships, and the conversations each Slack file is shared in), and embeddings. The query endpoints read only this schema, as the `centaur_company_context_v2_query` role, which can only select from it; the service switches to that role for each query transaction, so its login role must be able to grant itself membership (`CREATEROLE` or superuser).
 
 Documents are exposed to retrieval only through the query endpoints; no other database role can read them. The Helm deployment is gated by `experimentalCompanyContext.enabled` until it is ready for production.
 
@@ -70,6 +72,8 @@ Indexer switches (default `true`):
 - `COMPANY_CONTEXT_DRIVE_ENABLED`: schedule Google Drive sync.
 - `COMPANY_CONTEXT_GRANOLA_ENABLED`: schedule Granola sync.
 - `COMPANY_CONTEXT_SLACK_ENABLED`: schedule Slack sync and run the Slack queue worker.
+- `COMPANY_CONTEXT_TELEGRAM_ENABLED` (default `false`): project stored Telegram
+  messages. Telegram retention runs either way.
 
 Disabling an indexer pauses it without removing anything: no new sync or
 reconciliation is scheduled, already indexed documents stay searchable, and
@@ -109,6 +113,8 @@ Common optional settings:
 - `COMPANY_CONTEXT_SLACK_HISTORY_DAYS` (default `90`, at most `36500`)
 - `COMPANY_CONTEXT_SLACK_CHANNEL_HISTORY_DAYS`: comma-separated `CONVERSATION_ID=DAYS` overrides, e.g. `C0123456789=3650`
 - `COMPANY_CONTEXT_SLACK_RATE_LIMIT_SHARE` (default `0.3`, greater than 0 and at most 1)
+- `COMPANY_CONTEXT_TELEGRAM_PROJECT_INTERVAL_SECONDS` (default `300`)
+- `COMPANY_CONTEXT_TELEGRAM_RETENTION_DAYS` (default `90`, at most `36500`)
 - `COMPANY_CONTEXT_SLACK_WORKER_CONCURRENCY` (default `4`)
 - `COMPANY_CONTEXT_SLACK_THREAD_WORKER_CONCURRENCY` (default `1`)
 - `COMPANY_CONTEXT_DRIVE_PAGE_SIZE` (default `100`)
@@ -159,6 +165,11 @@ of the corresponding types. Disabling an OAuth app in the Console removes the
 corresponding identity, so its documents stop being returned without being
 removed from the index.
 
+Telegram documents come only from groups connected to company context, which
+are company-wide, so every principal sees them. Telegram principals (kinds
+starting with `telegram_`) act for a Telegram chat or user, so they are known by
+no Slack, Google, or Granola identity and see only Telegram documents.
+
 Granola does not report notes that are unshared or deleted, so a note stays
 visible to the principals whose credentials once observed it until those
 credentials are dead or deleted.
@@ -170,13 +181,13 @@ for a missing or invalid token, 403 for a principal unknown to the Console, and
 ### `POST /query`
 
 Searches the visible Slack channel documents, Slack file documents, Drive
-documents, and Granola notes.
+documents, Granola notes, and Telegram chat documents.
 
 ```json
 {
   "query": "falcon launch plan",
   "filters": {
-    "types": ["slack_message", "slack_file", "drive_doc", "granola_note"],
+    "types": ["slack_message", "slack_file", "drive_doc", "granola_note", "telegram_message"],
     "occurred_after": "2024-01-01T00:00:00Z",
     "occurred_before": "2024-02-01T00:00:00Z",
     "channel_ids": ["C0123456789"],
@@ -191,13 +202,14 @@ Filters combine with AND:
 
 - `types`: the data types to search. Absent or empty searches every type.
 - `occurred_after` (inclusive) and `occurred_before` (exclusive): RFC 3339
-  timestamps. A Slack channel document matches when its messages overlap the
-  window; a Slack file matches by when it was created, a Drive document by
+  timestamps. A Slack or Telegram chat document matches when its messages
+  overlap the window; a Slack file matches by when it was created, a Drive document by
   when it was last modified, and a Granola note by when its meeting occurred.
   Documents without a timestamp do not match a window.
-- `channel_ids`: Slack conversation IDs, at most 100. Searches only Slack
-  messages in these conversations and Slack files shared in them; a file
-  matches only through a conversation the principal can see.
+- `channel_ids`: Slack conversation or Telegram chat IDs, at most 100. Searches
+  only Slack messages in these conversations, Slack files shared in them, and
+  Telegram messages in these chats; a file matches only through a conversation
+  the principal can see.
 - `file_ids`: Slack or Drive file IDs, at most 100. Searches only these files'
   documents.
 
@@ -228,7 +240,8 @@ result's `score` is its fused rank score, comparable only within one response.
 `text` is the full document chunk. `metadata` holds type-specific fields:
 conversation, channel, and message times for `slack_message`; file ID and file
 type for `slack_file`; file ID, document type, MIME type, and pages for
-`drive_doc`; note ID, owner, and attendees for `granola_note`.
+`drive_doc`; note ID, owner, and attendees for `granola_note`; chat ID, chat
+title, and message times for `telegram_message`.
 
 ### `GET /documents/{document_id}`
 
