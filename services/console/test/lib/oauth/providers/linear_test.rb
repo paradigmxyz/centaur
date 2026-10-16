@@ -73,6 +73,8 @@ module Oauth
         assert_equal [ "api.linear.app", "uploads.linear.app", "mcp.linear.app" ], strategy.api_hosts
         assert_equal "scope", strategy.authorization_scope_param
         assert_equal ",", strategy.scope_separator
+        assert_equal ",", strategy.token_scope_separator(grant: "client_credentials")
+        assert_equal " ", strategy.token_scope_separator(grant: "refresh_token")
         assert_equal({}, strategy.extra_authorization_params)
         assert strategy.refreshable?
         assert_equal %w[read write], strategy.refresh_scopes(%w[read write])

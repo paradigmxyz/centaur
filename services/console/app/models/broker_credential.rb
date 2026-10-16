@@ -120,6 +120,11 @@ class BrokerCredential < ApplicationRecord
     oauth_app&.provider_strategy&.refresh_scopes(scopes) || scopes
   end
 
+  def token_scope_separator_for_provider(grant:)
+    strategy = oauth_app&.provider_strategy
+    strategy&.respond_to?(:token_scope_separator) ? strategy.token_scope_separator(grant: grant) : " "
+  end
+
   # --- Refresh state machine (ported from iron-token-broker credential.go) ----
 
   # The wall-clock time the loop should next refresh. min(early-trigger,
