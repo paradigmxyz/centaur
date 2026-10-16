@@ -170,6 +170,46 @@ describe("extractMessageOverrides", () => {
       model: undefined,
     });
   });
+
+  test("parses -rsn with space or equals", () => {
+    expect(extractMessageOverrides("-rsn high fix it").reasoning).toBe("high");
+    expect(extractMessageOverrides("-rsn=medium fix it").reasoning).toBe(
+      "medium",
+    );
+  });
+
+  test("-rsn is case-insensitive and normalizes the effort value", () => {
+    expect(extractMessageOverrides("-rsn HIGH fix it").reasoning).toBe("high");
+    expect(extractMessageOverrides("-rsn Medium fix it").reasoning).toBe(
+      "medium",
+    );
+  });
+
+  test("-rsn accepts short aliases", () => {
+    expect(extractMessageOverrides("-rsn min fix it").reasoning).toBe(
+      "minimal",
+    );
+    expect(extractMessageOverrides("-rsn med fix it").reasoning).toBe("medium");
+    expect(extractMessageOverrides("-rsn hi fix it").reasoning).toBe("high");
+    expect(extractMessageOverrides("-rsn xhi fix it").reasoning).toBe("xhigh");
+  });
+
+  test("-rsn strips the flag and combines with a harness flag", () => {
+    expect(extractMessageOverrides("-rsn high --codex audit this")).toEqual({
+      cleanedText: "audit this",
+      harnessType: "codex",
+      model: undefined,
+      reasoning: "high",
+    });
+  });
+
+  test("-rsn with an unknown effort value is left untouched", () => {
+    expect(extractMessageOverrides("-rsn turbo fix it")).toEqual({
+      cleanedText: "-rsn turbo fix it",
+      harnessType: undefined,
+      model: undefined,
+    });
+  });
 });
 
 describe("resolveStickyProvider", () => {

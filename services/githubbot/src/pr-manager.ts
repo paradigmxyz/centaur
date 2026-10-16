@@ -2,6 +2,7 @@ import type { GitHubAdapter } from "@chat-adapter/github";
 import type { StateAdapter } from "chat";
 import { backgroundWaitUntil } from "./context";
 import { reactWorkingOnReview, settleReviewReaction } from "./reactions";
+import { reasoningEffortFor } from "./reasoning-effort";
 import { runTurnStream, turnOutputChars } from "./turn";
 import {
   fetchCiEvaluation,
@@ -709,6 +710,13 @@ function fireManagementTurn(
     executeMessage: managementMessage(message.id, threadKey, message.text),
     messages: [],
     model: undefined,
+    // Autonomous turn: no message to carry a -rsn flag, so the effort comes
+    // from the configured per-turn-type policy. CI fix has its own knob; the
+    // other management turns (address-review, resolve-conflict) share one.
+    reasoning: reasoningEffortFor(
+      ctx.options.reasoningEffort,
+      message.label === "ci-fix" ? "ci-fix" : "management",
+    ),
     onEventId: (eventId) => {
       lastEventId = Math.max(lastEventId, eventId);
       forwardInput.afterEventId = lastEventId;

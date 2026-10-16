@@ -523,7 +523,11 @@ function handleCommentMention(
           harnessType: overrides.harnessType,
           model: overrides.model,
           provider: overrides.provider,
-          reasoning: reasoningEffortFor(options.reasoningEffort, "comment"),
+          // An explicit -rsn flag in the mention wins over the configured
+          // per-turn-type default.
+          reasoning:
+            overrides.reasoning ??
+            reasoningEffortFor(options.reasoningEffort, "comment"),
         },
         parentCommentId: rootCommentId,
         reactCommentId: event.commentId,

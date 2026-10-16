@@ -92,10 +92,12 @@ export type LinearbotOptions = {
   apiKey?: string;
   apiUrl: string;
   /**
-   * Reasoning effort per turn type. This bot's turns are mostly autonomous, so
-   * there is no message for a `-rsn` flag to ride on and every turn otherwise
-   * runs at the harness global default -- which suits neither an assignment
-   * turn implementing a whole ticket nor a one-line comment reply.
+   * Reasoning effort per turn type. Most of this bot's turns are autonomous
+   * (assignment kickoffs, replies on delegated issues), so there is no human
+   * message to carry a `-rsn` flag and every turn would otherwise run at the
+   * harness global default -- which suits neither an assignment turn
+   * implementing a whole ticket nor a one-line comment reply. On comment
+   * mentions an explicit `-rsn` flag in the text wins over this default.
    */
   reasoningEffort?: ReasoningEffortPolicy;
   /**

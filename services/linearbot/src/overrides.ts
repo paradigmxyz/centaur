@@ -5,20 +5,26 @@
  *   --meta                                       codex via Meta AI direct
  *   --provider <name>                            codex via a configured provider
  *   --model <name> (or --model=<name>)           pick the model within that harness
+ *   -rsn <effort> (or -rsn=<effort>)             per-turn reasoning effort (codex/nanocodex)
  *   --fable | --opus | --sonnet | --haiku        model shortcuts (imply claude-code)
  *
  * Flags are stripped from the text before it reaches the agent. The harness
  * applies at session creation (the API pins a thread to one harness); the model
  * applies per turn via the blocks-protocol `model` field. `--model` accepts a
  * full model id (claude-sonnet-4-6, gpt-5.2, …) or a Claude alias
- * (fable/opus/sonnet/haiku) which expands to the full id.
+ * (fable/opus/sonnet/haiku) which expands to the full id. Reasoning effort rides
+ * the blocks-protocol `reasoning` field per turn; only codex-compatible
+ * harnesses use it, others ignore it.
  */
+
+import { normalizeReasoningEffort } from "./reasoning-effort";
 
 export type MessageOverrides = {
   cleanedText: string;
   harnessType?: string;
   model?: string;
   provider?: string;
+  reasoning?: string;
 };
 
 export type StickyProviderResolution = {
@@ -74,17 +80,34 @@ const PROVIDER_FLAG_PATTERN = new RegExp(
   "i",
 );
 
+// Single dash by design: a short per-turn knob (`-rsn high`), matching
+// slackbotv2's flag.
+const REASONING_FLAG_PATTERN = new RegExp(
+  String.raw`(?:^|\s)-rsn${MODEL_VALUE_SEPARATOR}([A-Za-z-]+)${FLAG_VALUE_BOUNDARY}`,
+  "i",
+);
+
 export function extractMessageOverrides(text: string): MessageOverrides {
   let cleaned = text;
   let harnessType: string | undefined;
   let model: string | undefined;
   let provider: string | undefined;
+  let reasoning: string | undefined;
 
   const modelMatch = MODEL_FLAG_PATTERN.exec(cleaned);
   if (modelMatch) {
     const value = modelMatch[1]!;
     model = CLAUDE_MODEL_ALIASES[value.toLowerCase()] ?? value;
     cleaned = stripMatch(cleaned, modelMatch);
+  }
+
+  const reasoningMatch = REASONING_FLAG_PATTERN.exec(cleaned);
+  if (reasoningMatch) {
+    const normalized = normalizeReasoningEffort(reasoningMatch[1]);
+    if (normalized) {
+      reasoning = normalized;
+      cleaned = stripMatch(cleaned, reasoningMatch);
+    }
   }
 
   const providerMatch = PROVIDER_FLAG_PATTERN.exec(cleaned);
@@ -125,6 +148,7 @@ export function extractMessageOverrides(text: string): MessageOverrides {
     harnessType,
     model,
     provider,
+    reasoning,
   };
 }
 

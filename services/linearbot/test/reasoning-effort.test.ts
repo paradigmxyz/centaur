@@ -15,6 +15,7 @@ describe("normalizeReasoningEffort", () => {
       "high",
       "xhigh",
       "max",
+      "ultra",
     ]) {
       expect(normalizeReasoningEffort(effort)).toBe(effort);
     }

@@ -2,6 +2,7 @@ import { backgroundWaitUntil } from "./context";
 import { DEFAULT_ISSUE_PROMPT } from "./issue-prompt";
 import type { PrManagerContext } from "./pr-manager";
 import { reactWorkingOnSubject, settleSubjectReaction } from "./reactions";
+import { reasoningEffortFor } from "./reasoning-effort";
 import { runTurnStream, turnOutputChars } from "./turn";
 import type {
   ForwardSessionInput,
@@ -132,6 +133,9 @@ export function handleIssueEvent(
       }),
       messages: [],
       model: undefined,
+      // Autonomous turn: no message to carry a -rsn flag, so the effort comes
+      // from the configured per-turn-type policy.
+      reasoning: reasoningEffortFor(options.reasoningEffort, "assignment"),
       onEventId: (eventId) => {
         lastEventId = Math.max(lastEventId, eventId);
         forwardInput.afterEventId = lastEventId;

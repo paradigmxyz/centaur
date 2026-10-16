@@ -1,3 +1,5 @@
+import type { ReasoningEffortPolicy } from "./reasoning-effort";
+
 import type { RustSessionStreamEvent } from "@centaur/harness-events";
 import type { CodexAppServerToChatStreamOptions } from "@centaur/rendering";
 import type { Attachment, Chat, Logger, StateAdapter } from "chat";
@@ -138,6 +140,15 @@ export type GithubbotOptions = {
    */
   managementPrompt?: string;
   /**
+   * Reasoning effort per turn type. Most of this bot's turns are autonomous
+   * (issue work, requested reviews, CI fixes, owned-PR management), so there
+   * is no human message to carry a `-rsn` flag and every turn would otherwise
+   * run at the harness global default -- which suits neither an issue-work
+   * turn implementing a whole ticket nor a mechanical CI fix. On comment turns
+   * an explicit `-rsn` flag in the mention wins over this default.
+   */
+  reasoningEffort?: ReasoningEffortPolicy;
+  /**
    * v2 PR self-management: auto-merge owned PRs when GitHub reports them
    * mergeable (branch protection is the source of truth). Defaults to true.
    */
@@ -247,6 +258,8 @@ export type ForwardSessionInput = {
   model?: string;
   /** Effective model provider selected by a message flag; codex only. */
   provider?: string;
+  /** Per-turn reasoning effort, forwarded to the harness as turn/start.effort. */
+  reasoning?: string;
   onEventId(eventId: number): void;
   openStream: boolean;
   threadId: string;

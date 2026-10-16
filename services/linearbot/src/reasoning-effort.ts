@@ -35,6 +35,7 @@ const REASONING_EFFORTS: Record<string, string> = {
   xhi: "xhigh",
   "x-high": "xhigh",
   max: "max",
+  ultra: "ultra",
 };
 
 /**

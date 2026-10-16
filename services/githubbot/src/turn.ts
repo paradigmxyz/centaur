@@ -268,7 +268,12 @@ export async function runSessionTurn(input: {
   conversationName?: string;
   executeMessage: GithubbotApiMessage;
   options: GithubbotOptions;
-  overrides: { harnessType?: string; model?: string; provider?: string };
+  overrides: {
+    harnessType?: string;
+    model?: string;
+    provider?: string;
+    reasoning?: string;
+  };
   /** Comment to react to (👀 → 🚀/😕); the triggering comment, if any. */
   reactMessageId?: string;
   /**
@@ -313,6 +318,7 @@ export async function runSessionTurn(input: {
     messages: [],
     model: overrides.model,
     provider: provider.provider,
+    reasoning: overrides.reasoning,
     onEventId: (eventId) => {
       lastEventId = Math.max(lastEventId, eventId);
       forwardInput.afterEventId = lastEventId;
