@@ -52,6 +52,7 @@ import {
   serializeAttachment,
   serializeMessageLinks,
   serializeMessage,
+  SESSION_STEERING_DELIVERED_EVENT,
   sessionStreamError,
   slackApiTimeoutMs,
   WORKFLOW_ACTION_PREFIX,
@@ -2741,6 +2742,7 @@ async function renderExecutionStream(
     phase_ms: elapsedMs(titleStartedAtMs)
   })
   const capture = { diverged: false }
+  const statusTracker = newAssistantStatusTracker(options)
   try {
     const taskDisplayMode = slackStreamTaskDisplayMode(options)
     const visibleStream = await streamAfterFirstChunk(
@@ -2748,8 +2750,8 @@ async function renderExecutionStream(
         slackSafeChatSdkStream(
           slackVisibleChatSdkStream(
             harnessToChatSdkStream(
-              stream,
-              rendererOptions(thread, options, capture, trace)
+              restoreAssistantStatusAfterSteering(thread, stream, statusTracker, options, trace),
+              rendererOptions(thread, options, capture, trace, statusTracker)
             ),
             taskDisplayMode
           )
@@ -2795,6 +2797,7 @@ async function renderRecoveredExecutionStream(
     phase_ms: elapsedMs(titleStartedAtMs)
   })
   const capture = { diverged: false }
+  const statusTracker = newAssistantStatusTracker(options)
   try {
     const taskDisplayMode = slackStreamTaskDisplayMode(options)
     const visibleStream = await streamAfterFirstChunk(
@@ -2802,8 +2805,8 @@ async function renderRecoveredExecutionStream(
         slackSafeChatSdkStream(
           slackVisibleChatSdkStream(
             harnessToChatSdkStream(
-              stream,
-              rendererOptions(thread, options, capture, trace)
+              restoreAssistantStatusAfterSteering(thread, stream, statusTracker, options, trace),
+              rendererOptions(thread, options, capture, trace, statusTracker)
             ),
             taskDisplayMode
           )
@@ -2849,12 +2852,15 @@ async function renderPlainTextExecutionStream(
     assistant_status_already_visible: assistantStatusVisible,
     phase_ms: elapsedMs(titleStartedAtMs)
   })
+  const statusTracker = newAssistantStatusTracker(options)
   try {
     const chatStream = fallback.collectChatSdk(
       slackSafeChatSdkStream(
         harnessToChatSdkStream(
-          fallback.collectSource(stream),
-          rendererOptions(thread, options, undefined, trace)
+          fallback.collectSource(
+            restoreAssistantStatusAfterSteering(thread, stream, statusTracker, options, trace)
+          ),
+          rendererOptions(thread, options, undefined, trace, statusTracker)
         )
       )
     )
@@ -3713,11 +3719,49 @@ function rendererLogInfo(
   }
 }
 
+/** The status a live render currently owns, so it can be restored after Slack hides it. */
+type AssistantStatusTracker = { current: string }
+
+function newAssistantStatusTracker(options: SlackbotV2Options): AssistantStatusTracker {
+  return { current: options.assistantStatus ?? 'Thinking...' }
+}
+
+/**
+ * Slack hides the thread-wide assistant status when a new message is posted
+ * in the thread, and the steering handoff deliberately leaves the status to
+ * the active run. Once api-rs reports the follow-up delivered to that run,
+ * restore the run's latest status instead of leaving the thread without an
+ * indicator until the next activity summary (which may never arrive).
+ */
+async function* restoreAssistantStatusAfterSteering(
+  thread: Thread,
+  stream: AsyncIterable<SlackbotV2RendererSource>,
+  tracker: AssistantStatusTracker,
+  options: SlackbotV2Options,
+  trace?: SlackbotV2Trace
+): AsyncIterable<SlackbotV2RendererSource> {
+  for await (const event of stream) {
+    if (isSteeringDeliveredEvent(event)) {
+      traceLog(options, 'slackbotv2_assistant_status_restored_after_steering', trace)
+      await setAssistantStatus(thread, tracker.current, options, trace)
+      continue
+    }
+    yield event
+  }
+}
+
+function isSteeringDeliveredEvent(event: SlackbotV2RendererSource): boolean {
+  if (!event || typeof event !== 'object') return false
+  const eventKind = 'eventKind' in event ? event.eventKind : 'event' in event ? event.event : ''
+  return eventKind === SESSION_STEERING_DELIVERED_EVENT
+}
+
 function rendererOptions(
   thread: Thread,
   options: SlackbotV2Options,
   capture?: { diverged: boolean },
-  trace?: SlackbotV2Trace
+  trace?: SlackbotV2Trace,
+  statusTracker?: AssistantStatusTracker
 ): CodexAppServerToChatStreamOptions {
   const mapper = options.mapper
   return {
@@ -3729,6 +3773,7 @@ function rendererOptions(
         await setAssistantTitle(thread, event.title, options)
       }
       if (event.type === 'renderer.status' && options.activitySummaryStatusEnabled) {
+        if (statusTracker) statusTracker.current = event.status
         await setAssistantStatus(thread, event.status, options, trace)
       }
     }

@@ -3162,6 +3162,78 @@ describe('slackbotv2', () => {
     expect(text).not.toContain('Thinking')
   })
 
+  it('restores the latest activity summary status after a steering message is delivered', async () => {
+    bot = createProductionDefaultTestBot({ activitySummaryStatusEnabled: true })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before steering status.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> check the deploy`, {
+      threadTs: parent.ts
+    })
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    const key = threadKey(parent.ts)
+    const summary = "I'm checking the rollout"
+    codexApi.emitSessionEvent(key, 'session.activity_summary', {
+      execution_id: 'exe-steering-status',
+      summary
+    })
+    await waitFor(
+      () =>
+        slackApi.calls.filter(call => call.method === 'assistant.threads.setStatus').length === 2
+    )
+
+    const steering = await sendMessage(`<@${BOT_USER_ID}> also check the logs`, {
+      threadTs: parent.ts
+    })
+    expect(steering.response.status).toBe(200)
+    await steering.finished()
+    codexApi.emitSessionEvent(key, 'session.steering_delivered', {
+      execution_id: 'exe-steering-status',
+      input_line_count: 1
+    })
+    codexApi.emitOutputLine(key, JSON.stringify({ type: 'turn.done', result: 'Deploy is fine.' }))
+
+    await mention.finished()
+    const statusCalls = slackApi.calls.filter(call => call.method === 'assistant.threads.setStatus')
+    expect(statusCalls.map(call => stringField(call.body.status))).toEqual([
+      'Thinking...',
+      summary,
+      summary,
+      ''
+    ])
+    expect(codexApi.executes).toHaveLength(1)
+    expect(await threadText(parent.ts)).toContain('Deploy is fine.')
+  })
+
+  it('restores the default status after a steering message when no summary was published', async () => {
+    bot = createProductionDefaultTestBot()
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before default steering status.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> check the deploy`, {
+      threadTs: parent.ts
+    })
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    const key = threadKey(parent.ts)
+    codexApi.emitSessionEvent(key, 'session.steering_delivered', {
+      execution_id: 'exe-default-steering-status',
+      input_line_count: 1
+    })
+    codexApi.emitOutputLine(key, JSON.stringify({ type: 'turn.done', result: 'Deploy is fine.' }))
+
+    await mention.finished()
+    const statusCalls = slackApi.calls.filter(call => call.method === 'assistant.threads.setStatus')
+    expect(statusCalls.map(call => stringField(call.body.status))).toEqual([
+      'Thinking...',
+      'Thinking...',
+      ''
+    ])
+  })
+
   it('skips stale render obligations from Chat SDK state on startup', async () => {
     const logs: CapturedLog[] = []
     const sharedState = createMemoryState()
