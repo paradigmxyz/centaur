@@ -1734,11 +1734,15 @@ async function syncThreadMessageToSession(
       traceWarn(input.options, 'slackbotv2_handoff_retry_exhausted', trace, {
         error: errorMessage(error)
       })
+    } else {
+      traceWarn(input.options, 'slackbotv2_forward_failed', trace, {
+        error: errorMessage(error)
+      })
     }
     try {
       await renderExecutionStream(
         thread,
-        streamError(error),
+        streamError(input.options, error),
         serializedMessage,
         input.options,
         trace,
@@ -2454,7 +2458,13 @@ async function recoverRenderObligation(
       recordRenderAttempt('recovery', renderOutcome, renderStartedAtMs)
       return true
     }
-    await renderRecoveredExecutionStream(thread, streamError(error), obligation.message, options, trace)
+    await renderRecoveredExecutionStream(
+      thread,
+      streamError(options, error),
+      obligation.message,
+      options,
+      trace
+    )
     await thread.setState({
       activeExecution: false,
       lastEventId,
@@ -3094,15 +3104,26 @@ async function* streamSessionAfterHandoff(
       error: errorMessage(error)
     })
     if (isRetryableSessionApiError(error)) throw error
-    yield sessionStreamError(error)
+    yield sessionStreamError(visibleFailure(options, error))
     return
   }
 
   for await (const event of stream) yield event
 }
 
-async function* streamError(error: unknown): AsyncIterable<SlackbotV2RendererSource> {
-  yield sessionStreamError(error)
+async function* streamError(
+  options: SlackbotV2Options,
+  error: unknown
+): AsyncIterable<SlackbotV2RendererSource> {
+  yield sessionStreamError(visibleFailure(options, error))
+}
+
+/**
+ * The error text names internal services and carries raw API responses, so a
+ * deployment can show its own message instead. Callers log the error first.
+ */
+function visibleFailure(options: SlackbotV2Options, error: unknown): unknown {
+  return options.failureMessage || error
 }
 
 function backgroundWaitUntil(promise: Promise<unknown>): void {
