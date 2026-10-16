@@ -570,6 +570,8 @@ export async function forwardToSessionApi(
 export const WORKFLOW_ACTION_PREFIX = 'centaur.workflow.action:'
 /** Emitted by api-rs once a follow-up message reaches an active execution. */
 export const SESSION_STEERING_DELIVERED_EVENT = 'session.steering_delivered'
+/** Emitted by api-rs when a follow-up could not reach the still-running execution. */
+export const SESSION_STEERING_FAILED_EVENT = 'session.steering_failed'
 
 export async function dispatchSlackBlockAction(
   options: SlackbotV2Options,
@@ -2053,11 +2055,12 @@ async function* parseSessionEventStream(
       if (isTerminalCodexOutputLine(event.data)) return
       continue
     }
-    // Steering delivery lets the live renderer restore the assistant status
+    // Steering outcomes let the live renderer restore the assistant status
     // Slack hides when a follow-up message lands in the thread.
     if (
       event.event === 'session.activity_summary' ||
-      event.event === SESSION_STEERING_DELIVERED_EVENT
+      event.event === SESSION_STEERING_DELIVERED_EVENT ||
+      event.event === SESSION_STEERING_FAILED_EVENT
     ) {
       yield {
         data: sessionEventData(event),

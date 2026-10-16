@@ -53,6 +53,7 @@ import {
   serializeMessageLinks,
   serializeMessage,
   SESSION_STEERING_DELIVERED_EVENT,
+  SESSION_STEERING_FAILED_EVENT,
   sessionStreamError,
   slackApiTimeoutMs,
   WORKFLOW_ACTION_PREFIX,
@@ -2743,9 +2744,10 @@ async function renderExecutionStream(
   })
   const capture = { diverged: false }
   const statusTracker = newAssistantStatusTracker(options)
+  let visibleStream: FirstChunkStream | null = null
   try {
     const taskDisplayMode = slackStreamTaskDisplayMode(options)
-    const visibleStream = await streamAfterFirstChunk(
+    visibleStream = await streamAfterFirstChunk(
       conflateChatSdkStream(
         slackSafeChatSdkStream(
           slackVisibleChatSdkStream(
@@ -2774,7 +2776,10 @@ async function renderExecutionStream(
     }) ?? await thread.post(visibleStream)
     return { diverged: capture.diverged, messageId: sent?.id }
   } finally {
-    await setAssistantStatus(thread, '', options, trace)
+    // Stop the conflation pump and SSE even if the adapter abandoned the
+    // stream without draining it, then clear the status this render owns.
+    visibleStream?.close()
+    await closeAssistantStatus(thread, statusTracker, options, trace)
   }
 }
 
@@ -2798,9 +2803,10 @@ async function renderRecoveredExecutionStream(
   })
   const capture = { diverged: false }
   const statusTracker = newAssistantStatusTracker(options)
+  let visibleStream: FirstChunkStream | null = null
   try {
     const taskDisplayMode = slackStreamTaskDisplayMode(options)
-    const visibleStream = await streamAfterFirstChunk(
+    visibleStream = await streamAfterFirstChunk(
       conflateChatSdkStream(
         slackSafeChatSdkStream(
           slackVisibleChatSdkStream(
@@ -2825,7 +2831,10 @@ async function renderRecoveredExecutionStream(
     ) ?? await thread.post(visibleStream)
     return { diverged: capture.diverged, messageId: sent?.id }
   } finally {
-    await setAssistantStatus(thread, '', options, trace)
+    // Stop the conflation pump and SSE even if the adapter abandoned the
+    // stream without draining it, then clear the status this render owns.
+    visibleStream?.close()
+    await closeAssistantStatus(thread, statusTracker, options, trace)
   }
 }
 
@@ -2877,7 +2886,7 @@ async function renderPlainTextExecutionStream(
     })
     await thread.post(text)
   } finally {
-    await setAssistantStatus(thread, '', options, trace)
+    await closeAssistantStatus(thread, statusTracker, options, trace)
   }
 }
 
@@ -3017,20 +3026,40 @@ function truncateSlackText(value: string, maxChars: number, label: string): stri
   }
 }
 
+/** A render stream whose source can be released even if no consumer drains it. */
+type FirstChunkStream = AsyncIterable<ChatSDKStreamChunk> & { close(): void }
+
 async function streamAfterFirstChunk(
   stream: AsyncIterable<ChatSDKStreamChunk>
-): Promise<AsyncIterable<ChatSDKStreamChunk> | null> {
+): Promise<FirstChunkStream | null> {
   const iterator = stream[Symbol.asyncIterator]()
   const first = await iterator.next()
   if (first.done) return null
 
+  let finished = false
+  const close = (): void => {
+    if (finished) return
+    finished = true
+    // Do not await: a source blocked on a silent SSE can keep return() pending.
+    void Promise.resolve(iterator.return?.()).catch(() => undefined)
+  }
   return {
+    close,
     async *[Symbol.asyncIterator](): AsyncIterator<ChatSDKStreamChunk> {
-      yield first.value
-      for (;;) {
-        const next = await iterator.next()
-        if (next.done) return
-        yield next.value
+      try {
+        yield first.value
+        for (;;) {
+          const next = await iterator.next()
+          if (next.done) {
+            finished = true
+            return
+          }
+          yield next.value
+        }
+      } finally {
+        // A consumer that stops early (e.g. a Slack streaming error) must
+        // release the source so its pump stops consuming session events.
+        close()
       }
     }
   }
@@ -3720,18 +3749,46 @@ function rendererLogInfo(
 }
 
 /** The status a live render currently owns, so it can be restored after Slack hides it. */
-type AssistantStatusTracker = { current: string }
+type AssistantStatusTracker = { closed: boolean; current: string }
 
 function newAssistantStatusTracker(options: SlackbotV2Options): AssistantStatusTracker {
-  return { current: options.assistantStatus ?? 'Thinking...' }
+  return { closed: false, current: options.assistantStatus ?? 'Thinking...' }
+}
+
+/**
+ * Sets a status owned by a live render. Once the render has cleared its
+ * status, late writers (an abandoned stream pump or a status call that
+ * outlived its timeout) must not leave a stale indicator behind.
+ */
+async function setTrackedAssistantStatus(
+  thread: Thread,
+  tracker: AssistantStatusTracker,
+  status: string,
+  options: SlackbotV2Options,
+  trace?: SlackbotV2Trace
+): Promise<void> {
+  if (tracker.closed) return
+  await setAssistantStatus(thread, status, options, trace)
+  if (tracker.closed) await setAssistantStatus(thread, '', options, trace)
+}
+
+async function closeAssistantStatus(
+  thread: Thread,
+  tracker: AssistantStatusTracker,
+  options: SlackbotV2Options,
+  trace?: SlackbotV2Trace
+): Promise<void> {
+  tracker.closed = true
+  await setAssistantStatus(thread, '', options, trace)
 }
 
 /**
  * Slack hides the thread-wide assistant status when a new message is posted
  * in the thread, and the steering handoff deliberately leaves the status to
- * the active run. Once api-rs reports the follow-up delivered to that run,
- * restore the run's latest status instead of leaving the thread without an
- * indicator until the next activity summary (which may never arrive).
+ * the active run. Once api-rs reports the follow-up delivered to (or failed
+ * for) that still-running execution, restore the run's latest status instead
+ * of leaving the thread without an indicator until the next activity summary
+ * (which may never arrive).
  */
 async function* restoreAssistantStatusAfterSteering(
   thread: Thread,
@@ -3741,19 +3798,26 @@ async function* restoreAssistantStatusAfterSteering(
   trace?: SlackbotV2Trace
 ): AsyncIterable<SlackbotV2RendererSource> {
   for await (const event of stream) {
-    if (isSteeringDeliveredEvent(event)) {
-      traceLog(options, 'slackbotv2_assistant_status_restored_after_steering', trace)
-      await setAssistantStatus(thread, tracker.current, options, trace)
+    const steeringEvent = steeringEventKind(event)
+    if (steeringEvent) {
+      if (!tracker.closed) {
+        traceLog(options, 'slackbotv2_assistant_status_restored_after_steering', trace, {
+          steering_event: steeringEvent
+        })
+      }
+      await setTrackedAssistantStatus(thread, tracker, tracker.current, options, trace)
       continue
     }
     yield event
   }
 }
 
-function isSteeringDeliveredEvent(event: SlackbotV2RendererSource): boolean {
-  if (!event || typeof event !== 'object') return false
+function steeringEventKind(event: SlackbotV2RendererSource): string | null {
+  if (!event || typeof event !== 'object') return null
   const eventKind = 'eventKind' in event ? event.eventKind : 'event' in event ? event.event : ''
-  return eventKind === SESSION_STEERING_DELIVERED_EVENT
+  return eventKind === SESSION_STEERING_DELIVERED_EVENT || eventKind === SESSION_STEERING_FAILED_EVENT
+    ? eventKind
+    : null
 }
 
 function rendererOptions(
@@ -3773,8 +3837,12 @@ function rendererOptions(
         await setAssistantTitle(thread, event.title, options)
       }
       if (event.type === 'renderer.status' && options.activitySummaryStatusEnabled) {
-        if (statusTracker) statusTracker.current = event.status
-        await setAssistantStatus(thread, event.status, options, trace)
+        if (statusTracker) {
+          statusTracker.current = event.status
+          await setTrackedAssistantStatus(thread, statusTracker, event.status, options, trace)
+        } else {
+          await setAssistantStatus(thread, event.status, options, trace)
+        }
       }
     }
   }

@@ -3234,6 +3234,85 @@ describe('slackbotv2', () => {
     ])
   })
 
+  it('restores the status when api-rs reports a steering delivery failure', async () => {
+    bot = createProductionDefaultTestBot()
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before failed steering status.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> check the deploy`, {
+      threadTs: parent.ts
+    })
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    const key = threadKey(parent.ts)
+    codexApi.emitSessionEvent(key, 'session.steering_failed', {
+      error: 'stdin closed',
+      execution_id: 'exe-failed-steering-status'
+    })
+    codexApi.emitOutputLine(key, JSON.stringify({ type: 'turn.done', result: 'Deploy is fine.' }))
+
+    await mention.finished()
+    const statusCalls = slackApi.calls.filter(call => call.method === 'assistant.threads.setStatus')
+    expect(statusCalls.map(call => stringField(call.body.status))).toEqual([
+      'Thinking...',
+      'Thinking...',
+      ''
+    ])
+  })
+
+  it('does not restore the status after a render abandons its stream on a Slack error', async () => {
+    bot = createTestBot()
+    codexApi.autoRespond = false
+    slackApi.failStreamAppendsAfter(1, 'message_not_in_streaming_state')
+
+    const parent = await postUserMessage('Context before abandoned steering status.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> run something long`, {
+      threadTs: parent.ts
+    })
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    const key = threadKey(parent.ts)
+    const statuses = () =>
+      slackApi.calls
+        .filter(call => call.method === 'assistant.threads.setStatus')
+        .map(call => stringField(call.body.status))
+    for (const id of ['cmd-abandon-1', 'cmd-abandon-2', 'cmd-abandon-3']) {
+      codexApi.emitOutputLine(
+        key,
+        JSON.stringify({
+          type: 'item.completed',
+          item: {
+            id,
+            type: 'commandExecution',
+            // Large enough to flush the Slack SDK's client-side stream buffer.
+            command: `sleep 1 # ${'x'.repeat(300)}`,
+            status: 'completed',
+            aggregatedOutput: 'done'
+          }
+        })
+      )
+    }
+    // The failed append ends the live render, which clears its status.
+    await waitFor(() => statuses().includes(''), 3000)
+
+    codexApi.emitSessionEvent(key, 'session.steering_delivered', {
+      execution_id: 'exe-abandoned-steering-status',
+      input_line_count: 1
+    })
+    codexApi.emitSessionEvent(key, 'session.execution_completed', {
+      execution_id: 'exe-abandoned-steering-status',
+      status: 'completed',
+      result_text: 'ABANDONED_STREAM_ANSWER'
+    })
+
+    await mention.finished()
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(statuses()).toEqual(['Thinking...', ''])
+    expect(codexApi.streamCount).toBe(0)
+  })
+
   it('skips stale render obligations from Chat SDK state on startup', async () => {
     const logs: CapturedLog[] = []
     const sharedState = createMemoryState()
