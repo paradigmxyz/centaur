@@ -155,6 +155,27 @@ def _make_client() -> tuple[SlackClient, _FakeWebClient]:
     return client, fake_web_client
 
 
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        (None, "https://slack.com/api/"),
+        ("", "https://slack.com/api/"),
+        ("http://slack-emulator.test:443/api", "http://slack-emulator.test:443/api/"),
+        ("http://slack-emulator.test:443/api/", "http://slack-emulator.test:443/api/"),
+    ],
+)
+def test_client_uses_slack_api_url_for_direct_calls(monkeypatch, configured, expected) -> None:
+    if configured is None:
+        monkeypatch.delenv("SLACK_API_URL", raising=False)
+    else:
+        monkeypatch.setenv("SLACK_API_URL", configured)
+
+    client = SlackClient(bot_token="xoxb-placeholder", search_token="xoxp-placeholder")
+
+    assert client._client.base_url == expected
+    assert client._search_client.base_url == expected
+
+
 @pytest.mark.parametrize("emoji", ["pencil2", ":pencil2:", " :pencil2: "])
 def test_add_reaction_preserves_target_and_normalizes_emoji(emoji) -> None:
     client, web_client = _make_client()

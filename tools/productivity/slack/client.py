@@ -265,9 +265,10 @@ class SlackClient:
         self.token = token
         self.search_token = (search_token or secret("SLACK_SEARCH_TOKEN", default="")).strip()
         timeout = self._api_timeout_seconds()
-        self._client = WebClient(token=token, timeout=timeout)
+        base_url = self._api_base_url()
+        self._client = WebClient(token=token, timeout=timeout, base_url=base_url)
         self._search_client = (
-            WebClient(token=self.search_token, timeout=timeout)
+            WebClient(token=self.search_token, timeout=timeout, base_url=base_url)
             if self.search_token
             else self._client
         )
@@ -305,6 +306,14 @@ class SlackClient:
             return max(1, int(raw))
         except ValueError:
             return cls._DEFAULT_API_TIMEOUT_SECONDS
+
+    @staticmethod
+    def _api_base_url() -> str:
+        """Return the Slack Web API base URL, overridable with ``SLACK_API_URL``."""
+        raw = os.getenv("SLACK_API_URL", "").strip()  # noqa: TID251 - non-secret
+        if not raw:
+            return WebClient.BASE_URL
+        return raw.rstrip("/") + "/"
 
     def _clean_channel_ref(self, channel: str) -> str:
         """Normalize #name, ID, and <#ID|name> Slack channel references."""

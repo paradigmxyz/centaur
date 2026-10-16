@@ -253,6 +253,7 @@ Sandbox entrypoint and wrappers:
 | `CENTAUR_SKILL_DIRS` | Chart-rendered from `overlays.sources[*].skillsSubdir` (default `.agents/skills`) through `SESSION_SANDBOX_EXTRA_ENV`. | Ordered skill directories copied into the agent workspace. |
 | `COMPANY_CONTEXT_API_URL` | Chart-rendered through `SESSION_SANDBOX_EXTRA_ENV` when `experimentalCompanyContext.enabled`, or `sandbox.extraEnv`. | Company-context query API the `company_context v2` commands call through the sandbox proxy, which injects the principal API JWT. Unset disables those commands. |
 | `AGENT_REPO`, `AGENT_PERSONA` | Runtime assignment metadata. | Workspace repo clone and persona prompt. |
+| `SLACK_API_URL` | `sandbox.extraEnv`. | Optional Slack Web API base URL for the Slack tool's direct calls, matching the Slackbot and API settings. Defaults to `https://slack.com/api/`. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Sandbox entrypoint or `sandbox.extraEnv`. | Google ADC path; entrypoint creates a local stub when unset. |
 | `CODEX_API_KEY`, `CODEX_HOME`, `CODEX_CONTINUE_THREAD_ID` | `sandbox.extraEnv` or runtime resume. | Codex auth/config/resume behavior. |
 | `CODEX_AUTH_MODE` | `sandbox.codexAuthMode`. | Codex auth flow: `api_key` (default, hits `api.openai.com`) or `access_token` (hits `chatgpt.com` via the brokered ChatGPT login). The chart sets this on api-rs, which propagates it into sandboxes. See [Codex Auth Modes](/deploying-in-production#codex-auth-modes). |
