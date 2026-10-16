@@ -7,8 +7,9 @@
 // stock Bun image.
 //
 // Test control, on the same port: POST /_e2e/actions clicks a block element
-// the way Slack's interactivity delivery would, and GET /_e2e/ephemeral reads
-// the ephemeral messages a user was shown.
+// the way Slack's interactivity delivery would, GET /_e2e/ephemeral reads
+// the ephemeral messages a user was shown, and GET /_e2e/status reads a
+// thread's assistant status.
 import { createHmac } from 'node:crypto'
 import { BOT, CHANNELS, TEAM, USERS, type SlackUser } from './slack-fixture'
 
@@ -36,6 +37,8 @@ const eventsUrl = requiredEnv('SLACK_EVENTS_URL')
 
 const messages: Message[] = []
 const ephemerals: Ephemeral[] = []
+/** Assistant status by `channel:thread_ts`; Slack hides it once a message lands in the thread. */
+const statuses = new Map<string, string>()
 let lastTs = 0
 // Slack retries an event three times (immediately, then after 1 and 5
 // minutes); these delays are compressed to fit a turn's timeout.
@@ -52,6 +55,10 @@ Bun.serve({
     if (url.pathname === '/_e2e/ephemeral') {
       const user = url.searchParams.get('user')
       return Response.json(ephemerals.filter(ephemeral => ephemeral.user === user))
+    }
+    if (url.pathname === '/_e2e/status') {
+      const key = `${url.searchParams.get('channel')}:${url.searchParams.get('thread_ts')}`
+      return Response.json({ status: statuses.get(key) ?? '' })
     }
     const method = url.pathname.match(/^\/api\/([\w.]+)$/)?.[1]
     if (!method) return new Response('not found', { status: 404 })
@@ -175,8 +182,11 @@ function handle(method: string, actor: Actor, body: Record<string, unknown>) {
         ? { ok: true, type: 'message', channel, message: withReplies(message) }
         : { ok: false, error: 'message_not_found' }
     }
+    case 'assistant.threads.setStatus':
+      statuses.set(`${str(body.channel_id)}:${str(body.thread_ts)}`, str(body.status))
+      return { ok: true }
     default:
-      // Status and title calls are cosmetic for this stand-in.
+      // Title calls are cosmetic for this stand-in.
       log('fake_slack_unmodeled_method', { method })
       return { ok: true }
   }
@@ -196,6 +206,7 @@ function post(
     ...fields
   }
   messages.push(message)
+  statuses.delete(`${channel}:${message.thread_ts ?? message.ts}`)
   return message
 }
 

@@ -360,6 +360,13 @@ export class Thread {
     )
   }
 
+  /** The assistant status Slack shows on the thread now; empty when none is shown. */
+  async status(): Promise<string> {
+    const query = new URLSearchParams({ channel: this.channel.id, thread_ts: this.ts })
+    const { status } = (await (await fetch(`${slackUrl}/_e2e/status?${query}`)).json()) as { status: string }
+    return status
+  }
+
   private async send(text: string, script: Script | undefined, as: SlackUser = USER): Promise<string> {
     return postMention(this.channel, as, text, script, this.dm ? undefined : this.ts, { dm: this.dm })
   }
