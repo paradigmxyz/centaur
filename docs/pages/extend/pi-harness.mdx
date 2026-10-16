@@ -32,6 +32,7 @@ has keys for. api-rs refuses to start with `pi` as the default harness when
 | Variable | Purpose |
 |---|---|
 | `CENTAUR_PI_MODEL` | Default model as `provider/id`, for example `anthropic/claude-opus-4-8` or `openai/gpt-5.5`. When unset, Pi picks a default from the providers it has keys for. |
+| `CENTAUR_PI_EXTRA_MODELS` | Comma-separated `provider/id` entries, for example `pareto/pareto`, that turns may select in addition to the supported models below. Each must come from a provider declared in Pi's `models.json`. |
 
 Set it through `sandbox.extraEnv`. A per-thread `--model provider/id`
 overrides it. Turns run at the `medium` thinking level unless `-rsn <level>`
@@ -45,6 +46,12 @@ A model must be one Centaur supports on Pi, as `provider/id` or a bare `id`:
 - `openai/`: `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.4-pro`,
   `gpt-5.5`, `gpt-5.5-pro`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`,
   `gpt-6-astra`, `gpt-6-luna`, `gpt-6-sol`
+
+Pi also runs models from providers declared in its `models.json`, such as an
+OpenAI- or Anthropic-compatible endpoint. The sandbox writes that file at
+start from `PI_MODELS_JSON`, with API keys left as `$VAR` references to the
+sandbox environment so no secret lands on disk. Such a model is accepted when
+listed in `CENTAUR_PI_EXTRA_MODELS`, for example `pareto/pareto`.
 
 Another model fails that turn instead of reaching Pi. Slack then clears the
 rejected model from the thread, so later turns run the previous model.
