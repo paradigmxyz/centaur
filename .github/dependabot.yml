@@ -33,6 +33,7 @@ updates:
       - /services/sandbox
       - /services/slackbotv2
       - /services/teamsbot
+      - /services/telegrambot
     schedule:
       interval: weekly
       day: monday
@@ -182,6 +183,7 @@ updates:
       - /services/discordbot
       - /services/teamsbot
       - /services/githubbot
+      - /services/telegrambot
     schedule:
       interval: weekly
       day: monday

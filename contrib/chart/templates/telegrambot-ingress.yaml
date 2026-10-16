@@ -1,0 +1,35 @@
+{{- /* Only webhook mode has a public route; polling needs no ingress at all. */}}
+{{- if and .Values.telegrambot.enabled (eq (.Values.telegrambot.mode | default "polling") "webhook") .Values.telegrambot.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "telegrambot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "telegrambot") | nindent 4 }}
+  {{- with .Values.telegrambot.ingress.annotations }}
+  annotations:
+{{ toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.telegrambot.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    - {{- if .Values.telegrambot.ingress.host }}
+      host: {{ .Values.telegrambot.ingress.host | quote }}
+      {{- end }}
+      http:
+        paths:
+          # Expose only the webhook route, never /health.
+          - path: /api/webhooks/telegram
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "centaur.componentName" (dict "root" . "component" "telegrambot") }}
+                port:
+                  number: 3001
+  {{- with .Values.telegrambot.ingress.tls }}
+  tls:
+{{ toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
