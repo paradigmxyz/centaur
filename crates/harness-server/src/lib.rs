@@ -10,6 +10,7 @@ pub mod omp;
 mod otel;
 pub mod pi;
 mod server;
+mod session_config;
 mod traits;
 mod turn;
 mod util;
@@ -21,6 +22,7 @@ pub use hermes::run_hermes_blocks_server;
 pub use nanocodex::run_nanocodex_blocks_server;
 pub use otel::flush_telemetry;
 pub use server::{run_blocks_server, run_harness_server, run_validate_jsonrpc, server_for};
+pub use session_config::run_deferred_server;
 pub use traits::{
     AppServerNormalizer, AppServerRuntime, HarnessChild, HarnessKind, HarnessServer,
     NormalizedContent, NormalizedEvent, NormalizedTokenUsage, NormalizedToolResult, ThreadState,

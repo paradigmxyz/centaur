@@ -120,7 +120,7 @@ pub fn run_hermes_blocks_server() -> Result<()> {
             Ok(BlocksCommand::Interrupt) => {
                 eprintln!("Hermes blocks interrupt ignored: no active turn runs");
             }
-            Ok(BlocksCommand::AttachmentChunk) => {}
+            Ok(BlocksCommand::AttachmentChunk | BlocksCommand::Configured) => {}
             Err(error) => {
                 eprintln!("invalid Hermes blocks input: {error}");
                 write_blocks_error(&mut stdout, &thread_id, "input", error)?;

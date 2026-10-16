@@ -2,8 +2,9 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use harness_server::{
-    HarnessKind, Result, run_blocks_server, run_harness_server, run_hermes_blocks_server,
-    run_nanocodex_blocks_server, run_validate_agent_deltas, run_validate_jsonrpc,
+    HarnessKind, Result, run_blocks_server, run_deferred_server, run_harness_server,
+    run_hermes_blocks_server, run_nanocodex_blocks_server, run_validate_agent_deltas,
+    run_validate_jsonrpc,
 };
 
 #[derive(Debug, Parser)]
@@ -32,6 +33,10 @@ enum CliCommand {
     Pi(HarnessCommand),
     /// Drive OMP's long-lived RPC mode with native session continuation.
     Omp(HarnessCommand),
+    /// Wait for a `session.configure` stdin line naming the harness (and
+    /// optional persona), apply it, then serve that harness in blocks mode.
+    /// Used by warm-pool sandboxes that boot before a session claims them.
+    Deferred,
     ValidateJsonrpc,
     ValidateAgentDeltas,
 }
@@ -69,6 +74,7 @@ fn run() -> Result<()> {
         CliCommand::Nanocodex => run_nanocodex_blocks_server(),
         CliCommand::Hermes => run_hermes_blocks_server(),
         CliCommand::Omp(command) => run_mode(HarnessKind::Omp, command.mode),
+        CliCommand::Deferred => run_deferred_server(),
         CliCommand::ValidateJsonrpc => run_validate_jsonrpc(),
         CliCommand::ValidateAgentDeltas => run_validate_agent_deltas(),
     }

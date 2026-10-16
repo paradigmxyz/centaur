@@ -19,6 +19,12 @@ output parsing in Python, TypeScript, api-rs, or the ingresses.
   `parse_blocks_line_with_state` in `src/server.rs`. `--mode jsonrpc` accepts
   Codex App Server requests instead, including `turn/steer`. It is used for
   protocol testing.
+- **Late binding:** warm-pool sandboxes run `harness-server deferred`. The
+  first stdin line must be `session.configure` (`harness` subcommand name and
+  optional `persona`); harness-server writes the persona prompt, recomposes
+  `AGENTS.md`, and dispatches to that harness. api-rs resends it on every pipe
+  open, so every blocks parser accepts a matching resend as a no-op and rejects
+  a different one. See `src/session_config.rs`.
 - **Output:** stdout carries only Codex App Server V2 notifications, typed with
   the pinned `codex-app-server-protocol` crate (`thread/started`,
   `item/*`, `turn/completed`, `error`). Harness stderr may be logged, but
@@ -65,6 +71,9 @@ Backends:
 
 ## Invariants
 
+- Start the native harness lazily, on the first `user` line, never at
+  harness-server startup: a deferred sandbox applies the persona just before
+  dispatch, and the harness must read the composed prompt after that.
 - Keep one harness process per thread across turns, and resume it with the
   native session id (`--resume`, `threads continue`, `--session-id`). Never
   silently start a fresh conversation when the caller expects continuity.

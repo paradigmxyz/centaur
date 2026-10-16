@@ -329,9 +329,14 @@ pub struct SandboxRuntime {
     artifact_reader: Option<SandboxArtifactReader>,
     warm_spec_factory: Option<WarmSandboxSpecFactory>,
     workload_key: Option<String>,
-    /// The harness warm sandboxes boot with. A warm claim is only valid for a
-    /// session on the same harness; other sessions get a cold sandbox.
+    /// The workload's default harness. Unless warm sandboxes bind late, they
+    /// boot with it, and a warm claim is only valid for a session on the same
+    /// harness; other sessions get a cold sandbox.
     warm_harness: Option<HarnessType>,
+    /// Warm sandboxes boot `harness-server deferred` and receive the claiming
+    /// session's harness and persona as a `session.configure` stdin line, so
+    /// any harness or persona may claim them.
+    warm_late_binding: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -821,6 +826,36 @@ impl SessionRuntime {
             false,
             capabilities,
         )
+    }
+
+    /// The `session.configure` line for a sandbox that booted
+    /// `harness-server deferred`, or `None` for one whose harness is fixed by
+    /// its container args. Sent on every pipe open: a reattach reaches an
+    /// already-bound process (which ignores a matching resend) and a resumed
+    /// pod restarts an unbound one.
+    async fn late_bound_session_configure_line(
+        &self,
+        thread_key: &ThreadKey,
+        sandbox_id: &str,
+    ) -> Result<Option<String>, SessionRuntimeError> {
+        if !self.sandbox_runtime.warm_late_binding {
+            return Ok(None);
+        }
+        let observed = self
+            .sandbox_runtime
+            .manager
+            .observe(&SandboxId::new(sandbox_id))
+            .await?;
+        if !is_late_bound_sandbox(&observed.labels) {
+            return Ok(None);
+        }
+        let session = self.store.get_session(thread_key).await?;
+        let capabilities = session.sandbox_capabilities.unwrap_or_default();
+        let persona = self.resolve_stored_persona(session.persona_id.as_deref(), &capabilities)?;
+        Ok(Some(session_configure_line(
+            &session.harness_type,
+            persona.as_ref(),
+        )))
     }
 
     fn default_persona_id(&self) -> Option<&str> {
@@ -3065,14 +3100,18 @@ impl SessionRuntime {
                 }
             }
 
-            // Warm sandboxes are pre-booted with the workload's default
-            // harness; a session on any other harness needs a cold sandbox.
-            let warm_harness_matches = self
-                .sandbox_runtime
-                .warm_harness
-                .as_ref()
-                .is_none_or(|warm| warm == harness_type);
-            let warm_persona_matches = persona_context.is_none();
+            // Late-bound warm sandboxes take their harness and persona at
+            // pipe open. Otherwise they are pre-booted with the workload's
+            // default harness and no persona, and any other session needs a
+            // cold sandbox.
+            let warm_late_binding = self.sandbox_runtime.warm_late_binding;
+            let warm_harness_matches = warm_late_binding
+                || self
+                    .sandbox_runtime
+                    .warm_harness
+                    .as_ref()
+                    .is_none_or(|warm| warm == harness_type);
+            let warm_persona_matches = warm_late_binding || persona_context.is_none();
             if !warm_harness_matches && self.warm_pool.is_some() {
                 record_sandbox_warm_pool_claim("harness_mismatch");
             }
@@ -3423,6 +3462,9 @@ impl SessionRuntime {
                 return Ok(pipe);
             }
 
+            let session_configure = self
+                .late_bound_session_configure_line(thread_key, sandbox_id)
+                .await?;
             let io = self
                 .sandbox_runtime
                 .manager
@@ -3430,6 +3472,23 @@ impl SessionRuntime {
                 .await?
                 .into_parts();
             let pipe = session_pipe_from_parts(io.stdin, io.instance_id);
+            if let Some(line) = session_configure {
+                // Before the pipe is published, so it is the first line any
+                // harness-server process on this attach reads.
+                pipe.stdin
+                    .lock()
+                    .await
+                    .send(line)
+                    .await
+                    .map_err(codec_error_to_runtime)?;
+                info!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "session_pipe_configured",
+                    thread_key = %thread_key,
+                    sandbox_id,
+                    "sent session.configure to late-bound sandbox"
+                );
+            }
 
             self.sandbox_pipes
                 .insert(sandbox_id.to_owned(), pipe.clone());
@@ -4198,6 +4257,7 @@ impl SandboxRuntime {
             move || warm_workload.warm_spec(),
         );
         runtime.warm_harness = warm_harness;
+        runtime.warm_late_binding = true;
         runtime
     }
 
@@ -4215,6 +4275,7 @@ impl SandboxRuntime {
             warm_spec_factory: None,
             workload_key: None,
             warm_harness: None,
+            warm_late_binding: false,
         }
     }
 
@@ -4239,6 +4300,7 @@ impl SandboxRuntime {
             warm_spec_factory: Some(warm_spec_factory),
             workload_key: Some(workload_key),
             warm_harness: None,
+            warm_late_binding: false,
         }
     }
 
@@ -4289,8 +4351,18 @@ impl SandboxWorkloadMode {
         self.spec_for(Some(thread_key), harness, persona)
     }
 
+    /// Warm sandboxes boot before a session claims them, so they run
+    /// `harness-server deferred` and take the session's harness and persona
+    /// from the `session.configure` line sent when the pipe opens.
     fn warm_spec(&self) -> SandboxSpec {
-        self.spec_for(None, &self.harness, None)
+        let mut spec = self.spec_for(None, &self.harness, None);
+        spec.labels.remove("centaur.ai/harness");
+        spec.labels.insert(
+            HARNESS_BINDING_LABEL.to_owned(),
+            HARNESS_BINDING_DEFERRED.to_owned(),
+        );
+        spec.args = vec!["harness-server".to_owned(), "deferred".to_owned()];
+        spec
     }
 
     fn spec_for(
@@ -4334,6 +4406,35 @@ fn harness_server_subcommand(harness: &HarnessType) -> &'static str {
         HarnessType::Pi => "pi",
         HarnessType::Omp => "omp",
     }
+}
+
+/// Marks a sandbox that booted `harness-server deferred` and must receive
+/// `session.configure` before any other input.
+const HARNESS_BINDING_LABEL: &str = "centaur.ai/harness-binding";
+const HARNESS_BINDING_DEFERRED: &str = "deferred";
+
+fn is_late_bound_sandbox(labels: &BTreeMap<String, String>) -> bool {
+    labels.get(HARNESS_BINDING_LABEL).map(String::as_str) == Some(HARNESS_BINDING_DEFERRED)
+}
+
+/// Binds a deferred harness-server to the session's harness and persona; see
+/// `crates/harness-server/src/session_config.rs`.
+fn session_configure_line(harness: &HarnessType, persona: Option<&PersonaContext>) -> String {
+    let persona = persona.map(|persona| {
+        json!({
+            "id": persona.persona_id,
+            "prompt": persona.prompt,
+            "prompt_hash": persona.prompt_hash,
+            "source_path": persona.source_path,
+            "source_ref": persona.source_ref,
+        })
+    });
+    serde_json::to_string(&json!({
+        "type": "session.configure",
+        "harness": harness_server_subcommand(harness),
+        "persona": persona,
+    }))
+    .expect("session.configure line serializes")
 }
 
 fn sandbox_spec_key(spec: &SandboxSpec) -> String {
@@ -8667,26 +8768,54 @@ mod tests {
     }
 
     #[test]
-    fn warm_spec_uses_workload_default_harness() {
+    fn warm_spec_boots_a_deferred_harness_server() {
         let workload = SandboxWorkloadMode::codex_app_server(
             "centaur-agent:latest",
             Vec::new(),
             HarnessType::Codex,
         );
 
-        assert_eq!(
-            workload.warm_spec().args,
-            vec!["harness-server", "codex"],
-            "warm sandboxes boot the configured default harness"
-        );
-        // A session on a different harness produces a different spec, so a
-        // warm claim for it would hand over the wrong harness.
+        let warm = workload.warm_spec();
+
+        assert_eq!(warm.args, vec!["harness-server", "deferred"]);
+        assert_eq!(warm.labels.get("centaur.ai/harness"), None);
+        assert!(is_late_bound_sandbox(&warm.labels));
+        // Session sandboxes keep their harness pinned by container args.
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
+        let claimed = workload.spec(&thread_key, &HarnessType::ClaudeCode, None);
+        assert_eq!(claimed.args, vec!["harness-server", "claude-code"]);
+        assert!(!is_late_bound_sandbox(&claimed.labels));
+    }
+
+    #[test]
+    fn session_configure_line_names_the_harness_subcommand_and_persona() {
+        let persona = test_persona_context("eng");
+
+        let line: Value = serde_json::from_str(&session_configure_line(
+            &HarnessType::ClaudeCode,
+            Some(&persona),
+        ))
+        .unwrap();
+        let bare: Value =
+            serde_json::from_str(&session_configure_line(&HarnessType::Pi, None)).unwrap();
+
         assert_eq!(
-            workload
-                .spec(&thread_key, &HarnessType::ClaudeCode, None)
-                .args,
-            vec!["harness-server", "claude-code"]
+            line,
+            json!({
+                "type": "session.configure",
+                "harness": "claude-code",
+                "persona": {
+                    "id": "eng",
+                    "prompt": persona.prompt,
+                    "prompt_hash": persona.prompt_hash,
+                    "source_path": persona.source_path,
+                    "source_ref": persona.source_ref,
+                },
+            })
+        );
+        assert_eq!(
+            bare,
+            json!({"type": "session.configure", "harness": "pi", "persona": null})
         );
     }
 
@@ -9246,6 +9375,7 @@ mod adoption_tests {
         stopped: std::sync::Mutex<Vec<String>>,
         proxy_ensures: std::sync::Mutex<Vec<ProxyEnsure>>,
         missing_on_stop: std::sync::Mutex<BTreeSet<String>>,
+        labels: std::sync::Mutex<BTreeMap<String, String>>,
     }
 
     impl MockBackend {
@@ -9267,7 +9397,12 @@ mod adoption_tests {
                 stopped: std::sync::Mutex::new(Vec::new()),
                 proxy_ensures: std::sync::Mutex::new(Vec::new()),
                 missing_on_stop: std::sync::Mutex::new(BTreeSet::new()),
+                labels: std::sync::Mutex::new(BTreeMap::new()),
             }
+        }
+
+        fn set_labels(&self, labels: BTreeMap<String, String>) {
+            *self.labels.lock().unwrap() = labels;
         }
 
         async fn push_io(&self, io: SandboxIo) {
@@ -9389,6 +9524,7 @@ mod adoption_tests {
                 self.created_observed.notify_one();
             }
             Ok(ObservedSandbox::new(id.clone(), "mock", status)
+                .with_labels(self.labels.lock().unwrap().clone())
                 .with_reason(self.reason.lock().unwrap().clone())
                 .with_instance_id(Some(self.instance_id.lock().unwrap().clone())))
         }
@@ -10319,6 +10455,127 @@ mod adoption_tests {
         assert!(
             all.iter()
                 .any(|event| event.event_type == "session.sandbox_capabilities_replaced")
+        );
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn late_bound_warm_pool_serves_any_harness_and_persona() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:late-bind-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::ClaudeCode,
+                Some("eng"),
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution
+            .execution_id;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        backend.set_labels(BTreeMap::from([(
+            HARNESS_BINDING_LABEL.to_owned(),
+            HARNESS_BINDING_DEFERRED.to_owned(),
+        )]));
+        let mut runtime = runtime_with_warm_pool(&store, backend.clone(), thread_key.as_str())
+            .with_personas(
+                PersonaRegistry::new(
+                    [PersonaDefinition {
+                        id: "eng".to_owned(),
+                        source_root: "/repo/tools".to_owned(),
+                        source_path: "/repo/tools/personas/eng".to_owned(),
+                        source_ref: Some("abc123".to_owned()),
+                        prompt_hash: "sha256:eng".to_owned(),
+                        prompt: "eng persona prompt".to_owned(),
+                    }],
+                    None,
+                    vec!["/repo/tools".to_owned()],
+                )
+                .unwrap(),
+            );
+        runtime.sandbox_runtime.warm_harness = Some(HarnessType::Codex);
+        runtime.sandbox_runtime.warm_late_binding = true;
+        let workload_key = runtime
+            .warm_pool
+            .as_ref()
+            .unwrap()
+            .workload_key()
+            .to_owned();
+        let warm_sandbox_id = format!("warm-sbx-{}", uuid::Uuid::new_v4());
+        store
+            .insert_ready_warm_sandbox(&warm_sandbox_id, &workload_key)
+            .await
+            .expect("insert warm sandbox");
+
+        let sandbox_id = runtime
+            .ensure_session_sandbox(EnsureSessionSandboxRequest {
+                thread_key: &thread_key,
+                harness_type: &HarnessType::ClaudeCode,
+                persona_id: Some("eng"),
+                existing_sandbox_id: None,
+                existing_sandbox_capabilities: None,
+                iron_control_principal: None,
+                requester_principal: None,
+                proxy_labels: &BTreeMap::new(),
+                desired_capabilities: &default_capabilities(),
+                execution_id: &execution_id,
+            })
+            .await
+            .expect("ensure sandbox");
+
+        // A Claude Code session with a persona claims the Codex-default pool.
+        assert_eq!(sandbox_id, warm_sandbox_id);
+        assert!(backend.created_specs().is_empty());
+
+        // Its first pipe binds the harness-server; a reattach rebinds the same.
+        for _ in 0..2 {
+            let (io, _stdout, stdin) = mock_io();
+            backend.push_io(io).await;
+            runtime.sandbox_pipes.remove(&sandbox_id);
+            runtime
+                .ensure_session_pipe(&thread_key, &sandbox_id)
+                .await
+                .expect("open pipe");
+            let mut lines = FramedRead::new(stdin, LinesCodec::new());
+            let line = timeout(Duration::from_secs(5), lines.next())
+                .await
+                .expect("configure line")
+                .expect("stdin open")
+                .expect("line decodes");
+            let configure: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(configure["type"], "session.configure");
+            assert_eq!(configure["harness"], "claude-code");
+            assert_eq!(configure["persona"]["id"], "eng");
+            assert_eq!(configure["persona"]["prompt"], "eng persona prompt");
+        }
+
+        // A sandbox whose harness is pinned by its args gets no configure.
+        backend.set_labels(BTreeMap::new());
+        let (io, _stdout, stdin) = mock_io();
+        backend.push_io(io).await;
+        runtime.sandbox_pipes.remove(&sandbox_id);
+        runtime
+            .ensure_session_pipe(&thread_key, &sandbox_id)
+            .await
+            .expect("open pipe");
+        let mut lines = FramedRead::new(stdin, LinesCodec::new());
+        assert!(
+            timeout(Duration::from_millis(200), lines.next())
+                .await
+                .is_err(),
+            "cold sandboxes must not receive session.configure"
         );
         reset_test_store(&store).await;
     }

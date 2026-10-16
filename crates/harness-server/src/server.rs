@@ -186,7 +186,9 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
             BlocksReaderInput::Command(BlocksCommand::Interrupt) => {
                 eprintln!("blocks interrupt ignored: no active turn runs");
             }
-            BlocksReaderInput::Command(BlocksCommand::AttachmentChunk) => {}
+            BlocksReaderInput::Command(
+                BlocksCommand::AttachmentChunk | BlocksCommand::Configured,
+            ) => {}
             BlocksReaderInput::Error(error) => {
                 eprintln!("invalid blocks input: {error}");
                 write_blocks_error(&mut stdout, &state.id, "input", error)?;
@@ -310,6 +312,8 @@ pub(crate) enum BlocksCommand {
     },
     Interrupt,
     AttachmentChunk,
+    /// A resent `session.configure` that matched this process's binding.
+    Configured,
 }
 
 #[derive(Debug, Default)]
@@ -502,6 +506,10 @@ pub(crate) fn parse_blocks_line_with_state(
             Ok(BlocksCommand::AttachmentChunk)
         }
         "interrupt" => Ok(BlocksCommand::Interrupt),
+        crate::session_config::SESSION_CONFIGURE_TYPE => {
+            crate::session_config::check_repeated_configure(line)?;
+            Ok(BlocksCommand::Configured)
+        }
         kind => Err(HarnessServerError::InvalidBlocksInput {
             message: format!("unsupported blocks input type `{kind}`"),
         }),
@@ -1674,6 +1682,17 @@ mod tests {
         let same = downscale_oversized_image(&original);
 
         assert_eq!(same, original, "within-limit image is returned unchanged");
+    }
+
+    #[test]
+    fn resent_session_configure_is_a_no_op() {
+        let line =
+            r#"{"type":"session.configure","harness":"pi","persona":{"id":"eng","prompt":"p"}}"#;
+        assert!(matches!(
+            parse_blocks_line(line).expect("parses"),
+            BlocksCommand::Configured
+        ));
+        assert!(parse_blocks_line(r#"{"type":"session.configure"}"#).is_err());
     }
 
     #[test]
