@@ -235,6 +235,24 @@ export const slackbotMetrics = {
     help: 'Number of live Slack render tasks currently running.',
     name: 'slackbotv2_active_live_renders'
   }),
+  ambientTriggerCostUsd: counter({
+    help: 'API-reported OpenRouter cost for ambient trigger decisions, in USD.',
+    name: 'slackbotv2_ambient_trigger_cost_usd_total'
+  }),
+  ambientTriggerDecisions: counter({
+    help: 'Allowlisted non-mention Slack messages evaluated by the ambient trigger gate.',
+    labelNames: ['outcome'],
+    name: 'slackbotv2_ambient_trigger_decisions_total'
+  }),
+  ambientTriggerDuration: histogram({
+    help: 'Ambient trigger context collection and decision duration, in seconds.',
+    labelNames: ['outcome'],
+    name: 'slackbotv2_ambient_trigger_duration_seconds'
+  }),
+  ambientTriggerInputTokens: counter({
+    help: 'API-reported input tokens consumed by ambient trigger decisions.',
+    name: 'slackbotv2_ambient_trigger_input_tokens_total'
+  }),
   expose(): string {
     this.info.set({}, 1)
     return registry.render()
