@@ -5,6 +5,7 @@ mod title_generator;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     future::Future,
+    ops::Range,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -5218,7 +5219,7 @@ fn first_token_latency(
 
 #[derive(Default)]
 struct StdoutPumpState {
-    final_answer_text_by_execution: HashMap<String, String>,
+    final_answer_text_by_execution: HashMap<String, FinalAnswerText>,
     first_token_recorded_by_execution: HashSet<String>,
     turn_execution_by_id: HashMap<String, String>,
     item_execution_by_id: HashMap<String, String>,
@@ -5244,7 +5245,7 @@ impl StdoutPumpState {
                 &value,
                 self.final_answer_text_by_execution
                     .get(&known_execution_id)
-                    .map(String::as_str)
+                    .map(|answer| answer.text.as_str())
                     .unwrap_or(""),
             )
             .is_some()
@@ -5261,23 +5262,16 @@ impl StdoutPumpState {
 
     fn observe(&mut self, execution_id: &str, line: &str) -> Option<TerminalOutput> {
         let value: Value = serde_json::from_str(line).ok()?;
-        if let Some(update) = output_line_final_answer_text(&value) {
-            let text = self
-                .final_answer_text_by_execution
-                .entry(execution_id.to_owned())
-                .or_default();
-            match update {
-                FinalAnswerTextUpdate::Append(delta) => text.push_str(&delta),
-                FinalAnswerTextUpdate::Replace(canonical) => *text = canonical,
-            }
+        if let Some(answer) = self.final_answer_text_by_execution.get_mut(execution_id) {
+            answer.observe(&value);
+            return terminal_output(&value, &answer.text);
         }
-        terminal_output(
-            &value,
-            self.final_answer_text_by_execution
-                .get(execution_id)
-                .map(String::as_str)
-                .unwrap_or(""),
-        )
+        let answer = self
+            .final_answer_text_by_execution
+            .entry(execution_id.to_owned())
+            .or_default();
+        answer.observe(&value);
+        terminal_output(&value, &answer.text)
     }
 
     fn should_record_first_token(&self, execution_id: &str, value: Option<&Value>) -> bool {
@@ -5287,7 +5281,7 @@ impl StdoutPumpState {
             || self
                 .final_answer_text_by_execution
                 .get(execution_id)
-                .is_some_and(|text| !text.trim().is_empty())
+                .is_some_and(|answer| !answer.text.trim().is_empty())
         {
             return false;
         }
@@ -6279,11 +6273,9 @@ fn completed_turn_terminal_output(value: &Value, prior_final_answer_text: &str) 
                 prior_final_answer_text,
             )
         }
-        Some("interrupted") if prior_final_answer_text.trim().is_empty() => {
-            TerminalOutput::Cancelled {
-                reason: "turn_interrupted",
-            }
-        }
+        Some("interrupted") => TerminalOutput::Cancelled {
+            reason: "turn_interrupted",
+        },
         Some(_status) if !prior_final_answer_text.trim().is_empty() => {
             completed_terminal_output_with_fallback(
                 value,
@@ -6335,6 +6327,58 @@ enum FinalAnswerTextUpdate {
     Replace(String),
 }
 
+/// Final-answer text folded from one execution's output lines. Item-protocol
+/// deltas carry no phase, so the deltas of an agent message that completes as
+/// commentary are removed again.
+#[derive(Default)]
+struct FinalAnswerText {
+    text: String,
+    /// The byte range of `text` each agent message appended since the last
+    /// canonical replacement, in order.
+    runs: Vec<(Option<String>, Range<usize>)>,
+}
+
+impl FinalAnswerText {
+    fn observe(&mut self, value: &Value) {
+        match output_line_final_answer_text(value) {
+            Some(FinalAnswerTextUpdate::Append(delta)) => {
+                let item_id = item_ids(value).into_iter().next();
+                let start = self.text.len();
+                self.text.push_str(&delta);
+                match self.runs.last_mut() {
+                    Some((run_item_id, run)) if *run_item_id == item_id => {
+                        run.end = self.text.len()
+                    }
+                    _ => self.runs.push((item_id, start..self.text.len())),
+                }
+            }
+            Some(FinalAnswerTextUpdate::Replace(canonical)) => {
+                self.text = canonical;
+                self.runs.clear();
+            }
+            None => {
+                if let Some(item) = completed_agent_message(value)
+                    && item.get("phase").and_then(Value::as_str) == Some("commentary")
+                {
+                    let commentary_ids = item_ids(value);
+                    let mut removed = 0;
+                    self.runs.retain_mut(|(item_id, run)| {
+                        *run = run.start - removed..run.end - removed;
+                        let commentary = item_id
+                            .as_ref()
+                            .is_some_and(|item_id| commentary_ids.contains(item_id));
+                        if commentary {
+                            self.text.drain(run.clone());
+                            removed += run.len();
+                        }
+                        !commentary
+                    });
+                }
+            }
+        }
+    }
+}
+
 fn output_line_final_answer_text(value: &Value) -> Option<FinalAnswerTextUpdate> {
     let method = value.get("method").and_then(Value::as_str);
     let event_type = value.get("type").and_then(Value::as_str);
@@ -6372,25 +6416,32 @@ fn output_line_final_answer_text(value: &Value) -> Option<FinalAnswerTextUpdate>
         let text = terminal_payload_text(value).trim().to_owned();
         return (!text.is_empty()).then_some(FinalAnswerTextUpdate::Replace(text));
     }
-    if matches!(method, Some("item/completed")) || matches!(event_type, Some("item.completed")) {
-        let item = value
-            .get("item")
-            .or_else(|| value.get("params").and_then(|params| params.get("item")));
-        if let Some(item) = item
-            && matches!(
-                item.get("type").and_then(Value::as_str),
-                Some("agentMessage" | "agent_message")
-            )
-            && matches!(
-                item.get("phase").and_then(Value::as_str),
-                Some("final_answer" | "answer") | None
-            )
-        {
-            let text = terminal_payload_text(item).trim().to_owned();
-            return (!text.is_empty()).then_some(FinalAnswerTextUpdate::Replace(text));
-        }
+    if let Some(item) = completed_agent_message(value)
+        && matches!(
+            item.get("phase").and_then(Value::as_str),
+            Some("final_answer" | "answer") | None
+        )
+    {
+        let text = terminal_payload_text(item).trim().to_owned();
+        return (!text.is_empty()).then_some(FinalAnswerTextUpdate::Replace(text));
     }
     None
+}
+
+fn completed_agent_message(value: &Value) -> Option<&Value> {
+    let method = value.get("method").and_then(Value::as_str);
+    let event_type = value.get("type").and_then(Value::as_str);
+    if method != Some("item/completed") && event_type != Some("item.completed") {
+        return None;
+    }
+    let item = value
+        .get("item")
+        .or_else(|| value.get("params").and_then(|params| params.get("item")))?;
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("agentMessage" | "agent_message")
+    )
+    .then_some(item)
 }
 
 fn nanocodex_message_phase(value: &Value) -> Option<&str> {
@@ -7343,18 +7394,13 @@ fn max_duration_from_execution(execution: &SessionExecution) -> Option<Duration>
 /// returning the first terminal outcome (with its accumulated final answer)
 /// if the recorded history already contains the end of the turn.
 fn terminal_output_from_lines(lines: &[String]) -> Option<TerminalOutput> {
-    let mut final_answer_text = String::new();
+    let mut final_answer_text = FinalAnswerText::default();
     for line in lines {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        if let Some(update) = output_line_final_answer_text(&value) {
-            match update {
-                FinalAnswerTextUpdate::Append(delta) => final_answer_text.push_str(&delta),
-                FinalAnswerTextUpdate::Replace(canonical) => final_answer_text = canonical,
-            }
-        }
-        if let Some(terminal) = terminal_output(&value, &final_answer_text) {
+        final_answer_text.observe(&value);
+        if let Some(terminal) = terminal_output(&value, &final_answer_text.text) {
             return Some(terminal);
         }
     }
@@ -8002,11 +8048,45 @@ mod tests {
 
         assert_eq!(
             terminal_output(&event, "Final answer"),
-            Some(TerminalOutput::Completed {
-                reason: "turn_completed",
-                result_text: Some("Final answer".to_owned())
+            Some(TerminalOutput::Cancelled {
+                reason: "turn_interrupted"
             })
         );
+    }
+
+    #[test]
+    fn interrupted_turn_after_commentary_is_cancelled() {
+        let lines = [
+            r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"inProgress"}}}"#,
+            r#"{"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1","item":{"id":"omp-msg-1-0","type":"agentMessage","phase":"commentary","text":""}}}"#,
+            r#"{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"omp-msg-1-0","delta":"Need to fix the failing test:"}}"#,
+            r#"{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"id":"omp-msg-1-0","type":"agentMessage","phase":"commentary","text":"Need to fix the failing test:"}}}"#,
+            r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"interrupted","error":null}}}"#,
+        ]
+        .map(str::to_owned);
+
+        assert_eq!(
+            terminal_output_from_lines(&lines),
+            Some(TerminalOutput::Cancelled {
+                reason: "turn_interrupted"
+            })
+        );
+    }
+
+    #[test]
+    fn turn_failed_after_commentary_is_not_completed() {
+        let lines = [
+            r#"{"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1","item":{"id":"msg-1","type":"agentMessage","phase":null,"text":""}}}"#,
+            r#"{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"msg-1","delta":"Need to fix the failing test:"}}"#,
+            r#"{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"id":"msg-1","type":"agentMessage","phase":"commentary","text":"Need to fix the failing test:"}}}"#,
+            r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed","error":{"message":"provider request failed","codexErrorInfo":null,"additionalDetails":null}}}}"#,
+        ]
+        .map(str::to_owned);
+
+        assert!(matches!(
+            terminal_output_from_lines(&lines),
+            Some(TerminalOutput::Failed { .. })
+        ));
     }
 
     #[test]
@@ -8461,6 +8541,38 @@ mod tests {
             Some(TerminalOutput::Completed {
                 reason: "turn_completed",
                 result_text: Some("Final canonical answer.".to_owned())
+            })
+        );
+    }
+
+    #[test]
+    fn stdout_state_ignores_commentary_deltas() {
+        let mut state = StdoutPumpState::default();
+        for line in [
+            r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"inProgress"}}}"#,
+            r#"{"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1","item":{"id":"msg-1","type":"agentMessage","phase":null,"text":""}}}"#,
+            r#"{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"msg-1","delta":"Need to fix the failing test:"}}"#,
+            r#"{"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1","item":{"id":"msg-2","type":"agentMessage","phase":null,"text":""}}}"#,
+            r#"{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"msg-2","delta":"The failing test is fixed."}}"#,
+            r#"{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"id":"msg-1","type":"agentMessage","phase":"commentary","text":"Need to fix the failing test:"}}}"#,
+        ] {
+            assert_eq!(
+                state.execution_for_line(Some("exe-1"), line),
+                Some("exe-1".to_owned())
+            );
+            assert_eq!(state.observe("exe-1", line), None);
+        }
+        let terminal = r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","error":null}}}"#;
+
+        assert_eq!(
+            state.execution_for_line(Some("exe-1"), terminal),
+            Some("exe-1".to_owned())
+        );
+        assert_eq!(
+            state.observe("exe-1", terminal),
+            Some(TerminalOutput::Completed {
+                reason: "turn_completed",
+                result_text: Some("The failing test is fixed.".to_owned())
             })
         );
     }
