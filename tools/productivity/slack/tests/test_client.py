@@ -50,6 +50,12 @@ class _FakeWebClient:
         self.files_list_calls: list[dict] = []
         self.files_list_pages: list[dict] = []
         self._shares_by_file: dict[str, dict] = {}
+        self.auth_test_response: dict = {"ok": True, "user_id": "U0USER"}
+        self.auth_test_calls = 0
+
+    def auth_test(self, **kwargs):
+        self.auth_test_calls += 1
+        return self.auth_test_response
 
     def chat_postMessage(self, **kwargs):
         self.last_kwargs = kwargs
@@ -149,6 +155,7 @@ def _make_client() -> tuple[SlackClient, _FakeWebClient]:
     client._search_client = fake_web_client
     client._user_cache = {}
     client._ratelimit_deadlines = {}
+    client._user_token_clients = set()
     client._resolve_channel = lambda channel: "C123"  # type: ignore[method-assign]
     client._format_requester_attribution = lambda: ""  # type: ignore[method-assign]
     client.list_bot_channels = lambda **_: [{"id": "C123", "name": "paradigm-pulse"}]  # type: ignore[method-assign]
@@ -1876,3 +1883,74 @@ def test_indexed_search_uses_company_context_database(monkeypatch):
 
     assert IndexedSlackClient().database_url == company_context_database_url()
     assert IndexedSlackClient().database_url == "postgresql://u:p@proxy:5432/ai_v2"
+
+
+_BOT_IDENTITY = {"ok": True, "user_id": "U0BOT", "bot_id": "B0BOT"}
+
+
+@pytest.mark.parametrize(
+    ("read", "slack_method"),
+    [
+        (lambda c: c.get_channel_history_page("D0OTHERUSER"), "conversations.history"),
+        (lambda c: c.get_thread_replies_page("D0OTHERUSER", "100.000000"), "conversations.replies"),
+        (lambda c: c.get_channel_members("G0PRIVATE"), "conversations.members"),
+        (
+            lambda c: c.get_message_files("D0OTHERUSER", "100.000000", direct=True),
+            "conversations.replies",
+        ),
+        (lambda c: c.get_file_info_direct("F0FILE"), "files.info"),
+        (lambda c: c.search_files_direct("report"), "files.list"),
+    ],
+)
+def test_direct_reads_refuse_a_bot_token(read, slack_method) -> None:
+    client, fake_web_client = _make_client()
+    client._get_user_cache = lambda **_: {}  # type: ignore[method-assign]
+    fake_web_client.auth_test_response = _BOT_IDENTITY
+
+    with pytest.raises(SlackAuthError) as excinfo:
+        read(client)
+
+    assert excinfo.value.payload["error_code"] == "direct_read_requires_user_token"
+    assert excinfo.value.payload["slack_method"] == slack_method
+    assert fake_web_client.history_calls == []
+    assert fake_web_client.reply_calls == []
+    assert fake_web_client.files_info_calls == []
+    assert fake_web_client.files_list_calls == []
+
+
+def test_direct_file_download_refuses_a_bot_token(monkeypatch) -> None:
+    client, fake_web_client = _make_client()
+    client.token = "SLACK_BOT_TOKEN"
+    fake_web_client.auth_test_response = _BOT_IDENTITY
+    monkeypatch.setattr(slack_client.urllib.request, "urlopen", pytest.fail)
+
+    with pytest.raises(SlackAuthError):
+        client._fetch_slack_file("https://files.slack.com/files-pri/T0-F0FILE/report.pdf")
+
+
+def test_direct_reads_use_a_user_token_and_check_it_once() -> None:
+    client, fake_web_client = _make_client()
+    client._get_user_cache = lambda **_: {}  # type: ignore[method-assign]
+    fake_web_client.history_pages = [
+        {"messages": [{"user": "U0USER", "text": "mine", "ts": "100.000000"}]},
+        {"messages": []},
+    ]
+
+    first = client.get_channel_history_page("D0OWNDM")
+    client.get_channel_history_page("D0OWNDM")
+
+    assert first["messages"][0]["text"] == "mine"
+    assert len(fake_web_client.history_calls) == 2
+    assert fake_web_client.auth_test_calls == 1
+
+
+def test_posting_and_user_lookups_still_work_with_a_bot_token() -> None:
+    client, fake_web_client = _make_client()
+    fake_web_client.auth_test_response = _BOT_IDENTITY
+    fake_web_client.user_info_response = {"user": {"id": "U0USER", "name": "alice"}}
+
+    client.send_message("C123", "hello")
+    client.get_user_email("U0USER")
+
+    assert fake_web_client.last_kwargs["channel"] == "C123"
+    assert fake_web_client.auth_test_calls == 0

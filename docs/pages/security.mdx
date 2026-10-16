@@ -153,7 +153,8 @@ paths:
   account through the `slack` [OAuth app](/secrets/oauth-apps), and the
   resulting user token is granted to their DM principal. That token sees only
   what the user can see in Slack. In DMs the agent is told to use the Slack
-  tool's `-direct` methods.
+  tool's `-direct` methods. Those methods refuse to read conversations or
+  files when Slack reports the injected token as a bot token.
 
 Do not grant `SLACK_BOT_TOKEN`, or any other Slack bot token, to a principal
 or role. The bot token reaches every conversation the Slack app belongs to, so

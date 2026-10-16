@@ -273,6 +273,7 @@ class SlackClient:
         )
         self._user_cache: dict[str, str] = {}
         self._ratelimit_deadlines: dict[str, float] = {}
+        self._user_token_clients: set[int] = set()
 
     def __getattr__(self, name: str):
         """Proxy raw Slack SDK methods when the higher-level wrapper does not define them."""
@@ -350,6 +351,29 @@ class SlackClient:
                 resolved_channel=resolved_channel,
             ) from error
         raise RuntimeError(f"Slack API error: {error_code}") from error
+
+    def _require_user_token(self, client: WebClient, *, slack_method: str) -> None:
+        """Refuse a direct conversation or file read made with a bot token.
+
+        Direct reads skip the API server's per-requester channel check, so they
+        must use the requester's own user token, which Slack limits to what that
+        user can see. A bot token reaches every conversation the app is in,
+        including other users' DMs with the bot.
+        """
+        if id(client) in self._user_token_clients:
+            return
+        try:
+            identity = self._retry_on_ratelimit(client.auth_test, method_key="auth.test")
+        except SlackApiError as e:
+            self._raise_slack_api_error(e, slack_method="auth.test", access_path="direct")
+        if identity.get("bot_id"):
+            raise SlackAuthError(
+                slack_method=slack_method,
+                access_path="bot_token",
+                error_code="direct_read_requires_user_token",
+                status_code=None,
+            )
+        self._user_token_clients.add(id(client))
 
     def _retry_on_ratelimit(
         self,
@@ -1014,6 +1038,7 @@ class SlackClient:
         normalized_latest = self._normalize_ts(latest)
 
         requested_limit = max(1, min(int(limit), self._MAX_PAGE_SIZE))
+        self._require_user_token(self._client, slack_method="conversations.history")
 
         def fetch_page(next_cursor: str | None, batch_limit: int) -> dict[str, Any]:
             kwargs: dict[str, Any] = {
@@ -1185,6 +1210,7 @@ class SlackClient:
             raise ValueError("thread_ts is required")
 
         requested_limit = max(1, min(int(limit), self._MAX_PAGE_SIZE))
+        self._require_user_token(self._client, slack_method="conversations.replies")
 
         def fetch_page(next_cursor: str | None, batch_limit: int) -> dict[str, Any]:
             kwargs: dict[str, Any] = {
@@ -1545,6 +1571,7 @@ class SlackClient:
             List of member dicts with id, name, real_name, email
         """
         channel_id = self._resolve_channel(channel)
+        self._require_user_token(self._client, slack_method="conversations.members")
 
         # Get all member IDs in the channel
         member_ids = []
@@ -2162,6 +2189,7 @@ class SlackClient:
     ) -> list[dict]:
         """Get files attached to a specific message."""
         client = self._search_client if direct else self._client
+        self._require_user_token(client, slack_method="conversations.replies")
         try:
             response = client.conversations_replies(
                 channel=channel_id,
@@ -2206,6 +2234,7 @@ class SlackClient:
         normalized_file_id = file_id.strip().upper()
         if not self._FILE_ID_RE.fullmatch(normalized_file_id):
             raise ValueError(f"Invalid Slack file ID: {file_id!r}")
+        self._require_user_token(self._search_client, slack_method="files.info")
 
         try:
             response = self._retry_on_ratelimit(
@@ -2243,6 +2272,7 @@ class SlackClient:
             raise ValueError(
                 f"Slack file downloads only accept https://files.slack.com/ URLs; refusing {url!r}"
             )
+        self._require_user_token(self._search_client, slack_method="files.slack.com")
 
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
         with urllib.request.urlopen(req) as response:
@@ -2300,6 +2330,7 @@ class SlackClient:
     ) -> list[dict]:
         """Search files directly through Slack's `files.list` API."""
         requested_limit = max(1, int(max_results))
+        self._require_user_token(self._search_client, slack_method="files.list")
         user_cache = self._get_user_cache(direct=True)
         results: list[dict] = []
         page = 1
