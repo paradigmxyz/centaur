@@ -3262,7 +3262,10 @@ describe('slackbotv2', () => {
   })
 
   it('does not restore the status after a render abandons its stream on a Slack error', async () => {
-    bot = createTestBot()
+    const logs: CapturedLog[] = []
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ logger: captureLogger(logs), state: sharedState })
     codexApi.autoRespond = false
     slackApi.failStreamAppendsAfter(1, 'message_not_in_streaming_state')
 
@@ -3297,20 +3300,74 @@ describe('slackbotv2', () => {
     // The failed append ends the live render, which clears its status.
     await waitFor(() => statuses().includes(''), 3000)
 
+    // With the execution still running, the abandoned render's pump still
+    // receives the steering event; it must observe the closed tracker and
+    // skip the restore rather than resurrect the cleared status.
     codexApi.emitSessionEvent(key, 'session.steering_delivered', {
       execution_id: 'exe-abandoned-steering-status',
       input_line_count: 1
     })
+    await waitFor(() => hasLog(logs, 'slackbotv2_assistant_status_restore_skipped_closed'))
+    expect(hasLog(logs, 'slackbotv2_assistant_status_restored_after_steering')).toBe(false)
+    expect(statuses()).toEqual(['Thinking...', ''])
+
     codexApi.emitSessionEvent(key, 'session.execution_completed', {
       execution_id: 'exe-abandoned-steering-status',
       status: 'completed',
-      result_text: 'ABANDONED_STREAM_ANSWER'
+      result_text: 'ABANDONED_STREAM_ANSWER_VISIBLE'
     })
-
     await mention.finished()
-    await new Promise(resolve => setTimeout(resolve, 50))
     expect(statuses()).toEqual(['Thinking...', ''])
-    expect(codexApi.streamCount).toBe(0)
+    const answers = (await threadTexts(parent.ts)).filter(text =>
+      text.includes('ABANDONED_STREAM_ANSWER_VISIBLE')
+    )
+    expect(answers).toHaveLength(1)
+    expect(await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)).toEqual(
+      expect.objectContaining({ activeExecution: false, renderObligation: null })
+    )
+  })
+
+  it('clears a status write that lands after its render cleared the status', async () => {
+    const logs: CapturedLog[] = []
+    bot = createProductionDefaultTestBot({ logger: captureLogger(logs), slackApiTimeoutMs: 25 })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before a slow status write.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> check the deploy`, {
+      threadTs: parent.ts
+    })
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    const key = threadKey(parent.ts)
+    const statuses = () =>
+      slackApi.calls
+        .filter(call => call.method === 'assistant.threads.setStatus')
+        .map(call => stringField(call.body.status))
+    // Hold the next non-empty status request: the steering restore reaches
+    // Slack, outlives the 25ms Slack API timeout, and lands only after the
+    // render has finished and cleared its status.
+    const releaseStatus = slackApi.holdAssistantStatus()
+    try {
+      codexApi.emitSessionEvent(key, 'session.steering_delivered', {
+        execution_id: 'exe-slow-status-write',
+        input_line_count: 1
+      })
+      await waitFor(() => statuses().length === 2)
+      codexApi.emitOutputLine(key, JSON.stringify({ type: 'turn.done', result: 'Deploy is fine.' }))
+      await mention.finished()
+      expect(statuses()).toEqual(['Thinking...', 'Thinking...', ''])
+      expect(hasLog(logs, 'slackbotv2_assistant_status_late_write_reverted')).toBe(false)
+    } finally {
+      releaseStatus()
+    }
+
+    await waitFor(() => hasLog(logs, 'slackbotv2_assistant_status_late_write_reverted'))
+    await waitFor(() => statuses().length === 4)
+    expect(statuses()).toEqual(['Thinking...', 'Thinking...', '', ''])
+    expect(logData(logs, 'slackbotv2_assistant_status_late_write_reverted')).toEqual(
+      expect.objectContaining({ restored_newer_render_status: false })
+    )
   })
 
   it('skips stale render obligations from Chat SDK state on startup', async () => {

@@ -2735,15 +2735,15 @@ async function renderExecutionStream(
   }
   const titleStartedAtMs = nowMs()
   await setAssistantTitle(thread, titleFromMessage(promptText, options.userName), options, trace)
+  const statusTracker = newAssistantStatusTracker(thread, options)
   if (!assistantStatusVisible) {
-    await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...', options, trace)
+    await setTrackedAssistantStatus(thread, statusTracker, statusTracker.current, options, trace)
   }
   traceLog(options, 'slackbotv2_render_slack_metadata_set', trace, {
     assistant_status_already_visible: assistantStatusVisible,
     phase_ms: elapsedMs(titleStartedAtMs)
   })
   const capture = { diverged: false }
-  const statusTracker = newAssistantStatusTracker(options)
   let visibleStream: FirstChunkStream | null = null
   try {
     const taskDisplayMode = slackStreamTaskDisplayMode(options)
@@ -2797,12 +2797,12 @@ async function renderRecoveredExecutionStream(
   }
   const titleStartedAtMs = nowMs()
   await setAssistantTitle(thread, titleFromMessage(promptText, options.userName), options, trace)
-  await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...', options, trace)
+  const statusTracker = newAssistantStatusTracker(thread, options)
+  await setTrackedAssistantStatus(thread, statusTracker, statusTracker.current, options, trace)
   traceLog(options, 'slackbotv2_render_slack_metadata_set', trace, {
     phase_ms: elapsedMs(titleStartedAtMs)
   })
   const capture = { diverged: false }
-  const statusTracker = newAssistantStatusTracker(options)
   let visibleStream: FirstChunkStream | null = null
   try {
     const taskDisplayMode = slackStreamTaskDisplayMode(options)
@@ -2854,14 +2854,14 @@ async function renderPlainTextExecutionStream(
     options,
     trace
   )
+  const statusTracker = newAssistantStatusTracker(thread, options)
   if (!assistantStatusVisible) {
-    await setAssistantStatus(thread, options.assistantStatus ?? 'Thinking...', options, trace)
+    await setTrackedAssistantStatus(thread, statusTracker, statusTracker.current, options, trace)
   }
   traceLog(options, 'slackbotv2_render_plain_text_metadata_set', trace, {
     assistant_status_already_visible: assistantStatusVisible,
     phase_ms: elapsedMs(titleStartedAtMs)
   })
-  const statusTracker = newAssistantStatusTracker(options)
   try {
     const chatStream = fallback.collectChatSdk(
       slackSafeChatSdkStream(
@@ -3751,14 +3751,28 @@ function rendererLogInfo(
 /** The status a live render currently owns, so it can be restored after Slack hides it. */
 type AssistantStatusTracker = { closed: boolean; current: string }
 
-function newAssistantStatusTracker(options: SlackbotV2Options): AssistantStatusTracker {
-  return { closed: false, current: options.assistantStatus ?? 'Thinking...' }
+/**
+ * Open render status trackers in this process, by thread id. A late status
+ * write from a finished render hands the thread back to the newer render
+ * that owns it instead of clearing that render's status.
+ */
+const openAssistantStatusTrackers = new Map<string, AssistantStatusTracker>()
+
+function newAssistantStatusTracker(
+  thread: Thread,
+  options: SlackbotV2Options
+): AssistantStatusTracker {
+  const tracker = { closed: false, current: options.assistantStatus ?? 'Thinking...' }
+  openAssistantStatusTrackers.set(thread.id, tracker)
+  return tracker
 }
 
 /**
  * Sets a status owned by a live render. Once the render has cleared its
- * status, late writers (an abandoned stream pump or a status call that
- * outlived its timeout) must not leave a stale indicator behind.
+ * status, late writers (an abandoned stream pump, or a Slack request that
+ * outlived its timeout and lands after the clear) must not leave a stale
+ * indicator behind. The timeout does not cancel the Slack request, so the
+ * compensating write is ordered after the request itself settles.
  */
 async function setTrackedAssistantStatus(
   thread: Thread,
@@ -3768,8 +3782,27 @@ async function setTrackedAssistantStatus(
   trace?: SlackbotV2Trace
 ): Promise<void> {
   if (tracker.closed) return
-  await setAssistantStatus(thread, status, options, trace)
-  if (tracker.closed) await setAssistantStatus(thread, '', options, trace)
+  let applied: Promise<boolean> | undefined
+  await setAssistantStatus(thread, status, options, trace, request => {
+    applied = request
+  })
+  if (!applied) return
+  backgroundWaitUntil(
+    applied
+      .then(async wasApplied => {
+        if (!wasApplied || !tracker.closed) return
+        const owner = openAssistantStatusTrackers.get(thread.id)
+        traceLog(options, 'slackbotv2_assistant_status_late_write_reverted', trace, {
+          restored_newer_render_status: Boolean(owner)
+        })
+        if (owner) {
+          await setTrackedAssistantStatus(thread, owner, owner.current, options, trace)
+        } else {
+          await setAssistantStatus(thread, '', options, trace)
+        }
+      })
+      .catch(() => undefined)
+  )
 }
 
 async function closeAssistantStatus(
@@ -3779,6 +3812,9 @@ async function closeAssistantStatus(
   trace?: SlackbotV2Trace
 ): Promise<void> {
   tracker.closed = true
+  if (openAssistantStatusTrackers.get(thread.id) === tracker) {
+    openAssistantStatusTrackers.delete(thread.id)
+  }
   await setAssistantStatus(thread, '', options, trace)
 }
 
@@ -3800,11 +3836,14 @@ async function* restoreAssistantStatusAfterSteering(
   for await (const event of stream) {
     const steeringEvent = steeringEventKind(event)
     if (steeringEvent) {
-      if (!tracker.closed) {
-        traceLog(options, 'slackbotv2_assistant_status_restored_after_steering', trace, {
-          steering_event: steeringEvent
-        })
-      }
+      traceLog(
+        options,
+        tracker.closed
+          ? 'slackbotv2_assistant_status_restore_skipped_closed'
+          : 'slackbotv2_assistant_status_restored_after_steering',
+        trace,
+        { steering_event: steeringEvent }
+      )
       await setTrackedAssistantStatus(thread, tracker, tracker.current, options, trace)
       continue
     }
@@ -3899,7 +3938,9 @@ async function setAssistantStatus(
   thread: Thread,
   status: string,
   options?: SlackbotV2Options,
-  trace?: SlackbotV2Trace
+  trace?: SlackbotV2Trace,
+  /** Receives the Slack request itself, which may settle after the timeout. */
+  onRequest?: (applied: Promise<boolean>) => void
 ): Promise<boolean> {
   const startedAtMs = nowMs()
   const normalizedStatus = normalizeAssistantStatus(status)
@@ -3932,8 +3973,8 @@ async function setAssistantStatus(
       )
     : () => undefined
   try {
-    const visible = await withSlackApiTimeout(options, 'set assistant status', () =>
-      ignoreAssistantError(() =>
+    const visible = await withSlackApiTimeout(options, 'set assistant status', () => {
+      const request = ignoreAssistantError(() =>
         adapter.setAssistantStatus!(
           target.channel,
           target.threadTs,
@@ -3941,7 +3982,9 @@ async function setAssistantStatus(
           normalizedStatus ? [normalizedStatus] : undefined
         )
       )
-    )
+      onRequest?.(request)
+      return request
+    })
     if (options) {
       traceLog(options, 'slackbotv2_assistant_status_complete', trace, {
         ...fields,
