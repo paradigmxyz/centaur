@@ -653,6 +653,65 @@ module Api
         assert_equal "new-secret", ref.reload.source.secret
       end
 
+      test "POST creates a vault_kv source with mount, path, and kv_version" do
+        body = {
+          data: {
+            name: "vault-kv-ref",
+            inject_config: { "header" => "X-Api-Key" },
+            source: {
+              source_type: "vault_kv",
+              config: { "mount" => "secret", "path" => "prod/app/api-key", "json_key" => "credential", "kv_version" => 2 }
+            }
+          }
+        }
+
+        assert_difference -> { StaticSecret.count } => 1, -> { SecretSource.count } => 1 do
+          post api_v1_static_secrets_url, params: body.to_json, headers: auth_headers
+        end
+        assert_response :created
+
+        data = json_body.fetch("data")
+        assert_equal "vault_kv", data.dig("source", "source_type")
+        assert_equal({ "mount" => "secret", "path" => "prod/app/api-key", "json_key" => "credential", "kv_version" => 2 },
+                     data.dig("source", "config"))
+      end
+
+      test "POST rejects a vault_kv source missing mount or path" do
+        [ { "path" => "prod/app/api-key" }, { "mount" => "secret" } ].each do |config|
+          body = {
+            data: {
+              name: "vault-kv-incomplete",
+              inject_config: { "header" => "X-Api-Key" },
+              source: { source_type: "vault_kv", config: config }
+            }
+          }
+
+          assert_no_difference [ "StaticSecret.count", "SecretSource.count" ] do
+            post api_v1_static_secrets_url, params: body.to_json, headers: auth_headers
+          end
+          assert_response :unprocessable_entity
+        end
+      end
+
+      test "POST rejects a kv_version iron-proxy cannot decode" do
+        body = {
+          data: {
+            name: "vault-kv-bad-version",
+            inject_config: { "header" => "X-Api-Key" },
+            source: {
+              source_type: "vault_kv",
+              config: { "mount" => "secret", "path" => "prod/app/api-key", "kv_version" => "2" }
+            }
+          }
+        }
+
+        assert_no_difference [ "StaticSecret.count", "SecretSource.count" ] do
+          post api_v1_static_secrets_url, params: body.to_json, headers: auth_headers
+        end
+        assert_response :unprocessable_entity
+        assert_match(/kv_version/, response.body)
+      end
+
       test "POST rejects a control_plane source without a secret" do
         body = {
           data: {

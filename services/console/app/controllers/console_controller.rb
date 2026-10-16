@@ -18,7 +18,7 @@ class ConsoleController < ApplicationController
   # type). The secrets table shows only this -- the full reference lives on the
   # secret detail page.
   SOURCE_TYPE_LABELS = {
-    "env" => "Env", "aws_sm" => "AWS-SM", "aws_ssm" => "AWS-SSM",
+    "env" => "Env", "aws_sm" => "AWS-SM", "aws_ssm" => "AWS-SSM", "vault_kv" => "Vault-KV",
     "1password" => "1Password", "1password_connect" => "1Password-Connect",
     "control_plane" => "Inline", "token_broker" => "Token-Broker",
     "workload_identity" => "Workload-Identity"
