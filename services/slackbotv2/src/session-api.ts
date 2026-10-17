@@ -828,7 +828,7 @@ type CreateSessionOutcome = {
   personaId?: string | null
   /** The unavailable persona ID replaced by the API during new-session creation. */
   unavailableRequestedPersonaId?: string
-  /** Model the persona pins for the session's harness; turns without a model run on it. */
+  /** Model the persona pins for the session's harness; it overrides model and provider flags. */
   personaModel?: string
   /** The API restarted the thread onto the requested harness. */
   harnessSwitched: boolean

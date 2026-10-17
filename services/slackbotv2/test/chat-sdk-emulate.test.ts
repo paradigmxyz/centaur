@@ -973,7 +973,9 @@ describe('slackbotv2', () => {
     expect(mention.response.status).toBe(200)
     await mention.finished()
 
-    expect(stopStreamBlocksText(slackApi.calls)).toContain('Ultra')
+    const footer = stopStreamBlocksText(slackApi.calls)
+    expect(footer).toContain(modelDisplayName('gpt-6-astra'))
+    expect(footer).toContain('Ultra')
     const executeBody = codexApi.executes[0]!.body
     expect(executeBody.metadata.model).toBe('gpt-6-astra')
     const input = JSON.parse(executeBody.input_lines.at(-1)!) as Record<string, unknown>
@@ -982,7 +984,7 @@ describe('slackbotv2', () => {
     expect(input.reasoning).toBe('ultra')
   })
 
-  it('does not show the persona-pinned model when a provider is selected', async () => {
+  it('shows the persona-pinned model over model and provider flags', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
     bot = createTestBot({ state: sharedState })
@@ -994,13 +996,17 @@ describe('slackbotv2', () => {
     })
 
     const parent = await postUserMessage('Persona provider thread context.')
-    const mention = await sendMessage(`<@${BOT_USER_ID}> --persona eng --bedrock start`, {
-      threadTs: parent.ts
-    })
+    const mention = await sendMessage(
+      `<@${BOT_USER_ID}> --persona eng --bedrock --model gpt-5.4 start`,
+      { threadTs: parent.ts }
+    )
     expect(mention.response.status).toBe(200)
     await mention.finished()
 
-    expect(codexApi.executes[0]!.body.metadata.model).not.toBe('gpt-6-astra')
+    const footer = stopStreamBlocksText(slackApi.calls)
+    expect(footer).toContain(modelDisplayName('gpt-6-astra'))
+    expect(footer).not.toContain(modelDisplayName('gpt-5.4'))
+    expect(codexApi.executes[0]!.body.metadata.model).toBe('gpt-6-astra')
   })
 
   it('drops a per-channel reasoning default incompatible with its selected model', async () => {

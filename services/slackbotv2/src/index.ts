@@ -1638,15 +1638,14 @@ async function syncThreadMessageToSession(
         const abTested = outcome.harnessAssignment?.experiment === 'codex_nanocodex_ab'
         forwardInput.metadataHarnessType = harnessType
         forwardInput.harnessAssignment = outcome.harnessAssignment
-        // The API runs the persona's pinned model when the turn names neither
-        // a model nor a provider.
-        const personaModel = resolvedModel || resolvedProvider ? undefined : outcome.personaModel
+        // A persona-pinned model overrides any model or provider selection.
+        const personaModel = outcome.personaModel
         let model = effectiveModel
         let reasoning = effectiveReasoning
         if (harnessType !== effectiveHarnessType || abTested || personaModel) {
           model =
-            resolvedModel ??
             personaModel ??
+            resolvedModel ??
             defaultModelForHarness(harnessType, input.options.harnessDefaultModels)
           // Validate the raw request: resolvedReasoning was filtered against
           // the model expected before the session resolved.
@@ -1674,7 +1673,7 @@ async function syncThreadMessageToSession(
           notice: fallbackNotice,
           reasoning,
           serviceTier:
-            input.options.responseServiceTierEnabled === true && !resolvedProvider
+            input.options.responseServiceTierEnabled === true && (personaModel || !resolvedProvider)
               ? defaultServiceTierForHarness(harnessType)
               : undefined
         })

@@ -217,8 +217,9 @@ pub struct PersonaDefinition {
     pub prompt_hash: String,
     #[serde(skip_serializing)]
     pub prompt: String,
-    /// Model pinned per harness (keyed by harness wire value). Used for turns
-    /// that do not request a model explicitly.
+    /// Model pinned per harness (keyed by harness wire value). Every turn of
+    /// a session on that harness runs it, whatever model or provider the turn
+    /// requests.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, String>,
 }
@@ -2150,10 +2151,8 @@ impl SessionRuntime {
             validate_input_lines(&input_lines)?;
             let (idle_timeout, max_duration) = duration_options(idle_timeout_ms, max_duration_ms)?;
             let requester_metadata = metadata.clone();
-            let session_persona_model = self.persona_model(&session);
-            let persona_model = session_persona_model
-                .and_then(|model| persona_model_for_execution(&input_lines, model));
-            let input_lines = match session_persona_model {
+            let persona_model = self.persona_model(&session);
+            let input_lines = match persona_model {
                 Some(model) => input_lines_with_persona_model(input_lines, model),
                 None => input_lines,
             };
@@ -2172,7 +2171,7 @@ impl SessionRuntime {
                             metadata,
                             idle_timeout_ms,
                             max_duration_ms,
-                            persona_model.as_deref(),
+                            persona_model,
                         ),
                         persisted_request.expect("new executions have a persisted request"),
                     )
@@ -2422,11 +2421,9 @@ impl SessionRuntime {
         let session = self.store.get_session(thread_key).await?;
         validate_input_lines(&input.input_lines)?;
         let _ = duration_options(input.idle_timeout_ms, input.max_duration_ms)?;
-        // The persisted request keeps the caller's lines; the persona model is
-        // applied again when the driver writes them to the sandbox.
-        let persona_model = self
-            .persona_model(&session)
-            .and_then(|model| persona_model_for_execution(&input.input_lines, model));
+        // The persisted request keeps the caller's lines; the driver pins
+        // them to the persona model when it writes them to the sandbox.
+        let persona_model = self.persona_model(&session);
 
         let request = persisted_execute_request(&input)?;
         let execution = self
@@ -2438,7 +2435,7 @@ impl SessionRuntime {
                     input.metadata.clone(),
                     input.idle_timeout_ms,
                     input.max_duration_ms,
-                    persona_model.as_deref(),
+                    persona_model,
                 ),
                 request,
             )
@@ -6672,21 +6669,8 @@ fn finish_execution_trace_span(span: &Span, status: &str) {
     );
 }
 
-/// A user turn that names neither a model nor a provider runs on the
-/// persona-pinned model. A provider without a model keeps that provider's
-/// default, which a persona model may not be served by.
-fn user_turn_needs_persona_model(map: &serde_json::Map<String, Value>) -> Option<bool> {
-    if map.get("type").and_then(Value::as_str) != Some("user") {
-        return None;
-    }
-    let names = |key| {
-        map.get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value: &str| !value.trim().is_empty())
-    };
-    Some(!names("model") && !names("provider"))
-}
-
+/// Pins every user turn to the persona's model. The pin overrides a
+/// requested model and drops a requested provider, which may not serve it.
 fn input_lines_with_persona_model(input_lines: Vec<String>, model: &str) -> Vec<String> {
     input_lines
         .into_iter()
@@ -6694,27 +6678,14 @@ fn input_lines_with_persona_model(input_lines: Vec<String>, model: &str) -> Vec<
             let Ok(Value::Object(mut map)) = serde_json::from_str::<Value>(&line) else {
                 return line;
             };
-            if user_turn_needs_persona_model(&map) != Some(true) {
+            if map.get("type").and_then(Value::as_str) != Some("user") {
                 return line;
             }
             map.insert("model".to_owned(), json!(model));
+            map.remove("provider");
             Value::Object(map).to_string()
         })
         .collect()
-}
-
-/// The persona model when every user turn in the request runs on it, so the
-/// execution can record it as the model it ran.
-fn persona_model_for_execution(input_lines: &[String], model: &str) -> Option<String> {
-    let mut needs =
-        input_lines
-            .iter()
-            .filter_map(|line| match serde_json::from_str::<Value>(line) {
-                Ok(Value::Object(map)) => user_turn_needs_persona_model(&map),
-                _ => None,
-            });
-    let first = needs.next()?;
-    (first && needs.all(|needs| needs)).then(|| model.to_owned())
 }
 
 fn input_lines_with_session_context(
@@ -7376,8 +7347,7 @@ fn execution_metadata(
 ) -> Value {
     let mut metadata = default_metadata(metadata);
     if let Value::Object(object) = &mut metadata {
-        // The caller's model guess assumed the harness default; record the
-        // persona-pinned model the execution actually runs on.
+        // A persona-pinned model overrides whatever model the caller recorded.
         if let Some(model) = persona_model {
             object.insert("model".to_owned(), json!(model));
         }
@@ -8786,41 +8756,34 @@ mod tests {
     }
 
     #[test]
-    fn persona_model_fills_only_user_turns_without_a_model_or_provider() {
-        let lines = vec![
-            r#"{"type":"user","model":" "}"#.to_owned(),
-            r#"{"type":"user","model":"explicit"}"#.to_owned(),
-            r#"{"type":"user","provider":"amazon-bedrock"}"#.to_owned(),
-            r#"{"type":"control"}"#.to_owned(),
-            "raw".to_owned(),
-        ];
-        let models = input_lines_with_persona_model(lines.clone(), "pinned")
+    fn persona_model_overrides_requested_model_and_provider_on_user_turns() {
+        let lines = input_lines_with_persona_model(
+            vec![
+                r#"{"type":"user"}"#.to_owned(),
+                r#"{"type":"user","model":"explicit","provider":"amazon-bedrock"}"#.to_owned(),
+                r#"{"type":"control","provider":"amazon-bedrock"}"#.to_owned(),
+                "raw".to_owned(),
+            ],
+            "pinned",
+        );
+        let selections = lines
             .iter()
             .map(|line| {
                 serde_json::from_str::<Value>(line)
                     .ok()
-                    .and_then(|value| value.get("model").cloned())
+                    .map(|value| (value.get("model").cloned(), value.get("provider").cloned()))
             })
             .collect::<Vec<_>>();
 
         assert_eq!(
-            models,
+            selections,
             [
-                Some(json!("pinned")),
-                Some(json!("explicit")),
+                Some((Some(json!("pinned")), None)),
+                Some((Some(json!("pinned")), None)),
+                Some((None, Some(json!("amazon-bedrock")))),
                 None,
-                None,
-                None
             ]
         );
-        // The execution only records the persona model when it is the model
-        // every user turn runs on.
-        assert_eq!(persona_model_for_execution(&lines, "pinned"), None);
-        assert_eq!(
-            persona_model_for_execution(&[lines[0].clone(), lines[3].clone()], "pinned").as_deref(),
-            Some("pinned")
-        );
-        assert_eq!(persona_model_for_execution(&lines[3..], "pinned"), None);
     }
 
     #[test]
@@ -9938,9 +9901,9 @@ mod adoption_tests {
                 &thread_key,
                 ExecuteSessionInput {
                     idempotency_key: None,
-                    metadata: Some(json!({"model": "harness-default"})),
+                    metadata: Some(json!({"model": "explicit"})),
                     input_lines: vec![
-                        r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#
+                        r#"{"type":"user","model":"explicit","provider":"amazon-bedrock","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#
                             .to_owned(),
                     ],
                     idle_timeout_ms: None,
@@ -9959,6 +9922,7 @@ mod adoption_tests {
             .expect("input line present");
         let line: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(line["model"], "eng-model");
+        assert!(line.get("provider").is_none());
         assert_eq!(execution.metadata["model"], "eng-model");
         reset_test_store(&store).await;
     }

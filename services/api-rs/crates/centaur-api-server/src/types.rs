@@ -38,8 +38,8 @@ pub struct CreateSessionResponse {
     /// and the returned session uses the resolved fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unavailable_requested_persona_id: Option<String>,
-    /// Model the session's persona pins for its harness. Turns that do not
-    /// request a model run on it.
+    /// Model the session's persona pins for its harness. Every turn runs on
+    /// it; requested models and providers are ignored.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub persona_model: Option<String>,
 }
