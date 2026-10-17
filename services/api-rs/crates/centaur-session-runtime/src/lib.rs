@@ -2616,6 +2616,18 @@ impl SessionRuntime {
         if input_lines.is_empty() {
             return;
         }
+        // A steer that lands after the turn ends starts a new turn, which must
+        // run the pinned model too.
+        let input_lines = match self.store.get_session(thread_key).await {
+            Ok(session) => match self.persona_model(&session) {
+                Some(model) => input_lines_with_persona_model(input_lines, model),
+                None => input_lines,
+            },
+            Err(error) => {
+                warn!(%thread_key, %error, "session lookup failed during steering");
+                input_lines
+            }
+        };
 
         let Some(execution) = (match self.store.active_execution_for_thread(thread_key).await {
             Ok(execution) => execution,
@@ -6671,6 +6683,8 @@ fn finish_execution_trace_span(span: &Span, status: &str) {
 
 /// Pins every user turn to the persona's model. The pin overrides a
 /// requested model and drops a requested provider, which may not serve it.
+/// A reasoning effort chosen for a different requested model is dropped too,
+/// so the pinned model runs its default effort instead of rejecting the turn.
 fn input_lines_with_persona_model(input_lines: Vec<String>, model: &str) -> Vec<String> {
     input_lines
         .into_iter()
@@ -6680,6 +6694,14 @@ fn input_lines_with_persona_model(input_lines: Vec<String>, model: &str) -> Vec<
             };
             if map.get("type").and_then(Value::as_str) != Some("user") {
                 return line;
+            }
+            let replaces_model = map
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .is_some_and(|requested| !requested.is_empty() && requested != model);
+            if replaces_model {
+                map.remove("reasoning");
             }
             map.insert("model".to_owned(), json!(model));
             map.remove("provider");
@@ -8759,8 +8781,10 @@ mod tests {
     fn persona_model_overrides_requested_model_and_provider_on_user_turns() {
         let lines = input_lines_with_persona_model(
             vec![
-                r#"{"type":"user"}"#.to_owned(),
-                r#"{"type":"user","model":"explicit","provider":"amazon-bedrock"}"#.to_owned(),
+                r#"{"type":"user","reasoning":"high"}"#.to_owned(),
+                r#"{"type":"user","model":"pinned","reasoning":"high"}"#.to_owned(),
+                r#"{"type":"user","model":"explicit","provider":"amazon-bedrock","reasoning":"ultra"}"#
+                    .to_owned(),
                 r#"{"type":"control","provider":"amazon-bedrock"}"#.to_owned(),
                 "raw".to_owned(),
             ],
@@ -8769,18 +8793,20 @@ mod tests {
         let selections = lines
             .iter()
             .map(|line| {
-                serde_json::from_str::<Value>(line)
-                    .ok()
-                    .map(|value| (value.get("model").cloned(), value.get("provider").cloned()))
+                serde_json::from_str::<Value>(line).ok().map(|value| {
+                    ["model", "provider", "reasoning"].map(|key| value.get(key).cloned())
+                })
             })
             .collect::<Vec<_>>();
 
         assert_eq!(
             selections,
             [
-                Some((Some(json!("pinned")), None)),
-                Some((Some(json!("pinned")), None)),
-                Some((None, Some(json!("amazon-bedrock")))),
+                Some([Some(json!("pinned")), None, Some(json!("high"))]),
+                Some([Some(json!("pinned")), None, Some(json!("high"))]),
+                // The effort was chosen for the replaced model.
+                Some([Some(json!("pinned")), None, None]),
+                Some([None, Some(json!("amazon-bedrock")), None]),
                 None,
             ]
         );
@@ -9924,6 +9950,27 @@ mod adoption_tests {
         assert_eq!(line["model"], "eng-model");
         assert!(line.get("provider").is_none());
         assert_eq!(execution.metadata["model"], "eng-model");
+
+        // A steer can start a new turn, so it carries the pin too.
+        runtime
+            .append_messages(
+                &thread_key,
+                &[SessionMessageInput {
+                    client_message_id: Some("steer".to_owned()),
+                    role: MessageRole::User,
+                    parts: vec![json!({"type": "text", "text": "also this"})],
+                    metadata: json!({}),
+                }],
+            )
+            .await
+            .expect("append steering message");
+        let steer = timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("steering line written")
+            .expect("read steering line")
+            .expect("steering line present");
+        let steer: Value = serde_json::from_str(&steer).unwrap();
+        assert_eq!(steer["model"], "eng-model");
         reset_test_store(&store).await;
     }
 

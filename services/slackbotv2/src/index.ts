@@ -1657,6 +1657,12 @@ async function syncThreadMessageToSession(
           )
           forwardInput.metadataModel = model
           forwardInput.reasoning = modelReasoning
+          if (personaModel) {
+            // The API ignores model and provider selections on a pinned thread;
+            // don't send them, so a rejected pin isn't blamed on a sticky model.
+            forwardInput.model = undefined
+            forwardInput.provider = undefined
+          }
           traceLog(input.options, 'slackbotv2_session_harness_resolved', trace, {
             ab_tested: abTested,
             ab_test_experiment: outcome.harnessAssignment?.experiment,

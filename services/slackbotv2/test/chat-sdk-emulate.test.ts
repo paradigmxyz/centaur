@@ -1006,7 +1006,44 @@ describe('slackbotv2', () => {
     const footer = stopStreamBlocksText(slackApi.calls)
     expect(footer).toContain(modelDisplayName('gpt-6-astra'))
     expect(footer).not.toContain(modelDisplayName('gpt-5.4'))
-    expect(codexApi.executes[0]!.body.metadata.model).toBe('gpt-6-astra')
+    const executeBody = codexApi.executes[0]!.body
+    expect(executeBody.metadata.model).toBe('gpt-6-astra')
+    const input = JSON.parse(executeBody.input_lines.at(-1)!) as Record<string, unknown>
+    expect(input.model).toBeUndefined()
+    expect(input.provider).toBeUndefined()
+  })
+
+  it('keeps the sticky model when a persona-pinned model is rejected', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ state: sharedState })
+    codexApi.autoRespond = false
+    codexApi.queueCreateResponse({
+      harness_switched: false,
+      harness_type: 'codex',
+      persona_id: 'eng',
+      persona_model: 'gpt-retired'
+    })
+
+    const parent = await postUserMessage('Rejected persona model thread context.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> --persona eng --model gpt-5.4 start`, {
+      threadTs: parent.ts
+    })
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.eventRequests.length === codexApi.executes.length, 3000)
+    codexApi.emitSessionEvent(threadKey(parent.ts), 'session.execution_failed', {
+      error: JSON.stringify({
+        type: 'invalid_request_error',
+        code: 'model_not_found',
+        message: "The requested model 'gpt-retired' does not exist.",
+        param: 'model'
+      })
+    })
+    await mention.finished()
+
+    expect(
+      await sharedState.get<Record<string, unknown>>(`thread-state:${threadKey(parent.ts)}`)
+    ).toEqual(expect.objectContaining({ model: 'gpt-5.4' }))
   })
 
   it('drops a per-channel reasoning default incompatible with its selected model', async () => {
