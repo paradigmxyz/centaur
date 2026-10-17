@@ -159,7 +159,7 @@ module Oauth
           "aud" => MICROSOFT_CLIENT_ID,
           "iss" => "https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0",
           "oid" => "0c6b8a4e-1a2b-4c3d-9e8f-123456789abc", "sub" => "pairwise-sub",
-          "preferred_username" => "mailbox@example.com", "name" => "Mailbox Owner"
+          "email" => "mailbox@example.com", "xms_edov" => true, "name" => "Mailbox Owner"
         })
       }.merge(overrides).to_json
     end

@@ -20,7 +20,7 @@ module Oauth
 
       def valid_claims(**overrides)
         { "aud" => CLIENT_ID, "iss" => ISSUER, "oid" => "0c6b8a4e-1a2b-4c3d-9e8f-123456789abc",
-          "sub" => "pairwise-sub", "email" => "user@example.com",
+          "sub" => "pairwise-sub", "email" => "user@example.com", "xms_edov" => true,
           "preferred_username" => "user@example.onmicrosoft.com", "name" => "Example User" }.merge(overrides)
       end
 
@@ -31,9 +31,13 @@ module Oauth
         assert_equal "Example User", identity[:name]
       end
 
-      test "falls back to preferred_username when the email claim is absent" do
-        result = result_with(claims: valid_claims.except("email"))
-        assert_equal "user@example.onmicrosoft.com", strategy.identity_from(result, client_id: CLIENT_ID)[:email]
+      test "ignores email claims whose domain Microsoft has not verified" do
+        [ valid_claims.except("xms_edov"), valid_claims("xms_edov" => false),
+          valid_claims.except("email") ].each do |claims|
+          identity = strategy.identity_from(result_with(claims: claims), client_id: CLIENT_ID)
+          assert_nil identity[:email], claims.inspect
+          assert_equal "0c6b8a4e-1a2b-4c3d-9e8f-123456789abc", identity[:subject]
+        end
       end
 
       test "aud mismatch raises an oauth exchange error" do

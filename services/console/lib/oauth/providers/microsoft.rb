@@ -46,10 +46,12 @@ module Oauth
 
       # Extracts { subject:, email:, name: } from a successful code-exchange
       # result. The subject is the `oid` claim, the account's directory object
-      # id, which is stable across apps; `sub` is pairwise per client. Work
-      # accounts carry their mailbox address as `email` when the email scope is
-      # granted, with the UPN in `preferred_username` as the fallback. Raises
-      # Broker::ExchangeError on a missing/undecodable id_token or a mismatch.
+      # id, which is stable across apps; `sub` is pairwise per client. The email
+      # is used only when `xms_edov` says its domain is verified: on the `common`
+      # endpoint any tenant's admin can set an account's `email` or
+      # `preferred_username` to an arbitrary address, and credential
+      # reconciliation grants by email. Raises Broker::ExchangeError on a
+      # missing/undecodable id_token or a mismatch.
       def identity_from(result, client_id:, http_client: nil)
         claims = id_token_claims(result)
         require_audience!(claims, client_id)
@@ -66,9 +68,17 @@ module Oauth
 
         {
           subject: subject,
-          email: claims["email"].presence || claims["preferred_username"].presence,
+          email: verified_email(claims),
           name: claims["name"].presence
         }
+      end
+
+      private
+
+      def verified_email(claims)
+        return unless ActiveModel::Type::Boolean.new.cast(claims["xms_edov"])
+
+        claims["email"].presence
       end
     end
   end
