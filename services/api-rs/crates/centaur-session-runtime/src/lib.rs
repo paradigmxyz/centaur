@@ -2616,6 +2616,17 @@ impl SessionRuntime {
         if input_lines.is_empty() {
             return;
         }
+
+        let Some(execution) = (match self.store.active_execution_for_thread(thread_key).await {
+            Ok(execution) => execution,
+            Err(error) => {
+                warn!(%thread_key, %error, "active execution lookup failed during message append");
+                return;
+            }
+        }) else {
+            return;
+        };
+
         // A steer that lands after the turn ends starts a new turn, which must
         // run the pinned model too.
         let input_lines = match self.store.get_session(thread_key).await {
@@ -2627,16 +2638,6 @@ impl SessionRuntime {
                 warn!(%thread_key, %error, "session lookup failed during steering");
                 input_lines
             }
-        };
-
-        let Some(execution) = (match self.store.active_execution_for_thread(thread_key).await {
-            Ok(execution) => execution,
-            Err(error) => {
-                warn!(%thread_key, %error, "active execution lookup failed during message append");
-                return;
-            }
-        }) else {
-            return;
         };
 
         // Steering joins the active execution's trace so harness spans for the

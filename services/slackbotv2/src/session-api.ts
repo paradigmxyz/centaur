@@ -1435,10 +1435,11 @@ async function executeSession(
   const recordedModel = metadataModel ?? model
   const body: SlackbotV2ExecuteSessionRequest = {
     idempotency_key: message.id,
-    // Record the model this execution runs on (explicit override, else the
-    // configured/baked harness default) so downstream readers can show
-    // it. Metadata only; the harness receives `model` via input_lines and only
-    // when explicitly overridden.
+    // Record the model this execution runs on (persona pin, else explicit
+    // override, else the configured/baked harness default) so downstream
+    // readers can show it. Metadata only; the harness receives `model` via
+    // input_lines only when explicitly overridden, and api-rs sets a persona
+    // pin itself.
     metadata: sessionMetadata(
       options,
       message,
