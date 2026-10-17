@@ -578,10 +578,12 @@ async fn create_or_get_session(
             on_harness_conflict,
         )
         .await?;
+    let persona_model = runtime.persona_model(&outcome.session).map(str::to_owned);
     Ok(Json(CreateSessionResponse {
         session: outcome.session,
         harness_switched: outcome.harness_switched,
         unavailable_requested_persona_id: outcome.unavailable_requested_persona_id,
+        persona_model,
     }))
 }
 

@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
 use centaur_iron_control::{GCP_ID_TOKEN_ALLOWED_HEADERS, normalize_gcp_id_token_header};
@@ -9,6 +10,7 @@ use centaur_iron_proxy::{
     PgDsnSetting, PgDsnSettingValueFrom, PostgresListener, PostgresUpstream, ProxyFragment,
     SandboxEnv, Secret, SecretReplace, Transform, TransformConfig,
 };
+use centaur_session_core::HarnessType;
 use centaur_session_runtime::{PersonaDefinition, PersonaRegistry};
 use serde::Serialize;
 use serde_yaml::Value as YamlValue;
@@ -507,6 +509,7 @@ fn load_plugin_meta(
         let digest = Sha256::digest(prompt.as_bytes());
         format!("sha256:{}", hex::encode(digest))
     };
+    let models = persona_models(plugin_dir, tool_conf)?;
     Ok(Some(LoadedPluginMeta::Persona(PersonaDefinition {
         id,
         source_root: source_root.display().to_string(),
@@ -514,7 +517,40 @@ fn load_plugin_meta(
         source_ref: None,
         prompt_hash,
         prompt,
+        models,
     })))
+}
+
+/// Parses `[tool.centaur.models]`: harness wire value -> pinned model.
+fn persona_models(
+    plugin_dir: &Path,
+    tool_conf: &TomlValue,
+) -> Result<BTreeMap<String, String>, ToolDiscoveryError> {
+    let Some(models) = tool_conf.get("models") else {
+        return Ok(BTreeMap::new());
+    };
+    let invalid = |detail: String| {
+        ToolDiscoveryError::Invalid(format!(
+            "invalid persona models in {}: {detail}",
+            plugin_dir.display()
+        ))
+    };
+    let models = models
+        .as_table()
+        .ok_or_else(|| invalid("expected a table of harness = model".to_owned()))?;
+    models
+        .iter()
+        .map(|(harness, model)| {
+            let harness = HarnessType::from_str(harness)
+                .map_err(|_| invalid(format!("unknown harness {harness:?}")))?;
+            let model = model
+                .as_str()
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .ok_or_else(|| invalid(format!("{harness} model must be a non-empty string")))?;
+            Ok((harness.to_string(), model.to_owned()))
+        })
+        .collect()
 }
 
 fn load_tool_meta(
@@ -1805,6 +1841,11 @@ secrets = [
         write_persona(&base.join("personas").join("eng"), "base prompt");
         write_persona(&overlay.join("personas").join("eng"), "overlay prompt");
         write_persona(&overlay.join("personas").join("ops"), "ops prompt");
+        fs::write(
+            overlay.join("personas").join("ops").join("pyproject.toml"),
+            "[tool.centaur]\ntype = \"persona\"\n\n[tool.centaur.models]\nclaudecode = \"claude-opus-5\"\n",
+        )
+        .unwrap();
 
         let registry =
             discover_persona_registry(&[base.clone(), overlay.clone()], Some("eng".to_owned()))
@@ -1828,6 +1869,11 @@ secrets = [
         assert_eq!(
             eng["prompt_hash"],
             "sha256:af70f573f4496a1cf92865966cb522c2c142a5789e075660a56bea66080bc738"
+        );
+        assert!(eng.get("models").is_none());
+        assert_eq!(
+            personas["ops"]["models"],
+            serde_json::json!({"claudecode": "claude-opus-5"})
         );
         assert!(
             discover_persona_registry(&[base.clone(), overlay.clone()], Some("missing".to_owned()))

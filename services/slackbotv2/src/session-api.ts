@@ -828,6 +828,8 @@ type CreateSessionOutcome = {
   personaId?: string | null
   /** The unavailable persona ID replaced by the API during new-session creation. */
   unavailableRequestedPersonaId?: string
+  /** Model the persona pins for the session's harness; turns without a model run on it. */
+  personaModel?: string
   /** The API restarted the thread onto the requested harness. */
   harnessSwitched: boolean
 }
@@ -965,11 +967,13 @@ async function sessionOutcomeFromResponse(
       payload,
       'unavailable_requested_persona_id'
     )
+    const personaModel = rawSlackString(payload, 'persona_model')
     return {
       harnessSwitched: payloadIsObject && payload.harness_switched === true,
       ...(harnessType ? { harnessType } : {}),
       ...(personaId !== undefined ? { personaId } : {}),
       ...(unavailableRequestedPersonaId ? { unavailableRequestedPersonaId } : {}),
+      ...(personaModel ? { personaModel } : {}),
       ...(resolvedAssignment ? { harnessAssignment: resolvedAssignment } : {})
     }
   } catch {

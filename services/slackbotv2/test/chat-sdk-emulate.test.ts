@@ -954,6 +954,31 @@ describe('slackbotv2', () => {
     expect(JSON.parse(executeBody.input_lines.at(-1)!).model).toBeUndefined()
   })
 
+  it('shows the persona-pinned model in response metadata', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ state: sharedState })
+    codexApi.queueCreateResponse({
+      harness_switched: false,
+      harness_type: 'codex',
+      persona_id: 'eng',
+      persona_model: 'gpt-5.2'
+    })
+
+    const parent = await postUserMessage('Persona model thread context.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> --persona eng start`, {
+      threadTs: parent.ts
+    })
+    expect(mention.response.status).toBe(200)
+    await mention.finished()
+
+    expect(stopStreamBlocksText(slackApi.calls)).toContain('GPT 5.2')
+    const executeBody = codexApi.executes[0]!.body
+    expect(executeBody.metadata.model).toBe('gpt-5.2')
+    // The API applies the persona model; Slack does not forward it.
+    expect(JSON.parse(executeBody.input_lines.at(-1)!).model).toBeUndefined()
+  })
+
   it('drops a per-channel reasoning default incompatible with its selected model', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()

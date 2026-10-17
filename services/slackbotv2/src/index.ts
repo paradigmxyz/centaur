@@ -1637,11 +1637,15 @@ async function syncThreadMessageToSession(
         const abTested = outcome.harnessAssignment?.experiment === 'codex_nanocodex_ab'
         forwardInput.metadataHarnessType = harnessType
         forwardInput.harnessAssignment = outcome.harnessAssignment
+        // The API runs the persona's pinned model when the turn names none.
+        const personaModel = resolvedModel ? undefined : outcome.personaModel
         let model = effectiveModel
         let reasoning = effectiveReasoning
-        if (harnessType !== effectiveHarnessType || abTested) {
+        if (harnessType !== effectiveHarnessType || abTested || personaModel) {
           model =
-            resolvedModel ?? defaultModelForHarness(harnessType, input.options.harnessDefaultModels)
+            resolvedModel ??
+            personaModel ??
+            defaultModelForHarness(harnessType, input.options.harnessDefaultModels)
           const requestedReasoning = reasoningForModel(harnessType, model, resolvedReasoning)
           reasoning = effectiveReasoningForHarness(
             harnessType,
@@ -1654,6 +1658,7 @@ async function syncThreadMessageToSession(
             ab_tested: abTested,
             ab_test_experiment: outcome.harnessAssignment?.experiment,
             ab_test_cohort: outcome.harnessAssignment?.cohort,
+            persona_model: personaModel,
             requested_harness_type: effectiveHarnessType,
             resolved_harness_type: harnessType
           })
