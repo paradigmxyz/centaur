@@ -737,9 +737,6 @@ slackbotv2:
   # Join newly-created public channels after subscribed channel_created events.
   # Requires the Slack app to grant channels:read and channels:join.
   autoJoinCreatedChannels: false
-  # Sticky percentage of otherwise-default Codex Slack threads assigned to
-  # Nanocodex. A non-default model selection bypasses the rollout.
-  codexNanocodexRolloutPercent: 0
   # Append model, harness, and reasoning effort to the first live streamed
   # Slack assistant response, every response, or no responses. Independent of
   # the optional Console link below.

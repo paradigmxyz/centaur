@@ -527,7 +527,7 @@ describe('slackbotv2', () => {
   // The paragraph break (`\n\n`) after the model value is deliberate: the
   // unpatched chat SDK dropped it, gluing the value to the next word
   // (`fablefirst`); this exercises the patched extractPlainText end to end.
-  for (const scenario of ['classifier', 'harness flag', 'model flag', 'channel default', 'sticky thread', 'rollout', 'cleared model']) {
+  for (const scenario of ['classifier', 'harness flag', 'model flag', 'channel default', 'sticky thread', 'cleared model']) {
     it(`does not route to a disabled harness via ${scenario}`, async () => {
       const state = createMemoryState()
       await state.connect()
@@ -537,7 +537,6 @@ describe('slackbotv2', () => {
         defaultHarnessType: scenario === 'cleared model' ? 'claudecode' : undefined,
         channelDefaults: scenario === 'channel default' || scenario === 'cleared model'
           ? { [CHANNEL_ID]: { harnessType: 'amp', model: 'fast' } } : undefined,
-        codexNanocodexRolloutPercent: scenario === 'rollout' ? 100 : 0,
         messageOverridesStrategy: scenario === 'classifier'
           ? async () => ({ overrides: { harnessType: 'amp', model: 'fast' } }) : undefined
       })
@@ -560,11 +559,9 @@ describe('slackbotv2', () => {
       expect(JSON.parse(execute.input_lines.at(-1)!).model).toBeUndefined()
       expect(JSON.parse(execute.input_lines.at(-1)!).provider).toBeUndefined()
       expect(execute.metadata.harness_type).toBe('codex')
-      if (scenario !== 'rollout') {
-        expect(await state.get(`thread-state:${threadKey(parent.ts)}`)).toEqual(
-          expect.objectContaining({ harnessType: 'codex' })
-        )
-      }
+      expect(await state.get(`thread-state:${threadKey(parent.ts)}`)).toEqual(
+        expect.objectContaining({ harnessType: 'codex' })
+      )
       const replies = await slack.conversations.replies({ channel: CHANNEL_ID, ts: parent.ts })
       expect(JSON.stringify(replies.messages?.filter(message => message.user === BOT_USER_ID)))
         .not.toContain('Amp')
@@ -882,44 +879,6 @@ describe('slackbotv2', () => {
     expect(secondMention.response.status).toBe(200)
     await secondMention.finished()
     expect(metadataBlockTexts(slackApi.calls)).toHaveLength(0)
-  })
-
-  it('shows the Slack-assigned harness and retains rollout metadata', async () => {
-    const sharedState = createMemoryState()
-    await sharedState.connect()
-    const harnessAssignment = {
-      experiment: 'codex_nanocodex_ab',
-      requested_harness: 'codex',
-      cohort: 'nanocodex',
-      rollout_percent: 100
-    }
-    bot = createTestBot({
-      codexNanocodexRolloutPercent: 100,
-      state: sharedState
-    })
-
-    const parent = await postUserMessage('A/B test thread context.')
-    const mention = await sendMessage(
-      `<@${BOT_USER_ID}> inspect the repository and report what you find`,
-      { threadTs: parent.ts }
-    )
-    expect(mention.response.status).toBe(200)
-    await mention.finished()
-
-    const footer = slackApi.calls
-      .filter(call => call.method === 'chat.stopStream')
-      .flatMap(call => (Array.isArray(call.body.blocks) ? (call.body.blocks as unknown[]) : []))
-      .map(block => JSON.stringify(block))
-      .find(text => text.includes('Nanocodex'))
-    expect(footer).toContain('Nanocodex')
-    expect(footer).toContain('Medium')
-    expect(footer).not.toContain('Codex*')
-    expect(codexApi.creates[0]?.body.harness_type).toBe('nanocodex')
-    expect(codexApi.creates[0]?.body.metadata.harness_assignment).toEqual(harnessAssignment)
-    expect(codexApi.executes[0]?.body.metadata).toMatchObject({
-      harness_type: 'nanocodex',
-      harness_assignment: harnessAssignment
-    })
   })
 
   it('shows the harness default model in response metadata when no --model is set', async () => {
