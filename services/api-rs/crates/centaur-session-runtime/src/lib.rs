@@ -2150,9 +2150,12 @@ impl SessionRuntime {
             validate_input_lines(&input_lines)?;
             let (idle_timeout, max_duration) = duration_options(idle_timeout_ms, max_duration_ms)?;
             let requester_metadata = metadata.clone();
-            let (input_lines, persona_model) = match self.persona_model(&session) {
+            let session_persona_model = self.persona_model(&session);
+            let persona_model = session_persona_model
+                .and_then(|model| persona_model_for_execution(&input_lines, model));
+            let input_lines = match session_persona_model {
                 Some(model) => input_lines_with_persona_model(input_lines, model),
-                None => (input_lines, None),
+                None => input_lines,
             };
 
             let claim = if let Some(execution_id) = persisted_execution_id {
@@ -2423,7 +2426,7 @@ impl SessionRuntime {
         // applied again when the driver writes them to the sandbox.
         let persona_model = self
             .persona_model(&session)
-            .and_then(|model| input_lines_with_persona_model(input.input_lines.clone(), model).1);
+            .and_then(|model| persona_model_for_execution(&input.input_lines, model));
 
         let request = persisted_execute_request(&input)?;
         let execution = self
@@ -6669,32 +6672,49 @@ fn finish_execution_trace_span(span: &Span, status: &str) {
     );
 }
 
-/// Applies a persona-pinned model to user turns that do not request one.
-/// Returns the model when it was applied to any line.
-fn input_lines_with_persona_model(
-    input_lines: Vec<String>,
-    model: &str,
-) -> (Vec<String>, Option<String>) {
-    let mut applied = false;
-    let input_lines = input_lines
+/// A user turn that names neither a model nor a provider runs on the
+/// persona-pinned model. A provider without a model keeps that provider's
+/// default, which a persona model may not be served by.
+fn user_turn_needs_persona_model(map: &serde_json::Map<String, Value>) -> Option<bool> {
+    if map.get("type").and_then(Value::as_str) != Some("user") {
+        return None;
+    }
+    let names = |key| {
+        map.get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value: &str| !value.trim().is_empty())
+    };
+    Some(!names("model") && !names("provider"))
+}
+
+fn input_lines_with_persona_model(input_lines: Vec<String>, model: &str) -> Vec<String> {
+    input_lines
         .into_iter()
         .map(|line| {
             let Ok(Value::Object(mut map)) = serde_json::from_str::<Value>(&line) else {
                 return line;
             };
-            let requests_model = map
-                .get("model")
-                .and_then(Value::as_str)
-                .is_some_and(|model| !model.trim().is_empty());
-            if map.get("type").and_then(Value::as_str) != Some("user") || requests_model {
+            if user_turn_needs_persona_model(&map) != Some(true) {
                 return line;
             }
             map.insert("model".to_owned(), json!(model));
-            applied = true;
             Value::Object(map).to_string()
         })
-        .collect();
-    (input_lines, applied.then(|| model.to_owned()))
+        .collect()
+}
+
+/// The persona model when every user turn in the request runs on it, so the
+/// execution can record it as the model it ran.
+fn persona_model_for_execution(input_lines: &[String], model: &str) -> Option<String> {
+    let mut needs =
+        input_lines
+            .iter()
+            .filter_map(|line| match serde_json::from_str::<Value>(line) {
+                Ok(Value::Object(map)) => user_turn_needs_persona_model(&map),
+                _ => None,
+            });
+    let first = needs.next()?;
+    (first && needs.all(|needs| needs)).then(|| model.to_owned())
 }
 
 fn input_lines_with_session_context(
@@ -8766,17 +8786,15 @@ mod tests {
     }
 
     #[test]
-    fn persona_model_fills_only_user_turns_without_a_model() {
-        let (lines, applied) = input_lines_with_persona_model(
-            vec![
-                r#"{"type":"user","model":" "}"#.to_owned(),
-                r#"{"type":"user","model":"explicit"}"#.to_owned(),
-                r#"{"type":"control"}"#.to_owned(),
-                "raw".to_owned(),
-            ],
-            "pinned",
-        );
-        let models = lines
+    fn persona_model_fills_only_user_turns_without_a_model_or_provider() {
+        let lines = vec![
+            r#"{"type":"user","model":" "}"#.to_owned(),
+            r#"{"type":"user","model":"explicit"}"#.to_owned(),
+            r#"{"type":"user","provider":"amazon-bedrock"}"#.to_owned(),
+            r#"{"type":"control"}"#.to_owned(),
+            "raw".to_owned(),
+        ];
+        let models = input_lines_with_persona_model(lines.clone(), "pinned")
             .iter()
             .map(|line| {
                 serde_json::from_str::<Value>(line)
@@ -8787,15 +8805,22 @@ mod tests {
 
         assert_eq!(
             models,
-            [Some(json!("pinned")), Some(json!("explicit")), None, None]
+            [
+                Some(json!("pinned")),
+                Some(json!("explicit")),
+                None,
+                None,
+                None
+            ]
         );
-        assert_eq!(applied.as_deref(), Some("pinned"));
-
-        let (_, applied) = input_lines_with_persona_model(
-            vec![r#"{"type":"user","model":"explicit"}"#.to_owned()],
-            "pinned",
+        // The execution only records the persona model when it is the model
+        // every user turn runs on.
+        assert_eq!(persona_model_for_execution(&lines, "pinned"), None);
+        assert_eq!(
+            persona_model_for_execution(&[lines[0].clone(), lines[3].clone()], "pinned").as_deref(),
+            Some("pinned")
         );
-        assert_eq!(applied, None);
+        assert_eq!(persona_model_for_execution(&lines[3..], "pinned"), None);
     }
 
     #[test]
@@ -9884,7 +9909,7 @@ mod adoption_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn execute_runs_persona_pinned_model_for_session_harness() {
+    async fn queued_execution_runs_persona_pinned_model_for_session_harness() {
         let Some(store) = test_store().await else {
             return;
         };
@@ -9906,8 +9931,24 @@ mod adoption_tests {
             .await
             .expect("create persona session");
 
-        let execution =
-            execute_with_metadata(&runtime, &thread_key, json!({"model": "harness-default"})).await;
+        // Ingresses execute through the durable queue; the driver writes the
+        // persisted request to the sandbox.
+        let execution = runtime
+            .enqueue_session_execution(
+                &thread_key,
+                ExecuteSessionInput {
+                    idempotency_key: None,
+                    metadata: Some(json!({"model": "harness-default"})),
+                    input_lines: vec![
+                        r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#
+                            .to_owned(),
+                    ],
+                    idle_timeout_ms: None,
+                    max_duration_ms: None,
+                },
+            )
+            .await
+            .expect("enqueue execution");
 
         use tokio::io::AsyncBufReadExt;
         let mut lines = tokio::io::BufReader::new(stdin).lines();

@@ -962,21 +962,45 @@ describe('slackbotv2', () => {
       harness_switched: false,
       harness_type: 'codex',
       persona_id: 'eng',
-      persona_model: 'gpt-5.2'
+      persona_model: 'gpt-6-astra'
     })
 
     const parent = await postUserMessage('Persona model thread context.')
-    const mention = await sendMessage(`<@${BOT_USER_ID}> --persona eng start`, {
+    // The baked default model has no Ultra effort; the persona model does.
+    const mention = await sendMessage(`<@${BOT_USER_ID}> --persona eng -rsn ultra start`, {
       threadTs: parent.ts
     })
     expect(mention.response.status).toBe(200)
     await mention.finished()
 
-    expect(stopStreamBlocksText(slackApi.calls)).toContain('GPT 5.2')
+    expect(stopStreamBlocksText(slackApi.calls)).toContain('Ultra')
     const executeBody = codexApi.executes[0]!.body
-    expect(executeBody.metadata.model).toBe('gpt-5.2')
-    // The API applies the persona model; Slack does not forward it.
-    expect(JSON.parse(executeBody.input_lines.at(-1)!).model).toBeUndefined()
+    expect(executeBody.metadata.model).toBe('gpt-6-astra')
+    const input = JSON.parse(executeBody.input_lines.at(-1)!) as Record<string, unknown>
+    // The API applies the persona model; Slack forwards only the effort.
+    expect(input.model).toBeUndefined()
+    expect(input.reasoning).toBe('ultra')
+  })
+
+  it('does not show the persona-pinned model when a provider is selected', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ state: sharedState })
+    codexApi.queueCreateResponse({
+      harness_switched: false,
+      harness_type: 'codex',
+      persona_id: 'eng',
+      persona_model: 'gpt-6-astra'
+    })
+
+    const parent = await postUserMessage('Persona provider thread context.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> --persona eng --bedrock start`, {
+      threadTs: parent.ts
+    })
+    expect(mention.response.status).toBe(200)
+    await mention.finished()
+
+    expect(codexApi.executes[0]!.body.metadata.model).not.toBe('gpt-6-astra')
   })
 
   it('drops a per-channel reasoning default incompatible with its selected model', async () => {

@@ -1349,10 +1349,11 @@ async function syncThreadMessageToSession(
     threadId: thread.id
   })
   const rolloutSelected = harnessRollout.assignment !== undefined
+  const requestedReasoning = overrides.reasoning ?? channelDefault?.reasoning
   const resolvedReasoning = reasoningForModel(
     effectiveHarnessType,
     effectiveModel,
-    overrides.reasoning ?? channelDefault?.reasoning
+    requestedReasoning
   )
   const effectiveReasoning = effectiveReasoningForHarness(
     effectiveHarnessType,
@@ -1637,8 +1638,9 @@ async function syncThreadMessageToSession(
         const abTested = outcome.harnessAssignment?.experiment === 'codex_nanocodex_ab'
         forwardInput.metadataHarnessType = harnessType
         forwardInput.harnessAssignment = outcome.harnessAssignment
-        // The API runs the persona's pinned model when the turn names none.
-        const personaModel = resolvedModel ? undefined : outcome.personaModel
+        // The API runs the persona's pinned model when the turn names neither
+        // a model nor a provider.
+        const personaModel = resolvedModel || resolvedProvider ? undefined : outcome.personaModel
         let model = effectiveModel
         let reasoning = effectiveReasoning
         if (harnessType !== effectiveHarnessType || abTested || personaModel) {
@@ -1646,14 +1648,16 @@ async function syncThreadMessageToSession(
             resolvedModel ??
             personaModel ??
             defaultModelForHarness(harnessType, input.options.harnessDefaultModels)
-          const requestedReasoning = reasoningForModel(harnessType, model, resolvedReasoning)
+          // Validate the raw request: resolvedReasoning was filtered against
+          // the model expected before the session resolved.
+          const modelReasoning = reasoningForModel(harnessType, model, requestedReasoning)
           reasoning = effectiveReasoningForHarness(
             harnessType,
-            requestedReasoning,
+            modelReasoning,
             input.options.harnessDefaultReasoning
           )
           forwardInput.metadataModel = model
-          forwardInput.reasoning = requestedReasoning
+          forwardInput.reasoning = modelReasoning
           traceLog(input.options, 'slackbotv2_session_harness_resolved', trace, {
             ab_tested: abTested,
             ab_test_experiment: outcome.harnessAssignment?.experiment,
