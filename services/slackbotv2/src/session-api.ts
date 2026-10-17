@@ -17,7 +17,6 @@ import type {
   SlackbotV2ExecuteSessionRequest,
   SlackbotV2ExecuteSessionResponse,
   SlackbotV2Fetch,
-  SlackbotV2HarnessAssignment,
   SlackbotV2InterruptSessionResponse,
   SlackbotV2Options,
   SlackbotV2RendererSource,
@@ -493,9 +492,7 @@ export async function forwardToSessionApi(
       input.threadId,
       input.harnessType,
       input.personaId,
-      sessionRequesterMessage(input),
-      input.restartOnHarnessConflict,
-      input.harnessAssignment
+      sessionRequesterMessage(input)
     ),
     sessionApiTimeoutMs(options),
     'create session'
@@ -504,10 +501,7 @@ export async function forwardToSessionApi(
     throw new Error(`Harness ${created.harnessType} is not enabled for this deployment`)
   }
   if (created.harnessType) input.metadataHarnessType = created.harnessType
-  input.harnessAssignment = created.harnessAssignment
   traceLog(options, 'slackbotv2_session_create_complete', input.trace, {
-    ab_test_experiment: created.harnessAssignment?.experiment,
-    ab_test_cohort: created.harnessAssignment?.cohort,
     harness_type: created.harnessType,
     harness_switched: created.harnessSwitched,
     persona_id: created.personaId,
@@ -551,8 +545,7 @@ export async function forwardToSessionApi(
       input.reasoning,
       input.provider,
       input.metadataModel,
-      input.metadataHarnessType,
-      input.harnessAssignment
+      input.metadataHarnessType
     ),
     sessionApiTimeoutMs(options),
     'execute session'
@@ -822,8 +815,6 @@ export function clearConversationNameCacheForTests(): void {
 type CreateSessionOutcome = {
   /** The harness persisted by the API. */
   harnessType?: string
-  /** The Slack-owned experiment/cohort used to select the persisted harness. */
-  harnessAssignment?: SlackbotV2HarnessAssignment
   /** The persona persisted by the API. Null means the session has no persona. */
   personaId?: string | null
   /** The unavailable persona ID replaced by the API during new-session creation. */
@@ -839,9 +830,7 @@ async function createSession(
   threadId: string,
   harnessType?: string,
   personaId?: string,
-  message?: SlackbotV2ApiMessage,
-  restartOnHarnessConflict?: boolean,
-  harnessAssignment?: SlackbotV2HarnessAssignment
+  message?: SlackbotV2ApiMessage
 ): Promise<CreateSessionOutcome> {
   const requested = harnessType ?? options.defaultHarnessType ?? DEFAULT_HARNESS_TYPE
   if (!isHarnessEnabled(requested, options.enabledHarnesses)) {
@@ -855,11 +844,10 @@ async function createSession(
     requested,
     personaId,
     message,
-    (restartOnHarnessConflict ?? Boolean(harnessType)) ? 'restart' : undefined,
-    harnessAssignment
+    harnessType ? 'restart' : undefined
   )
   if (response.ok) {
-    return sessionOutcomeFromResponse(response, harnessAssignment)
+    return sessionOutcomeFromResponse(response)
   }
 
   let body = ''
@@ -881,11 +869,10 @@ async function createSession(
       existingEnabled ? existing : requested,
       personaId,
       message,
-      existingEnabled ? undefined : 'restart',
-      harnessAssignment
+      existingEnabled ? undefined : 'restart'
     )
     await ensureApiOk(retry, 'create session')
-    return sessionOutcomeFromResponse(retry, harnessAssignment)
+    return sessionOutcomeFromResponse(retry)
   }
   throw new SessionApiError({
     action: 'create session',
@@ -902,8 +889,7 @@ async function postCreateSession(
   harnessType: string,
   personaId?: string,
   message?: SlackbotV2ApiMessage,
-  onHarnessConflict?: 'reject' | 'restart',
-  harnessAssignment?: SlackbotV2HarnessAssignment
+  onHarnessConflict?: 'reject' | 'restart'
 ): Promise<Response> {
   const fetchFn = options.fetch ?? fetch
   // The conversation name becomes the session principal's display name in
@@ -922,9 +908,6 @@ async function postCreateSession(
       thread_id: threadId,
       ...slackHomeTeamMetadata(options),
       ...sessionRequesterMetadata(message, requesterIdentity),
-      ...(harnessAssignment
-        ? { harness_assignment: harnessAssignmentMetadata(harnessAssignment) }
-        : {}),
       ...(conversationName ? { slack_conversation_name: conversationName } : {})
     },
     ...(personaId ? { persona_id: personaId } : {}),
@@ -943,19 +926,11 @@ async function postCreateSession(
   )
 }
 
-async function sessionOutcomeFromResponse(
-  response: Response,
-  harnessAssignment?: SlackbotV2HarnessAssignment
-): Promise<CreateSessionOutcome> {
+async function sessionOutcomeFromResponse(response: Response): Promise<CreateSessionOutcome> {
   try {
     const payload = await response.json()
     const payloadIsObject = isJsonObject(payload)
     const harnessType = rawSlackString(payload, 'harness_type')
-    const resolvedAssignment =
-      harnessAssignment &&
-      (!harnessType || harnessType === 'codex' || harnessType === 'nanocodex')
-        ? { ...harnessAssignment, cohort: harnessType ?? harnessAssignment.cohort }
-        : undefined
     const personaId = payloadIsObject
       ? typeof payload.persona_id === 'string'
         ? payload.persona_id
@@ -973,23 +948,10 @@ async function sessionOutcomeFromResponse(
       ...(harnessType ? { harnessType } : {}),
       ...(personaId !== undefined ? { personaId } : {}),
       ...(unavailableRequestedPersonaId ? { unavailableRequestedPersonaId } : {}),
-      ...(personaModel ? { personaModel } : {}),
-      ...(resolvedAssignment ? { harnessAssignment: resolvedAssignment } : {})
+      ...(personaModel ? { personaModel } : {})
     }
   } catch {
-    return {
-      harnessSwitched: false,
-      ...(harnessAssignment ? { harnessAssignment } : {})
-    }
-  }
-}
-
-function harnessAssignmentMetadata(assignment: SlackbotV2HarnessAssignment): JsonObject {
-  return {
-    experiment: assignment.experiment,
-    requested_harness: assignment.requestedHarness,
-    cohort: assignment.cohort,
-    rollout_percent: assignment.rolloutPercent
+    return { harnessSwitched: false }
   }
 }
 
@@ -1426,8 +1388,7 @@ async function executeSession(
   reasoning?: string,
   provider?: string,
   metadataModel?: string,
-  metadataHarnessType?: string,
-  harnessAssignment?: SlackbotV2HarnessAssignment
+  metadataHarnessType?: string
 ): Promise<SlackbotV2ExecuteSessionResponse> {
   const fetchFn = options.fetch ?? fetch
   const requesterIdentity = await resolveRequesterIdentity(options, message)
@@ -1446,10 +1407,7 @@ async function executeSession(
       {
         action: 'execute',
         ...(recordedModel ? { model: recordedModel } : {}),
-        ...(metadataHarnessType ? { harness_type: metadataHarnessType } : {}),
-        ...(harnessAssignment
-          ? { harness_assignment: harnessAssignmentMetadata(harnessAssignment) }
-          : {})
+        ...(metadataHarnessType ? { harness_type: metadataHarnessType } : {})
       },
       requesterIdentity
     ),

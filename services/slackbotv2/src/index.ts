@@ -31,7 +31,6 @@ import {
 } from '@centaur/rendering'
 import { conflateChatSdkStream } from './conflate'
 import { CitationTextFilter, stripUnresolvedCitations } from './citation-text'
-import { resolveHarnessRollout } from './harness-rollout'
 import { observeSeconds, slackbotMetrics } from './metrics'
 import {
   renderSlackDisplayText,
@@ -1334,21 +1333,9 @@ async function syncThreadMessageToSession(
   // Without an explicit override or channel default the harness runs its
   // configured default (CLAUDE_MODEL/CODEX_MODEL, else the baked harness
   // config); show and record that instead of dropping the model entirely.
-  const harnessDefaultModel = defaultModelForHarness(
-    effectiveHarnessType,
-    input.options.harnessDefaultModels
-  )
-  const effectiveModel = resolvedModel ?? harnessDefaultModel
-  const modelOverride = resolvedModel !== harnessDefaultModel ? resolvedModel : undefined
-  const harnessRollout = resolveHarnessRollout({
-    modelOverride,
-    requestedHarness: effectiveHarnessType,
-    rolloutPercent: isHarnessEnabled('nanocodex', input.options.enabledHarnesses)
-      ? input.options.codexNanocodexRolloutPercent ?? 0
-      : 0,
-    threadId: thread.id
-  })
-  const rolloutSelected = harnessRollout.assignment !== undefined
+  const effectiveModel =
+    resolvedModel ??
+    defaultModelForHarness(effectiveHarnessType, input.options.harnessDefaultModels)
   const requestedReasoning = overrides.reasoning ?? channelDefault?.reasoning
   const resolvedReasoning = reasoningForModel(
     effectiveHarnessType,
@@ -1451,12 +1438,7 @@ async function syncThreadMessageToSession(
     executeMessage: shouldStartExecution ? serializedMessage : undefined,
     // Sticky harness changes only apply when a message starts an execution;
     // restarting the thread out from under an active execution would kill it.
-    harnessType: shouldStartExecution
-      ? rolloutSelected
-        ? harnessRollout.harnessType
-        : resolvedHarnessType
-      : undefined,
-    harnessAssignment: shouldStartExecution ? harnessRollout.assignment : undefined,
+    harnessType: shouldStartExecution ? resolvedHarnessType : undefined,
     metadataHarnessType: shouldStartExecution ? effectiveHarnessType : undefined,
     messages: messagesToAppend,
     model: shouldStartExecution ? resolvedModel : undefined,
@@ -1464,8 +1446,6 @@ async function syncThreadMessageToSession(
     personaId: shouldStartExecution ? resolvedPersonaId : undefined,
     provider: shouldStartExecution ? resolvedProvider : undefined,
     reasoning: resolvedReasoning,
-    restartOnHarnessConflict:
-      shouldStartExecution && rolloutSelected ? Boolean(resolvedHarnessType) : undefined,
     onEventId: eventId => {
       lastEventId = Math.max(lastEventId, eventId)
     },
@@ -1635,14 +1615,12 @@ async function syncThreadMessageToSession(
           }
         }
         const harnessType = outcome.harnessType ?? effectiveHarnessType
-        const abTested = outcome.harnessAssignment?.experiment === 'codex_nanocodex_ab'
         forwardInput.metadataHarnessType = harnessType
-        forwardInput.harnessAssignment = outcome.harnessAssignment
         // A persona-pinned model overrides any model or provider selection.
         const personaModel = outcome.personaModel
         let model = effectiveModel
         let reasoning = effectiveReasoning
-        if (harnessType !== effectiveHarnessType || abTested || personaModel) {
+        if (harnessType !== effectiveHarnessType || personaModel) {
           model =
             personaModel ??
             resolvedModel ??
@@ -1664,9 +1642,6 @@ async function syncThreadMessageToSession(
             forwardInput.provider = undefined
           }
           traceLog(input.options, 'slackbotv2_session_harness_resolved', trace, {
-            ab_tested: abTested,
-            ab_test_experiment: outcome.harnessAssignment?.experiment,
-            ab_test_cohort: outcome.harnessAssignment?.cohort,
             persona_model: personaModel,
             requested_harness_type: effectiveHarnessType,
             resolved_harness_type: harnessType

@@ -62,10 +62,6 @@ const options: SlackbotV2Options = {
   channelDefaults: parseChannelDefaults(optionalEnv('SLACKBOTV2_CHANNEL_DEFAULTS'), reason =>
     consoleLogger.warn('slackbotv2 SLACKBOTV2_CHANNEL_DEFAULTS', { reason })
   ),
-  codexNanocodexRolloutPercent: percentEnv(
-    'SLACKBOTV2_CODEX_NANOCODEX_ROLLOUT_PERCENT',
-    0
-  ),
   responseMetadataMode: responseMetadataModeEnv('SLACKBOTV2_RESPONSE_METADATA_MODE'),
   responseServiceTierEnabled: booleanEnv('SLACKBOTV2_RESPONSE_SERVICE_TIER_ENABLED', false),
   defaultHarnessType,
@@ -181,16 +177,6 @@ function responseMetadataModeEnv(name: string): 'first' | 'always' | 'never' {
   if (!value) return 'first'
   if (value === 'first' || value === 'always' || value === 'never') return value
   throw new Error(`${name} must be "first", "always", or "never"`)
-}
-
-function percentEnv(name: string, fallback: number): number {
-  const value = optionalEnv(name)
-  if (!value) return fallback
-  const parsed = Number(value)
-  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 100) {
-    throw new Error(`${name} must be an integer from 0 to 100`)
-  }
-  return parsed
 }
 
 function createMessageOverridesStrategy(): SlackbotV2Options['messageOverridesStrategy'] {
