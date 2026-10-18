@@ -93,6 +93,8 @@ spec:
               value: {{ $companyContext.granolaOauthAppSlug | quote }}
             - name: COMPANY_CONTEXT_CALENDAR_SYNC_INTERVAL_SECONDS
               value: {{ $companyContext.calendarSyncIntervalSeconds | quote }}
+            - name: COMPANY_CONTEXT_CALENDAR_HISTORY_DAYS
+              value: {{ $companyContext.calendarHistoryDays | quote }}
             - name: COMPANY_CONTEXT_GRANOLA_SYNC_INTERVAL_SECONDS
               value: {{ $companyContext.granolaSyncIntervalSeconds | quote }}
             - name: COMPANY_CONTEXT_SLACK_OAUTH_APP_SLUG

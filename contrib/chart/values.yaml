@@ -499,6 +499,10 @@ experimentalCompanyContext:
   granolaOauthAppSlug: granola
   scanIntervalSeconds: 300
   calendarSyncIntervalSeconds: 1800
+  # Days of past Calendar events to index, by when they ended; recurring events
+  # are kept regardless. Raising it backfills older events on the next sync;
+  # lowering it removes the events that fall outside.
+  calendarHistoryDays: 90
   granolaSyncIntervalSeconds: 1800
   # Slack conversations are discovered through the same per-user Slack
   # credentials as the Console DM sync (console.slackDmSync.oauthAppSlug).

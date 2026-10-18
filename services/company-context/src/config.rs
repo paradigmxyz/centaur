@@ -301,6 +301,15 @@ pub struct Config {
         value_parser = positive_duration
     )]
     pub calendar_sync_interval: Duration,
+    /// Days of past Calendar events to index, by when they ended. Recurring
+    /// events are kept regardless.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_CALENDAR_HISTORY_DAYS",
+        default_value = "90",
+        value_parser = history_days
+    )]
+    pub calendar_history_days: usize,
     #[arg(
         long = "granola-sync-interval-seconds",
         env = "COMPANY_CONTEXT_GRANOLA_SYNC_INTERVAL_SECONDS",
@@ -553,6 +562,7 @@ mod tests {
         assert_eq!(config.openai_base_url, "http://localhost:8080/v1");
         assert_eq!(config.scan_interval, Duration::from_secs(300));
         assert_eq!(config.slack_rate_limit_share, 0.3);
+        assert_eq!(config.calendar_history_days, 90);
         assert!(
             config.drive_enabled
                 && config.calendar_enabled

@@ -13,6 +13,9 @@ create table company_context_system.google_calendars (
     -- Set while a full sync runs; events it does not list are removed when it
     -- completes.
     full_sync_started_at timestamptz,
+    -- The earliest end time the latest full sync kept events from. Raising the
+    -- history days moves the cutoff before it and starts a full sync.
+    history_start timestamptz,
     last_success_at timestamptz,
     last_error text not null default '',
     first_seen_at timestamptz not null default now(),
@@ -51,6 +54,8 @@ create table company_context_system.google_calendar_events (
     content_text text not null,
     url text not null default '',
     private boolean not null default false,
+    -- Recurring events are kept however long ago their series started.
+    recurring boolean not null default false,
     starts_at timestamptz,
     ends_at timestamptz,
     organizer_email text not null default '',

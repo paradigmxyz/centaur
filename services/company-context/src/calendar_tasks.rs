@@ -8,7 +8,7 @@ use sqlx::{PgPool, Row};
 use tracing::{error, info, warn};
 
 use crate::{
-    calendar::{CalendarListEntry, EventPage},
+    calendar::{CalendarListEntry, EventPage, RenderedEvent},
     config::{
         CALENDAR_CREDENTIALS_RECONCILE_TASK, CALENDAR_DISCOVER_TASK, CALENDAR_EVENTS_EMBED_TASK,
         CALENDAR_SYNC_TASK, GOOGLE_CALENDAR_DOCUMENT_ID_PREFIX,
@@ -320,10 +320,12 @@ struct Cursor {
     sync_token: String,
     page_token: String,
     full_sync_started_at: Option<DateTime<Utc>>,
+    history_start: Option<DateTime<Utc>>,
 }
 
 /// Syncs a calendar's events through the live credential observing it with
 /// the most access, so that private events are read in full when possible.
+/// Events that ended before the history cutoff are left out, unless recurring.
 async fn sync_calendar(
     state: &TaskState,
     params: CalendarSyncParams,
@@ -351,14 +353,21 @@ async fn sync_calendar(
         return Ok(CalendarSummary::new("unobserved", 0));
     };
 
+    let cutoff = Utc::now() - chrono::Duration::days(state.config.calendar_history_days as i64);
     let result = async {
         let mut events = 0;
         loop {
             let Some(cursor) = load_cursor(&state.pool, calendar_id).await? else {
                 return Ok(("removed", events));
             };
-            if cursor.sync_credential_id != Some(credential_id) {
-                if !restart_full_sync(&state.pool, calendar_id, &cursor, credential_id).await? {
+            // The cutoff only moves before the last full sync's when the
+            // history days are raised; a full sync then backfills the older events.
+            if cursor.sync_credential_id != Some(credential_id)
+                || cursor.history_start.is_none_or(|start| cutoff < start)
+            {
+                if !restart_full_sync(&state.pool, calendar_id, &cursor, credential_id, cutoff)
+                    .await?
+                {
                     return Ok(("superseded", events));
                 }
                 continue;
@@ -381,14 +390,18 @@ async fn sync_calendar(
                     task_id = ctx.task_id(),
                     calendar_id
                 );
-                if !restart_full_sync(&state.pool, calendar_id, &cursor, credential_id).await? {
+                if !restart_full_sync(&state.pool, calendar_id, &cursor, credential_id, cutoff)
+                    .await?
+                {
                     return Ok(("superseded", events));
                 }
                 continue;
             };
             events += page.items.len();
             let complete = page.next_page_token.is_none();
-            let Some(pending) = apply_page(&state.pool, calendar_id, &cursor, &page).await? else {
+            let Some(pending) =
+                apply_page(&state.pool, calendar_id, &cursor, &page, cutoff).await?
+            else {
                 return Ok(("superseded", events));
             };
             spawn_embed(state, calendar_id, pending).await?;
@@ -444,7 +457,8 @@ async fn sync_calendar(
 async fn load_cursor(pool: &PgPool, calendar_id: &str) -> Result<Option<Cursor>> {
     Ok(sqlx::query_as(
         r#"
-        SELECT sync_credential_id, sync_token, page_token, full_sync_started_at
+        SELECT sync_credential_id, sync_token, page_token, full_sync_started_at,
+               history_start
         FROM company_context_system.google_calendars
         WHERE calendar_id = $1
         "#,
@@ -454,12 +468,14 @@ async fn load_cursor(pool: &PgPool, calendar_id: &str) -> Result<Option<Cursor>>
     .await?)
 }
 
-/// Starts a full sync through `credential_id` if the cursor is still current.
+/// Starts a full sync through `credential_id`, keeping events that ended
+/// after `cutoff`, if the cursor is still current.
 async fn restart_full_sync(
     pool: &PgPool,
     calendar_id: &str,
     cursor: &Cursor,
     credential_id: i64,
+    cutoff: DateTime<Utc>,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
     if lock_cursor(&mut tx, calendar_id).await?.as_ref() != Some(cursor) {
@@ -472,12 +488,14 @@ async fn restart_full_sync(
             sync_token = '',
             page_token = '',
             full_sync_started_at = NOW(),
+            history_start = $3,
             updated_at = NOW()
         WHERE calendar_id = $1
         "#,
     )
     .bind(calendar_id)
     .bind(credential_id)
+    .bind(cutoff)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -490,7 +508,8 @@ async fn lock_cursor(
 ) -> Result<Option<Cursor>> {
     Ok(sqlx::query_as(
         r#"
-        SELECT sync_credential_id, sync_token, page_token, full_sync_started_at
+        SELECT sync_credential_id, sync_token, page_token, full_sync_started_at,
+               history_start
         FROM company_context_system.google_calendars
         WHERE calendar_id = $1
         FOR UPDATE
@@ -501,13 +520,15 @@ async fn lock_cursor(
     .await?)
 }
 
-/// Stores a page of events and advances the cursor it was listed from.
-/// Returns the events awaiting publication, or `None` if the cursor moved.
+/// Stores a page of events, dropping cancelled ones and those that ended
+/// before `cutoff`, and advances the cursor it was listed from. Returns the
+/// events awaiting publication, or `None` if the cursor moved.
 async fn apply_page(
     pool: &PgPool,
     calendar_id: &str,
     cursor: &Cursor,
     page: &EventPage,
+    cutoff: DateTime<Utc>,
 ) -> Result<Option<Vec<EventRevision>>> {
     let mut tx = pool.begin().await?;
     if lock_cursor(&mut tx, calendar_id).await?.as_ref() != Some(cursor) {
@@ -515,7 +536,10 @@ async fn apply_page(
     }
     let mut pending = Vec::new();
     for event in page.items.iter().filter(|event| !event.id.is_empty()) {
-        let Some(rendered) = event.render() else {
+        let Some(rendered) = event
+            .render()
+            .filter(|rendered| rendered.recurring || !ended_before(rendered, cutoff))
+        else {
             sqlx::query(
                 r#"
                 DELETE FROM company_context_system.google_calendar_events
@@ -535,14 +559,15 @@ async fn apply_page(
             r#"
             INSERT INTO company_context_system.google_calendar_events AS events (
                 calendar_id, event_id, title, content_text, url, private,
-                starts_at, ends_at, organizer_email, content_hash
+                recurring, starts_at, ends_at, organizer_email, content_hash
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (calendar_id, event_id) DO UPDATE
             SET title = EXCLUDED.title,
                 content_text = EXCLUDED.content_text,
                 url = EXCLUDED.url,
                 private = EXCLUDED.private,
+                recurring = EXCLUDED.recurring,
                 starts_at = EXCLUDED.starts_at,
                 ends_at = EXCLUDED.ends_at,
                 organizer_email = EXCLUDED.organizer_email,
@@ -565,6 +590,7 @@ async fn apply_page(
         .bind(&rendered.content_text)
         .bind(&rendered.url)
         .bind(rendered.private)
+        .bind(rendered.recurring)
         .bind(rendered.starts_at)
         .bind(rendered.ends_at)
         .bind(&rendered.organizer_email)
@@ -613,6 +639,19 @@ async fn apply_page(
             .execute(&mut *tx)
             .await?;
         }
+        // Events that have since aged out of the history are removed too.
+        sqlx::query(
+            r#"
+            DELETE FROM company_context_system.google_calendar_events
+            WHERE calendar_id = $1
+              AND NOT recurring
+              AND COALESCE(ends_at, starts_at) < $2
+            "#,
+        )
+        .bind(calendar_id)
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             r#"
             UPDATE company_context_system.google_calendars
@@ -988,6 +1027,13 @@ async fn record_embedding_failure(
     }
 }
 
+fn ended_before(event: &RenderedEvent, cutoff: DateTime<Utc>) -> bool {
+    event
+        .ends_at
+        .or(event.starts_at)
+        .is_some_and(|end| end < cutoff)
+}
+
 fn nonempty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
@@ -1037,16 +1083,30 @@ mod tests {
         .unwrap()
     }
 
-    /// Applies a page from the calendar's current cursor.
-    async fn apply(pool: &PgPool, page: &EventPage) -> Vec<String> {
+    fn at(value: &str) -> DateTime<Utc> {
+        value.parse().unwrap()
+    }
+
+    /// Applies a page from the calendar's current cursor, keeping events that
+    /// ended after `cutoff`.
+    async fn apply(pool: &PgPool, page: &EventPage, cutoff: &str) -> Vec<String> {
         let cursor = load_cursor(pool, "CAL").await.unwrap().unwrap();
-        apply_page(pool, "CAL", &cursor, page)
+        apply_page(pool, "CAL", &cursor, page, at(cutoff))
             .await
             .unwrap()
             .unwrap()
             .into_iter()
             .map(|event| format!("{}@{}", event.event_id, event.revision))
             .collect()
+    }
+
+    fn weekly() -> serde_json::Value {
+        json!({
+            "id": "WEEKLY",
+            "start": { "date": "2023-06-01" },
+            "end": { "date": "2023-06-02" },
+            "recurrence": ["RRULE:FREQ=WEEKLY"]
+        })
     }
 
     #[tokio::test]
@@ -1079,57 +1139,97 @@ mod tests {
 
         // A sync through a new credential starts a full sync, and a stale
         // cursor can no longer advance.
+        let cutoff = "2024-01-01T00:00:00Z";
         let stale = load_cursor(pool, "CAL").await.unwrap().unwrap();
-        assert!(restart_full_sync(pool, "CAL", &stale, 1).await.unwrap());
-        assert!(!restart_full_sync(pool, "CAL", &stale, 1).await.unwrap());
+        assert!(
+            restart_full_sync(pool, "CAL", &stale, 1, at(cutoff))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !restart_full_sync(pool, "CAL", &stale, 1, at(cutoff))
+                .await
+                .unwrap()
+        );
         let first = page(
             json!([event("E1", "Plan"), event("E2", "Retro")]),
             Some("p2"),
             None,
         );
         assert!(
-            apply_page(pool, "CAL", &stale, &first)
+            apply_page(pool, "CAL", &stale, &first, at(cutoff))
                 .await
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(apply(pool, &first).await, ["E1@1", "E2@1"]);
-        assert_eq!(
-            apply(pool, &page(json!([]), None, Some("s1"))).await,
-            Vec::<String>::new()
+        assert_eq!(apply(pool, &first, cutoff).await, ["E1@1", "E2@1"]);
+        assert!(
+            apply(pool, &page(json!([]), None, Some("s1")), cutoff)
+                .await
+                .is_empty()
         );
         let cursor = load_cursor(pool, "CAL").await.unwrap().unwrap();
         assert_eq!(
             (cursor.sync_token.as_str(), cursor.full_sync_started_at),
             ("s1", None)
         );
+        assert_eq!(cursor.history_start, Some(at(cutoff)));
 
-        // Incremental changes republish changed events and remove cancelled ones.
-        sqlx::query("UPDATE company_context_system.google_calendar_events SET embedding_status = 'completed'")
-            .execute(pool)
-            .await
-            .unwrap();
+        // Incremental changes republish changed events and remove cancelled
+        // ones. Events that ended before the cutoff are left out unless they
+        // recur.
+        sqlx::query(
+            "UPDATE company_context_system.google_calendar_events SET embedding_status = 'completed'",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
         let changes = page(
             json!([
                 event("E1", "Plan v2"),
                 { "id": "E2", "status": "cancelled" },
                 event("E3", "Offsite"),
+                { "id": "OLD", "start": { "date": "2023-06-01" }, "end": { "date": "2023-06-02" } },
+                weekly(),
             ]),
             None,
             Some("s2"),
         );
-        assert_eq!(apply(pool, &changes).await, ["E1@2", "E3@1"]);
+        assert_eq!(
+            apply(pool, &changes, cutoff).await,
+            ["E1@2", "E3@1", "WEEKLY@1"]
+        );
         assert_eq!(
             events(pool).await,
-            [("E1".to_owned(), 2), ("E3".to_owned(), 1)]
+            [
+                ("E1".to_owned(), 2),
+                ("E3".to_owned(), 1),
+                ("WEEKLY".to_owned(), 1)
+            ]
         );
 
         // A full sync keeps unchanged events and removes those it did not list.
         let cursor = load_cursor(pool, "CAL").await.unwrap().unwrap();
-        assert!(restart_full_sync(pool, "CAL", &cursor, 1).await.unwrap());
-        let full = page(json!([event("E1", "Plan v2")]), None, Some("s3"));
-        assert_eq!(apply(pool, &full).await, ["E1@2"]);
-        assert_eq!(events(pool).await, [("E1".to_owned(), 2)]);
+        assert!(
+            restart_full_sync(pool, "CAL", &cursor, 1, at(cutoff))
+                .await
+                .unwrap()
+        );
+        let full = page(json!([event("E1", "Plan v2"), weekly()]), None, Some("s3"));
+        assert_eq!(apply(pool, &full, cutoff).await, ["E1@2", "WEEKLY@1"]);
+        assert_eq!(
+            events(pool).await,
+            [("E1".to_owned(), 2), ("WEEKLY".to_owned(), 1)]
+        );
+
+        // Events that age out of the history are removed by the next sync.
+        let unchanged = page(json!([]), None, Some("s4"));
+        assert!(
+            apply(pool, &unchanged, "2024-06-01T00:00:00Z")
+                .await
+                .is_empty()
+        );
+        assert_eq!(events(pool).await, [("WEEKLY".to_owned(), 1)]);
 
         // A calendar goes, with its events, once no live credential observes it.
         assert_eq!(remove_unobserved(pool, &[1]).await.unwrap(), (0, 0));

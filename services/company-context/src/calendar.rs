@@ -94,6 +94,7 @@ pub struct RenderedEvent {
     pub url: String,
     /// Whether only the calendar's writers and owners may see the details.
     pub private: bool,
+    pub recurring: bool,
     pub starts_at: Option<DateTime<Utc>>,
     pub ends_at: Option<DateTime<Utc>>,
     pub organizer_email: String,
@@ -129,6 +130,7 @@ impl Person {
 
 impl Event {
     /// Renders the event, or returns `None` for a cancelled event.
+    /// Recurring events are rendered with the times of their first occurrence.
     pub fn render(&self) -> Option<RenderedEvent> {
         if self.status == "cancelled" {
             return None;
@@ -193,6 +195,7 @@ impl Event {
             content_text,
             url: self.html_link.clone(),
             private,
+            recurring: !self.recurrence.is_empty(),
             starts_at,
             ends_at,
             organizer_email,
