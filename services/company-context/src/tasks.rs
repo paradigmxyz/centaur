@@ -14,13 +14,15 @@ use tokio::time::interval;
 use tracing::{error, info, warn};
 
 use crate::{
+    calendar::CalendarClient,
+    calendar_tasks,
     config::{
         Config, DOCUMENT_DELETE_TASK, DOCUMENT_EMBED_TASK, DOCUMENT_EXTRACT_TASK,
         DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK, GOOGLE_DOC_MIME_TYPE,
         GOOGLE_DRIVE_DOCUMENT_ID_PREFIX, PDF_MIME_TYPE, SHARED_DRIVE_SCAN_TASK,
         SHARED_DRIVES_DISCOVER_TASK, SHARED_FOLDERS_BATCH_TASK,
     },
-    credentials::{ConsoleCredentials, GoogleCredential},
+    credentials::{ConsoleCredentials, GoogleCredential, GoogleProduct},
     drive::{DriveChange, DriveClient, DriveFile},
     embeddings::EmbeddingsClient,
     errors::{is_rejected, rejected},
@@ -38,6 +40,7 @@ pub struct TaskState {
     pub absurd: AbsurdClient,
     pub credentials: Arc<ConsoleCredentials>,
     pub drive: DriveClient,
+    pub calendar: CalendarClient,
     pub granola: GranolaClient,
     pub slack: SlackClient,
     pub embeddings: EmbeddingsClient,
@@ -116,6 +119,7 @@ pub struct TaskSummary {
 }
 
 pub fn register(state: TaskState) -> Result<()> {
+    calendar_tasks::register(&state)?;
     granola_tasks::register(&state)?;
     slack_documents::register(&state)?;
     slack_files::register(&state)?;
@@ -197,7 +201,7 @@ async fn reconcile_credentials(
     let retained_ids = state
         .drive
         .credentials()
-        .retained_google_credential_ids()
+        .retained_google_credential_ids(GoogleProduct::Drive)
         .await?;
     let mut tx = state.pool.begin().await?;
     let stale_observations = sqlx::query(
@@ -347,7 +351,7 @@ async fn discover_shared_drives(
     let credential = state
         .drive
         .credentials()
-        .google_credential(params.credential_id)
+        .google_credential(params.credential_id, GoogleProduct::Drive)
         .await?;
     let mut drive_ids = BTreeSet::new();
     let mut page_token: Option<String> = None;
@@ -528,7 +532,7 @@ async fn walk_folder_batch(
     let credential = state
         .drive
         .credentials()
-        .google_credential(params.credential_id)
+        .google_credential(params.credential_id, GoogleProduct::Drive)
         .await?;
     let mut files = 0;
     let mut child_folder_ids = Vec::new();
@@ -645,7 +649,7 @@ async fn scan_corpus(
     let credential = state
         .drive
         .credentials()
-        .google_credential(credential_id)
+        .google_credential(credential_id, GoogleProduct::Drive)
         .await?;
     let scope = checkpoint_scope(credential.id, shared_drive_id);
     ensure_checkpoint(&state.pool, &scope).await?;

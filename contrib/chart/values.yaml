@@ -463,9 +463,9 @@ companyContextV1:
   enabled: true
 
 # Standalone company-context ingestion service. It indexes Google Docs and PDFs
-# from Google Drive and Granola meeting notes into its private system and data
-# schemas. Disabled while the corpus is validated alongside the legacy Python
-# workflows.
+# from Google Drive, Google Calendar events, and Granola meeting notes into its
+# private system and data schemas. Disabled while the corpus is validated
+# alongside the legacy Python workflows.
 experimentalCompanyContext:
   enabled: false
   replicaCount: 1
@@ -483,18 +483,22 @@ experimentalCompanyContext:
   indexers:
     drive:
       enabled: true
+    calendar:
+      enabled: true
     granola:
       enabled: true
     slack:
       enabled: true
   # Rails Console OAuth app whose live per-user Google broker credentials are
-  # synchronized. The embeddings API key comes from OPENAI_API_KEY in the
-  # shared Kubernetes Secret.
+  # synchronized: those with drive.readonly for Drive and those with
+  # calendar.readonly for Calendar. The embeddings API key comes from
+  # OPENAI_API_KEY in the shared Kubernetes Secret.
   googleOauthAppSlug: google
   # Rails Console OAuth app whose live per-user Granola MCP credentials are
   # synchronized.
   granolaOauthAppSlug: granola
   scanIntervalSeconds: 300
+  calendarSyncIntervalSeconds: 1800
   granolaSyncIntervalSeconds: 1800
   # Slack conversations are discovered through the same per-user Slack
   # credentials as the Console DM sync (console.slackDmSync.oauthAppSlug).
@@ -517,6 +521,7 @@ experimentalCompanyContext:
   # list removes indexed data that only the excluded users or conversations kept.
   syncLimits:
     googleDriveUserEmails: []
+    googleCalendarUserEmails: []
     granolaUserEmails: []
     slackUserIds: []
     # Slack conversation IDs (channels and DMs).

@@ -9,12 +9,14 @@ use tokio::time::{MissedTickBehavior, interval};
 use tracing::{error, info};
 
 use crate::{
+    calendar_tasks::{CalendarDiscoverParams, CalendarReconcileParams},
     config::{
-        Config, DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK,
-        GRANOLA_CREDENTIALS_RECONCILE_TASK, GRANOLA_SYNC_TASK, SHARED_DRIVES_DISCOVER_TASK,
-        SLACK_CREDENTIALS_RECONCILE_TASK, SLACK_USER_DISCOVER_TASK, SLACK_USERS_SYNC_TASK,
+        CALENDAR_CREDENTIALS_RECONCILE_TASK, CALENDAR_DISCOVER_TASK, Config,
+        DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK, GRANOLA_CREDENTIALS_RECONCILE_TASK,
+        GRANOLA_SYNC_TASK, SHARED_DRIVES_DISCOVER_TASK, SLACK_CREDENTIALS_RECONCILE_TASK,
+        SLACK_USER_DISCOVER_TASK, SLACK_USERS_SYNC_TASK,
     },
-    credentials::ConsoleCredentials,
+    credentials::{ConsoleCredentials, GoogleProduct},
     granola_tasks::{GranolaReconcileParams, GranolaSyncParams},
     slack_tasks::{SlackDiscoverParams, SlackReconcileParams, UsersSyncParams},
     tasks::{DiscoverSharedDrivesParams, ReconcileCredentialsParams, ScanParams},
@@ -55,7 +57,10 @@ pub async fn run(config: Arc<Config>, client: Client, credentials: Arc<ConsoleCr
                 error!(event = "company_context_credentials_reconcile_enqueue_failed", error = %error);
             }
         }
-        let credential_ids = match credentials.google_credential_ids().await {
+        let credential_ids = match credentials
+            .google_credential_ids(GoogleProduct::Drive)
+            .await
+        {
             Ok(ids) => ids,
             Err(error) => {
                 telemetry::scheduler_error("drive", "load_credentials");
@@ -85,6 +90,68 @@ pub async fn run(config: Arc<Config>, client: Client, credentials: Arc<ConsoleCr
                     bucket,
                 },
                 format!("drive.shared_drives.discover:{credential_id}:{bucket}"),
+                credential_id,
+            )
+            .await;
+        }
+    }
+}
+
+/// Enqueues Calendar reconciliation and per-credential calendar discovery.
+pub async fn run_calendar(
+    config: Arc<Config>,
+    client: Client,
+    credentials: Arc<ConsoleCredentials>,
+) {
+    let mut ticker = interval(config.calendar_sync_interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let bucket = now / config.calendar_sync_interval.as_secs().max(1);
+        match client
+            .spawn(
+                CALENDAR_CREDENTIALS_RECONCILE_TASK,
+                CalendarReconcileParams { bucket },
+                SpawnOptions {
+                    idempotency_key: Some(format!("calendar.credentials.reconcile:{bucket}")),
+                    ..SpawnOptions::default()
+                },
+            )
+            .await
+        {
+            Ok(result) => {
+                telemetry::task_enqueued(CALENDAR_CREDENTIALS_RECONCILE_TASK, result.created);
+            }
+            Err(error) => {
+                telemetry::scheduler_error("calendar", "enqueue");
+                error!(event = "company_context_calendar_reconcile_enqueue_failed", error = %error);
+            }
+        }
+        let credential_ids = match credentials
+            .google_credential_ids(GoogleProduct::Calendar)
+            .await
+        {
+            Ok(ids) => ids,
+            Err(error) => {
+                telemetry::scheduler_error("calendar", "load_credentials");
+                error!(event = "company_context_calendar_credentials_load_failed", error = %error);
+                continue;
+            }
+        };
+        for credential_id in credential_ids {
+            spawn_credential_task(
+                &client,
+                "calendar",
+                CALENDAR_DISCOVER_TASK,
+                CalendarDiscoverParams {
+                    credential_id,
+                    bucket,
+                },
+                format!("calendar.user.discover:{credential_id}:{bucket}"),
                 credential_id,
             )
             .await;

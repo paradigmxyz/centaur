@@ -16,7 +16,39 @@ use crate::{
     slack::{AuthTest, SlackClient, SlackReply, conversation_types},
 };
 
-const DRIVE_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/drive.readonly";
+/// A Google product synchronized through the Google OAuth app's per-user
+/// credentials. Each needs its own scope and has its own sync limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GoogleProduct {
+    Drive,
+    Calendar,
+}
+
+impl GoogleProduct {
+    fn scope(self) -> &'static str {
+        match self {
+            Self::Drive => "https://www.googleapis.com/auth/drive.readonly",
+            Self::Calendar => "https://www.googleapis.com/auth/calendar.readonly",
+        }
+    }
+
+    /// The product's name in errors.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Drive => "Drive",
+            Self::Calendar => "Calendar",
+        }
+    }
+
+    /// The product's upstream label in telemetry.
+    pub fn upstream(self) -> &'static str {
+        match self {
+            Self::Drive => "drive",
+            Self::Calendar => "calendar",
+        }
+    }
+}
+
 /// The credential ID the Slack app's bot token syncs under. Rails assigns
 /// broker credentials positive IDs, so it cannot collide with one.
 pub const SLACK_BOT_CREDENTIAL_ID: i64 = 0;
@@ -36,7 +68,8 @@ pub struct ConsoleCredentials {
     slack: SlackClient,
     slack_bot_user_id: Arc<OnceCell<String>>,
     /// Sync limits; an empty list allows every credential.
-    google_user_emails: Vec<String>,
+    google_drive_user_emails: Vec<String>,
+    google_calendar_user_emails: Vec<String>,
     granola_user_emails: Vec<String>,
     slack_user_ids: Vec<String>,
     slack_conversation_types: Vec<String>,
@@ -104,16 +137,26 @@ impl ConsoleCredentials {
             slack_bot_token: config.slack_bot_token.clone(),
             slack: SlackClient::new(config)?,
             slack_bot_user_id: Arc::new(OnceCell::new()),
-            google_user_emails: config.google_drive_user_emails.clone(),
+            google_drive_user_emails: config.google_drive_user_emails.clone(),
+            google_calendar_user_emails: config.google_calendar_user_emails.clone(),
             granola_user_emails: config.granola_user_emails.clone(),
             slack_user_ids: config.slack_user_ids.clone(),
             slack_conversation_types: config.slack_conversation_types.clone(),
         };
-        credentials.google_credential_ids().await?;
+        credentials
+            .google_credential_ids(GoogleProduct::Drive)
+            .await?;
         Ok(credentials)
     }
 
-    pub async fn google_credential_ids(&self) -> Result<Vec<i64>> {
+    fn google_user_emails(&self, product: GoogleProduct) -> &[String] {
+        match product {
+            GoogleProduct::Drive => &self.google_drive_user_emails,
+            GoogleProduct::Calendar => &self.google_calendar_user_emails,
+        }
+    }
+
+    pub async fn google_credential_ids(&self, product: GoogleProduct) -> Result<Vec<i64>> {
         let rows = sqlx::query(
             r#"
             SELECT credentials.id, credentials.scopes
@@ -136,7 +179,7 @@ impl ConsoleCredentials {
             "#,
         )
         .bind(&self.google_oauth_app_slug)
-        .bind(&self.google_user_emails)
+        .bind(self.google_user_emails(product))
         .fetch_all(&self.pool)
         .await
         .context("list Google broker credentials from Rails Console")?;
@@ -146,7 +189,7 @@ impl ConsoleCredentials {
             let Json(scopes): Json<Vec<String>> = row
                 .try_get("scopes")
                 .context("decode Google broker credential scopes")?;
-            if scopes.iter().any(|scope| scope == DRIVE_READONLY_SCOPE) {
+            if scopes.iter().any(|scope| scope == product.scope()) {
                 ids.push(
                     row.try_get("id")
                         .context("decode Google broker credential ID")?,
@@ -156,7 +199,7 @@ impl ConsoleCredentials {
         Ok(ids)
     }
 
-    pub async fn retained_google_credential_ids(&self) -> Result<Vec<i64>> {
+    pub async fn retained_google_credential_ids(&self, product: GoogleProduct) -> Result<Vec<i64>> {
         sqlx::query_scalar(
             r#"
             SELECT credentials.id
@@ -173,13 +216,17 @@ impl ConsoleCredentials {
             "#,
         )
         .bind(&self.google_oauth_app_slug)
-        .bind(&self.google_user_emails)
+        .bind(self.google_user_emails(product))
         .fetch_all(&self.pool)
         .await
         .context("list retained Google broker credentials from Rails Console")
     }
 
-    pub async fn google_credential(&self, credential_id: i64) -> Result<GoogleCredential> {
+    pub async fn google_credential(
+        &self,
+        credential_id: i64,
+        product: GoogleProduct,
+    ) -> Result<GoogleCredential> {
         let row = sqlx::query(
             r#"
             SELECT credentials.id,
@@ -204,7 +251,7 @@ impl ConsoleCredentials {
         )
         .bind(credential_id)
         .bind(&self.google_oauth_app_slug)
-        .bind(&self.google_user_emails)
+        .bind(self.google_user_emails(product))
         .fetch_optional(&self.pool)
         .await
         .context("load Google broker credential from Rails Console")?
@@ -215,8 +262,11 @@ impl ConsoleCredentials {
             bail!("Google broker credential {credential_id} is expired");
         }
         let Json(scopes): Json<Vec<String>> = row.try_get("scopes")?;
-        if !scopes.iter().any(|scope| scope == DRIVE_READONLY_SCOPE) {
-            bail!("Google broker credential {credential_id} lacks Drive read access");
+        if !scopes.iter().any(|scope| scope == product.scope()) {
+            bail!(
+                "Google broker credential {credential_id} lacks {} read access",
+                product.name()
+            );
         }
         Ok(GoogleCredential {
             id: credential_id,
@@ -543,13 +593,15 @@ impl ConsoleCredentials {
     }
 
     pub async fn ready(&self) -> bool {
-        let Ok(ids) = self.google_credential_ids().await else {
+        let Ok(ids) = self.google_credential_ids(GoogleProduct::Drive).await else {
             return false;
         };
         let Some(id) = ids.first() else {
             return false;
         };
-        self.google_credential(*id).await.is_ok()
+        self.google_credential(*id, GoogleProduct::Drive)
+            .await
+            .is_ok()
     }
 
     pub async fn close(&self) {
@@ -611,7 +663,8 @@ mod tests {
             slack_bot_token: config.slack_bot_token.clone(),
             slack: SlackClient::new(&config).unwrap(),
             slack_bot_user_id: Arc::new(OnceCell::new()),
-            google_user_emails: Vec::new(),
+            google_drive_user_emails: Vec::new(),
+            google_calendar_user_emails: Vec::new(),
             granola_user_emails: Vec::new(),
             slack_user_ids: Vec::new(),
             slack_conversation_types: Vec::new(),

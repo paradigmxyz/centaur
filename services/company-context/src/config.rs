@@ -16,6 +16,10 @@ pub const DRIVE_CREDENTIALS_RECONCILE_TASK: &str = "drive.credentials.reconcile"
 pub const DOCUMENT_EXTRACT_TASK: &str = "drive.pdf.extract";
 pub const DOCUMENT_EMBED_TASK: &str = "drive.document.embed";
 pub const DOCUMENT_DELETE_TASK: &str = "drive.document.delete";
+pub const CALENDAR_CREDENTIALS_RECONCILE_TASK: &str = "calendar.credentials.reconcile";
+pub const CALENDAR_DISCOVER_TASK: &str = "calendar.user.discover";
+pub const CALENDAR_SYNC_TASK: &str = "calendar.calendar.sync";
+pub const CALENDAR_EVENTS_EMBED_TASK: &str = "calendar.events.embed";
 pub const GRANOLA_CREDENTIALS_RECONCILE_TASK: &str = "granola.credentials.reconcile";
 pub const GRANOLA_SYNC_TASK: &str = "granola.user.sync";
 pub const GRANOLA_NOTES_FETCH_TASK: &str = "granola.notes.fetch";
@@ -45,13 +49,14 @@ pub const GOOGLE_DRIVE_DOCUMENT_ID_PREFIX: &str = "google-drive:";
 pub const SLACK_DOCUMENT_ID_PREFIX: &str = "slack:";
 pub const SLACK_FILE_DOCUMENT_ID_PREFIX: &str = "slack-file:";
 pub const GRANOLA_DOCUMENT_ID_PREFIX: &str = "granola:";
+pub const GOOGLE_CALENDAR_DOCUMENT_ID_PREFIX: &str = "google-calendar:";
 /// Slack conversation types that can be synchronized.
 pub const SLACK_CONVERSATION_TYPES: [&str; 3] = ["public_channel", "private_channel", "im"];
 
 #[derive(Clone, Debug, Parser)]
 #[command(
     name = "centaur-company-context",
-    about = "Ingest company context from Google Drive, Granola, and Slack"
+    about = "Ingest company context from Google Drive, Google Calendar, Granola, and Slack"
 )]
 pub struct Config {
     #[arg(long, env = "DATABASE_URL", value_parser = nonempty)]
@@ -106,6 +111,15 @@ pub struct Config {
         action = clap::ArgAction::Set
     )]
     pub drive_enabled: bool,
+    /// Schedules Google Calendar sync. Disabling it pauses ingestion and keeps
+    /// indexed events searchable.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_CALENDAR_ENABLED",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub calendar_enabled: bool,
     /// Schedules Granola sync. Disabling it pauses ingestion and keeps indexed
     /// notes searchable.
     #[arg(
@@ -132,6 +146,15 @@ pub struct Config {
         value_parser = email
     )]
     pub google_drive_user_emails: Vec<String>,
+    /// Limits Google Calendar sync to these credential emails. Unset syncs
+    /// every user.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_GOOGLE_CALENDAR_USER_EMAILS",
+        value_delimiter = ',',
+        value_parser = email
+    )]
+    pub google_calendar_user_emails: Vec<String>,
     /// Limits Granola sync to these credential emails. Unset syncs every user.
     #[arg(
         long,
@@ -216,6 +239,13 @@ pub struct Config {
     pub google_api_base_url: String,
     #[arg(
         long,
+        env = "GOOGLE_CALENDAR_API_BASE_URL",
+        default_value = "https://www.googleapis.com/calendar/v3",
+        value_parser = normalized_base_url
+    )]
+    pub google_calendar_api_base_url: String,
+    #[arg(
+        long,
         env = "GRANOLA_MCP_URL",
         default_value = "https://mcp.granola.ai/mcp",
         value_parser = nonempty
@@ -264,6 +294,13 @@ pub struct Config {
         value_parser = positive_duration
     )]
     pub scan_interval: Duration,
+    #[arg(
+        long = "calendar-sync-interval-seconds",
+        env = "COMPANY_CONTEXT_CALENDAR_SYNC_INTERVAL_SECONDS",
+        default_value = "1800",
+        value_parser = positive_duration
+    )]
+    pub calendar_sync_interval: Duration,
     #[arg(
         long = "granola-sync-interval-seconds",
         env = "COMPANY_CONTEXT_GRANOLA_SYNC_INTERVAL_SECONDS",
@@ -516,15 +553,28 @@ mod tests {
         assert_eq!(config.openai_base_url, "http://localhost:8080/v1");
         assert_eq!(config.scan_interval, Duration::from_secs(300));
         assert_eq!(config.slack_rate_limit_share, 0.3);
-        assert!(config.drive_enabled && config.granola_enabled && config.slack_enabled);
+        assert!(
+            config.drive_enabled
+                && config.calendar_enabled
+                && config.granola_enabled
+                && config.slack_enabled
+        );
     }
 
     #[test]
     fn parses_indexer_switches() {
         let mut args = required_args();
-        args.extend(["--granola-enabled", "false", "--drive-enabled", "false"]);
+        args.extend([
+            "--granola-enabled",
+            "false",
+            "--drive-enabled",
+            "false",
+            "--calendar-enabled",
+            "false",
+        ]);
         let config = Config::try_parse_from(args).unwrap();
         assert!(!config.drive_enabled);
+        assert!(!config.calendar_enabled);
         assert!(!config.granola_enabled);
         assert!(config.slack_enabled);
     }
