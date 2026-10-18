@@ -213,6 +213,7 @@ async fn freshness_samples(pool: &PgPool, credentials: &ConsoleCredentials) -> R
                count(*) FILTER (WHERE last_error <> '')::float8,
                coalesce(extract(epoch FROM now() - min(coalesce(last_success_at, first_seen_at))), 0)::float8
         FROM company_context_system.google_calendars
+        WHERE broker_credential_id::text = ANY($3)
         UNION ALL
         SELECT 'slack',
                count(*)::float8,
@@ -223,6 +224,7 @@ async fn freshness_samples(pool: &PgPool, credentials: &ConsoleCredentials) -> R
     )
     .bind(ids(&google))
     .bind(ids(&granola))
+    .bind(ids(&calendar))
     .fetch_all(pool)
     .await?;
     for row in rows {

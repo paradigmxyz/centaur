@@ -1,10 +1,10 @@
-use std::collections::BTreeSet;
+use std::collections::HashMap;
 
 use absurd::{SpawnOptions, TaskContext};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use tracing::{error, info, warn};
 
 use crate::{
@@ -30,8 +30,10 @@ pub struct CalendarDiscoverParams {
     pub bucket: u64,
 }
 
+/// One credential's view of one calendar.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CalendarSyncParams {
+    pub credential_id: i64,
     pub calendar_id: String,
     pub bucket: u64,
 }
@@ -44,6 +46,7 @@ pub struct EventRevision {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct EventsEmbedParams {
+    pub credential_id: i64,
     pub calendar_id: String,
     pub events: Vec<EventRevision>,
 }
@@ -99,8 +102,7 @@ pub fn register(state: &TaskState) -> Result<()> {
     Ok(())
 }
 
-/// Deactivates observations from dead or deleted credentials and removes
-/// calendars that no live credential still observes, with their events.
+/// Removes the calendars, with their events, of dead or deleted credentials.
 async fn reconcile_credentials(
     state: &TaskState,
     params: CalendarReconcileParams,
@@ -110,69 +112,27 @@ async fn reconcile_credentials(
         .credentials
         .retained_google_credential_ids(GoogleProduct::Calendar)
         .await?;
-    let (deactivated, removed) = remove_unobserved(&state.pool, &retained_ids).await?;
+    let removed = remove_unretained(&state.pool, &retained_ids).await?;
     info!(
         event = "company_context_calendar_credentials_reconciled",
         task_id = ctx.task_id(),
         bucket = params.bucket,
-        observations_deactivated = deactivated,
         calendars_removed = removed
     );
-    Ok(CalendarSummary::new("completed", removed))
+    Ok(CalendarSummary::new("completed", removed as usize))
 }
 
-/// Returns the number of observations deactivated and calendars removed.
-async fn remove_unobserved(pool: &PgPool, retained_ids: &[i64]) -> Result<(u64, usize)> {
-    let mut tx = pool.begin().await?;
-    let deactivated = sqlx::query(
+async fn remove_unretained(pool: &PgPool, retained_ids: &[i64]) -> Result<u64> {
+    Ok(sqlx::query(
         r#"
-        UPDATE company_context_data.google_calendar_broker_observations
-        SET active = FALSE,
-            updated_at = NOW()
-        WHERE active
-          AND NOT (broker_credential_id = ANY($1::bigint[]))
+        DELETE FROM company_context_system.google_calendars
+        WHERE NOT (broker_credential_id = ANY($1::bigint[]))
         "#,
     )
     .bind(retained_ids)
-    .execute(&mut *tx)
+    .execute(pool)
     .await?
-    .rows_affected();
-    let candidates: Vec<String> = sqlx::query_scalar(
-        r#"
-        SELECT calendars.calendar_id
-        FROM company_context_system.google_calendars calendars
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM company_context_data.google_calendar_broker_observations observations
-            WHERE observations.calendar_id = calendars.calendar_id
-              AND observations.active
-        )
-        ORDER BY calendars.calendar_id
-        FOR UPDATE OF calendars
-        "#,
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    // Recheck after locking: a discovery that committed meanwhile keeps its
-    // calendar, and one that commits later recreates it.
-    let removed = sqlx::query(
-        r#"
-        DELETE FROM company_context_system.google_calendars calendars
-        WHERE calendars.calendar_id = ANY($1::text[])
-          AND NOT EXISTS (
-              SELECT 1
-              FROM company_context_data.google_calendar_broker_observations observations
-              WHERE observations.calendar_id = calendars.calendar_id
-                AND observations.active
-          )
-        "#,
-    )
-    .bind(&candidates)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    tx.commit().await?;
-    Ok((deactivated, removed as usize))
+    .rows_affected())
 }
 
 /// Records the calendars a credential can read and syncs each of them.
@@ -188,20 +148,20 @@ async fn discover(
     let result = async {
         let calendars = state.calendar.list_calendars(credential.id).await?;
         record_discovery(&state.pool, &credential, &calendars).await?;
-        // The first discovery in a cycle to list a calendar syncs it.
         for calendar in &calendars {
             state
                 .absurd
                 .spawn(
                     CALENDAR_SYNC_TASK,
                     CalendarSyncParams {
+                        credential_id: credential.id,
                         calendar_id: calendar.id.clone(),
                         bucket: params.bucket,
                     },
                     SpawnOptions {
                         idempotency_key: Some(format!(
-                            "calendar.calendar.sync:{}:{}",
-                            calendar.id, params.bucket
+                            "calendar.calendar.sync:{}:{}:{}",
+                            credential.id, calendar.id, params.bucket
                         )),
                         ..SpawnOptions::default()
                     },
@@ -235,72 +195,50 @@ async fn discover(
     }
 }
 
+/// Stores the credential's calendars and removes, with their events, those it
+/// no longer lists.
 async fn record_discovery(
     pool: &PgPool,
     credential: &GoogleCredential,
     calendars: &[CalendarListEntry],
 ) -> Result<()> {
-    // Lock calendars in a consistent order to avoid deadlocking with
-    // reconciliation and other discoveries.
-    let mut calendars: Vec<&CalendarListEntry> = calendars
-        .iter()
-        .filter(|calendar| matches!(calendar.access_role.as_str(), "reader" | "writer" | "owner"))
-        .collect();
+    if credential.provider_subject.is_empty() {
+        bail!(
+            "Google broker credential {} has no provider subject",
+            credential.id
+        );
+    }
+    let mut calendars: Vec<&CalendarListEntry> = calendars.iter().collect();
     calendars.sort_by(|left, right| left.id.cmp(&right.id));
     calendars.dedup_by(|left, right| left.id == right.id);
     let ids: Vec<&str> = calendars.iter().map(|item| item.id.as_str()).collect();
     let summaries: Vec<&str> = calendars.iter().map(|item| item.summary.as_str()).collect();
-    let roles: Vec<&str> = calendars
-        .iter()
-        .map(|item| item.access_role.as_str())
-        .collect();
 
     let mut tx = pool.begin().await?;
     sqlx::query(
         r#"
-        INSERT INTO company_context_system.google_calendars (calendar_id, summary)
-        SELECT calendar_id, summary
-        FROM unnest($1::text[], $2::text[]) AS listed(calendar_id, summary)
+        INSERT INTO company_context_system.google_calendars
+            (broker_credential_id, calendar_id, provider_subject, summary)
+        SELECT $1, calendar_id, $2, summary
+        FROM unnest($3::text[], $4::text[]) AS listed(calendar_id, summary)
         ORDER BY calendar_id
-        ON CONFLICT (calendar_id) DO UPDATE
-        SET summary = EXCLUDED.summary,
+        ON CONFLICT (broker_credential_id, calendar_id) DO UPDATE
+        SET provider_subject = EXCLUDED.provider_subject,
+            summary = EXCLUDED.summary,
             last_seen_at = NOW(),
             updated_at = NOW()
         "#,
     )
+    .bind(credential.id)
+    .bind(&credential.provider_subject)
     .bind(&ids)
     .bind(&summaries)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
         r#"
-        INSERT INTO company_context_data.google_calendar_broker_observations
-            (broker_credential_id, calendar_id, provider_email, provider_subject, access_role)
-        SELECT $1, calendar_id, $3, $4, access_role
-        FROM unnest($2::text[], $5::text[]) AS listed(calendar_id, access_role)
-        ON CONFLICT (broker_credential_id, calendar_id) DO UPDATE
-        SET provider_email = EXCLUDED.provider_email,
-            provider_subject = EXCLUDED.provider_subject,
-            access_role = EXCLUDED.access_role,
-            active = TRUE,
-            last_seen_at = NOW(),
-            updated_at = NOW()
-        "#,
-    )
-    .bind(credential.id)
-    .bind(&ids)
-    .bind(credential.provider_email.trim().to_lowercase())
-    .bind(&credential.provider_subject)
-    .bind(&roles)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        r#"
-        UPDATE company_context_data.google_calendar_broker_observations
-        SET active = FALSE,
-            updated_at = NOW()
+        DELETE FROM company_context_system.google_calendars
         WHERE broker_credential_id = $1
-          AND active
           AND NOT (calendar_id = ANY($2::text[]))
         "#,
     )
@@ -316,56 +254,32 @@ async fn record_discovery(
 /// was listed from is still current, so concurrent syncs cannot interleave.
 #[derive(Debug, PartialEq, sqlx::FromRow)]
 struct Cursor {
-    sync_credential_id: Option<i64>,
     sync_token: String,
     page_token: String,
     full_sync_started_at: Option<DateTime<Utc>>,
     history_start: Option<DateTime<Utc>>,
 }
 
-/// Syncs a calendar's events through the live credential observing it with
-/// the most access, so that private events are read in full when possible.
-/// Events that ended before the history cutoff are left out, unless recurring.
+/// Syncs the events of one credential's calendar. Events that ended before the
+/// history cutoff are left out, unless recurring.
 async fn sync_calendar(
     state: &TaskState,
     params: CalendarSyncParams,
     ctx: &TaskContext,
 ) -> Result<CalendarSummary> {
-    let calendar_id = params.calendar_id.as_str();
-    let syncable = state
-        .credentials
-        .google_credential_ids(GoogleProduct::Calendar)
-        .await?;
-    let observers: Vec<i64> = sqlx::query_scalar(
-        r#"
-        SELECT broker_credential_id
-        FROM company_context_data.google_calendar_broker_observations
-        WHERE calendar_id = $1
-          AND active
-        ORDER BY CASE access_role WHEN 'owner' THEN 0 WHEN 'writer' THEN 1 ELSE 2 END,
-                 broker_credential_id
-        "#,
-    )
-    .bind(calendar_id)
-    .fetch_all(&state.pool)
-    .await?;
-    let Some(credential_id) = observers.into_iter().find(|id| syncable.contains(id)) else {
-        return Ok(CalendarSummary::new("unobserved", 0));
-    };
-
+    let (credential_id, calendar_id) = (params.credential_id, params.calendar_id.as_str());
     let cutoff = Utc::now() - chrono::Duration::days(state.config.calendar_history_days as i64);
     let result = async {
         let mut events = 0;
         loop {
-            let Some(cursor) = load_cursor(&state.pool, calendar_id).await? else {
+            let Some(cursor) = load_cursor(&state.pool, credential_id, calendar_id).await? else {
                 return Ok(("removed", events));
             };
             // The cutoff only moves before the last full sync's when the
-            // history days are raised; a full sync then backfills the older events.
-            if cursor.sync_credential_id != Some(credential_id)
-                || cursor.history_start.is_none_or(|start| cutoff < start)
-            {
-                if !restart_full_sync(&state.pool, calendar_id, &cursor, credential_id, cutoff)
+            // history days are raised; a full sync then backfills the older
+            // events.
+            if cursor.history_start.is_none_or(|start| cutoff < start) {
+                if !restart_full_sync(&state.pool, credential_id, calendar_id, &cursor, cutoff)
                     .await?
                 {
                     return Ok(("superseded", events));
@@ -388,9 +302,10 @@ async fn sync_calendar(
                 warn!(
                     event = "company_context_calendar_full_sync_required",
                     task_id = ctx.task_id(),
+                    credential_id,
                     calendar_id
                 );
-                if !restart_full_sync(&state.pool, calendar_id, &cursor, credential_id, cutoff)
+                if !restart_full_sync(&state.pool, credential_id, calendar_id, &cursor, cutoff)
                     .await?
                 {
                     return Ok(("superseded", events));
@@ -399,12 +314,19 @@ async fn sync_calendar(
             };
             events += page.items.len();
             let complete = page.next_page_token.is_none();
-            let Some(pending) =
-                apply_page(&state.pool, calendar_id, &cursor, &page, cutoff).await?
+            let Some(pending) = apply_page(
+                &state.pool,
+                credential_id,
+                calendar_id,
+                &cursor,
+                &page,
+                cutoff,
+            )
+            .await?
             else {
                 return Ok(("superseded", events));
             };
-            spawn_embed(state, calendar_id, pending).await?;
+            spawn_embed(state, credential_id, calendar_id, pending).await?;
             if complete {
                 return Ok(("completed", events));
             }
@@ -417,8 +339,8 @@ async fn sync_calendar(
             info!(
                 event = "company_context_calendar_sync_finished",
                 task_id = ctx.task_id(),
-                calendar_id,
                 credential_id,
+                calendar_id,
                 status,
                 events
             );
@@ -428,11 +350,13 @@ async fn sync_calendar(
             if let Err(db_error) = sqlx::query(
                 r#"
                 UPDATE company_context_system.google_calendars
-                SET last_error = $2,
+                SET last_error = $3,
                     updated_at = NOW()
-                WHERE calendar_id = $1
+                WHERE broker_credential_id = $1
+                  AND calendar_id = $2
                 "#,
             )
+            .bind(credential_id)
             .bind(calendar_id)
             .bind(bounded_error(&error))
             .execute(&state.pool)
@@ -444,6 +368,7 @@ async fn sync_calendar(
                 warn!(
                     event = "company_context_calendar_sync_rejected",
                     task_id = ctx.task_id(),
+                    credential_id,
                     calendar_id,
                     error = %error
                 );
@@ -454,47 +379,78 @@ async fn sync_calendar(
     }
 }
 
-async fn load_cursor(pool: &PgPool, calendar_id: &str) -> Result<Option<Cursor>> {
-    Ok(sqlx::query_as(
+const CURSOR_COLUMNS: &str = "sync_token, page_token, full_sync_started_at, history_start";
+
+async fn load_cursor(
+    pool: &PgPool,
+    credential_id: i64,
+    calendar_id: &str,
+) -> Result<Option<Cursor>> {
+    Ok(sqlx::query_as(&format!(
         r#"
-        SELECT sync_credential_id, sync_token, page_token, full_sync_started_at,
-               history_start
+        SELECT {CURSOR_COLUMNS}
         FROM company_context_system.google_calendars
-        WHERE calendar_id = $1
-        "#,
-    )
+        WHERE broker_credential_id = $1
+          AND calendar_id = $2
+        "#
+    ))
+    .bind(credential_id)
     .bind(calendar_id)
     .fetch_optional(pool)
     .await?)
 }
 
-/// Starts a full sync through `credential_id`, keeping events that ended
-/// after `cutoff`, if the cursor is still current.
+async fn lock_cursor(
+    tx: &mut Transaction<'_, Postgres>,
+    credential_id: i64,
+    calendar_id: &str,
+) -> Result<Option<Cursor>> {
+    Ok(sqlx::query_as(&format!(
+        r#"
+        SELECT {CURSOR_COLUMNS}
+        FROM company_context_system.google_calendars
+        WHERE broker_credential_id = $1
+          AND calendar_id = $2
+        FOR UPDATE
+        "#
+    ))
+    .bind(credential_id)
+    .bind(calendar_id)
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+/// Starts a full sync keeping events that ended after `cutoff`, if the cursor
+/// is still current.
 async fn restart_full_sync(
     pool: &PgPool,
+    credential_id: i64,
     calendar_id: &str,
     cursor: &Cursor,
-    credential_id: i64,
     cutoff: DateTime<Utc>,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
-    if lock_cursor(&mut tx, calendar_id).await?.as_ref() != Some(cursor) {
+    if lock_cursor(&mut tx, credential_id, calendar_id)
+        .await?
+        .as_ref()
+        != Some(cursor)
+    {
         return Ok(false);
     }
     sqlx::query(
         r#"
         UPDATE company_context_system.google_calendars
-        SET sync_credential_id = $2,
-            sync_token = '',
+        SET sync_token = '',
             page_token = '',
             full_sync_started_at = NOW(),
             history_start = $3,
             updated_at = NOW()
-        WHERE calendar_id = $1
+        WHERE broker_credential_id = $1
+          AND calendar_id = $2
         "#,
     )
-    .bind(calendar_id)
     .bind(credential_id)
+    .bind(calendar_id)
     .bind(cutoff)
     .execute(&mut *tx)
     .await?;
@@ -502,36 +458,23 @@ async fn restart_full_sync(
     Ok(true)
 }
 
-async fn lock_cursor(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    calendar_id: &str,
-) -> Result<Option<Cursor>> {
-    Ok(sqlx::query_as(
-        r#"
-        SELECT sync_credential_id, sync_token, page_token, full_sync_started_at,
-               history_start
-        FROM company_context_system.google_calendars
-        WHERE calendar_id = $1
-        FOR UPDATE
-        "#,
-    )
-    .bind(calendar_id)
-    .fetch_optional(&mut **tx)
-    .await?)
-}
-
 /// Stores a page of events, dropping cancelled ones and those that ended
 /// before `cutoff`, and advances the cursor it was listed from. Returns the
 /// events awaiting publication, or `None` if the cursor moved.
 async fn apply_page(
     pool: &PgPool,
+    credential_id: i64,
     calendar_id: &str,
     cursor: &Cursor,
     page: &EventPage,
     cutoff: DateTime<Utc>,
 ) -> Result<Option<Vec<EventRevision>>> {
     let mut tx = pool.begin().await?;
-    if lock_cursor(&mut tx, calendar_id).await?.as_ref() != Some(cursor) {
+    if lock_cursor(&mut tx, credential_id, calendar_id)
+        .await?
+        .as_ref()
+        != Some(cursor)
+    {
         return Ok(None);
     }
     let mut pending = Vec::new();
@@ -543,10 +486,12 @@ async fn apply_page(
             sqlx::query(
                 r#"
                 DELETE FROM company_context_system.google_calendar_events
-                WHERE calendar_id = $1
-                  AND event_id = $2
+                WHERE broker_credential_id = $1
+                  AND calendar_id = $2
+                  AND event_id = $3
                 "#,
             )
+            .bind(credential_id)
             .bind(calendar_id)
             .bind(&event.id)
             .execute(&mut *tx)
@@ -558,15 +503,14 @@ async fn apply_page(
         let row = sqlx::query(
             r#"
             INSERT INTO company_context_system.google_calendar_events AS events (
-                calendar_id, event_id, title, content_text, url, private,
+                broker_credential_id, calendar_id, event_id, title, content_text, url,
                 recurring, starts_at, ends_at, organizer_email, content_hash
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-            ON CONFLICT (calendar_id, event_id) DO UPDATE
+            ON CONFLICT (broker_credential_id, calendar_id, event_id) DO UPDATE
             SET title = EXCLUDED.title,
                 content_text = EXCLUDED.content_text,
                 url = EXCLUDED.url,
-                private = EXCLUDED.private,
                 recurring = EXCLUDED.recurring,
                 starts_at = EXCLUDED.starts_at,
                 ends_at = EXCLUDED.ends_at,
@@ -584,12 +528,12 @@ async fn apply_page(
             RETURNING revision, embedding_status
             "#,
         )
+        .bind(credential_id)
         .bind(calendar_id)
         .bind(&event.id)
         .bind(&rendered.title)
         .bind(&rendered.content_text)
         .bind(&rendered.url)
-        .bind(rendered.private)
         .bind(rendered.recurring)
         .bind(rendered.starts_at)
         .bind(rendered.ends_at)
@@ -609,12 +553,14 @@ async fn apply_page(
         sqlx::query(
             r#"
             UPDATE company_context_system.google_calendars
-            SET page_token = $2,
+            SET page_token = $3,
                 last_error = '',
                 updated_at = NOW()
-            WHERE calendar_id = $1
+            WHERE broker_credential_id = $1
+              AND calendar_id = $2
             "#,
         )
+        .bind(credential_id)
         .bind(calendar_id)
         .bind(page_token)
         .execute(&mut *tx)
@@ -625,45 +571,39 @@ async fn apply_page(
             .as_deref()
             .filter(|token| !token.is_empty())
             .context("Google Calendar's last event page omitted nextSyncToken")?;
-        // A full sync lists every event, so events it did not list are gone.
-        if let Some(started_at) = cursor.full_sync_started_at {
-            sqlx::query(
-                r#"
-                DELETE FROM company_context_system.google_calendar_events
-                WHERE calendar_id = $1
-                  AND last_seen_at < $2
-                "#,
-            )
-            .bind(calendar_id)
-            .bind(started_at)
-            .execute(&mut *tx)
-            .await?;
-        }
-        // Events that have since aged out of the history are removed too.
+        // A full sync lists every event, so events it did not list are gone,
+        // and events that have since aged out of the history are removed too.
         sqlx::query(
             r#"
             DELETE FROM company_context_system.google_calendar_events
-            WHERE calendar_id = $1
-              AND NOT recurring
-              AND COALESCE(ends_at, starts_at) < $2
+            WHERE broker_credential_id = $1
+              AND calendar_id = $2
+              AND (
+                  last_seen_at < $3
+                  OR (NOT recurring AND COALESCE(ends_at, starts_at) < $4)
+              )
             "#,
         )
+        .bind(credential_id)
         .bind(calendar_id)
+        .bind(cursor.full_sync_started_at)
         .bind(cutoff)
         .execute(&mut *tx)
         .await?;
         sqlx::query(
             r#"
             UPDATE company_context_system.google_calendars
-            SET sync_token = $2,
+            SET sync_token = $3,
                 page_token = '',
                 full_sync_started_at = NULL,
                 last_success_at = NOW(),
                 last_error = '',
                 updated_at = NOW()
-            WHERE calendar_id = $1
+            WHERE broker_credential_id = $1
+              AND calendar_id = $2
             "#,
         )
+        .bind(credential_id)
         .bind(calendar_id)
         .bind(sync_token)
         .execute(&mut *tx)
@@ -675,6 +615,7 @@ async fn apply_page(
 
 async fn spawn_embed(
     state: &TaskState,
+    credential_id: i64,
     calendar_id: &str,
     mut events: Vec<EventRevision>,
 ) -> Result<()> {
@@ -692,12 +633,13 @@ async fn spawn_embed(
         .spawn(
             CALENDAR_EVENTS_EMBED_TASK,
             EventsEmbedParams {
+                credential_id,
                 calendar_id: calendar_id.to_owned(),
                 events,
             },
             SpawnOptions {
                 idempotency_key: Some(format!(
-                    "calendar.events.embed:{calendar_id}:{}:{}",
+                    "calendar.events.embed:{credential_id}:{calendar_id}:{}:{}",
                     hex_sha256(key.as_bytes()),
                     state.embeddings.model()
                 )),
@@ -721,10 +663,10 @@ struct EventChunk {
 struct StagedEvent {
     event_id: String,
     revision: i64,
+    provider_subject: String,
     title: String,
     content_text: String,
     url: String,
-    private: bool,
     starts_at: Option<DateTime<Utc>>,
     ends_at: Option<DateTime<Utc>>,
     organizer_email: String,
@@ -736,25 +678,40 @@ async fn embed_events(
     params: EventsEmbedParams,
     ctx: &TaskContext,
 ) -> Result<CalendarSummary> {
-    let event_ids: Vec<&str> = params.events.iter().map(|e| e.event_id.as_str()).collect();
-    let revisions: Vec<i64> = params.events.iter().map(|e| e.revision).collect();
+    let (credential_id, calendar_id) = (params.credential_id, params.calendar_id.as_str());
     let staged: Vec<StagedEvent> = sqlx::query_as(
         r#"
-        SELECT events.event_id, events.revision, events.title, events.content_text,
-               events.url, events.private, events.starts_at, events.ends_at,
+        SELECT events.event_id, events.revision, calendars.provider_subject, events.title,
+               events.content_text, events.url, events.starts_at, events.ends_at,
                events.organizer_email
         FROM company_context_system.google_calendar_events events
-        JOIN unnest($2::text[], $3::bigint[]) AS listed(event_id, revision)
+        JOIN company_context_system.google_calendars calendars
+          USING (broker_credential_id, calendar_id)
+        JOIN unnest($3::text[], $4::bigint[]) AS listed(event_id, revision)
           ON listed.event_id = events.event_id
          AND listed.revision = events.revision
-        WHERE events.calendar_id = $1
+        WHERE events.broker_credential_id = $1
+          AND events.calendar_id = $2
           AND events.embedding_status = 'pending'
         ORDER BY events.event_id
         "#,
     )
-    .bind(&params.calendar_id)
-    .bind(&event_ids)
-    .bind(&revisions)
+    .bind(credential_id)
+    .bind(calendar_id)
+    .bind(
+        params
+            .events
+            .iter()
+            .map(|event| event.event_id.as_str())
+            .collect::<Vec<_>>(),
+    )
+    .bind(
+        params
+            .events
+            .iter()
+            .map(|event| event.revision)
+            .collect::<Vec<_>>(),
+    )
     .fetch_all(&state.pool)
     .await?;
     if staged.is_empty() {
@@ -769,8 +726,8 @@ async fn embed_events(
                 .map(|chunk| EventChunk {
                     event_id: event.event_id.clone(),
                     document_id: format!(
-                        "{GOOGLE_CALENDAR_DOCUMENT_ID_PREFIX}{}:{}:{}",
-                        params.calendar_id, event.event_id, chunk.chunk_id
+                        "{GOOGLE_CALENDAR_DOCUMENT_ID_PREFIX}{credential_id}:{calendar_id}:{}:{}",
+                        event.event_id, chunk.chunk_id
                     ),
                     chunk_id: chunk.chunk_id,
                     content_hash: chunk.content_hash,
@@ -778,28 +735,21 @@ async fn embed_events(
                 })
         })
         .collect();
-    // Reuse vectors for chunks whose text is unchanged.
-    let reusable: BTreeSet<String> = sqlx::query_scalar(
+    // Reuse a vector for any text already embedded, such as an event shared
+    // with another user. Vectors stay in their textual form.
+    let mut vectors: HashMap<String, String> = sqlx::query_as(
         r#"
-        SELECT embeddings.document_id
-        FROM company_context_data.google_calendar_document_embeddings embeddings
-        JOIN unnest($1::text[], $2::text[]) AS chunks(document_id, content_hash)
-          ON chunks.document_id = embeddings.document_id
-         AND chunks.content_hash = embeddings.content_hash
-        WHERE embeddings.model = $3
-          AND embeddings.dimensions = $4
+        SELECT DISTINCT ON (content_hash) content_hash, embedding::text
+        FROM company_context_data.google_calendar_document_embeddings
+        WHERE content_hash = ANY($1::text[])
+          AND model = $2
+          AND dimensions = $3
         "#,
     )
     .bind(
         chunks
             .iter()
-            .map(|c| c.document_id.as_str())
-            .collect::<Vec<_>>(),
-    )
-    .bind(
-        chunks
-            .iter()
-            .map(|c| c.content_hash.as_str())
+            .map(|chunk| chunk.content_hash.as_str())
             .collect::<Vec<_>>(),
     )
     .bind(state.embeddings.model())
@@ -808,63 +758,60 @@ async fn embed_events(
     .await?
     .into_iter()
     .collect();
-    let inputs: Vec<String> = chunks
-        .iter()
-        .filter(|chunk| !reusable.contains(&chunk.document_id))
-        .map(|chunk| chunk.body.clone())
-        .collect();
-    let result = if inputs.is_empty() {
-        Ok(Vec::new())
-    } else {
-        state.embeddings.embed(&inputs).await
-    };
-    let mut embeddings = match result {
-        Ok(embeddings) => embeddings.into_iter(),
-        Err(error) => {
-            let rejected = is_rejected(&error);
-            record_embedding_failure(&state.pool, &params, rejected, &error).await;
-            if rejected {
-                warn!(
-                    event = "company_context_calendar_embedding_rejected",
-                    task_id = ctx.task_id(),
-                    calendar_id = params.calendar_id,
-                    error = %error
-                );
-                return Ok(CalendarSummary::new("rejected", 0));
-            }
-            return Err(error);
+    let mut missing: Vec<&EventChunk> = Vec::new();
+    for chunk in &chunks {
+        if !vectors.contains_key(&chunk.content_hash)
+            && !missing
+                .iter()
+                .any(|other| other.content_hash == chunk.content_hash)
+        {
+            missing.push(chunk);
         }
-    };
+    }
+    if !missing.is_empty() {
+        let inputs: Vec<String> = missing.iter().map(|chunk| chunk.body.clone()).collect();
+        match state.embeddings.embed(&inputs).await {
+            Ok(embeddings) => {
+                for (chunk, embedding) in missing.iter().zip(embeddings) {
+                    vectors.insert(
+                        chunk.content_hash.clone(),
+                        serde_json::to_string(&embedding)?,
+                    );
+                }
+            }
+            Err(error) => {
+                let rejected = is_rejected(&error);
+                record_embedding_failure(&state.pool, &params, rejected, &error).await;
+                if rejected {
+                    warn!(
+                        event = "company_context_calendar_embedding_rejected",
+                        task_id = ctx.task_id(),
+                        credential_id,
+                        calendar_id,
+                        error = %error
+                    );
+                    return Ok(CalendarSummary::new("rejected", 0));
+                }
+                return Err(error);
+            }
+        }
+    }
 
     let mut tx = state.pool.begin().await?;
     let mut published = 0;
     for event in &staged {
-        let event_chunks: Vec<&EventChunk> = chunks
-            .iter()
-            .filter(|chunk| chunk.event_id == event.event_id)
-            .collect();
-        // Embeddings follow chunk order, so consume them even for superseded
-        // events.
-        let mut vectors = Vec::new();
-        for chunk in &event_chunks {
-            if !reusable.contains(&chunk.document_id) {
-                vectors.push(
-                    embeddings
-                        .next()
-                        .context("embeddings response omitted a chunk")?,
-                );
-            }
-        }
         let current = sqlx::query_scalar::<_, bool>(
             r#"
-            SELECT revision = $3 AND embedding_status = 'pending'
+            SELECT revision = $4 AND embedding_status = 'pending'
             FROM company_context_system.google_calendar_events
-            WHERE calendar_id = $1
-              AND event_id = $2
+            WHERE broker_credential_id = $1
+              AND calendar_id = $2
+              AND event_id = $3
             FOR UPDATE
             "#,
         )
-        .bind(&params.calendar_id)
+        .bind(credential_id)
+        .bind(calendar_id)
         .bind(&event.event_id)
         .bind(event.revision)
         .fetch_optional(&mut *tx)
@@ -873,20 +820,24 @@ async fn embed_events(
         if !current {
             continue;
         }
-        let mut vectors = vectors.into_iter();
+        let event_chunks: Vec<&EventChunk> = chunks
+            .iter()
+            .filter(|chunk| chunk.event_id == event.event_id)
+            .collect();
         for chunk in &event_chunks {
             sqlx::query(
                 r#"
                 INSERT INTO company_context_data.google_calendar_documents (
-                    document_id, calendar_id, event_id, chunk_id, title, body, url,
-                    private, starts_at, ends_at, organizer_email, content_hash, updated_at
+                    document_id, broker_credential_id, provider_subject, calendar_id,
+                    event_id, chunk_id, title, body, url, starts_at, ends_at,
+                    organizer_email, content_hash, updated_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
                 ON CONFLICT (document_id) DO UPDATE
-                SET title = EXCLUDED.title,
+                SET provider_subject = EXCLUDED.provider_subject,
+                    title = EXCLUDED.title,
                     body = EXCLUDED.body,
                     url = EXCLUDED.url,
-                    private = EXCLUDED.private,
                     starts_at = EXCLUDED.starts_at,
                     ends_at = EXCLUDED.ends_at,
                     organizer_email = EXCLUDED.organizer_email,
@@ -895,23 +846,20 @@ async fn embed_events(
                 "#,
             )
             .bind(&chunk.document_id)
-            .bind(&params.calendar_id)
+            .bind(credential_id)
+            .bind(&event.provider_subject)
+            .bind(calendar_id)
             .bind(&event.event_id)
             .bind(&chunk.chunk_id)
             .bind(&event.title)
             .bind(&chunk.body)
             .bind(&event.url)
-            .bind(event.private)
             .bind(event.starts_at)
             .bind(event.ends_at)
             .bind(&event.organizer_email)
             .bind(&chunk.content_hash)
             .execute(&mut *tx)
             .await?;
-            if reusable.contains(&chunk.document_id) {
-                continue;
-            }
-            let embedding = vectors.next().context("embedding missing for a chunk")?;
             sqlx::query(
                 r#"
                 INSERT INTO company_context_data.google_calendar_document_embeddings (
@@ -924,25 +872,34 @@ async fn embed_events(
                     content_hash = EXCLUDED.content_hash,
                     embedding = EXCLUDED.embedding,
                     updated_at = NOW()
+                WHERE google_calendar_document_embeddings.content_hash
+                      IS DISTINCT FROM EXCLUDED.content_hash
+                   OR google_calendar_document_embeddings.model <> EXCLUDED.model
                 "#,
             )
             .bind(&chunk.document_id)
             .bind(state.embeddings.model())
             .bind(state.embeddings.dimensions() as i32)
             .bind(&chunk.content_hash)
-            .bind(serde_json::to_string(&embedding)?)
+            .bind(
+                vectors
+                    .get(&chunk.content_hash)
+                    .context("embeddings response omitted a chunk")?,
+            )
             .execute(&mut *tx)
             .await?;
         }
         sqlx::query(
             r#"
             DELETE FROM company_context_data.google_calendar_documents
-            WHERE calendar_id = $1
-              AND event_id = $2
-              AND NOT (document_id = ANY($3::text[]))
+            WHERE broker_credential_id = $1
+              AND calendar_id = $2
+              AND event_id = $3
+              AND NOT (document_id = ANY($4::text[]))
             "#,
         )
-        .bind(&params.calendar_id)
+        .bind(credential_id)
+        .bind(calendar_id)
         .bind(&event.event_id)
         .bind(
             event_chunks
@@ -959,11 +916,13 @@ async fn embed_events(
                 last_error = '',
                 published_at = NOW(),
                 updated_at = NOW()
-            WHERE calendar_id = $1
-              AND event_id = $2
+            WHERE broker_credential_id = $1
+              AND calendar_id = $2
+              AND event_id = $3
             "#,
         )
-        .bind(&params.calendar_id)
+        .bind(credential_id)
+        .bind(calendar_id)
         .bind(&event.event_id)
         .execute(&mut *tx)
         .await?;
@@ -973,8 +932,10 @@ async fn embed_events(
     info!(
         event = "company_context_calendar_events_published",
         task_id = ctx.task_id(),
-        calendar_id = params.calendar_id,
-        events = published
+        credential_id,
+        calendar_id,
+        events = published,
+        chunks_embedded = missing.len()
     );
     Ok(CalendarSummary::new("completed", published))
 }
@@ -989,16 +950,18 @@ async fn record_embedding_failure(
     if let Err(db_error) = sqlx::query(
         r#"
         UPDATE company_context_system.google_calendar_events events
-        SET embedding_status = CASE WHEN $4 THEN 'rejected' ELSE embedding_status END,
-            last_error = $5,
+        SET embedding_status = CASE WHEN $5 THEN 'rejected' ELSE embedding_status END,
+            last_error = $6,
             updated_at = NOW()
-        FROM unnest($2::text[], $3::bigint[]) AS listed(event_id, revision)
-        WHERE events.calendar_id = $1
+        FROM unnest($3::text[], $4::bigint[]) AS listed(event_id, revision)
+        WHERE events.broker_credential_id = $1
+          AND events.calendar_id = $2
           AND events.event_id = listed.event_id
           AND events.revision = listed.revision
           AND events.embedding_status = 'pending'
         "#,
     )
+    .bind(params.credential_id)
     .bind(&params.calendar_id)
     .bind(
         params
@@ -1051,9 +1014,16 @@ mod tests {
         GoogleCredential {
             id,
             access_token: "token".to_owned(),
-            provider_email: "Ada@Example.com".to_owned(),
+            provider_email: "ada@example.com".to_owned(),
             provider_subject: format!("G-{id}"),
             revision: String::new(),
+        }
+    }
+
+    fn listed(id: &str) -> CalendarListEntry {
+        CalendarListEntry {
+            id: id.to_owned(),
+            summary: "Team".to_owned(),
         }
     }
 
@@ -1074,32 +1044,6 @@ mod tests {
         json!({ "id": id, "summary": summary, "start": { "date": "2024-03-01" } })
     }
 
-    async fn events(pool: &PgPool) -> Vec<(String, i64)> {
-        sqlx::query_as(
-            "SELECT event_id, revision FROM company_context_system.google_calendar_events ORDER BY event_id",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap()
-    }
-
-    fn at(value: &str) -> DateTime<Utc> {
-        value.parse().unwrap()
-    }
-
-    /// Applies a page from the calendar's current cursor, keeping events that
-    /// ended after `cutoff`.
-    async fn apply(pool: &PgPool, page: &EventPage, cutoff: &str) -> Vec<String> {
-        let cursor = load_cursor(pool, "CAL").await.unwrap().unwrap();
-        apply_page(pool, "CAL", &cursor, page, at(cutoff))
-            .await
-            .unwrap()
-            .unwrap()
-            .into_iter()
-            .map(|event| format!("{}@{}", event.event_id, event.revision))
-            .collect()
-    }
-
     fn weekly() -> serde_json::Value {
         json!({
             "id": "WEEKLY",
@@ -1109,45 +1053,86 @@ mod tests {
         })
     }
 
+    fn at(value: &str) -> DateTime<Utc> {
+        value.parse().unwrap()
+    }
+
+    async fn events(pool: &PgPool) -> Vec<(i64, String, i64)> {
+        sqlx::query_as(
+            r#"
+            SELECT broker_credential_id, event_id, revision
+            FROM company_context_system.google_calendar_events
+            ORDER BY broker_credential_id, event_id
+            "#,
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    fn row(credential_id: i64, event_id: &str, revision: i64) -> (i64, String, i64) {
+        (credential_id, event_id.to_owned(), revision)
+    }
+
+    /// Applies a page from the current cursor of credential 1's calendar,
+    /// keeping events that ended after `cutoff`.
+    async fn apply(pool: &PgPool, page: &EventPage, cutoff: &str) -> Vec<String> {
+        let cursor = load_cursor(pool, 1, "CAL").await.unwrap().unwrap();
+        apply_page(pool, 1, "CAL", &cursor, page, at(cutoff))
+            .await
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .map(|event| format!("{}@{}", event.event_id, event.revision))
+            .collect()
+    }
+
     #[tokio::test]
-    async fn calendars_sync_from_one_cursor_and_follow_live_observations() {
+    async fn each_credential_syncs_its_own_calendars() {
         let Ok(database_url) = env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
             eprintln!("skipping: set COMPANY_CONTEXT_TEST_DATABASE_URL to a ParadeDB Postgres URL");
             return;
         };
         let database = TestDatabase::create(&database_url, "calendar").await;
         let pool = &database.pool;
-        let listed = |role: &str| CalendarListEntry {
-            id: "CAL".to_owned(),
-            summary: "Team".to_owned(),
-            access_role: role.to_owned(),
-        };
-        // Free/busy access does not count as observing a calendar.
-        record_discovery(pool, &credential(1), &[listed("owner")])
-            .await
-            .unwrap();
-        record_discovery(pool, &credential(2), &[listed("freeBusyReader")])
-            .await
-            .unwrap();
-        let observers: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT broker_credential_id, access_role FROM company_context_data.google_calendar_broker_observations",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap();
-        assert_eq!(observers, [(1, "owner".to_owned())]);
-
-        // A sync through a new credential starts a full sync, and a stale
-        // cursor can no longer advance.
         let cutoff = "2024-01-01T00:00:00Z";
-        let stale = load_cursor(pool, "CAL").await.unwrap().unwrap();
+
+        // Two credentials list the same calendar; each keeps its own copy.
+        record_discovery(pool, &credential(1), &[listed("CAL")])
+            .await
+            .unwrap();
+        record_discovery(pool, &credential(2), &[listed("CAL")])
+            .await
+            .unwrap();
+        let other = load_cursor(pool, 2, "CAL").await.unwrap().unwrap();
         assert!(
-            restart_full_sync(pool, "CAL", &stale, 1, at(cutoff))
+            restart_full_sync(pool, 2, "CAL", &other, at(cutoff))
+                .await
+                .unwrap()
+        );
+        let other = load_cursor(pool, 2, "CAL").await.unwrap().unwrap();
+        apply_page(
+            pool,
+            2,
+            "CAL",
+            &other,
+            &page(json!([event("E1", "Plan")]), None, Some("t1")),
+            at(cutoff),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        // A full sync starts from a fresh cursor, and a stale cursor can no
+        // longer advance.
+        let stale = load_cursor(pool, 1, "CAL").await.unwrap().unwrap();
+        assert!(
+            restart_full_sync(pool, 1, "CAL", &stale, at(cutoff))
                 .await
                 .unwrap()
         );
         assert!(
-            !restart_full_sync(pool, "CAL", &stale, 1, at(cutoff))
+            !restart_full_sync(pool, 1, "CAL", &stale, at(cutoff))
                 .await
                 .unwrap()
         );
@@ -1157,7 +1142,7 @@ mod tests {
             None,
         );
         assert!(
-            apply_page(pool, "CAL", &stale, &first, at(cutoff))
+            apply_page(pool, 1, "CAL", &stale, &first, at(cutoff))
                 .await
                 .unwrap()
                 .is_none()
@@ -1168,7 +1153,7 @@ mod tests {
                 .await
                 .is_empty()
         );
-        let cursor = load_cursor(pool, "CAL").await.unwrap().unwrap();
+        let cursor = load_cursor(pool, 1, "CAL").await.unwrap().unwrap();
         assert_eq!(
             (cursor.sync_token.as_str(), cursor.full_sync_started_at),
             ("s1", None)
@@ -1202,25 +1187,22 @@ mod tests {
         assert_eq!(
             events(pool).await,
             [
-                ("E1".to_owned(), 2),
-                ("E3".to_owned(), 1),
-                ("WEEKLY".to_owned(), 1)
+                row(1, "E1", 2),
+                row(1, "E3", 1),
+                row(1, "WEEKLY", 1),
+                row(2, "E1", 1)
             ]
         );
 
         // A full sync keeps unchanged events and removes those it did not list.
-        let cursor = load_cursor(pool, "CAL").await.unwrap().unwrap();
+        let cursor = load_cursor(pool, 1, "CAL").await.unwrap().unwrap();
         assert!(
-            restart_full_sync(pool, "CAL", &cursor, 1, at(cutoff))
+            restart_full_sync(pool, 1, "CAL", &cursor, at(cutoff))
                 .await
                 .unwrap()
         );
         let full = page(json!([event("E1", "Plan v2"), weekly()]), None, Some("s3"));
         assert_eq!(apply(pool, &full, cutoff).await, ["E1@2", "WEEKLY@1"]);
-        assert_eq!(
-            events(pool).await,
-            [("E1".to_owned(), 2), ("WEEKLY".to_owned(), 1)]
-        );
 
         // Events that age out of the history are removed by the next sync.
         let unchanged = page(json!([]), None, Some("s4"));
@@ -1229,13 +1211,15 @@ mod tests {
                 .await
                 .is_empty()
         );
-        assert_eq!(events(pool).await, [("WEEKLY".to_owned(), 1)]);
+        assert_eq!(events(pool).await, [row(1, "WEEKLY", 1), row(2, "E1", 1)]);
 
-        // A calendar goes, with its events, once no live credential observes it.
-        assert_eq!(remove_unobserved(pool, &[1]).await.unwrap(), (0, 0));
-        assert_eq!(remove_unobserved(pool, &[]).await.unwrap(), (1, 1));
+        // A calendar the credential no longer lists goes with its events, as
+        // do the calendars of credentials that are not retained.
+        record_discovery(pool, &credential(1), &[]).await.unwrap();
+        assert_eq!(events(pool).await, [row(2, "E1", 1)]);
+        assert_eq!(remove_unretained(pool, &[2]).await.unwrap(), 0);
+        assert_eq!(remove_unretained(pool, &[]).await.unwrap(), 1);
         assert!(events(pool).await.is_empty());
-        assert!(load_cursor(pool, "CAL").await.unwrap().is_none());
 
         database.drop().await;
     }

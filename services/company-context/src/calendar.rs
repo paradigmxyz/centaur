@@ -14,8 +14,8 @@ use crate::{
     extraction::hex_sha256,
 };
 
-const CALENDAR_LIST_FIELDS: &str = "nextPageToken,items(id,summary,accessRole)";
-const EVENT_FIELDS: &str = "nextPageToken,nextSyncToken,items(id,status,summary,description,location,htmlLink,start,end,organizer(email,displayName),attendees(email,displayName,responseStatus,resource),recurrence,visibility)";
+const CALENDAR_LIST_FIELDS: &str = "nextPageToken,items(id,summary)";
+const EVENT_FIELDS: &str = "nextPageToken,nextSyncToken,items(id,status,summary,description,location,htmlLink,start,end,organizer(email,displayName),attendees(email,displayName,responseStatus,resource),recurrence)";
 const EVENTS_PAGE_SIZE: &str = "250";
 
 /// Reads calendars and events with users' Google broker credentials.
@@ -32,7 +32,6 @@ pub struct CalendarListEntry {
     pub id: String,
     #[serde(default)]
     pub summary: String,
-    pub access_role: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,7 +65,6 @@ pub struct Event {
     pub organizer: Person,
     pub attendees: Vec<Person>,
     pub recurrence: Vec<String>,
-    pub visibility: String,
 }
 
 /// An event boundary: `date_time` for timed events, `date` for all-day events.
@@ -92,8 +90,6 @@ pub struct RenderedEvent {
     pub title: String,
     pub content_text: String,
     pub url: String,
-    /// Whether only the calendar's writers and owners may see the details.
-    pub private: bool,
     pub recurring: bool,
     pub starts_at: Option<DateTime<Utc>>,
     pub ends_at: Option<DateTime<Utc>>,
@@ -173,7 +169,6 @@ impl Event {
             lines.extend([String::new(), description.to_owned()]);
         }
         let content_text = lines.join("\n");
-        let private = matches!(self.visibility.as_str(), "private" | "confidential");
         let starts_at = self.start.utc();
         let ends_at = self.end.utc();
         let organizer_email = self.organizer.email.trim().to_lowercase();
@@ -182,7 +177,6 @@ impl Event {
                 title,
                 content_text,
                 self.html_link,
-                private,
                 starts_at,
                 ends_at,
                 organizer_email
@@ -194,7 +188,6 @@ impl Event {
             title,
             content_text,
             url: self.html_link.clone(),
-            private,
             recurring: !self.recurrence.is_empty(),
             starts_at,
             ends_at,
@@ -215,7 +208,8 @@ impl CalendarClient {
         })
     }
 
-    /// Lists the calendars the credential can read event details of.
+    /// Lists the calendars the credential can read event details of. Google
+    /// redacts the private events of calendars it can only read.
     pub async fn list_calendars(&self, credential_id: i64) -> Result<Vec<CalendarListEntry>> {
         let mut calendars = Vec::new();
         let mut page_token = None;
@@ -331,7 +325,6 @@ mod tests {
                 { "email": "room@resource.example.com", "resource": true }
             ],
             "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=TU"],
-            "visibility": "default",
             "unknownField": true
         }))
         .render()
@@ -353,16 +346,15 @@ mod tests {
             Some("2024-01-02T08:00:00Z".parse().unwrap())
         );
         assert_eq!(rendered.organizer_email, "ada@example.com");
-        assert!(!rendered.private);
+        assert!(rendered.recurring);
     }
 
     #[test]
-    fn all_day_private_and_cancelled_events() {
+    fn all_day_untitled_and_cancelled_events() {
         let rendered = event(json!({
             "id": "e2",
             "start": { "date": "2024-03-01" },
-            "end": { "date": "2024-03-02" },
-            "visibility": "private"
+            "end": { "date": "2024-03-02" }
         }))
         .render()
         .unwrap();
@@ -374,7 +366,7 @@ mod tests {
             rendered.starts_at,
             Some("2024-03-01T00:00:00Z".parse().unwrap())
         );
-        assert!(rendered.private);
+        assert!(!rendered.recurring);
 
         assert!(
             event(json!({ "id": "e3", "status": "cancelled" }))

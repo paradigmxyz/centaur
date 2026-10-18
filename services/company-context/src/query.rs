@@ -4,9 +4,9 @@
 //!
 //! A principal sees a document only while an active broker observation for its
 //! Slack user ID, or for the subject of a Google or Granola credential granted
-//! to it, still reaches the document's file, conversation, calendar, or Granola
-//! note. Private calendar events are visible only to the calendar's writers and
-//! owners.
+//! to it, still reaches the document's file, conversation, or Granola note.
+//! Calendar events are stored per Google identity, as Google showed them to it,
+//! and are visible only to that identity.
 //! Queries run as [`QUERY_ROLE`], which can only read `company_context_data`.
 
 use std::{
@@ -272,17 +272,7 @@ impl DataType {
                        'ends_at', d.ends_at,
                        'organizer_email', d.organizer_email
                    ) AS metadata"#,
-                // Readers do not see private events' details.
-                visible: r#"(d.calendar_id IN (
-                       SELECT o.calendar_id
-                       FROM company_context_data.google_calendar_broker_observations o
-                       WHERE o.active AND o.provider_subject = ANY($2)
-                         AND o.access_role IN ('writer', 'owner')
-                   ) OR (NOT d.private AND d.calendar_id IN (
-                       SELECT o.calendar_id
-                       FROM company_context_data.google_calendar_broker_observations o
-                       WHERE o.active AND o.provider_subject = ANY($2)
-                   )))"#,
+                visible: "d.provider_subject = ANY($2)",
                 // An event matches a window it overlaps; a recurring event
                 // by its first occurrence.
                 starts_at: "d.starts_at",
@@ -977,30 +967,28 @@ mod tests {
     /// inactive) and Slack conversations C1 and C3; Bob observes C2. Slack
     /// file SF1 is shared in C1 and SF2 in both C2 and C3. Ada's Granola
     /// account observes note N1 (not N3, whose observation is inactive); Bob's
-    /// second Granola account observes N2. Ada owns calendar CAL-ADA and reads
-    /// CAL-TEAM, so she sees its event E2 but not its private event E3.
+    /// second Granola account observes N2. Ada's Google account synced
+    /// calendar events E1 and E2; Carol's synced E3.
     async fn seed(pool: &PgPool) {
         pool.execute(
             r#"
-            INSERT INTO company_context_system.google_calendars (calendar_id)
-            VALUES ('CAL-ADA'), ('CAL-TEAM');
-            INSERT INTO company_context_data.google_calendar_broker_observations
-                (broker_credential_id, calendar_id, provider_subject, access_role)
-            VALUES (1, 'CAL-ADA', 'G-ADA', 'owner'), (1, 'CAL-TEAM', 'G-ADA', 'reader');
+            INSERT INTO company_context_system.google_calendars
+                (broker_credential_id, calendar_id, provider_subject)
+            VALUES (1, 'CAL-ADA', 'G-ADA'), (5, 'CAL-TEAM', 'G-CAROL');
             INSERT INTO company_context_system.google_calendar_events
-                (calendar_id, event_id, content_text, content_hash)
-            VALUES ('CAL-ADA', 'E1', 'text', 'hash'), ('CAL-TEAM', 'E2', 'text', 'hash'),
-                   ('CAL-TEAM', 'E3', 'text', 'hash');
+                (broker_credential_id, calendar_id, event_id, content_text, content_hash)
+            VALUES (1, 'CAL-ADA', 'E1', 'text', 'hash'), (1, 'CAL-ADA', 'E2', 'text', 'hash'),
+                   (5, 'CAL-TEAM', 'E3', 'text', 'hash');
             INSERT INTO company_context_data.google_calendar_documents
-                (document_id, calendar_id, event_id, chunk_id, title, body, private,
-                 starts_at, ends_at, content_hash)
+                (document_id, broker_credential_id, provider_subject, calendar_id, event_id,
+                 chunk_id, title, body, starts_at, ends_at, content_hash)
             VALUES
-                ('google-calendar:CAL-ADA:E1:000000', 'CAL-ADA', 'E1', '000000', 'Falcon prep',
-                 'falcon launch prep', true, '2024-01-03T10:00Z', '2024-01-03T11:00Z', 'hash'),
-                ('google-calendar:CAL-TEAM:E2:000000', 'CAL-TEAM', 'E2', '000000', 'Falcon review',
-                 'falcon launch review', false, '2024-01-04T10:00Z', '2024-01-04T11:00Z', 'hash'),
-                ('google-calendar:CAL-TEAM:E3:000000', 'CAL-TEAM', 'E3', '000000', 'Falcon 1:1',
-                 'falcon launch private', true, '2024-01-04T12:00Z', '2024-01-04T13:00Z', 'hash');
+                ('google-calendar:1:CAL-ADA:E1:000000', 1, 'G-ADA', 'CAL-ADA', 'E1', '000000',
+                 'Falcon prep', 'falcon launch prep', '2024-01-03T10:00Z', '2024-01-03T11:00Z', 'hash'),
+                ('google-calendar:1:CAL-ADA:E2:000000', 1, 'G-ADA', 'CAL-ADA', 'E2', '000000',
+                 'Falcon review', 'falcon launch review', '2024-01-04T10:00Z', '2024-01-04T11:00Z', 'hash'),
+                ('google-calendar:5:CAL-TEAM:E3:000000', 5, 'G-CAROL', 'CAL-TEAM', 'E3', '000000',
+                 'Falcon 1:1', 'falcon launch private', '2024-01-04T12:00Z', '2024-01-04T13:00Z', 'hash');
             "#,
         )
         .await
@@ -1085,8 +1073,8 @@ mod tests {
         assert_eq!(
             ids(pool, None, &ada, json!({ "query": "Falcon launch?" })).await,
             [
-                "google-calendar:CAL-ADA:E1:000000",
-                "google-calendar:CAL-TEAM:E2:000000",
+                "google-calendar:1:CAL-ADA:E1:000000",
+                "google-calendar:1:CAL-ADA:E2:000000",
                 "google-drive:F1",
                 "google-drive:F4",
                 "granola:N1:000000",
@@ -1119,7 +1107,7 @@ mod tests {
                 } })
             )
             .await,
-            ["google-calendar:CAL-ADA:E1:000000"]
+            ["google-calendar:1:CAL-ADA:E1:000000"]
         );
         assert!(
             ids(pool, None, &ada, json!({ "query": "unrelated" }))
@@ -1244,8 +1232,8 @@ mod tests {
             )
             .await,
             [
-                "google-calendar:CAL-ADA:E1:000000",
-                "google-calendar:CAL-TEAM:E2:000000",
+                "google-calendar:1:CAL-ADA:E1:000000",
+                "google-calendar:1:CAL-ADA:E2:000000",
                 "google-drive:F1",
                 "google-drive:F4",
                 "granola:N1:000000",
@@ -1355,7 +1343,7 @@ mod tests {
             .unwrap();
         assert_eq!(note.data_type, DataType::GranolaNote);
         assert_eq!(note.metadata["note_id"], "N1");
-        let event = document(pool, &ada, "google-calendar:CAL-ADA:E1:000000")
+        let event = document(pool, &ada, "google-calendar:1:CAL-ADA:E1:000000")
             .await
             .unwrap()
             .unwrap();
@@ -1368,8 +1356,8 @@ mod tests {
             (&ada, "slack:C2:2024-01-02:000000"),
             (&ada, "granola:N2:000000"),
             (&ada, "granola:N3:000000"),
-            (&ada, "google-calendar:CAL-TEAM:E3:000000"),
-            (&bob, "google-calendar:CAL-TEAM:E2:000000"),
+            (&ada, "google-calendar:5:CAL-TEAM:E3:000000"),
+            (&bob, "google-calendar:1:CAL-ADA:E2:000000"),
             (&ada, "missing"),
             (&bob, "google-drive:F1"),
             (&bob, "slack-file:SF1"),
