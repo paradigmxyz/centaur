@@ -734,6 +734,11 @@ slackbotv2:
     pullPolicy: Always
   userName: centaur
   assistantStatus: ""
+  # Posted in the thread instead of the internal error when slackbotv2 cannot
+  # hand a message to api-rs or open its event stream. The error names internal
+  # services and includes raw API responses; the full error is still logged.
+  # Empty posts the error itself.
+  failureMessage: ""
   # Match Slack's features.agent_view manifest setting. Changing Slack's
   # manifest is irreversible; this switch only controls the service behavior.
   agentViewEnabled: false
