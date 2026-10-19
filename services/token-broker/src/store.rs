@@ -34,10 +34,37 @@ pub(crate) async fn due_credential_ids(
     .await
 }
 
-pub(crate) async fn dead_credential_count(pool: &PgPool) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar("SELECT count(*) FROM broker_credentials WHERE dead")
-        .fetch_one(pool)
-        .await
+pub(crate) struct CredentialCounts {
+    pub provider: Option<String>,
+    pub token_endpoint: String,
+    pub dead: i64,
+    pub backing_off: i64,
+}
+
+/// Dead credentials, and live ones whose last refresh failed, by OAuth app
+/// provider and token endpoint.
+pub(crate) async fn credential_counts(pool: &PgPool) -> Result<Vec<CredentialCounts>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT oauth_apps.provider, broker_credentials.token_endpoint, \
+                count(*) FILTER (WHERE broker_credentials.dead) AS dead, \
+                count(*) FILTER (WHERE NOT broker_credentials.dead \
+                                 AND broker_credentials.failure_count > 0) AS backing_off \
+         FROM broker_credentials \
+         LEFT JOIN oauth_apps ON oauth_apps.id = broker_credentials.oauth_app_id \
+         GROUP BY 1, 2",
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|row| {
+            Ok(CredentialCounts {
+                provider: row.try_get("provider")?,
+                token_endpoint: row.try_get("token_endpoint")?,
+                dead: row.try_get("dead")?,
+                backing_off: row.try_get("backing_off")?,
+            })
+        })
+        .collect()
 }
 
 pub(crate) struct DueCredential {

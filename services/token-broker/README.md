@@ -60,10 +60,26 @@ secrets, or response bodies.
 
 ## Metrics
 
-`GET /metrics` exposes Prometheus metrics: refresh attempts by grant and outcome
-(`success`, `retry`, `dead`, or `error` for database and decryption failures),
-refresh latency, and the number of due and dead credentials. `GET /healthz`
-reports liveness.
+`GET /metrics` exposes Prometheus metrics, and `GET /healthz` reports
+liveness. The `provider` label is the credential's OAuth app provider (such as
+`google` or `slack`), or for credentials without an app, the token endpoint's
+host.
+
+- `token_broker_refreshes_total{provider, grant, outcome}`: refresh attempts.
+  `outcome` is `success`, `retry`, `dead`, or `error` (a database or
+  decryption failure, labeled with provider and grant `unknown`).
+- `token_broker_refresh_duration_seconds{provider, outcome}`: refresh attempt
+  latency, including its token requests.
+- `token_broker_token_requests_total{provider, result}`: token endpoint
+  requests; a fallback makes two. `result` is `success`, `rejected` (an OAuth
+  error), `rate_limited` (429), `server_error` (5xx), `client_error` (another
+  status), `malformed` (an unreadable successful response), `timeout`,
+  `connection_failed`, or `network_error`.
+- `token_broker_due_credentials`: credentials due at the start of the last poll.
+- `token_broker_dead_credentials{provider}`: credentials that need
+  re-authorization.
+- `token_broker_backing_off_credentials{provider}`: live credentials whose last
+  refresh failed and is being retried.
 
 ## Configuration
 

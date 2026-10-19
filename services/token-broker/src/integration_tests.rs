@@ -19,6 +19,7 @@ use axum::{
     routing::post,
 };
 use chrono::{NaiveDateTime, TimeDelta, Utc};
+use metrics_exporter_prometheus::PrometheusBuilder;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 
@@ -610,6 +611,58 @@ async fn credentials_that_cannot_build_a_request_back_off() {
         assert!(within(stored.next_attempt_in, 5));
     }
     assert!(fixture.requests().is_empty());
+}
+
+#[tokio::test]
+async fn metrics_count_refreshes_and_token_requests_by_provider() {
+    let fixture = fixture![
+        (429, json!("slow down")),
+        (200, json!({"access_token": "AT"}))
+    ];
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let metrics = recorder.handle();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let id = fixture
+        .credential("refresh_token", &[("refresh_token", "RT")])
+        .await;
+    fixture.link_oauth_app(id, "google", "cid", "secret").await;
+
+    fixture.refresh(id).await;
+    fixture.update(id, "next_attempt_at = now()").await;
+    fixture.refresh(id).await;
+
+    let metrics = metrics.render();
+    for line in [
+        r#"token_broker_token_requests_total{provider="google",result="rate_limited"} 1"#,
+        r#"token_broker_token_requests_total{provider="google",result="success"} 1"#,
+        r#"token_broker_refreshes_total{provider="google",grant="refresh_token",outcome="retry"} 1"#,
+        r#"token_broker_refreshes_total{provider="google",grant="refresh_token",outcome="success"} 1"#,
+    ] {
+        assert!(metrics.contains(line), "{line} missing from:\n{metrics}");
+    }
+}
+
+#[tokio::test]
+async fn credential_counts_group_dead_and_backing_off_credentials_by_provider() {
+    let fixture = fixture![];
+    let provider = fixture.name("provider");
+    for update in ["dead = TRUE", "failure_count = 2", "failure_count = 0"] {
+        let id = fixture
+            .credential("refresh_token", &[("refresh_token", "RT")])
+            .await;
+        fixture.link_oauth_app(id, &provider, "cid", "secret").await;
+        fixture.update(id, update).await;
+    }
+
+    let counts: Vec<(i64, i64)> = store::credential_counts(&fixture.pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|counts| counts.provider.as_deref() == Some(&provider))
+        .map(|counts| (counts.dead, counts.backing_off))
+        .collect();
+
+    assert_eq!(counts, [(1, 1)]);
 }
 
 #[tokio::test]

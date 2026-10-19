@@ -28,6 +28,26 @@ pub(crate) struct Credential {
     pub timeout: Duration,
 }
 
+impl Credential {
+    pub fn provider_label(&self) -> String {
+        provider_label(self.provider.as_deref(), &self.token_endpoint)
+    }
+}
+
+/// The `provider` metrics label: the OAuth app's provider, or for credentials
+/// without one, the token endpoint's host.
+pub(crate) fn provider_label(provider: Option<&str>, token_endpoint: &str) -> String {
+    provider
+        .map(str::to_owned)
+        .or_else(|| {
+            Url::parse(token_endpoint)
+                .ok()?
+                .host_str()
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
 pub(crate) enum Outcome {
     Refreshed {
         token: TokenResponse,
@@ -260,6 +280,7 @@ async fn post(
     }
     client
         .post(TokenRequest {
+            provider: &credential.provider_label(),
             url,
             form,
             multipart: preqin,
@@ -284,7 +305,7 @@ fn required(value: &Option<String>, name: &'static str) -> Result<String, Refres
 mod tests {
     use std::time::Duration;
 
-    use super::{Credential, oauth_form};
+    use super::{Credential, oauth_form, provider_label};
 
     fn credential(provider: Option<&str>) -> Credential {
         Credential {
@@ -302,6 +323,19 @@ mod tests {
             scopes: vec!["a".into(), "b".into()],
             timeout: Duration::from_secs(30),
         }
+    }
+
+    #[test]
+    fn credentials_without_an_oauth_app_are_labeled_by_token_endpoint_host() {
+        assert_eq!(
+            provider_label(Some("google"), "https://oauth2.googleapis.com/token"),
+            "google"
+        );
+        assert_eq!(
+            provider_label(None, "https://api.preqin.com/connect/token"),
+            "api.preqin.com"
+        );
+        assert_eq!(provider_label(None, "not a url"), "unknown");
     }
 
     #[test]

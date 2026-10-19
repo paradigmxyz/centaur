@@ -11,6 +11,8 @@ use reqwest::{
 };
 use serde_json::Value;
 
+use crate::telemetry;
+
 const MAX_BODY_BYTES: usize = 64 * 1024;
 /// Caps a credential's `refresh_timeout_seconds`, so a refresh, which makes at
 /// most two requests, fits in the shutdown grace period (see the chart's
@@ -18,6 +20,8 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) struct TokenRequest<'a> {
+    /// The `provider` metrics label.
+    pub provider: &'a str,
     pub url: &'a str,
     pub form: Vec<(&'static str, String)>,
     pub multipart: bool,
@@ -117,6 +121,13 @@ impl TokenClient {
     }
 
     pub async fn post(&self, request: TokenRequest<'_>) -> Result<TokenResponse, RefreshError> {
+        let provider = request.provider;
+        let result = self.send(request).await;
+        telemetry::record_token_request(provider, request_result(&result));
+        result
+    }
+
+    async fn send(&self, request: TokenRequest<'_>) -> Result<TokenResponse, RefreshError> {
         let builder = self
             .http
             .post(request.url)
@@ -150,6 +161,25 @@ impl TokenClient {
         }
         body.truncate(MAX_BODY_BYTES);
         interpret(status, &body, request.strict_4xx)
+    }
+}
+
+/// The `result` metrics label for one token request.
+fn request_result(result: &Result<TokenResponse, RefreshError>) -> &'static str {
+    let Err(error) = result else {
+        return "success";
+    };
+    match (error.stage, error.status) {
+        ("network", _) => match error.code.as_deref() {
+            Some("timeout") => "timeout",
+            Some("connect") => "connection_failed",
+            _ => "network_error",
+        },
+        ("oauth", _) => "rejected",
+        ("parse", _) => "malformed",
+        (_, Some(429)) => "rate_limited",
+        (_, Some(status)) if status >= 500 => "server_error",
+        _ => "client_error",
     }
 }
 
