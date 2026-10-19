@@ -144,6 +144,15 @@ spec:
           ports:
             - containerPort: 3001
               name: http
+          # /health fails until the state database connects; keep liveness
+          # from restarting the pod while Postgres is still starting.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            periodSeconds: 5
+            failureThreshold: 24
+            timeoutSeconds: 5
           readinessProbe:
             httpGet:
               path: /health
