@@ -3895,6 +3895,29 @@ describe('slackbotv2', () => {
     }
   })
 
+  it('drain waits for an in-flight reply to finish', async () => {
+    codexApi.autoRespond = false
+    const parent = await postUserMessage('Context before a shutdown.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> answer before exiting`, {
+      threadTs: parent.ts
+    })
+    expect(mention.response.status).toBe(200)
+    const key = threadKey(parent.ts)
+    await waitFor(() => codexApi.eventRequests.some(request => request.threadKey === key), 2000)
+
+    let unfinished: number | undefined
+    const drained = bot.drain(5000).then(count => {
+      unfinished = count
+    })
+    await sleep(200)
+    expect(unfinished).toBeUndefined()
+
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('Answered before exiting.'))
+    await drained
+    expect(unfinished).toBe(0)
+    expect(await threadText(parent.ts)).toContain('Answered before exiting.')
+  })
+
   it('abandons an obligation after repeated non-retryable recovery failures', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()

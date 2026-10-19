@@ -224,6 +224,11 @@ export type MessageOverridesStrategy = (
 export type SlackbotV2 = {
   app: Hono
   chat: Chat
+  /**
+   * Waits up to `timeoutMs` for in-flight webhook handoffs and replies.
+   * Resolves to how many are still running.
+   */
+  drain(timeoutMs: number): Promise<number>
 }
 
 export type SlackbotV2ThreadState = {

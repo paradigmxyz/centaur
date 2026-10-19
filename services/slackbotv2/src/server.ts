@@ -108,7 +108,7 @@ const options: SlackbotV2Options = {
 }
 options.slackHomeTeamId = await resolveSlackHomeTeamId(options)
 
-const { app } = createSlackbotV2(options)
+const { app, drain } = createSlackbotV2(options)
 const server = Bun.serve({
   port,
   fetch: app.fetch
@@ -135,6 +135,25 @@ console.log(
     api_url: apiUrl
   })
 )
+
+// How long SIGTERM waits for in-flight replies; keep it under the pod's
+// termination grace period (30s by default). A reply still running then is
+// recovered by the next process from its render obligation.
+const shutdownDrainMs = numberEnv('SLACKBOTV2_SHUTDOWN_DRAIN_MS', 25_000)
+let shuttingDown = false
+const shutdown = async (signal: string): Promise<void> => {
+  if (shuttingDown) return
+  shuttingDown = true
+  log('info', 'slackbotv2_shutdown_started', { signal, drain_ms: shutdownDrainMs })
+  // Keep serving while draining: events that arrive before this pod leaves
+  // the Service endpoints are handled and drained like the rest.
+  const unfinished = await drain(shutdownDrainMs)
+  log('info', 'slackbotv2_shutdown_complete', { signal, unfinished })
+  process.exit(0)
+}
+// As PID 1 the process would otherwise ignore SIGTERM until the kubelet's SIGKILL.
+process.on('SIGTERM', () => void shutdown('SIGTERM'))
+process.on('SIGINT', () => void shutdown('SIGINT'))
 
 function optionalEnv(name: string): string | undefined {
   const value = process.env[name]?.trim()

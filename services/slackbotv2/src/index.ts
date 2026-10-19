@@ -332,6 +332,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     onLockConflict: 'force',
     logger
   })
+  const background = createBackgroundWork()
   const steeringReactions = createSteeringReactionController(options)
   const lateSlackFiles = createLateSlackFileRepair(options, state, steeringReactions)
   const stateConnectionStatus: StateConnectionStatus = { attempts: 0, connected: false }
@@ -586,16 +587,19 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
           && action.action_id.startsWith(WORKFLOW_ACTION_PREFIX))
       const awaitHandoff = workflowAction || shouldAwaitSlackHandoff(rawBody)
       const handoffTasks: Promise<unknown>[] = []
-      const context: SlackbotV2RequestContext = {
-        waitUntil: promise => waitUntil(c, promise)
+      const keepAlive = (promise: Promise<unknown>) => {
+        background.track(promise)
+        waitUntil(c, promise)
       }
+      const context: SlackbotV2RequestContext = { waitUntil: keepAlive }
       const response = await requestContext.run(context, () => {
         return chat.webhooks.slack(c.req.raw, {
           waitUntil: promise => {
             if (awaitHandoff) {
+              background.track(promise)
               handoffTasks.push(promise)
             } else {
-              waitUntil(c, promise)
+              keepAlive(promise)
             }
           }
         })
@@ -603,7 +607,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       const channelCreatedJoinTask = response.ok && options.autoJoinCreatedChannels === true
         ? joinSlackChannelCreatedEvent(rawBody, options)
         : null
-      if (channelCreatedJoinTask) waitUntil(c, channelCreatedJoinTask)
+      if (channelCreatedJoinTask) keepAlive(channelCreatedJoinTask)
       if (awaitHandoff && response.ok) {
         const waitStartedAtMs = nowMs()
         const waitFields = {
@@ -638,7 +642,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
         }
       }
       const lateFileTask = response.ok ? lateSlackFiles.repairFromWebhook(rawBody) : null
-      if (lateFileTask) waitUntil(c, lateFileTask)
+      if (lateFileTask) keepAlive(lateFileTask)
       outcome = response.ok ? 'success' : 'error'
       return new globalThis.Response(await response.text(), {
         headers: response.headers,
@@ -665,7 +669,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     scheduleRenderObligationRecovery(chat, state, options, stateConnected)
   }
 
-  return { app, chat }
+  return { app, chat, drain: background.drain }
 }
 
 async function handleSlackMessageHandoff(
@@ -3175,6 +3179,40 @@ async function* streamSessionAfterHandoff(
 
 async function* streamError(error: unknown): AsyncIterable<SlackbotV2RendererSource> {
   yield sessionStreamError(error)
+}
+
+/**
+ * Work started by Slack webhooks: handoffs and the live renders and retries
+ * they schedule (via requestContext). Drained on shutdown.
+ */
+function createBackgroundWork() {
+  const pending = new Set<Promise<unknown>>()
+  return {
+    track(promise: Promise<unknown>): void {
+      if (pending.has(promise)) return
+      pending.add(promise)
+      const settle = () => pending.delete(promise)
+      promise.then(settle, settle)
+    },
+    /**
+     * Waits for tracked work, including work started while waiting, until the
+     * deadline. Returns how much is still running.
+     */
+    async drain(timeoutMs: number): Promise<number> {
+      const deadline = Date.now() + timeoutMs
+      while (pending.size > 0 && Date.now() < deadline) {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        await Promise.race([
+          Promise.allSettled(pending),
+          new Promise(resolve => {
+            timer = setTimeout(resolve, deadline - Date.now())
+          })
+        ])
+        clearTimeout(timer)
+      }
+      return pending.size
+    }
+  }
 }
 
 function backgroundWaitUntil(promise: Promise<unknown>): void {
