@@ -3,6 +3,11 @@
 {{- $prefix := .Values.secretManager.envPrefix }}
 {{- $console := include "centaur.consoleValues" . | fromYaml }}
 {{- $tokenBroker := .Values.tokenBroker }}
+{{- $metricsAnnotations := dict -}}
+{{- if $tokenBroker.metrics.scrapeAnnotations -}}
+{{- $metricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" $tokenBroker.metrics.path "prometheus.io/port" (printf "%v" $tokenBroker.port) -}}
+{{- $metricsAnnotations = mergeOverwrite $metricsAnnotations ($tokenBroker.metrics.annotations | default dict) -}}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,13 +23,8 @@ spec:
     metadata:
       annotations:
         checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
-{{- if $tokenBroker.metrics.scrapeAnnotations }}
-        prometheus.io/scrape: "true"
-        prometheus.io/path: {{ $tokenBroker.metrics.path | quote }}
-        prometheus.io/port: {{ $tokenBroker.port | quote }}
-{{- with $tokenBroker.metrics.annotations }}
-{{ toYaml . | nindent 8 }}
-{{- end }}
+{{- with $metricsAnnotations }}
+{{- toYaml . | nindent 8 }}
 {{- end }}
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "token-broker") | nindent 8 }}
