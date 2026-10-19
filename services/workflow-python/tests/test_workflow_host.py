@@ -652,6 +652,31 @@ class WorkflowHostTests(unittest.TestCase):
         registered.principal = " prn_01k2m3n4p5 "
         self.assertEqual(host.normalize_principal(registered), "prn_01k2m3n4p5")
 
+    def test_load_workflow_file_reads_workflow_starters(self) -> None:
+        host = load_workflow_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "starters_workflow.py"
+            path.write_text(
+                "WORKFLOW_NAME = 'starters_workflow'\n"
+                "WORKFLOW_STARTERS = {' console ', 'admin'}\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            registered = host.load_workflow_file(path)
+
+        assert registered is not None
+        self.assertEqual(host.normalize_starters(registered), ["admin", "console"])
+
+        registered.starters = None
+        self.assertIsNone(host.normalize_starters(registered))
+
+        registered.starters = "console"
+        self.assertEqual(host.normalize_starters(registered), ["console"])
+
+        # A declared but malformed value fails closed.
+        registered.starters = True
+        self.assertEqual(host.normalize_starters(registered), [])
+
     def test_workflow_name_from_source_reads_string_constant(self) -> None:
         host = load_workflow_host()
         with tempfile.TemporaryDirectory() as tmp:

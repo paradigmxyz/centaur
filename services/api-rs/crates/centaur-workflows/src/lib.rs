@@ -121,7 +121,12 @@ struct WorkflowRuntimeInner {
     _schedule_worker: Worker,
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
+    starter_registry: Arc<RwLock<WorkflowStarters>>,
 }
+
+/// API caller classes each workflow allows to start it, from
+/// `WORKFLOW_STARTERS`. Workflows without a declaration are absent.
+type WorkflowStarters = BTreeMap<String, BTreeSet<String>>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct WorkflowEnablement {
@@ -200,6 +205,9 @@ impl WorkflowEnablement {
         });
         metadata
             .principals
+            .retain(|workflow_name, _| self.is_enabled(workflow_name));
+        metadata
+            .starters
             .retain(|workflow_name, _| self.is_enabled(workflow_name));
     }
 }
@@ -634,6 +642,7 @@ impl WorkflowRuntime {
             &discovery,
             &enablement,
         )?));
+        let starter_registry = Arc::new(RwLock::new(discovery.starters.clone()));
 
         let task_session_runtime = session_runtime.clone();
         let task_workflow_host_sandbox = workflow_host_sandbox.clone();
@@ -820,6 +829,7 @@ impl WorkflowRuntime {
                 workflow_clients,
                 webhook_registry.clone(),
                 schedule_registry.clone(),
+                starter_registry.clone(),
                 workflow_host_sandbox.clone(),
                 workflow_principal_registrar,
                 interval,
@@ -839,6 +849,7 @@ impl WorkflowRuntime {
                 _schedule_worker: schedule_worker,
                 webhook_registry,
                 schedule_registry,
+                starter_registry,
             }),
         })
     }
@@ -1098,6 +1109,17 @@ impl WorkflowRuntime {
             .values()
             .cloned()
             .collect()
+    }
+
+    /// API caller classes allowed to start `workflow_name`, or `None` when the
+    /// workflow does not restrict who may start it.
+    pub fn workflow_starters(&self, workflow_name: &str) -> Option<BTreeSet<String>> {
+        self.inner
+            .starter_registry
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(workflow_name.trim())
+            .cloned()
     }
 
     pub fn list_schedules(&self) -> Vec<RegisteredWorkflowSchedule> {
@@ -1739,6 +1761,8 @@ struct PythonWorkflowDiscovery {
     schedule: Option<Value>,
     #[serde(default)]
     principal: Option<PythonWorkflowPrincipal>,
+    #[serde(default)]
+    starters: Option<BTreeSet<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1759,6 +1783,7 @@ struct PythonWorkflowMetadata {
     schedules: Vec<Value>,
     workflow_names: BTreeSet<String>,
     principals: BTreeMap<String, WorkflowPrincipalDeclaration>,
+    starters: WorkflowStarters,
 }
 
 fn metadata_from_discovery_payload(
@@ -1770,6 +1795,11 @@ fn metadata_from_discovery_payload(
             .workflow_names
             .insert(workflow.workflow_name.clone());
         metadata.webhooks.extend(workflow.webhooks);
+        if let Some(starters) = workflow.starters {
+            metadata
+                .starters
+                .insert(workflow.workflow_name.clone(), starters);
+        }
         if let Some(mut schedule) = workflow.schedule {
             if let Some(object) = schedule.as_object_mut() {
                 object
@@ -1973,11 +2003,13 @@ fn parse_worker_concurrency(raw: Option<&str>, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_workflow_metadata_reconciler(
     schedule_client: Client,
     workflow_clients: WorkflowQueueClients,
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
+    starter_registry: Arc<RwLock<WorkflowStarters>>,
     workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
     workflow_principal_registrar: WorkflowPrincipalRegistrar,
     interval: Duration,
@@ -1994,6 +2026,7 @@ fn spawn_workflow_metadata_reconciler(
                 &schedule_client,
                 &webhook_registry,
                 &schedule_registry,
+                &starter_registry,
                 workflow_host_sandbox.as_ref(),
                 &workflow_principal_registrar,
             )
@@ -2031,6 +2064,7 @@ async fn reconcile_workflow_metadata_once(
     schedule_client: &Client,
     webhook_registry: &Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: &Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
+    starter_registry: &Arc<RwLock<WorkflowStarters>>,
     workflow_host_sandbox: Option<&WorkflowHostSandboxRuntime>,
     workflow_principal_registrar: &WorkflowPrincipalRegistrar,
 ) -> Result<
@@ -2064,6 +2098,12 @@ async fn reconcile_workflow_metadata_once(
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *schedules = next_schedules.clone();
+    }
+    {
+        let mut starters = starter_registry
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *starters = discovery.starters.clone();
     }
     reconcile_schedules(schedule_client, &next_schedules).await?;
     info!(
@@ -5239,11 +5279,19 @@ mod tests {
                     "workflow_name": "manual_workflow",
                     "source_path": "workflows/manual_workflow.py",
                     "principal": "finance-automation",
+                    "starters": ["console"],
                 },
             ],
         }))
         .unwrap();
         let metadata = metadata_from_discovery_payload(payload);
+        assert_eq!(
+            metadata.starters,
+            BTreeMap::from([(
+                "manual_workflow".to_owned(),
+                BTreeSet::from(["console".to_owned()])
+            )])
+        );
         assert_eq!(
             metadata.workflow_names,
             BTreeSet::from([

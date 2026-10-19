@@ -867,10 +867,46 @@ fn principal_subject_owns_session(subject: Option<&str>, session_principal: Opti
     subject.is_none_or(|subject| session_principal == Some(subject))
 }
 
+/// A workflow that declares `WORKFLOW_STARTERS` may only be started through
+/// the API by those caller classes; undeclared workflows accept any caller
+/// with workflow write access.
+fn caller_may_start_workflow(starters: Option<&BTreeSet<String>>, caller: CallerClass) -> bool {
+    starters.is_none_or(|starters| starters.contains(caller.as_str()))
+}
+
 #[cfg(test)]
 mod session_authorization_tests {
-    use super::{CallerClass, principal_subject_owns_session, sanitize_execute_metadata};
+    use std::collections::BTreeSet;
+
+    use super::{
+        CallerClass, caller_may_start_workflow, principal_subject_owns_session,
+        sanitize_execute_metadata,
+    };
     use serde_json::json;
+
+    #[test]
+    fn declared_workflow_starters_limit_which_callers_may_start_a_run() {
+        let console_only = BTreeSet::from(["console".to_owned()]);
+        assert!(caller_may_start_workflow(
+            Some(&console_only),
+            CallerClass::Console
+        ));
+        for caller_class in [
+            CallerClass::Admin,
+            CallerClass::Ingress,
+            CallerClass::Principal,
+        ] {
+            assert!(!caller_may_start_workflow(
+                Some(&console_only),
+                caller_class
+            ));
+        }
+        assert!(!caller_may_start_workflow(
+            Some(&BTreeSet::new()),
+            CallerClass::Console
+        ));
+        assert!(caller_may_start_workflow(None, CallerClass::Principal));
+    }
 
     #[test]
     fn principal_session_reads_require_exact_persisted_owner() {
@@ -2383,9 +2419,17 @@ async fn invoke_workflow_button(
 
 async fn create_workflow_run(
     State(state): State<AppState>,
+    Extension(caller): Extension<AuthenticatedCaller>,
     Json(request): Json<CreateWorkflowRunRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let workflows = workflow_runtime(&state)?;
+    let starters = workflows.workflow_starters(&request.workflow_name);
+    if !caller_may_start_workflow(starters.as_ref(), caller.class()) {
+        return Err(ApiError::Forbidden(format!(
+            "caller is not allowed to start workflow {:?}",
+            request.workflow_name.trim()
+        )));
+    }
     let run = workflows.create_run(request).await?;
     Ok(Json(serde_json::to_value(run)?))
 }

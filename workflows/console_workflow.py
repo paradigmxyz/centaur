@@ -6,6 +6,9 @@ import re
 from typing import Any
 
 WORKFLOW_NAME = "console_workflow"
+# The agent runs as the principal named in the input, so only Console, which
+# supplies the scheduled task author's principal, may start this workflow.
+WORKFLOW_STARTERS = {"console"}
 SLACK_MESSAGE_MAX_LENGTH = 50_000
 # Stay below Slack's 4,000-character soft limit so it cannot create extra roots.
 SLACK_MESSAGE_CHUNK_MAX_LENGTH = 3_800
