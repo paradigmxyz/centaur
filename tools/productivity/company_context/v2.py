@@ -62,6 +62,7 @@ class CompanyContextV2Client:
         occurred_before: str | None = None,
         channel_ids: list[str] | None = None,
         file_ids: list[str] | None = None,
+        sources: list[str] | None = None,
     ) -> dict:
         """Search documents visible to the requester; the API validates every field."""
         filters = {
@@ -70,6 +71,7 @@ class CompanyContextV2Client:
             "occurred_before": occurred_before,
             "channel_ids": channel_ids,
             "file_ids": file_ids,
+            "sources": sources,
         }
         body: dict[str, Any] = {
             "query": query,

@@ -86,7 +86,19 @@ def test_v2_search_forwards_filters(monkeypatch):
 
     result = CliRunner().invoke(
         cli.app,
-        ["v2", "search", "roadmap", "--type", "drive_doc", "--type", "slack_file", "-n", "5"],
+        [
+            "v2",
+            "search",
+            "roadmap",
+            "--type",
+            "drive_doc",
+            "--type",
+            "slack_file",
+            "--source",
+            "archive",
+            "-n",
+            "5",
+        ],
     )
 
     assert result.exit_code == 0, result.output
@@ -99,5 +111,6 @@ def test_v2_search_forwards_filters(monkeypatch):
             "occurred_before": None,
             "channel_ids": None,
             "file_ids": None,
+            "sources": ["archive"],
         }
     ]
