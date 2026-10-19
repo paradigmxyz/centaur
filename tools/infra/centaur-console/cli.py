@@ -18,7 +18,7 @@ console = Console()
 admin_app = typer.Typer(
     help=(
         "Manage principal roles, secret grants, Slack permissions, and sandbox access. "
-        "Works only in a DM or Console session of an active Console admin."
+        "Works only in an active Console admin's Slack DM."
     )
 )
 app.add_typer(admin_app, name="admin")

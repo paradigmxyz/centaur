@@ -44,6 +44,7 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
       assert_response :created
       grant_id = json_body.dig("data", "id")
       assert_includes @channel.granted_static_secrets, secret
+      assert_equal users(:acme_admin), Grant.find_by_oid!(grant_id).created_by
 
       get "/api/v1/sandbox/admin/principals/#{@channel.oid}/grants", headers: headers
       assert_includes json_body.fetch("data").map { |grant| grant["id"] }, grant_id
@@ -69,6 +70,7 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
 
   test "an admin's Slack DM sandbox changes Slack permissions and sandbox capabilities" do
     @channel.update!(sandbox_sessions_read_enabled: false, sandbox_workflows_read_enabled: true)
+    version = -> { @channel.reload.sync_config_cache_version }
 
     with_token(dm_proxy_for(users(:acme_admin))) do |headers|
       post "/api/v1/sandbox/admin/principals/#{@channel.oid}/slack_channel_permissions",
@@ -78,13 +80,17 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
       assert_not permission.upload_enabled
       assert permission.history_enabled
 
-      delete "/api/v1/sandbox/admin/principals/#{@channel.oid}/slack_channel_permissions/c0999999999",
-             headers: headers
+      assert_changes version do
+        delete "/api/v1/sandbox/admin/principals/#{@channel.oid}/slack_channel_permissions/c0999999999",
+               headers: headers
+      end
       assert_response :no_content
       assert_not @channel.slack_channel_permissions.exists?(channel_id: "C0999999999")
 
-      patch "/api/v1/sandbox/admin/principals/#{@channel.oid}/sandbox_access",
-            params: { data: { sandbox_sessions_read_enabled: true } }, headers: headers, as: :json
+      assert_changes version do
+        patch "/api/v1/sandbox/admin/principals/#{@channel.oid}/sandbox_access",
+              params: { data: { sandbox_sessions_read_enabled: true } }, headers: headers, as: :json
+      end
       assert_response :ok
     end
 
@@ -94,14 +100,54 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
     assert_equal "all", @channel.sandbox_repo_cache
   end
 
-  test "sandboxes not linked to an active admin cannot change roles" do
-    proxies = [
-      dm_proxy_for(users(:member_user)),
-      dm_proxy_for(users(:acme_admin).tap { |user| user.update!(status: :disabled) }),
-      Proxy.create!(name: "channel-proxy", principal: @channel, bearer_token_hash: Digest::SHA256.hexdigest("channel"))
-    ]
+  test "sandbox access updates reject values that are not booleans or a repo cache mode" do
+    with_token(dm_proxy_for(users(:acme_admin))) do |headers|
+      [
+        { sandbox_sessions_read_enabled: nil },
+        { sandbox_sessions_read_enabled: "maybe" },
+        { sandbox_repo_cache: true },
+        {}
+      ].each do |data|
+        patch "/api/v1/sandbox/admin/principals/#{@channel.oid}/sandbox_access",
+              params: { data: data }, headers: headers, as: :json
+        assert_response :bad_request
+      end
 
-    proxies.each do |proxy|
+      patch "/api/v1/sandbox/admin/principals/#{@channel.oid}/sandbox_access",
+            params: { data: { sandbox_repo_cache: "everything" } }, headers: headers, as: :json
+      assert_response :unprocessable_entity
+    end
+    assert_equal "all", @channel.reload.sandbox_repo_cache
+  end
+
+  test "only a home-workspace Slack DM linked to an active admin can change roles" do
+    admin = users(:acme_admin)
+    proxies = {
+      "non-admin DM" => dm_proxy_for(users(:member_user)),
+      "Slack Connect DM" => dm_proxy_for(admin, slack_team_id: "T0EXTERNAL1"),
+      "Console session" => proxy_for(admin, kind: :console_user, slack_team_id: nil),
+      "admin-linked channel" => proxy_for(admin, kind: :slack_channel, slack_team_id: nil,
+                                                 slack_user_id: nil, slack_channel_id: "C0555555555"),
+      "unlinked channel" => Proxy.create!(name: "channel-proxy", principal: @channel,
+                                          bearer_token_hash: Digest::SHA256.hexdigest("channel"))
+    }
+
+    proxies.each do |label, proxy|
+      with_token(proxy) do |headers|
+        post "/api/v1/sandbox/admin/principals/#{@channel.oid}/roles",
+             params: { data: { role_id: @role.oid } }, headers: headers, as: :json
+      end
+      assert_response :forbidden, label
+    end
+    assert_not_includes @channel.reload.roles, @role
+  end
+
+  test "an admin's DM loses access once the admin is disabled or demoted" do
+    admin = users(:acme_admin)
+    proxy = dm_proxy_for(admin)
+
+    [ { status: :disabled }, { status: :active, admin: false } ].each do |change|
+      admin.update!(change)
       with_token(proxy) do |headers|
         post "/api/v1/sandbox/admin/principals/#{@channel.oid}/roles",
              params: { data: { role_id: @role.oid } }, headers: headers, as: :json
@@ -121,19 +167,25 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
 
   private
 
-  def dm_proxy_for(user)
+  # The Slack channel catalog fixtures put the bot in T0123456789.
+  def dm_proxy_for(user, slack_team_id: "T0123456789")
+    proxy_for(user, kind: :slack_dm, slack_team_id: slack_team_id)
+  end
+
+  def proxy_for(user, kind:, slack_team_id:, slack_user_id: "U0123456789", slack_channel_id: nil)
+    name = "#{kind}-#{user.id}-#{slack_team_id}"
     principal = Principal.create!(
-      foreign_id: "slack-user-#{user.id}",
-      name: "DM #{user.email}",
-      kind: :slack_dm,
+      foreign_id: name.downcase,
+      name: name,
+      kind: kind,
+      slack_user_id: slack_user_id,
+      slack_team_id: slack_team_id,
+      slack_channel_id: slack_channel_id,
       console_user: user,
       created_by: users(:acme_admin)
     )
-    Proxy.create!(
-      name: "dm-proxy-#{user.id}",
-      principal: principal,
-      bearer_token_hash: Digest::SHA256.hexdigest("dm-#{user.id}")
-    )
+    Proxy.create!(name: "proxy-#{name}".downcase, principal: principal,
+                  bearer_token_hash: Digest::SHA256.hexdigest(name))
   end
 
   def with_token(proxy)

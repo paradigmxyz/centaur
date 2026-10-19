@@ -1,8 +1,10 @@
-# Lets a sandbox use selected admin API endpoints on behalf of the Console admin
-# its principal is linked to: a Slack DM with that admin, or that admin's
-# Console session. Channel and other unlinked principals are refused, so
-# permission changes can only be requested in a direct conversation with an
-# active admin. Include into a subclass of an Api::V1 admin controller.
+# Lets a sandbox use selected admin API endpoints on behalf of a Console admin,
+# but only from that admin's Slack DM with the bot. The principal must be a
+# Slack DM principal in the bot's own workspace (per the Slack channel catalog)
+# linked to an active admin. Channel, Slack Connect, and Console-user principals
+# are refused; Console-user principals also run scheduled tasks and MCP
+# sessions with no admin present. Include into a subclass of an Api::V1 admin
+# controller.
 module SandboxAdminAuthentication
   extend ActiveSupport::Concern
   include SandboxTokenAuthentication
@@ -22,15 +24,24 @@ module SandboxAdminAuthentication
     authenticate_sandbox_token!
     return if performed?
 
-    user = current_proxy.principal.console_user
-    unless user&.active? && user.admin?
-      return render_error(status: :forbidden, message: "sandbox principal is not linked to an active Console admin")
+    principal = current_proxy.principal
+    user = principal.console_user
+    unless principal.kind == "slack_dm" && home_slack_team?(principal.slack_team_id) &&
+        user&.active? && user.admin?
+      return render_error(
+        status: :forbidden,
+        message: "admin changes require a Slack DM from an active Console admin in the bot's workspace"
+      )
     end
 
     @sandbox_admin = user
     Rails.logger.info(
-      "sandbox_admin_request admin=#{user.oid} principal=#{current_proxy.principal.oid} " \
+      "sandbox_admin_request admin=#{user.oid} principal=#{principal.oid} " \
       "proxy=#{current_proxy.oid} method=#{request.method} path=#{request.path}"
     )
+  end
+
+  def home_slack_team?(team_id)
+    team_id.present? && SlackBotChannel.exists?(team_id: team_id)
   end
 end

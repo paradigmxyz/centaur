@@ -260,8 +260,7 @@ Rails.application.routes.draw do
             delete :remove_editor, path: "editors"
           end
         end
-        # Permission management for a sandbox whose principal is linked to an
-        # active Console admin (their Slack DM or Console session).
+        # Permission management from an active Console admin's Slack DM.
         namespace :admin do
           resources :principals, only: %i[index show] do
             collection do
