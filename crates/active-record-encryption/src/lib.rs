@@ -2,12 +2,13 @@ use std::{fmt, io::Read};
 
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
-    aead::{Aead, Payload, consts::U12},
+    aead::{Aead, Generate, Payload, consts::U12},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use flate2::read::ZlibDecoder;
 use pbkdf2::pbkdf2_hmac;
 use serde::Deserialize;
+use serde_json::json;
 use sha1::Sha1;
 use sha2::Sha256;
 
@@ -61,6 +62,29 @@ impl ActiveRecordEncryption {
         Self {
             keys: [sha256_key, sha1_key],
         }
+    }
+
+    /// Encrypts like a non-deterministic Rails `encrypts` attribute, with the
+    /// current (SHA-256-derived) key and no compression, which Rails reads.
+    pub fn encrypt(&self, plaintext: &str) -> Result<String, Error> {
+        let nonce =
+            Nonce::<U12>::try_generate().map_err(|_| Error("random IV generation failed"))?;
+        let mut ciphertext = Aes256Gcm::new_from_slice(&self.keys[0])
+            .map_err(|_| Error("invalid encryption key"))?
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext.as_bytes(),
+                    aad: b"",
+                },
+            )
+            .map_err(|_| Error("attribute encryption failed"))?;
+        let tag = ciphertext.split_off(ciphertext.len() - 16);
+        Ok(json!({
+            "p": STANDARD.encode(ciphertext),
+            "h": { "iv": STANDARD.encode(nonce), "at": STANDARD.encode(tag) },
+        })
+        .to_string())
     }
 
     pub fn decrypt(&self, encoded: &str) -> Result<String, Error> {
@@ -127,5 +151,18 @@ mod tests {
 
         let legacy = r#"{"p":"dSeLBWwnaY1TWU1x","h":{"iv":"SB1xJfmKBwS48kLd","at":"DW6Ug2HRtVMhkRn7VEBbFg=="}}"#;
         assert_eq!(encryption.decrypt(legacy).unwrap(), "known secret");
+    }
+
+    #[test]
+    fn encrypts_round_trip_values_with_a_fresh_iv() {
+        let encryption = ActiveRecordEncryption::new(
+            "dev_ar_encryption_primary_key_0000000000000000",
+            "dev_ar_encryption_key_derivation_salt_000000000",
+        );
+        for plaintext in ["", "known secret", &"long token ".repeat(40)] {
+            let first = encryption.encrypt(plaintext).unwrap();
+            assert_eq!(encryption.decrypt(&first).unwrap(), plaintext);
+            assert_ne!(first, encryption.encrypt(plaintext).unwrap());
+        }
     }
 }
