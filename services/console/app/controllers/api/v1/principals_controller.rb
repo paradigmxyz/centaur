@@ -40,15 +40,7 @@ module Api
       # PUT/PATCH upserts: an opaque id updates that record, any other identifier
       # is a foreign_id that is created when absent. foreign_id is immutable.
       def update
-        principal = resolve_for_upsert(Principal)
-        was_new = principal.new_record?
-        ActiveRecord::Base.transaction do
-          principal.assign_attributes(principal_params)
-          principal.link_console_user_by_slack_email if data_params.key?(:slack_email)
-          principal.apply_default_sandbox_capabilities!(principal_params) if was_new
-          principal.save!
-          replace_slack_channel_permissions!(principal) if data_params.key?(:slack_channel_permissions)
-        end
+        principal, was_new = upsert_with_retry
         render status: (was_new ? :created : :ok), json: { data: record_payload(principal) }
       rescue ActiveRecord::RecordInvalid => e
         render_validation_error(e.record)
@@ -75,6 +67,39 @@ module Api
       end
 
       private
+
+      # Concurrent first turns upsert the same new foreign_id. The loser fails
+      # the uniqueness validation or the unique index, so retry once as an
+      # update of the winner.
+      def upsert_with_retry
+        attempts = 0
+
+        begin
+          attempts += 1
+          principal = resolve_for_upsert(Principal)
+          was_new = principal.new_record?
+          assign_and_save!(principal, was_new)
+          [ principal, was_new ]
+        rescue ActiveRecord::RecordNotUnique, ActiveRecord::RecordInvalid => e
+          raise unless was_new && attempts < 2 && lost_create_race?(e)
+
+          retry
+        end
+      end
+
+      def lost_create_race?(error)
+        error.is_a?(ActiveRecord::RecordNotUnique) || error.record.errors.of_kind?(:foreign_id, :taken)
+      end
+
+      def assign_and_save!(principal, was_new)
+        ActiveRecord::Base.transaction do
+          principal.assign_attributes(principal_params)
+          principal.link_console_user_by_slack_email if data_params.key?(:slack_email)
+          principal.apply_default_sandbox_capabilities!(principal_params) if was_new
+          principal.save!
+          replace_slack_channel_permissions!(principal) if data_params.key?(:slack_channel_permissions)
+        end
+      end
 
       def record_payload(principal)
         {

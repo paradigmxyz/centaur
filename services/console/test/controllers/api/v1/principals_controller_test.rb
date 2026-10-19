@@ -327,6 +327,33 @@ module Api
         assert_response :unprocessable_content
       end
 
+      test "PUT updates the winner when a concurrent upsert creates the foreign_id first" do
+        calls = 0
+        PrincipalsController.define_method(:resolve_for_upsert) do |model|
+          calls += 1
+          return super(model) unless calls == 1
+
+          # The concurrent request commits after this one saw no record.
+          model.create!(foreign_id: "raced-slack-user", name: "winner", created_by: current_user)
+          model.new(foreign_id: "raced-slack-user")
+        end
+        PrincipalsController.send(:private, :resolve_for_upsert)
+
+        assert_difference -> { Principal.count } => 1 do
+          put api_v1_principal_url(id: "raced-slack-user"),
+              params: { data: { name: "Ada", kind: "slack_dm", slack_user_id: "U0123456789" } }.to_json,
+              headers: auth_headers
+        end
+        assert_response :ok
+
+        principal = Principal.find_by!(foreign_id: "raced-slack-user")
+        assert_equal "Ada", principal.name
+        assert_equal "U0123456789", principal.slack_user_id
+        assert_equal 2, calls
+      ensure
+        PrincipalsController.send(:remove_method, :resolve_for_upsert)
+      end
+
       test "POST returns 400 when the data key is missing" do
         post api_v1_principals_url, params: {}.to_json, headers: auth_headers
         assert_response :bad_request
