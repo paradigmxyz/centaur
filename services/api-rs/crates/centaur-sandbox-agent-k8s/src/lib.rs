@@ -45,6 +45,10 @@ const MANAGED_BY_VALUE: &str = "api-rs";
 const SANDBOX_FILES_VOLUME: &str = "sandbox-files";
 const ARTIFACT_GET_COMMAND: &str = "/usr/local/bin/centaur-artifact-get";
 const ARTIFACT_ERROR_MAX_BYTES: usize = 64 * 1024;
+/// Capacity of each attach stdin/stdout pipe. kube-rs services an attach
+/// connection from one loop that blocks while a pipe is full, so its 1 KiB
+/// default lets a modest burst of output in one direction stall the other.
+const ATTACH_STREAM_BUF_SIZE: usize = 1024 * 1024;
 // iron-control principal OID the sandbox's proxy binds to, stamped at create
 // so resume (which has only the sandbox id) can rebind without the spec or any
 // in-memory state. Survives pause and api-rs restarts.
@@ -552,12 +556,7 @@ impl AgentSandboxBackend {
             )));
         }
         let instance_id = observed.instance_id;
-        let params = AttachParams::default()
-            .container(self.config.container_name.clone())
-            .stdin(true)
-            .stdout(true)
-            .stderr(true)
-            .tty(false);
+        let params = sandbox_attach_params(&self.config.container_name);
         let mut attached = self
             .pods()
             .attach(id.as_str(), &params)
@@ -1010,6 +1009,17 @@ fn sandbox_paused_at(sandbox: &crd::Sandbox) -> Option<SystemTime> {
         .get(PAUSED_AT_ANNOTATION)?;
     let timestamp = raw.parse::<jiff::Timestamp>().ok()?;
     Some(SystemTime::from(timestamp))
+}
+
+fn sandbox_attach_params(container_name: &str) -> AttachParams {
+    AttachParams::default()
+        .container(container_name.to_owned())
+        .stdin(true)
+        .stdout(true)
+        .stderr(true)
+        .tty(false)
+        .max_stdin_buf_size(ATTACH_STREAM_BUF_SIZE)
+        .max_stdout_buf_size(ATTACH_STREAM_BUF_SIZE)
 }
 
 fn sandbox_status_from_pod(replicas: i32, pod: Option<&Pod>) -> SandboxStatus {
@@ -1583,6 +1593,15 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     use super::*;
+
+    #[test]
+    fn attach_params_raise_kube_stdio_buffers() {
+        let params = sandbox_attach_params("agent");
+        assert_eq!(params.container.as_deref(), Some("agent"));
+        assert!(params.stdin && params.stdout && params.stderr && !params.tty);
+        assert_eq!(params.max_stdin_buf_size, Some(ATTACH_STREAM_BUF_SIZE));
+        assert_eq!(params.max_stdout_buf_size, Some(ATTACH_STREAM_BUF_SIZE));
+    }
 
     #[test]
     fn artifact_command_failures_are_safe_tool_rejections() {

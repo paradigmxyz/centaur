@@ -26,7 +26,7 @@ sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 time.workspace = true
-tokio = { workspace = true, features = ["io-util", "process"] }
+tokio = { workspace = true, features = ["io-util", "process", "sync"] }
 tracing.workspace = true
 uuid.workspace = true
 
