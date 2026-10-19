@@ -29,12 +29,12 @@ returns trigger
 language plpgsql
 as $$
 begin
-    new.content_hash := md5(jsonb_build_array(
+    new.content_hash := encode(sha256(convert_to(jsonb_build_array(
         new.title,
         new.body,
         extract(epoch from new.occurred_at),
         new.metadata
-    )::text);
+    )::text, 'UTF8')), 'hex');
     if tg_op = 'UPDATE' then
         new.created_at := old.created_at;
         new.updated_at := now();
