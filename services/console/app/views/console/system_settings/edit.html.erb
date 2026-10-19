@@ -74,6 +74,21 @@
   </section>
 
   <section class="form-section">
+    <h2 class="form-section-heading">Slack Connect</h2>
+    <label class="block max-w-xl">
+      <span class="form-label">Allowed external workspaces</span>
+      <%= form.text_area :slack_external_team_ids_text,
+                         rows: 4,
+                         placeholder: "T01234567",
+                         spellcheck: false,
+                         class: "form-input font-mono #{field_error_class(@system_setting, :slack_external_team_ids)}" %>
+      <span class="form-hint">
+        Slack team ids, one per line or comma-separated. Centaur ignores messages and actions from any other external workspace.
+      </span>
+    </label>
+  </section>
+
+  <section class="form-section">
     <h2 class="form-section-heading">Default Roles</h2>
     <p class="mb-4 text-sm text-zinc-500">
       New principals with no preassigned roles receive the selected roles. Existing principals are unchanged.
