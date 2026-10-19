@@ -65,6 +65,7 @@ pub fn conversation_types(scopes: &[String], allowed: &[String]) -> Vec<&'static
 pub enum SlackMethod {
     UsersConversations,
     ConversationsHistory,
+    ConversationsMembers,
     ConversationsReplies,
     UsersList,
 }
@@ -74,6 +75,7 @@ impl SlackMethod {
         match self {
             Self::UsersConversations => "users.conversations",
             Self::ConversationsHistory => "conversations.history",
+            Self::ConversationsMembers => "conversations.members",
             Self::ConversationsReplies => "conversations.replies",
             Self::UsersList => "users.list",
         }
@@ -86,6 +88,8 @@ impl SlackMethod {
             Self::UsersConversations | Self::ConversationsHistory | Self::ConversationsReplies => {
                 50.0
             }
+            // Tier 4.
+            Self::ConversationsMembers => 100.0,
             // Tier 2.
             Self::UsersList => 20.0,
         }
@@ -151,6 +155,15 @@ pub struct ConversationsPage {
 pub struct MessagesPage {
     #[serde(default)]
     pub messages: Vec<Value>,
+    #[serde(default)]
+    pub response_metadata: ResponseMetadata,
+}
+
+/// A page of `conversations.members`: the members' Slack user IDs.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MembersPage {
+    #[serde(default)]
+    pub members: Vec<String>,
     #[serde(default)]
     pub response_metadata: ResponseMetadata,
 }

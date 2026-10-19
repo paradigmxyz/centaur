@@ -18,8 +18,8 @@ use crate::{
     credentials::ConsoleCredentials,
     errors::{is_rejected, rejected},
     slack::{
-        AuthTest, Conversation, ConversationsPage, MessagesPage, SlackClient, SlackMethod,
-        SlackReply, User, UsersPage,
+        AuthTest, Conversation, ConversationsPage, MembersPage, MessagesPage, SlackClient,
+        SlackMethod, SlackReply, User, UsersPage,
     },
     slack_documents::ConversationProjectParams,
     slack_files,
@@ -38,6 +38,8 @@ const CONVERSATIONS_PAGE_SIZE: &str = "999";
 const MESSAGES_PAGE_SIZE: &str = "200";
 /// Slack recommends at most 200 users per `users.list` page.
 const USERS_PAGE_SIZE: &str = "200";
+/// Slack recommends at most 200 members per `conversations.members` page.
+const MEMBERS_PAGE_SIZE: &str = "200";
 /// Each history sync rereads at least this much recent history, so edits and
 /// new replies to threads started within it are picked up. Replies to older
 /// threads are not.
@@ -304,8 +306,9 @@ async fn discover(
     }
 }
 
-/// Stores a conversation's history since its last sync, rereading at least
-/// the thread refresh window, and syncs each thread whose replies changed.
+/// Records a conversation's members, then stores its history since its last
+/// sync, rereading at least the thread refresh window, and syncs each thread
+/// whose replies changed.
 async fn sync_conversation(
     state: &SlackTaskState,
     params: ConversationSyncParams,
@@ -343,6 +346,32 @@ async fn sync_conversation(
             .credentials
             .slack_credential(params.credential_id)
             .await?;
+        let mut members = Vec::new();
+        let mut cursor = String::new();
+        for page_number in 0.. {
+            let page: MembersPage = paced_call(
+                &state.slack,
+                &state.limiter,
+                ctx,
+                &format!("slack.conversations.members.{page_number}"),
+                &params.team_id,
+                SlackMethod::ConversationsMembers,
+                &credential.access_token,
+                &[
+                    ("channel", conversation_id.to_owned()),
+                    ("limit", MEMBERS_PAGE_SIZE.to_owned()),
+                    ("cursor", cursor.clone()),
+                ],
+            )
+            .await?;
+            members.extend(page.members);
+            cursor = page.response_metadata.next_cursor;
+            if cursor.is_empty() {
+                break;
+            }
+        }
+        record_members(&state.pool, conversation_id, &members).await?;
+
         let oldest = format!(
             "{}.{:06}",
             window.oldest.timestamp(),
@@ -790,6 +819,54 @@ async fn record_discovery(
     Ok(())
 }
 
+/// Replaces a conversation's members with those Slack listed.
+async fn record_members(pool: &PgPool, conversation_id: &str, members: &[String]) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    // Lock the conversation so reconciliation cannot remove it meanwhile.
+    let observed: Option<bool> = sqlx::query_scalar(
+        r#"
+        SELECT TRUE
+        FROM company_context_system.slack_conversations
+        WHERE conversation_id = $1
+        FOR KEY SHARE
+        "#,
+    )
+    .bind(conversation_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if observed.is_none() {
+        return Err(rejected(format!(
+            "Slack conversation {conversation_id} is no longer observed"
+        )));
+    }
+    sqlx::query(
+        r#"
+        DELETE FROM company_context_data.slack_conversation_members
+        WHERE conversation_id = $1
+          AND NOT (user_id = ANY($2::text[]))
+        "#,
+    )
+    .bind(conversation_id)
+    .bind(members)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO company_context_data.slack_conversation_members (conversation_id, user_id)
+        SELECT $1, user_id
+        FROM unnest($2::text[]) AS listed(user_id)
+        WHERE user_id <> ''
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(conversation_id)
+    .bind(members)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Claims a conversation's history for a sync task. Returns the span already
 /// synchronized, or `None` if the conversation is gone or another live sync
 /// holds it.
@@ -1225,6 +1302,52 @@ mod tests {
             active_observations(pool).await,
             [(1, "G1".to_owned(), "U1".to_owned())]
         );
+
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    async fn members_are_replaced_by_each_sync_and_removed_with_their_conversation() {
+        let Ok(database_url) = env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
+            eprintln!("skipping: set COMPANY_CONTEXT_TEST_DATABASE_URL to a ParadeDB Postgres URL");
+            return;
+        };
+        let database = TestDatabase::create(&database_url, "slack_members").await;
+        let pool = &database.pool;
+        record_discovery(
+            pool,
+            1,
+            &identity("U1"),
+            &[conversation("C1", "general", false)],
+        )
+        .await
+        .unwrap();
+        let members = || async {
+            sqlx::query_scalar::<_, String>(
+                "SELECT user_id FROM company_context_data.slack_conversation_members ORDER BY 1",
+            )
+            .fetch_all(pool)
+            .await
+            .unwrap()
+        };
+        let listed = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+
+        record_members(pool, "C1", &listed(&["U1", "U2"]))
+            .await
+            .unwrap();
+        assert_eq!(members().await, ["U1", "U2"]);
+        // A member who left loses membership at the next sync.
+        record_members(pool, "C1", &listed(&["U1", "U3"]))
+            .await
+            .unwrap();
+        assert_eq!(members().await, ["U1", "U3"]);
+
+        remove_unobserved(pool, &[]).await.unwrap();
+        assert!(members().await.is_empty());
+        let error = record_members(pool, "C1", &listed(&["U1"]))
+            .await
+            .unwrap_err();
+        assert!(is_rejected(&error));
 
         database.drop().await;
     }
