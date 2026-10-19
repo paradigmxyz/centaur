@@ -102,10 +102,6 @@ spec:
             - name: SLACKBOTV2_ASSISTANT_STATUS
               value: {{ .Values.slackbotv2.assistantStatus | quote }}
 {{- end }}
-{{- if .Values.slackbotv2.externalOrgAllowlist }}
-            - name: SLACKBOT_EXTERNAL_ORG_ALLOWLIST
-              value: {{ .Values.slackbotv2.externalOrgAllowlist | quote }}
-{{- end }}
 {{- if .Values.slackbotv2.triggerBotAllowlist }}
             - name: SLACKBOT_TRIGGER_BOT_ALLOWLIST
               value: {{ .Values.slackbotv2.triggerBotAllowlist | quote }}

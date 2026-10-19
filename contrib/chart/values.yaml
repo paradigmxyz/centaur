@@ -791,7 +791,6 @@ slackbotv2:
   # Public/local MCP endpoint shown in MCP SSO setup messages. The default
   # assumes users connect through `kubectl port-forward ... 3000:8080`.
   mcpPublicUrl: "http://localhost:3000"
-  externalOrgAllowlist: ""
   triggerBotAllowlist: ""
   # Per-channel default persona / harness / model / provider / reasoning, keyed
   # by Slack conversation id (the C…/G…/D… id). Each value is an object of

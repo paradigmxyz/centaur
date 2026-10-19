@@ -120,6 +120,12 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sDATABASE_URL" $prefix }}
+{{- with .Values.slackbotv2.externalOrgAllowlist }}
+            # Deprecated: seeds the Console's Slack Connect allowlist once when
+            # upgrading from the Helm value. Manage it in Console Settings.
+            - name: SLACKBOT_EXTERNAL_ORG_ALLOWLIST
+              value: {{ . | quote }}
+{{- end }}
             - name: CENTAUR_CONSOLE_SLACKBOTV2_USER_NAME
               value: {{ .Values.slackbotv2.userName | quote }}
             - name: CENTAUR_CONSOLE_SLACK_BOT_TOKEN

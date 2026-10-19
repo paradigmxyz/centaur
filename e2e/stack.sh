@@ -151,6 +151,7 @@ up() {
     seed_broker_credentials
   fi
   wait "$helm_pid"
+  seed_console_settings
   kubectl apply -f e2e/infra/test-access.yaml > /dev/null
   wait_for_test_access
 }
@@ -168,6 +169,12 @@ wait_for_test_access() {
   done
   echo "api-rs, console, and Postgres NodePorts did not become reachable" >&2
   return 1
+}
+
+# Admits EXTERNAL_TEAM in e2e/fakes/slack-fixture.ts, a Slack Connect partner.
+seed_console_settings() {
+  kubectl -n "$NAMESPACE" exec "deploy/${RELEASE}-centaur-console" -- bin/rails runner \
+    "SystemSetting.current.update!(slack_external_team_ids: %w[TE2EEXT01])"
 }
 
 # Stores the subscription access tokens as token-broker would after a refresh.
