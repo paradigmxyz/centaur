@@ -260,6 +260,19 @@ Rails.application.routes.draw do
             delete :remove_editor, path: "editors"
           end
         end
+        # Role management for a sandbox whose principal is linked to an active
+        # Console admin (their Slack DM or Console session).
+        namespace :admin do
+          resources :principals, only: %i[index show] do
+            collection do
+              get "lookup/:foreign_id", action: :lookup, as: :lookup, constraints: { foreign_id: /[^\/]+/ }
+            end
+            resources :roles, only: %i[index create destroy], controller: :principal_roles
+          end
+          resources :roles, only: %i[index show] do
+            collection { get "lookup/:foreign_id", action: :lookup, as: :lookup, constraints: { foreign_id: /[^\/]+/ } }
+          end
+        end
       end
     end
   end
