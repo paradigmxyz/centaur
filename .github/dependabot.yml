@@ -156,16 +156,16 @@ updates:
         versions:
           - ">= 0.3.6"
       # The codex git dependency pins rama-core 0.3.0-alpha.4, whose caret requirements
-      # on these crates resolve to the incompatible stable 0.3.0 release.
+      # on these crates also match the incompatible 0.3.0 prereleases and stable release.
       - dependency-name: rama-error
         versions:
-          - ">= 0.3.0"
+          - "> 0.3.0-alpha.4"
       - dependency-name: rama-macros
         versions:
-          - ">= 0.3.0"
+          - "> 0.3.0-alpha.4"
       - dependency-name: rama-utils
         versions:
-          - ">= 0.3.0"
+          - "> 0.3.0-alpha.4"
     groups:
       harness-server-dependencies:
         patterns:
