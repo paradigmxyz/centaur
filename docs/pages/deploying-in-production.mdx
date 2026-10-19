@@ -184,7 +184,7 @@ component that acts on the mode.
 
 `access_token` mode routes Codex through a ChatGPT account rather than a raw
 API key. The console owns the refresh token as the `openai-codex` broker
-credential: the token-broker service refreshes it and mints short-lived access
+credential: its background worker refreshes it and mints short-lived access
 tokens, which the per-sandbox proxy injects on outbound requests so the
 sandbox never sees them. The refresh token is stored encrypted in the
 console's own database. It is not read from or synced to your secrets
