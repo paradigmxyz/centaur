@@ -3,6 +3,8 @@ import json
 import httpx
 import pytest
 from client import (
+    SANDBOX_ADMIN_PRINCIPALS_PATH,
+    SANDBOX_ADMIN_ROLES_PATH,
     SANDBOX_OAUTH_APPS_PATH,
     SANDBOX_PERMISSIONS_PATH,
     SANDBOX_SCHEDULED_TASKS_PATH,
@@ -240,3 +242,40 @@ def test_health_returns_identity_details():
             "principal_id": "principal-1",
         },
     }
+
+
+def test_admin_assign_role_resolves_foreign_ids_before_assigning():
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/lookup/slack-channel-c123":
+            return json_response({"data": {"id": "prn_123"}})
+        if request.url.path == f"{SANDBOX_ADMIN_ROLES_PATH}/lookup/tool-github":
+            return json_response({"data": {"id": "role_456"}})
+        assert request.method == "POST"
+        assert request.url.path == f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/prn_123/roles"
+        assert json.loads(request.content) == {"data": {"role_id": "role_456"}}
+        return json_response({"data": {"id": "role_456", "foreign_id": "tool-github"}}, 201)
+
+    result = make_client(handler).admin_assign_role("slack-channel-c123", "tool-github")
+
+    assert result == {"id": "role_456", "foreign_id": "tool-github"}
+    assert len(requests) == 3
+
+
+def test_admin_roles_follows_pagination():
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params["page"])
+        return json_response({"data": [{"id": f"role_{page}"}], "meta": {"total_pages": 2}})
+
+    assert make_client(handler).admin_roles() == [{"id": "role_1"}, {"id": "role_2"}]
+
+
+def test_admin_requests_surface_forbidden_errors():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        message = "sandbox principal is not linked to an active Console admin"
+        return json_response({"error": {"message": message}}, status_code=403)
+
+    with pytest.raises(RuntimeError, match="HTTP 403"):
+        make_client(handler).admin_unassign_role("prn_123", "role_456")

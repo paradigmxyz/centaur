@@ -15,6 +15,18 @@ app = typer.Typer(
     help="Inspect Console permissions and manage the current user's scheduled tasks",
 )
 console = Console()
+admin_app = typer.Typer(
+    help="Manage principal roles. Works only in a DM or Console session of an active Console admin."
+)
+app.add_typer(admin_app, name="admin")
+
+URL_OPTION = typer.Option(None, "--url", help="centaur-console base URL")
+BEARER_TOKEN_OPTION = typer.Option(
+    None,
+    "--bearer-token",
+    help="Local/debug bearer token override",
+    envvar="CENTAUR_CONSOLE_BEARER_TOKEN",
+)
 
 
 def get_client(
@@ -198,6 +210,71 @@ def run_scheduled_task(
     with get_client(url=url, bearer_token=bearer_token) as client:
         result = client.run_scheduled_task(task_id)
     console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("principals")
+def admin_principals(
+    slack_channel_id: str | None = typer.Option(
+        None, "--slack-channel", help="Only principals bound to this Slack channel ID"
+    ),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """List principals."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_principals(slack_channel_id=slack_channel_id)
+    console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("principal")
+def admin_principal(
+    principal: str = typer.Argument(..., help="Principal OID or foreign ID"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Show a principal and the roles assigned to it."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_principal(principal)
+    console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("roles")
+def admin_roles(
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """List every role that can be assigned."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_roles()
+    console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("assign-role")
+def admin_assign_role(
+    principal: str = typer.Argument(..., help="Principal OID or foreign ID"),
+    role: str = typer.Argument(..., help="Role OID or foreign ID, such as tool-github"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Assign a role to a principal."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_assign_role(principal, role)
+    console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("unassign-role")
+def admin_unassign_role(
+    principal: str = typer.Argument(..., help="Principal OID or foreign ID"),
+    role: str = typer.Argument(..., help="Role OID or foreign ID"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Remove a role from a principal."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        client.admin_unassign_role(principal, role)
+    console.print_json(
+        json.dumps({"data": {"principal": principal, "role": role, "removed": True}})
+    )
 
 
 @app.command()
