@@ -8,6 +8,10 @@ It also indexes Granola meeting notes (title, summary, owner, and attendees) thr
 
 It also discovers the public and private Slack channels (and, when enabled, direct messages) each user belongs to, through the same per-user Slack broker credentials the Rails Console Slack DM sync uses. The app's bot token (`SLACK_BOT_TOKEN`) is synced as one more credential: it discovers the public and private channels the bot is a member of and can sync their history and files, but never its direct messages. The bot is not a principal, so channels only it observes are indexed without being visible to anyone until a user credential observes them too. While `COMPANY_CONTEXT_SLACK_USER_IDS` is set, the bot is synced only if the limit lists the bot's Slack user ID. Each discovery records the credential's Slack identity and its channel memberships; channels that no live Slack credential still observes are removed, along with their messages. The first discovery each cycle to list a conversation syncs its message history. A sync reads the conversation's configured history days (`COMPANY_CONTEXT_SLACK_HISTORY_DAYS`, overridden per conversation by `COMPANY_CONTEXT_SLACK_CHANNEL_HISTORY_DAYS`) whenever part of that span has not been synchronized yet, so raising a value backfills the older history; lowering one keeps messages already synchronized. Otherwise it reads from its previous sync, always rereading the last 72 hours so edits within that window are picked up. Threads are synced whenever a parent message read this way shows a new reply; replies to threads started more than 72 hours earlier are not picked up. Only one sync reads a conversation at a time. Messages are stored privately in the system schema. Each discovery cycle also lists the workspace users through the app's bot token (`SLACK_BOT_TOKEN`), so documents show names instead of user IDs; the bot token needs the `users:read` scope and belongs to the same Slack app, so it shares the same rate-limit schedule. Users are removed once no live credential in their workspace remains. Slack tasks run on their own `company_context_slack` queue and worker, except thread syncs, which run in order on the `company_context_slack_threads` queue so a large backlog of threads does not delay discovery and history syncs.
 
+Producers can also publish documents directly through the ingestion API (see
+[Ingestion](#ingestion)). Published documents are public: every principal can
+read them.
+
 After each sync, the conversation's history is projected into documents on the main queue. Each channel's UTC day is rendered as a transcript in which thread replies follow their parent, in the day the thread started. Joins, topic changes, and similar system messages are left out. The transcript is split into chunks of at most `COMPANY_CONTEXT_CHUNK_CHARS` characters that together cover the whole day: chunks break between messages, a thread split across chunks repeats the start of its parent, and only a single message longer than a chunk is split. Each chunk starts with its channel, date, and time range, and is published as its own document with its own embedding. A day is rendered again when its messages, its channel's name, or the name of a user it mentions changes, and republished only when its content changes; vectors are reused for chunks whose text is unchanged. Slack documents are exposed to retrieval only through the query endpoints.
 
 Files attached to projected messages are indexed as their own documents, not in the channel day transcripts, which only name them. Projection records which messages share each file, so a file shared in several channels is extracted once. Each file is downloaded with a live credential observing one of its conversations whose scopes include `files:read`; without one, files wait until such a credential syncs. A credential Slack refuses a file to is not used for that file again until the file changes. Files whose extraction or publication has not finished within an hour are enqueued again by their conversation's next projection. PDFs are extracted with `pdftotext`; Word, PowerPoint, and Excel files (`docx`, `pptx`, `xlsx`), OpenDocument text, RTF, and EPUB with sandboxed `pandoc`; and snippets and other text files directly. Legacy binary Office formats, images, canvases, and external files such as Google Docs links are not indexed. Downloaded bytes are discarded after extraction, and only the extracted text, chunked like Drive documents, is stored. A file is extracted again when Slack reports different content for it, and keeps its published text until the new version replaces it; a version that cannot be indexed removes it. Its documents are also removed when Slack reports it deleted, and the file is removed once no stored message shares it.
@@ -17,7 +21,7 @@ Slack limits each Web API method per workspace per app, and every token the app 
 The service owns these Postgres schemas:
 
 - `company_context_system`: private cursors, staging (including Slack messages and users), and processing state.
-- `company_context_data`: retrieval-facing Drive documents, Calendar events, Granola notes, Slack channel and file documents, access observations (including Slack identities, channel memberships, and the conversations each Slack file is shared in), and embeddings. The query endpoints read only this schema, as the `centaur_company_context_v2_query` role, which can only select from it; the service switches to that role for each query transaction, so its login role must be able to grant itself membership (`CREATEROLE` or superuser).
+- `company_context_data`: retrieval-facing Drive documents, Calendar events, Granola notes, Slack channel and file documents, published documents, access observations (including Slack identities, channel memberships, and the conversations each Slack file is shared in), and embeddings. The query endpoints read only this schema, as the `centaur_company_context_v2_query` role, which can only select from it; the service switches to that role for each query transaction, so its login role must be able to grant itself membership (`CREATEROLE` or superuser).
 
 Documents are exposed to retrieval only through the query endpoints; no other database role can read them. The Helm deployment is gated by `experimentalCompanyContext.enabled` until it is ready for production.
 
@@ -98,6 +102,7 @@ users or conversations still observed.
 Common optional settings:
 
 - `IRON_CONTROL_DATABASE_NAME`
+- `COMPANY_CONTEXT_INGEST_API_KEY`: key, at least 32 characters, that producers send to publish through the ingestion API. Unset disables publishing. The Helm deployment reads it from the shared Kubernetes Secret when present.
 - `CENTAUR_API_JWT_AUDIENCE` (default `centaur-api`) and `CENTAUR_API_JWT_ISSUER` (default `centaur-console`): must match the Console's API JWT settings
 - `COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG` (default `google`)
 - `COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG` (default `granola`)
@@ -151,6 +156,10 @@ indexed PDFs are not downloaded again.
 - `GET /metrics`
 - `POST /query`
 - `GET /documents/{document_id}`
+- `PUT /sources/{source}/documents/{external_id}`
+- `DELETE /sources/{source}/documents/{external_id}`
+- `POST /sources/{source}/syncs`
+- `POST /sources/{source}/syncs/{sync_id}/complete`
 
 Both query endpoints are authenticated with the same principal API JWT the
 Console mints for api-rs (`Authorization: Bearer <jwt>`); iron-proxy injects it
@@ -164,7 +173,7 @@ and principal labels do not count. A document is visible only while an active
 broker observation for one of those identities still reaches its Drive file,
 Slack conversation (for Slack files, any conversation the file is shared in),
 or Granola note; a Calendar event only to the Google identity it was synced
-for. A principal without one of those identities sees no documents
+for. Published documents are visible to every principal. A principal without one of those identities sees no documents
 of the corresponding types. Disabling an OAuth app in the Console removes the
 corresponding identity, so its documents stop being returned without being
 removed from the index.
@@ -174,23 +183,25 @@ visible to the principals whose credentials once observed it until those
 credentials are dead or deleted.
 
 Errors return `{"error": "..."}` with status 400 for an invalid request, 401
-for a missing or invalid token, 403 for a principal unknown to the Console, and
-404 for a document that does not exist or is not visible.
+for a missing or invalid token or API key, 403 for a principal unknown to the
+Console or when publishing is not configured, 404 for a document or sync that does not
+exist or is not visible, and 409 for a sync that cannot accept the request.
 
 ### `POST /query`
 
 Searches the visible Slack channel documents, Slack file documents, Drive
-documents, Calendar events, and Granola notes.
+documents, Calendar events, Granola notes, and published documents.
 
 ```json
 {
   "query": "falcon launch plan",
   "filters": {
-    "types": ["slack_message", "slack_file", "drive_doc", "calendar_event", "granola_note"],
+    "types": ["slack_message", "slack_file", "drive_doc", "calendar_event", "granola_note", "published_doc"],
     "occurred_after": "2024-01-01T00:00:00Z",
     "occurred_before": "2024-02-01T00:00:00Z",
     "channel_ids": ["C0123456789"],
-    "file_ids": ["F0123456789"]
+    "file_ids": ["F0123456789"],
+    "sources": ["archive"]
   },
   "limit": 10
 }
@@ -204,16 +215,19 @@ Filters combine with AND:
   timestamps. A Slack channel document matches when its messages overlap the
   window; a Slack file matches by when it was created, a Drive document by
   when it was last modified, a Calendar event when it overlaps the window, its
-  end being exclusive (a recurring event by its first occurrence), and a
-  Granola note by when its meeting occurred.
+  end being exclusive (a recurring event by its first occurrence), a
+  Granola note by when its meeting occurred, and a published document by its
+  `occurred_at`.
   Documents without a timestamp do not match a window.
 - `channel_ids`: Slack conversation IDs, at most 100. Searches only Slack
   messages in these conversations and Slack files shared in them; a file
   matches only through a conversation the principal can see.
 - `file_ids`: Slack or Drive file IDs, at most 100. Searches only these files'
   documents.
+- `sources`: publishing sources, at most 100. Searches only documents
+  published to them.
 
-`channel_ids` and `file_ids` restrict the search to the types they apply to; a
+`channel_ids`, `file_ids`, and `sources` restrict the search to the types they apply to; a
 request whose types cannot satisfy every filter is rejected. `limit` defaults
 to 10 and is at most 50; there is no pagination, so narrow the filters instead.
 Keyword (BM25) and embedding similarity ranks are combined with reciprocal rank
@@ -243,12 +257,58 @@ score, comparable only within one response.
 conversation, channel, and message times for `slack_message`; file ID and file
 type for `slack_file`; file ID, document type, MIME type, and pages for
 `drive_doc`; calendar ID, event ID, start and end times, and organizer for
-`calendar_event`; note ID, owner, and attendees for `granola_note`.
+`calendar_event`; note ID, owner, and attendees for `granola_note`; source,
+external ID, and author for `published_doc`.
 
 ### `GET /documents/{document_id}`
 
 Returns one visible document, by a `document_id` from `POST /query`, in the
 same shape as a query result without `score`.
+
+## Ingestion
+
+Producers, such as a scheduled workflow, publish public documents to a named
+source. A source name is 1-64 lowercase letters, digits, or hyphens. Every
+request must send `COMPANY_CONTEXT_INGEST_API_KEY` in the `X-Api-Key` header;
+any holder of the key can write to every source.
+
+### `PUT /sources/{source}/documents/{external_id}`
+
+Publishes a document under the producer's ID for it, replacing any previous
+version. URL-encode the ID; it is 1-512 bytes without control characters.
+
+```json
+{
+  "title": "Launch retro",
+  "body": "What went well ...",
+  "url": "https://notes.example.com/123",
+  "author": "Ada",
+  "occurred_at": "2024-01-02T09:00:00Z",
+  "sync_id": "8a1c3d0e-..."
+}
+```
+
+Only `body` is required; it is at most 1,000,000 bytes. `title` is at most
+1,000 characters, `author` at most 500, and `url` an http or https URL of at
+most 2,048 characters. Unknown fields are rejected. The body is chunked and
+embedded like other documents; republishing unchanged fields is not embedded
+again. The response is `{"status": "published" | "unchanged", "chunks": N}`.
+An embeddings failure fails the request, which can be retried.
+
+### `DELETE /sources/{source}/documents/{external_id}`
+
+Removes a document. Returns `{"deleted": true | false}`.
+
+### Full syncs
+
+To replace a source's documents, `POST /sources/{source}/syncs` returns a
+`sync_id`. Publish every document with that `sync_id`, then
+`POST /sources/{source}/syncs/{sync_id}/complete`, which removes the source's
+documents the sync did not publish and returns `{"removed": N}`. Completing a
+sync again removes nothing. Starting a sync supersedes any sync in progress:
+the superseded sync can no longer complete (409), and publishing to a completed
+sync is rejected (409). Documents published without the `sync_id` while a sync
+runs are removed when it completes.
 
 ## Development
 

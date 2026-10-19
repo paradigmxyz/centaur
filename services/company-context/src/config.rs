@@ -49,6 +49,7 @@ pub const SLACK_DOCUMENT_ID_PREFIX: &str = "slack:";
 pub const SLACK_FILE_DOCUMENT_ID_PREFIX: &str = "slack-file:";
 pub const GRANOLA_DOCUMENT_ID_PREFIX: &str = "granola:";
 pub const GOOGLE_CALENDAR_DOCUMENT_ID_PREFIX: &str = "google-calendar:";
+pub const PUBLISHED_DOCUMENT_ID_PREFIX: &str = "published:";
 /// Slack conversation types that can be synchronized.
 pub const SLACK_CONVERSATION_TYPES: [&str; 3] = ["public_channel", "private_channel", "im"];
 
@@ -213,6 +214,15 @@ pub struct Config {
         hide_env_values = true
     )]
     pub jwt_signing_secret: String,
+    /// Key producers send in the `X-Api-Key` header to publish through the
+    /// ingestion API. Unset disables publishing.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_INGEST_API_KEY",
+        value_parser = api_key,
+        hide_env_values = true
+    )]
+    pub ingest_api_key: Option<String>,
     #[arg(
         long,
         env = "CENTAUR_API_JWT_AUDIENCE",
@@ -466,6 +476,23 @@ fn channel_history_days(value: &str) -> Result<(String, usize), String> {
     Ok((nonempty(channel_id)?, history_days(days.trim())?))
 }
 
+/// Whether `value` is a valid publishing source name.
+pub fn is_source_name(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+fn api_key(value: &str) -> Result<String, String> {
+    let value = nonempty(value)?;
+    if value.chars().count() < 32 {
+        return Err("value must be at least 32 characters".to_owned());
+    }
+    Ok(value)
+}
+
 fn history_days(value: &str) -> Result<usize, String> {
     let value = positive_usize(value)?;
     if value > 36_500 {
@@ -630,6 +657,14 @@ mod tests {
             args.extend(["--slack-channel-history-days", invalid]);
             assert!(Config::try_parse_from(args).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn ingest_api_key_must_be_long() {
+        let config = Config::try_parse_from(required_args()).unwrap();
+        assert_eq!(config.ingest_api_key, None);
+        assert!(api_key(&"k".repeat(32)).is_ok());
+        assert!(api_key(&"k".repeat(31)).is_err());
     }
 
     #[test]

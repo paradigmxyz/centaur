@@ -6,7 +6,7 @@
 //! Slack user ID, or for the subject of a Google or Granola credential granted
 //! to it, still reaches the document's file, conversation, or Granola note.
 //! Calendar events are stored per Google identity, as Google showed them to it,
-//! and are visible only to that identity.
+//! and are visible only to that identity. Published documents are public.
 //! Queries run as [`QUERY_ROLE`], which can only read `company_context_data`.
 
 use std::{
@@ -35,7 +35,8 @@ use tracing::{error, warn};
 use crate::{
     config::{
         Config, GOOGLE_CALENDAR_DOCUMENT_ID_PREFIX, GOOGLE_DRIVE_DOCUMENT_ID_PREFIX,
-        GRANOLA_DOCUMENT_ID_PREFIX, SLACK_DOCUMENT_ID_PREFIX, SLACK_FILE_DOCUMENT_ID_PREFIX,
+        GRANOLA_DOCUMENT_ID_PREFIX, PUBLISHED_DOCUMENT_ID_PREFIX, SLACK_DOCUMENT_ID_PREFIX,
+        SLACK_FILE_DOCUMENT_ID_PREFIX,
     },
     credentials::{ConsoleCredentials, PrincipalIdentity},
     embeddings::EmbeddingsClient,
@@ -94,6 +95,9 @@ pub struct Filters {
     /// Slack or Drive file IDs. Limits the search to these files' documents.
     #[serde(default)]
     pub file_ids: Vec<String>,
+    /// Publishing sources. Limits the search to documents published to them.
+    #[serde(default)]
+    pub sources: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -104,10 +108,11 @@ pub enum DataType {
     DriveDoc,
     CalendarEvent,
     GranolaNote,
+    PublishedDoc,
 }
 
 /// How one data type's documents are selected. Queries bind the principal's
-/// subjects to `$2` and the filters to `$4` through `$7`.
+/// subjects to `$2` and the filters to `$4` through `$8`.
 struct Source {
     /// Prefix of the type's document IDs.
     id_prefix: &'static str,
@@ -126,6 +131,8 @@ struct Source {
     in_channels: Option<&'static str>,
     /// The type's file ID column, or `None` if it has none.
     file_id: Option<&'static str>,
+    /// The type's publishing source column, or `None` if it has none.
+    source: Option<&'static str>,
 }
 
 impl Source {
@@ -137,11 +144,16 @@ impl Source {
             .file_id
             .map(|column| format!("{column} = ANY($7)"))
             .unwrap_or_else(|| "FALSE".to_owned());
+        let in_sources = self
+            .source
+            .map(|column| format!("{column} = ANY($8)"))
+            .unwrap_or_else(|| "FALSE".to_owned());
         format!(
             r#"($4::timestamptz IS NULL OR {ends_at} {ends_after} $4)
                AND ($5::timestamptz IS NULL OR {starts_at} < $5)
                AND ($6::text[] IS NULL OR {in_channels})
-               AND ($7::text[] IS NULL OR {in_files})"#,
+               AND ($7::text[] IS NULL OR {in_files})
+               AND ($8::text[] IS NULL OR {in_sources})"#,
             ends_at = self.ends_at,
             ends_after = if self.end_exclusive { ">" } else { ">=" },
             starts_at = self.starts_at,
@@ -150,17 +162,19 @@ impl Source {
 }
 
 impl DataType {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::SlackMessage,
         Self::SlackFile,
         Self::DriveDoc,
         Self::CalendarEvent,
         Self::GranolaNote,
+        Self::PublishedDoc,
     ];
 
-    /// The principal's identities the type's observations are keyed by.
-    fn subjects(self, identity: &PrincipalIdentity) -> Vec<&str> {
-        match self {
+    /// The principal's identities the type's observations are keyed by, or
+    /// `None` if the principal can see none of the type's documents.
+    fn subjects(self, identity: &PrincipalIdentity) -> Option<Vec<&str>> {
+        let subjects: Vec<&str> = match self {
             Self::SlackMessage | Self::SlackFile => {
                 identity.slack_user_id.as_deref().into_iter().collect()
             }
@@ -174,7 +188,10 @@ impl DataType {
                 .iter()
                 .map(String::as_str)
                 .collect(),
-        }
+            // Public: visible without an identity.
+            Self::PublishedDoc => return Some(Vec::new()),
+        };
+        (!subjects.is_empty()).then_some(subjects)
     }
 
     fn source(self) -> Source {
@@ -204,6 +221,7 @@ impl DataType {
                 end_exclusive: false,
                 in_channels: Some("d.conversation_id = ANY($6)"),
                 file_id: None,
+                source: None,
             },
             Self::SlackFile => Source {
                 id_prefix: SLACK_FILE_DOCUMENT_ID_PREFIX,
@@ -240,6 +258,7 @@ impl DataType {
                    )"#,
                 ),
                 file_id: Some("d.file_id"),
+                source: None,
             },
             Self::DriveDoc => Source {
                 id_prefix: GOOGLE_DRIVE_DOCUMENT_ID_PREFIX,
@@ -265,6 +284,7 @@ impl DataType {
                 end_exclusive: false,
                 in_channels: None,
                 file_id: Some("d.file_id"),
+                source: None,
             },
             Self::CalendarEvent => Source {
                 id_prefix: GOOGLE_CALENDAR_DOCUMENT_ID_PREFIX,
@@ -287,6 +307,7 @@ impl DataType {
                 end_exclusive: true,
                 in_channels: None,
                 file_id: None,
+                source: None,
             },
             Self::GranolaNote => Source {
                 id_prefix: GRANOLA_DOCUMENT_ID_PREFIX,
@@ -310,6 +331,26 @@ impl DataType {
                 end_exclusive: false,
                 in_channels: None,
                 file_id: None,
+                source: None,
+            },
+            Self::PublishedDoc => Source {
+                id_prefix: PUBLISHED_DOCUMENT_ID_PREFIX,
+                documents: "company_context_data.published_documents",
+                embeddings: Some("company_context_data.published_document_embeddings"),
+                columns: r#"d.document_id, d.title, d.body, NULLIF(d.url, '') AS url,
+                   d.occurred_at,
+                   jsonb_build_object(
+                       'source', d.source,
+                       'external_id', d.external_id,
+                       'author', NULLIF(d.author, '')
+                   ) AS metadata"#,
+                visible: "TRUE",
+                starts_at: "d.occurred_at",
+                ends_at: "d.occurred_at",
+                end_exclusive: false,
+                in_channels: None,
+                file_id: None,
+                source: Some("d.source"),
             },
         }
     }
@@ -326,6 +367,7 @@ impl DataType {
         let source = self.source();
         (filters.channel_ids.is_empty() || source.in_channels.is_some())
             && (filters.file_ids.is_empty() || source.file_id.is_some())
+            && (filters.sources.is_empty() || source.source.is_some())
     }
 }
 
@@ -378,11 +420,12 @@ impl Row {
 }
 
 #[derive(Debug)]
-enum ApiError {
+pub(crate) enum ApiError {
     BadRequest(String),
-    Unauthorized,
-    Forbidden,
-    NotFound,
+    Unauthorized(&'static str),
+    Forbidden(&'static str),
+    NotFound(&'static str),
+    Conflict(String),
     Internal,
 }
 
@@ -390,9 +433,10 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
-            Self::Unauthorized => (StatusCode::UNAUTHORIZED, "invalid bearer token".to_owned()),
-            Self::Forbidden => (StatusCode::FORBIDDEN, "unknown principal".to_owned()),
-            Self::NotFound => (StatusCode::NOT_FOUND, "document not found".to_owned()),
+            Self::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message.to_owned()),
+            Self::Forbidden(message) => (StatusCode::FORBIDDEN, message.to_owned()),
+            Self::NotFound(message) => (StatusCode::NOT_FOUND, message.to_owned()),
+            Self::Conflict(message) => (StatusCode::CONFLICT, message),
             Self::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "request failed".to_owned(),
@@ -409,7 +453,7 @@ async fn authenticate(
 ) -> Result<PrincipalIdentity, ApiError> {
     let principal_id = bearer_token(headers)
         .and_then(|token| state.jwt.principal_id(token))
-        .ok_or(ApiError::Unauthorized)?;
+        .ok_or(ApiError::Unauthorized("invalid bearer token"))?;
     state
         .credentials
         .principal_identity(principal_id)
@@ -418,15 +462,30 @@ async fn authenticate(
             error!(event = "company_context_query_principal_failed", error = %format!("{error:#}"));
             ApiError::Internal
         })?
-        .ok_or(ApiError::Forbidden)
+        .ok_or(ApiError::Forbidden("unknown principal"))
 }
 
-fn internal(event: &'static str) -> impl FnOnce(anyhow::Error) -> ApiError {
-    move |error| match error.downcast::<InvalidQuery>() {
-        Ok(InvalidQuery(message)) => ApiError::BadRequest(message),
-        Err(error) => {
-            error!(event, error = %format!("{error:#}"));
-            ApiError::Internal
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for ApiError {}
+
+/// Maps a handler's error to its response, logging unexpected failures.
+pub(crate) fn internal(event: &'static str) -> impl FnOnce(anyhow::Error) -> ApiError {
+    move |error| {
+        let error = match error.downcast::<ApiError>() {
+            Ok(error) => return error,
+            Err(error) => error,
+        };
+        match error.downcast::<InvalidQuery>() {
+            Ok(InvalidQuery(message)) => ApiError::BadRequest(message),
+            Err(error) => {
+                error!(event, error = %format!("{error:#}"));
+                ApiError::Internal
+            }
         }
     }
 }
@@ -455,11 +514,11 @@ async fn handle_document(
         .await
         .map_err(internal("company_context_document_failed"))?
         .map(Json)
-        .ok_or(ApiError::NotFound)
+        .ok_or(ApiError::NotFound("document not found"))
 }
 
 #[derive(Debug)]
-struct InvalidQuery(String);
+pub(crate) struct InvalidQuery(pub(crate) String);
 
 impl std::fmt::Display for InvalidQuery {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -469,16 +528,17 @@ impl std::fmt::Display for InvalidQuery {
 
 impl std::error::Error for InvalidQuery {}
 
-fn invalid(message: impl Into<String>) -> anyhow::Error {
+pub(crate) fn invalid(message: impl Into<String>) -> anyhow::Error {
     InvalidQuery(message.into()).into()
 }
 
-/// Bound filter parameters `$4` through `$7`.
+/// Bound filter parameters `$4` through `$8`.
 struct FilterParams {
     occurred_after: Option<DateTime<Utc>>,
     occurred_before: Option<DateTime<Utc>>,
     channel_ids: Option<Vec<String>>,
     file_ids: Option<Vec<String>>,
+    sources: Option<Vec<String>>,
 }
 
 impl FilterParams {
@@ -493,6 +553,7 @@ impl FilterParams {
             occurred_before: filters.occurred_before,
             channel_ids: ids(&filters.channel_ids, "channel_ids")?,
             file_ids: ids(&filters.file_ids, "file_ids")?,
+            sources: ids(&filters.sources, "sources")?,
         })
     }
 }
@@ -544,8 +605,7 @@ pub async fn search(
     }
     let searches: Vec<(DataType, Vec<&str>)> = types
         .into_iter()
-        .map(|data_type| (data_type, data_type.subjects(identity)))
-        .filter(|(_, subjects)| !subjects.is_empty())
+        .filter_map(|data_type| Some((data_type, data_type.subjects(identity)?)))
         .collect();
     if searches.is_empty() {
         return Ok(Vec::new());
@@ -599,7 +659,7 @@ pub async fn search(
                 SELECT {columns}
                 FROM {embeddings} e
                 JOIN {documents} d ON d.document_id = e.document_id
-                WHERE e.model = $8
+                WHERE e.model = $9
                   AND {visible}
                   AND {filters}
                 ORDER BY e.embedding <=> $1::text::vector, d.document_id
@@ -637,10 +697,9 @@ pub async fn document(
     let Some(data_type) = DataType::of_document(document_id) else {
         return Ok(None);
     };
-    let subjects = data_type.subjects(identity);
-    if subjects.is_empty() {
+    let Some(subjects) = data_type.subjects(identity) else {
         return Ok(None);
-    }
+    };
     let source = data_type.source();
     let mut tx = read_only(pool).await?;
     let row: Option<Row> = sqlx::query_as(&format!(
@@ -692,7 +751,7 @@ async fn query_vector(embeddings: &EmbeddingsClient, query: &str) -> Option<(Str
 }
 
 /// Runs one ranked lane: `$1` is the query text or vector, `$2` the subjects,
-/// `$3` the limit, `$4`..`$7` the filters, and `$8` the embedding model.
+/// `$3` the limit, `$4`..`$8` the filters, and `$9` the embedding model.
 async fn lane(
     tx: &mut Transaction<'_, Postgres>,
     sql: &str,
@@ -709,7 +768,8 @@ async fn lane(
         .bind(params.occurred_after)
         .bind(params.occurred_before)
         .bind(params.channel_ids.as_deref())
-        .bind(params.file_ids.as_deref());
+        .bind(params.file_ids.as_deref())
+        .bind(params.sources.as_deref());
     if let Some(model) = model {
         query = query.bind(model);
     }

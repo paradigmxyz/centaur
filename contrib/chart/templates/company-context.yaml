@@ -130,6 +130,13 @@ spec:
 {{- end }}
 {{- end }}
 {{- end }}
+            # Ingestion API key; publishing is disabled while it is unset.
+            - name: COMPANY_CONTEXT_INGEST_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sCOMPANY_CONTEXT_INGEST_API_KEY" $prefix }}
+                  optional: true
             # POST /query accepts the principal API JWTs the Console mints.
             - name: CENTAUR_JWT_SIGNING_SECRET
               valueFrom:

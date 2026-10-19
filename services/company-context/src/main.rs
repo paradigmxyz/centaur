@@ -9,6 +9,7 @@ mod errors;
 mod extraction;
 mod granola;
 mod granola_tasks;
+mod publish;
 mod query;
 mod sampler;
 mod scheduler;
@@ -119,6 +120,12 @@ async fn main() -> Result<()> {
         embeddings: embeddings.clone(),
         jwt: Arc::new(query::JwtVerifier::new(&config)),
     };
+    let publish_state = publish::PublishState {
+        pool: pool.clone(),
+        embeddings: embeddings.clone(),
+        api_key: config.ingest_api_key.clone().map(Arc::from),
+        chunk_chars: config.chunk_chars,
+    };
     let slack = SlackClient::new(&config)?;
     tasks::register(TaskState {
         config: config.clone(),
@@ -165,7 +172,8 @@ async fn main() -> Result<()> {
         .route("/readyz", get(ready))
         .route("/metrics", get(render_metrics))
         .with_state(http_state)
-        .merge(query::router(query_state));
+        .merge(query::router(query_state))
+        .merge(publish::router(publish_state));
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
 
     telemetry::worker_concurrency(QUEUE_NAME, config.worker_concurrency);
