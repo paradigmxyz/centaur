@@ -28,7 +28,7 @@ use crate::{
     errors::{is_rejected, rejected},
     extraction::{chunk_text, extract_google_doc_text, extract_pdf_text, hex_sha256},
     granola::GranolaClient,
-    granola_tasks,
+    granola_tasks, imported_documents,
     slack::SlackClient,
     slack_documents, slack_files,
 };
@@ -121,6 +121,7 @@ pub struct TaskSummary {
 pub fn register(state: TaskState) -> Result<()> {
     calendar_tasks::register(&state)?;
     granola_tasks::register(&state)?;
+    imported_documents::register(&state)?;
     slack_documents::register(&state)?;
     slack_files::register(&state)?;
 

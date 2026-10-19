@@ -13,11 +13,12 @@ use crate::{
     config::{
         CALENDAR_CREDENTIALS_RECONCILE_TASK, CALENDAR_DISCOVER_TASK, Config,
         DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK, GRANOLA_CREDENTIALS_RECONCILE_TASK,
-        GRANOLA_SYNC_TASK, SHARED_DRIVES_DISCOVER_TASK, SLACK_CREDENTIALS_RECONCILE_TASK,
-        SLACK_USER_DISCOVER_TASK, SLACK_USERS_SYNC_TASK,
+        GRANOLA_SYNC_TASK, IMPORTED_PROJECT_TASK, SHARED_DRIVES_DISCOVER_TASK,
+        SLACK_CREDENTIALS_RECONCILE_TASK, SLACK_USER_DISCOVER_TASK, SLACK_USERS_SYNC_TASK,
     },
     credentials::{ConsoleCredentials, GoogleProduct},
     granola_tasks::{GranolaReconcileParams, GranolaSyncParams},
+    imported_documents::ImportedProjectParams,
     slack_tasks::{SlackDiscoverParams, SlackReconcileParams, UsersSyncParams},
     tasks::{DiscoverSharedDrivesParams, ReconcileCredentialsParams, ScanParams},
     telemetry,
@@ -213,6 +214,37 @@ pub async fn run_granola(
                 credential_id,
             )
             .await;
+        }
+    }
+}
+
+/// Enqueues projection of imported documents.
+pub async fn run_imported(config: Arc<Config>, client: Client) {
+    let mut ticker = interval(config.imported_project_interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let bucket = now / config.imported_project_interval.as_secs().max(1);
+        match client
+            .spawn(
+                IMPORTED_PROJECT_TASK,
+                ImportedProjectParams { bucket },
+                SpawnOptions {
+                    idempotency_key: Some(format!("imported.project:{bucket}")),
+                    ..SpawnOptions::default()
+                },
+            )
+            .await
+        {
+            Ok(result) => telemetry::task_enqueued(IMPORTED_PROJECT_TASK, result.created),
+            Err(error) => {
+                telemetry::scheduler_error("imported", "enqueue");
+                error!(event = "company_context_imported_project_enqueue_failed", error = %error);
+            }
         }
     }
 }

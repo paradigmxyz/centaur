@@ -23,14 +23,14 @@ app = typer.Typer(
         "Granola notes. Search for and read the `company-context` skill with "
         "`centaur-skills` before use.\n\n"
         "Preview: `company_context v2 search|read` query Slack messages and files, "
-        "Google Docs and PDFs, Google Calendar events, Granola notes, and published "
+        "Google Docs and PDFs, Google Calendar events, Granola notes, and imported "
         "documents through the company-context service's API, where it is deployed."
     ),
 )
 v2_app = typer.Typer(
     help=(
         "Preview: query Slack messages and files, Google Docs and PDFs, Google Calendar "
-        "events, Granola notes, and published documents visible to the current user "
+        "events, Granola notes, and imported documents visible to the current user "
         "through the company-context service's API."
     ),
 )
@@ -394,7 +394,7 @@ def latest_date(
 
 _V2_TYPES_HELP = (
     "Data type to search; repeat for several: slack_message, slack_file, drive_doc, "
-    "calendar_event, granola_note, or published_doc. Defaults to every type."
+    "calendar_event, granola_note, or imported_doc. Defaults to every type."
 )
 
 
@@ -418,7 +418,7 @@ def v2_search(
         None, "--file-id", help="Only this Slack or Drive file's documents; repeatable."
     ),
     sources: list[str] | None = typer.Option(  # noqa: B008
-        None, "--source", help="Only documents published to this source; repeatable."
+        None, "--source", help="Only documents imported to this source; repeatable."
     ),
     json_output: bool = typer.Option(
         True,
@@ -426,7 +426,7 @@ def v2_search(
         help="Output JSON (default) or human-readable text.",
     ),
 ) -> None:
-    """Search Slack, Drive, Calendar, Granola, and published documents visible to the current user."""
+    """Search Slack, Drive, Calendar, Granola, and imported documents visible to the current user."""
     result = CompanyContextV2Client().search(
         query=query,
         limit=limit,

@@ -6,7 +6,7 @@
 //! Slack user ID, or for the subject of a Google or Granola credential granted
 //! to it, still reaches the document's file, conversation, or Granola note.
 //! Calendar events are stored per Google identity, as Google showed them to it,
-//! and are visible only to that identity. Published documents are public.
+//! and are visible only to that identity. Imported documents are public.
 //! Queries run as [`QUERY_ROLE`], which can only read `company_context_data`.
 
 use std::{
@@ -35,7 +35,7 @@ use tracing::{error, warn};
 use crate::{
     config::{
         Config, GOOGLE_CALENDAR_DOCUMENT_ID_PREFIX, GOOGLE_DRIVE_DOCUMENT_ID_PREFIX,
-        GRANOLA_DOCUMENT_ID_PREFIX, PUBLISHED_DOCUMENT_ID_PREFIX, SLACK_DOCUMENT_ID_PREFIX,
+        GRANOLA_DOCUMENT_ID_PREFIX, IMPORTED_DOCUMENT_ID_PREFIX, SLACK_DOCUMENT_ID_PREFIX,
         SLACK_FILE_DOCUMENT_ID_PREFIX,
     },
     credentials::{ConsoleCredentials, PrincipalIdentity},
@@ -95,7 +95,7 @@ pub struct Filters {
     /// Slack or Drive file IDs. Limits the search to these files' documents.
     #[serde(default)]
     pub file_ids: Vec<String>,
-    /// Publishing sources. Limits the search to documents published to them.
+    /// Import sources. Limits the search to documents imported to them.
     #[serde(default)]
     pub sources: Vec<String>,
 }
@@ -108,7 +108,7 @@ pub enum DataType {
     DriveDoc,
     CalendarEvent,
     GranolaNote,
-    PublishedDoc,
+    ImportedDoc,
 }
 
 /// How one data type's documents are selected. Queries bind the principal's
@@ -131,7 +131,7 @@ struct Source {
     in_channels: Option<&'static str>,
     /// The type's file ID column, or `None` if it has none.
     file_id: Option<&'static str>,
-    /// The type's publishing source column, or `None` if it has none.
+    /// The type's import source column, or `None` if it has none.
     source: Option<&'static str>,
 }
 
@@ -168,7 +168,7 @@ impl DataType {
         Self::DriveDoc,
         Self::CalendarEvent,
         Self::GranolaNote,
-        Self::PublishedDoc,
+        Self::ImportedDoc,
     ];
 
     /// The principal's identities the type's observations are keyed by, or
@@ -189,7 +189,7 @@ impl DataType {
                 .map(String::as_str)
                 .collect(),
             // Public: visible without an identity.
-            Self::PublishedDoc => return Some(Vec::new()),
+            Self::ImportedDoc => return Some(Vec::new()),
         };
         (!subjects.is_empty()).then_some(subjects)
     }
@@ -333,11 +333,11 @@ impl DataType {
                 file_id: None,
                 source: None,
             },
-            Self::PublishedDoc => Source {
-                id_prefix: PUBLISHED_DOCUMENT_ID_PREFIX,
-                documents: "company_context_data.published_documents",
-                embeddings: Some("company_context_data.published_document_embeddings"),
-                // The producer's metadata, with the source and external ID.
+            Self::ImportedDoc => Source {
+                id_prefix: IMPORTED_DOCUMENT_ID_PREFIX,
+                documents: "company_context_data.imported_document_chunks",
+                embeddings: Some("company_context_data.imported_document_chunk_embeddings"),
+                // The importer's metadata, with the source and external ID.
                 columns: r#"d.document_id, d.title, d.body, NULL::text AS url,
                    d.occurred_at,
                    d.metadata || jsonb_build_object(
@@ -420,11 +420,11 @@ impl Row {
 }
 
 #[derive(Debug)]
-pub(crate) enum ApiError {
+enum ApiError {
     BadRequest(String),
-    Unauthorized(&'static str),
-    Forbidden(&'static str),
-    NotFound(&'static str),
+    Unauthorized,
+    Forbidden,
+    NotFound,
     Internal,
 }
 
@@ -432,9 +432,9 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
-            Self::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message.to_owned()),
-            Self::Forbidden(message) => (StatusCode::FORBIDDEN, message.to_owned()),
-            Self::NotFound(message) => (StatusCode::NOT_FOUND, message.to_owned()),
+            Self::Unauthorized => (StatusCode::UNAUTHORIZED, "invalid bearer token".to_owned()),
+            Self::Forbidden => (StatusCode::FORBIDDEN, "unknown principal".to_owned()),
+            Self::NotFound => (StatusCode::NOT_FOUND, "document not found".to_owned()),
             Self::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "request failed".to_owned(),
@@ -451,7 +451,7 @@ async fn authenticate(
 ) -> Result<PrincipalIdentity, ApiError> {
     let principal_id = bearer_token(headers)
         .and_then(|token| state.jwt.principal_id(token))
-        .ok_or(ApiError::Unauthorized("invalid bearer token"))?;
+        .ok_or(ApiError::Unauthorized)?;
     state
         .credentials
         .principal_identity(principal_id)
@@ -460,30 +460,15 @@ async fn authenticate(
             error!(event = "company_context_query_principal_failed", error = %format!("{error:#}"));
             ApiError::Internal
         })?
-        .ok_or(ApiError::Forbidden("unknown principal"))
+        .ok_or(ApiError::Forbidden)
 }
 
-impl std::fmt::Display for ApiError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{self:?}")
-    }
-}
-
-impl std::error::Error for ApiError {}
-
-/// Maps a handler's error to its response, logging unexpected failures.
-pub(crate) fn internal(event: &'static str) -> impl FnOnce(anyhow::Error) -> ApiError {
-    move |error| {
-        let error = match error.downcast::<ApiError>() {
-            Ok(error) => return error,
-            Err(error) => error,
-        };
-        match error.downcast::<InvalidQuery>() {
-            Ok(InvalidQuery(message)) => ApiError::BadRequest(message),
-            Err(error) => {
-                error!(event, error = %format!("{error:#}"));
-                ApiError::Internal
-            }
+fn internal(event: &'static str) -> impl FnOnce(anyhow::Error) -> ApiError {
+    move |error| match error.downcast::<InvalidQuery>() {
+        Ok(InvalidQuery(message)) => ApiError::BadRequest(message),
+        Err(error) => {
+            error!(event, error = %format!("{error:#}"));
+            ApiError::Internal
         }
     }
 }
@@ -512,11 +497,11 @@ async fn handle_document(
         .await
         .map_err(internal("company_context_document_failed"))?
         .map(Json)
-        .ok_or(ApiError::NotFound("document not found"))
+        .ok_or(ApiError::NotFound)
 }
 
 #[derive(Debug)]
-pub(crate) struct InvalidQuery(pub(crate) String);
+struct InvalidQuery(String);
 
 impl std::fmt::Display for InvalidQuery {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -526,7 +511,7 @@ impl std::fmt::Display for InvalidQuery {
 
 impl std::error::Error for InvalidQuery {}
 
-pub(crate) fn invalid(message: impl Into<String>) -> anyhow::Error {
+fn invalid(message: impl Into<String>) -> anyhow::Error {
     InvalidQuery(message.into()).into()
 }
 
@@ -1254,6 +1239,7 @@ mod tests {
             json!({ "query": "  " }),
             json!({ "query": "falcon", "limit": 0 }),
             json!({ "query": "falcon", "filters": { "types": ["drive_doc"], "channel_ids": ["C1"] } }),
+            json!({ "query": "falcon", "filters": { "types": ["drive_doc"], "sources": ["archive"] } }),
             json!({ "query": "falcon", "filters": { "file_ids": [" "] } }),
             json!({ "query": "falcon", "filters": {
                 "occurred_after": "2024-02-01T00:00:00Z",

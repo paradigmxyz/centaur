@@ -87,6 +87,8 @@ spec:
               value: {{ $companyContext.indexers.granola.enabled | quote }}
             - name: COMPANY_CONTEXT_SLACK_ENABLED
               value: {{ $companyContext.indexers.slack.enabled | quote }}
+            - name: COMPANY_CONTEXT_IMPORTED_ENABLED
+              value: {{ $companyContext.indexers.imported.enabled | quote }}
             - name: COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG
               value: {{ $companyContext.googleOauthAppSlug | quote }}
             - name: COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG
@@ -97,6 +99,8 @@ spec:
               value: {{ $companyContext.calendarHistoryDays | quote }}
             - name: COMPANY_CONTEXT_GRANOLA_SYNC_INTERVAL_SECONDS
               value: {{ $companyContext.granolaSyncIntervalSeconds | quote }}
+            - name: COMPANY_CONTEXT_IMPORTED_PROJECT_INTERVAL_SECONDS
+              value: {{ $companyContext.importedProjectIntervalSeconds | quote }}
             - name: COMPANY_CONTEXT_SLACK_OAUTH_APP_SLUG
               value: {{ $console.slackDmSync.oauthAppSlug | default "slack" | quote }}
             - name: COMPANY_CONTEXT_SLACK_DISCOVERY_INTERVAL_SECONDS
@@ -130,13 +134,6 @@ spec:
 {{- end }}
 {{- end }}
 {{- end }}
-            # Ingestion API key; publishing is disabled while it is unset.
-            - name: COMPANY_CONTEXT_INGEST_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $secretEnv }}
-                  key: {{ printf "%sCOMPANY_CONTEXT_INGEST_API_KEY" $prefix }}
-                  optional: true
             # POST /query accepts the principal API JWTs the Console mints.
             - name: CENTAUR_JWT_SIGNING_SECRET
               valueFrom:

@@ -43,13 +43,14 @@ pub const SLACK_CHANNEL_DAY_EMBED_TASK: &str = "slack.channel_day.embed";
 /// run on the main queue too.
 pub const SLACK_FILE_EXTRACT_TASK: &str = "slack.file.extract";
 pub const SLACK_FILE_EMBED_TASK: &str = "slack.file.embed";
+pub const IMPORTED_PROJECT_TASK: &str = "imported.project";
 /// Document ID prefixes, which identify each published document's type.
 pub const GOOGLE_DRIVE_DOCUMENT_ID_PREFIX: &str = "google-drive:";
 pub const SLACK_DOCUMENT_ID_PREFIX: &str = "slack:";
 pub const SLACK_FILE_DOCUMENT_ID_PREFIX: &str = "slack-file:";
 pub const GRANOLA_DOCUMENT_ID_PREFIX: &str = "granola:";
 pub const GOOGLE_CALENDAR_DOCUMENT_ID_PREFIX: &str = "google-calendar:";
-pub const PUBLISHED_DOCUMENT_ID_PREFIX: &str = "published:";
+pub const IMPORTED_DOCUMENT_ID_PREFIX: &str = "imported:";
 /// Slack conversation types that can be synchronized.
 pub const SLACK_CONVERSATION_TYPES: [&str; 3] = ["public_channel", "private_channel", "im"];
 
@@ -138,6 +139,15 @@ pub struct Config {
         action = clap::ArgAction::Set
     )]
     pub slack_enabled: bool,
+    /// Schedules projection of imported documents. Disabling it pauses
+    /// projection and keeps projected documents searchable.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_IMPORTED_ENABLED",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub imported_enabled: bool,
     /// Limits Google Drive sync to these credential emails. Unset syncs every user.
     #[arg(
         long,
@@ -214,15 +224,6 @@ pub struct Config {
         hide_env_values = true
     )]
     pub jwt_signing_secret: String,
-    /// Key producers send in the `X-Api-Key` header to publish through the
-    /// ingestion API. Unset disables publishing.
-    #[arg(
-        long,
-        env = "COMPANY_CONTEXT_INGEST_API_KEY",
-        value_parser = api_key,
-        hide_env_values = true
-    )]
-    pub ingest_api_key: Option<String>,
     #[arg(
         long,
         env = "CENTAUR_API_JWT_AUDIENCE",
@@ -334,6 +335,13 @@ pub struct Config {
         value_parser = positive_usize
     )]
     pub granola_initial_lookback_days: usize,
+    #[arg(
+        long = "imported-project-interval-seconds",
+        env = "COMPANY_CONTEXT_IMPORTED_PROJECT_INTERVAL_SECONDS",
+        default_value = "60",
+        value_parser = positive_duration
+    )]
+    pub imported_project_interval: Duration,
     #[arg(
         long = "slack-discovery-interval-seconds",
         env = "COMPANY_CONTEXT_SLACK_DISCOVERY_INTERVAL_SECONDS",
@@ -474,23 +482,6 @@ fn channel_history_days(value: &str) -> Result<(String, usize), String> {
         .split_once('=')
         .ok_or_else(|| "value must be CONVERSATION_ID=DAYS".to_owned())?;
     Ok((nonempty(channel_id)?, history_days(days.trim())?))
-}
-
-/// Whether `value` is a valid publishing source name.
-pub fn is_source_name(value: &str) -> bool {
-    (1..=64).contains(&value.len())
-        && value.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
-        && value
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
-
-fn api_key(value: &str) -> Result<String, String> {
-    let value = nonempty(value)?;
-    if value.chars().count() < 32 {
-        return Err("value must be at least 32 characters".to_owned());
-    }
-    Ok(value)
 }
 
 fn history_days(value: &str) -> Result<usize, String> {
@@ -657,14 +648,6 @@ mod tests {
             args.extend(["--slack-channel-history-days", invalid]);
             assert!(Config::try_parse_from(args).is_err(), "{invalid}");
         }
-    }
-
-    #[test]
-    fn ingest_api_key_must_be_long() {
-        let config = Config::try_parse_from(required_args()).unwrap();
-        assert_eq!(config.ingest_api_key, None);
-        assert!(api_key(&"k".repeat(32)).is_ok());
-        assert!(api_key(&"k".repeat(31)).is_err());
     }
 
     #[test]
