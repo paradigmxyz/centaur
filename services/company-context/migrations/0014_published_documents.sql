@@ -24,13 +24,14 @@ create table company_context_data.published_documents (
     chunk_id text not null,
     title text not null default '',
     body text not null,
-    url text not null default '',
-    author text not null default '',
+    -- Producer-defined fields, such as a link or author; not searched.
+    metadata jsonb not null default '{}'::jsonb,
     occurred_at timestamptz,
     content_hash text not null,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
     unique (source, external_id, chunk_id),
+    check (jsonb_typeof(metadata) = 'object'),
     foreign key (source, external_id)
         references company_context_system.published_items(source, external_id)
         on delete cascade,
@@ -52,7 +53,6 @@ create index published_documents_bm25_idx
         chunk_id,
         title,
         body,
-        author,
         occurred_at
     )
     with (

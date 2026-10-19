@@ -255,8 +255,8 @@ score, comparable only within one response.
 conversation, channel, and message times for `slack_message`; file ID and file
 type for `slack_file`; file ID, document type, MIME type, and pages for
 `drive_doc`; calendar ID, event ID, start and end times, and organizer for
-`calendar_event`; note ID, owner, and attendees for `granola_note`; source,
-external ID, and author for `published_doc`.
+`calendar_event`; note ID, owner, and attendees for `granola_note`; the
+producer's metadata with the source and external ID for `published_doc`.
 
 ### `GET /documents/{document_id}`
 
@@ -279,16 +279,16 @@ version. URL-encode the ID; it is 1-512 bytes without control characters.
 {
   "title": "Launch retro",
   "body": "What went well ...",
-  "url": "https://notes.example.com/123",
-  "author": "Ada",
-  "occurred_at": "2024-01-02T09:00:00Z"
+  "occurred_at": "2024-01-02T09:00:00Z",
+  "metadata": { "author": "Ada", "url": "https://notes.example.com/123" }
 }
 ```
 
 Only `body` is required; it is at most 1,000,000 bytes. `title` is at most
-1,000 characters, `author` at most 500, and `url` an http or https URL of at
-most 2,048 characters. Unknown fields are rejected. The body is chunked and
-embedded like other documents; republishing unchanged fields is not embedded
+1,000 characters. `metadata` is a JSON object of producer-defined fields of at
+most 65,536 bytes; it is returned with the document but not searched, and
+`source` and `external_id` keys are overridden. Unknown top-level fields are
+rejected. Title and body are chunked and embedded like other documents; republishing unchanged fields is not embedded
 again. The response is `{"status": "published" | "unchanged", "chunks": N}`.
 An embeddings failure fails the request, which can be retried.
 

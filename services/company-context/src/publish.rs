@@ -15,7 +15,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tracing::info;
@@ -29,8 +29,7 @@ use crate::{
 
 const MAX_EXTERNAL_ID_BYTES: usize = 512;
 const MAX_TITLE_CHARS: usize = 1_000;
-const MAX_AUTHOR_CHARS: usize = 500;
-const MAX_URL_CHARS: usize = 2_048;
+const MAX_METADATA_BYTES: usize = 65_536;
 const MAX_BODY_BYTES: usize = 1_000_000;
 /// Leaves room for JSON escaping of a body at the limit.
 const MAX_REQUEST_BYTES: usize = 4 * MAX_BODY_BYTES;
@@ -60,8 +59,9 @@ pub struct PublishRequest {
     #[serde(default)]
     pub title: String,
     pub body: String,
-    pub url: Option<String>,
-    pub author: Option<String>,
+    /// Producer-defined fields, such as a link or author.
+    #[serde(default)]
+    pub metadata: Map<String, Value>,
     pub occurred_at: Option<DateTime<Utc>>,
 }
 
@@ -152,8 +152,7 @@ fn validate_source(source: &str) -> Result<()> {
 struct Fields<'a> {
     title: &'a str,
     body: &'a str,
-    url: &'a str,
-    author: &'a str,
+    metadata: &'a Map<String, Value>,
     occurred_at: Option<DateTime<Utc>>,
 }
 
@@ -174,41 +173,24 @@ impl<'a> Fields<'a> {
                 "body must be at most {MAX_BODY_BYTES} bytes"
             )));
         }
-        let author = request.author.as_deref().unwrap_or_default().trim();
-        if author.chars().count() > MAX_AUTHOR_CHARS {
+        if serde_json::to_vec(&request.metadata)?.len() > MAX_METADATA_BYTES {
             return Err(invalid(format!(
-                "author must be at most {MAX_AUTHOR_CHARS} characters"
-            )));
-        }
-        let url = request.url.as_deref().unwrap_or_default().trim();
-        if !url.is_empty()
-            && (url.chars().count() > MAX_URL_CHARS
-                || !url::Url::parse(url).is_ok_and(|url| matches!(url.scheme(), "http" | "https")))
-        {
-            return Err(invalid(format!(
-                "url must be an http or https URL of at most {MAX_URL_CHARS} characters"
+                "metadata must be at most {MAX_METADATA_BYTES} bytes"
             )));
         }
         Ok(Self {
             title,
             body,
-            url,
-            author,
+            metadata: &request.metadata,
             occurred_at: request.occurred_at,
         })
     }
 
     fn content_hash(&self) -> String {
         hex_sha256(
-            json!([
-                self.title,
-                self.body,
-                self.url,
-                self.author,
-                self.occurred_at
-            ])
-            .to_string()
-            .as_bytes(),
+            json!([self.title, self.body, self.metadata, self.occurred_at])
+                .to_string()
+                .as_bytes(),
         )
     }
 }
@@ -315,10 +297,10 @@ pub async fn publish(
         sqlx::query(
             r#"
             INSERT INTO company_context_data.published_documents (
-                document_id, source, external_id, chunk_id, title, body, url,
-                author, occurred_at, content_hash
+                document_id, source, external_id, chunk_id, title, body,
+                metadata, occurred_at, content_hash
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             "#,
         )
         .bind(document_id)
@@ -327,8 +309,7 @@ pub async fn publish(
         .bind(chunk_id)
         .bind(fields.title)
         .bind(body)
-        .bind(fields.url)
-        .bind(fields.author)
+        .bind(sqlx::types::Json(fields.metadata))
         .bind(fields.occurred_at)
         .bind(chunk_hash)
         .execute(&mut *tx)
@@ -488,8 +469,7 @@ mod tests {
         let note = json!({
             "title": "Falcon",
             "body": "falcon launch retro",
-            "author": "Ada",
-            "url": "https://notes.example.com/1",
+            "metadata": { "author": "Ada", "url": "https://notes.example.com/1" },
             "occurred_at": "2020-01-02T00:00:00Z",
         });
         assert_eq!(
@@ -512,10 +492,14 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(document.url.as_deref(), Some("https://notes.example.com/1"));
         assert_eq!(
             document.metadata,
-            json!({ "source": "notes", "external_id": "note/1", "author": "Ada" })
+            json!({
+                "source": "notes",
+                "external_id": "note/1",
+                "author": "Ada",
+                "url": "https://notes.example.com/1",
+            })
         );
         assert!(
             search(
@@ -567,7 +551,7 @@ mod tests {
 
         for invalid in [
             json!({ "body": "  " }),
-            json!({ "body": "x", "url": "javascript:alert(1)" }),
+            json!({ "body": "x", "metadata": { "notes": "n".repeat(65_536) } }),
             json!({ "body": "x", "title": "t".repeat(1_001) }),
         ] {
             let error = publish("note/4", invalid.clone()).await.unwrap_err();

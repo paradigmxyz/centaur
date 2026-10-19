@@ -337,12 +337,12 @@ impl DataType {
                 id_prefix: PUBLISHED_DOCUMENT_ID_PREFIX,
                 documents: "company_context_data.published_documents",
                 embeddings: Some("company_context_data.published_document_embeddings"),
-                columns: r#"d.document_id, d.title, d.body, NULLIF(d.url, '') AS url,
+                // The producer's metadata, with the source and external ID.
+                columns: r#"d.document_id, d.title, d.body, NULL::text AS url,
                    d.occurred_at,
-                   jsonb_build_object(
+                   d.metadata || jsonb_build_object(
                        'source', d.source,
-                       'external_id', d.external_id,
-                       'author', NULLIF(d.author, '')
+                       'external_id', d.external_id
                    ) AS metadata"#,
                 visible: "TRUE",
                 starts_at: "d.occurred_at",
