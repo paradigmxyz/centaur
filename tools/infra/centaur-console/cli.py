@@ -241,6 +241,18 @@ def admin_principal(
     console.print_json(json.dumps({"data": result}, default=str))
 
 
+@admin_app.command("effective-grants")
+def admin_effective_grants(
+    principal: str = typer.Argument(..., help="Principal OID or foreign ID"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """List secrets a principal holds directly or through roles, and how each is granted."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_effective_grants(principal)
+    console.print_json(json.dumps({"data": result}, default=str))
+
+
 @admin_app.command("roles")
 def admin_roles(
     url: str | None = URL_OPTION,

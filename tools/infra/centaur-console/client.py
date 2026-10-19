@@ -219,6 +219,13 @@ class ConsoleClient:
         result["grants"] = self._admin_list_all(f"{path}/grants")
         return result
 
+    def admin_effective_grants(self, principal: str) -> list[dict[str, Any]]:
+        """List secrets a principal holds directly or through roles, with their sources."""
+        principal_id = self._admin_principal_id(principal)
+        return self._admin_list_all(
+            f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/{principal_id}/effective_grants"
+        )
+
     def admin_roles(self) -> list[dict[str, Any]]:
         """List every role. Console admins only."""
         return self._admin_list_all(SANDBOX_ADMIN_ROLES_PATH)

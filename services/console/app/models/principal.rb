@@ -86,6 +86,19 @@ class Principal < ApplicationRecord
       .sort
   end
 
+  # Every kind of secret this principal resolves to, keyed by secret kind.
+  def granted_secrets_by_kind
+    {
+      "static" => granted_static_secrets,
+      "gcp_auth" => granted_gcp_auth_secrets,
+      "gcp_id_token" => granted_gcp_id_token_secrets,
+      "aws_auth" => granted_aws_auth_secrets,
+      "oauth_token" => granted_oauth_token_secrets,
+      "pg_dsn" => granted_pg_dsn_secrets,
+      "hmac" => granted_hmac_secrets
+    }
+  end
+
   # Static secrets this principal resolves to, via its effective grants.
   def granted_static_secrets
     granted_secrets_by_priority(StaticSecret, :static_secret_id, includes: %i[source rules])

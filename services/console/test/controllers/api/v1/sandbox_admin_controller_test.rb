@@ -55,6 +55,32 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "an admin's Slack DM sandbox lists a principal's effective grants and their sources" do
+    role_secret = static_secrets(:acme_prod_api_key)
+    pages = []
+
+    with_token(dm_proxy_for(users(:acme_admin))) do |headers|
+      [ 1, 2 ].each do |page|
+        get "/api/v1/sandbox/admin/principals/#{@channel.oid}/effective_grants",
+            params: { page: page, limit: 2 }, headers: headers
+        assert_response :ok
+        pages << json_body
+      end
+    end
+
+    assert_equal({ "page" => 1, "limit" => 2, "total" => 4, "total_pages" => 2 }, pages.first["meta"])
+    rows = pages.flat_map { |body| body.fetch("data") }
+    expected = [ static_secrets(:github_token_inject), static_secrets(:db_password_replace), role_secret,
+                 pg_dsn_secrets(:acme_analytics_pg) ].map(&:oid)
+    assert_equal expected.sort, rows.map { |row| row["id"] }.sort
+
+    inherited = rows.find { |row| row["id"] == role_secret.oid }
+    assert_equal "static_secret_id", inherited["grant_key"]
+    assert_not inherited["direct"]
+    assert_equal [ roles(:acme_infra).oid ], inherited["roles"].map { |role| role["id"] }
+    assert rows.find { |row| row["id"] == static_secrets(:github_token_inject).oid }["direct"]
+  end
+
   test "sandbox admin grants cannot change role grants" do
     with_token(dm_proxy_for(users(:acme_admin))) do |headers|
       post "/api/v1/sandbox/admin/grants",
