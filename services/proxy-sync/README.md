@@ -2,7 +2,7 @@
 
 `centaur-proxy-sync` serves `POST /api/v1/proxy/sync` for iron-proxy. It authenticates proxy bearer tokens and
 builds effective proxy configuration directly from Console's PostgreSQL schema.
-Console remains responsible for credential administration and token refresh.
+Console remains responsible for credential administration; token-broker refreshes broker credentials.
 
 The Helm chart always deploys this service. `api-rs` sends administrative
 requests to Console and configures managed proxies to poll this service through

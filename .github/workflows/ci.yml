@@ -24,6 +24,7 @@ jobs:
       company_context_checks: ${{ steps.filter.outputs.company_context_checks }}
       rust_api: ${{ steps.filter.outputs.rust_api }}
       proxy_sync_checks: ${{ steps.filter.outputs.proxy_sync_checks }}
+      token_broker_checks: ${{ steps.filter.outputs.token_broker_checks }}
       sandbox_tests: ${{ steps.filter.outputs.sandbox_tests }}
       workflow_python_tests: ${{ steps.filter.outputs.workflow_python_tests }}
       tool_tests: ${{ steps.filter.outputs.tool_tests }}
@@ -129,6 +130,12 @@ jobs:
           set_output proxy_sync_checks \
             '^crates/active-record-encryption/' \
             '^services/proxy-sync/' \
+            '^services/console/' \
+            '^\.github/scripts/start-test-postgres\.sh$' \
+            '^\.github/workflows/ci\.yml$'
+          set_output token_broker_checks \
+            '^crates/active-record-encryption/' \
+            '^services/token-broker/' \
             '^services/console/' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
@@ -335,6 +342,74 @@ jobs:
         env:
           PROXY_SYNC_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/proxy_sync_test
         run: cargo test --locked
+
+  token-broker-checks:
+    name: Token broker fmt, clippy, and tests
+    runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.token_broker_checks == 'true'
+    defaults:
+      run:
+        working-directory: services/token-broker
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/token-broker
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Start test database
+        working-directory: .
+        run: .github/scripts/start-test-postgres.sh token-broker-test-postgres 5432 token_broker_test pgvector
+
+      - name: Install Console packages
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
+
+      - uses: ruby/setup-ruby@651ff0d62c5c79bed6d53ec518387aae20e72c1a # v1.329.0
+        with:
+          working-directory: services/console
+          bundler-cache: true
+
+      # token-broker reads and writes Console's tables directly, so its
+      # integration tests run against the schema Console currently ships.
+      - name: Load Console schema
+        working-directory: services/console
+        env:
+          RAILS_ENV: test
+          CENTAUR_CONSOLE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/token_broker_test
+        run: bin/rails db:prepare
+
+      - name: Test
+        env:
+          TOKEN_BROKER_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/token_broker_test
+        run: cargo test --locked
+
+      # The tests store tokens encrypted by token-broker; Console must read them.
+      - name: Decrypt token-broker's writes with Console
+        working-directory: services/console
+        env:
+          RAILS_ENV: test
+          CENTAUR_CONSOLE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/token_broker_test
+        run: |
+          bin/rails runner '
+            credentials = BrokerCredential.where.not(access_token: nil).to_a
+            abort "token-broker tests stored no tokens" if credentials.empty?
+            credentials.each { |credential| [credential.access_token, credential.refresh_token] }
+            puts "Console decrypted #{credentials.size} credentials token-broker wrote"'
 
   rust-api:
     name: Rust API fmt, clippy, and tests
@@ -688,6 +763,7 @@ jobs:
       - harness-server-checks
       - company-context-checks
       - proxy-sync-checks
+      - token-broker-checks
       - rust-api
       - rust-api-postgres
       - sandbox-tests
@@ -702,5 +778,5 @@ jobs:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
-          allowed-skips: migration-order, harness-server-checks, company-context-checks, proxy-sync-checks, rust-api, rust-api-postgres, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
+          allowed-skips: migration-order, harness-server-checks, company-context-checks, proxy-sync-checks, token-broker-checks, rust-api, rust-api-postgres, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
           jobs: ${{ toJSON(needs) }}

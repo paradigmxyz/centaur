@@ -50,7 +50,7 @@ case "$AUTH_MODE" in
   api_key | access_token) ;;
   *) echo "CENTAUR_E2E_AUTH_MODE must be api_key or access_token, not $AUTH_MODE" >&2; exit 2 ;;
 esac
-IMAGES=(api-rs:apiRs proxy-sync:proxySync iron-proxy:ironProxy slackbotv2:slackbotv2 agent:sandbox console:console)
+IMAGES=(api-rs:apiRs proxy-sync:proxySync token-broker:tokenBroker iron-proxy:ironProxy slackbotv2:slackbotv2 agent:sandbox console:console)
 
 export KUBECONFIG
 KUBECONFIG="$(mktemp)"
@@ -167,8 +167,8 @@ wait_for_test_access() {
   return 1
 }
 
-# Stores the subscription access tokens as the console's broker would after a
-# refresh. Without a refresh token the console never tries to refresh them.
+# Stores the subscription access tokens as token-broker would after a refresh.
+# Without a refresh token token-broker never tries to refresh them.
 seed_broker_credentials() {
   local console="deploy/${RELEASE}-centaur-console"
   until kubectl -n "$NAMESPACE" get "$console" > /dev/null 2>&1; do sleep 2; done

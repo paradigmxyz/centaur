@@ -454,6 +454,35 @@ proxySync:
     annotations: {}
   resources: {}
 
+# Refreshes the console's broker credentials (OAuth access tokens) before they
+# expire. It serves only /healthz and /metrics; its egress is Postgres and
+# HTTPS to token endpoints. Replicas coordinate through row locks, so a rolling
+# update never refreshes a credential twice.
+tokenBroker:
+  replicaCount: 1
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  image:
+    repository: centaur-token-broker
+    tag: latest
+    pullPolicy: Always
+  port: 8080
+  # Seconds between checks for credentials due for refresh.
+  pollIntervalSeconds: 15
+  # Credentials refreshed at once; each holds a database connection for the
+  # duration of its token request, so keep it below databaseMaxConnections.
+  concurrency: 4
+  databaseMaxConnections: 5
+  # Lets in-flight refreshes finish storing a just-rotated refresh token. A
+  # refresh makes at most two token requests of up to 60 seconds each.
+  terminationGracePeriodSeconds: 150
+  metrics:
+    scrapeAnnotations: true
+    path: /metrics
+    annotations: {}
+  resources: {}
+
 # v1 company-context ingestion: the api-rs Slack workflows (slack_sync,
 # slack_backfill, slack_retention) and the Console Slack DM, Google Docs, and
 # Granola sync jobs. Set false to stop all of them, for example to roll out
