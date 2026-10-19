@@ -510,6 +510,7 @@ fn load_plugin_meta(
         format!("sha256:{}", hex::encode(digest))
     };
     let models = persona_models(plugin_dir, tool_conf)?;
+    let harness = persona_harness(plugin_dir, tool_conf)?;
     Ok(Some(LoadedPluginMeta::Persona(PersonaDefinition {
         id,
         source_root: source_root.display().to_string(),
@@ -518,7 +519,28 @@ fn load_plugin_meta(
         prompt_hash,
         prompt,
         models,
+        harness,
     })))
+}
+
+/// Parses `[tool.centaur] harness`: the harness every new session runs on.
+fn persona_harness(
+    plugin_dir: &Path,
+    tool_conf: &TomlValue,
+) -> Result<Option<HarnessType>, ToolDiscoveryError> {
+    let Some(harness) = tool_conf.get("harness") else {
+        return Ok(None);
+    };
+    harness
+        .as_str()
+        .and_then(|harness| HarnessType::from_str(harness.trim()).ok())
+        .map(Some)
+        .ok_or_else(|| {
+            ToolDiscoveryError::Invalid(format!(
+                "invalid persona harness in {}: expected a known harness, got {harness}",
+                plugin_dir.display()
+            ))
+        })
 }
 
 /// Parses `[tool.centaur.models]`: harness wire value -> pinned model.
@@ -1843,7 +1865,7 @@ secrets = [
         write_persona(&overlay.join("personas").join("ops"), "ops prompt");
         fs::write(
             overlay.join("personas").join("ops").join("pyproject.toml"),
-            "[tool.centaur]\ntype = \"persona\"\n\n[tool.centaur.models]\nclaudecode = \"claude-opus-5\"\n",
+            "[tool.centaur]\ntype = \"persona\"\nharness = \"claudecode\"\n\n[tool.centaur.models]\nclaudecode = \"claude-opus-5\"\n",
         )
         .unwrap();
 
@@ -1871,6 +1893,8 @@ secrets = [
             "sha256:af70f573f4496a1cf92865966cb522c2c142a5789e075660a56bea66080bc738"
         );
         assert!(eng.get("models").is_none());
+        assert!(eng.get("harness").is_none());
+        assert_eq!(personas["ops"]["harness"], "claudecode");
         assert_eq!(
             personas["ops"]["models"],
             serde_json::json!({"claudecode": "claude-opus-5"})

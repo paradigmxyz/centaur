@@ -222,6 +222,10 @@ pub struct PersonaDefinition {
     /// requests.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, String>,
+    /// Harness pinned for new sessions. Requested harnesses are ignored for
+    /// sessions with this persona.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<HarnessType>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -293,6 +297,10 @@ impl PersonaRegistry {
             .models
             .get(harness.as_ref())
             .map(String::as_str)
+    }
+
+    fn harness_for(&self, persona_id: &str) -> Option<&HarnessType> {
+        self.get(persona_id)?.harness.as_ref()
     }
 
     fn persona_allowed_for_access(
@@ -1607,12 +1615,13 @@ impl SessionRuntime {
             // Use the stored persona before the requested one so later persona
             // flags cannot change or invalidate an existing thread. Its
             // context is resolved once from the post-create session below.
-            let existing_persona_id = match self.store.get_session(thread_key).await {
-                Ok(session) => Some(session.persona_id),
+            let existing = match self.store.get_session(thread_key).await {
+                Ok(session) => Some((session.persona_id, session.harness_type)),
                 Err(SessionStoreError::NotFound { .. }) => None,
                 Err(error) => return Err(error.into()),
             };
-            let persona_resolution = match existing_persona_id {
+            let existing_harness = existing.as_ref().map(|(_, harness)| harness.clone());
+            let persona_resolution = match existing.map(|(persona_id, _)| persona_id) {
                 Some(persona_id) => PersonaResolution {
                     context: None,
                     persona_id,
@@ -1627,6 +1636,18 @@ impl SessionRuntime {
             if let Some(context) = persona_resolution.context.as_ref() {
                 add_persona_metadata(&mut session_metadata, context);
             }
+            // A persona-pinned harness ignores the requested one: new sessions
+            // start on the pin, and existing sessions keep their harness
+            // rather than restarting and losing their conversation.
+            let pinned_harness = persona_resolution
+                .persona_id
+                .as_deref()
+                .zip(self.personas.as_deref())
+                .and_then(|(persona_id, personas)| personas.harness_for(persona_id));
+            let harness_type = match pinned_harness {
+                Some(pinned) => existing_harness.as_ref().unwrap_or(pinned),
+                None => harness_type,
+            };
             match self
                 .store
                 .create_or_get_session(
@@ -7662,6 +7683,7 @@ mod tests {
                 prompt_hash: "sha256:prompt".to_owned(),
                 prompt: "secret prompt".to_owned(),
                 models: BTreeMap::new(),
+                harness: None,
             }],
             Some("eng".to_owned()),
             vec!["/repo/tools".to_owned()],
@@ -7699,6 +7721,7 @@ mod tests {
                     prompt_hash: "sha256:private".to_owned(),
                     prompt: "private prompt".to_owned(),
                     models: BTreeMap::new(),
+                    harness: None,
                 },
                 PersonaDefinition {
                     id: "public".to_owned(),
@@ -7708,6 +7731,7 @@ mod tests {
                     prompt_hash: "sha256:public".to_owned(),
                     prompt: "public prompt".to_owned(),
                     models: BTreeMap::new(),
+                    harness: None,
                 },
             ],
             Some("private".to_owned()),
@@ -7781,6 +7805,7 @@ mod tests {
                 prompt_hash: "sha256:eng".to_owned(),
                 prompt: "engineering persona".to_owned(),
                 models: BTreeMap::new(),
+                harness: None,
             }],
             Some("eng".to_owned()),
             vec!["/repo/tools".to_owned()],
@@ -9841,10 +9866,62 @@ mod adoption_tests {
             prompt_hash: format!("sha256:{persona_id}"),
             prompt: format!("{persona_id} persona prompt"),
             models: BTreeMap::from([("codex".to_owned(), format!("{persona_id}-model"))]),
+            harness: None,
         });
+        let pinned = PersonaDefinition {
+            id: "pinned".to_owned(),
+            source_root: "/repo/tools".to_owned(),
+            source_path: "/repo/tools/personas/pinned".to_owned(),
+            source_ref: Some("abc123".to_owned()),
+            prompt_hash: "sha256:pinned".to_owned(),
+            prompt: "pinned persona prompt".to_owned(),
+            models: BTreeMap::new(),
+            harness: Some(HarnessType::ClaudeCode),
+        };
         runtime_with(store, backend).with_personas(
-            PersonaRegistry::new(definitions, None, vec!["/repo/tools".to_owned()]).unwrap(),
+            PersonaRegistry::new(
+                definitions.into_iter().chain([pinned]),
+                None,
+                vec!["/repo/tools".to_owned()],
+            )
+            .unwrap(),
         )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persona_pinned_harness_overrides_requested_harness() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key = ThreadKey::parse(format!(
+            "test:persona-pinned-harness-{}",
+            uuid::Uuid::new_v4()
+        ))
+        .unwrap();
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with_personas(&store, backend);
+
+        for policy in [
+            HarnessConflictPolicy::Reject,
+            HarnessConflictPolicy::Restart,
+        ] {
+            let outcome = runtime
+                .create_or_get_session(
+                    &thread_key,
+                    &HarnessType::Codex,
+                    Some("pinned"),
+                    Some(json!({})),
+                    policy,
+                )
+                .await
+                .expect("create or load pinned session");
+
+            assert_eq!(outcome.session.harness_type, HarnessType::ClaudeCode);
+            assert_eq!(outcome.session.persona_id.as_deref(), Some("pinned"));
+            assert!(!outcome.harness_switched);
+        }
+        reset_test_store(&store).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
