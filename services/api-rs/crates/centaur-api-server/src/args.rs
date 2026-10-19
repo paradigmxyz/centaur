@@ -90,6 +90,10 @@ impl Args {
         self.sandbox.iron_control_runtime().await
     }
 
+    pub(crate) fn iron_control_client(&self) -> Option<IronControlClient> {
+        self.sandbox.iron_control.client()
+    }
+
     pub(crate) fn persona_registry(&self) -> Result<PersonaRegistry, ServerError> {
         self.sandbox.persona_registry()
     }

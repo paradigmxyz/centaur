@@ -494,6 +494,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slack_ingress_reads_external_team_ids_from_console() {
+        let console = axum::Router::new().route(
+            "/api/v1/system_settings",
+            axum::routing::get(|headers: axum::http::HeaderMap| async move {
+                assert_eq!(headers[header::AUTHORIZATION], "Bearer console-key");
+                axum::Json(json!({ "data": { "slack_external_team_ids": ["T0PARTNER"] } }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let console_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, console).await.unwrap() });
+        let state = AppState::unready(test_auth_with_slack()).with_iron_control(
+            centaur_iron_control::IronControlClient::new(console_url, "console-key"),
+        );
+
+        let mut statuses = Vec::new();
+        for token in [
+            "test-slackbot-key".to_owned(),
+            principal_token("prn_sandbox"),
+        ] {
+            let response = build_router_with_app_state(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/slack/external-team-ids")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            statuses.push(response.status());
+            if response.status() == StatusCode::OK {
+                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(body, json!({ "slack_external_team_ids": ["T0PARTNER"] }));
+            }
+        }
+        server.abort();
+
+        assert_eq!(statuses, [StatusCode::OK, StatusCode::FORBIDDEN]);
+    }
+
+    #[tokio::test]
     async fn principal_jwt_is_capability_scoped() {
         let principal = principal_token("prn_sandbox");
         let write_response = build_router_with_app_state(AppState::unready(test_auth()))

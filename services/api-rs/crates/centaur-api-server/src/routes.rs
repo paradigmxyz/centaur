@@ -20,6 +20,7 @@ use axum::{
     routing::{any, get, post},
 };
 use base64::{Engine as _, engine::general_purpose};
+use centaur_iron_control::IronControlClient;
 use centaur_session_core::{ChatDestination, ThreadKey};
 use centaur_session_runtime::{
     ExecuteSessionInput, HarnessConflictPolicy, SandboxRuntime, SessionPrincipalRegistrar,
@@ -65,6 +66,7 @@ pub struct AppState {
     initialized: Arc<RwLock<Option<AppRuntimeState>>>,
     metrics: PrometheusHandle,
     auth: ApiAuthConfig,
+    iron_control: Option<IronControlClient>,
 }
 
 #[derive(Clone)]
@@ -80,7 +82,14 @@ impl AppState {
             initialized: Arc::new(RwLock::new(None)),
             metrics: prometheus_handle().expect("failed to initialize Prometheus metrics recorder"),
             auth,
+            iron_control: None,
         }
+    }
+
+    /// The console admin client used to read deployment-wide settings.
+    pub fn with_iron_control(mut self, client: IronControlClient) -> Self {
+        self.iron_control = Some(client);
+        self
     }
 
     pub fn ready(
@@ -163,6 +172,7 @@ impl AppState {
     }
 }
 
+const CONSOLE_SETTINGS_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
 const REDACTED_WEBHOOK_HEADERS: &[&str] = &[
     "authorization",
@@ -228,6 +238,10 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
             post(pause_session_sandbox),
         )
         .route("/api/sandboxes/drain", post(drain_sandboxes))
+        .route(
+            "/api/slack/external-team-ids",
+            get(get_slack_external_team_ids),
+        )
         .merge(slack_proxy_router())
         .route("/api/workflows/schedules", get(list_workflow_schedules))
         .route(
@@ -495,6 +509,9 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
         (&Method::POST, "/api/workflows/events") => capability(Capability::WorkflowsEvents),
         (&Method::POST, "/api/workflows/actions/invoke") => {
             capability(Capability::WorkflowsActions)
+        }
+        (&Method::GET, "/api/slack/external-team-ids") => {
+            capability(Capability::SlackExternalTeamsRead)
         }
         (_, route) if route.starts_with("/api/slack/") => Some(RouteAccess::PrincipalOnly),
         (_, route) if route.starts_with("/api/admin/slack/dm-sync/") => {
@@ -795,6 +812,26 @@ async fn drain_sandboxes(
         "busy": report.busy,
         "failed": failed,
     })))
+}
+
+/// Slack Connect workspaces the console admits. Slackbot ignores messages and
+/// actions from any other external workspace.
+async fn get_slack_external_team_ids(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
+    let client = state
+        .iron_control
+        .as_ref()
+        .ok_or_else(|| ApiError::ServiceUnavailable("console is not configured".to_owned()))?;
+    let team_ids = tokio::time::timeout(CONSOLE_SETTINGS_TIMEOUT, client.slack_external_team_ids())
+        .await
+        .map_err(|_| "request timed out".to_owned())
+        .and_then(|result| result.map_err(|error| error.to_string()))
+        .map_err(|error| {
+            tracing::warn!(error, "failed to read Slack external team ids from console");
+            ApiError::ServiceUnavailable("console settings are unavailable".to_owned())
+        })?;
+    Ok(Json(json!({ "slack_external_team_ids": team_ids })))
 }
 
 /// Pauses a session's sandbox now, as its idle timeout would; the next turn
