@@ -69,29 +69,21 @@ module Api
       private
 
       # Concurrent first turns upsert the same new foreign_id. The loser fails
-      # the uniqueness validation or the unique index, so retry once as an
-      # update of the winner.
+      # the unique index or the uniqueness validation, so retry once, which
+      # finds and updates the winner's record.
       def upsert_with_retry
-        attempts = 0
+        upsert!
+      rescue ActiveRecord::RecordNotUnique
+        upsert!
+      rescue ActiveRecord::RecordInvalid => e
+        raise unless e.record.errors.of_kind?(:foreign_id, :taken)
 
-        begin
-          attempts += 1
-          principal = resolve_for_upsert(Principal)
-          was_new = principal.new_record?
-          assign_and_save!(principal, was_new)
-          [ principal, was_new ]
-        rescue ActiveRecord::RecordNotUnique, ActiveRecord::RecordInvalid => e
-          raise unless was_new && attempts < 2 && lost_create_race?(e)
-
-          retry
-        end
+        upsert!
       end
 
-      def lost_create_race?(error)
-        error.is_a?(ActiveRecord::RecordNotUnique) || error.record.errors.of_kind?(:foreign_id, :taken)
-      end
-
-      def assign_and_save!(principal, was_new)
+      def upsert!
+        principal = resolve_for_upsert(Principal)
+        was_new = principal.new_record?
         ActiveRecord::Base.transaction do
           principal.assign_attributes(principal_params)
           principal.link_console_user_by_slack_email if data_params.key?(:slack_email)
@@ -99,6 +91,7 @@ module Api
           principal.save!
           replace_slack_channel_permissions!(principal) if data_params.key?(:slack_channel_permissions)
         end
+        [ principal, was_new ]
       end
 
       def record_payload(principal)
