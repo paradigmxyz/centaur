@@ -95,7 +95,7 @@ created. Changing a default does not rewrite existing principals.
 | `SHUTDOWN_DRAIN_TIMEOUT_S` | `api.extraEnv`. | Graceful shutdown wait for in-flight HTTP requests. |
 | `EXECUTION_WORKER_ENABLED` | `api.executionWorkerEnabled`. | Starts the durable agent execution worker. |
 | `WORKFLOW_WORKER_ENABLED` | `api.workflowWorkerEnabled`. | Starts the durable workflow worker. |
-| `WARM_POOL_ENABLED` | `api.warmPoolEnabled`. | Starts warm sandbox replenishment. |
+| `WARM_POOL_ENABLED` | `api.warmPoolEnabled`. | Starts warm sandbox replenishment. Warm sandboxes run `harness-server deferred` and are bound to the claiming session's harness and persona when its pipe opens, so only sandbox capabilities (repo-cache access, observability) limit which sessions can claim them. |
 | `PLUGIN_WATCHER_ENABLED` | `api.pluginWatcherEnabled`. | Enables tool and workflow hot-reload watchers. |
 | `TOOL_DIRS`, `PLUGINS_DIR` | Chart-rendered from `overlays.sources[*].toolsSubdir` (default `tools`); fallback to `PLUGINS_DIR`. | Tool discovery paths. |
 | `WORKFLOW_DIRS` | Chart-rendered from `overlays.sources[*].workflowsSubdir` (default `workflows`). | Workflow discovery paths. |

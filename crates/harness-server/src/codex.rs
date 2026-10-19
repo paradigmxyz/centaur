@@ -284,7 +284,9 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
             CodexBlocksReaderInput::Command(BlocksCommand::Interrupt) => {
                 eprintln!("Codex blocks interrupt ignored: no active turn runs");
             }
-            CodexBlocksReaderInput::Command(BlocksCommand::AttachmentChunk) => {}
+            CodexBlocksReaderInput::Command(
+                BlocksCommand::AttachmentChunk | BlocksCommand::Configured,
+            ) => {}
             CodexBlocksReaderInput::Error(error) => {
                 eprintln!("invalid Codex blocks input: {error}");
                 write_blocks_error(

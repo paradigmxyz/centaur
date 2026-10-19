@@ -99,7 +99,7 @@ async fn run() -> Result<()> {
                 )
                 .await?;
             }
-            BlocksCommand::AttachmentChunk => {}
+            BlocksCommand::AttachmentChunk | BlocksCommand::Configured => {}
             BlocksCommand::Interrupt => {
                 eprintln!("nanocodex interrupt ignored: no cancellation API is exposed");
             }
@@ -203,7 +203,7 @@ async fn run_turn(
                         }
                         turn.steer(prompt).await.map_err(nanocodex_error)?;
                     }
-                    BlocksCommand::AttachmentChunk => {}
+                    BlocksCommand::AttachmentChunk | BlocksCommand::Configured => {}
                     BlocksCommand::Interrupt => {
                         turn.cancel().await.map_err(nanocodex_error)?;
                         input_open = false;
@@ -238,6 +238,8 @@ enum BlocksCommand {
     },
     AttachmentChunk,
     Interrupt,
+    /// A resent `session.configure` that matched this process's binding.
+    Configured,
 }
 
 #[derive(Deserialize)]
@@ -337,6 +339,10 @@ fn parse_blocks_line(line: &str, staged: &mut HashMap<String, PathBuf>) -> Resul
             Ok(BlocksCommand::AttachmentChunk)
         }
         "interrupt" => Ok(BlocksCommand::Interrupt),
+        crate::session_config::SESSION_CONFIGURE_TYPE => {
+            crate::session_config::check_repeated_configure(line)?;
+            Ok(BlocksCommand::Configured)
+        }
         kind => Err(HarnessServerError::InvalidBlocksInput {
             message: format!("unsupported blocks input type `{kind}`"),
         }),
