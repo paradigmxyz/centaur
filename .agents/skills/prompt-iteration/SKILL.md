@@ -35,7 +35,8 @@ model through this sandbox's normal proxy path. Nothing is deployed.
 
    Flags combine. Use `--no-persona` to compose without a persona. Read
    `/tmp/prompt-preview/AGENTS.md` to confirm the sections and their order
-   before you run anything.
+   before you run anything. The preview directory also links this session's
+   installed skills, so the child sees the same skills.
 
 3. Run a fresh child on the composed prompt, from the preview directory so it
    reads that `AGENTS.md`. Use the harness the persona targets. If the persona
@@ -57,8 +58,19 @@ model through this sandbox's normal proxy path. Nothing is deployed.
 
 ## Limits
 
-- A child agent tests prompt behavior only. It does not show persona selection,
-  persona model pinning, or Slack rendering. Those require a deploy, and
-  persona registry edits also need an api-rs restart.
+The child gets the same composed prompt, skills, harness config, tools, and
+proxy credentials as this session. It differs in these ways:
+
+- It runs on the harness config's default model and effort. Real turns use the
+  model api-rs picks: the persona's pin, the channel default, or the user's
+  flags. Pass `--model` to match.
+- It gets one bare message: no thread history, and none of the context the
+  chat ingress adds (sender, channel, attachments). If the prompt reacts to that
+  context, write it into the probe message.
+- It bypasses `harness-server`, so Nanocodex subagent tools and the other
+  harnesses (Pi, Amp, Hermes) are not covered.
+- It does not show persona selection, persona model pinning, or Slack
+  rendering. Those require a deploy, and persona registry edits also need an
+  api-rs restart.
 - Keep probe messages free of secrets. The child runs with this sandbox's
   credentials, so give it the same tasks you would run here.

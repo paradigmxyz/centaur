@@ -31,7 +31,7 @@ out="$1"
 
 home="$out/home"
 mount="$out/github"
-rm -rf "$home" "$mount" "$out/AGENTS.md"
+rm -rf "$home" "$mount" "$out/AGENTS.md" "$out/.agents" "$out/.claude"
 mkdir -p "$home" "$mount"
 
 copy_if_file() { if [ -f "$1" ]; then cp "$1" "$2"; fi; }
@@ -72,6 +72,23 @@ done
 for repo in ${repos[@]+"${repos[@]}"}; do
     link_repo "$repo"
 done
+
+# Expose the session's installed skills, found the same way as
+# install_tool_shims._workspace_dir(), to children started in OUT_DIR.
+workspace="${WORKSPACE_DIR:-${CENTAUR_WORKSPACE_DIR:-}}"
+if [ -z "$workspace" ]; then
+    workspace="${CENTAUR_STATE_DIR:-$HOME/state}/workspace"
+    if [ "${CENTAUR_PERSISTENT_STATE:-}" != 1 ] && [ ! -e "$workspace" ]; then
+        workspace="$HOME/workspace"
+    fi
+fi
+if [ -d "$workspace/.agents/skills" ]; then
+    mkdir -p "$out/.agents" "$out/.claude"
+    ln -sfn "$workspace/.agents/skills" "$out/.agents/skills"
+    ln -sfn "$workspace/.agents/skills" "$out/.claude/skills"
+else
+    echo "warning: no skills at $workspace/.agents/skills; the child will lack session skills" >&2
+fi
 
 compose-system-prompt --home-dir "$home" --repo-mount "$mount" --target-prompt "$out/AGENTS.md"
 [ -f "$out/AGENTS.md" ] || { echo "no base prompt found" >&2; exit 1; }
