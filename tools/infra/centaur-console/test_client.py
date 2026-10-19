@@ -3,8 +3,10 @@ import json
 import httpx
 import pytest
 from client import (
+    SANDBOX_ADMIN_GRANTS_PATH,
     SANDBOX_ADMIN_PRINCIPALS_PATH,
     SANDBOX_ADMIN_ROLES_PATH,
+    SANDBOX_ADMIN_SECRETS_PATH,
     SANDBOX_OAUTH_APPS_PATH,
     SANDBOX_PERMISSIONS_PATH,
     SANDBOX_SCHEDULED_TASKS_PATH,
@@ -279,3 +281,76 @@ def test_admin_requests_surface_forbidden_errors():
 
     with pytest.raises(RuntimeError, match="HTTP 403"):
         make_client(handler).admin_unassign_role("prn_123", "role_456")
+
+
+SECRETS = [
+    {"id": "sst_1", "grant_key": "static_secret_id", "foreign_id": "github-pat", "name": "GitHub"},
+    {"id": "pgd_2", "grant_key": "pg_dsn_secret_id", "foreign_id": "analytics", "name": "DB"},
+]
+
+
+def test_admin_grant_secret_posts_the_secret_under_its_grant_key():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/prn_123":
+            return json_response({"data": {"id": "prn_123"}})
+        if request.url.path == SANDBOX_ADMIN_SECRETS_PATH:
+            return json_response({"data": SECRETS})
+        assert request.method == "POST"
+        assert request.url.path == SANDBOX_ADMIN_GRANTS_PATH
+        assert json.loads(request.content) == {
+            "data": {"principal_id": "prn_123", "pg_dsn_secret_id": "pgd_2"}
+        }
+        return json_response({"data": {"id": "grt_9"}}, 201)
+
+    assert make_client(handler).admin_grant_secret("prn_123", "analytics") == {"id": "grt_9"}
+
+
+def test_admin_revoke_secret_deletes_the_matching_direct_grant():
+    deleted = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            deleted.append(request.url.path)
+            return httpx.Response(204)
+        if request.url.path == f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/prn_123":
+            return json_response({"data": {"id": "prn_123"}})
+        if request.url.path == SANDBOX_ADMIN_SECRETS_PATH:
+            return json_response({"data": SECRETS})
+        return json_response(
+            {
+                "data": [
+                    {"id": "grt_1", "pg_dsn_secret_id": "pgd_other"},
+                    {"id": "grt_2", "static_secret_id": "sst_1"},
+                ],
+                "meta": {"total_pages": 1},
+            }
+        )
+
+    make_client(handler).admin_revoke_secret("prn_123", "sst_1")
+
+    assert deleted == [f"{SANDBOX_ADMIN_GRANTS_PATH}/grt_2"]
+
+
+def test_admin_grant_secret_refuses_ambiguous_names():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == SANDBOX_ADMIN_SECRETS_PATH:
+            duplicate = {**SECRETS[1], "id": "pgd_3", "foreign_id": "other"}
+            return json_response({"data": [*SECRETS, duplicate]})
+        return json_response({"data": {"id": "prn_123"}})
+
+    with pytest.raises(RuntimeError, match="several secrets"):
+        make_client(handler).admin_grant_secret("prn_123", "DB")
+
+
+def test_admin_set_sandbox_access_sends_only_supplied_capabilities():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return json_response({"data": {"id": "prn_123"}})
+        assert request.method == "PATCH"
+        assert request.url.path == f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/prn_123/sandbox_access"
+        assert json.loads(request.content) == {"data": {"sandbox_sessions_read_enabled": True}}
+        return json_response({"data": {"id": "prn_123"}})
+
+    make_client(handler).admin_set_sandbox_access(
+        "prn_123", sandbox_sessions_read_enabled=True, sandbox_repo_cache=None
+    )
