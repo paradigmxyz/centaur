@@ -575,7 +575,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
         route,
         ...webhookFields
       })
-      if (!isAllowedSlackWebhookBody(rawBody, options, logger)) {
+      if (!(await isAllowedSlackWebhookBody(rawBody, options, logger))) {
         outcome = 'ignored'
         return new globalThis.Response('ok', { status: 200 })
       }

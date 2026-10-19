@@ -1,7 +1,7 @@
 import type { Logger, Message } from 'chat'
-import { withSlackApiTimeout } from './session-api'
+import { fetchSlackExternalTeamIds, withSlackApiTimeout } from './session-api'
 import type { JsonValue, SlackbotV2Options } from './types'
-import { isJsonObject, stringValue } from './utils'
+import { errorMessage, isJsonObject, nowMs, stringValue } from './utils'
 
 type RawSlackBotProfile = {
   app_id?: JsonValue
@@ -40,6 +40,15 @@ type TriggerBotIdentity = {
   userId?: string
 }
 
+type ExternalTeamIdsCacheEntry = {
+  expiresAtMs: number
+  lookup: Promise<ReadonlySet<string>>
+}
+
+const EXTERNAL_TEAM_IDS_TTL_MS = 30_000
+const EXTERNAL_TEAM_IDS_RETRY_MS = 5_000
+
+const externalTeamIdsCaches = new WeakMap<SlackbotV2Options, ExternalTeamIdsCacheEntry>()
 const triggerBotIdentityCaches = new WeakMap<
   SlackbotV2Options,
   Map<string, Promise<TriggerBotIdentity | null>>
@@ -49,11 +58,11 @@ const triggerBotUserAppCaches = new WeakMap<
   Map<string, Promise<string | null>>
 >()
 
-export function isAllowedSlackWebhookBody(
+export async function isAllowedSlackWebhookBody(
   rawBody: string,
   options: SlackbotV2Options,
   logger: Logger
-): boolean {
+): Promise<boolean> {
   const payload = parseSlackWebhookPayload(rawBody)
   if (!payload) return true
   if (isRawSlackInteraction(payload) && payload.type === 'block_actions') {
@@ -63,10 +72,8 @@ export function isAllowedSlackWebhookBody(
   const event = isRawSlackEvent(payload.event) ? payload.event : undefined
   if (!event) return true
 
-  const allowedExternalTeamIds =
-    options.allowedExternalTeamIds ?? splitEnvList(process.env.SLACKBOT_EXTERNAL_ORG_ALLOWLIST)
   const externalTeamId = externalSlackTeamIdForHome(stringValue(payload.team_id), event)
-  if (externalTeamId && !new Set(allowedExternalTeamIds).has(externalTeamId)) {
+  if (externalTeamId && !(await allowedExternalTeamIds(options, logger)).has(externalTeamId)) {
     logger.warn('slackbotv2_event_ignored_external_org_not_allowlisted', {
       event_id: stringValue(payload.event_id),
       external_team_id: externalTeamId,
@@ -93,20 +100,20 @@ function parseJsonObject(value: string): Record<string, unknown> | null {
   }
 }
 
-function isAllowedSlackInteraction(
+async function isAllowedSlackInteraction(
   payload: RawSlackInteraction,
   options: SlackbotV2Options,
   logger: Logger
-): boolean {
+): Promise<boolean> {
   const team = isJsonObject(payload.team) ? payload.team : undefined
   const user = isJsonObject(payload.user) ? payload.user : undefined
   const homeTeamId = stringValue(team?.id)
   const externalTeamId = externalSlackTeamIdForHome(homeTeamId, {
     user_team: user?.team_id
   })
-  const allowedExternalTeamIds =
-    options.allowedExternalTeamIds ?? splitEnvList(process.env.SLACKBOT_EXTERNAL_ORG_ALLOWLIST)
-  if (!externalTeamId || new Set(allowedExternalTeamIds).has(externalTeamId)) return true
+  if (!externalTeamId || (await allowedExternalTeamIds(options, logger)).has(externalTeamId)) {
+    return true
+  }
 
   const actions = Array.isArray(payload.actions) ? payload.actions : []
   const firstAction = actions.find(isJsonObject)
@@ -124,10 +131,8 @@ export async function isAllowedSlackMessage(
   logger: Logger
 ): Promise<boolean> {
   const raw = isRawSlackEvent(message.raw) ? message.raw : undefined
-  const allowedExternalTeamIds =
-    options.allowedExternalTeamIds ?? splitEnvList(process.env.SLACKBOT_EXTERNAL_ORG_ALLOWLIST)
   const externalTeamId = raw ? externalSlackTeamId(raw) : undefined
-  if (externalTeamId && !new Set(allowedExternalTeamIds).has(externalTeamId)) {
+  if (externalTeamId && !(await allowedExternalTeamIds(options, logger)).has(externalTeamId)) {
     logger.warn('slackbotv2_event_ignored_external_org_not_allowlisted', {
       external_team_id: externalTeamId,
       message_id: message.id,
@@ -167,6 +172,35 @@ export async function slackStreamRecipientUserId(
   if (author.isBot !== true || isSlackMemberId(author.userId)) return author.userId
   const identity = await resolveTriggerBotIdentity(author.userId, options, logger)
   return identity?.userId && isSlackMemberId(identity.userId) ? identity.userId : author.userId
+}
+
+/**
+ * Console-managed Slack Connect allowlist, cached briefly. A failed refresh
+ * keeps the last known list (or none, so external orgs stay blocked) and
+ * retries sooner.
+ */
+async function allowedExternalTeamIds(
+  options: SlackbotV2Options,
+  logger: Logger
+): Promise<ReadonlySet<string>> {
+  if (options.allowedExternalTeamIds) return new Set(options.allowedExternalTeamIds)
+  const cached = externalTeamIdsCaches.get(options)
+  if (cached && nowMs() < cached.expiresAtMs) return cached.lookup
+
+  const previous = cached?.lookup ?? Promise.resolve(new Set<string>())
+  const entry: ExternalTeamIdsCacheEntry = {
+    expiresAtMs: nowMs() + EXTERNAL_TEAM_IDS_TTL_MS,
+    lookup: fetchSlackExternalTeamIds(options).then(
+      teamIds => new Set(teamIds),
+      error => {
+        logger.warn('slackbotv2_external_team_ids_lookup_failed', { error: errorMessage(error) })
+        entry.expiresAtMs = nowMs() + EXTERNAL_TEAM_IDS_RETRY_MS
+        return previous
+      }
+    )
+  }
+  externalTeamIdsCaches.set(options, entry)
+  return entry.lookup
 }
 
 function externalSlackTeamId(event: RawSlackEvent): string | undefined {
