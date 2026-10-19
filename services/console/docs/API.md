@@ -1107,9 +1107,9 @@ The sandbox permissions response includes an `oauth_credentials` array with non-
 }
 ```
 
-### Sandbox Admin Role Management
+### Sandbox Admin Permission Management
 
-A sandbox whose principal is linked to an active admin Console user (that admin's Slack DM or Console session) may manage principal roles with its sandbox entitlement JWT. Other sandboxes, including channel sessions, receive `403`. Request and response shapes match the corresponding admin endpoints.
+A sandbox whose principal is linked to an active admin Console user (that admin's Slack DM or Console session) may manage principal roles, direct secret grants, Slack channel permissions, and sandbox capabilities with its sandbox entitlement JWT. Other sandboxes, including channel sessions, receive `403`. Request and response shapes match the corresponding admin endpoints.
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
@@ -1119,6 +1119,13 @@ A sandbox whose principal is linked to an active admin Console user (that admin'
 | `GET`/`POST` | `/api/v1/sandbox/admin/principals/:principal_id/roles` | List or assign roles (`data: { role_id }`). |
 | `DELETE` | `/api/v1/sandbox/admin/principals/:principal_id/roles/:id` | Unassign a role. |
 | `GET` | `/api/v1/sandbox/admin/roles`, `/roles/:id`, `/roles/lookup/:foreign_id` | List or fetch roles. |
+| `GET` | `/api/v1/sandbox/admin/principals/:principal_id/grants` | List a principal's direct grants. |
+| `POST` | `/api/v1/sandbox/admin/grants` | Grant a secret to a principal (`data: { principal_id, <grant_key>: <secret oid> }`). Role grants return `403`. |
+| `DELETE` | `/api/v1/sandbox/admin/grants/:id` | Revoke a direct principal grant. Role grants return `404`. |
+| `GET` | `/api/v1/sandbox/admin/secrets` | List grantable secrets of every kind with `id`, `grant_key`, `foreign_id`, `name`, `description`, and `labels`. `q` filters by name or foreign ID. |
+| `POST` | `/api/v1/sandbox/admin/principals/:id/slack_channel_permissions` | Upsert one Slack channel permission (`data: { channel_id, upload_enabled, download_enabled, history_enabled }`). New permissions default omitted flags to `true`. |
+| `DELETE` | `/api/v1/sandbox/admin/principals/:id/slack_channel_permissions/:channel_id` | Remove the principal's own permission for a channel. |
+| `PATCH` | `/api/v1/sandbox/admin/principals/:id/sandbox_access` | Update only the supplied `sandbox_repo_cache` and `sandbox_*_enabled` fields. |
 
 ## OAuth consent flow
 

@@ -29,6 +29,71 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "an admin's Slack DM sandbox finds a secret and grants it directly to a principal" do
+    secret = static_secrets(:acme_staging_api_key)
+
+    with_token(dm_proxy_for(users(:acme_admin))) do |headers|
+      get "/api/v1/sandbox/admin/secrets", params: { q: secret.name }, headers: headers
+      assert_response :ok
+      listed = json_body.fetch("data").find { |row| row["id"] == secret.oid }
+      assert_equal "static_secret_id", listed["grant_key"]
+      assert_equal %w[description foreign_id grant_key id labels name], listed.keys.sort
+
+      post "/api/v1/sandbox/admin/grants",
+           params: { data: { principal_id: @channel.oid, static_secret_id: secret.oid } }, headers: headers, as: :json
+      assert_response :created
+      grant_id = json_body.dig("data", "id")
+      assert_includes @channel.granted_static_secrets, secret
+
+      get "/api/v1/sandbox/admin/principals/#{@channel.oid}/grants", headers: headers
+      assert_includes json_body.fetch("data").map { |grant| grant["id"] }, grant_id
+
+      delete "/api/v1/sandbox/admin/grants/#{grant_id}", headers: headers
+      assert_response :no_content
+      assert_not_includes @channel.reload.granted_static_secrets, secret
+    end
+  end
+
+  test "sandbox admin grants cannot change role grants" do
+    with_token(dm_proxy_for(users(:acme_admin))) do |headers|
+      post "/api/v1/sandbox/admin/grants",
+           params: { data: { role_id: @role.oid, static_secret_id: static_secrets(:acme_staging_api_key).oid } },
+           headers: headers, as: :json
+      assert_response :forbidden
+
+      delete "/api/v1/sandbox/admin/grants/#{grants(:acme_infra_prod_api_key).oid}", headers: headers
+      assert_response :not_found
+    end
+    assert Grant.exists?(grants(:acme_infra_prod_api_key).id)
+  end
+
+  test "an admin's Slack DM sandbox changes Slack permissions and sandbox capabilities" do
+    @channel.update!(sandbox_sessions_read_enabled: false, sandbox_workflows_read_enabled: true)
+
+    with_token(dm_proxy_for(users(:acme_admin))) do |headers|
+      post "/api/v1/sandbox/admin/principals/#{@channel.oid}/slack_channel_permissions",
+           params: { data: { channel_id: "C0999999999", upload_enabled: false } }, headers: headers, as: :json
+      assert_response :created
+      permission = @channel.slack_channel_permissions.find_by!(channel_id: "C0999999999")
+      assert_not permission.upload_enabled
+      assert permission.history_enabled
+
+      delete "/api/v1/sandbox/admin/principals/#{@channel.oid}/slack_channel_permissions/c0999999999",
+             headers: headers
+      assert_response :no_content
+      assert_not @channel.slack_channel_permissions.exists?(channel_id: "C0999999999")
+
+      patch "/api/v1/sandbox/admin/principals/#{@channel.oid}/sandbox_access",
+            params: { data: { sandbox_sessions_read_enabled: true } }, headers: headers, as: :json
+      assert_response :ok
+    end
+
+    @channel.reload
+    assert @channel.sandbox_sessions_read_enabled
+    assert @channel.sandbox_workflows_read_enabled
+    assert_equal "all", @channel.sandbox_repo_cache
+  end
+
   test "sandboxes not linked to an active admin cannot change roles" do
     proxies = [
       dm_proxy_for(users(:member_user)),
