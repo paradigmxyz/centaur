@@ -12,6 +12,7 @@ const TOKEN_REQUESTS_TOTAL: &str = "token_broker_token_requests_total";
 const DUE_CREDENTIALS: &str = "token_broker_due_credentials";
 const DEAD_CREDENTIALS: &str = "token_broker_dead_credentials";
 const BACKING_OFF_CREDENTIALS: &str = "token_broker_backing_off_credentials";
+const LAST_POLL_TIMESTAMP_SECONDS: &str = "token_broker_last_poll_timestamp_seconds";
 const REFRESH_DURATION_BUCKETS: &[f64] = &[0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0];
 
 /// Providers the credential gauges have reported, so a provider whose
@@ -42,7 +43,8 @@ fn describe() {
     metrics::describe_counter!(
         TOKEN_REQUESTS_TOTAL,
         "Token endpoint requests by provider and result (success, rejected, rate_limited, \
-         server_error, client_error, malformed, timeout, connection_failed, network_error)."
+         server_error, redirect, client_error, malformed, timeout, connection_failed, \
+         network_error)."
     );
     metrics::describe_gauge!(
         DUE_CREDENTIALS,
@@ -51,6 +53,11 @@ fn describe() {
     metrics::describe_gauge!(
         DEAD_CREDENTIALS,
         "Broker credentials that need re-authorization, by provider."
+    );
+    metrics::describe_gauge!(
+        LAST_POLL_TIMESTAMP_SECONDS,
+        metrics::Unit::Seconds,
+        "Unix time the last poll finished refreshing every due credential."
     );
     metrics::describe_gauge!(
         BACKING_OFF_CREDENTIALS,
@@ -81,6 +88,13 @@ pub(crate) fn record_token_request(provider: &str, result: &'static str) {
         "result" => result,
     )
     .increment(1);
+}
+
+pub(crate) fn record_tick_completed() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    metrics::gauge!(LAST_POLL_TIMESTAMP_SECONDS).set(now.as_secs_f64());
 }
 
 pub(crate) fn record_due_credentials(count: usize) {

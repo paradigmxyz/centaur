@@ -32,20 +32,29 @@ impl Broker {
     /// refreshes once `shutdown` is set; refreshes already running finish so
     /// a token the endpoint has just rotated is not lost.
     pub async fn tick(&self, shutdown: &watch::Receiver<bool>) -> Result<(), sqlx::Error> {
-        let mut counts = BTreeMap::<String, (i64, i64)>::new();
-        for row in store::credential_counts(&self.pool).await? {
-            let provider = grants::provider_label(row.provider.as_deref(), &row.token_endpoint);
-            let count = counts.entry(provider).or_default();
-            count.0 += row.dead;
-            count.1 += row.backing_off;
+        // The gauges are only for observability; failing to count must not
+        // hold up refreshes.
+        match store::credential_counts(&self.pool).await {
+            Ok(rows) => {
+                let mut counts = BTreeMap::<String, (i64, i64)>::new();
+                for row in rows {
+                    let provider =
+                        grants::provider_label(row.provider.as_deref(), &row.token_endpoint);
+                    let count = counts.entry(provider).or_default();
+                    count.0 += row.dead;
+                    count.1 += row.backing_off;
+                }
+                telemetry::record_credential_counts(&counts);
+            }
+            Err(error) => warn!(%error, "counting broker credentials for metrics failed"),
         }
-        telemetry::record_credential_counts(&counts);
         let due = store::due_credential_ids(&self.pool, Utc::now().naive_utc()).await?;
         telemetry::record_due_credentials(due.len());
         stream::iter(due)
             .take_while(|_| std::future::ready(!*shutdown.borrow()))
             .for_each_concurrent(self.concurrency, |id| self.refresh(id))
             .await;
+        telemetry::record_tick_completed();
         Ok(())
     }
 

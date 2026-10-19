@@ -71,11 +71,15 @@ host.
 - `token_broker_refresh_duration_seconds{provider, outcome}`: refresh attempt
   latency, including its token requests.
 - `token_broker_token_requests_total{provider, result}`: token endpoint
-  requests; a fallback makes two. `result` is `success`, `rejected` (an OAuth
-  error), `rate_limited` (429), `server_error` (5xx), `client_error` (another
-  status), `malformed` (an unreadable successful response), `timeout`,
+  requests; a fallback makes two. `result` is `success`, `rejected` (a response
+  that marks the credential dead), `rate_limited` (429), `server_error` (5xx),
+  `redirect` (3xx, which is not followed), `client_error` (another 4xx),
+  `malformed` (an unreadable successful response), `timeout`,
   `connection_failed`, or `network_error`.
 - `token_broker_due_credentials`: credentials due at the start of the last poll.
+- `token_broker_last_poll_timestamp_seconds`: when the last poll finished
+  refreshing every due credential. Alert when it falls behind, which also
+  catches a poll stuck on the database.
 - `token_broker_dead_credentials{provider}`: credentials that need
   re-authorization.
 - `token_broker_backing_off_credentials{provider}`: live credentials whose last

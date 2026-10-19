@@ -503,6 +503,9 @@ async fn preqin_grant_replaces_a_refresh_token_its_refresh_endpoint_rejects() {
             json!({"access_token": "AT-preqin", "refresh_token": "RT-good"}),
         )
     ];
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let metrics = recorder.handle();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
     let id = fixture
         .credential(
             "preqin",
@@ -531,6 +534,9 @@ async fn preqin_grant_replaces_a_refresh_token_its_refresh_endpoint_rejects() {
     assert_eq!(initial.multipart_field("username"), Some("user"));
     assert_eq!(initial.multipart_field("apikey"), Some("api-key"));
     assert_eq!(initial.multipart_field("client_id"), None);
+    assert!(metrics.render().contains(
+        r#"token_broker_token_requests_total{provider="127.0.0.1",result="rejected"} 1"#
+    ));
     assert_eq!(stored.access_token.as_deref(), Some("AT-preqin"));
     assert_eq!(stored.refresh_token.as_deref(), Some("RT-good"));
     assert!(!stored.dead);

@@ -175,10 +175,13 @@ fn request_result(result: &Result<TokenResponse, RefreshError>) -> &'static str 
             Some("connect") => "connection_failed",
             _ => "network_error",
         },
-        ("oauth", _) => "rejected",
+        // Any response that marks the credential dead, including Preqin's
+        // bare 4xx.
+        _ if !error.retryable => "rejected",
         ("parse", _) => "malformed",
         (_, Some(429)) => "rate_limited",
         (_, Some(status)) if status >= 500 => "server_error",
+        (_, Some(300..=399)) => "redirect",
         _ => "client_error",
     }
 }
