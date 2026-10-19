@@ -15,7 +15,7 @@ use crate::{
 };
 
 const CALENDAR_LIST_FIELDS: &str = "nextPageToken,items(id,summary)";
-const EVENT_FIELDS: &str = "nextPageToken,nextSyncToken,items(id,status,summary,description,location,htmlLink,start,end,organizer(email,displayName),attendees(email,displayName,responseStatus,resource),recurrence)";
+const EVENT_FIELDS: &str = "nextPageToken,nextSyncToken,items(id,status,summary,description,location,htmlLink,start,end,organizer(email,displayName),attendees(email,displayName,resource),recurrence)";
 const EVENTS_PAGE_SIZE: &str = "250";
 
 /// Reads calendars and events with users' Google broker credentials.
@@ -80,7 +80,6 @@ pub struct EventTime {
 pub struct Person {
     pub email: String,
     pub display_name: String,
-    pub response_status: String,
     pub resource: bool,
 }
 
@@ -151,22 +150,20 @@ impl Event {
         if !organizer.is_empty() {
             lines.push(format!("- Organizer: {organizer}"));
         }
+        // Responses are left out, so an RSVP does not rewrite the document.
         let attendees: Vec<String> = self
             .attendees
             .iter()
             .filter(|attendee| !attendee.resource)
-            .map(|attendee| match attendee.response_status.as_str() {
-                "" | "needsAction" => attendee.label(),
-                status => format!("{} ({status})", attendee.label()),
-            })
+            .map(Person::label)
             .filter(|label| !label.is_empty())
             .collect();
         if !attendees.is_empty() {
             lines.push(format!("- Attendees: {}", attendees.join(", ")));
         }
-        let description = self.description.trim();
+        let description = plain_text(&self.description);
         if !description.is_empty() {
-            lines.extend([String::new(), description.to_owned()]);
+            lines.extend([String::new(), description]);
         }
         let content_text = lines.join("\n");
         let starts_at = self.start.utc();
@@ -195,6 +192,102 @@ impl Event {
             content_hash,
         })
     }
+}
+
+/// HTML tags Google Calendar descriptions use. Other `<...>` text, such as an
+/// address in angle brackets, is kept.
+const HTML_TAGS: [&str; 30] = [
+    "a",
+    "b",
+    "blockquote",
+    "br",
+    "code",
+    "div",
+    "em",
+    "font",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "hr",
+    "html-blob",
+    "i",
+    "img",
+    "li",
+    "ol",
+    "p",
+    "pre",
+    "s",
+    "span",
+    "strong",
+    "table",
+    "td",
+    "tr",
+    "u",
+    "ul",
+];
+/// Tags that end a line.
+const HTML_BLOCK_TAGS: [&str; 16] = [
+    "blockquote",
+    "br",
+    "div",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "hr",
+    "li",
+    "ol",
+    "p",
+    "pre",
+    "tr",
+    "ul",
+];
+
+/// Converts a description, which Google often stores as HTML, to plain text.
+fn plain_text(description: &str) -> String {
+    let mut text = String::with_capacity(description.len());
+    let mut rest = description;
+    while let Some(start) = rest.find('<') {
+        text.push_str(&rest[..start]);
+        let tag = &rest[start..];
+        let Some(end) = tag.find('>') else {
+            rest = tag;
+            break;
+        };
+        let name = tag[1..end]
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if HTML_BLOCK_TAGS.contains(&name.as_str()) {
+            text.push('\n');
+        } else if !HTML_TAGS.contains(&name.as_str()) {
+            text.push_str(&tag[..=end]);
+        }
+        rest = &tag[end + 1..];
+    }
+    text.push_str(rest);
+    let text = text
+        .replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
+    // Trim each line and keep at most one blank line between paragraphs.
+    let mut lines: Vec<&str> = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if !line.is_empty() || lines.last().is_some_and(|last| !last.is_empty()) {
+            lines.push(line);
+        }
+    }
+    lines.join("\n").trim().to_owned()
 }
 
 impl CalendarClient {
@@ -245,7 +338,7 @@ impl CalendarClient {
 
     /// Lists a page of events: the page `page_token` names, the changes since
     /// `sync_token`, or else the first page of a full sync. Returns `None` when
-    /// Google requires a full sync instead.
+    /// Google has expired the tokens and requires a full sync instead.
     pub async fn list_events(
         &self,
         credential_id: i64,
@@ -261,9 +354,11 @@ impl CalendarClient {
             .http
             .get(url)
             .query(&[("maxResults", EVENTS_PAGE_SIZE), ("fields", EVENT_FIELDS)]);
+        // Pages of incremental changes repeat the sync token they follow.
         if let Some(page_token) = page_token {
             request = request.query(&[("pageToken", page_token)]);
-        } else if let Some(sync_token) = sync_token {
+        }
+        if let Some(sync_token) = sync_token {
             request = request.query(&[("syncToken", sync_token)]);
         }
         let response = self
@@ -338,7 +433,7 @@ mod tests {
              - Recurrence: RRULE:FREQ=WEEKLY;BYDAY=TU\n\
              - Location: Room 4\n\
              - Organizer: Ada <Ada@Example.com>\n\
-             - Attendees: Ada <ada@example.com> (accepted), bob@example.com\n\n\
+             - Attendees: Ada <ada@example.com>, bob@example.com\n\n\
              Agenda: go/no-go"
         );
         assert_eq!(
@@ -347,6 +442,22 @@ mod tests {
         );
         assert_eq!(rendered.organizer_email, "ada@example.com");
         assert!(rendered.recurring);
+    }
+
+    #[test]
+    fn html_descriptions_become_plain_text() {
+        assert_eq!(
+            plain_text(
+                "<b>Agenda</b><br>1. Go/no-go&nbsp;&amp; dates<br><br><br>\
+                 <ul><li>Docs: <a href=\"https://example.com\">deck</a></li></ul>\
+                 Ping Ada &lt;ada@example.com&gt;"
+            ),
+            "Agenda\n1. Go/no-go & dates\n\nDocs: deck\n\nPing Ada <ada@example.com>"
+        );
+        assert_eq!(
+            plain_text("Ask <ada@example.com> if 2 < 3"),
+            "Ask <ada@example.com> if 2 < 3"
+        );
     }
 
     #[test]

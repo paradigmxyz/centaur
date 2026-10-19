@@ -2,7 +2,7 @@
 
 Standalone company-context ingestion service. It indexes regular Google Docs and text-bearing PDFs from users' My Drive, shared folders, Shared Drives they are members of, and Shared Drive folders shared with them without membership, using durable Absurd tasks. Google Docs are exported as plain text through the Drive API before chunking. Each user corpus and each member Shared Drive is followed through its own Drive change feed and checkpoint. Shared Drive folders shared with non-members have no change feed, so they are walked recursively each cycle, and files no walk has reached for 24 hours are removed.
 
-It also indexes Google Calendar events through the same Google broker credentials, when they include the `calendar.readonly` scope. Each sync cycle lists the calendars each credential can read event details of (reader, writer, or owner access) and syncs each one through that credential with Google's incremental sync tokens; a sync token Google expires starts over with a full sync, which removes the events it no longer lists. Events are stored per credential, as Google showed them to it, so private events on calendars the user can only read stay redacted by Google; a calendar shared by several users is stored once per user, and identical text reuses an existing embedding. Only events that ended within the last `COMPANY_CONTEXT_CALENDAR_HISTORY_DAYS`, and upcoming events, are indexed; each sync removes events that have since aged out. Raising the value starts a full sync that backfills the older events; lowering it removes the events that fall outside. Recurring events are indexed once, by their first occurrence, and kept however long ago their series started. Each event (title, times, recurrence, location, organizer, attendees, and description) is published as its own document and republished only when its content changes. A calendar its credential no longer lists, or whose credential is dead or deleted, is removed with its events.
+It also indexes Google Calendar events through the same Google broker credentials, when they include the `calendar.readonly` scope. Each sync cycle lists the calendars each credential can read event details of (reader, writer, or owner access) and syncs each one through that credential with Google's incremental sync tokens; a stored token Google expires or rejects starts over with a full sync, which removes the events it no longer lists. Events are stored per credential, as Google showed them to it, so private events on calendars the user can only read stay redacted by Google; a calendar shared by several users is stored once per user. Only events that ended within the last `COMPANY_CONTEXT_CALENDAR_HISTORY_DAYS`, and upcoming events, are indexed; each sync removes events that have since aged out. Raising the value starts a full sync that backfills the older events; lowering it removes the events that fall outside. Recurring events are indexed once, by their first occurrence, and kept however long ago their series started. Each event (title, times, recurrence, location, organizer, attendees, and description, converted from HTML to plain text) is published as its own document as it is synced. Calendar events are searched by keyword only; they are not embedded. A calendar its credential no longer lists, or whose credential is dead or deleted, is removed with its events.
 
 It also indexes Granola meeting notes (title, summary, owner, and attendees) through each user's Granola MCP OAuth credential. Each sync lists the account's meetings from its checkpoint onward, fetches their details ten meetings at a time, and republishes a note only when its content changes. Transcripts are not indexed; the Granola tool fetches them on demand. Notes that no live Granola credential still observes are removed.
 
@@ -203,9 +203,9 @@ Filters combine with AND:
 - `occurred_after` (inclusive) and `occurred_before` (exclusive): RFC 3339
   timestamps. A Slack channel document matches when its messages overlap the
   window; a Slack file matches by when it was created, a Drive document by
-  when it was last modified, a Calendar event when it overlaps the window (a
-  recurring event by its first occurrence), and a Granola note by when its
-  meeting occurred.
+  when it was last modified, a Calendar event when it overlaps the window, its
+  end being exclusive (a recurring event by its first occurrence), and a
+  Granola note by when its meeting occurred.
   Documents without a timestamp do not match a window.
 - `channel_ids`: Slack conversation IDs, at most 100. Searches only Slack
   messages in these conversations and Slack files shared in them; a file
@@ -217,8 +217,10 @@ Filters combine with AND:
 request whose types cannot satisfy every filter is rejected. `limit` defaults
 to 10 and is at most 50; there is no pagination, so narrow the filters instead.
 Keyword (BM25) and embedding similarity ranks are combined with reciprocal rank
-fusion; if the query cannot be embedded, keyword ranks alone are used. A
-result's `score` is its fused rank score, comparable only within one response.
+fusion; if the query cannot be embedded, keyword ranks alone are used.
+Calendar events have only a keyword rank, so they tend to rank below other
+types' documents that match both ways. A result's `score` is its fused rank
+score, comparable only within one response.
 
 ```json
 {

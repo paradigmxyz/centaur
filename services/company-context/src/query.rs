@@ -112,13 +112,16 @@ struct Source {
     /// Prefix of the type's document IDs.
     id_prefix: &'static str,
     documents: &'static str,
-    embeddings: &'static str,
+    /// The type's embeddings table, or `None` if it is searched by keyword only.
+    embeddings: Option<&'static str>,
     columns: &'static str,
     /// Documents visible to any subject in `$2`.
     visible: &'static str,
     /// Expressions for when the document's content starts and ends.
     starts_at: &'static str,
     ends_at: &'static str,
+    /// Whether content ends before `ends_at`, as calendar events do.
+    end_exclusive: bool,
     /// Documents in the conversations `$6`, or `None` if the type has none.
     in_channels: Option<&'static str>,
     /// The type's file ID column, or `None` if it has none.
@@ -135,11 +138,12 @@ impl Source {
             .map(|column| format!("{column} = ANY($7)"))
             .unwrap_or_else(|| "FALSE".to_owned());
         format!(
-            r#"($4::timestamptz IS NULL OR {ends_at} >= $4)
+            r#"($4::timestamptz IS NULL OR {ends_at} {ends_after} $4)
                AND ($5::timestamptz IS NULL OR {starts_at} < $5)
                AND ($6::text[] IS NULL OR {in_channels})
                AND ($7::text[] IS NULL OR {in_files})"#,
             ends_at = self.ends_at,
+            ends_after = if self.end_exclusive { ">" } else { ">=" },
             starts_at = self.starts_at,
         )
     }
@@ -178,7 +182,7 @@ impl DataType {
             Self::SlackMessage => Source {
                 id_prefix: SLACK_DOCUMENT_ID_PREFIX,
                 documents: "company_context_data.slack_documents",
-                embeddings: "company_context_data.slack_document_embeddings",
+                embeddings: Some("company_context_data.slack_document_embeddings"),
                 columns: r#"d.document_id, d.title, d.body, NULL::text AS url,
                    d.first_message_at AS occurred_at,
                    jsonb_build_object(
@@ -197,13 +201,14 @@ impl DataType {
                 // A channel day chunk matches a window its messages overlap.
                 starts_at: "d.first_message_at",
                 ends_at: "d.last_message_at",
+                end_exclusive: false,
                 in_channels: Some("d.conversation_id = ANY($6)"),
                 file_id: None,
             },
             Self::SlackFile => Source {
                 id_prefix: SLACK_FILE_DOCUMENT_ID_PREFIX,
                 documents: "company_context_data.slack_file_documents",
-                embeddings: "company_context_data.slack_file_document_embeddings",
+                embeddings: Some("company_context_data.slack_file_document_embeddings"),
                 columns: r#"d.document_id, d.title, d.body, NULLIF(d.url, '') AS url,
                    d.source_created_at AS occurred_at,
                    jsonb_build_object(
@@ -221,6 +226,7 @@ impl DataType {
                    )"#,
                 starts_at: "d.source_created_at",
                 ends_at: "d.source_created_at",
+                end_exclusive: false,
                 // Only shares the subject can see count, so a filter does not
                 // reveal where else a file was shared.
                 in_channels: Some(
@@ -238,7 +244,7 @@ impl DataType {
             Self::DriveDoc => Source {
                 id_prefix: GOOGLE_DRIVE_DOCUMENT_ID_PREFIX,
                 documents: "company_context_data.google_drive_documents",
-                embeddings: "company_context_data.google_drive_document_embeddings",
+                embeddings: Some("company_context_data.google_drive_document_embeddings"),
                 columns: r#"d.document_id, d.title, d.body, NULLIF(d.url, '') AS url,
                    COALESCE(d.source_modified_at, d.source_created_at) AS occurred_at,
                    jsonb_build_object(
@@ -256,13 +262,14 @@ impl DataType {
                    )"#,
                 starts_at: "COALESCE(d.source_modified_at, d.source_created_at)",
                 ends_at: "COALESCE(d.source_modified_at, d.source_created_at)",
+                end_exclusive: false,
                 in_channels: None,
                 file_id: Some("d.file_id"),
             },
             Self::CalendarEvent => Source {
                 id_prefix: GOOGLE_CALENDAR_DOCUMENT_ID_PREFIX,
                 documents: "company_context_data.google_calendar_documents",
-                embeddings: "company_context_data.google_calendar_document_embeddings",
+                embeddings: None,
                 columns: r#"d.document_id, d.title, d.body, NULLIF(d.url, '') AS url,
                    d.starts_at AS occurred_at,
                    jsonb_build_object(
@@ -274,16 +281,17 @@ impl DataType {
                    ) AS metadata"#,
                 visible: "d.provider_subject = ANY($2)",
                 // An event matches a window it overlaps; a recurring event
-                // by its first occurrence.
+                // by its first occurrence. Events are not embedded.
                 starts_at: "d.starts_at",
                 ends_at: "d.ends_at",
+                end_exclusive: true,
                 in_channels: None,
                 file_id: None,
             },
             Self::GranolaNote => Source {
                 id_prefix: GRANOLA_DOCUMENT_ID_PREFIX,
                 documents: "company_context_data.granola_documents",
-                embeddings: "company_context_data.granola_document_embeddings",
+                embeddings: Some("company_context_data.granola_document_embeddings"),
                 columns: r#"d.document_id, d.title, d.body, NULL::text AS url,
                    d.occurred_at,
                    jsonb_build_object(
@@ -299,6 +307,7 @@ impl DataType {
                    )"#,
                 starts_at: "d.occurred_at",
                 ends_at: "d.occurred_at",
+                end_exclusive: false,
                 in_channels: None,
                 file_id: None,
             },
@@ -584,7 +593,7 @@ pub async fn search(
         .with_context(|| format!("keyword search {data_type:?}"))?;
         lanes.push((data_type, rows));
 
-        if let Some((model, vector)) = &vector {
+        if let (Some((model, vector)), Some(embeddings)) = (&vector, source.embeddings) {
             let semantic = format!(
                 r#"
                 SELECT {columns}
@@ -597,7 +606,6 @@ pub async fn search(
                 LIMIT $3
                 "#,
                 columns = source.columns,
-                embeddings = source.embeddings,
                 documents = source.documents,
                 visible = source.visible,
                 filters = source.filters(),
@@ -975,19 +983,15 @@ mod tests {
             INSERT INTO company_context_system.google_calendars
                 (broker_credential_id, calendar_id, provider_subject)
             VALUES (1, 'CAL-ADA', 'G-ADA'), (5, 'CAL-TEAM', 'G-CAROL');
-            INSERT INTO company_context_system.google_calendar_events
-                (broker_credential_id, calendar_id, event_id, content_text, content_hash)
-            VALUES (1, 'CAL-ADA', 'E1', 'text', 'hash'), (1, 'CAL-ADA', 'E2', 'text', 'hash'),
-                   (5, 'CAL-TEAM', 'E3', 'text', 'hash');
             INSERT INTO company_context_data.google_calendar_documents
                 (document_id, broker_credential_id, provider_subject, calendar_id, event_id,
-                 chunk_id, title, body, starts_at, ends_at, content_hash)
+                 title, body, starts_at, ends_at, content_hash)
             VALUES
-                ('google-calendar:1:CAL-ADA:E1:000000', 1, 'G-ADA', 'CAL-ADA', 'E1', '000000',
+                ('google-calendar:1:CAL-ADA:E1', 1, 'G-ADA', 'CAL-ADA', 'E1',
                  'Falcon prep', 'falcon launch prep', '2024-01-03T10:00Z', '2024-01-03T11:00Z', 'hash'),
-                ('google-calendar:1:CAL-ADA:E2:000000', 1, 'G-ADA', 'CAL-ADA', 'E2', '000000',
+                ('google-calendar:1:CAL-ADA:E2', 1, 'G-ADA', 'CAL-ADA', 'E2',
                  'Falcon review', 'falcon launch review', '2024-01-04T10:00Z', '2024-01-04T11:00Z', 'hash'),
-                ('google-calendar:5:CAL-TEAM:E3:000000', 5, 'G-CAROL', 'CAL-TEAM', 'E3', '000000',
+                ('google-calendar:5:CAL-TEAM:E3', 5, 'G-CAROL', 'CAL-TEAM', 'E3',
                  'Falcon 1:1', 'falcon launch private', '2024-01-04T12:00Z', '2024-01-04T13:00Z', 'hash');
             "#,
         )
@@ -1073,8 +1077,8 @@ mod tests {
         assert_eq!(
             ids(pool, None, &ada, json!({ "query": "Falcon launch?" })).await,
             [
-                "google-calendar:1:CAL-ADA:E1:000000",
-                "google-calendar:1:CAL-ADA:E2:000000",
+                "google-calendar:1:CAL-ADA:E1",
+                "google-calendar:1:CAL-ADA:E2",
                 "google-drive:F1",
                 "google-drive:F4",
                 "granola:N1:000000",
@@ -1107,7 +1111,21 @@ mod tests {
                 } })
             )
             .await,
-            ["google-calendar:1:CAL-ADA:E1:000000"]
+            ["google-calendar:1:CAL-ADA:E1"]
+        );
+        // An event ends before its end time.
+        assert_eq!(
+            ids(
+                pool,
+                None,
+                &ada,
+                json!({ "query": "falcon", "filters": {
+                    "types": ["calendar_event"],
+                    "occurred_after": "2024-01-03T11:00:00Z",
+                } })
+            )
+            .await,
+            ["google-calendar:1:CAL-ADA:E2"]
         );
         assert!(
             ids(pool, None, &ada, json!({ "query": "unrelated" }))
@@ -1209,10 +1227,7 @@ mod tests {
                 (document_id, model, dimensions, content_hash, embedding)
             SELECT document_id, 'text-embedding-3-small', 1536, 'hash', array_fill(0.5, ARRAY[1536])::vector
             FROM company_context_data.granola_documents;
-            INSERT INTO company_context_data.google_calendar_document_embeddings
-                (document_id, model, dimensions, content_hash, embedding)
-            SELECT document_id, 'text-embedding-3-small', 1536, 'hash', array_fill(0.5, ARRAY[1536])::vector
-            FROM company_context_data.google_calendar_documents;
+
             "#,
         )
         .await
@@ -1231,9 +1246,8 @@ mod tests {
                 json!({ "query": "unrelated" })
             )
             .await,
+            // Calendar events are matched by keyword only.
             [
-                "google-calendar:1:CAL-ADA:E1:000000",
-                "google-calendar:1:CAL-ADA:E2:000000",
                 "google-drive:F1",
                 "google-drive:F4",
                 "granola:N1:000000",
@@ -1343,7 +1357,7 @@ mod tests {
             .unwrap();
         assert_eq!(note.data_type, DataType::GranolaNote);
         assert_eq!(note.metadata["note_id"], "N1");
-        let event = document(pool, &ada, "google-calendar:1:CAL-ADA:E1:000000")
+        let event = document(pool, &ada, "google-calendar:1:CAL-ADA:E1")
             .await
             .unwrap()
             .unwrap();
@@ -1356,8 +1370,8 @@ mod tests {
             (&ada, "slack:C2:2024-01-02:000000"),
             (&ada, "granola:N2:000000"),
             (&ada, "granola:N3:000000"),
-            (&ada, "google-calendar:5:CAL-TEAM:E3:000000"),
-            (&bob, "google-calendar:1:CAL-ADA:E2:000000"),
+            (&ada, "google-calendar:5:CAL-TEAM:E3"),
+            (&bob, "google-calendar:1:CAL-ADA:E2"),
             (&ada, "missing"),
             (&bob, "google-drive:F1"),
             (&bob, "slack-file:SF1"),

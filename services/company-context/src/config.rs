@@ -19,7 +19,6 @@ pub const DOCUMENT_DELETE_TASK: &str = "drive.document.delete";
 pub const CALENDAR_CREDENTIALS_RECONCILE_TASK: &str = "calendar.credentials.reconcile";
 pub const CALENDAR_DISCOVER_TASK: &str = "calendar.user.discover";
 pub const CALENDAR_SYNC_TASK: &str = "calendar.calendar.sync";
-pub const CALENDAR_EVENTS_EMBED_TASK: &str = "calendar.events.embed";
 pub const GRANOLA_CREDENTIALS_RECONCILE_TASK: &str = "granola.credentials.reconcile";
 pub const GRANOLA_SYNC_TASK: &str = "granola.user.sync";
 pub const GRANOLA_NOTES_FETCH_TASK: &str = "granola.notes.fetch";

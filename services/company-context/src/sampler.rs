@@ -131,9 +131,6 @@ async fn item_samples(pool: &PgPool) -> Result<Vec<Sample>> {
         SELECT 'drive', 'embedding', embedding_status, count(*)::float8
         FROM company_context_system.google_drive_files GROUP BY embedding_status
         UNION ALL
-        SELECT 'calendar', 'embedding', embedding_status, count(*)::float8
-        FROM company_context_system.google_calendar_events GROUP BY embedding_status
-        UNION ALL
         SELECT 'granola', 'embedding', embedding_status, count(*)::float8
         FROM company_context_system.granola_notes GROUP BY embedding_status
         UNION ALL
