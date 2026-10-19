@@ -2,8 +2,7 @@
 //! principal can then retrieve through the query endpoints.
 //!
 //! Every write is authenticated with the configured ingestion API key, sent in
-//! the `X-Api-Key` header. A full sync replaces a source's documents:
-//! documents not published during the sync are removed when it completes.
+//! the `X-Api-Key` header.
 
 use std::sync::Arc;
 
@@ -12,15 +11,14 @@ use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, State, rejection::JsonRejection},
     http::HeaderMap,
-    routing::{post, put},
+    routing::put,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgPool;
 use tracing::info;
-use uuid::Uuid;
 
 use crate::{
     config::{PUBLISHED_DOCUMENT_ID_PREFIX, is_source_name},
@@ -52,11 +50,6 @@ pub fn router(state: PublishState) -> Router {
             "/sources/{source}/documents/{external_id}",
             put(handle_publish).delete(handle_delete),
         )
-        .route("/sources/{source}/syncs", post(handle_start_sync))
-        .route(
-            "/sources/{source}/syncs/{sync_id}/complete",
-            post(handle_complete_sync),
-        )
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .with_state(state)
 }
@@ -70,8 +63,6 @@ pub struct PublishRequest {
     pub url: Option<String>,
     pub author: Option<String>,
     pub occurred_at: Option<DateTime<Utc>>,
-    /// The full sync this publication belongs to.
-    pub sync_id: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -138,52 +129,6 @@ async fn handle_delete(
     Ok(Json(json!({ "deleted": deleted })))
 }
 
-async fn handle_start_sync(
-    State(state): State<PublishState>,
-    headers: HeaderMap,
-    Path(source): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    authorize(state.api_key.as_deref(), &headers)?;
-    let sync_id = start_sync(&state.pool, &source)
-        .await
-        .map_err(internal("company_context_sync_start_failed"))?;
-    Ok(Json(json!({ "sync_id": sync_id })))
-}
-
-async fn handle_complete_sync(
-    State(state): State<PublishState>,
-    headers: HeaderMap,
-    Path((source, sync_id)): Path<(String, String)>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    authorize(state.api_key.as_deref(), &headers)?;
-    let removed = complete_sync(&state.pool, &source, &sync_id)
-        .await
-        .map_err(internal("company_context_sync_complete_failed"))?;
-    Ok(Json(json!({ "removed": removed })))
-}
-
-/// Serializes completing a source's full sync against every other write to
-/// the source: completions and sync starts lock it exclusively, publications
-/// and deletions share it.
-async fn lock_source(
-    tx: &mut Transaction<'_, Postgres>,
-    source: &str,
-    exclusive: bool,
-) -> Result<()> {
-    let function = if exclusive {
-        "pg_advisory_xact_lock"
-    } else {
-        "pg_advisory_xact_lock_shared"
-    };
-    sqlx::query(&format!(
-        "SELECT {function}(hashtextextended('company_context.published:' || $1, 0))"
-    ))
-    .bind(source)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
 fn validate_external_id(external_id: &str) -> Result<()> {
     if external_id.is_empty()
         || external_id.len() > MAX_EXTERNAL_ID_BYTES
@@ -201,10 +146,6 @@ fn validate_source(source: &str) -> Result<()> {
         return Err(invalid("invalid source name"));
     }
     Ok(())
-}
-
-fn parse_sync_id(sync_id: &str) -> Result<Uuid> {
-    Uuid::parse_str(sync_id).map_err(|_| invalid("sync_id must be a UUID"))
 }
 
 /// A document's fields after validation.
@@ -313,28 +254,8 @@ async fn embed_chunks(
         .collect())
 }
 
-/// Checks that the sync exists for `source` and has not completed.
-async fn check_sync(tx: &mut Transaction<'_, Postgres>, source: &str, sync_id: Uuid) -> Result<()> {
-    let completed: Option<bool> = sqlx::query_scalar(
-        r#"
-        SELECT completed_at IS NOT NULL
-        FROM company_context_system.published_syncs
-        WHERE sync_id = $1::text::uuid AND source = $2
-        "#,
-    )
-    .bind(sync_id.to_string())
-    .bind(source)
-    .fetch_optional(&mut **tx)
-    .await?;
-    match completed {
-        None => Err(ApiError::NotFound("sync not found").into()),
-        Some(true) => Err(ApiError::Conflict("sync already completed".to_owned()).into()),
-        Some(false) => Ok(()),
-    }
-}
-
-/// Publishes a document, replacing any previous version. Unchanged documents
-/// are only recorded as part of the sync, without being embedded again.
+/// Publishes a document, replacing any previous version. Republishing
+/// unchanged fields does not embed the document again.
 pub async fn publish(
     pool: &PgPool,
     embeddings: &EmbeddingsClient,
@@ -346,9 +267,7 @@ pub async fn publish(
     validate_source(source)?;
     validate_external_id(external_id)?;
     let fields = Fields::new(request)?;
-    let sync_id = request.sync_id.as_deref().map(parse_sync_id).transpose()?;
     let content_hash = fields.content_hash();
-
     let current: Option<String> = sqlx::query_scalar(
         r#"
         SELECT content_hash FROM company_context_system.published_items
@@ -359,115 +278,40 @@ pub async fn publish(
     .bind(external_id)
     .fetch_optional(pool)
     .await?;
-    // Embed outside the transaction; a document that changes meanwhile is
-    // embedded on the next pass.
-    let mut chunks = None;
-    if current.as_deref() != Some(content_hash.as_str()) {
-        chunks = Some(embed_chunks(embeddings, chunk_chars, source, external_id, &fields).await?);
-    }
-    loop {
-        let mut tx = pool.begin().await?;
-        lock_source(&mut tx, source, false).await?;
-        if let Some(sync_id) = sync_id {
-            check_sync(&mut tx, source, sync_id).await?;
-        }
-        let previous: Option<String> = sqlx::query_scalar(
-            r#"
-            SELECT content_hash FROM company_context_system.published_items
-            WHERE source = $1 AND external_id = $2
-            FOR UPDATE
-            "#,
-        )
-        .bind(source)
-        .bind(external_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if previous.as_deref() == Some(content_hash.as_str()) {
-            sqlx::query(
-                r#"
-                UPDATE company_context_system.published_items
-                SET sync_id = $3::text::uuid, updated_at = NOW()
-                WHERE source = $1 AND external_id = $2
-                "#,
-            )
-            .bind(source)
-            .bind(external_id)
-            .bind(sync_id.map(|id| id.to_string()))
-            .execute(&mut *tx)
-            .await?;
-            tx.commit().await?;
-            return Ok(PublishResponse {
-                status: PublishStatus::Unchanged,
-                chunks: 0,
-            });
-        }
-        let Some(chunks) = &chunks else {
-            // Republished concurrently with other content than was read.
-            tx.rollback().await?;
-            chunks =
-                Some(embed_chunks(embeddings, chunk_chars, source, external_id, &fields).await?);
-            continue;
-        };
-        write_document(
-            &mut tx,
-            embeddings,
-            source,
-            external_id,
-            &fields,
-            &content_hash,
-            sync_id,
-            chunks,
-        )
-        .await?;
-        tx.commit().await?;
-        info!(
-            event = "company_context_document_published",
-            source,
-            chunks = chunks.len()
-        );
+    if current.as_deref() == Some(content_hash.as_str()) {
         return Ok(PublishResponse {
-            status: PublishStatus::Published,
-            chunks: chunks.len(),
+            status: PublishStatus::Unchanged,
+            chunks: 0,
         });
     }
-}
 
-#[allow(clippy::too_many_arguments)]
-async fn write_document(
-    tx: &mut Transaction<'_, Postgres>,
-    embeddings: &EmbeddingsClient,
-    source: &str,
-    external_id: &str,
-    fields: &Fields<'_>,
-    content_hash: &str,
-    sync_id: Option<Uuid>,
-    chunks: &[Chunk],
-) -> Result<()> {
+    // Embed outside the transaction. Concurrent publications of a document
+    // serialize on its item row; the last to commit wins.
+    let chunks = embed_chunks(embeddings, chunk_chars, source, external_id, &fields).await?;
+    let mut tx = pool.begin().await?;
     sqlx::query(
         r#"
         INSERT INTO company_context_system.published_items
-            (source, external_id, content_hash, sync_id)
-        VALUES ($1, $2, $3, $4::text::uuid)
+            (source, external_id, content_hash)
+        VALUES ($1, $2, $3)
         ON CONFLICT (source, external_id) DO UPDATE
         SET content_hash = EXCLUDED.content_hash,
-            sync_id = EXCLUDED.sync_id,
             updated_at = NOW()
         "#,
     )
     .bind(source)
     .bind(external_id)
-    .bind(content_hash)
-    .bind(sync_id.map(|id| id.to_string()))
-    .execute(&mut **tx)
+    .bind(&content_hash)
+    .execute(&mut *tx)
     .await?;
     sqlx::query(
         "DELETE FROM company_context_data.published_documents WHERE source = $1 AND external_id = $2",
     )
     .bind(source)
     .bind(external_id)
-    .execute(&mut **tx)
+    .execute(&mut *tx)
     .await?;
-    for (document_id, chunk_id, body, chunk_hash, vector) in chunks {
+    for (document_id, chunk_id, body, chunk_hash, vector) in &chunks {
         sqlx::query(
             r#"
             INSERT INTO company_context_data.published_documents (
@@ -487,7 +331,7 @@ async fn write_document(
         .bind(fields.author)
         .bind(fields.occurred_at)
         .bind(chunk_hash)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await?;
         sqlx::query(
             r#"
@@ -502,126 +346,42 @@ async fn write_document(
         .bind(embeddings.dimensions() as i32)
         .bind(chunk_hash)
         .bind(serde_json::to_string(vector)?)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await
         .context("insert published document embedding")?;
     }
-    Ok(())
+    tx.commit().await?;
+    info!(
+        event = "company_context_document_published",
+        source,
+        chunks = chunks.len()
+    );
+    Ok(PublishResponse {
+        status: PublishStatus::Published,
+        chunks: chunks.len(),
+    })
 }
 
 /// Removes a published document. Returns whether it existed.
 pub async fn delete(pool: &PgPool, source: &str, external_id: &str) -> Result<bool> {
     validate_source(source)?;
     validate_external_id(external_id)?;
-    let mut tx = pool.begin().await?;
-    lock_source(&mut tx, source, false).await?;
     let deleted = sqlx::query(
         "DELETE FROM company_context_system.published_items WHERE source = $1 AND external_id = $2",
     )
     .bind(source)
     .bind(external_id)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected()
-        > 0;
-    tx.commit().await?;
-    Ok(deleted)
-}
-
-/// Starts a full sync of `source`, superseding any sync in progress.
-pub async fn start_sync(pool: &PgPool, source: &str) -> Result<String> {
-    validate_source(source)?;
-    let sync_id = Uuid::new_v4().to_string();
-    let mut tx = pool.begin().await?;
-    lock_source(&mut tx, source, true).await?;
-    // clock_timestamp orders syncs by when they took the lock.
-    sqlx::query(
-        r#"
-        INSERT INTO company_context_system.published_syncs (sync_id, source, started_at)
-        VALUES ($1::text::uuid, $2, clock_timestamp())
-        "#,
-    )
-    .bind(&sync_id)
-    .bind(source)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(sync_id)
-}
-
-/// Completes the latest full sync of `source`, removing the source's documents
-/// it did not publish. Returns the number removed. Completing an already
-/// completed sync removes nothing.
-pub async fn complete_sync(pool: &PgPool, source: &str, sync_id: &str) -> Result<u64> {
-    validate_source(source)?;
-    let sync_id = parse_sync_id(sync_id)?.to_string();
-    let mut tx = pool.begin().await?;
-    lock_source(&mut tx, source, true).await?;
-    let latest: Option<(String, bool)> = sqlx::query_as(
-        r#"
-        SELECT sync_id::text, completed_at IS NOT NULL
-        FROM company_context_system.published_syncs
-        WHERE source = $1
-        ORDER BY started_at DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(source)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let completed = match latest {
-        Some((latest, completed)) if latest == sync_id => completed,
-        _ => {
-            let exists: bool = sqlx::query_scalar(
-                r#"
-                SELECT EXISTS (
-                    SELECT 1 FROM company_context_system.published_syncs
-                    WHERE sync_id = $1::text::uuid AND source = $2
-                )
-                "#,
-            )
-            .bind(&sync_id)
-            .bind(source)
-            .fetch_one(&mut *tx)
-            .await?;
-            return Err(if exists {
-                ApiError::Conflict("a newer sync has started".to_owned())
-            } else {
-                ApiError::NotFound("sync not found")
-            }
-            .into());
-        }
-    };
-    if completed {
-        return Ok(0);
-    }
-    let removed = sqlx::query(
-        r#"
-        DELETE FROM company_context_system.published_items
-        WHERE source = $1 AND sync_id IS DISTINCT FROM $2::text::uuid
-        "#,
-    )
-    .bind(source)
-    .bind(&sync_id)
-    .execute(&mut *tx)
+    .execute(pool)
     .await?
     .rows_affected();
-    sqlx::query(
-        "UPDATE company_context_system.published_syncs SET completed_at = NOW() WHERE sync_id = $1::text::uuid",
-    )
-    .bind(&sync_id)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    info!(event = "company_context_sync_completed", source, removed);
-    Ok(removed)
+    Ok(deleted > 0)
 }
 
 #[cfg(test)]
 mod tests {
     use std::env;
 
-    use axum::http::HeaderValue;
+    use axum::{http::HeaderValue, routing::post};
     use clap::Parser;
     use serde_json::Value;
 
@@ -701,12 +461,8 @@ mod tests {
         results
     }
 
-    fn api_error(error: anyhow::Error) -> ApiError {
-        error.downcast::<ApiError>().unwrap()
-    }
-
     #[tokio::test]
-    async fn published_documents_are_public_and_replaced_by_full_syncs() {
+    async fn published_documents_are_public_replaced_and_deleted() {
         let Ok(database_url) = env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
             eprintln!("skipping: set COMPANY_CONTEXT_TEST_DATABASE_URL to a ParadeDB Postgres URL");
             return;
@@ -799,51 +555,20 @@ mod tests {
             .await
             .unwrap();
 
-        // A full sync removes the documents it did not publish.
-        let sync_id = start_sync(pool, "notes").await.unwrap();
-        let in_sync = |mut body: Value| {
-            body["sync_id"] = json!(sync_id);
-            body
-        };
-        assert_eq!(
-            publish("note/1", in_sync(changed.clone()))
-                .await
-                .unwrap()
-                .status,
-            PublishStatus::Unchanged
-        );
-        assert_eq!(complete_sync(pool, "notes", &sync_id).await.unwrap(), 1);
-        assert_eq!(complete_sync(pool, "notes", &sync_id).await.unwrap(), 0);
-        assert_eq!(published().await.unwrap(), ["falcon retro\n\nsecond part"]);
-        assert!(matches!(
-            api_error(
-                publish("note/3", in_sync(json!({ "body": "late" })))
-                    .await
-                    .unwrap_err()
-            ),
-            ApiError::Conflict(_)
-        ));
-
-        // Only the latest sync of the source completes.
-        let superseded = start_sync(pool, "notes").await.unwrap();
-        start_sync(pool, "notes").await.unwrap();
-        assert!(matches!(
-            api_error(complete_sync(pool, "notes", &superseded).await.unwrap_err()),
-            ApiError::Conflict(_)
-        ));
-        assert!(matches!(
-            api_error(complete_sync(pool, "wiki", &superseded).await.unwrap_err()),
-            ApiError::NotFound(_)
-        ));
-
         assert!(delete(pool, "notes", "note/1").await.unwrap());
         assert!(!delete(pool, "notes", "note/1").await.unwrap());
-        assert!(search(pool, json!({ "query": "falcon" })).await.is_empty());
+        assert_eq!(
+            search(pool, json!({ "query": "falcon" })).await,
+            [(
+                "published:notes:note/2:000000".to_owned(),
+                "falcon budget".to_owned()
+            )]
+        );
 
         for invalid in [
             json!({ "body": "  " }),
             json!({ "body": "x", "url": "javascript:alert(1)" }),
-            json!({ "body": "x", "sync_id": "not-a-uuid" }),
+            json!({ "body": "x", "title": "t".repeat(1_001) }),
         ] {
             let error = publish("note/4", invalid.clone()).await.unwrap_err();
             assert!(error.is::<query::InvalidQuery>(), "{invalid}");

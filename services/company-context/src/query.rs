@@ -425,7 +425,6 @@ pub(crate) enum ApiError {
     Unauthorized(&'static str),
     Forbidden(&'static str),
     NotFound(&'static str),
-    Conflict(String),
     Internal,
 }
 
@@ -436,7 +435,6 @@ impl IntoResponse for ApiError {
             Self::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message.to_owned()),
             Self::Forbidden(message) => (StatusCode::FORBIDDEN, message.to_owned()),
             Self::NotFound(message) => (StatusCode::NOT_FOUND, message.to_owned()),
-            Self::Conflict(message) => (StatusCode::CONFLICT, message),
             Self::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "request failed".to_owned(),

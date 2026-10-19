@@ -158,8 +158,6 @@ indexed PDFs are not downloaded again.
 - `GET /documents/{document_id}`
 - `PUT /sources/{source}/documents/{external_id}`
 - `DELETE /sources/{source}/documents/{external_id}`
-- `POST /sources/{source}/syncs`
-- `POST /sources/{source}/syncs/{sync_id}/complete`
 
 Both query endpoints are authenticated with the same principal API JWT the
 Console mints for api-rs (`Authorization: Bearer <jwt>`); iron-proxy injects it
@@ -184,8 +182,8 @@ credentials are dead or deleted.
 
 Errors return `{"error": "..."}` with status 400 for an invalid request, 401
 for a missing or invalid token or API key, 403 for a principal unknown to the
-Console or when publishing is not configured, 404 for a document or sync that does not
-exist or is not visible, and 409 for a sync that cannot accept the request.
+Console or when publishing is not configured, and 404 for a document that does
+not exist or is not visible.
 
 ### `POST /query`
 
@@ -283,8 +281,7 @@ version. URL-encode the ID; it is 1-512 bytes without control characters.
   "body": "What went well ...",
   "url": "https://notes.example.com/123",
   "author": "Ada",
-  "occurred_at": "2024-01-02T09:00:00Z",
-  "sync_id": "8a1c3d0e-..."
+  "occurred_at": "2024-01-02T09:00:00Z"
 }
 ```
 
@@ -298,17 +295,6 @@ An embeddings failure fails the request, which can be retried.
 ### `DELETE /sources/{source}/documents/{external_id}`
 
 Removes a document. Returns `{"deleted": true | false}`.
-
-### Full syncs
-
-To replace a source's documents, `POST /sources/{source}/syncs` returns a
-`sync_id`. Publish every document with that `sync_id`, then
-`POST /sources/{source}/syncs/{sync_id}/complete`, which removes the source's
-documents the sync did not publish and returns `{"removed": N}`. Completing a
-sync again removes nothing. Starting a sync supersedes any sync in progress:
-the superseded sync can no longer complete (409), and publishing to a completed
-sync is rejected (409). Documents published without the `sync_id` while a sync
-runs are removed when it completes.
 
 ## Development
 

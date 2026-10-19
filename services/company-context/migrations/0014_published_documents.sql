@@ -3,27 +3,12 @@
 -- by the producer's external ID. Published documents are public: every
 -- principal can read them.
 
--- Full syncs let a producer replace a source's documents: those not published
--- during the sync are removed when it completes.
-create table company_context_system.published_syncs (
-    sync_id uuid primary key,
-    source text not null,
-    started_at timestamptz not null default now(),
-    completed_at timestamptz,
-    check (source <> '')
-);
-
-create index published_syncs_source_started_idx
-    on company_context_system.published_syncs (source, started_at desc);
-
 create table company_context_system.published_items (
     source text not null,
     external_id text not null,
     -- Hash of the published fields; unchanged republications are not embedded
     -- again.
     content_hash text not null,
-    -- The full sync that last published the item, if any.
-    sync_id uuid references company_context_system.published_syncs(sync_id) on delete set null,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
     primary key (source, external_id),
