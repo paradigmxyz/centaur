@@ -77,9 +77,10 @@ host.
   `malformed` (an unreadable successful response), `timeout`,
   `connection_failed`, or `network_error`.
 - `token_broker_due_credentials`: credentials due at the start of the last poll.
-- `token_broker_last_poll_timestamp_seconds`: when the last poll finished
-  refreshing every due credential. Alert when it falls behind, which also
-  catches a poll stuck on the database.
+- `token_broker_last_poll_timestamp_seconds`: when the last poll finished a
+  pass over the due credentials (whatever their outcomes), or when the service
+  started. Alert when it falls behind, which catches a poll that is stuck, for
+  example on the database, or that keeps failing to list the due credentials.
 - `token_broker_dead_credentials{provider}`: credentials that need
   re-authorization.
 - `token_broker_backing_off_credentials{provider}`: live credentials whose last

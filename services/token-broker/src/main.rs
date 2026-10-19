@@ -64,6 +64,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
     let config = Config::parse();
     let metrics = telemetry::init_metrics()?;
+    // Starts the last-poll clock, so a service that never completes a poll
+    // still falls behind.
+    telemetry::record_tick_completed();
 
     let mut connect_options = PgConnectOptions::from_str(&config.database_url)?;
     if let Some(name) = config

@@ -57,7 +57,7 @@ fn describe() {
     metrics::describe_gauge!(
         LAST_POLL_TIMESTAMP_SECONDS,
         metrics::Unit::Seconds,
-        "Unix time the last poll finished refreshing every due credential."
+        "Unix time the last poll finished a pass over the due credentials, or the service started."
     );
     metrics::describe_gauge!(
         BACKING_OFF_CREDENTIALS,
