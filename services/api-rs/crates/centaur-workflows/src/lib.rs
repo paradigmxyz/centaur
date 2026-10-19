@@ -315,13 +315,17 @@ impl WorkflowPrincipalRegistrar {
         Self { client }
     }
 
+    /// Resolves each declared principal independently. A workflow whose
+    /// principal cannot be resolved is omitted, so it fails closed when run
+    /// while other workflows and api-rs startup proceed; the periodic
+    /// metadata reconciler retries it.
     async fn register_workflow_principals(
         &self,
         principals: &BTreeMap<String, WorkflowPrincipalDeclaration>,
-    ) -> Result<BTreeMap<String, String>, WorkflowRuntimeError> {
+    ) -> BTreeMap<String, String> {
         let mut registered = BTreeMap::new();
         for (workflow_name, declaration) in principals {
-            let record = match declaration {
+            let result = match declaration {
                 WorkflowPrincipalDeclaration::Managed => {
                     let foreign_id = canonical_workflow_principal_foreign_id(workflow_name);
                     self.client
@@ -335,15 +339,24 @@ impl WorkflowPrincipalRegistrar {
                             slack_team_id: None,
                             slack_email: None,
                         })
-                        .await?
+                        .await
                 }
                 WorkflowPrincipalDeclaration::Existing(reference) => {
-                    self.client.get_principal(reference).await?
+                    self.client.get_principal(reference).await
                 }
             };
-            registered.insert(workflow_name.clone(), record.id);
+            match result {
+                Ok(record) => {
+                    registered.insert(workflow_name.clone(), record.id);
+                }
+                Err(error) => warn!(
+                    workflow_name,
+                    %error,
+                    "failed to resolve workflow principal; workflow runs will fail until it resolves"
+                ),
+            }
         }
-        Ok(registered)
+        registered
     }
 }
 
@@ -1856,7 +1869,7 @@ async fn prepare_workflow_host_sandbox(
         discovery,
         enablement,
     )
-    .await?;
+    .await;
     Ok(Some(sandbox))
 }
 
@@ -1865,19 +1878,12 @@ async fn reconcile_workflow_principals(
     registrar: &WorkflowPrincipalRegistrar,
     discovery: &PythonWorkflowMetadata,
     enablement: &WorkflowEnablement,
-) -> Result<(), WorkflowRuntimeError> {
+) {
     let mut principals = discovery.principals.clone();
     principals.retain(|workflow_name, _| enablement.is_enabled(workflow_name));
     let required = principals.keys().cloned().collect();
-    let registered = match registrar.register_workflow_principals(&principals).await {
-        Ok(registered) => registered,
-        Err(error) => {
-            sandbox.update_workflow_principals(BTreeMap::new(), required);
-            return Err(error);
-        }
-    };
+    let registered = registrar.register_workflow_principals(&principals).await;
     sandbox.update_workflow_principals(registered, required);
-    Ok(())
 }
 
 async fn discover_python_workflow_metadata() -> Result<PythonWorkflowMetadata, WorkflowRuntimeError>
@@ -2085,7 +2091,7 @@ async fn reconcile_workflow_metadata_once(
             &discovery,
             &enablement,
         )
-        .await?;
+        .await;
     }
     {
         let mut webhooks = webhook_registry
@@ -5375,6 +5381,22 @@ mod tests {
                 .expect("optional workflow should be allowed"),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn unresolvable_workflow_principal_does_not_fail_registration() {
+        let registrar = WorkflowPrincipalRegistrar::new(IronControlClient::new(
+            "http://127.0.0.1:1",
+            "test-key",
+        ));
+        let registered = registrar
+            .register_workflow_principals(&BTreeMap::from([(
+                "nightly_report".to_owned(),
+                WorkflowPrincipalDeclaration::Existing("missing-principal".to_owned()),
+            )]))
+            .await;
+
+        assert!(registered.is_empty());
     }
 
     #[tokio::test]
