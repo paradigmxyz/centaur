@@ -195,7 +195,7 @@ def test_query_enforces_timeout(database):
     assert time.monotonic() - started < 5
 
 
-def test_reader_sees_only_documents_in_visible_slack_channels(database):
+def test_reader_sees_visible_slack_channels_and_company_documents(database):
     database.add_document("slack:visible", title="Launch plan")
     database.add_slack_channel("C_SECRET", is_private=True)
     database.add_document("slack:secret", title="Launch plan", channel_id="C_SECRET")
@@ -207,10 +207,9 @@ def test_reader_sees_only_documents_in_visible_slack_channels(database):
     )
     client = CompanyContextClient(database.dsn)
 
-    assert _ids(client.search("launch plan")) == ["slack:visible"]
-    assert client.query("SELECT document_id FROM company_context_documents")["rows"] == [
-        {"document_id": "slack:visible"}
-    ]
+    assert sorted(_ids(client.search("launch plan"))) == ["linear:issue", "slack:visible"]
+    result = client.query("SELECT document_id FROM company_context_documents ORDER BY document_id")
+    assert result["rows"] == [{"document_id": "linear:issue"}, {"document_id": "slack:visible"}]
 
 
 def test_search_returns_compact_results(database):
