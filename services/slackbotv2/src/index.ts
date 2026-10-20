@@ -79,6 +79,7 @@ import { createFlagMessageOverridesStrategy } from './message-overrides-strategy
 import {
   isAllowedSlackMessage,
   isAllowedSlackWebhookBody,
+  SlackExternalTeamIdsUnavailableError,
   parseSlackWebhookPayload,
   slackStreamRecipientUserId
 } from './slack-events'
@@ -575,7 +576,15 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
         route,
         ...webhookFields
       })
-      if (!(await isAllowedSlackWebhookBody(rawBody, options, logger))) {
+      let allowed: boolean
+      try {
+        allowed = await isAllowedSlackWebhookBody(rawBody, options, logger)
+      } catch (error) {
+        if (!(error instanceof SlackExternalTeamIdsUnavailableError)) throw error
+        outcome = 'error'
+        return new globalThis.Response('Slack Connect allowlist is unavailable. Please retry.', { status: 503 })
+      }
+      if (!allowed) {
         outcome = 'ignored'
         return new globalThis.Response('ok', { status: 200 })
       }

@@ -40,15 +40,28 @@ type TriggerBotIdentity = {
   userId?: string
 }
 
-type ExternalTeamIdsCacheEntry = {
+type ExternalTeamIdsCache = {
   expiresAtMs: number
-  lookup: Promise<ReadonlySet<string>>
+  lookup?: Promise<ReadonlySet<string>>
+  /** Last list api-rs returned; kept when a refresh fails. */
+  teamIds?: ReadonlySet<string>
+}
+
+/**
+ * The Slack Connect allowlist has never loaded, so an external org's event
+ * can be neither admitted nor safely dropped. Callers ask Slack to retry.
+ */
+export class SlackExternalTeamIdsUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super(`Slack Connect allowlist is unavailable: ${errorMessage(cause)}`)
+    this.name = 'SlackExternalTeamIdsUnavailableError'
+  }
 }
 
 const EXTERNAL_TEAM_IDS_TTL_MS = 30_000
 const EXTERNAL_TEAM_IDS_RETRY_MS = 5_000
 
-const externalTeamIdsCaches = new WeakMap<SlackbotV2Options, ExternalTeamIdsCacheEntry>()
+const externalTeamIdsCaches = new WeakMap<SlackbotV2Options, ExternalTeamIdsCache>()
 const triggerBotIdentityCaches = new WeakMap<
   SlackbotV2Options,
   Map<string, Promise<TriggerBotIdentity | null>>
@@ -132,7 +145,7 @@ export async function isAllowedSlackMessage(
 ): Promise<boolean> {
   const raw = isRawSlackEvent(message.raw) ? message.raw : undefined
   const externalTeamId = raw ? externalSlackTeamId(raw) : undefined
-  if (externalTeamId && !(await allowedExternalTeamIds(options, logger)).has(externalTeamId)) {
+  if (externalTeamId && !(await isAllowedExternalTeamForMessage(externalTeamId, options, logger))) {
     logger.warn('slackbotv2_event_ignored_external_org_not_allowlisted', {
       external_team_id: externalTeamId,
       message_id: message.id,
@@ -158,6 +171,20 @@ export async function isAllowedSlackMessage(
   return true
 }
 
+/** The webhook gate already asked Slack to retry if the list was unavailable. */
+async function isAllowedExternalTeamForMessage(
+  externalTeamId: string,
+  options: SlackbotV2Options,
+  logger: Logger
+): Promise<boolean> {
+  try {
+    return (await allowedExternalTeamIds(options, logger)).has(externalTeamId)
+  } catch (error) {
+    if (!(error instanceof SlackExternalTeamIdsUnavailableError)) throw error
+    return false
+  }
+}
+
 /**
  * Slack's `chat.startStream` only accepts a `U...`/`W...` member id as
  * `recipient_user_id`. A bot-authored message without `user` or
@@ -176,31 +203,30 @@ export async function slackStreamRecipientUserId(
 
 /**
  * Console-managed Slack Connect allowlist, cached briefly. A failed refresh
- * keeps the last known list (or none, so external orgs stay blocked) and
- * retries sooner.
+ * keeps the last known list and retries sooner; with no list yet it throws
+ * {@link SlackExternalTeamIdsUnavailableError}.
  */
 async function allowedExternalTeamIds(
   options: SlackbotV2Options,
   logger: Logger
 ): Promise<ReadonlySet<string>> {
   if (options.allowedExternalTeamIds) return new Set(options.allowedExternalTeamIds)
-  const cached = externalTeamIdsCaches.get(options)
-  if (cached && nowMs() < cached.expiresAtMs) return cached.lookup
+  const cache = externalTeamIdsCaches.get(options) ?? { expiresAtMs: 0 }
+  externalTeamIdsCaches.set(options, cache)
+  if (cache.lookup && nowMs() < cache.expiresAtMs) return cache.lookup
 
-  const previous = cached?.lookup ?? Promise.resolve(new Set<string>())
-  const entry: ExternalTeamIdsCacheEntry = {
-    expiresAtMs: nowMs() + EXTERNAL_TEAM_IDS_TTL_MS,
-    lookup: fetchSlackExternalTeamIds(options).then(
-      teamIds => new Set(teamIds),
-      error => {
-        logger.warn('slackbotv2_external_team_ids_lookup_failed', { error: errorMessage(error) })
-        entry.expiresAtMs = nowMs() + EXTERNAL_TEAM_IDS_RETRY_MS
-        return previous
-      }
-    )
-  }
-  externalTeamIdsCaches.set(options, entry)
-  return entry.lookup
+  cache.expiresAtMs = nowMs() + EXTERNAL_TEAM_IDS_TTL_MS
+  const lookup = fetchSlackExternalTeamIds(options).then(
+    teamIds => (cache.teamIds = new Set(teamIds)),
+    error => {
+      logger.warn('slackbotv2_external_team_ids_lookup_failed', { error: errorMessage(error) })
+      cache.expiresAtMs = nowMs() + EXTERNAL_TEAM_IDS_RETRY_MS
+      if (cache.teamIds) return cache.teamIds
+      throw new SlackExternalTeamIdsUnavailableError(error)
+    }
+  )
+  cache.lookup = lookup
+  return lookup
 }
 
 function externalSlackTeamId(event: RawSlackEvent): string | undefined {
