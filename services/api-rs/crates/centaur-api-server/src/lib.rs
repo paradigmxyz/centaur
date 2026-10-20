@@ -16,7 +16,7 @@ pub use routes::{
     AppState, build_router_with_app_state, build_router_with_runtime,
     build_router_with_session_and_workflow_runtime, build_router_with_session_runtime,
 };
-pub use slack_external_teams::normalize_slack_external_team_ids;
+pub use slack_external_teams::partition_slack_external_team_ids;
 pub use tool_discovery::{
     DiscoveredToolProxyFragment, ToolDiscoveryConfig, ToolDiscoveryError,
     discover_persona_registry, discover_tool_proxy_fragment,

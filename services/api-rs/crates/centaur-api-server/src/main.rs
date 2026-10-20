@@ -2,7 +2,7 @@ mod activity_summary;
 mod args;
 
 use centaur_api_server::{
-    ApiAuthConfig, AppState, build_router_with_app_state, normalize_slack_external_team_ids,
+    ApiAuthConfig, AppState, build_router_with_app_state, partition_slack_external_team_ids,
     warm_slack_public_channel_cache,
 };
 use centaur_session_runtime::SessionRuntime;
@@ -82,26 +82,30 @@ async fn migrate(args: MigrateArgs) -> Result<(), ServerError> {
     Ok(())
 }
 
-async fn seed_legacy_slack_external_team_ids(
-    store: &PgSessionStore,
-    raw: &str,
-) -> Result<(), ServerError> {
-    let team_ids: Vec<&str> = raw.split([',', ' ', '\t', '\n']).collect();
-    let team_ids = match normalize_slack_external_team_ids(&team_ids) {
-        Ok(team_ids) if team_ids.is_empty() => return Ok(()),
-        Ok(team_ids) => team_ids,
-        Err(error) => {
-            warn!(%error, "ignoring invalid SLACKBOT_EXTERNAL_ORG_ALLOWLIST");
-            return Ok(());
-        }
-    };
-    if store.seed_slack_external_team_ids(&team_ids).await? {
-        info!(
-            team_count = team_ids.len(),
-            "seeded Slack Connect allowlist from SLACKBOT_EXTERNAL_ORG_ALLOWLIST"
+/// Best effort: a failure here must not keep the control plane from starting.
+async fn seed_legacy_slack_external_team_ids(store: &PgSessionStore, raw: &str) {
+    let entries: Vec<&str> = raw.split([',', ' ', '\t', '\n']).collect();
+    let (team_ids, invalid) = partition_slack_external_team_ids(&entries);
+    if !invalid.is_empty() {
+        warn!(
+            invalid = invalid.join(", "),
+            "skipping invalid SLACKBOT_EXTERNAL_ORG_ALLOWLIST entries"
         );
     }
-    Ok(())
+    if team_ids.is_empty() {
+        return;
+    }
+    match store.seed_slack_external_team_ids(&team_ids).await {
+        Ok(true) => info!(
+            team_count = team_ids.len(),
+            "seeded Slack Connect allowlist from SLACKBOT_EXTERNAL_ORG_ALLOWLIST"
+        ),
+        Ok(false) => {}
+        Err(error) => warn!(
+            error = %error,
+            "failed to seed Slack Connect allowlist from SLACKBOT_EXTERNAL_ORG_ALLOWLIST"
+        ),
+    }
 }
 
 async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), ServerError> {
@@ -110,7 +114,7 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         store.run_migrations(args.server.text_search).await?;
     }
     if let Some(raw) = args.server.legacy_slack_external_org_allowlist.as_deref() {
-        seed_legacy_slack_external_team_ids(&store, raw).await?;
+        seed_legacy_slack_external_team_ids(&store, raw).await;
     }
     if let Some(config) = args.activity_summary_config() {
         let worker = activity_summary::ActivitySummaryWorker::new(store.clone(), config)?;

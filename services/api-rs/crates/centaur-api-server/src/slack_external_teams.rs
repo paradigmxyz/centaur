@@ -44,34 +44,43 @@ pub(crate) async fn replace_slack_external_team_ids(
 
 /// Trims, upper-cases, and de-duplicates Slack workspace (`T…`) and
 /// Enterprise Grid org (`E…`) ids, rejecting anything else.
-pub fn normalize_slack_external_team_ids<S: AsRef<str>>(
+pub(crate) fn normalize_slack_external_team_ids<S: AsRef<str>>(
     team_ids: &[S],
 ) -> Result<Vec<String>, ApiError> {
-    let mut normalized: Vec<String> = Vec::new();
-    let mut invalid = Vec::new();
-    for team_id in team_ids {
-        let team_id = team_id.as_ref().trim().to_ascii_uppercase();
-        if team_id.is_empty() || normalized.contains(&team_id) {
-            continue;
-        }
-        if is_slack_team_id(&team_id) {
-            normalized.push(team_id);
-        } else {
-            invalid.push(team_id);
-        }
-    }
+    let (valid, invalid) = partition_slack_external_team_ids(team_ids);
     if !invalid.is_empty() {
         return Err(ApiError::BadRequest(format!(
             "invalid Slack team ids: {}",
             invalid.join(", ")
         )));
     }
-    if normalized.len() > MAX_TEAM_IDS {
+    if valid.len() > MAX_TEAM_IDS {
         return Err(ApiError::BadRequest(format!(
             "at most {MAX_TEAM_IDS} Slack team ids are allowed"
         )));
     }
-    Ok(normalized)
+    Ok(valid)
+}
+
+/// Splits ids into normalized valid ids and the invalid entries, skipping
+/// blanks and duplicates.
+pub fn partition_slack_external_team_ids<S: AsRef<str>>(
+    team_ids: &[S],
+) -> (Vec<String>, Vec<String>) {
+    let mut valid: Vec<String> = Vec::new();
+    let mut invalid = Vec::new();
+    for team_id in team_ids {
+        let team_id = team_id.as_ref().trim().to_ascii_uppercase();
+        if team_id.is_empty() || valid.contains(&team_id) || invalid.contains(&team_id) {
+            continue;
+        }
+        if is_slack_team_id(&team_id) {
+            valid.push(team_id);
+        } else {
+            invalid.push(team_id);
+        }
+    }
+    (valid, invalid)
 }
 
 fn is_slack_team_id(value: &str) -> bool {
@@ -82,7 +91,7 @@ fn is_slack_team_id(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_slack_external_team_ids;
+    use super::{normalize_slack_external_team_ids, partition_slack_external_team_ids};
 
     #[test]
     fn normalizes_and_validates_team_ids() {
@@ -94,5 +103,13 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert_eq!(error, "invalid Slack team ids: C0CHANNEL, T0-BAD");
+    }
+
+    #[test]
+    fn partition_keeps_valid_ids_beside_invalid_ones() {
+        assert_eq!(
+            partition_slack_external_team_ids(&["T0PARTNER", "junk", "", "t0partner"]),
+            (vec!["T0PARTNER".to_owned()], vec!["JUNK".to_owned()])
+        );
     }
 }

@@ -501,12 +501,14 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
         (&Method::POST, "/api/workflows/actions/invoke") => {
             capability(Capability::WorkflowsActions)
         }
-        (&Method::GET, "/api/slack/external-team-ids") => {
+        (&Method::GET | &Method::HEAD, "/api/slack/external-team-ids") => {
             capability(Capability::SlackExternalTeamsRead)
         }
         (&Method::PUT, "/api/slack/external-team-ids") => {
             capability(Capability::SlackExternalTeamsWrite)
         }
+        // Keep other methods out of the principal-only `/api/slack/` family.
+        (_, "/api/slack/external-team-ids") => None,
         (_, route) if route.starts_with("/api/slack/") => Some(RouteAccess::PrincipalOnly),
         (_, route) if route.starts_with("/api/admin/slack/dm-sync/") => {
             capability(Capability::AdminSync)
