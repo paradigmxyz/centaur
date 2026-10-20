@@ -276,6 +276,12 @@ spec:
 {{- end }}
             - name: IRON_CONTROL_SYNC_INFRA_SECRETS
               value: {{ .Values.apiRs.syncInfraSecrets | quote }}
+{{- with .Values.slackbotv2.externalOrgAllowlist }}
+            # Deprecated: seeds the Slack Connect allowlist once when upgrading
+            # from this Helm value. Manage it in Console Settings.
+            - name: SLACKBOT_EXTERNAL_ORG_ALLOWLIST
+              value: {{ . | quote }}
+{{- end }}
             - name: RUST_LOG
               value: info
             - name: TOOL_DIRS
