@@ -136,18 +136,22 @@ console.log(
   })
 )
 
-// How long SIGTERM waits for in-flight replies; keep it under the pod's
-// termination grace period (30s by default). A reply still running then is
-// recovered by the next process from its render obligation.
-const shutdownDrainMs = numberEnv('SLACKBOTV2_SHUTDOWN_DRAIN_MS', 25_000)
+// Kubernetes removes a terminating pod from its Service while SIGTERM is
+// delivered, so keep accepting requests for a moment before draining.
+const SHUTDOWN_LINGER_MS = 5_000
+// How long SIGTERM then waits for in-flight replies; linger plus drain stays
+// under the pod's termination grace period (30s by default). A reply still
+// running then is recovered by the next process from its render obligation.
+const shutdownDrainMs = numberEnv('SLACKBOTV2_SHUTDOWN_DRAIN_MS', 20_000)
 let shuttingDown = false
 const shutdown = async (signal: string): Promise<void> => {
   if (shuttingDown) return
   shuttingDown = true
   log('info', 'slackbotv2_shutdown_started', { signal, drain_ms: shutdownDrainMs })
-  // Keep serving while draining: events that arrive before this pod leaves
-  // the Service endpoints are handled and drained like the rest.
+  await new Promise(resolve => setTimeout(resolve, SHUTDOWN_LINGER_MS))
   const unfinished = await drain(shutdownDrainMs)
+  // Lets requests still in progress send their responses.
+  await server.stop()
   log('info', 'slackbotv2_shutdown_complete', { signal, unfinished })
   process.exit(0)
 }
