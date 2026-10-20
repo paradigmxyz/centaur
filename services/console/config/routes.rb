@@ -139,7 +139,9 @@ Rails.application.routes.draw do
         post :demote
       end
     end
-    resource :system_settings, only: %i[edit update], path: "settings"
+    resource :system_settings, only: %i[edit update], path: "settings" do
+      patch :slack_external_teams
+    end
     # Admin self-descope ("view as operator"): pause (admin-only) and restore
     # admin permissions. A singular resource because it's a per-session flag.
     resource :descope, only: %i[create destroy]
