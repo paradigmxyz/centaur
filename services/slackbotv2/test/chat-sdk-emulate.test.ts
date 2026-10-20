@@ -4317,31 +4317,54 @@ describe('slackbotv2', () => {
     }
   })
 
-  it("asks Slack to retry an external org's event until the allowlist loads", async () => {
+  it('rejects an unsigned external org event before checking the allowlist', async () => {
     codexApi.externalTeamIds = null
-    bot = createTestBot()
-    const mention = await postUserMessage(`<@${BOT_USER_ID}> from a partner during an outage`)
-    const event = {
-      type: 'app_mention',
-      user: USER_ID,
-      channel: CHANNEL_ID,
-      team: 'TEXTERNAL',
-      user_team: 'TEXTERNAL',
-      ts: mention.ts,
-      text: `<@${BOT_USER_ID}> from a partner during an outage`
+    const forged = signedSlackEvent({
+      event_id: 'Ev-allowlist-forged',
+      event: { type: 'app_mention', user: USER_ID, channel: CHANNEL_ID, user_team: 'TEXTERNAL' }
+    })
+    const response = await bot.app.request('/api/webhooks/slack', {
+      ...forged,
+      headers: { ...(forged.headers as Record<string, string>), 'x-slack-signature': 'v0=0' }
+    })
+
+    expect(response.status).toBe(401)
+  })
+
+  it("asks Slack to retry an external org's event until the allowlist loads", async () => {
+    const realNow = performance.now.bind(performance)
+    let clockOffsetMs = 0
+    const clock = spyOn(performance, 'now').mockImplementation(() => realNow() + clockOffsetMs)
+    try {
+      codexApi.externalTeamIds = null
+      const mention = await postUserMessage(`<@${BOT_USER_ID}> from a partner during an outage`)
+      const event = {
+        type: 'app_mention',
+        user: USER_ID,
+        channel: CHANNEL_ID,
+        team: 'TEXTERNAL',
+        user_team: 'TEXTERNAL',
+        ts: mention.ts,
+        text: `<@${BOT_USER_ID}> from a partner during an outage`
+      }
+      const deliver = async (retryNum?: string) => {
+        const delivery = await deliverEvent(event, { eventId: 'Ev-allowlist-outage', retryNum })
+        await delivery.finished()
+        return delivery.response.status
+      }
+
+      expect(await deliver()).toBe(503)
+      // Slack's immediate first retry lands inside the failed lookup's retry window.
+      codexApi.externalTeamIds = ['TEXTERNAL']
+      expect(await deliver('1')).toBe(503)
+      expect(codexApi.appends).toHaveLength(0)
+
+      clockOffsetMs += 6_000
+      expect(await deliver('2')).toBe(200)
+      expect(codexApi.appends).toHaveLength(1)
+    } finally {
+      clock.mockRestore()
     }
-
-    const unavailable = await deliverEvent(event, { eventId: 'Ev-allowlist-outage' })
-    expect(unavailable.response.status).toBe(503)
-    await unavailable.finished()
-    expect(codexApi.appends).toHaveLength(0)
-
-    codexApi.externalTeamIds = ['TEXTERNAL']
-    bot = createTestBot()
-    const retried = await deliverEvent(event, { eventId: 'Ev-allowlist-outage', retryNum: '1' })
-    expect(retried.response.status).toBe(200)
-    await retried.finished()
-    expect(codexApi.appends).toHaveLength(1)
   })
 
   it('enforces external org and trigger-bot member allowlists', async () => {

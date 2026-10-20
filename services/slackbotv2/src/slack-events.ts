@@ -49,7 +49,9 @@ type ExternalTeamIdsCache = {
 
 /**
  * The Slack Connect allowlist has never loaded, so an external org's event
- * can be neither admitted nor safely dropped. Callers ask Slack to retry.
+ * can be neither admitted nor safely dropped. The webhook answers 503: Slack
+ * redelivers Events API events, but not interactions such as button clicks,
+ * which the user has to repeat.
  */
 export class SlackExternalTeamIdsUnavailableError extends Error {
   constructor(cause: unknown) {
@@ -171,7 +173,10 @@ export async function isAllowedSlackMessage(
   return true
 }
 
-/** The webhook gate already asked Slack to retry if the list was unavailable. */
+/**
+ * The webhook gate already answered 503 if the list was unavailable, so a
+ * failure here only denies.
+ */
 async function isAllowedExternalTeamForMessage(
   externalTeamId: string,
   options: SlackbotV2Options,
