@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_10_19_205325) do
+ActiveRecord::Schema[8.1].define(version: 2026_10_10_025431) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -531,7 +531,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_19_205325) do
     t.boolean "default_sandbox_workflows_read_enabled", default: false, null: false
     t.boolean "default_sandbox_workflows_write_enabled", default: false, null: false
     t.boolean "singleton", default: true, null: false
-    t.text "slack_external_team_ids", default: [], null: false, array: true
     t.datetime "updated_at", null: false
     t.index ["singleton"], name: "index_system_settings_on_singleton", unique: true
   end

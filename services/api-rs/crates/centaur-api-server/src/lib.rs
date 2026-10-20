@@ -4,6 +4,7 @@ pub mod client;
 mod error;
 mod mcp;
 mod routes;
+mod slack_external_teams;
 mod slack_proxy;
 mod tool_discovery;
 pub mod types;
@@ -15,6 +16,7 @@ pub use routes::{
     AppState, build_router_with_app_state, build_router_with_runtime,
     build_router_with_session_and_workflow_runtime, build_router_with_session_runtime,
 };
+pub use slack_external_teams::normalize_slack_external_team_ids;
 pub use tool_discovery::{
     DiscoveredToolProxyFragment, ToolDiscoveryConfig, ToolDiscoveryError,
     discover_persona_registry, discover_tool_proxy_fragment,
@@ -494,46 +496,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slack_ingress_reads_external_team_ids_from_console() {
-        let console = axum::Router::new().route(
-            "/api/v1/system_settings",
-            axum::routing::get(|headers: axum::http::HeaderMap| async move {
-                assert_eq!(headers[header::AUTHORIZATION], "Bearer console-key");
-                axum::Json(json!({ "data": { "slack_external_team_ids": ["T0PARTNER"] } }))
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let console_url = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move { axum::serve(listener, console).await.unwrap() });
-        let state = AppState::unready(test_auth_with_slack()).with_iron_control(
-            centaur_iron_control::IronControlClient::new(console_url, "console-key"),
-        );
-
-        let mut statuses = Vec::new();
-        for token in [
-            "test-slackbot-key".to_owned(),
-            principal_token("prn_sandbox"),
+    async fn slack_external_team_ids_are_readable_by_slackbot_and_writable_by_console() {
+        let slackbot = "test-slackbot-key".to_owned();
+        let body = r#"{"slack_external_team_ids":["T0PARTNER"]}"#;
+        for (method, token, expected) in [
+            (
+                Method::GET,
+                slackbot.clone(),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                Method::GET,
+                principal_token("prn_sandbox"),
+                StatusCode::FORBIDDEN,
+            ),
+            (Method::PUT, slackbot, StatusCode::FORBIDDEN),
+            (
+                Method::PUT,
+                console_token(),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
         ] {
-            let response = build_router_with_app_state(state.clone())
+            let response = build_router_with_app_state(AppState::unready(test_auth_with_slack()))
                 .oneshot(
                     Request::builder()
+                        .method(&method)
                         .uri("/api/slack/external-team-ids")
                         .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                        .body(Body::empty())
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
                         .unwrap(),
                 )
                 .await
                 .unwrap();
-            statuses.push(response.status());
-            if response.status() == StatusCode::OK {
-                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-                let body: Value = serde_json::from_slice(&body).unwrap();
-                assert_eq!(body, json!({ "slack_external_team_ids": ["T0PARTNER"] }));
-            }
+            assert_eq!(response.status(), expected, "{method}");
         }
-        server.abort();
-
-        assert_eq!(statuses, [StatusCode::OK, StatusCode::FORBIDDEN]);
     }
 
     #[tokio::test]

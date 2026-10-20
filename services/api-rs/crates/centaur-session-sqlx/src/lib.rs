@@ -106,6 +106,54 @@ impl PgSessionStore {
         migrate(&mut conn, text_search).await
     }
 
+    /// Slack Connect workspaces admitted for Slack ingress; empty when unset.
+    pub async fn slack_external_team_ids(&self) -> Result<Vec<String>, SessionStoreError> {
+        let team_ids = sqlx::query_scalar::<_, Vec<String>>(
+            "select team_ids from slack_external_team_allowlist",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(team_ids.unwrap_or_default())
+    }
+
+    /// Replace the admitted Slack Connect workspaces.
+    pub async fn replace_slack_external_team_ids(
+        &self,
+        team_ids: &[String],
+    ) -> Result<(), SessionStoreError> {
+        sqlx::query(
+            r#"
+            insert into slack_external_team_allowlist (singleton, team_ids)
+            values (true, $1)
+            on conflict (singleton)
+            do update set team_ids = excluded.team_ids, updated_at = now()
+            "#,
+        )
+        .bind(team_ids)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Set the admitted Slack Connect workspaces only if they were never
+    /// configured, so a later Console edit (including clearing the list) wins.
+    pub async fn seed_slack_external_team_ids(
+        &self,
+        team_ids: &[String],
+    ) -> Result<bool, SessionStoreError> {
+        let result = sqlx::query(
+            r#"
+            insert into slack_external_team_allowlist (singleton, team_ids)
+            values (true, $1)
+            on conflict (singleton) do nothing
+            "#,
+        )
+        .bind(team_ids)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     pub async fn listen_session_events(&self) -> Result<SessionEventListener, SessionStoreError> {
         let mut listener = PgListener::connect_with(&self.pool).await?;
         listener.listen(SESSION_EVENTS_CHANNEL).await?;
@@ -2117,6 +2165,52 @@ mod tests {
             .await
             .expect("run migrations");
         Some(store)
+    }
+
+    #[tokio::test]
+    async fn slack_external_team_ids_seed_only_until_configured() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        sqlx::query("delete from slack_external_team_allowlist")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let ids = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        assert!(store.slack_external_team_ids().await.unwrap().is_empty());
+        assert!(
+            store
+                .seed_slack_external_team_ids(&ids(&["TLEGACY"]))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .seed_slack_external_team_ids(&ids(&["TOTHER"]))
+                .await
+                .unwrap()
+        );
+        assert_eq!(store.slack_external_team_ids().await.unwrap(), ["TLEGACY"]);
+
+        store.replace_slack_external_team_ids(&[]).await.unwrap();
+        assert!(
+            !store
+                .seed_slack_external_team_ids(&ids(&["TLEGACY"]))
+                .await
+                .unwrap()
+        );
+        assert!(store.slack_external_team_ids().await.unwrap().is_empty());
+
+        sqlx::query("delete from slack_external_team_allowlist")
+            .execute(store.pool())
+            .await
+            .unwrap();
     }
 
     #[test]

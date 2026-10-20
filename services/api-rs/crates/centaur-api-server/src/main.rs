@@ -2,7 +2,8 @@ mod activity_summary;
 mod args;
 
 use centaur_api_server::{
-    ApiAuthConfig, AppState, build_router_with_app_state, warm_slack_public_channel_cache,
+    ApiAuthConfig, AppState, build_router_with_app_state, normalize_slack_external_team_ids,
+    warm_slack_public_channel_cache,
 };
 use centaur_session_runtime::SessionRuntime;
 use centaur_session_sqlx::PgSessionStore;
@@ -11,7 +12,7 @@ use centaur_workflows::WorkflowRuntime;
 use clap::Parser;
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{info, warn};
 
 use args::{Args, MigrateArgs};
 
@@ -34,10 +35,7 @@ async fn main() -> Result<(), ServerError> {
         "starting centaur api-rs server"
     );
 
-    let mut app_state = AppState::unready(api_auth);
-    if let Some(client) = args.iron_control_client() {
-        app_state = app_state.with_iron_control(client);
-    }
+    let app_state = AppState::unready(api_auth);
     let app = build_router_with_app_state(app_state.clone());
     warm_slack_public_channel_cache();
     let shutdown_state = app_state.clone();
@@ -84,10 +82,35 @@ async fn migrate(args: MigrateArgs) -> Result<(), ServerError> {
     Ok(())
 }
 
+async fn seed_legacy_slack_external_team_ids(
+    store: &PgSessionStore,
+    raw: &str,
+) -> Result<(), ServerError> {
+    let team_ids: Vec<&str> = raw.split([',', ' ', '\t', '\n']).collect();
+    let team_ids = match normalize_slack_external_team_ids(&team_ids) {
+        Ok(team_ids) if team_ids.is_empty() => return Ok(()),
+        Ok(team_ids) => team_ids,
+        Err(error) => {
+            warn!(%error, "ignoring invalid SLACKBOT_EXTERNAL_ORG_ALLOWLIST");
+            return Ok(());
+        }
+    };
+    if store.seed_slack_external_team_ids(&team_ids).await? {
+        info!(
+            team_count = team_ids.len(),
+            "seeded Slack Connect allowlist from SLACKBOT_EXTERNAL_ORG_ALLOWLIST"
+        );
+    }
+    Ok(())
+}
+
 async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), ServerError> {
     let store = PgSessionStore::connect(&args.server.database_url).await?;
     if args.server.run_migrations {
         store.run_migrations(args.server.text_search).await?;
+    }
+    if let Some(raw) = args.server.legacy_slack_external_org_allowlist.as_deref() {
+        seed_legacy_slack_external_team_ids(&store, raw).await?;
     }
     if let Some(config) = args.activity_summary_config() {
         let worker = activity_summary::ActivitySummaryWorker::new(store.clone(), config)?;

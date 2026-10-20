@@ -33,8 +33,7 @@ module Console
         :default_sandbox_observability_enabled,
         :default_sandbox_sessions_read_enabled,
         :default_sandbox_workflows_read_enabled,
-        :default_sandbox_workflows_write_enabled,
-        :slack_external_team_ids_text
+        :default_sandbox_workflows_write_enabled
       )
     end
 

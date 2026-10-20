@@ -17,7 +17,7 @@ use crate::models::{
     EffectiveConfig, GcpAuthSecretInput, GcpIdTokenSecretInput, Grant, GrantSecret, Grantee,
     HmacSecretInput, IdentityInput, OAuthTokenSecretInput, PgDsnSecretInput, Principal,
     PrincipalInput, Proxy, ProxyInput, Role, SecretRecord, SlackChannelPermissionInput,
-    StaticSecretInput, SystemSettings,
+    StaticSecretInput,
 };
 
 const API_PREFIX: &str = "/api/v1";
@@ -191,17 +191,6 @@ impl IronControlClient {
         );
         let resp = self.send(Method::DELETE, &path, None::<&Value>).await?;
         expect_success(resp, Method::DELETE, &path).await
-    }
-
-    // ----- system settings -------------------------------------------------
-
-    /// Slack Connect workspaces (team ids) admitted by the console's system
-    /// settings. Messages from any other external workspace are ignored.
-    pub async fn slack_external_team_ids(&self) -> Result<Vec<String>> {
-        let path = format!("{API_PREFIX}/system_settings");
-        let resp = self.send(Method::GET, &path, None::<&Value>).await?;
-        let settings: SystemSettings = decode_data(resp, Method::GET, &path).await?;
-        Ok(settings.slack_external_team_ids)
     }
 
     // ----- secrets ---------------------------------------------------------

@@ -27,10 +27,11 @@ pub(crate) enum Capability {
     WorkflowsActions,
     AdminSync,
     SlackExternalTeamsRead,
+    SlackExternalTeamsWrite,
 }
 
 impl Capability {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::SessionsRead,
         Self::SessionsWrite,
         Self::SandboxesDrain,
@@ -40,6 +41,7 @@ impl Capability {
         Self::WorkflowsActions,
         Self::AdminSync,
         Self::SlackExternalTeamsRead,
+        Self::SlackExternalTeamsWrite,
     ];
 }
 

@@ -482,12 +482,6 @@ pub struct Principal {
     pub sandbox_observability_enabled: bool,
 }
 
-/// Deployment-wide console settings that api-rs reads.
-#[derive(Clone, Debug, Deserialize)]
-pub(crate) struct SystemSettings {
-    pub slack_external_team_ids: Vec<String>,
-}
-
 /// Request body for creating/updating one Slack permission row on a principal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SlackChannelPermissionInput {

@@ -90,10 +90,6 @@ impl Args {
         self.sandbox.iron_control_runtime().await
     }
 
-    pub(crate) fn iron_control_client(&self) -> Option<IronControlClient> {
-        self.sandbox.iron_control.client()
-    }
-
     pub(crate) fn persona_registry(&self) -> Result<PersonaRegistry, ServerError> {
         self.sandbox.persona_registry()
     }
@@ -602,6 +598,13 @@ pub(crate) struct ServerArgs {
         value_parser = TextSearchBackend::from_str
     )]
     pub(crate) text_search: TextSearchBackend,
+    /// Deprecated Helm-era Slack Connect allowlist. Seeds the Console-managed
+    /// list once, only if it was never configured.
+    #[arg(
+        long = "legacy-slack-external-org-allowlist",
+        env = "SLACKBOT_EXTERNAL_ORG_ALLOWLIST"
+    )]
+    pub(crate) legacy_slack_external_org_allowlist: Option<String>,
     /// How long shutdown waits for in-flight executions to finish before
     /// releasing their stdout-owner leases for adoption by a peer. Keep
     /// below the pod's terminationGracePeriodSeconds (35s in the chart) so

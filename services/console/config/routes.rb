@@ -227,7 +227,6 @@ Rails.application.routes.draw do
       resources :api_keys, only: %i[index show create destroy]
       resources :proxies, only: %i[index show create update destroy]
       resources :scheduled_tasks, only: %i[show]
-      resource :system_settings, only: %i[show]
       # Operator-managed broker credentials (ApiKey auth). CRUD + lookup; the
       # rotating token blob is never serialized back.
       resources :broker_credentials, only: %i[index show create update destroy] do

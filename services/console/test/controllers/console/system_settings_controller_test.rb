@@ -30,29 +30,6 @@ module Console
       assert_select "input[name='system_setting[default_sandbox_workflows_read_enabled]']"
       assert_select "input[name='system_setting[default_sandbox_workflows_write_enabled]']"
       assert_select "input[name='system_setting[default_role_ids][]'][value=?]", roles(:acme_infra).id.to_s
-      assert_select "textarea[name='system_setting[slack_external_team_ids_text]']"
-    end
-
-    test "admin updates allowed Slack Connect workspaces" do
-      sign_in users(:acme_admin)
-
-      patch console_system_settings_url,
-            params: { system_setting: { slack_external_team_ids_text: "t0partner1, T0PARTNER2\nT0PARTNER1" } }
-
-      assert_redirected_to edit_console_system_settings_path
-      assert_equal %w[T0PARTNER1 T0PARTNER2], system_settings(:default).reload.slack_external_team_ids
-    end
-
-    test "rejects invalid Slack team ids" do
-      sign_in users(:acme_admin)
-      system_settings(:default).update!(slack_external_team_ids: %w[T0PARTNER1])
-
-      patch console_system_settings_url,
-            params: { system_setting: { slack_external_team_ids_text: "T0PARTNER2 C0CHANNEL" } }
-
-      assert_response :unprocessable_entity
-      assert_select ".alert-error", text: /C0CHANNEL/
-      assert_equal %w[T0PARTNER1], system_settings(:default).reload.slack_external_team_ids
     end
 
     test "admin updates principal defaults" do
