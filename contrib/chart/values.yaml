@@ -494,9 +494,10 @@ companyContextV1:
   enabled: true
 
 # Standalone company-context ingestion service. It indexes Google Docs and PDFs
-# from Google Drive, Google Calendar events, and Granola meeting notes into its
-# private system and data schemas. Disabled while the corpus is validated
-# alongside the legacy Python workflows.
+# from Google Drive, Google Calendar events, Granola meeting notes, and Attio
+# meetings with their call transcripts into its private system and data
+# schemas. Disabled while the corpus is validated alongside the legacy Python
+# workflows.
 experimentalCompanyContext:
   enabled: false
   replicaCount: 1
@@ -518,6 +519,8 @@ experimentalCompanyContext:
       enabled: true
     granola:
       enabled: true
+    attio:
+      enabled: true
     slack:
       enabled: true
     # Projects rows imported into company_context_system.imported_documents.
@@ -531,6 +534,9 @@ experimentalCompanyContext:
   # Rails Console OAuth app whose live per-user Granola MCP credentials are
   # synchronized.
   granolaOauthAppSlug: granola
+  # Rails Console OAuth app whose live Attio workspace credentials are
+  # synchronized.
+  attioOauthAppSlug: attio
   scanIntervalSeconds: 300
   calendarSyncIntervalSeconds: 1800
   # Days of past Calendar events to index, by when they ended; recurring events
@@ -538,6 +544,7 @@ experimentalCompanyContext:
   # lowering it removes the events that fall outside.
   calendarHistoryDays: 90
   granolaSyncIntervalSeconds: 1800
+  attioSyncIntervalSeconds: 1800
   importedProjectIntervalSeconds: 60
   # Slack conversations are discovered through the same per-user Slack
   # credentials as the Console DM sync (console.slackDmSync.oauthAppSlug).

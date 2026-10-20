@@ -9,12 +9,14 @@ use tokio::time::{MissedTickBehavior, interval};
 use tracing::{error, info};
 
 use crate::{
+    attio_tasks::{AttioReconcileParams, AttioSyncParams},
     calendar_tasks::{CalendarDiscoverParams, CalendarReconcileParams},
     config::{
-        CALENDAR_CREDENTIALS_RECONCILE_TASK, CALENDAR_DISCOVER_TASK, Config,
-        DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK, GRANOLA_CREDENTIALS_RECONCILE_TASK,
-        GRANOLA_SYNC_TASK, IMPORTED_PROJECT_TASK, SHARED_DRIVES_DISCOVER_TASK,
-        SLACK_CREDENTIALS_RECONCILE_TASK, SLACK_USER_DISCOVER_TASK, SLACK_USERS_SYNC_TASK,
+        ATTIO_CREDENTIALS_RECONCILE_TASK, ATTIO_SYNC_TASK, CALENDAR_CREDENTIALS_RECONCILE_TASK,
+        CALENDAR_DISCOVER_TASK, Config, DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK,
+        GRANOLA_CREDENTIALS_RECONCILE_TASK, GRANOLA_SYNC_TASK, IMPORTED_PROJECT_TASK,
+        SHARED_DRIVES_DISCOVER_TASK, SLACK_CREDENTIALS_RECONCILE_TASK, SLACK_USER_DISCOVER_TASK,
+        SLACK_USERS_SYNC_TASK,
     },
     credentials::{ConsoleCredentials, GoogleProduct},
     granola_tasks::{GranolaReconcileParams, GranolaSyncParams},
@@ -211,6 +213,61 @@ pub async fn run_granola(
                     bucket,
                 },
                 format!("granola.user.sync:{credential_id}:{bucket}"),
+                credential_id,
+            )
+            .await;
+        }
+    }
+}
+
+/// Enqueues Attio reconciliation and per-workspace meeting sync.
+pub async fn run_attio(config: Arc<Config>, client: Client, credentials: Arc<ConsoleCredentials>) {
+    let mut ticker = interval(config.attio_sync_interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let bucket = now / config.attio_sync_interval.as_secs().max(1);
+        match client
+            .spawn(
+                ATTIO_CREDENTIALS_RECONCILE_TASK,
+                AttioReconcileParams { bucket },
+                SpawnOptions {
+                    idempotency_key: Some(format!("attio.credentials.reconcile:{bucket}")),
+                    ..SpawnOptions::default()
+                },
+            )
+            .await
+        {
+            Ok(result) => {
+                telemetry::task_enqueued(ATTIO_CREDENTIALS_RECONCILE_TASK, result.created);
+            }
+            Err(error) => {
+                telemetry::scheduler_error("attio", "enqueue");
+                error!(event = "company_context_attio_reconcile_enqueue_failed", error = %error);
+            }
+        }
+        let credential_ids = match credentials.attio_credential_ids().await {
+            Ok(ids) => ids,
+            Err(error) => {
+                telemetry::scheduler_error("attio", "load_credentials");
+                error!(event = "company_context_attio_credentials_load_failed", error = %error);
+                continue;
+            }
+        };
+        for credential_id in credential_ids {
+            spawn_credential_task(
+                &client,
+                "attio",
+                ATTIO_SYNC_TASK,
+                AttioSyncParams {
+                    credential_id,
+                    bucket,
+                },
+                format!("attio.workspace.sync:{credential_id}:{bucket}"),
                 credential_id,
             )
             .await;

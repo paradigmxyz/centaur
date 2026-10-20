@@ -1,3 +1,5 @@
+mod attio;
+mod attio_tasks;
 mod calendar;
 mod calendar_tasks;
 mod config;
@@ -41,6 +43,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use crate::{
+    attio::AttioClient,
     calendar::CalendarClient,
     config::{Config, QUEUE_NAME, SLACK_QUEUE_NAME, SLACK_THREAD_QUEUE_NAME},
     credentials::ConsoleCredentials,
@@ -113,6 +116,7 @@ async fn main() -> Result<()> {
     let drive = DriveClient::new(&config, credentials.clone())?;
     let calendar = CalendarClient::new(&config, credentials.clone())?;
     let granola = GranolaClient::new(&config)?;
+    let attio = AttioClient::new(&config)?;
     let embeddings = EmbeddingsClient::new(&config)?;
     let query_state = query::QueryState {
         pool: pool.clone(),
@@ -129,6 +133,7 @@ async fn main() -> Result<()> {
         drive,
         calendar,
         granola,
+        attio,
         slack: slack.clone(),
         embeddings,
     })?;
@@ -230,6 +235,13 @@ async fn main() -> Result<()> {
             credentials.clone(),
         )));
     }
+    if config.attio_enabled {
+        schedulers.push(tokio::spawn(scheduler::run_attio(
+            config.clone(),
+            absurd.clone(),
+            credentials.clone(),
+        )));
+    }
     if config.imported_enabled {
         schedulers.push(tokio::spawn(scheduler::run_imported(
             config.clone(),
@@ -262,6 +274,7 @@ async fn main() -> Result<()> {
         drive_enabled = config.drive_enabled,
         calendar_enabled = config.calendar_enabled,
         granola_enabled = config.granola_enabled,
+        attio_enabled = config.attio_enabled,
         imported_enabled = config.imported_enabled,
         slack_enabled = config.slack_enabled
     );

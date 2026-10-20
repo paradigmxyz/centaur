@@ -85,6 +85,8 @@ spec:
               value: {{ $companyContext.indexers.calendar.enabled | quote }}
             - name: COMPANY_CONTEXT_GRANOLA_ENABLED
               value: {{ $companyContext.indexers.granola.enabled | quote }}
+            - name: COMPANY_CONTEXT_ATTIO_ENABLED
+              value: {{ $companyContext.indexers.attio.enabled | quote }}
             - name: COMPANY_CONTEXT_SLACK_ENABLED
               value: {{ $companyContext.indexers.slack.enabled | quote }}
             - name: COMPANY_CONTEXT_IMPORTED_ENABLED
@@ -93,12 +95,16 @@ spec:
               value: {{ $companyContext.googleOauthAppSlug | quote }}
             - name: COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG
               value: {{ $companyContext.granolaOauthAppSlug | quote }}
+            - name: COMPANY_CONTEXT_ATTIO_OAUTH_APP_SLUG
+              value: {{ $companyContext.attioOauthAppSlug | quote }}
             - name: COMPANY_CONTEXT_CALENDAR_SYNC_INTERVAL_SECONDS
               value: {{ $companyContext.calendarSyncIntervalSeconds | quote }}
             - name: COMPANY_CONTEXT_CALENDAR_HISTORY_DAYS
               value: {{ $companyContext.calendarHistoryDays | quote }}
             - name: COMPANY_CONTEXT_GRANOLA_SYNC_INTERVAL_SECONDS
               value: {{ $companyContext.granolaSyncIntervalSeconds | quote }}
+            - name: COMPANY_CONTEXT_ATTIO_SYNC_INTERVAL_SECONDS
+              value: {{ $companyContext.attioSyncIntervalSeconds | quote }}
             - name: COMPANY_CONTEXT_IMPORTED_PROJECT_INTERVAL_SECONDS
               value: {{ $companyContext.importedProjectIntervalSeconds | quote }}
             - name: COMPANY_CONTEXT_SLACK_OAUTH_APP_SLUG

@@ -6,7 +6,9 @@
 //! Slack user ID, or for the subject of a Google or Granola credential granted
 //! to it, still reaches the document's file, conversation, or Granola note.
 //! Calendar events are stored per Google identity, as Google showed them to it,
-//! and are visible only to that identity. Imported documents are public.
+//! and are visible only to that identity. Attio meetings are visible to
+//! principals granted a credential for their workspace. Imported documents are
+//! public.
 //! Queries run as [`QUERY_ROLE`], which can only read `company_context_data`.
 
 use std::{
@@ -34,9 +36,9 @@ use tracing::{error, warn};
 
 use crate::{
     config::{
-        Config, GOOGLE_CALENDAR_DOCUMENT_ID_PREFIX, GOOGLE_DRIVE_DOCUMENT_ID_PREFIX,
-        GRANOLA_DOCUMENT_ID_PREFIX, IMPORTED_DOCUMENT_ID_PREFIX, SLACK_DOCUMENT_ID_PREFIX,
-        SLACK_FILE_DOCUMENT_ID_PREFIX,
+        ATTIO_DOCUMENT_ID_PREFIX, Config, GOOGLE_CALENDAR_DOCUMENT_ID_PREFIX,
+        GOOGLE_DRIVE_DOCUMENT_ID_PREFIX, GRANOLA_DOCUMENT_ID_PREFIX, IMPORTED_DOCUMENT_ID_PREFIX,
+        SLACK_DOCUMENT_ID_PREFIX, SLACK_FILE_DOCUMENT_ID_PREFIX,
     },
     credentials::{ConsoleCredentials, PrincipalIdentity},
     embeddings::EmbeddingsClient,
@@ -108,6 +110,7 @@ pub enum DataType {
     DriveDoc,
     CalendarEvent,
     GranolaNote,
+    AttioMeeting,
     ImportedDoc,
 }
 
@@ -162,12 +165,13 @@ impl Source {
 }
 
 impl DataType {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::SlackMessage,
         Self::SlackFile,
         Self::DriveDoc,
         Self::CalendarEvent,
         Self::GranolaNote,
+        Self::AttioMeeting,
         Self::ImportedDoc,
     ];
 
@@ -188,6 +192,7 @@ impl DataType {
                 .iter()
                 .map(String::as_str)
                 .collect(),
+            Self::AttioMeeting => identity.attio_subjects.iter().map(String::as_str).collect(),
             // Public: visible without an identity.
             Self::ImportedDoc => return Some(Vec::new()),
         };
@@ -329,6 +334,29 @@ impl DataType {
                 starts_at: "d.occurred_at",
                 ends_at: "d.occurred_at",
                 end_exclusive: false,
+                in_channels: None,
+                file_id: None,
+                source: None,
+            },
+            Self::AttioMeeting => Source {
+                id_prefix: ATTIO_DOCUMENT_ID_PREFIX,
+                documents: "company_context_data.attio_documents",
+                embeddings: Some("company_context_data.attio_document_embeddings"),
+                columns: r#"d.document_id, d.title, d.body, NULLIF(d.url, '') AS url,
+                   d.starts_at AS occurred_at,
+                   jsonb_build_object(
+                       'meeting_id', d.meeting_id,
+                       'workspace_id', d.provider_subject,
+                       'starts_at', d.starts_at,
+                       'ends_at', d.ends_at,
+                       'participants', d.participants,
+                       'linked_records', d.linked_records
+                   ) AS metadata"#,
+                visible: "d.provider_subject = ANY($2)",
+                // A meeting matches a window it overlaps.
+                starts_at: "d.starts_at",
+                ends_at: "d.ends_at",
+                end_exclusive: true,
                 in_channels: None,
                 file_id: None,
                 source: None,
@@ -1002,6 +1030,7 @@ mod tests {
             slack_user_id: Some("U-ADA".to_owned()),
             google_subjects: vec!["G-ADA".to_owned()],
             granola_subjects: vec!["GR-ADA".to_owned()],
+            attio_subjects: vec!["WS-ACME".to_owned()],
         }
     }
 
@@ -1011,6 +1040,7 @@ mod tests {
             slack_user_id: Some("U-BOB".to_owned()),
             google_subjects: Vec::new(),
             granola_subjects: vec!["GR-BOB".to_owned(), "GR-BOB-2".to_owned()],
+            attio_subjects: Vec::new(),
         }
     }
 
@@ -1019,7 +1049,8 @@ mod tests {
     /// file SF1 is shared in C1 and SF2 in both C2 and C3. Ada's Granola
     /// account observes note N1 (not N3, whose observation is inactive); Bob's
     /// second Granola account observes N2. Ada's Google account synced
-    /// calendar events E1 and E2; Carol's synced E3.
+    /// calendar events E1 and E2; Carol's synced E3. Ada's Attio workspace has
+    /// meeting AM1; another workspace has AM2.
     async fn seed(pool: &PgPool) {
         pool.execute(
             r#"
@@ -1100,6 +1131,18 @@ mod tests {
                 ('granola:N1:000000', 'N1', '000000', 'Falcon sync', 'falcon launch timeline', 'ada@example.com', '2024-01-05Z', 'hash'),
                 ('granola:N2:000000', 'N2', '000000', 'Falcon sync', 'falcon launch timeline', 'bob@example.com', '2024-01-05Z', 'hash'),
                 ('granola:N3:000000', 'N3', '000000', 'Falcon sync', 'falcon launch timeline', 'carol@example.com', '2024-01-05Z', 'hash');
+
+            INSERT INTO company_context_system.attio_meetings
+                (broker_credential_id, meeting_id, provider_subject)
+            VALUES (30, 'AM1', 'WS-ACME'), (31, 'AM2', 'WS-OTHER');
+            INSERT INTO company_context_data.attio_documents
+                (document_id, broker_credential_id, meeting_id, provider_subject, chunk_id,
+                 title, body, starts_at, ends_at, content_hash)
+            VALUES
+                ('attio:30:AM1:000000', 30, 'AM1', 'WS-ACME', '000000', 'Falcon customer call',
+                 'falcon launch pricing', '2024-01-06T15:00Z', '2024-01-06T16:00Z', 'hash'),
+                ('attio:31:AM2:000000', 31, 'AM2', 'WS-OTHER', '000000', 'Falcon customer call',
+                 'falcon launch pricing', '2024-01-06T15:00Z', '2024-01-06T16:00Z', 'hash');
             "#,
         )
         .await
@@ -1120,6 +1163,7 @@ mod tests {
         assert_eq!(
             ids(pool, None, &ada, json!({ "query": "Falcon launch?" })).await,
             [
+                "attio:30:AM1:000000",
                 "google-calendar:1:CAL-ADA:E1",
                 "google-calendar:1:CAL-ADA:E2",
                 "google-drive:F1",
@@ -1169,6 +1213,22 @@ mod tests {
             )
             .await,
             ["google-calendar:1:CAL-ADA:E2"]
+        );
+        // Attio meetings match windows they overlap, their end being exclusive.
+        let attio_window = |after: &str| {
+            json!({ "query": "pricing", "filters": {
+                "types": ["attio_meeting"],
+                "occurred_after": after,
+            } })
+        };
+        assert_eq!(
+            ids(pool, None, &ada, attio_window("2024-01-06T15:30:00Z")).await,
+            ["attio:30:AM1:000000"]
+        );
+        assert!(
+            ids(pool, None, &ada, attio_window("2024-01-06T16:00:00Z"))
+                .await
+                .is_empty()
         );
         assert!(
             ids(pool, None, &ada, json!({ "query": "unrelated" }))
@@ -1271,6 +1331,10 @@ mod tests {
                 (document_id, model, dimensions, content_hash, embedding)
             SELECT document_id, 'text-embedding-3-small', 1536, 'hash', array_fill(0.5, ARRAY[1536])::vector
             FROM company_context_data.granola_documents;
+            INSERT INTO company_context_data.attio_document_embeddings
+                (document_id, model, dimensions, content_hash, embedding)
+            SELECT document_id, 'text-embedding-3-small', 1536, 'hash', array_fill(0.5, ARRAY[1536])::vector
+            FROM company_context_data.attio_documents;
 
             "#,
         )
@@ -1292,6 +1356,7 @@ mod tests {
             .await,
             // Calendar events are matched by keyword only.
             [
+                "attio:30:AM1:000000",
                 "google-drive:F1",
                 "google-drive:F4",
                 "granola:N1:000000",
@@ -1407,6 +1472,12 @@ mod tests {
             .unwrap();
         assert_eq!(event.data_type, DataType::CalendarEvent);
         assert_eq!(event.metadata["calendar_id"], "CAL-ADA");
+        let meeting = document(pool, &ada, "attio:30:AM1:000000")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(meeting.data_type, DataType::AttioMeeting);
+        assert_eq!(meeting.metadata["workspace_id"], "WS-ACME");
 
         for (identity, document_id) in [
             (&ada, "google-drive:F2"),
@@ -1415,6 +1486,8 @@ mod tests {
             (&ada, "granola:N2:000000"),
             (&ada, "granola:N3:000000"),
             (&ada, "google-calendar:5:CAL-TEAM:E3"),
+            (&ada, "attio:31:AM2:000000"),
+            (&bob, "attio:30:AM1:000000"),
             (&bob, "google-calendar:1:CAL-ADA:E2"),
             (&ada, "missing"),
             (&bob, "google-drive:F1"),

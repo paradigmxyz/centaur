@@ -14,6 +14,8 @@ use tokio::time::interval;
 use tracing::{error, info, warn};
 
 use crate::{
+    attio::AttioClient,
+    attio_tasks,
     calendar::CalendarClient,
     calendar_tasks,
     config::{
@@ -42,6 +44,7 @@ pub struct TaskState {
     pub drive: DriveClient,
     pub calendar: CalendarClient,
     pub granola: GranolaClient,
+    pub attio: AttioClient,
     pub slack: SlackClient,
     pub embeddings: EmbeddingsClient,
 }
@@ -119,6 +122,7 @@ pub struct TaskSummary {
 }
 
 pub fn register(state: TaskState) -> Result<()> {
+    attio_tasks::register(&state)?;
     calendar_tasks::register(&state)?;
     granola_tasks::register(&state)?;
     imported_documents::register(&state)?;

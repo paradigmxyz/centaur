@@ -379,6 +379,7 @@ mod tests {
             slack_user_id: None,
             google_subjects: Vec::new(),
             granola_subjects: Vec::new(),
+            attio_subjects: Vec::new(),
         }
     }
 

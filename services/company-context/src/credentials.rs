@@ -62,6 +62,7 @@ pub struct ConsoleCredentials {
     encryption: Arc<ActiveRecordEncryption>,
     google_oauth_app_slug: String,
     granola_oauth_app_slug: String,
+    attio_oauth_app_slug: String,
     slack_oauth_app_slug: String,
     slack_bot_token: String,
     /// Resolves the bot's Slack user ID, needed only to match a user limit.
@@ -93,6 +94,15 @@ pub struct GranolaCredential {
     pub provider_subject: String,
 }
 
+/// An Attio workspace credential. Attio tokens are scoped to a workspace, whose
+/// ID is the credential's subject.
+#[derive(Clone, Debug)]
+pub struct AttioCredential {
+    pub id: i64,
+    pub access_token: String,
+    pub workspace_id: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct GoogleCredential {
     pub id: i64,
@@ -102,15 +112,16 @@ pub struct GoogleCredential {
     pub revision: String,
 }
 
-/// The provider identities a Console principal is known by. Google and
-/// Granola identities are the subjects of the live broker credentials granted
-/// directly to the principal, the accounts it can already use through the
-/// proxy; principal labels are not trusted.
+/// The provider identities a Console principal is known by. Google, Granola,
+/// and Attio identities are the subjects of the live broker credentials
+/// granted directly to the principal, the accounts (for Attio, workspaces) it
+/// can already use through the proxy; principal labels are not trusted.
 #[derive(Clone, Debug, Default, sqlx::FromRow)]
 pub struct PrincipalIdentity {
     pub slack_user_id: Option<String>,
     pub google_subjects: Vec<String>,
     pub granola_subjects: Vec<String>,
+    pub attio_subjects: Vec<String>,
 }
 
 impl ConsoleCredentials {
@@ -133,6 +144,7 @@ impl ConsoleCredentials {
             )),
             google_oauth_app_slug: config.google_oauth_app_slug.clone(),
             granola_oauth_app_slug: config.granola_oauth_app_slug.clone(),
+            attio_oauth_app_slug: config.attio_oauth_app_slug.clone(),
             slack_oauth_app_slug: config.slack_oauth_app_slug.clone(),
             slack_bot_token: config.slack_bot_token.clone(),
             slack: SlackClient::new(config)?,
@@ -382,6 +394,89 @@ impl ConsoleCredentials {
         })
     }
 
+    pub async fn attio_credential_ids(&self) -> Result<Vec<i64>> {
+        sqlx::query_scalar(
+            r#"
+            SELECT credentials.id
+            FROM broker_credentials credentials
+            JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+            WHERE app.provider = 'attio'
+              AND app.slug = $1
+              AND app.enabled = TRUE
+              AND credentials.dead = FALSE
+              AND COALESCE(credentials.provider_subject, '') <> ''
+              AND credentials.access_token IS NOT NULL
+              AND (
+                  credentials.expires_at IS NULL
+                  OR credentials.expires_at > NOW()
+              )
+            ORDER BY credentials.id
+            "#,
+        )
+        .bind(&self.attio_oauth_app_slug)
+        .fetch_all(&self.pool)
+        .await
+        .context("list Attio broker credentials from Rails Console")
+    }
+
+    pub async fn retained_attio_credential_ids(&self) -> Result<Vec<i64>> {
+        sqlx::query_scalar(
+            r#"
+            SELECT credentials.id
+            FROM broker_credentials credentials
+            JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+            WHERE app.provider = 'attio'
+              AND app.slug = $1
+              AND credentials.dead = FALSE
+            ORDER BY credentials.id
+            "#,
+        )
+        .bind(&self.attio_oauth_app_slug)
+        .fetch_all(&self.pool)
+        .await
+        .context("list retained Attio broker credentials from Rails Console")
+    }
+
+    pub async fn attio_credential(&self, credential_id: i64) -> Result<AttioCredential> {
+        let row = sqlx::query(
+            r#"
+            SELECT credentials.access_token,
+                   credentials.expires_at,
+                   credentials.provider_subject
+            FROM broker_credentials credentials
+            JOIN oauth_apps app ON app.id = credentials.oauth_app_id
+            WHERE credentials.id = $1
+              AND app.provider = 'attio'
+              AND app.slug = $2
+              AND app.enabled = TRUE
+              AND credentials.dead = FALSE
+            "#,
+        )
+        .bind(credential_id)
+        .bind(&self.attio_oauth_app_slug)
+        .fetch_optional(&self.pool)
+        .await
+        .context("load Attio broker credential from Rails Console")?
+        .with_context(|| format!("Attio broker credential {credential_id} is not syncable"))?;
+
+        let expires_at: Option<NaiveDateTime> = row.try_get("expires_at")?;
+        if expires_at.is_some_and(|expires_at| expires_at <= Utc::now().naive_utc()) {
+            bail!("Attio broker credential {credential_id} is expired");
+        }
+        let workspace_id = row
+            .try_get::<Option<String>, _>("provider_subject")?
+            .unwrap_or_default();
+        if workspace_id.is_empty() {
+            bail!("Attio broker credential {credential_id} has no workspace ID");
+        }
+        Ok(AttioCredential {
+            id: credential_id,
+            access_token: self
+                .decrypt_required(row.try_get("access_token")?, "Attio broker access token")?,
+            workspace_id,
+        })
+    }
+
     /// Lists the bot token, then the credentials the Console Slack DM sync
     /// selects, narrowed to those whose scopes cover an ingested conversation
     /// type.
@@ -578,7 +673,12 @@ impl ConsoleCredentials {
                        SELECT DISTINCT provider_subject FROM granted
                        WHERE provider = 'granola' AND slug = $3
                        ORDER BY provider_subject
-                   ) AS granola_subjects
+                   ) AS granola_subjects,
+                   ARRAY(
+                       SELECT DISTINCT provider_subject FROM granted
+                       WHERE provider = 'attio' AND slug = $5
+                       ORDER BY provider_subject
+                   ) AS attio_subjects
             FROM principals p
             WHERE p.id = $1
             "#,
@@ -587,6 +687,7 @@ impl ConsoleCredentials {
         .bind(&self.google_oauth_app_slug)
         .bind(&self.granola_oauth_app_slug)
         .bind(&self.slack_oauth_app_slug)
+        .bind(&self.attio_oauth_app_slug)
         .fetch_optional(&self.pool)
         .await
         .context("load principal from Rails Console")
@@ -659,6 +760,7 @@ mod tests {
             encryption: Arc::new(ActiveRecordEncryption::new("primary", "salt")),
             google_oauth_app_slug: "google".to_owned(),
             granola_oauth_app_slug: "granola".to_owned(),
+            attio_oauth_app_slug: "attio".to_owned(),
             slack_oauth_app_slug: "slack".to_owned(),
             slack_bot_token: config.slack_bot_token.clone(),
             slack: SlackClient::new(&config).unwrap(),
@@ -680,9 +782,10 @@ mod tests {
         let database = TestDatabase::create(&database_url, "principal_identity").await;
         let pool = &database.pool;
         // The Console tables the identity lookup reads. Ada (1) holds direct
-        // grants for a Google credential and two live Granola credentials,
-        // plus a dead one and one from another app. Bob (2) has Granola only
-        // through a role grant, and a Google subject only as a label.
+        // grants for a Google credential, two live Granola credentials, and an
+        // Attio workspace credential, plus a dead one and one from another
+        // app. Bob (2) has Granola and Attio only through role grants, and a
+        // Google subject only as a label.
         pool.execute(
             r#"
             CREATE TABLE principals (
@@ -704,18 +807,19 @@ mod tests {
                 (2, '{"google_subject": "G-BOB"}', NULL);
             INSERT INTO oauth_apps VALUES
                 (1, 'granola', 'granola'), (2, 'granola', 'other'), (3, 'google', 'google'),
-                (4, 'slack', 'slack');
+                (4, 'slack', 'slack'), (5, 'attio', 'attio');
             INSERT INTO broker_credentials VALUES
                 (1, 1, 'GR-ADA', 'ada@example.com', false),
                 (2, 1, 'GR-ADA-2', 'ada@example.com', false),
                 (3, 1, 'GR-DEAD', 'ada@example.com', true),
                 (4, 2, 'GR-OTHER-APP', 'ada@example.com', false),
                 (5, 3, 'G-ADA', 'ada@example.com', false),
-                (6, 1, 'GR-BOB', 'bob@example.com', false);
+                (6, 1, 'GR-BOB', 'bob@example.com', false),
+                (7, 5, 'WS-ACME', NULL, false);
             INSERT INTO static_secrets SELECT id, id FROM broker_credentials;
             INSERT INTO grants VALUES
                 (1, NULL, 1), (1, NULL, 2), (1, NULL, 3), (1, NULL, 4), (1, NULL, 5),
-                (NULL, 1, 6);
+                (1, NULL, 7), (NULL, 1, 6), (NULL, 1, 7);
             "#,
         )
         .await
@@ -726,9 +830,11 @@ mod tests {
         assert_eq!(ada.slack_user_id.as_deref(), Some("U-ADA"));
         assert_eq!(ada.google_subjects, ["G-ADA"]);
         assert_eq!(ada.granola_subjects, ["GR-ADA", "GR-ADA-2"]);
+        assert_eq!(ada.attio_subjects, ["WS-ACME"]);
         let bob = credentials.principal_identity(2).await.unwrap().unwrap();
         assert!(bob.google_subjects.is_empty());
         assert!(bob.granola_subjects.is_empty());
+        assert!(bob.attio_subjects.is_empty());
         assert!(credentials.principal_identity(3).await.unwrap().is_none());
 
         // Disabling an app hides the identities that reach its documents.

@@ -6,6 +6,8 @@ It also indexes Google Calendar events through the same Google broker credential
 
 It also indexes Granola meeting notes (title, summary, owner, and attendees) through each user's Granola MCP OAuth credential. Each sync lists the account's meetings from its checkpoint onward, fetches their details ten meetings at a time, and republishes a note only when its content changes. Transcripts are not indexed; the Granola tool fetches them on demand. Notes that no live Granola credential still observes are removed.
 
+It also indexes Attio meetings, with the transcripts of their completed call recordings, through the Attio OAuth app's workspace credentials. Each sync lists the meetings that have started and that ended after the credential's previous sync, less 72 hours, so transcripts that finish processing after a meeting are picked up; a credential without a checkpoint lists the last `COMPANY_CONTEXT_ATTIO_INITIAL_LOOKBACK_DAYS`. Upcoming meetings are left to Calendar and listed once they start. Each meeting (title, participants, description, and transcripts) is republished only when its content changes. Attio does not report deleted meetings, and meetings are not reread after that window, so later edits are not picked up and deleted meetings stay until their credential is dead or deleted, which removes its meetings.
+
 It also discovers the public and private Slack channels (and, when enabled, direct messages) each user belongs to, through the same per-user Slack broker credentials the Rails Console Slack DM sync uses. The app's bot token (`SLACK_BOT_TOKEN`) is synced as one more credential: it discovers the public and private channels the bot is a member of and can sync their history and files, but never its direct messages. The bot is not a principal, so channels only it observes are indexed without being visible to anyone until a user credential observes them too. While `COMPANY_CONTEXT_SLACK_USER_IDS` is set, the bot is synced only if the limit lists the bot's Slack user ID. Each discovery records the credential's Slack identity and its channel memberships; channels that no live Slack credential still observes are removed, along with their messages. The first discovery each cycle to list a conversation syncs its message history. A sync reads the conversation's configured history days (`COMPANY_CONTEXT_SLACK_HISTORY_DAYS`, overridden per conversation by `COMPANY_CONTEXT_SLACK_CHANNEL_HISTORY_DAYS`) whenever part of that span has not been synchronized yet, so raising a value backfills the older history; lowering one keeps messages already synchronized. Otherwise it reads from its previous sync, always rereading the last 72 hours so edits within that window are picked up. Threads are synced whenever a parent message read this way shows a new reply; replies to threads started more than 72 hours earlier are not picked up. Only one sync reads a conversation at a time. Messages are stored privately in the system schema. Each discovery cycle also lists the workspace users through the app's bot token (`SLACK_BOT_TOKEN`), so documents show names instead of user IDs; the bot token needs the `users:read` scope and belongs to the same Slack app, so it shares the same rate-limit schedule. Users are removed once no live credential in their workspace remains. Slack tasks run on their own `company_context_slack` queue and worker, except thread syncs, which run in order on the `company_context_slack_threads` queue so a large backlog of threads does not delay discovery and history syncs.
 
 It also projects documents operators import directly into the database (see
@@ -21,7 +23,7 @@ Slack limits each Web API method per workspace per app, and every token the app 
 The service owns these Postgres schemas:
 
 - `company_context_system`: private cursors, staging (including Slack messages and users, and imported documents), and processing state.
-- `company_context_data`: retrieval-facing Drive documents, Calendar events, Granola notes, Slack channel and file documents, imported document chunks, access observations (including Slack identities, channel memberships, and the conversations each Slack file is shared in), and embeddings. The query endpoints read only this schema, as the `centaur_company_context_v2_query` role, which can only select from it; the service switches to that role for each query transaction, so its login role must be able to grant itself membership (`CREATEROLE` or superuser).
+- `company_context_data`: retrieval-facing Drive documents, Calendar events, Granola notes, Attio meetings, Slack channel and file documents, imported document chunks, access observations (including Slack identities, channel memberships, and the conversations each Slack file is shared in), and embeddings. The query endpoints read only this schema, as the `centaur_company_context_v2_query` role, which can only select from it; the service switches to that role for each query transaction, so its login role must be able to grant itself membership (`CREATEROLE` or superuser).
 
 Documents are exposed to retrieval only through the query endpoints; no other database role can read them. The Helm deployment is gated by `experimentalCompanyContext.enabled` until it is ready for production.
 
@@ -30,7 +32,7 @@ Documents are exposed to retrieval only through the query endpoints; no other da
 - Postgres with the existing Absurd schema and the `vector` and `pg_search` extensions available.
 - `pdftotext` from Poppler (for PDF sources).
 - `pandoc` 3.8.3 or later (for Office, OpenDocument, RTF, and EPUB Slack files).
-- A Rails Console database containing live per-user Google and Granola OAuth broker credentials.
+- A Rails Console database containing live per-user Google and Granola, and Attio workspace, OAuth broker credentials.
 - The Active Record encryption primary key and derivation salt used by Rails Console.
 - An embeddings API key supplied through a Kubernetes Secret.
 
@@ -57,7 +59,9 @@ sync those with the `calendar.readonly` scope. Rails Console owns refreshing
 those tokens; the service decrypts the current access token before each Google
 request. Granola broker credentials are
 selected the same way by `COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG` (default
-`granola`), and Slack broker credentials by
+`granola`), Attio broker credentials by `COMPANY_CONTEXT_ATTIO_OAUTH_APP_SLUG`
+(default `attio`; their tokens need `meeting:read`, `call_recording:read`, and
+`record_permission:read`), and Slack broker credentials by
 `COMPANY_CONTEXT_SLACK_OAUTH_APP_SLUG` (default `slack`), which should match the
 Console's Slack DM sync app. Google requests honor `Retry-After`
 on rate limits and retry server errors with bounded exponential backoff. Durable
@@ -78,6 +82,7 @@ Indexer switches (default `true`):
 - `COMPANY_CONTEXT_DRIVE_ENABLED`: schedule Google Drive sync.
 - `COMPANY_CONTEXT_CALENDAR_ENABLED`: schedule Google Calendar sync.
 - `COMPANY_CONTEXT_GRANOLA_ENABLED`: schedule Granola sync.
+- `COMPANY_CONTEXT_ATTIO_ENABLED`: schedule Attio sync.
 - `COMPANY_CONTEXT_SLACK_ENABLED`: schedule Slack sync and run the Slack queue worker.
 - `COMPANY_CONTEXT_IMPORTED_ENABLED`: schedule projection of imported documents.
 
@@ -106,11 +111,13 @@ Common optional settings:
 - `CENTAUR_API_JWT_AUDIENCE` (default `centaur-api`) and `CENTAUR_API_JWT_ISSUER` (default `centaur-console`): must match the Console's API JWT settings
 - `COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG` (default `google`)
 - `COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG` (default `granola`)
+- `COMPANY_CONTEXT_ATTIO_OAUTH_APP_SLUG` (default `attio`)
 - `COMPANY_CONTEXT_SLACK_OAUTH_APP_SLUG` (default `slack`)
 - `BIND_ADDR` (default `0.0.0.0:8080`)
 - `GOOGLE_DRIVE_API_BASE_URL`
 - `GOOGLE_CALENDAR_API_BASE_URL` (default `https://www.googleapis.com/calendar/v3`)
 - `GRANOLA_MCP_URL` (default `https://mcp.granola.ai/mcp`)
+- `ATTIO_API_BASE_URL` (default `https://api.attio.com/v2`)
 - `SLACK_API_BASE_URL` (default `https://slack.com/api`)
 - `SLACK_FILES_BASE_URL` (default `https://files.slack.com`): the only origin Slack file downloads, which carry user tokens, are sent to
 - `OPENAI_BASE_URL`
@@ -119,6 +126,8 @@ Common optional settings:
 - `COMPANY_CONTEXT_CALENDAR_HISTORY_DAYS` (default `90`, at most `36500`)
 - `COMPANY_CONTEXT_GRANOLA_SYNC_INTERVAL_SECONDS` (default `1800`)
 - `COMPANY_CONTEXT_GRANOLA_INITIAL_LOOKBACK_DAYS` (default `365`)
+- `COMPANY_CONTEXT_ATTIO_SYNC_INTERVAL_SECONDS` (default `1800`)
+- `COMPANY_CONTEXT_ATTIO_INITIAL_LOOKBACK_DAYS` (default `365`, at most `36500`)
 - `COMPANY_CONTEXT_IMPORTED_PROJECT_INTERVAL_SECONDS` (default `60`)
 - `COMPANY_CONTEXT_SLACK_DISCOVERY_INTERVAL_SECONDS` (default `1800`)
 - `COMPANY_CONTEXT_SLACK_HISTORY_DAYS` (default `90`, at most `36500`)
@@ -162,15 +171,17 @@ Both query endpoints are authenticated with the same principal API JWT the
 Console mints for api-rs (`Authorization: Bearer <jwt>`); iron-proxy injects it
 into sandbox requests to this service. The token's subject names the principal,
 whose Slack user ID and granted broker credentials are looked up in the Rails
-Console database. The principal's Google and Granola identities are the
-subjects of the live Google and Granola broker credentials (from
-`COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG` and
-`COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG`) granted directly to it; role grants
-and principal labels do not count. A document is visible only while an active
+Console database. The principal's Google, Granola, and Attio identities are
+the subjects of the live Google, Granola, and Attio broker credentials (from
+`COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG`,
+`COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG`, and
+`COMPANY_CONTEXT_ATTIO_OAUTH_APP_SLUG`) granted directly to it; role grants
+and principal labels do not count. An Attio credential's subject is its
+workspace ID. A document is visible only while an active
 broker observation for one of those identities still reaches its Drive file,
 Slack conversation (for Slack files, any conversation the file is shared in),
 or Granola note; a Calendar event only to the Google identity it was synced
-for. Imported documents are visible to every principal. A principal without one of those identities sees no documents
+for; an Attio meeting to the identities of its workspace. Imported documents are visible to every principal. A principal without one of those identities sees no documents
 of the corresponding types. Disabling an OAuth app in the Console removes the
 corresponding identity, so its documents stop being returned without being
 removed from the index.
@@ -186,13 +197,14 @@ for a missing or invalid token, 403 for a principal unknown to the Console, and
 ### `POST /query`
 
 Searches the visible Slack channel documents, Slack file documents, Drive
-documents, Calendar events, Granola notes, and imported documents.
+documents, Calendar events, Granola notes, Attio meetings, and imported
+documents.
 
 ```json
 {
   "query": "falcon launch plan",
   "filters": {
-    "types": ["slack_message", "slack_file", "drive_doc", "calendar_event", "granola_note", "imported_doc"],
+    "types": ["slack_message", "slack_file", "drive_doc", "calendar_event", "granola_note", "attio_meeting", "imported_doc"],
     "occurred_after": "2024-01-01T00:00:00Z",
     "occurred_before": "2024-02-01T00:00:00Z",
     "channel_ids": ["C0123456789"],
@@ -212,7 +224,8 @@ Filters combine with AND:
   window; a Slack file matches by when it was created, a Drive document by
   when it was last modified, a Calendar event when it overlaps the window, its
   end being exclusive (a recurring event by its first occurrence), a
-  Granola note by when its meeting occurred, and an imported document by its
+  Granola note by when its meeting occurred, an Attio meeting when it overlaps
+  the window, its end being exclusive, and an imported document by its
   `occurred_at`.
   Documents without a timestamp do not match a window.
 - `channel_ids`: Slack conversation IDs, at most 100. Searches only Slack
@@ -253,7 +266,9 @@ score, comparable only within one response.
 conversation, channel, and message times for `slack_message`; file ID and file
 type for `slack_file`; file ID, document type, MIME type, and pages for
 `drive_doc`; calendar ID, event ID, start and end times, and organizer for
-`calendar_event`; note ID, owner, and attendees for `granola_note`; the
+`calendar_event`; note ID, owner, and attendees for `granola_note`; meeting
+ID, workspace ID, start and end times, participants, and linked records for
+`attio_meeting`; the
 imported metadata with the source and external ID for `imported_doc`.
 
 ### `GET /documents/{document_id}`

@@ -394,7 +394,7 @@ def latest_date(
 
 _V2_TYPES_HELP = (
     "Data type to search; repeat for several: slack_message, slack_file, drive_doc, "
-    "calendar_event, granola_note, or imported_doc. Defaults to every type."
+    "calendar_event, granola_note, attio_meeting, or imported_doc. Defaults to every type."
 )
 
 

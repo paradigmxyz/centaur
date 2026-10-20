@@ -23,6 +23,10 @@ pub const GRANOLA_CREDENTIALS_RECONCILE_TASK: &str = "granola.credentials.reconc
 pub const GRANOLA_SYNC_TASK: &str = "granola.user.sync";
 pub const GRANOLA_NOTES_FETCH_TASK: &str = "granola.notes.fetch";
 pub const GRANOLA_NOTE_EMBED_TASK: &str = "granola.note.embed";
+pub const ATTIO_CREDENTIALS_RECONCILE_TASK: &str = "attio.credentials.reconcile";
+pub const ATTIO_SYNC_TASK: &str = "attio.workspace.sync";
+pub const ATTIO_MEETINGS_FETCH_TASK: &str = "attio.meetings.fetch";
+pub const ATTIO_MEETING_EMBED_TASK: &str = "attio.meeting.embed";
 /// Slack tasks wait on the Slack app's shared rate limits, so they run on their
 /// own queue and worker instead of delaying Drive and Granola work.
 pub const SLACK_QUEUE_NAME: &str = "company_context_slack";
@@ -50,6 +54,7 @@ pub const SLACK_DOCUMENT_ID_PREFIX: &str = "slack:";
 pub const SLACK_FILE_DOCUMENT_ID_PREFIX: &str = "slack-file:";
 pub const GRANOLA_DOCUMENT_ID_PREFIX: &str = "granola:";
 pub const GOOGLE_CALENDAR_DOCUMENT_ID_PREFIX: &str = "google-calendar:";
+pub const ATTIO_DOCUMENT_ID_PREFIX: &str = "attio:";
 pub const IMPORTED_DOCUMENT_ID_PREFIX: &str = "imported:";
 /// Slack conversation types that can be synchronized.
 pub const SLACK_CONVERSATION_TYPES: [&str; 3] = ["public_channel", "private_channel", "im"];
@@ -57,7 +62,7 @@ pub const SLACK_CONVERSATION_TYPES: [&str; 3] = ["public_channel", "private_chan
 #[derive(Clone, Debug, Parser)]
 #[command(
     name = "centaur-company-context",
-    about = "Ingest company context from Google Drive, Google Calendar, Granola, and Slack"
+    about = "Ingest company context from Google Drive, Google Calendar, Granola, Attio, and Slack"
 )]
 pub struct Config {
     #[arg(long, env = "DATABASE_URL", value_parser = nonempty)]
@@ -94,6 +99,14 @@ pub struct Config {
         value_parser = nonempty
     )]
     pub granola_oauth_app_slug: String,
+    /// Rails Console OAuth app whose Attio workspace credentials are synchronized.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_ATTIO_OAUTH_APP_SLUG",
+        default_value = "attio",
+        value_parser = nonempty
+    )]
+    pub attio_oauth_app_slug: String,
     /// Rails Console OAuth app whose per-user Slack credentials are synchronized.
     /// Keep it aligned with the app the Console Slack DM sync uses.
     #[arg(
@@ -130,6 +143,15 @@ pub struct Config {
         action = clap::ArgAction::Set
     )]
     pub granola_enabled: bool,
+    /// Schedules Attio sync. Disabling it pauses ingestion and keeps indexed
+    /// meetings searchable.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_ATTIO_ENABLED",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub attio_enabled: bool,
     /// Schedules Slack sync and runs the Slack worker. Disabling it pauses
     /// ingestion and keeps indexed documents searchable.
     #[arg(
@@ -263,6 +285,13 @@ pub struct Config {
     pub granola_mcp_url: String,
     #[arg(
         long,
+        env = "ATTIO_API_BASE_URL",
+        default_value = "https://api.attio.com/v2",
+        value_parser = normalized_base_url
+    )]
+    pub attio_api_base_url: String,
+    #[arg(
+        long,
         env = "SLACK_API_BASE_URL",
         default_value = "https://slack.com/api",
         value_parser = normalized_base_url
@@ -335,6 +364,21 @@ pub struct Config {
         value_parser = positive_usize
     )]
     pub granola_initial_lookback_days: usize,
+    #[arg(
+        long = "attio-sync-interval-seconds",
+        env = "COMPANY_CONTEXT_ATTIO_SYNC_INTERVAL_SECONDS",
+        default_value = "1800",
+        value_parser = positive_duration
+    )]
+    pub attio_sync_interval: Duration,
+    /// Days of meetings listed for an Attio workspace without a checkpoint.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_ATTIO_INITIAL_LOOKBACK_DAYS",
+        default_value = "365",
+        value_parser = history_days
+    )]
+    pub attio_initial_lookback_days: usize,
     #[arg(
         long = "imported-project-interval-seconds",
         env = "COMPANY_CONTEXT_IMPORTED_PROJECT_INTERVAL_SECONDS",
@@ -584,6 +628,7 @@ mod tests {
             config.drive_enabled
                 && config.calendar_enabled
                 && config.granola_enabled
+                && config.attio_enabled
                 && config.slack_enabled
         );
     }

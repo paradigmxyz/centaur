@@ -134,6 +134,9 @@ async fn item_samples(pool: &PgPool) -> Result<Vec<Sample>> {
         SELECT 'granola', 'embedding', embedding_status, count(*)::float8
         FROM company_context_system.granola_notes GROUP BY embedding_status
         UNION ALL
+        SELECT 'attio', 'embedding', embedding_status, count(*)::float8
+        FROM company_context_system.attio_meetings GROUP BY embedding_status
+        UNION ALL
         SELECT 'slack', 'embedding', embedding_status, count(*)::float8
         FROM company_context_system.slack_channel_days GROUP BY embedding_status
         UNION ALL
@@ -172,11 +175,13 @@ async fn freshness_samples(pool: &PgPool, credentials: &ConsoleCredentials) -> R
         .google_credential_ids(GoogleProduct::Calendar)
         .await?;
     let granola = credentials.granola_credential_ids().await?;
+    let attio = credentials.attio_credential_ids().await?;
     let slack = credentials.slack_credential_ids().await?;
     let mut samples: Vec<Sample> = [
         ("drive", &google),
         ("calendar", &calendar),
         ("granola", &granola),
+        ("attio", &attio),
         ("slack", &slack),
     ]
     .into_iter()
@@ -205,6 +210,13 @@ async fn freshness_samples(pool: &PgPool, credentials: &ConsoleCredentials) -> R
         FROM company_context_system.granola_checkpoints
         WHERE split_part(scope_id, ':broker:', 2) = ANY($2)
         UNION ALL
+        SELECT 'attio',
+               count(*)::float8,
+               count(*) FILTER (WHERE last_error <> '')::float8,
+               coalesce(extract(epoch FROM now() - min(coalesce(last_success_at, created_at))), 0)::float8
+        FROM company_context_system.attio_checkpoints
+        WHERE split_part(scope_id, ':broker:', 2) = ANY($4)
+        UNION ALL
         SELECT 'calendar',
                count(*)::float8,
                count(*) FILTER (WHERE last_error <> '')::float8,
@@ -222,6 +234,7 @@ async fn freshness_samples(pool: &PgPool, credentials: &ConsoleCredentials) -> R
     .bind(ids(&google))
     .bind(ids(&granola))
     .bind(ids(&calendar))
+    .bind(ids(&attio))
     .fetch_all(pool)
     .await?;
     for row in rows {
