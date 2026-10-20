@@ -183,6 +183,50 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
     assert_not_includes @channel.reload.roles, @role
   end
 
+  test "an admin's Slack DM sandbox adds and removes Slack Connect workspaces" do
+    api = FakeSlackExternalTeamsApi.new(%w[T0PARTNER1])
+
+    with_slack_external_teams_api(api) do
+      with_token(dm_proxy_for(users(:acme_admin))) do |headers|
+        get "/api/v1/sandbox/admin/slack_external_teams", headers: headers
+        assert_response :ok
+        assert_equal %w[T0PARTNER1], json_body.fetch("data")
+
+        2.times do
+          post "/api/v1/sandbox/admin/slack_external_teams",
+               params: { data: { team_id: " e0grid " } }, headers: headers, as: :json
+          assert_response :ok
+          assert_equal %w[T0PARTNER1 E0GRID], json_body.fetch("data")
+        end
+        assert_equal 1, api.replacements
+
+        delete "/api/v1/sandbox/admin/slack_external_teams/t0partner1", headers: headers
+        assert_response :ok
+        assert_equal %w[E0GRID], api.team_ids
+
+        delete "/api/v1/sandbox/admin/slack_external_teams/T0PARTNER1", headers: headers
+        assert_response :not_found
+
+        api.error = CentaurApiClient::Error.new("invalid Slack team ids: C0CHANNEL", status: 400)
+        post "/api/v1/sandbox/admin/slack_external_teams",
+             params: { data: { team_id: "C0CHANNEL" } }, headers: headers, as: :json
+        assert_response :unprocessable_entity
+        assert_equal "invalid Slack team ids: C0CHANNEL", json_body.dig("error", "message")
+
+        api.error = Errno::ECONNREFUSED.new
+        get "/api/v1/sandbox/admin/slack_external_teams", headers: headers
+        assert_response :service_unavailable
+      end
+
+      with_token(dm_proxy_for(users(:member_user))) do |headers|
+        post "/api/v1/sandbox/admin/slack_external_teams",
+             params: { data: { team_id: "T0OTHER" } }, headers: headers, as: :json
+      end
+      assert_response :forbidden
+    end
+    assert_equal %w[E0GRID], api.team_ids
+  end
+
   test "admin endpoints reject requests without a sandbox token" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       get "/api/v1/sandbox/admin/roles", headers: { "Authorization" => "Bearer iak_acme-ci-token" }
@@ -192,6 +236,39 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
   end
 
   private
+
+  # Stands in for api-rs, which stores the allowlist.
+  class FakeSlackExternalTeamsApi
+    attr_reader :team_ids, :replacements
+    attr_writer :error
+
+    def initialize(team_ids)
+      @team_ids = team_ids
+      @replacements = 0
+    end
+
+    def slack_external_team_ids
+      raise @error if @error
+
+      @team_ids
+    end
+
+    def replace_slack_external_team_ids(team_ids)
+      raise @error if @error
+
+      @replacements += 1
+      @team_ids = team_ids
+    end
+  end
+
+  def with_slack_external_teams_api(api)
+    controller = Api::V1::Sandbox::Admin::SlackExternalTeamsController
+    original = controller.api_client_factory
+    controller.api_client_factory = -> { api }
+    yield
+  ensure
+    controller.api_client_factory = original
+  end
 
   # The Slack channel catalog fixtures put the bot in T0123456789.
   def dm_proxy_for(user, slack_team_id: "T0123456789")

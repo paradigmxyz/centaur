@@ -279,6 +279,7 @@ Rails.application.routes.draw do
           end
           resources :grants, only: %i[create destroy]
           resources :secrets, only: %i[index]
+          resources :slack_external_teams, only: %i[index create destroy]
           resources :roles, only: %i[index show] do
             collection { get "lookup/:foreign_id", action: :lookup, as: :lookup, constraints: { foreign_id: /[^\/]+/ } }
           end

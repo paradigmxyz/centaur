@@ -17,7 +17,8 @@ app = typer.Typer(
 console = Console()
 admin_app = typer.Typer(
     help=(
-        "Manage principal roles, secret grants, Slack permissions, and sandbox access. "
+        "Manage principal roles, secret grants, Slack permissions, sandbox access, "
+        "and allowed Slack Connect workspaces. "
         "Works only in an active Console admin's Slack DM."
     )
 )
@@ -389,6 +390,41 @@ def admin_set_sandbox_access(
     with get_client(url=url, bearer_token=bearer_token) as client:
         result = client.admin_set_sandbox_access(principal, **capabilities)
     console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("slack-connect-teams")
+def admin_slack_connect_teams(
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """List the Slack Connect workspace and org ids Centaur accepts messages from."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_slack_external_teams()
+    console.print_json(json.dumps({"data": result}))
+
+
+@admin_app.command("add-slack-connect-team")
+def admin_add_slack_connect_team(
+    team_id: str = typer.Argument(..., help="Slack workspace (T…) or Enterprise Grid org (E…) ID"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Allow messages from a Slack Connect workspace or org; prints the updated list."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_add_slack_external_team(team_id)
+    console.print_json(json.dumps({"data": result}))
+
+
+@admin_app.command("remove-slack-connect-team")
+def admin_remove_slack_connect_team(
+    team_id: str = typer.Argument(..., help="Slack workspace (T…) or Enterprise Grid org (E…) ID"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Stop accepting messages from a Slack Connect workspace or org; prints the updated list."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_remove_slack_external_team(team_id)
+    console.print_json(json.dumps({"data": result}))
 
 
 @app.command()

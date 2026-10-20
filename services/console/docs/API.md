@@ -1109,7 +1109,7 @@ The sandbox permissions response includes an `oauth_credentials` array with non-
 
 ### Sandbox Admin Permission Management
 
-An active admin Console user's Slack DM sandbox may inspect a principal's effective grants and manage its roles, direct secret grants, Slack channel permissions, and sandbox capabilities with its sandbox entitlement JWT. The sandbox principal must be a `slack_dm` principal linked to that admin whose Slack team is the bot's workspace, as recorded by the Slack channel catalog. Other sandboxes, including channel, Slack Connect, and Console-user sessions, receive `403`. Request and response shapes match the corresponding admin endpoints.
+An active admin Console user's Slack DM sandbox may inspect a principal's effective grants, manage its roles, direct secret grants, Slack channel permissions, and sandbox capabilities, and edit the Slack Connect allowlist with its sandbox entitlement JWT. The sandbox principal must be a `slack_dm` principal linked to that admin whose Slack team is the bot's workspace, as recorded by the Slack channel catalog. Other sandboxes, including channel, Slack Connect, and Console-user sessions, receive `403`. Request and response shapes match the corresponding admin endpoints.
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
@@ -1127,6 +1127,9 @@ An active admin Console user's Slack DM sandbox may inspect a principal's effect
 | `POST` | `/api/v1/sandbox/admin/principals/:id/slack_channel_permissions` | Upsert one Slack channel permission (`data: { channel_id, upload_enabled, download_enabled, history_enabled }`). New permissions default omitted flags to `true`. |
 | `DELETE` | `/api/v1/sandbox/admin/principals/:id/slack_channel_permissions/:channel_id` | Remove the principal's own permission for a channel. |
 | `PATCH` | `/api/v1/sandbox/admin/principals/:id/sandbox_access` | Update only the supplied `sandbox_repo_cache` and `sandbox_*_enabled` fields. Flags must be JSON booleans; other values return `400`. |
+| `GET` | `/api/v1/sandbox/admin/slack_external_teams` | List allowed Slack Connect workspace (`T…`) and Enterprise Grid org (`E…`) ids as `data: [id, …]`. The list is stored by api-rs; if it is unreachable the request returns `503`. |
+| `POST` | `/api/v1/sandbox/admin/slack_external_teams` | Allow one id (`data: { team_id }`) and return the updated list. Adding an allowed id changes nothing. Invalid ids return `422`. |
+| `DELETE` | `/api/v1/sandbox/admin/slack_external_teams/:id` | Remove one id and return the updated list. Returns `404` if the id is not allowed. |
 
 ## OAuth consent flow
 

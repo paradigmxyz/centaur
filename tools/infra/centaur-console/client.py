@@ -15,6 +15,7 @@ SANDBOX_ADMIN_PRINCIPALS_PATH = "/api/v1/sandbox/admin/principals"
 SANDBOX_ADMIN_ROLES_PATH = "/api/v1/sandbox/admin/roles"
 SANDBOX_ADMIN_GRANTS_PATH = "/api/v1/sandbox/admin/grants"
 SANDBOX_ADMIN_SECRETS_PATH = "/api/v1/sandbox/admin/secrets"
+SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH = "/api/v1/sandbox/admin/slack_external_teams"
 ADMIN_PAGE_LIMIT = 200
 
 
@@ -318,6 +319,25 @@ class ConsoleClient:
             json={"data": data},
         )
 
+    def admin_slack_external_teams(self) -> list[str]:
+        """List Slack Connect workspace and org ids Centaur accepts messages from."""
+        return self._admin_list(SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH)
+
+    def admin_add_slack_external_team(self, team_id: str) -> list[str]:
+        """Allow a Slack Connect workspace (T…) or Enterprise Grid org (E…)."""
+        return self._admin_list(
+            SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH,
+            method="POST",
+            json={"data": {"team_id": team_id}},
+        )
+
+    def admin_remove_slack_external_team(self, team_id: str) -> list[str]:
+        """Stop accepting messages from a Slack Connect workspace or org."""
+        return self._admin_list(
+            f"{SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH}/{quote(team_id, safe='')}",
+            method="DELETE",
+        )
+
     def _admin_principal_id(self, principal: str) -> str:
         path = self._admin_ref_path(SANDBOX_ADMIN_PRINCIPALS_PATH, principal, "prn_")
         return self._admin_object(path)["id"]
@@ -353,8 +373,14 @@ class ConsoleClient:
                 return records
             page += 1
 
-    def _admin_list(self, path: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        return _admin_data(self._admin_request(path, params=params), list)
+    def _admin_list(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        method: str = "GET",
+        json: dict[str, Any] | None = None,
+    ) -> list[Any]:
+        return _admin_data(self._admin_request(path, method=method, params=params, json=json), list)
 
     def _admin_object(
         self, path: str, method: str = "GET", json: dict[str, Any] | None = None

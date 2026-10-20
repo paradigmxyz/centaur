@@ -7,6 +7,7 @@ from client import (
     SANDBOX_ADMIN_PRINCIPALS_PATH,
     SANDBOX_ADMIN_ROLES_PATH,
     SANDBOX_ADMIN_SECRETS_PATH,
+    SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH,
     SANDBOX_OAUTH_APPS_PATH,
     SANDBOX_PERMISSIONS_PATH,
     SANDBOX_SCHEDULED_TASKS_PATH,
@@ -354,3 +355,21 @@ def test_admin_set_sandbox_access_sends_only_supplied_capabilities():
     make_client(handler).admin_set_sandbox_access(
         "prn_123", sandbox_sessions_read_enabled=True, sandbox_repo_cache=None
     )
+
+
+def test_admin_slack_external_teams_add_and_remove_one_team_id():
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else None
+        requests.append((request.method, request.url.path, body))
+        return json_response({"data": ["T0PARTNER"]})
+
+    client = make_client(handler)
+    assert client.admin_add_slack_external_team("T0PARTNER") == ["T0PARTNER"]
+    assert client.admin_remove_slack_external_team("E0GRID") == ["T0PARTNER"]
+
+    assert requests == [
+        ("POST", SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH, {"data": {"team_id": "T0PARTNER"}}),
+        ("DELETE", f"{SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH}/E0GRID", None),
+    ]
