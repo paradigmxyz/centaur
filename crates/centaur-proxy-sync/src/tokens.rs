@@ -4,11 +4,11 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::Serialize;
 use serde_json::json;
 
+use console_db::{models::Config, oid, slack_channels};
+
 use crate::{
     ApiError,
-    database::permission_channels,
-    identifiers::oid,
-    models::{AppState, Config, ProxyRecord},
+    models::{AppState, ProxyRecord},
 };
 
 #[derive(Serialize)]
@@ -78,8 +78,7 @@ pub(crate) async fn append_api_jwt(
     if state.api_hosts.is_empty() {
         return Ok(());
     }
-    let (upload_channels, download_channels, history_channels) =
-        permission_channels(&state.pool, principal_id).await?;
+    let channels = slack_channels(&state.pool, principal_id).await?;
     let principal_oid = oid("prn", principal_id);
     let iat = window_start(&principal_oid, now, 900);
     let claims = ApiJwtClaims {
@@ -103,9 +102,9 @@ pub(crate) async fn append_api_jwt(
                 .unwrap_or(false),
         },
         slack: SlackChannels {
-            upload_channels,
-            download_channels,
-            history_channels,
+            upload_channels: channels.upload,
+            download_channels: channels.download,
+            history_channels: channels.history,
         },
     };
     let token = jwt(&claims, secret)?;

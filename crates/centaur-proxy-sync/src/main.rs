@@ -1,8 +1,6 @@
 mod cache;
 mod config;
-mod conflicts;
 mod database;
-mod identifiers;
 #[cfg(test)]
 mod integration_tests;
 mod models;
@@ -11,7 +9,7 @@ mod tokens;
 
 use std::{env, net::SocketAddr, str::FromStr, sync::Arc, time::Instant};
 
-use active_record_encryption::{ActiveRecordEncryption, Error as EncryptionError};
+use active_record_encryption::ActiveRecordEncryption;
 use axum::{
     Json, Router,
     body::Body,
@@ -24,9 +22,9 @@ use axum::{
 use cache::SyncCache;
 use chrono::Utc;
 use config::{build_config, config_hash};
+use console_db::{models::Config, oid};
 use database::load_proxy;
-use identifiers::oid;
-use models::{AppState, Config};
+use models::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -74,8 +72,8 @@ impl ApiError {
     }
 }
 
-impl From<EncryptionError> for ApiError {
-    fn from(error: EncryptionError) -> Self {
+impl From<console_db::Error> for ApiError {
+    fn from(error: console_db::Error) -> Self {
         Self::internal(error.to_string())
     }
 }

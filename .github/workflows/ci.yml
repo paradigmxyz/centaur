@@ -139,6 +139,7 @@ jobs:
             '^Cargo\.(toml|lock)$' \
             '^crates/active-record-encryption/' \
             '^crates/centaur-proxy-sync/' \
+            '^crates/console-db/' \
             '^services/console/' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
@@ -356,6 +357,9 @@ jobs:
           RAILS_ENV: test
           CENTAUR_CONSOLE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/proxy_sync_test
         run: bin/rails db:prepare
+
+      - name: Test Console database crate
+        run: cargo test --locked -p console-db
 
       - name: Test
         env:

@@ -633,6 +633,7 @@ dependencies = [
  "active-record-encryption",
  "axum",
  "chrono",
+ "console-db",
  "crc32fast",
  "hex",
  "jsonwebtoken",
@@ -642,7 +643,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
- "sqids",
  "sqlx",
  "tokio",
  "tower",
@@ -991,6 +991,20 @@ dependencies = [
  "rustversion",
  "ryu",
  "static_assertions",
+]
+
+[[package]]
+name = "console-db"
+version = "0.1.0"
+dependencies = [
+ "active-record-encryption",
+ "hex",
+ "rand 0.10.3",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "sqids",
+ "sqlx",
 ]
 
 [[package]]

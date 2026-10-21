@@ -1,6 +1,7 @@
 use sha2::{Digest, Sha256};
 
-pub(crate) fn oid(prefix: &str, id: i64) -> String {
+/// Console's opaque id for row `id` of the model with oid prefix `prefix`.
+pub fn oid(prefix: &str, id: i64) -> String {
     let mut alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         .chars()
         .collect();
