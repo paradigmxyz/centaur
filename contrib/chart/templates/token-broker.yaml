@@ -1,0 +1,112 @@
+{{- if .Values.tokenBroker.enabled }}
+{{- $name := include "centaur.componentName" (dict "root" . "component" "token-broker") }}
+{{- $secretEnv := include "centaur.secretEnvName" . }}
+{{- $prefix := .Values.secretManager.envPrefix }}
+{{- $console := include "centaur.consoleValues" . | fromYaml }}
+{{- $tokenBroker := .Values.tokenBroker }}
+{{- $metricsAnnotations := dict -}}
+{{- if $tokenBroker.metrics.scrapeAnnotations -}}
+{{- $metricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" $tokenBroker.metrics.path "prometheus.io/port" (printf "%v" $tokenBroker.port) -}}
+{{- $metricsAnnotations = mergeOverwrite $metricsAnnotations ($tokenBroker.metrics.annotations | default dict) -}}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "token-broker") | nindent 4 }}
+spec:
+  replicas: {{ $tokenBroker.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "token-broker") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+{{- with $metricsAnnotations }}
+{{- toYaml . | nindent 8 }}
+{{- end }}
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "token-broker") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ $tokenBroker.terminationGracePeriodSeconds }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+{{- include "centaur.podScheduling" (dict "values" $tokenBroker "indent" 6) }}
+      containers:
+        - name: token-broker
+          image: {{ printf "%s:%s" $tokenBroker.image.repository $tokenBroker.image.tag | quote }}
+          imagePullPolicy: {{ $tokenBroker.image.pullPolicy }}
+          env:
+            - name: BIND_ADDR
+              value: {{ printf "0.0.0.0:%v" $tokenBroker.port | quote }}
+            - name: DATABASE_MAX_CONNECTIONS
+              value: {{ $tokenBroker.databaseMaxConnections | quote }}
+            - name: TOKEN_BROKER_POLL_INTERVAL_SECONDS
+              value: {{ $tokenBroker.pollIntervalSeconds | quote }}
+            - name: TOKEN_BROKER_CONCURRENCY
+              value: {{ $tokenBroker.concurrency | quote }}
+            - name: IRON_CONTROL_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_DATABASE_URL" $prefix }}
+            - name: IRON_CONTROL_DATABASE_NAME
+              value: {{ $console.database.name | quote }}
+            - name: IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY" $prefix }}
+            - name: IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT" $prefix }}
+            - name: RUST_LOG
+              value: info
+          ports:
+            - name: http
+              containerPort: {{ $tokenBroker.port }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+{{ toYaml $tokenBroker.resources | nindent 12 }}
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "token-broker") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "token-broker") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  # Only /healthz and /metrics are served.
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: {{ $tokenBroker.port }}
+  egress:
+    {{- include "centaur.postgresEgress" . | nindent 4 }}
+    # HTTPS to OAuth token endpoints. DNS is allowed namespace-wide.
+    - ports:
+        - protocol: TCP
+          port: 443
+{{- end }}
+{{- end }}

@@ -77,8 +77,10 @@ def test_search_posts_filters_and_returns_results(api_url):
     result = CompanyContextV2Client(api_url).search(
         "roadmap",
         limit=5,
-        types=["drive_doc"],
+        types=["drive_doc", "custom_doc"],
         occurred_after="2026-05-01T00:00:00Z",
+        sources=["archive"],
+        metadata={"author": "Ada"},
     )
 
     assert result == {"status": "ok", "results": [{**DOCUMENT, "score": 0.03}]}
@@ -88,7 +90,12 @@ def test_search_posts_filters_and_returns_results(api_url):
             "/query",
             {
                 "query": "roadmap",
-                "filters": {"types": ["drive_doc"], "occurred_after": "2026-05-01T00:00:00Z"},
+                "filters": {
+                    "types": ["drive_doc", "custom_doc"],
+                    "occurred_after": "2026-05-01T00:00:00Z",
+                    "sources": ["archive"],
+                    "metadata": {"author": "Ada"},
+                },
                 "limit": 5,
             },
         )

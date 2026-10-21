@@ -1876,3 +1876,68 @@ def test_indexed_search_uses_company_context_database(monkeypatch):
 
     assert IndexedSlackClient().database_url == company_context_database_url()
     assert IndexedSlackClient().database_url == "postgresql://u:p@proxy:5432/ai_v2"
+
+
+@pytest.mark.parametrize("emoji", ["pencil2", ":pencil2:", " :pencil2: "])
+def test_remove_reaction_preserves_target_and_normalizes_emoji(emoji) -> None:
+    client, web_client = _make_client()
+    web_client.reactions_remove = web_client.reactions_add
+
+    result = client.remove_reaction("C1234567890", "1789546423.000001", emoji)
+
+    assert web_client.last_kwargs == {
+        "channel": "C1234567890",
+        "timestamp": "1789546423.000001",
+        "name": "pencil2",
+    }
+    assert result == {
+        "ok": True,
+        "channel": "C1234567890",
+        "ts": "1789546423.000001",
+        "name": "pencil2",
+        "removed": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("channel", "timestamp", "emoji"),
+    [
+        ("general", "123.456", "pencil2"),
+        ("U1234567890", "123.456", "pencil2"),
+        ("C1234567890", "not-a-timestamp", "pencil2"),
+        ("C1234567890", "123.456", "::"),
+        ("C1234567890", "123.456", "two words"),
+    ],
+)
+def test_remove_reaction_rejects_invalid_input_before_request(channel, timestamp, emoji) -> None:
+    client, web_client = _make_client()
+    web_client.reactions_remove = web_client.reactions_add
+    with pytest.raises(ValueError):
+        client.remove_reaction(channel, timestamp, emoji)
+    assert web_client.last_kwargs is None
+
+
+@pytest.mark.parametrize(
+    "error", ["no_reaction", "missing_scope", "message_not_found", "ratelimited"]
+)
+def test_remove_reaction_handles_slack_errors(monkeypatch, error) -> None:
+    client, web_client = _make_client()
+    web_client.reactions_remove = web_client.reactions_add
+    calls = []
+
+    def fail(**kwargs):
+        calls.append(kwargs)
+        raise _make_slack_error(error=error, status_code=429 if error == "ratelimited" else 200)
+
+    monkeypatch.setattr(web_client, "reactions_remove", fail)
+    if error == "no_reaction":
+        assert client.remove_reaction("C1234567890", "123.456", "pencil2")["removed"] is False
+    else:
+        expected = {
+            "missing_scope": SlackAuthError,
+            "message_not_found": RuntimeError,
+            "ratelimited": SlackRateLimitError,
+        }[error]
+        with pytest.raises(expected):
+            client.remove_reaction("C1234567890", "123.456", "pencil2")
+    assert len(calls) == 1

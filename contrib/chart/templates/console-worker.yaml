@@ -179,6 +179,10 @@ spec:
 {{- end }}
             - name: CENTAUR_CONSOLE_COMPANY_CONTEXT_V1_ENABLED
               value: {{ .Values.companyContextV1.enabled | quote }}
+            # token-broker refreshes broker credentials when it is deployed, so
+            # the worker's refresh jobs stand down.
+            - name: CENTAUR_CONSOLE_TOKEN_BROKER_ENABLED
+              value: {{ .Values.tokenBroker.enabled | quote }}
             - name: RAILS_LOG_TO_STDOUT
               value: "1"
 {{- if .Values.apiRs.enabled }}

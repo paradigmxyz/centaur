@@ -4,11 +4,14 @@ FROM ubuntu:24.04 AS toolchain
 
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# ── System packages (cached unless base image changes) ───────────────────────
+# Bump this pin to refresh the trust store even when the base image is cached.
+ARG CA_CERTIFICATES_VERSION=20260816ubuntu0.24.04.1
+
+# ── System packages (cached unless base image or package pins change) ─────────
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-    git curl wget ca-certificates gnupg lsb-release sudo \
+    git curl wget ca-certificates=${CA_CERTIFICATES_VERSION} gnupg lsb-release sudo \
     build-essential pkg-config cmake ninja-build \
     ffmpeg ghostscript dvisvgm file \
     libssl-dev libclang-dev protobuf-compiler \
@@ -293,6 +296,20 @@ RUN mkdir -p ~/.amp/bin ~/.config/amp ~/.codex ~/github ~/workspace \
     && git config --global --add safe.directory '*' \
     && git config --global user.useConfigOnly true
 
+# harness-server is a member of the repo-wide Cargo workspace, so the build
+# needs the workspace manifest, lockfile, and every crate's sources. Build it
+# in its own stage so only the binary reaches the sandbox image.
+FROM toolchain AS harness-server-build
+
+WORKDIR /home/agent/centaur-src
+COPY --chown=1001:1001 Cargo.toml Cargo.lock ./
+COPY --chown=1001:1001 crates/ crates/
+RUN --mount=type=cache,target=/home/agent/.cargo/registry,uid=1001,gid=1001,sharing=locked \
+    --mount=type=cache,target=/home/agent/.cargo/git,uid=1001,gid=1001,sharing=locked \
+    --mount=type=cache,target=/home/agent/.cache/harness-server-target,uid=1001,gid=1001,sharing=locked \
+    CARGO_TARGET_DIR=/home/agent/.cache/harness-server-target \
+    cargo +stable install --locked --path crates/harness-server --root /home/agent/harness-server
+
 # ==============================================================================
 # Final thin stage: only frequently-changing local files below.
 # Changing harness_session.py / SYSTEM_PROMPT.md / entrypoint.sh rebuilds only
@@ -325,18 +342,10 @@ COPY --link --chmod=755 services/sandbox/compose_system_prompt.py /usr/local/bin
 COPY --link --chmod=755 services/sandbox/repo_cache_sync.py /usr/local/bin/repo-cache-sync
 COPY --link --chmod=755 services/sandbox/repo_cache_watch.py /usr/local/bin/repo-cache-watch
 COPY --link --chmod=755 services/sandbox/entrypoint.sh /entrypoint.sh
-COPY --link --chown=1001:1001 crates/harness-server/ /opt/centaur/harness-server-src/
+COPY --link --chown=1001:1001 --from=harness-server-build /home/agent/harness-server/bin/harness-server /home/agent/.local/bin/harness-server
 
 USER agent
 WORKDIR /home/agent
-
-# Keep harness-server source as a real image input so crate changes invalidate
-# the install layer. Do not COPY into /tmp; that can clobber /tmp's sticky bit.
-RUN --mount=type=cache,target=/home/agent/.cargo/registry,uid=1001,gid=1001,sharing=locked \
-    --mount=type=cache,target=/home/agent/.cargo/git,uid=1001,gid=1001,sharing=locked \
-    --mount=type=cache,target=/home/agent/.cache/harness-server-target,uid=1001,gid=1001,sharing=locked \
-    CARGO_TARGET_DIR=/home/agent/.cache/harness-server-target \
-    cargo +stable install --locked --path /opt/centaur/harness-server-src --root /home/agent/.local
 
 # No RUN instructions after these — all repo-local content at the very end.
 COPY --link --chown=1001:1001 .agents/skills/ /home/agent/.agents/skills/

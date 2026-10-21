@@ -139,7 +139,9 @@ Rails.application.routes.draw do
         post :demote
       end
     end
-    resource :system_settings, only: %i[edit update], path: "settings"
+    resource :system_settings, only: %i[edit update], path: "settings" do
+      patch :slack_external_teams
+    end
     # Admin self-descope ("view as operator"): pause (admin-only) and restore
     # admin permissions. A singular resource because it's a per-session flag.
     resource :descope, only: %i[create destroy]
@@ -258,6 +260,28 @@ Rails.application.routes.draw do
             get :editors
             post :add_editor, path: "editors"
             delete :remove_editor, path: "editors"
+          end
+        end
+        # Permission management from an active Console admin's Slack DM.
+        namespace :admin do
+          resources :principals, only: %i[index show] do
+            collection do
+              get "lookup/:foreign_id", action: :lookup, as: :lookup, constraints: { foreign_id: /[^\/]+/ }
+            end
+            member do
+              get "effective_grants", action: :effective_grants
+              patch "sandbox_access", action: :update_sandbox_access
+              post "slack_channel_permissions", action: :upsert_slack_channel_permission
+              delete "slack_channel_permissions/:channel_id", action: :destroy_slack_channel_permission
+            end
+            resources :roles, only: %i[index create destroy], controller: :principal_roles
+            resources :grants, only: %i[index], controller: :grantee_grants
+          end
+          resources :grants, only: %i[create destroy]
+          resources :secrets, only: %i[index]
+          resources :slack_external_teams, only: %i[index create destroy]
+          resources :roles, only: %i[index show] do
+            collection { get "lookup/:foreign_id", action: :lookup, as: :lookup, constraints: { foreign_id: /[^\/]+/ } }
           end
         end
       end

@@ -1797,6 +1797,44 @@ class SlackClient:
                 )
         return {"ok": True, "channel": channel_id, "ts": timestamp, "name": name, "added": added}
 
+    def remove_reaction(self, channel_id: str, timestamp: str, emoji: str) -> dict:
+        """Remove this bot's reaction to a message; requires Slack's reactions:write scope.
+
+        Accept an emoji name with or without surrounding colons. A missing
+        reaction by this bot is a successful no-op. Message timestamps stay
+        strings to preserve their precision.
+        """
+        channel_id = self._normalize_explicit_channel_id(channel_id)
+        timestamp = timestamp.strip()
+        if not re.fullmatch(r"\d+\.\d+", timestamp):
+            raise ValueError("timestamp must be a Slack message timestamp like 1234567890.123456")
+        name = emoji.strip()
+        if name.startswith(":") and name.endswith(":"):
+            name = name[1:-1]
+        if not name or any(char.isspace() for char in name):
+            raise ValueError("emoji must be a Slack emoji name like pencil2 or :pencil2:")
+
+        removed = True
+        try:
+            self._retry_on_ratelimit(
+                self._client.reactions_remove,
+                channel=channel_id,
+                timestamp=timestamp,
+                name=name,
+            )
+        except SlackApiError as error:
+            if self._slack_error_code(error) == "no_reaction":
+                removed = False
+            else:
+                self._raise_slack_api_error(
+                    error,
+                    slack_method="reactions.remove",
+                    access_path="slack_api",
+                    requested_channel=channel_id,
+                    resolved_channel=channel_id,
+                )
+        return {"ok": True, "channel": channel_id, "ts": timestamp, "name": name, "removed": removed}
+
     def send_dm(
         self,
         user_id: str,
@@ -2669,3 +2707,7 @@ def search_users(*args, **kwargs):
 
 def get_user_profile(*args, **kwargs):
     return _client().get_user_profile(*args, **kwargs)
+
+
+def remove_reaction(*args, **kwargs):
+    return _client().remove_reaction(*args, **kwargs)

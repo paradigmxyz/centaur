@@ -6,6 +6,7 @@ on:
     tags: [v*]
     paths:
       - .github/workflows/publish-images.yml
+      - .github/workflows/e2e.yml
       - services/**
       - crates/**
       - harness/**
@@ -51,7 +52,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [api-rs, company-context, proxy-sync, slackbotv2, linearbot, discordbot, githubbot, teamsbot, agent, iron-proxy, console]
+        service: [api-rs, company-context, proxy-sync, token-broker, slackbotv2, linearbot, discordbot, githubbot, teamsbot, agent, iron-proxy, console]
         platform: ${{ github.event_name == 'push' && fromJSON('["linux/amd64", "linux/arm64"]') || fromJSON('["linux/amd64"]') }}
         include:
           - service: api-rs
@@ -68,6 +69,11 @@ jobs:
             image: centaur-proxy-sync
             context: .
             dockerfile: services/proxy-sync/Dockerfile
+            target: ""
+          - service: token-broker
+            image: centaur-token-broker
+            context: .
+            dockerfile: services/token-broker/Dockerfile
             target: ""
           - service: slackbotv2
             image: centaur-slackbotv2
@@ -168,7 +174,7 @@ jobs:
 
       - name: Upload digest
         if: ${{ !github.event.pull_request.head.repo.fork }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: digests-${{ matrix.image }}-${{ env.PLATFORM_SLUG }}
           path: ${{ runner.temp }}/digests/*
@@ -186,6 +192,7 @@ jobs:
           - image: centaur-api-rs
           - image: centaur-company-context
           - image: centaur-proxy-sync
+          - image: centaur-token-broker
           - image: centaur-slackbotv2
           - image: centaur-linearbot
           - image: centaur-agent
@@ -197,7 +204,7 @@ jobs:
 
     steps:
       - name: Download digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: digests-${{ matrix.image }}-*
           path: ${{ runner.temp }}/digests
@@ -245,56 +252,13 @@ jobs:
         run: |
           docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ steps.meta.outputs.version }}
 
-  # Deploys the images just published to a kind cluster and runs the e2e/
-  # scenarios: real control plane, sandboxes, and harnesses against a fake
-  # Slack and a scripted model server, with API keys. e2e-subscription-harnesses
-  # runs only the harness smoke test with ChatGPT/Claude.ai subscriptions,
-  # since harness upgrades can break that path on its own. Both informational.
+  # Runs the e2e scenarios against the images just published.
   e2e:
-    name: ${{ matrix.name }}
     needs: merge
     if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
-    runs-on: depot-ubuntu-24.04-16
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: e2e
-            auth-mode: api_key
-            tests: ""
-          - name: e2e-subscription-harnesses
-            auth-mode: access_token
-            tests: e2e/tests/harnesses.test.ts
     permissions:
       contents: read
-    env:
-      HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      CENTAUR_E2E_AUTH_MODE: ${{ matrix.auth-mode }}
-      E2E_TESTS: ${{ matrix.tests }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
-        with:
-          install_only: true
-          version: v0.30.0
-
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
-
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-
-      - name: Deploy the e2e stack
-        run: CENTAUR_E2E_IMAGE_TAG="sha-${HEAD_SHA::7}" e2e/stack.sh up
-
-      - name: Run e2e scenarios
-        run: e2e/stack.sh test $E2E_TESTS
-
-      - name: Dump diagnostics
-        if: ${{ failure() }}
-        run: e2e/stack.sh logs
+    uses: ./.github/workflows/e2e.yml
 
   notify-centaur-paradigm:
     name: Notify Paradigm Overlay

@@ -86,7 +86,21 @@ def test_v2_search_forwards_filters(monkeypatch):
 
     result = CliRunner().invoke(
         cli.app,
-        ["v2", "search", "roadmap", "--type", "drive_doc", "--type", "slack_file", "-n", "5"],
+        [
+            "v2",
+            "search",
+            "roadmap",
+            "--type",
+            "drive_doc",
+            "--type",
+            "slack_file",
+            "--source",
+            "archive",
+            "--metadata",
+            '{"author": "Ada"}',
+            "-n",
+            "5",
+        ],
     )
 
     assert result.exit_code == 0, result.output
@@ -99,5 +113,17 @@ def test_v2_search_forwards_filters(monkeypatch):
             "occurred_before": None,
             "channel_ids": None,
             "file_ids": None,
+            "sources": ["archive"],
+            "metadata": {"author": "Ada"},
         }
     ]
+
+
+def test_v2_search_rejects_metadata_that_is_not_a_json_object(monkeypatch):
+    monkeypatch.setattr(cli, "CompanyContextV2Client", None)
+
+    for metadata in ["author=Ada", '["Ada"]']:
+        result = CliRunner().invoke(cli.app, ["v2", "search", "roadmap", "--metadata", metadata])
+
+        assert result.exit_code == 2, result.output
+        assert "JSON object" in result.output

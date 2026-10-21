@@ -15,6 +15,7 @@ import {
   type Thread
 } from 'chat'
 import { createSlackAdapter } from '@chat-adapter/slack'
+import { verifySlackSignature } from '@chat-adapter/slack/webhook'
 import {
   assertSlackOk,
   callSlackApi,
@@ -79,6 +80,7 @@ import { createFlagMessageOverridesStrategy } from './message-overrides-strategy
 import {
   isAllowedSlackMessage,
   isAllowedSlackWebhookBody,
+  SlackExternalTeamIdsUnavailableError,
   parseSlackWebhookPayload,
   slackStreamRecipientUserId
 } from './slack-events'
@@ -332,6 +334,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     onLockConflict: 'force',
     logger
   })
+  const background = createBackgroundWork()
   const steeringReactions = createSteeringReactionController(options)
   const lateSlackFiles = createLateSlackFileRepair(options, state, steeringReactions)
   const stateConnectionStatus: StateConnectionStatus = { attempts: 0, connected: false }
@@ -520,6 +523,36 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     })
   })
 
+  // Slack's native Stop button. The adapter only aborts its local turn and
+  // resets the Slack session status; the execution itself runs in api-rs.
+  chat.onAgentSessionStopped(async event => {
+    const thread = chat.thread(event.threadId)
+    const trace: SlackbotV2Trace = {
+      includeContext: false,
+      messageId: event.threadTs,
+      mode: 'append',
+      openStream: false,
+      slackUserId: stringValue(event.userId),
+      startedAtMs: nowMs(),
+      threadId: thread.id
+    }
+    try {
+      await interruptThreadExecution(thread, options, trace, 'agent_session_stopped')
+    } catch {
+      // Slack already shows the session as stopped, so say the stop may
+      // not have taken effect.
+      await withSlackApiTimeout(options, 'post stop failure notice', () =>
+        thread.postEphemeral(
+          event.userId,
+          "Couldn't confirm the stop. The agent may still be working.",
+          { fallbackToDM: false }
+        )
+      ).catch(error => {
+        traceWarn(options, 'slackbotv2_stop_notice_failed', trace, { error: errorMessage(error) })
+      })
+    }
+  })
+
   const app = new Hono()
   app.get('/health', c => healthResponse(c, stateConnectionStatus))
   app.get('/metrics', c =>
@@ -544,7 +577,27 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
         route,
         ...webhookFields
       })
-      if (!isAllowedSlackWebhookBody(rawBody, options, logger)) {
+      // Verify before the policy gate: it can call api-rs and answer 503, which
+      // an unsigned request must not be able to trigger. The adapter verifies
+      // again before dispatch.
+      try {
+        await verifySlackSignature(rawBody, c.req.raw.headers, {
+          signingSecret: options.signingSecret
+        })
+      } catch (error) {
+        outcome = 'error'
+        logger.warn('slackbotv2_webhook_signature_rejected', { error: errorMessage(error) })
+        return new globalThis.Response('Invalid signature', { status: 401 })
+      }
+      let allowed: boolean
+      try {
+        allowed = await isAllowedSlackWebhookBody(rawBody, options, logger)
+      } catch (error) {
+        if (!(error instanceof SlackExternalTeamIdsUnavailableError)) throw error
+        outcome = 'error'
+        return new globalThis.Response('Slack Connect allowlist is unavailable. Please retry.', { status: 503 })
+      }
+      if (!allowed) {
         outcome = 'ignored'
         return new globalThis.Response('ok', { status: 200 })
       }
@@ -556,16 +609,19 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
           && action.action_id.startsWith(WORKFLOW_ACTION_PREFIX))
       const awaitHandoff = workflowAction || shouldAwaitSlackHandoff(rawBody)
       const handoffTasks: Promise<unknown>[] = []
-      const context: SlackbotV2RequestContext = {
-        waitUntil: promise => waitUntil(c, promise)
+      const keepAlive = (promise: Promise<unknown>) => {
+        background.track(promise)
+        waitUntil(c, promise)
       }
+      const context: SlackbotV2RequestContext = { waitUntil: keepAlive }
       const response = await requestContext.run(context, () => {
         return chat.webhooks.slack(c.req.raw, {
           waitUntil: promise => {
             if (awaitHandoff) {
+              background.track(promise)
               handoffTasks.push(promise)
             } else {
-              waitUntil(c, promise)
+              keepAlive(promise)
             }
           }
         })
@@ -573,7 +629,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       const channelCreatedJoinTask = response.ok && options.autoJoinCreatedChannels === true
         ? joinSlackChannelCreatedEvent(rawBody, options)
         : null
-      if (channelCreatedJoinTask) waitUntil(c, channelCreatedJoinTask)
+      if (channelCreatedJoinTask) keepAlive(channelCreatedJoinTask)
       if (awaitHandoff && response.ok) {
         const waitStartedAtMs = nowMs()
         const waitFields = {
@@ -608,7 +664,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
         }
       }
       const lateFileTask = response.ok ? lateSlackFiles.repairFromWebhook(rawBody) : null
-      if (lateFileTask) waitUntil(c, lateFileTask)
+      if (lateFileTask) keepAlive(lateFileTask)
       outcome = response.ok ? 'success' : 'error'
       return new globalThis.Response(await response.text(), {
         headers: response.headers,
@@ -635,7 +691,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     scheduleRenderObligationRecovery(chat, state, options, stateConnected)
   }
 
-  return { app, chat }
+  return { app, chat, drain: background.drain }
 }
 
 async function handleSlackMessageHandoff(
@@ -722,24 +778,39 @@ async function handleStopCommand(
   trigger: string
 ): Promise<boolean> {
   if (!isSlackStopCommand(message)) return false
-  const trace = createHandoffTrace(thread, message, 'append')
+  await interruptThreadExecution(thread, options, createHandoffTrace(thread, message, 'append'), trigger)
+  return true
+}
+
+async function interruptThreadExecution(
+  thread: Thread<SlackbotV2ThreadState>,
+  options: SlackbotV2Options,
+  trace: SlackbotV2Trace,
+  trigger: string
+): Promise<void> {
   traceLog(options, 'slackbotv2_stop_command_started', trace, { trigger })
   const latest = (await thread.state) ?? {}
-  const reason = `Interrupted from Slack by ${slackUserIdForMessage(message) ?? 'unknown user'}`
+  const reason = `Interrupted from Slack by ${trace.slackUserId ?? 'unknown user'}`
   try {
+    // Record the stop before interrupting: an execution api-rs has not
+    // started yet sees it in its handoff (see stopRequestedFor), and one it
+    // has started is visible to the interrupt below.
+    await thread.setState({ stopRequestedAt: Date.now() })
     const response = await interruptSessionExecution(options, thread.id, reason)
-    await thread.setState({
-      activeExecution: false,
-      lastEventId: latest.lastEventId ?? latest.renderObligation?.afterEventId ?? 0,
-      renderObligation: null
-    })
+    // With nothing interrupted, a handoff may still own this state.
+    if (response.interrupted) {
+      await thread.setState({
+        activeExecution: false,
+        lastEventId: latest.lastEventId ?? latest.renderObligation?.afterEventId ?? 0,
+        renderObligation: null
+      })
+    }
     await setAssistantStatus(thread, '', options, trace)
     traceLog(options, 'slackbotv2_stop_command_complete', trace, {
       execution_id: response.execution_id,
       interrupted: response.interrupted,
       trigger
     })
-    return true
   } catch (error) {
     traceWarn(options, 'slackbotv2_stop_command_failed', trace, {
       error: errorMessage(error),
@@ -747,6 +818,11 @@ async function handleStopCommand(
     })
     throw error
   }
+}
+
+/** Whether a stop was requested after this message was sent. */
+function stopRequestedFor(state: SlackbotV2ThreadState, message: ChatMessage): boolean {
+  return (state.stopRequestedAt ?? 0) >= message.metadata.dateSent.getTime()
 }
 
 async function subscribeSlackThreadForHandoff(
@@ -1515,6 +1591,21 @@ async function syncThreadMessageToSession(
     latestExecutedMessageIds.add(serializedMessage.id)
     const steeringReactionAck = input.steeringReactionAck
     forwardInput.executionId = execution.execution_id
+    if (stopRequestedFor(latest, message)) {
+      // The stop landed while execute was in flight. Interrupt in the
+      // background; the live render shows the interrupted result.
+      traceLog(input.options, 'slackbotv2_forward_stop_requested_during_execute', trace, {
+        execution_id: execution.execution_id
+      })
+      backgroundWaitUntil(
+        interruptSessionExecution(input.options, thread.id, 'Interrupted from Slack').catch(error => {
+          traceWarn(input.options, 'slackbotv2_forward_stop_interrupt_failed', trace, {
+            error: errorMessage(error),
+            execution_id: execution.execution_id
+          })
+        })
+      )
+    }
     // Take the render lease before the obligation becomes visible so a
     // concurrent recovery sweep never claims it while this process is about
     // to render it live.
@@ -1587,10 +1678,15 @@ async function syncThreadMessageToSession(
   }
 
   let responseContextBlock: SlackContextBlock | undefined
+  let stoppedBeforeExecute = false
   try {
     await thread.setState({ activeExecution: true })
     traceLog(input.options, 'slackbotv2_forward_active_execution_marked', trace)
     await forwardToSessionApi(input.options, forwardInput, {
+      shouldExecute: async () => {
+        stoppedBeforeExecute = stopRequestedFor((await thread.state) ?? {}, message)
+        return !stoppedBeforeExecute
+      },
       onExecutionStarted: commitExecutionStarted,
       onMessagesAppended: commitMessagesAppended,
       onSessionCreated: async outcome => {
@@ -1662,6 +1758,19 @@ async function syncThreadMessageToSession(
       onSessionRestarted: handleSessionRestarted
     })
     finishSteeringReaction(input, trace)
+    if (stoppedBeforeExecute) {
+      const latest = (await thread.state) ?? {}
+      const latestExecutedMessageIds = new Set(latest.executedMessageIds ?? [])
+      latestExecutedMessageIds.add(serializedMessage.id)
+      await thread.setState({
+        activeExecution: false,
+        executedMessageIds: Array.from(latestExecutedMessageIds).slice(-1000)
+      })
+      if (assistantStatusVisible) await setAssistantStatus(thread, '', input.options, trace)
+      traceLog(input.options, 'slackbotv2_forward_stopped_before_execute', trace)
+      recordForward(input.mode, 'stopped', traceStartedAtMs)
+      return
+    }
     scheduleExecutionRender(
       thread,
       serializedMessage,
@@ -3092,6 +3201,40 @@ async function* streamSessionAfterHandoff(
 
 async function* streamError(error: unknown): AsyncIterable<SlackbotV2RendererSource> {
   yield sessionStreamError(error)
+}
+
+/**
+ * Work started by Slack webhooks: handoffs and the live renders and retries
+ * they schedule (via requestContext). Drained on shutdown.
+ */
+function createBackgroundWork() {
+  const pending = new Set<Promise<unknown>>()
+  return {
+    track(promise: Promise<unknown>): void {
+      if (pending.has(promise)) return
+      pending.add(promise)
+      const settle = () => pending.delete(promise)
+      promise.then(settle, settle)
+    },
+    /**
+     * Waits for tracked work, including work started while waiting, until the
+     * deadline. Returns how much is still running.
+     */
+    async drain(timeoutMs: number): Promise<number> {
+      const deadline = Date.now() + timeoutMs
+      while (pending.size > 0 && Date.now() < deadline) {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        await Promise.race([
+          Promise.allSettled(pending),
+          new Promise(resolve => {
+            timer = setTimeout(resolve, deadline - Date.now())
+          })
+        ])
+        clearTimeout(timer)
+      }
+      return pending.size
+    }
+  }
 }
 
 function backgroundWaitUntil(promise: Promise<unknown>): void {

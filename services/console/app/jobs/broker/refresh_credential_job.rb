@@ -13,6 +13,8 @@ module Broker
     limits_concurrency to: 1, key: ->(credential_id) { "broker_refresh_#{credential_id}" }
 
     def perform(credential_id)
+      return if Broker.external_refresh?
+
       credential = BrokerCredential.find_by(id: credential_id)
       return unless credential
 

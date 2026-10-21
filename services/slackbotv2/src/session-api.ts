@@ -80,6 +80,7 @@ export function isSessionPrincipalAdmissionDenied(error: unknown): boolean {
 export const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 3 * 60 * 60 * 1000
 const DEFAULT_SESSION_API_TIMEOUT_MS = 30_000
 const DEFAULT_SLACK_API_TIMEOUT_MS = 5_000
+const SLACK_EXTERNAL_TEAM_IDS_TIMEOUT_MS = 2_000
 
 function sessionIdleTimeoutMs(options: SlackbotV2Options): number {
   if (options.idleTimeoutMs !== undefined) return options.idleTimeoutMs
@@ -177,6 +178,8 @@ export async function withSlackApiTimeout<T>(
 }
 
 type ForwardSessionApiCallbacks = {
+  /** Runs after append; returning false skips execute. */
+  shouldExecute?(): Promise<boolean>
   onExecutionStarted?(execution: SlackbotV2ExecuteSessionResponse): Promise<void>
   onMessagesAppended?(): Promise<void>
   onSessionCreated?(outcome: CreateSessionOutcome): Promise<void>
@@ -531,6 +534,7 @@ export async function forwardToSessionApi(
     })
   }
   if (!input.executeMessage) return null
+  if (callbacks.shouldExecute && !(await callbacks.shouldExecute())) return null
   const executeMessage = input.executeMessage
 
   const executeStartedAtMs = nowMs()
@@ -1459,6 +1463,28 @@ async function postInterruptSessionExecution(
   )
   await ensureApiOk(response, 'interrupt session')
   return (await response.json()) as SlackbotV2InterruptSessionResponse
+}
+
+/**
+ * Slack Connect workspaces admitted in the console. Bounded tightly because
+ * the webhook waits on it before acknowledging Slack.
+ */
+export async function fetchSlackExternalTeamIds(options: SlackbotV2Options): Promise<string[]> {
+  const action = 'read Slack external team ids'
+  const response = await fetchWithTimeout(
+    options.fetch ?? fetch,
+    new URL('/api/slack/external-team-ids', ensureTrailingSlash(options.apiUrl)),
+    { method: 'GET', headers: apiHeaders(options, false) },
+    SLACK_EXTERNAL_TEAM_IDS_TIMEOUT_MS,
+    action
+  )
+  await ensureApiOk(response, action)
+  const body: unknown = await response.json()
+  const teamIds = isJsonObject(body) ? body.slack_external_team_ids : undefined
+  if (!Array.isArray(teamIds) || !teamIds.every(teamId => typeof teamId === 'string')) {
+    throw new Error(`${action} returned an invalid response`)
+  }
+  return teamIds
 }
 
 async function ensureApiOk(response: Response, action: string): Promise<void> {

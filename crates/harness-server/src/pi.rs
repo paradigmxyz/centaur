@@ -15,9 +15,9 @@
 use std::env;
 use std::process::Command as ProcessCommand;
 
-use codex_app_server_protocol::UserInput;
 use serde_json::{Value, json};
 
+use crate::protocol::UserInput;
 use crate::{
     HarnessKind, HarnessServer, NormalizedContent, NormalizedEvent, NormalizedTokenUsage,
     NormalizedToolResult, Result, ThreadState, user_input_to_anthropic_content,

@@ -118,6 +118,29 @@ def react(
 
 
 @app.command()
+def unreact(
+    channel_id: str = typer.Argument(..., help="Slack conversation ID, e.g. C1234567890"),
+    timestamp: str = typer.Argument(..., help="Timestamp of the message to react to"),
+    emoji: str = typer.Argument(..., help="Emoji name, e.g. pencil2 (surrounding colons optional)"),
+):
+    """Remove this bot's emoji reaction to a message using the bot's reactions:write scope.
+
+    Example: slack unreact C1234567890 1234567890.123456 pencil2
+    """
+    from .client import remove_reaction
+
+    try:
+        result = remove_reaction(channel_id, timestamp, emoji)
+        if result["removed"]:
+            console.print("[green]✓ Reaction removed[/]")
+        else:
+            console.print("[green]✓ Reaction already absent[/]")
+    except (RuntimeError, ValueError) as e:
+        stderr_console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+
+@app.command()
 def dm(
     user_id: str = typer.Argument(..., help="Slack user ID, e.g. U12345678"),
     message: str = typer.Argument(..., help="Message text to send"),

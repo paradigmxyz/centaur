@@ -15,6 +15,22 @@ app = typer.Typer(
     help="Inspect Console permissions and manage the current user's scheduled tasks",
 )
 console = Console()
+admin_app = typer.Typer(
+    help=(
+        "Manage principal roles, secret grants, Slack permissions, sandbox access, "
+        "and allowed Slack Connect workspaces. "
+        "Works only in an active Console admin's Slack DM."
+    )
+)
+app.add_typer(admin_app, name="admin")
+
+URL_OPTION = typer.Option(None, "--url", help="centaur-console base URL")
+BEARER_TOKEN_OPTION = typer.Option(
+    None,
+    "--bearer-token",
+    help="Local/debug bearer token override",
+    envvar="CENTAUR_CONSOLE_BEARER_TOKEN",
+)
 
 
 def get_client(
@@ -198,6 +214,217 @@ def run_scheduled_task(
     with get_client(url=url, bearer_token=bearer_token) as client:
         result = client.run_scheduled_task(task_id)
     console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("principals")
+def admin_principals(
+    slack_channel_id: str | None = typer.Option(
+        None, "--slack-channel", help="Only principals bound to this Slack channel ID"
+    ),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """List principals."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_principals(slack_channel_id=slack_channel_id)
+    console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("principal")
+def admin_principal(
+    principal: str = typer.Argument(..., help="Principal OID or foreign ID"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Show a principal with its roles, direct grants, Slack permissions, and sandbox access."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_principal(principal)
+    console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("effective-grants")
+def admin_effective_grants(
+    principal: str = typer.Argument(..., help="Principal OID or foreign ID"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """List secrets a principal holds directly or through roles, and how each is granted."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_effective_grants(principal)
+    console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("roles")
+def admin_roles(
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """List every role that can be assigned."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_roles()
+    console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("assign-role")
+def admin_assign_role(
+    principal: str = typer.Argument(..., help="Principal OID or foreign ID"),
+    role: str = typer.Argument(..., help="Role OID or foreign ID, such as tool-github"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Assign a role to a principal."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_assign_role(principal, role)
+    console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("unassign-role")
+def admin_unassign_role(
+    principal: str = typer.Argument(..., help="Principal OID or foreign ID"),
+    role: str = typer.Argument(..., help="Role OID or foreign ID"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Remove a role from a principal."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        client.admin_unassign_role(principal, role)
+    console.print_json(
+        json.dumps({"data": {"principal": principal, "role": role, "removed": True}})
+    )
+
+
+@admin_app.command("secrets")
+def admin_secrets(
+    query: str | None = typer.Option(None, "--query", "-q", help="Name or foreign ID filter"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """List secrets that can be granted."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_secrets(query)
+    console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("grant-secret")
+def admin_grant_secret(
+    principal: str = typer.Argument(..., help="Principal OID or foreign ID"),
+    secret: str = typer.Argument(..., help="Secret OID, foreign ID, or name"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Grant a secret directly to a principal."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_grant_secret(principal, secret)
+    console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("revoke-secret")
+def admin_revoke_secret(
+    principal: str = typer.Argument(..., help="Principal OID or foreign ID"),
+    secret: str = typer.Argument(..., help="Secret OID, foreign ID, or name"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Revoke a secret granted directly to a principal."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        client.admin_revoke_secret(principal, secret)
+    console.print_json(
+        json.dumps({"data": {"principal": principal, "secret": secret, "revoked": True}})
+    )
+
+
+@admin_app.command("set-slack-permission")
+def admin_set_slack_permission(
+    principal: str = typer.Argument(..., help="Principal OID or foreign ID"),
+    channel_id: str = typer.Argument(..., help="Slack channel ID"),
+    upload: bool | None = typer.Option(None, "--upload/--no-upload"),
+    download: bool | None = typer.Option(None, "--download/--no-download"),
+    history: bool | None = typer.Option(None, "--history/--no-history"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Create or update a Slack channel permission. New ones enable unspecified flags."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_set_slack_permission(
+            principal, channel_id, upload=upload, download=download, history=history
+        )
+    console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("remove-slack-permission")
+def admin_remove_slack_permission(
+    principal: str = typer.Argument(..., help="Principal OID or foreign ID"),
+    channel_id: str = typer.Argument(..., help="Slack channel ID"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Remove a principal's own permission for a Slack channel."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        client.admin_remove_slack_permission(principal, channel_id)
+    console.print_json(
+        json.dumps({"data": {"principal": principal, "channel_id": channel_id, "removed": True}})
+    )
+
+
+@admin_app.command("set-sandbox-access")
+def admin_set_sandbox_access(
+    principal: str = typer.Argument(..., help="Principal OID or foreign ID"),
+    repo_cache: str | None = typer.Option(None, "--repo-cache", help="none, public, or all"),
+    observability: bool | None = typer.Option(None, "--observability/--no-observability"),
+    sessions_read: bool | None = typer.Option(None, "--sessions-read/--no-sessions-read"),
+    workflows_read: bool | None = typer.Option(None, "--workflows-read/--no-workflows-read"),
+    workflows_write: bool | None = typer.Option(None, "--workflows-write/--no-workflows-write"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Change selected sandbox capabilities; unspecified ones are unchanged."""
+    capabilities = {
+        "sandbox_repo_cache": repo_cache,
+        "sandbox_observability_enabled": observability,
+        "sandbox_sessions_read_enabled": sessions_read,
+        "sandbox_workflows_read_enabled": workflows_read,
+        "sandbox_workflows_write_enabled": workflows_write,
+    }
+    if all(value is None for value in capabilities.values()):
+        raise typer.BadParameter("provide at least one sandbox capability")
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_set_sandbox_access(principal, **capabilities)
+    console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("slack-connect-teams")
+def admin_slack_connect_teams(
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """List the Slack Connect workspace and org ids Centaur accepts messages from."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_slack_external_teams()
+    console.print_json(json.dumps({"data": result}))
+
+
+@admin_app.command("add-slack-connect-team")
+def admin_add_slack_connect_team(
+    team_id: str = typer.Argument(..., help="Slack workspace (T…) or Enterprise Grid org (E…) ID"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Allow messages from a Slack Connect workspace or org; prints the updated list."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_add_slack_external_team(team_id)
+    console.print_json(json.dumps({"data": result}))
+
+
+@admin_app.command("remove-slack-connect-team")
+def admin_remove_slack_connect_team(
+    team_id: str = typer.Argument(..., help="Slack workspace (T…) or Enterprise Grid org (E…) ID"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Stop accepting messages from a Slack Connect workspace or org; prints the updated list."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_remove_slack_external_team(team_id)
+    console.print_json(json.dumps({"data": result}))
 
 
 @app.command()

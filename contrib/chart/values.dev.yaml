@@ -35,6 +35,11 @@ proxySync:
   image:
     pullPolicy: IfNotPresent
 
+tokenBroker:
+  enabled: true
+  image:
+    pullPolicy: IfNotPresent
+
 console:
   image:
     pullPolicy: IfNotPresent

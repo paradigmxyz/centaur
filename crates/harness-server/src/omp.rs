@@ -20,11 +20,11 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use codex_app_server_protocol::UserInput;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::pi::{command_line, message_text, session_id, thinking_level, token_usage, tool_result};
+use crate::protocol::UserInput;
 use crate::{
     HarnessChild, HarnessKind, HarnessServer, HarnessServerError, NormalizedContent,
     NormalizedEvent, NormalizedToolResult, Result, ThreadState, TurnHold,

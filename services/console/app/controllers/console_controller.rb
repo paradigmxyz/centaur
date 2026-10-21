@@ -48,18 +48,9 @@ class ConsoleController < ApplicationController
     load_slack_channel_permission_form(@principal)
     @inherited_slack_channel_permissions = @principal.inherited_slack_channel_permissions_payload
     load_principal_roles
-    effective_grant_relations = {
-      "static" => @principal.granted_static_secrets,
-      "gcp_auth" => @principal.granted_gcp_auth_secrets,
-      "gcp_id_token" => @principal.granted_gcp_id_token_secrets,
-      "aws_auth" => @principal.granted_aws_auth_secrets,
-      "oauth_token" => @principal.granted_oauth_token_secrets,
-      "pg_dsn" => @principal.granted_pg_dsn_secrets,
-      "hmac" => @principal.granted_hmac_secrets
-    }
     effective_page = PrincipalEffectiveGrantsPage.new(
       principal: @principal,
-      relations: effective_grant_relations,
+      relations: @principal.granted_secrets_by_kind,
       page: params[:effective_grants_page],
       per_page: PRINCIPAL_DETAIL_PER_PAGE
     ).call

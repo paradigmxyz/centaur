@@ -13,17 +13,10 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use codex_app_server_protocol::{
-    ApprovalsReviewer, AskForApproval, ClientResponse, InitializeResponse, JSONRPCError,
-    JSONRPCErrorError, JSONRPCMessage, JSONRPCRequest, JSONRPCResponse, RequestId, SandboxPolicy,
-    ServerNotification, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
-    ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse, TurnStatus, TurnSteerParams, TurnSteerResponse, UserInput,
-};
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageError};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -33,13 +26,20 @@ use crate::codex::CodexHarnessServer;
 use crate::omp::OmpHarness;
 use crate::otel::{TraceContext, TurnStatus as TelemetryTurnStatus, TurnTelemetry};
 use crate::pi::PiHarness;
+use crate::protocol::{
+    ApprovalsReviewer, AskForApproval, InitializeResponse, JSONRPCError, JSONRPCErrorError,
+    JSONRPCMessage, JSONRPCRequest, JSONRPCResponse, RequestId, SandboxPolicy, ServerNotification,
+    ThreadResumeParams, ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, Turn,
+    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnStatus,
+    TurnSteerParams, TurnSteerResponse, UserInput,
+};
 use crate::traits::{
     AppServerNormalizer, AppServerRuntime, HarnessChild, HarnessKind, HarnessServer,
     NormalizedEvent, ThreadState, TurnHold,
 };
 use crate::turn::{BridgeConfig, CodexTurnNormalizer};
 use crate::util::{absolute_path, default_codex_home, write_value};
-use crate::wire::{is_known_untyped_server_notification, notification_to_wire_value};
+use crate::wire::notification_to_wire_value;
 use crate::{HarnessServerError, Result};
 
 pub fn server_for(kind: HarnessKind) -> Box<dyn AppServerRuntime> {
@@ -64,27 +64,6 @@ pub fn run_blocks_server(kind: HarnessKind) -> Result<()> {
         HarnessKind::Pi => run_blocks_app_server(&PiHarness),
         HarnessKind::Omp => run_blocks_app_server(&OmpHarness),
     }
-}
-
-pub fn run_validate_jsonrpc() -> Result<()> {
-    let stdin = io::stdin();
-    for raw in stdin.lock().lines() {
-        let line = raw?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let message: JSONRPCMessage = serde_json::from_str(&line)?;
-        if let JSONRPCMessage::Notification(notification) = message {
-            let method = notification.method.clone();
-            if !is_known_untyped_server_notification(&method) {
-                let _typed = codex_app_server_protocol::ServerNotification::try_from(notification)
-                    .map_err(|error| HarnessServerError::InvalidServerNotification {
-                        message: error.to_string(),
-                    })?;
-            }
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()> {
@@ -889,13 +868,7 @@ fn handle_request<H: HarnessServer, W: Write>(
                 platform_family: env::consts::FAMILY.to_string(),
                 platform_os: env::consts::OS.to_string(),
             };
-            write_client_response(
-                stdout,
-                ClientResponse::Initialize {
-                    request_id: request.id,
-                    response,
-                },
-            )
+            write_response(stdout, request.id, &response)
         }
         "thread/start" => {
             let params: ThreadStartParams = request_params(request.params)?;
@@ -927,13 +900,7 @@ fn handle_request<H: HarnessServer, W: Write>(
                 reasoning_effort: None,
             };
             threads.insert(thread_id, state);
-            write_client_response(
-                stdout,
-                ClientResponse::ThreadStart {
-                    request_id: request.id,
-                    response,
-                },
-            )
+            write_response(stdout, request.id, &response)
         }
         "thread/resume" => {
             let params: ThreadResumeParams = request_params(request.params)?;
@@ -951,27 +918,23 @@ fn handle_request<H: HarnessServer, W: Write>(
                 thread.turns = state.completed_turns.clone();
             }
             let response = ThreadResumeResponse {
-                thread,
-                model: state.model.clone(),
-                model_provider: state.model_provider.clone(),
-                service_tier: state.service_tier.clone(),
-                cwd: absolute_path(state.cwd.clone())?,
-                runtime_workspace_roots: Vec::new(),
-                instruction_sources: Vec::new(),
-                approval_policy: AskForApproval::Never,
-                approvals_reviewer: ApprovalsReviewer::User,
-                sandbox: SandboxPolicy::DangerFullAccess,
-                active_permission_profile: None,
-                reasoning_effort: None,
+                response: ThreadStartResponse {
+                    thread,
+                    model: state.model.clone(),
+                    model_provider: state.model_provider.clone(),
+                    service_tier: state.service_tier.clone(),
+                    cwd: absolute_path(state.cwd.clone())?,
+                    runtime_workspace_roots: Vec::new(),
+                    instruction_sources: Vec::new(),
+                    approval_policy: AskForApproval::Never,
+                    approvals_reviewer: ApprovalsReviewer::User,
+                    sandbox: SandboxPolicy::DangerFullAccess,
+                    active_permission_profile: None,
+                    reasoning_effort: None,
+                },
                 initial_turns_page: None,
             };
-            write_client_response(
-                stdout,
-                ClientResponse::ThreadResume {
-                    request_id: request.id,
-                    response,
-                },
-            )
+            write_response(stdout, request.id, &response)
         }
         "turn/start" => {
             let params: TurnStartParams = request_params(request.params)?;
@@ -980,25 +943,15 @@ fn handle_request<H: HarnessServer, W: Write>(
                     thread_id: params.thread_id.clone(),
                 }
             })?;
-            let effort = match &params.effort {
-                Some(effort) => serde_json::to_value(effort)?.as_str().map(str::to_owned),
-                None => None,
-            };
-            state.reasoning_effort = effort
-                .as_deref()
-                .and_then(|effort| harness.reasoning_effort(effort));
+            state.reasoning_effort = params
+                .effort
+                .and_then(|effort| harness.reasoning_effort(effort.as_str()));
             let turn_id = format!("turn-{}", Uuid::new_v4().simple());
             let mut normalizer = normalizer_for(harness, state, &turn_id);
             let response = TurnStartResponse {
                 turn: normalizer.turn_snapshot(TurnStatus::InProgress),
             };
-            write_client_response(
-                stdout,
-                ClientResponse::TurnStart {
-                    request_id: request.id,
-                    response,
-                },
-            )?;
+            write_response(stdout, request.id, &response)?;
             run_normalized_turn(
                 harness,
                 state,
@@ -1012,13 +965,7 @@ fn handle_request<H: HarnessServer, W: Write>(
         }
         "turn/interrupt" => {
             let _params: TurnInterruptParams = request_params(request.params)?;
-            write_client_response(
-                stdout,
-                ClientResponse::TurnInterrupt {
-                    request_id: request.id,
-                    response: TurnInterruptResponse {},
-                },
-            )
+            write_response(stdout, request.id, &TurnInterruptResponse {})
         }
         "turn/steer" => write_error(
             stdout,
@@ -1144,13 +1091,11 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                 .stdin
                 .write_all(&harness.stdin_for_steer(&params.input)?)?;
             process.stdin.flush()?;
-            write_client_response(
+            write_response(
                 stdout,
-                ClientResponse::TurnSteer {
-                    request_id: request.id,
-                    response: TurnSteerResponse {
-                        turn_id: normalizer.turn_id().to_string(),
-                    },
+                request.id,
+                &TurnSteerResponse {
+                    turn_id: normalizer.turn_id().to_string(),
                 },
             )?;
             for notification in normalizer
@@ -1185,13 +1130,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                 return Ok(false);
             }
             process.kill_and_wait()?;
-            write_client_response(
-                stdout,
-                ClientResponse::TurnInterrupt {
-                    request_id: request.id,
-                    response: TurnInterruptResponse {},
-                },
-            )?;
+            write_response(stdout, request.id, &TurnInterruptResponse {})?;
             Ok(true)
         }
         _ => {
@@ -1310,7 +1249,7 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
     stdout: &mut W,
     request_rx: &Receiver<ActiveTurnRequest>,
     telemetry: &mut TurnTelemetry,
-) -> Result<Option<codex_app_server_protocol::Turn>> {
+) -> Result<Option<Turn>> {
     ensure_harness_process(harness, state)?;
     {
         let process = state
@@ -1576,8 +1515,12 @@ fn request_params<T: serde::de::DeserializeOwned>(params: Option<Value>) -> Resu
         .map_err(|source| HarnessServerError::InvalidParams { source })
 }
 
-fn write_client_response<W: Write>(stdout: &mut W, response: ClientResponse) -> Result<()> {
-    let (id, result) = response.into_jsonrpc_parts()?;
+fn write_response<W: Write, T: Serialize>(
+    stdout: &mut W,
+    id: RequestId,
+    response: &T,
+) -> Result<()> {
+    let result = serde_json::to_value(response)?;
     write_value(
         stdout,
         &serde_json::to_value(JSONRPCMessage::Response(JSONRPCResponse { id, result }))?,

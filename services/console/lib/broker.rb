@@ -8,6 +8,12 @@
 module Broker
   class Error < StandardError; end
 
+  # True when centaur-token-broker refreshes broker credentials, so the
+  # Console's refresh jobs must not also refresh them.
+  def self.external_refresh?
+    ActiveModel::Type::Boolean.new.cast(ConsoleEnv["TOKEN_BROKER_ENABLED"]) || false
+  end
+
   # Raised by RefreshClient when the token-endpoint round trip fails. `retryable`
   # distinguishes transient failures (network, 5xx, bodyless 4xx, malformed 2xx)
   # from unrecoverable ones (RFC 6749 5.2 error codes), which mark the credential

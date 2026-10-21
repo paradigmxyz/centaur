@@ -4,7 +4,9 @@ module Oauth
   # and how to resolve a stable identity after the token exchange. Everything
   # else (state signing, PKCE, the code exchange itself, credential upsert) is
   # provider-agnostic, so adding a provider is a new strategy class plus a
-  # registry entry -- not a migration.
+  # registry entry -- not a migration. Also add the provider to
+  # crates/centaur-token-broker/providers.json, which says how token-broker
+  # refreshes its credentials.
   module Providers
     # Memoized so a strategy is built once per process. The strategies are
     # stateless, so sharing one instance across flows is safe.
@@ -16,6 +18,7 @@ module Oauth
         Granola::KEY => Granola.new,
         Linear::KEY => Linear.new,
         Mercator::KEY => Mercator.new,
+        Microsoft::KEY => Microsoft.new,
         Slack::KEY => Slack.new,
         Zoom::KEY => Zoom.new
       }.freeze

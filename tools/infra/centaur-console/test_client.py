@@ -3,6 +3,11 @@ import json
 import httpx
 import pytest
 from client import (
+    SANDBOX_ADMIN_GRANTS_PATH,
+    SANDBOX_ADMIN_PRINCIPALS_PATH,
+    SANDBOX_ADMIN_ROLES_PATH,
+    SANDBOX_ADMIN_SECRETS_PATH,
+    SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH,
     SANDBOX_OAUTH_APPS_PATH,
     SANDBOX_PERMISSIONS_PATH,
     SANDBOX_SCHEDULED_TASKS_PATH,
@@ -240,3 +245,131 @@ def test_health_returns_identity_details():
             "principal_id": "principal-1",
         },
     }
+
+
+def test_admin_assign_role_resolves_foreign_ids_before_assigning():
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/lookup/slack-channel-c123":
+            return json_response({"data": {"id": "prn_123"}})
+        if request.url.path == f"{SANDBOX_ADMIN_ROLES_PATH}/lookup/tool-github":
+            return json_response({"data": {"id": "role_456"}})
+        assert request.method == "POST"
+        assert request.url.path == f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/prn_123/roles"
+        assert json.loads(request.content) == {"data": {"role_id": "role_456"}}
+        return json_response({"data": {"id": "role_456", "foreign_id": "tool-github"}}, 201)
+
+    result = make_client(handler).admin_assign_role("slack-channel-c123", "tool-github")
+
+    assert result == {"id": "role_456", "foreign_id": "tool-github"}
+    assert len(requests) == 3
+
+
+def test_admin_roles_follows_pagination():
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params["page"])
+        return json_response({"data": [{"id": f"role_{page}"}], "meta": {"total_pages": 2}})
+
+    assert make_client(handler).admin_roles() == [{"id": "role_1"}, {"id": "role_2"}]
+
+
+def test_admin_requests_surface_forbidden_errors():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        message = "sandbox principal is not linked to an active Console admin"
+        return json_response({"error": {"message": message}}, status_code=403)
+
+    with pytest.raises(RuntimeError, match="HTTP 403"):
+        make_client(handler).admin_unassign_role("prn_123", "role_456")
+
+
+SECRETS = [
+    {"id": "sst_1", "grant_key": "static_secret_id", "foreign_id": "github-pat", "name": "GitHub"},
+    {"id": "pgd_2", "grant_key": "pg_dsn_secret_id", "foreign_id": "analytics", "name": "DB"},
+]
+
+
+def test_admin_grant_secret_posts_the_secret_under_its_grant_key():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/prn_123":
+            return json_response({"data": {"id": "prn_123"}})
+        if request.url.path == SANDBOX_ADMIN_SECRETS_PATH:
+            return json_response({"data": SECRETS})
+        assert request.method == "POST"
+        assert request.url.path == SANDBOX_ADMIN_GRANTS_PATH
+        assert json.loads(request.content) == {
+            "data": {"principal_id": "prn_123", "pg_dsn_secret_id": "pgd_2"}
+        }
+        return json_response({"data": {"id": "grt_9"}}, 201)
+
+    assert make_client(handler).admin_grant_secret("prn_123", "analytics") == {"id": "grt_9"}
+
+
+def test_admin_revoke_secret_deletes_the_matching_direct_grant():
+    deleted = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            deleted.append(request.url.path)
+            return httpx.Response(204)
+        if request.url.path == f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/prn_123":
+            return json_response({"data": {"id": "prn_123"}})
+        if request.url.path == SANDBOX_ADMIN_SECRETS_PATH:
+            return json_response({"data": SECRETS})
+        return json_response(
+            {
+                "data": [
+                    {"id": "grt_1", "pg_dsn_secret_id": "pgd_other"},
+                    {"id": "grt_2", "static_secret_id": "sst_1"},
+                ],
+                "meta": {"total_pages": 1},
+            }
+        )
+
+    make_client(handler).admin_revoke_secret("prn_123", "sst_1")
+
+    assert deleted == [f"{SANDBOX_ADMIN_GRANTS_PATH}/grt_2"]
+
+
+def test_admin_grant_secret_refuses_ambiguous_names():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == SANDBOX_ADMIN_SECRETS_PATH:
+            duplicate = {**SECRETS[1], "id": "pgd_3", "foreign_id": "other"}
+            return json_response({"data": [*SECRETS, duplicate]})
+        return json_response({"data": {"id": "prn_123"}})
+
+    with pytest.raises(RuntimeError, match="several secrets"):
+        make_client(handler).admin_grant_secret("prn_123", "DB")
+
+
+def test_admin_set_sandbox_access_sends_only_supplied_capabilities():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return json_response({"data": {"id": "prn_123"}})
+        assert request.method == "PATCH"
+        assert request.url.path == f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/prn_123/sandbox_access"
+        assert json.loads(request.content) == {"data": {"sandbox_sessions_read_enabled": True}}
+        return json_response({"data": {"id": "prn_123"}})
+
+    make_client(handler).admin_set_sandbox_access(
+        "prn_123", sandbox_sessions_read_enabled=True, sandbox_repo_cache=None
+    )
+
+
+def test_admin_slack_external_teams_add_and_remove_one_team_id():
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else None
+        requests.append((request.method, request.url.path, body))
+        return json_response({"data": ["T0PARTNER"]})
+
+    client = make_client(handler)
+    assert client.admin_add_slack_external_team("T0PARTNER") == ["T0PARTNER"]
+    assert client.admin_remove_slack_external_team("E0GRID") == ["T0PARTNER"]
+
+    assert requests == [
+        ("POST", SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH, {"data": {"team_id": "T0PARTNER"}}),
+        ("DELETE", f"{SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH}/E0GRID", None),
+    ]

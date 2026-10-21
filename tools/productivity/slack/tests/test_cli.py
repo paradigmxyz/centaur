@@ -781,3 +781,45 @@ def test_thread_direct_calls_direct_client(monkeypatch) -> None:
             },
         )
     ]
+
+
+@pytest.mark.parametrize("removed", [True, False])
+def test_unreact_calls_client_and_reports_result(monkeypatch, removed) -> None:
+    calls = []
+
+    def fake_remove_reaction(*args):
+        calls.append(args)
+        return {"removed": removed}
+
+    monkeypatch.setitem(
+        sys.modules, "slack.client", types.SimpleNamespace(remove_reaction=fake_remove_reaction)
+    )
+    result = CliRunner().invoke(app, ["unreact", "C1234567890", "123.000001", ":pencil2:"])
+
+    assert result.exit_code == 0
+    assert calls == [("C1234567890", "123.000001", ":pencil2:")]
+    assert ("Reaction removed" if removed else "Reaction already absent") in result.output
+
+
+@pytest.mark.parametrize(
+    "error", [RuntimeError("Slack API error: missing_scope"), ValueError("invalid emoji")]
+)
+def test_unreact_reports_failure(monkeypatch, error) -> None:
+    def fake_remove_reaction(*args):
+        raise error
+
+    monkeypatch.setitem(
+        sys.modules, "slack.client", types.SimpleNamespace(remove_reaction=fake_remove_reaction)
+    )
+    result = CliRunner().invoke(app, ["unreact", "C1234567890", "123.456", "pencil2"])
+
+    assert result.exit_code == 1
+    assert str(error) in result.output
+    assert "Reaction removed" not in result.output
+
+
+def test_unreact_is_discoverable() -> None:
+    assert "unreact" in CliRunner().invoke(app, ["--help"]).output
+    result = CliRunner().invoke(app, ["unreact", "--help"])
+    assert result.exit_code == 0
+    assert "reactions:write" in result.output

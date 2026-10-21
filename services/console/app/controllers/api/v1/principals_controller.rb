@@ -40,15 +40,7 @@ module Api
       # PUT/PATCH upserts: an opaque id updates that record, any other identifier
       # is a foreign_id that is created when absent. foreign_id is immutable.
       def update
-        principal = resolve_for_upsert(Principal)
-        was_new = principal.new_record?
-        ActiveRecord::Base.transaction do
-          principal.assign_attributes(principal_params)
-          principal.link_console_user_by_slack_email if data_params.key?(:slack_email)
-          principal.apply_default_sandbox_capabilities!(principal_params) if was_new
-          principal.save!
-          replace_slack_channel_permissions!(principal) if data_params.key?(:slack_channel_permissions)
-        end
+        principal, was_new = upsert_with_retry
         render status: (was_new ? :created : :ok), json: { data: record_payload(principal) }
       rescue ActiveRecord::RecordInvalid => e
         render_validation_error(e.record)
@@ -75,6 +67,32 @@ module Api
       end
 
       private
+
+      # Concurrent first turns upsert the same new foreign_id. The loser fails
+      # the unique index or the uniqueness validation, so retry once, which
+      # finds and updates the winner's record.
+      def upsert_with_retry
+        upsert!
+      rescue ActiveRecord::RecordNotUnique
+        upsert!
+      rescue ActiveRecord::RecordInvalid => e
+        raise unless e.record.errors.of_kind?(:foreign_id, :taken)
+
+        upsert!
+      end
+
+      def upsert!
+        principal = resolve_for_upsert(Principal)
+        was_new = principal.new_record?
+        ActiveRecord::Base.transaction do
+          principal.assign_attributes(principal_params)
+          principal.link_console_user_by_slack_email if data_params.key?(:slack_email)
+          principal.apply_default_sandbox_capabilities!(principal_params) if was_new
+          principal.save!
+          replace_slack_channel_permissions!(principal) if data_params.key?(:slack_channel_permissions)
+        end
+        [ principal, was_new ]
+      end
 
       def record_payload(principal)
         {

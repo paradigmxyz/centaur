@@ -92,6 +92,7 @@ const apiUrl = required('E2E_API_URL')
 const apiKey = required('E2E_API_KEY')
 const consoleUrl = required('E2E_CONSOLE_URL')
 const consoleApiKey = required('E2E_CONSOLE_API_KEY')
+const logDir = required('E2E_LOG_DIR')
 const namespace = 'centaur'
 const release = 'centaur'
 
@@ -202,6 +203,10 @@ export const cluster = {
   },
   /** Restarts a release component and waits for the new pods to be ready. */
   async restart(component: string): Promise<void> {
+    // The new pods replace the old ones and their logs; keep them for failures earlier in the run.
+    const logs = await kubectl({}, 'logs', `deploy/${release}-centaur-${component}`, '--tail=-1')
+      .catch(error => String(error))
+    await Bun.write(`${logDir}/${component}-before-restart-${Date.now()}.log`, logs)
     await kubectl({}, 'rollout', 'restart', `deploy/${release}-centaur-${component}`)
     await kubectl({}, 'rollout', 'status', `deploy/${release}-centaur-${component}`, '--timeout=180s')
   },

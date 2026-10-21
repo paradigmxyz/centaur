@@ -20,16 +20,15 @@ ENV CARGO_INCREMENTAL=0 \
     RUSTC_WRAPPER=/usr/local/bin/sccache \
     SCCACHE_DIR=/var/cache/sccache
 WORKDIR /build
-COPY crates/active-record-encryption/ crates/active-record-encryption/
-COPY services/proxy-sync/ services/proxy-sync/
-WORKDIR /build/services/proxy-sync
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
 ARG RUST_BUILD_PROFILE=release
 RUN --mount=type=cache,id=proxy-sync-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=proxy-sync-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=proxy-sync-sccache-${TARGETARCH},target=/var/cache/sccache,sharing=locked \
     case "$RUST_BUILD_PROFILE" in \
-      release) cargo build --release && cp target/release/centaur-proxy-sync /usr/local/bin/centaur-proxy-sync ;; \
-      debug|dev) cargo build && cp target/debug/centaur-proxy-sync /usr/local/bin/centaur-proxy-sync ;; \
+      release) cargo build --release --locked -p centaur-proxy-sync && cp target/release/centaur-proxy-sync /usr/local/bin/centaur-proxy-sync ;; \
+      debug|dev) cargo build --locked -p centaur-proxy-sync && cp target/debug/centaur-proxy-sync /usr/local/bin/centaur-proxy-sync ;; \
       *) echo "unsupported RUST_BUILD_PROFILE=$RUST_BUILD_PROFILE" >&2; exit 2 ;; \
     esac && \
     sccache --show-stats

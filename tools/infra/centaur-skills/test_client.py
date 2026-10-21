@@ -4,7 +4,7 @@ import httpx
 import pytest
 from cli import (
     add_editor,
-    create,
+    app,
     delete,
     edit,
     editors,
@@ -19,6 +19,8 @@ from client import (
     SkillsCatalog,
     SkillsClient,
 )
+from rich.text import Text
+from typer.testing import CliRunner
 
 
 def json_response(payload, status_code=200):
@@ -121,7 +123,8 @@ def test_read_uses_skill_name_or_oid_and_returns_document(identifier):
     assert result["document"].startswith("---\n")
 
 
-def test_create_posts_skill_fields_and_returns_author_payload():
+@pytest.mark.parametrize("visibility", [None, "private", "shared"])
+def test_create_posts_skill_fields_and_returns_author_payload(visibility):
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
         assert request.url.path == SANDBOX_SKILLS_PATH
@@ -130,6 +133,7 @@ def test_create_posts_skill_fields_and_returns_author_payload():
                 "name": "incident-triage",
                 "description": "Triage incidents.",
                 "instructions": "# Workflow\n\nInvestigate the alert.",
+                "visibility": visibility or "shared",
             }
         }
         return json_response(
@@ -147,6 +151,7 @@ def test_create_posts_skill_fields_and_returns_author_payload():
         "incident-triage",
         "Triage incidents.",
         "# Workflow\n\nInvestigate the alert.",
+        **({"visibility": visibility} if visibility is not None else {}),
     )
 
     assert result == {
@@ -443,35 +448,98 @@ def test_cli_read_outputs_raw_skill_markdown(monkeypatch, capsys):
     assert capsys.readouterr().out == "# Incident Response\n"
 
 
-def test_cli_create_reads_instructions_file(monkeypatch, capsys, tmp_path):
+def test_cli_create_reads_instructions_file(monkeypatch, tmp_path):
     instructions_file = tmp_path / "instructions.md"
     instructions_file.write_text("# Workflow\n\nInvestigate the alert.\n")
+    requests = []
 
-    class StubClient:
-        def __enter__(self):
-            return self
+    def handler(request):
+        requests.append(request)
+        return json_response({"data": {"id": "skl_123"}}, status_code=201)
 
-        def __exit__(self, *_args):
-            return None
+    monkeypatch.setattr("cli.get_client", lambda: make_client(handler))
 
-        def create(self, name, description, instructions):
-            assert name == "incident-triage"
-            assert description == "Triage incidents."
-            assert instructions == "# Workflow\n\nInvestigate the alert.\n"
-            return {"id": "skl_123", "name": name, "lock_version": 0}
-
-    monkeypatch.setattr("cli.get_client", StubClient)
-
-    create(
-        "incident-triage",
-        description="Triage incidents.",
-        instructions=None,
-        instructions_file=instructions_file,
+    result = CliRunner().invoke(
+        app,
+        [
+            "create",
+            "incident-triage",
+            "--description",
+            "Triage incidents.",
+            "--instructions-file",
+            str(instructions_file),
+            "--visibility",
+            "private",
+        ],
     )
 
-    assert json.loads(capsys.readouterr().out) == {
-        "data": {"id": "skl_123", "name": "incident-triage", "lock_version": 0}
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"data": {"id": "skl_123"}}
+    assert len(requests) == 1
+    assert requests[0].method == "POST"
+    assert requests[0].url.path == SANDBOX_SKILLS_PATH
+    assert json.loads(requests[0].content) == {
+        "data": {
+            "name": "incident-triage",
+            "description": "Triage incidents.",
+            "instructions": "# Workflow\n\nInvestigate the alert.\n",
+            "visibility": "private",
+        }
     }
+
+
+@pytest.mark.parametrize("visibility", [None, "private", "shared"])
+def test_cli_create_sends_visibility_in_request(monkeypatch, visibility):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return json_response({"data": {"id": "skl_123"}}, status_code=201)
+
+    monkeypatch.setattr("cli.get_client", lambda: make_client(handler))
+    args = [
+        "create",
+        "incident-triage",
+        "--description",
+        "Triage incidents.",
+        "--instructions",
+        "Investigate the alert.",
+    ]
+    if visibility is not None:
+        args.extend(["--visibility", visibility])
+
+    result = CliRunner().invoke(app, args)
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"data": {"id": "skl_123"}}
+    assert len(requests) == 1
+    assert requests[0].method == "POST"
+    assert requests[0].url.path == SANDBOX_SKILLS_PATH
+    assert json.loads(requests[0].content)["data"]["visibility"] == (visibility or "shared")
+
+
+def test_cli_create_rejects_invalid_visibility_before_request(monkeypatch):
+    def unexpected_client():
+        pytest.fail("invalid visibility must not reach the API")
+
+    monkeypatch.setattr("cli.get_client", unexpected_client)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "create",
+            "incident-triage",
+            "--description",
+            "Triage incidents.",
+            "--instructions",
+            "Investigate the alert.",
+            "--visibility",
+            "invalid",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "Invalid value for '--visibility'" in Text.from_ansi(result.output).plain
 
 
 def test_cli_edit_sends_partial_fields(monkeypatch, capsys):

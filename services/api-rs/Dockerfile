@@ -31,16 +31,15 @@ ENV CARGO_INCREMENTAL=0 \
     RUSTC_WRAPPER=/usr/local/bin/sccache \
     SCCACHE_DIR=/var/cache/sccache
 WORKDIR /build
-COPY crates/absurd-sdk/ crates/absurd-sdk/
-COPY services/api-rs/ services/api-rs/
-WORKDIR /build/services/api-rs
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
 ARG RUST_BUILD_PROFILE=release
 RUN --mount=type=cache,id=api-rs-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=api-rs-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=api-rs-sccache-${TARGETARCH},target=/var/cache/sccache,sharing=locked \
     case "$RUST_BUILD_PROFILE" in \
-      release) cargo build --release -p centaur-api-server && cp target/release/centaur-api-server /usr/local/bin/centaur-api-server ;; \
-      debug|dev) cargo build -p centaur-api-server && cp target/debug/centaur-api-server /usr/local/bin/centaur-api-server ;; \
+      release) cargo build --release --locked -p centaur-api-server && cp target/release/centaur-api-server /usr/local/bin/centaur-api-server ;; \
+      debug|dev) cargo build --locked -p centaur-api-server && cp target/debug/centaur-api-server /usr/local/bin/centaur-api-server ;; \
       *) echo "unsupported RUST_BUILD_PROFILE=$RUST_BUILD_PROFILE" >&2; exit 2 ;; \
     esac && \
     sccache --show-stats

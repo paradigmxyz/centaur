@@ -212,6 +212,7 @@ settings:
       - app_mention
       - message.im
       - app_home_opened
+      - agent_session_stopped
 ```
 
 This is a fragment to merge into your app manifest. Reinstall the app if its
@@ -225,11 +226,10 @@ that thread's session without a mention. Channel replies still require a
 mention. Existing DM thread replies retain their thread identity. Older
 conversation-wide DM subscriptions do not override Agent mode's thread roots.
 
-Streaming progress and titles continue through the existing renderer. Native
-Stop support is deferred. Do not subscribe to `agent_session_stopped` yet;
-remove it if you previously added it. Without that subscription, Slack shows
-a loading indicator without a Stop button. The existing mentioned `stop`
-command remains available.
+Streaming progress and titles continue through the existing renderer. With
+`agent_session_stopped` subscribed, Slack shows a Stop button that interrupts
+the running execution, like the mentioned `stop` command. Without that
+subscription, Slack shows a loading indicator without a Stop button.
 
 Suggested prompts can be configured statically in the manifest. Context-aware
 prompts and synchronization of user-edited Slack session titles are separate

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from enum import StrEnum
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from dotenv import load_dotenv
@@ -15,6 +17,11 @@ app = typer.Typer(
     help="Discover repository and Console skills, and manage Console skills",
     no_args_is_help=True,
 )
+
+
+class SkillVisibility(StrEnum):
+    private = "private"
+    shared = "shared"
 
 
 def get_client():
@@ -82,12 +89,17 @@ def create(
         readable=True,
         help="Read the Markdown instruction body from this file",
     ),
+    visibility: Annotated[
+        SkillVisibility, typer.Option("--visibility", help="Who can discover and read the skill")
+    ] = SkillVisibility.shared,
 ) -> None:
-    """Create a shared Console-authored skill."""
+    """Create a private or shared Console-authored skill."""
     resolved_instructions = _resolve_instructions(instructions, instructions_file, required=True)
     assert resolved_instructions is not None
     with get_client() as client:
-        result = client.create(name, description, resolved_instructions)
+        result = client.create(
+            name, description, resolved_instructions, visibility=visibility.value
+        )
     print(json.dumps({"data": result}, indent=2, default=str))
 
 

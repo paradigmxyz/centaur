@@ -1,20 +1,19 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use codex_app_server_protocol::{
-    AgentMessageDeltaNotification, CommandAction, CommandExecutionSource, CommandExecutionStatus,
-    DynamicToolCallStatus, ErrorNotification, ItemCompletedNotification, ItemStartedNotification,
-    ServerNotification, SessionSource, Thread, ThreadItem, ThreadStartedNotification, ThreadStatus,
-    Turn, TurnCompletedNotification, TurnError, TurnItemsView, TurnStartedNotification, TurnStatus,
-    UserInput,
-};
-use codex_protocol::models::MessagePhase;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Value;
 
+use crate::Result;
+use crate::protocol::{
+    AgentMessageDeltaNotification, CommandAction, CommandExecutionSource, CommandExecutionStatus,
+    DynamicToolCallOutputContentItem, DynamicToolCallStatus, ErrorNotification,
+    ItemCompletedNotification, ItemStartedNotification, MessagePhase,
+    ReasoningTextDeltaNotification, ServerNotification, SessionSource, Thread, ThreadItem,
+    ThreadStartedNotification, ThreadStatus, Turn, TurnCompletedNotification, TurnError,
+    TurnItemsView, TurnStartedNotification, TurnStatus, UserInput,
+};
 use crate::traits::{NormalizedContent, NormalizedEvent, NormalizedToolResult};
-use crate::util::{now_millis, now_secs, stable_id, suffix_delta};
-use crate::{HarnessServerError, Result};
+use crate::util::{absolute_path, now_millis, now_secs, stable_id, suffix_delta};
 
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
@@ -310,11 +309,7 @@ impl CodexTurnNormalizer {
     }
 
     fn thread(&self) -> Result<Thread> {
-        let cwd = AbsolutePathBuf::from_absolute_path(&self.cwd).map_err(|_| {
-            HarnessServerError::CwdMustBeAbsolute {
-                path: self.cwd.clone(),
-            }
-        })?;
+        let cwd = absolute_path(self.cwd.clone())?;
         let now = now_secs();
         Ok(Thread {
             id: self.thread_id.clone(),
@@ -460,7 +455,7 @@ impl CodexTurnNormalizer {
         let delta = suffix_delta(&previous, &final_text);
         if !delta.is_empty() {
             out.push(ServerNotification::ReasoningTextDelta(
-                codex_app_server_protocol::ReasoningTextDeltaNotification {
+                ReasoningTextDeltaNotification {
                     thread_id: self.thread_id.clone(),
                     turn_id: self.turn_id.clone(),
                     item_id: item_id.to_string(),
@@ -503,7 +498,7 @@ impl CodexTurnNormalizer {
             out.push(self.item_started(item));
         }
         out.push(ServerNotification::ReasoningTextDelta(
-            codex_app_server_protocol::ReasoningTextDeltaNotification {
+            ReasoningTextDeltaNotification {
                 thread_id: self.thread_id.clone(),
                 turn_id: self.turn_id.clone(),
                 item_id: item_id.to_string(),
@@ -628,11 +623,9 @@ impl CodexTurnNormalizer {
                 } else {
                     DynamicToolCallStatus::Completed
                 },
-                content_items: Some(vec![
-                    codex_app_server_protocol::DynamicToolCallOutputContentItem::InputText {
-                        text: result.content.clone(),
-                    },
-                ]),
+                content_items: Some(vec![DynamicToolCallOutputContentItem::InputText {
+                    text: result.content.clone(),
+                }]),
                 success: Some(!result.is_error),
                 duration_ms: None,
             },
@@ -650,11 +643,7 @@ impl CodexTurnNormalizer {
         aggregated_output: Option<String>,
         exit_code: Option<i32>,
     ) -> Result<ThreadItem> {
-        let cwd = AbsolutePathBuf::from_absolute_path(&self.cwd).map_err(|_| {
-            HarnessServerError::CwdMustBeAbsolute {
-                path: self.cwd.clone(),
-            }
-        })?;
+        let cwd = absolute_path(self.cwd.clone())?;
         Ok(ThreadItem::CommandExecution {
             id: item_id,
             command: command.clone(),
@@ -750,10 +739,10 @@ fn strip_exit_code_prefix(content: &str) -> (String, Option<i32>) {
 
 #[cfg(test)]
 mod tests {
-    use codex_app_server_protocol::ServerNotification;
     use serde_json::{Value, json};
 
     use crate::anthropic::AnthropicStreamEvent;
+    use crate::protocol::ServerNotification;
     use crate::wire::notification_to_jsonrpc;
 
     use super::*;
