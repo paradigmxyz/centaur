@@ -250,9 +250,8 @@ mod tests {
     use super::*;
     use crate::test_support::TestDatabase;
 
-    const ABSURD_SCHEMA: &str = include_str!(
-        "../../api-rs/crates/centaur-session-sqlx/migrations/0007_absurd_workflows.sql"
-    );
+    const ABSURD_SCHEMA: &str =
+        include_str!("../../../crates/centaur-session-sqlx/migrations/0007_absurd_workflows.sql");
 
     fn tasks(samples: &[Sample], state: &str) -> f64 {
         samples

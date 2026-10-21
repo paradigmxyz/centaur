@@ -1,19 +1,12 @@
 [workspace]
 members = [
-    "crates/centaur-api-server",
-    "crates/centaur-iron-control",
-    "crates/centaur-iron-proxy",
-    "crates/centaur-perms",
-    "crates/centaur-sandbox-core",
-    "crates/centaur-sandbox-agent-k8s",
-    "crates/centaur-sandbox-manager",
-    "crates/centaur-session-cli",
-    "crates/centaur-session-core",
-    "crates/centaur-session-runtime",
-    "crates/centaur-session-sqlx",
-    "crates/centaur-telemetry",
-    "crates/centaur-workflows",
+    "crates/*",
+    "services/company-context",
+    "services/proxy-sync",
+    "services/token-broker",
 ]
+# Its own workspace, so the Codex dependency tree stays out of this lockfile.
+exclude = ["crates/harness-server-conformance"]
 resolver = "3"
 
 [workspace.package]
@@ -32,7 +25,7 @@ unimplemented = "warn"
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"
-absurd-sdk = { path = "../../crates/absurd-sdk" }
+absurd-sdk = { path = "crates/absurd-sdk" }
 axum = "0.8.9"
 bytes = { version = "1", features = ["serde"] }
 centaur-api-server = { path = "crates/centaur-api-server" }

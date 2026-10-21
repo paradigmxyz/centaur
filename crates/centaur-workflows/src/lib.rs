@@ -4244,15 +4244,13 @@ fn python_workflow_host_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
-        .join("..")
+        .join("services")
         .join("workflow-python")
         .join("workflow_host.py")
 }
 
 fn default_workflow_dirs() -> String {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
         .join("..")
         .join("..");
     repo_root.join("workflows").to_string_lossy().to_string()

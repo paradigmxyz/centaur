@@ -168,7 +168,7 @@ postgres:
 #[test]
 fn shipped_proxy_allowlist_preserves_integration_headers() {
     let config: serde_yaml::Value =
-        serde_yaml::from_str(include_str!("../../../../iron-proxy/iron-proxy.yaml")).unwrap();
+        serde_yaml::from_str(include_str!("../../../services/iron-proxy/iron-proxy.yaml")).unwrap();
     let transforms = config["transforms"].as_sequence().unwrap();
     let header_allowlist = transforms
         .iter()

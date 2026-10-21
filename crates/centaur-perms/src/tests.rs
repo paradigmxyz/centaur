@@ -913,7 +913,7 @@ fn select_secrets_unknown_name_errors() {
 /// The repo `tools/` directory, relative to this crate. `None` when the crate
 /// is built outside the monorepo checkout (the fidelity tests then no-op).
 fn repo_tools_dir() -> Option<PathBuf> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../tools");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools");
     dir.is_dir().then_some(dir)
 }
 
