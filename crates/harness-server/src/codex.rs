@@ -10,11 +10,11 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
-use codex_app_server_protocol::UserInput;
 use serde_json::{Value, json};
 
 use self::citations::CodexCitationFilter;
 use crate::otel::{TurnStatus as TelemetryTurnStatus, TurnTelemetry};
+use crate::protocol::UserInput;
 use crate::server::{
     BlocksCommand, BlocksState, parse_blocks_line_with_state, usage_span_input_value,
     write_blocks_error,
