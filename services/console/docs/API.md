@@ -1109,12 +1109,13 @@ The sandbox permissions response includes an `oauth_credentials` array with non-
 
 ### Sandbox Admin Permission Management
 
-An active admin Console user's Slack DM sandbox may inspect a principal's effective grants, manage its roles, direct secret grants, Slack channel permissions, and sandbox capabilities, and edit the Slack Connect allowlist with its sandbox entitlement JWT. The sandbox principal must be a `slack_dm` principal linked to that admin whose Slack team is the bot's workspace, as recorded by the Slack channel catalog. Other sandboxes, including channel, Slack Connect, and Console-user sessions, receive `403`. Request and response shapes match the corresponding admin endpoints.
+An active admin Console user's Slack DM sandbox may create Slack channel and Slack user principals, inspect a principal's effective grants, manage its roles, direct secret grants, Slack channel permissions, and sandbox capabilities, and edit the Slack Connect allowlist with its sandbox entitlement JWT. The sandbox principal must be a `slack_dm` principal linked to that admin whose Slack team is the bot's workspace, as recorded by the Slack channel catalog. Other sandboxes, including channel, Slack Connect, and Console-user sessions, receive `403`. Request and response shapes match the corresponding admin endpoints.
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
 | `GET` | `/api/v1/sandbox/admin/principals` | List principals. `slack_channel_id=<id>` returns only principals bound to that channel. |
 | `GET` | `/api/v1/sandbox/admin/principals/:id` | Fetch one by OID. |
+| `POST` | `/api/v1/sandbox/admin/principals` | Create a Slack channel (`data: { kind: "slack_channel", slack_channel_id, name }`) or Slack user (`data: { kind: "slack_dm", slack_user_id, name }`) principal. `name` is optional. The foreign ID, kind, display name, and Slack fields match what api-rs derives at session start: `slack-channel-<channel>`, or `slack-user-<team>-<user>` in the admin's workspace. A new channel principal gets full Slack access to its own channel. Other kinds and DM channel IDs return `400`. An existing principal returns `409`, with its `id` and `foreign_id` in `error.details`. |
 | `GET` | `/api/v1/sandbox/admin/principals/lookup/:foreign_id` | Fetch one by foreign ID. |
 | `GET`/`POST` | `/api/v1/sandbox/admin/principals/:principal_id/roles` | List or assign roles (`data: { role_id }`). |
 | `DELETE` | `/api/v1/sandbox/admin/principals/:principal_id/roles/:id` | Unassign a role. |

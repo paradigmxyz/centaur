@@ -264,7 +264,7 @@ Rails.application.routes.draw do
         end
         # Permission management from an active Console admin's Slack DM.
         namespace :admin do
-          resources :principals, only: %i[index show] do
+          resources :principals, only: %i[index show create] do
             collection do
               get "lookup/:foreign_id", action: :lookup, as: :lookup, constraints: { foreign_id: /[^\/]+/ }
             end

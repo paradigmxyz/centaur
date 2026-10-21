@@ -22,6 +22,34 @@ module Api
             render json: { data: principals.map { |principal| record_payload(principal) } }
           end
 
+          # POST /api/v1/sandbox/admin/principals
+          #
+          # Only Slack channel and Slack user principals, with the identity
+          # api-rs derives at session start. A user principal is scoped to the
+          # admin's own workspace. Replaces the operator API's free-form create.
+          def create
+            data = data_params
+            raise ActionController::BadRequest, "data must be an object" unless data.is_a?(ActionController::Parameters)
+
+            id_key = data[:kind] == "slack_dm" ? :slack_user_id : :slack_channel_id
+            values = { kind: data[:kind], id: data[id_key], name: data[:name] }
+            invalid = values.reject { |key, value| value.is_a?(String) || (key == :name && value.nil?) }
+            raise ActionController::BadRequest, "kind, #{id_key}, and name must be strings" if invalid.any?
+
+            principal = SlackPrincipalProvisioner.new(
+              kind: values[:kind], slack_id: values[:id], display_name: values[:name],
+              slack_team_id: current_proxy.principal.slack_team_id, created_by: current_user
+            ).call
+            render status: :created, json: { data: record_payload(principal) }
+          rescue SlackPrincipalProvisioner::InvalidRequest => e
+            render_error(status: :bad_request, message: e.message)
+          rescue SlackPrincipalProvisioner::Conflict => e
+            render_error(status: :conflict, message: e.message,
+                         details: { id: e.principal.oid, foreign_id: e.principal.foreign_id })
+          rescue ActiveRecord::RecordInvalid => e
+            render_validation_error(e.record)
+          end
+
           # GET /api/v1/sandbox/admin/principals/:id/effective_grants
           #
           # Secrets granted directly or through roles, as on the Console
