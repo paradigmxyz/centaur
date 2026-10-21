@@ -9,9 +9,8 @@ It also indexes Granola meeting notes (title, summary, owner, and attendees) thr
 It also discovers the public and private Slack channels (and, when enabled, direct messages) each user belongs to, through the same per-user Slack broker credentials the Rails Console Slack DM sync uses. The app's bot token (`SLACK_BOT_TOKEN`) is synced as one more credential: it discovers the public and private channels the bot is a member of and can sync their history and files, but never its direct messages. The bot is not a principal, so channels only it observes are indexed without being visible to anyone until a user credential observes them too. While `COMPANY_CONTEXT_SLACK_USER_IDS` is set, the bot is synced only if the limit lists the bot's Slack user ID. Each discovery records the credential's Slack identity and its channel memberships; channels that no live Slack credential still observes are removed, along with their messages. The first discovery each cycle to list a conversation syncs its message history. A sync reads the conversation's configured history days (`COMPANY_CONTEXT_SLACK_HISTORY_DAYS`, overridden per conversation by `COMPANY_CONTEXT_SLACK_CHANNEL_HISTORY_DAYS`) whenever part of that span has not been synchronized yet, so raising a value backfills the older history; lowering one keeps messages already synchronized. Otherwise it reads from its previous sync, always rereading the last 72 hours so edits within that window are picked up. Threads are synced whenever a parent message read this way shows a new reply; replies to threads started more than 72 hours earlier are not picked up. Only one sync reads a conversation at a time. Messages are stored privately in the system schema. Each discovery cycle also lists the workspace users through the app's bot token (`SLACK_BOT_TOKEN`), so documents show names instead of user IDs; the bot token needs the `users:read` scope and belongs to the same Slack app, so it shares the same rate-limit schedule. Users are removed once no live credential in their workspace remains. Slack tasks run on their own `company_context_slack` queue and worker, except thread syncs, which run in order on the `company_context_slack_threads` queue so a large backlog of threads does not delay discovery and history syncs.
 
 It also projects documents written directly to the database, such as imports,
-notes, and memory (see [Custom documents](#custom-documents)). Custom documents
-are public:
-every principal can read them.
+notes, and memory (see [Custom documents](#custom-documents)). Each custom
+document is visible only to the principals, roles, or everyone its readers name.
 
 After each sync, the conversation's history is projected into documents on the main queue. Each channel's UTC day is rendered as a transcript in which thread replies follow their parent, in the day the thread started. Joins, topic changes, and similar system messages are left out. The transcript is split into chunks of at most `COMPANY_CONTEXT_CHUNK_CHARS` characters that together cover the whole day: chunks break between messages, a thread split across chunks repeats the start of its parent, and only a single message longer than a chunk is split. Each chunk starts with its channel, date, and time range, and is published as its own document with its own embedding. A day is rendered again when its messages, its channel's name, or the name of a user it mentions changes, and republished only when its content changes; vectors are reused for chunks whose text is unchanged. Slack documents are exposed to retrieval only through the query endpoints.
 
@@ -171,7 +170,7 @@ and principal labels do not count. A document is visible only while an active
 broker observation for one of those identities still reaches its Drive file,
 Slack conversation (for Slack files, any conversation the file is shared in),
 or Granola note; a Calendar event only to the Google identity it was synced
-for. Custom documents are visible to every principal. A principal without one of those identities sees no documents
+for. A custom document is visible to the principals its readers match. A principal without one of those identities sees no documents
 of the corresponding types. Disabling an OAuth app in the Console removes the
 corresponding identity, so its documents stop being returned without being
 removed from the index.
@@ -270,7 +269,7 @@ same shape as a query result without `score`.
 
 ## Custom documents
 
-Custom documents, such as imported archives, notes, and memory, are public.
+Custom documents are imported archives, notes, memory, and similar content.
 Add them by writing rows to `company_context_system.custom_documents` with any
 role that can write to the table, for example with `INSERT ... ON CONFLICT` or
 `\copy`:
@@ -282,10 +281,27 @@ role that can write to the table, for example with `INSERT ... ON CONFLICT` or
 | `title` | At most 1,000 characters. |
 | `body` | Required, not blank, at most 1,000,000 bytes. |
 | `occurred_at` | When the document's content occurred; used by time filters. |
+| `readers` | Required. Who can read the document; see below. |
 | `metadata` | A JSON object of at most 65,536 bytes, such as a link or author. Returned with the document and matched by the `metadata` query filter, but not searched by text; `source` and `external_id` keys are overridden. |
 
 Check constraints reject invalid rows on write. A trigger maintains
 `content_hash`, `created_at`, and `updated_at`.
+
+`readers` is an array, and a principal can read the document when any element
+matches it. An empty array hides the document from everyone. Each element is
+one of:
+
+| Reader | Matches |
+|---|---|
+| `public` | Every principal. |
+| `principal:<id>` | The Console principal with this opaque ID (`prn_...`) or foreign ID. |
+| `role:<id>` | Principals assigned the Console role with this opaque ID (`role_...`) or foreign ID. |
+
+For example, `'{role:eng,principal:prn_5CO4fITZ}'`. A change to `readers`
+applies to the published documents immediately and does not re-embed them.
+Queries run as the session's principal, so in a channel session only readers
+that match the channel's principal or its roles apply, not the person who sent
+the message.
 
 Every `COMPANY_CONTEXT_CUSTOM_PROJECT_INTERVAL_SECONDS`, the service chunks
 and embeds new and changed rows, title and body together, and publishes them as

@@ -105,9 +105,14 @@ pub struct GoogleCredential {
 /// The provider identities a Console principal is known by. Google and
 /// Granola identities are the subjects of the live broker credentials granted
 /// directly to the principal, the accounts it can already use through the
-/// proxy; principal labels are not trusted.
+/// proxy; principal labels are not trusted. The principal and its roles are
+/// also known by their Console IDs, which custom document grants name.
 #[derive(Clone, Debug, Default, sqlx::FromRow)]
 pub struct PrincipalIdentity {
+    pub principal_id: i64,
+    pub principal_foreign_id: Option<String>,
+    pub role_ids: Vec<i64>,
+    pub role_foreign_ids: Vec<String>,
     pub slack_user_id: Option<String>,
     pub google_subjects: Vec<String>,
     pub granola_subjects: Vec<String>,
@@ -565,7 +570,21 @@ impl ConsoleCredentials {
                   AND credentials.dead = FALSE
                   AND credentials.provider_subject <> ''
             )
-            SELECT CASE WHEN EXISTS (
+            SELECT p.id AS principal_id,
+                   NULLIF(p.foreign_id, '') AS principal_foreign_id,
+                   ARRAY(
+                       SELECT r.id FROM principal_roles pr
+                       JOIN roles r ON r.id = pr.role_id
+                       WHERE pr.principal_id = p.id
+                       ORDER BY r.id
+                   ) AS role_ids,
+                   ARRAY(
+                       SELECT r.foreign_id FROM principal_roles pr
+                       JOIN roles r ON r.id = pr.role_id
+                       WHERE pr.principal_id = p.id AND r.foreign_id <> ''
+                       ORDER BY r.foreign_id
+                   ) AS role_foreign_ids,
+                   CASE WHEN EXISTS (
                        SELECT 1 FROM oauth_apps app
                        WHERE app.provider = 'slack' AND app.slug = $4 AND app.enabled = TRUE
                    ) THEN NULLIF(BTRIM(p.slack_user_id), '') END AS slack_user_id,
@@ -682,12 +701,16 @@ mod tests {
         // The Console tables the identity lookup reads. Ada (1) holds direct
         // grants for a Google credential and two live Granola credentials,
         // plus a dead one and one from another app. Bob (2) has Granola only
-        // through a role grant, and a Google subject only as a label.
+        // through a role grant, and a Google subject only as a label. Bob has
+        // roles 1 and 2, of which only 1 has a foreign ID.
         pool.execute(
             r#"
             CREATE TABLE principals (
-                id bigint PRIMARY KEY, labels jsonb NOT NULL DEFAULT '{}', slack_user_id text
+                id bigint PRIMARY KEY, labels jsonb NOT NULL DEFAULT '{}', slack_user_id text,
+                foreign_id text
             );
+            CREATE TABLE roles (id bigint PRIMARY KEY, foreign_id text);
+            CREATE TABLE principal_roles (principal_id bigint, role_id bigint);
             CREATE TABLE oauth_apps (
                 id bigint PRIMARY KEY, provider text NOT NULL, slug text NOT NULL,
                 enabled boolean NOT NULL DEFAULT true
@@ -700,8 +723,10 @@ mod tests {
             CREATE TABLE grants (principal_id bigint, role_id bigint, static_secret_id bigint);
 
             INSERT INTO principals VALUES
-                (1, '{}', 'U-ADA'),
-                (2, '{"google_subject": "G-BOB"}', NULL);
+                (1, '{}', 'U-ADA', 'ada'),
+                (2, '{"google_subject": "G-BOB"}', NULL, NULL);
+            INSERT INTO roles VALUES (1, 'eng'), (2, NULL);
+            INSERT INTO principal_roles VALUES (2, 1), (2, 2);
             INSERT INTO oauth_apps VALUES
                 (1, 'granola', 'granola'), (2, 'granola', 'other'), (3, 'google', 'google'),
                 (4, 'slack', 'slack');
@@ -726,7 +751,13 @@ mod tests {
         assert_eq!(ada.slack_user_id.as_deref(), Some("U-ADA"));
         assert_eq!(ada.google_subjects, ["G-ADA"]);
         assert_eq!(ada.granola_subjects, ["GR-ADA", "GR-ADA-2"]);
+        assert_eq!(ada.principal_foreign_id.as_deref(), Some("ada"));
+        assert!(ada.role_ids.is_empty());
         let bob = credentials.principal_identity(2).await.unwrap().unwrap();
+        assert_eq!(bob.principal_id, 2);
+        assert!(bob.principal_foreign_id.is_none());
+        assert_eq!(bob.role_ids, [1, 2]);
+        assert_eq!(bob.role_foreign_ids, ["eng"]);
         assert!(bob.google_subjects.is_empty());
         assert!(bob.granola_subjects.is_empty());
         assert!(credentials.principal_identity(3).await.unwrap().is_none());

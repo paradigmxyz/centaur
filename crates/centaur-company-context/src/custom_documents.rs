@@ -201,9 +201,11 @@ async fn write(
     }
     let mut tx = pool.begin().await?;
     // Holds off concurrent updates and deletes of the row until committed.
-    let current: Option<String> = sqlx::query_scalar(
+    // Readers are read here, not with the batch, since changing them does
+    // not change the content hash.
+    let current: Option<(String, Vec<String>)> = sqlx::query_as(
         r#"
-        SELECT content_hash FROM company_context_system.custom_documents
+        SELECT content_hash, readers FROM company_context_system.custom_documents
         WHERE source = $1 AND external_id = $2
         FOR SHARE
         "#,
@@ -212,10 +214,13 @@ async fn write(
     .bind(&item.external_id)
     .fetch_optional(&mut *tx)
     .await?;
-    if current.as_deref() != Some(item.content_hash.as_str()) {
-        tx.rollback().await?;
-        return Ok(false);
-    }
+    let readers = match current {
+        Some((content_hash, readers)) if content_hash == item.content_hash => readers,
+        _ => {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+    };
     sqlx::query(
         r#"
         DELETE FROM company_context_data.custom_document_chunks
@@ -232,9 +237,9 @@ async fn write(
             r#"
             INSERT INTO company_context_data.custom_document_chunks (
                 document_id, source, external_id, chunk_id, title, body,
-                occurred_at, metadata, item_hash, content_hash
+                occurred_at, metadata, item_hash, content_hash, readers
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             "#,
         )
         .bind(&chunk.document_id)
@@ -247,6 +252,7 @@ async fn write(
         .bind(&item.metadata)
         .bind(&item.content_hash)
         .bind(&content_hash)
+        .bind(&readers)
         .execute(&mut *tx)
         .await?;
         sqlx::query(
@@ -373,18 +379,22 @@ mod tests {
         (EmbeddingsClient::new(&config).unwrap(), server)
     }
 
-    /// A principal without any source identity.
+    /// A principal without any source identity or role.
     fn anyone() -> PrincipalIdentity {
-        PrincipalIdentity {
-            slack_user_id: None,
-            google_subjects: Vec::new(),
-            granola_subjects: Vec::new(),
-        }
+        PrincipalIdentity::default()
     }
 
     async fn search(pool: &PgPool, body: Value) -> Result<Vec<(String, String)>> {
+        search_as(pool, &anyone(), body).await
+    }
+
+    async fn search_as(
+        pool: &PgPool,
+        identity: &PrincipalIdentity,
+        body: Value,
+    ) -> Result<Vec<(String, String)>> {
         let request: QueryRequest = serde_json::from_value(body).unwrap();
-        let mut results: Vec<_> = query::search(pool, None, &anyone(), &request)
+        let mut results: Vec<_> = query::search(pool, None, identity, &request)
             .await?
             .into_iter()
             .map(|result| (result.document.document_id, result.document.text))
@@ -401,7 +411,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn custom_rows_are_projected_public_and_follow_their_rows() {
+    async fn custom_rows_are_projected_and_follow_their_rows() {
         let Ok(database_url) = env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
             eprintln!("skipping: set COMPANY_CONTEXT_TEST_DATABASE_URL to a ParadeDB Postgres URL");
             return;
@@ -414,11 +424,11 @@ mod tests {
         pool.execute(
             r#"
             INSERT INTO company_context_system.custom_documents
-                (source, external_id, title, body, occurred_at, metadata)
+                (source, external_id, title, body, occurred_at, metadata, readers)
             VALUES
                 ('archive', 'note/1', 'Falcon', 'falcon launch retro', '2020-01-02Z',
-                 '{"author": "Ada", "source": "spoofed"}'),
-                ('archive', 'note/2', '', 'falcon budget REJECT', NULL, '{}');
+                 '{"author": "Ada", "source": "spoofed"}', '{public}'),
+                ('archive', 'note/2', '', 'falcon budget REJECT', NULL, '{}', '{public}');
             "#,
         )
         .await
@@ -427,7 +437,7 @@ mod tests {
         assert_eq!(project().await.unwrap(), summary(1, 1));
         assert_eq!(project().await.unwrap(), summary(0, 0));
 
-        // Any principal finds and reads it, even without source identities.
+        // Any principal finds and reads a public row, even without identities.
         assert_eq!(
             search(pool, json!({ "query": "falcon" })).await.unwrap(),
             [(
@@ -557,21 +567,147 @@ mod tests {
 
         // Invalid rows are refused on write.
         for invalid in [
-            "('Archive', 'x', 'body', '{}')",
-            "('archive', '', 'body', '{}')",
-            "('archive', 'x', '  ', '{}')",
-            "('archive', 'x', 'body', '[]')",
+            "('Archive', 'x', 'body', '{}', '{public}')",
+            "('archive', '', 'body', '{}', '{public}')",
+            "('archive', 'x', '  ', '{}', '{public}')",
+            "('archive', 'x', 'body', '[]', '{public}')",
+            "('archive', 'x', 'body', '{}', NULL)",
+            "('archive', 'x', 'body', '{}', '{NULL}')",
+            "('archive', 'x', 'body', '{}', '{everyone}')",
+            "('archive', 'x', 'body', '{}', '{principal:}')",
+            "('archive', 'x', 'body', '{}', '{user:ada}')",
+            "('archive', 'x', 'body', '{}', '{public,\"role:a b\"}')",
         ] {
             let result = pool
                 .execute(
                     format!(
-                        "INSERT INTO company_context_system.custom_documents (source, external_id, body, metadata) VALUES {invalid}"
+                        "INSERT INTO company_context_system.custom_documents (source, external_id, body, metadata, readers) VALUES {invalid}"
                     )
                     .as_str(),
                 )
                 .await;
             assert!(result.is_err(), "{invalid}");
         }
+
+        server.abort();
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    async fn custom_documents_are_visible_only_to_their_readers() {
+        let Ok(database_url) = env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
+            eprintln!("skipping: set COMPANY_CONTEXT_TEST_DATABASE_URL to a ParadeDB Postgres URL");
+            return;
+        };
+        let database = TestDatabase::create(&database_url, "custom_readers").await;
+        let pool = &database.pool;
+        let (embeddings, server) = fake_embeddings().await;
+        let project = || project(pool, &embeddings, 6000);
+
+        // Principal 1 is prn_5CO4fITZ with foreign ID "ada"; role 1 is
+        // role_1Uc5uCJR with foreign ID "eng".
+        pool.execute(
+            r#"
+            INSERT INTO company_context_system.custom_documents (source, external_id, body, readers)
+            VALUES ('notes', 'public', 'falcon', '{public}'),
+                   ('notes', 'ada', 'falcon', '{principal:prn_5CO4fITZ}'),
+                   ('notes', 'ada-foreign', 'falcon', '{principal:ada}'),
+                   ('notes', 'eng', 'falcon', '{role:role_1Uc5uCJR}'),
+                   ('notes', 'eng-foreign', 'falcon', '{role:eng,principal:prn_xUC2fVYG}'),
+                   ('notes', 'hidden', 'falcon', '{}');
+            "#,
+        )
+        .await
+        .unwrap();
+        assert_eq!(project().await.unwrap(), summary(6, 0));
+
+        let ada = PrincipalIdentity {
+            principal_id: 1,
+            principal_foreign_id: Some("ada".to_owned()),
+            ..Default::default()
+        };
+        let engineer = PrincipalIdentity {
+            principal_id: 2,
+            role_ids: vec![1],
+            role_foreign_ids: vec!["eng".to_owned()],
+            ..Default::default()
+        };
+        let visible = |identity: PrincipalIdentity| async move {
+            search_as(pool, &identity, json!({ "query": "falcon" }))
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|(document_id, _)| document_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            visible(ada.clone()).await,
+            [
+                "custom:notes:ada-foreign:000000",
+                "custom:notes:ada:000000",
+                "custom:notes:public:000000"
+            ]
+        );
+        assert_eq!(
+            visible(engineer.clone()).await,
+            [
+                "custom:notes:eng-foreign:000000",
+                "custom:notes:eng:000000",
+                "custom:notes:public:000000"
+            ]
+        );
+        assert_eq!(visible(anyone()).await, ["custom:notes:public:000000"]);
+        for (identity, external_id) in [(&ada, "eng"), (&engineer, "ada"), (&ada, "hidden")] {
+            let document_id = format!("custom:notes:{external_id}:000000");
+            assert!(
+                query::document(pool, identity, &document_id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{document_id}"
+            );
+        }
+
+        // Changing readers applies to published documents at once, without
+        // projecting them again.
+        pool.execute(
+            r#"
+            UPDATE company_context_system.custom_documents SET readers = '{}'
+            WHERE external_id = 'ada';
+            UPDATE company_context_system.custom_documents SET readers = '{principal:ada}'
+            WHERE external_id = 'hidden';
+            "#,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            visible(ada.clone()).await,
+            [
+                "custom:notes:ada-foreign:000000",
+                "custom:notes:hidden:000000",
+                "custom:notes:public:000000"
+            ]
+        );
+        assert_eq!(project().await.unwrap(), summary(0, 0));
+
+        // Projecting changed content keeps the row's current readers.
+        pool.execute(
+            "UPDATE company_context_system.custom_documents SET body = 'falcon v2' WHERE external_id = 'hidden'",
+        )
+        .await
+        .unwrap();
+        assert_eq!(project().await.unwrap(), summary(1, 0));
+        assert_eq!(
+            search_as(pool, &ada, json!({ "query": "falcon v2" }))
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|(document_id, _)| document_id == "custom:notes:hidden:000000"),
+            Some((
+                "custom:notes:hidden:000000".to_owned(),
+                "falcon v2".to_owned()
+            ))
+        );
 
         server.abort();
         database.drop().await;

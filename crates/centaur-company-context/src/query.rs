@@ -6,7 +6,8 @@
 //! Slack user ID, or for the subject of a Google or Granola credential granted
 //! to it, still reaches the document's file, conversation, or Granola note.
 //! Calendar events are stored per Google identity, as Google showed them to it,
-//! and are visible only to that identity. Custom documents are public.
+//! and are visible only to that identity. A custom document is visible to
+//! the principals, roles, or everyone its readers name.
 //! Queries run as [`QUERY_ROLE`], which can only read `company_context_data`.
 
 use std::{
@@ -193,25 +194,16 @@ impl DataType {
         Self::CustomDoc,
     ];
 
-    /// The principal's identities the type's observations are keyed by, or
+    /// The principal's identities the type's visibility is keyed by, or
     /// `None` if the principal can see none of the type's documents.
-    fn subjects(self, identity: &PrincipalIdentity) -> Option<Vec<&str>> {
-        let subjects: Vec<&str> = match self {
+    fn subjects(self, identity: &PrincipalIdentity) -> Option<Vec<String>> {
+        let subjects: Vec<String> = match self {
             Self::SlackMessage | Self::SlackFile => {
-                identity.slack_user_id.as_deref().into_iter().collect()
+                identity.slack_user_id.iter().cloned().collect()
             }
-            Self::DriveDoc | Self::CalendarEvent => identity
-                .google_subjects
-                .iter()
-                .map(String::as_str)
-                .collect(),
-            Self::GranolaNote => identity
-                .granola_subjects
-                .iter()
-                .map(String::as_str)
-                .collect(),
-            // Public: visible without an identity.
-            Self::CustomDoc => return Some(Vec::new()),
+            Self::DriveDoc | Self::CalendarEvent => identity.google_subjects.clone(),
+            Self::GranolaNote => identity.granola_subjects.clone(),
+            Self::CustomDoc => custom_readers(identity),
         };
         (!subjects.is_empty()).then_some(subjects)
     }
@@ -369,7 +361,7 @@ impl DataType {
                     custom_metadata!(),
                     " AS metadata"
                 ),
-                visible: "TRUE",
+                visible: "d.readers && $2",
                 starts_at: "d.occurred_at",
                 ends_at: "d.occurred_at",
                 end_exclusive: false,
@@ -621,7 +613,7 @@ pub async fn search(
     if types.is_empty() {
         return Err(invalid("no requested type supports every filter"));
     }
-    let searches: Vec<(DataType, Vec<&str>)> = types
+    let searches: Vec<(DataType, Vec<String>)> = types
         .into_iter()
         .filter_map(|data_type| Some((data_type, data_type.subjects(identity)?)))
         .collect();
@@ -775,7 +767,7 @@ async fn lane(
     sql: &str,
     input: &str,
     model: Option<&str>,
-    subjects: &[&str],
+    subjects: &[String],
     limit: i64,
     params: &FilterParams,
 ) -> Result<Vec<Row>> {
@@ -875,25 +867,53 @@ impl JwtVerifier {
     }
 }
 
+/// Mirrors the Rails OpaqueId concern: Sqids with an alphabet shuffled per
+/// prefix and a minimum length of 8.
+fn opaque_ids(prefix: &str) -> Sqids {
+    let mut alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        .chars()
+        .collect();
+    alphabet.sort_by_cached_key(|character| {
+        hex::encode(Sha256::digest(format!("{prefix}:{character}").as_bytes()))
+    });
+    Sqids::builder()
+        .alphabet(alphabet)
+        .min_length(8)
+        .build()
+        .expect("valid sqids settings")
+}
+
+static PRINCIPAL_SQIDS: LazyLock<Sqids> = LazyLock::new(|| opaque_ids("prn"));
+static ROLE_SQIDS: LazyLock<Sqids> = LazyLock::new(|| opaque_ids("role"));
+
+/// Encodes a Console record ID as its opaque ID, such as `prn_...`.
+fn opaque_id(prefix: &str, sqids: &Sqids, id: i64) -> Option<String> {
+    Some(format!(
+        "{prefix}_{}",
+        sqids.encode(&[id.try_into().ok()?]).ok()?
+    ))
+}
+
+/// The custom document readers that match the principal: everyone, the
+/// principal, and its roles, each by opaque ID and foreign ID.
+fn custom_readers(identity: &PrincipalIdentity) -> Vec<String> {
+    let principals = opaque_id("prn", &PRINCIPAL_SQIDS, identity.principal_id)
+        .into_iter()
+        .chain(identity.principal_foreign_id.clone());
+    let roles = identity
+        .role_ids
+        .iter()
+        .filter_map(|&id| opaque_id("role", &ROLE_SQIDS, id))
+        .chain(identity.role_foreign_ids.iter().cloned());
+    std::iter::once("public".to_owned())
+        .chain(principals.map(|id| format!("principal:{id}")))
+        .chain(roles.map(|id| format!("role:{id}")))
+        .collect()
+}
+
 /// Decodes a Console principal opaque ID (`prn_...`), accepting only its
 /// canonical encoding.
 fn principal_id(oid: &str) -> Option<i64> {
-    // Mirrors the Rails OpaqueId concern: Sqids with an alphabet shuffled per
-    // prefix and a minimum length of 8.
-    static PRINCIPAL_SQIDS: LazyLock<Sqids> = LazyLock::new(|| {
-        let mut alphabet: Vec<char> =
-            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-                .chars()
-                .collect();
-        alphabet.sort_by_cached_key(|character| {
-            hex::encode(Sha256::digest(format!("prn:{character}").as_bytes()))
-        });
-        Sqids::builder()
-            .alphabet(alphabet)
-            .min_length(8)
-            .build()
-            .expect("valid sqids settings")
-    });
     let encoded = oid.strip_prefix("prn_")?;
     let [id] = PRINCIPAL_SQIDS.decode(encoded)[..] else {
         return None;
@@ -927,6 +947,28 @@ mod tests {
         ] {
             assert_eq!(principal_id(invalid), None, "{invalid}");
         }
+    }
+
+    #[test]
+    fn custom_readers_name_the_principal_and_its_roles_by_rails_ids() {
+        let identity = PrincipalIdentity {
+            principal_id: 123,
+            principal_foreign_id: Some("ada".to_owned()),
+            role_ids: vec![1, 123],
+            role_foreign_ids: vec!["eng".to_owned()],
+            ..Default::default()
+        };
+        assert_eq!(
+            custom_readers(&identity),
+            [
+                "public",
+                "principal:prn_yRoWctYw",
+                "principal:ada",
+                "role:role_1Uc5uCJR",
+                "role:role_5iuMPpQI",
+                "role:eng"
+            ]
+        );
     }
 
     fn config(extra: &[&str]) -> Config {
@@ -1035,6 +1077,7 @@ mod tests {
             slack_user_id: Some("U-ADA".to_owned()),
             google_subjects: vec!["G-ADA".to_owned()],
             granola_subjects: vec!["GR-ADA".to_owned()],
+            ..Default::default()
         }
     }
 
@@ -1044,6 +1087,7 @@ mod tests {
             slack_user_id: Some("U-BOB".to_owned()),
             google_subjects: Vec::new(),
             granola_subjects: vec!["GR-BOB".to_owned(), "GR-BOB-2".to_owned()],
+            ..Default::default()
         }
     }
 
