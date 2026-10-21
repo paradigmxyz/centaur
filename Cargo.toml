@@ -1,10 +1,5 @@
 [workspace]
-members = [
-    "crates/*",
-    "services/company-context",
-    "services/proxy-sync",
-    "services/token-broker",
-]
+members = ["crates/*"]
 # Its own workspace, so the Codex dependency tree stays out of this lockfile.
 exclude = ["crates/harness-server-conformance"]
 resolver = "3"

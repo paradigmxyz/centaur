@@ -39,7 +39,7 @@ jobs:
             changed_files="$(git diff --name-only origin/main...HEAD)"
           fi
 
-          if printf '%s\n' "${changed_files}" | grep -Eq '^(services/console/|services/token-broker/providers\.json$|\.github/workflows/console-ci\.yml$)'; then
+          if printf '%s\n' "${changed_files}" | grep -Eq '^(services/console/|crates/centaur-token-broker/providers\.json$|\.github/workflows/console-ci\.yml$)'; then
             echo "relevant=true" >>"${GITHUB_OUTPUT}"
           else
             echo "relevant=false" >>"${GITHUB_OUTPUT}"

@@ -5,7 +5,7 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-active-record-encryption = { path = "../../crates/active-record-encryption" }
+active-record-encryption = { path = "../active-record-encryption" }
 axum = "0.8"
 base64 = "0.23"
 chrono = { version = "0.4", features = ["clock"] }

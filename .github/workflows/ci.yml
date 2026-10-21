@@ -122,7 +122,6 @@ jobs:
           set_output rust_checks \
             '^Cargo\.(toml|lock)$' \
             '^crates/' \
-            '^services/(company-context|proxy-sync|token-broker)/' \
             '^\.github/workflows/ci\.yml$'
           set_output harness_server_checks \
             '^Cargo\.(toml|lock)$' \
@@ -133,20 +132,20 @@ jobs:
             '^Cargo\.(toml|lock)$' \
             '^crates/absurd-sdk/' \
             '^crates/active-record-encryption/' \
-            '^services/company-context/' \
+            '^crates/centaur-company-context/' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
           set_output proxy_sync_checks \
             '^Cargo\.(toml|lock)$' \
             '^crates/active-record-encryption/' \
-            '^services/proxy-sync/' \
+            '^crates/centaur-proxy-sync/' \
             '^services/console/' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
           set_output token_broker_checks \
             '^Cargo\.(toml|lock)$' \
             '^crates/active-record-encryption/' \
-            '^services/token-broker/' \
+            '^crates/centaur-token-broker/' \
             '^services/console/' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
@@ -172,7 +171,7 @@ jobs:
             '^\.github/scripts/run-tool-tests\.sh$' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^crates/centaur-session-sqlx/(search-)?migrations/' \
-            '^services/company-context/migrations/' \
+            '^crates/centaur-company-context/migrations/' \
             '^services/iron-proxy/Dockerfile$' \
             '^\.github/workflows/ci\.yml$'
           set_output slackbotv2_tests \

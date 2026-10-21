@@ -5,7 +5,7 @@ module Oauth
     # token-broker refreshes flow-minted credentials with its own table of
     # providers; one missing there would never refresh.
     test "token-broker knows how to refresh every provider's credentials" do
-      table = JSON.parse(Rails.root.join("../token-broker/providers.json").read)
+      table = JSON.parse(Rails.root.join("../../crates/centaur-token-broker/providers.json").read)
 
       assert_equal Providers.keys.sort, table.keys.sort
       Providers.registry.each do |key, provider|

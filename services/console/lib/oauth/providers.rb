@@ -5,8 +5,8 @@ module Oauth
   # else (state signing, PKCE, the code exchange itself, credential upsert) is
   # provider-agnostic, so adding a provider is a new strategy class plus a
   # registry entry -- not a migration. Also add the provider to
-  # services/token-broker/providers.json, which says how token-broker refreshes
-  # its credentials.
+  # crates/centaur-token-broker/providers.json, which says how token-broker
+  # refreshes its credentials.
   module Providers
     # Memoized so a strategy is built once per process. The strategies are
     # stateless, so sharing one instance across flows is safe.

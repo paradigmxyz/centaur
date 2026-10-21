@@ -251,7 +251,7 @@ mod tests {
     use crate::test_support::TestDatabase;
 
     const ABSURD_SCHEMA: &str =
-        include_str!("../../../crates/centaur-session-sqlx/migrations/0007_absurd_workflows.sql");
+        include_str!("../../centaur-session-sqlx/migrations/0007_absurd_workflows.sql");
 
     fn tasks(samples: &[Sample], state: &str) -> f64 {
         samples

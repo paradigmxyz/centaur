@@ -297,16 +297,13 @@ RUN mkdir -p ~/.amp/bin ~/.config/amp ~/.codex ~/github ~/workspace \
     && git config --global user.useConfigOnly true
 
 # harness-server is a member of the repo-wide Cargo workspace, so the build
-# needs the workspace manifest, lockfile, and every member's sources. Build it
+# needs the workspace manifest, lockfile, and every crate's sources. Build it
 # in its own stage so only the binary reaches the sandbox image.
 FROM toolchain AS harness-server-build
 
 WORKDIR /home/agent/centaur-src
 COPY --chown=1001:1001 Cargo.toml Cargo.lock ./
 COPY --chown=1001:1001 crates/ crates/
-COPY --chown=1001:1001 services/company-context/ services/company-context/
-COPY --chown=1001:1001 services/proxy-sync/ services/proxy-sync/
-COPY --chown=1001:1001 services/token-broker/ services/token-broker/
 RUN --mount=type=cache,target=/home/agent/.cargo/registry,uid=1001,gid=1001,sharing=locked \
     --mount=type=cache,target=/home/agent/.cargo/git,uid=1001,gid=1001,sharing=locked \
     --mount=type=cache,target=/home/agent/.cache/harness-server-target,uid=1001,gid=1001,sharing=locked \

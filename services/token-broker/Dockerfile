@@ -22,9 +22,6 @@ ENV CARGO_INCREMENTAL=0 \
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
-COPY services/company-context/ services/company-context/
-COPY services/proxy-sync/ services/proxy-sync/
-COPY services/token-broker/ services/token-broker/
 ARG RUST_BUILD_PROFILE=release
 RUN --mount=type=cache,id=token-broker-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=token-broker-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \

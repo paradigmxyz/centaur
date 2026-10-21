@@ -25,9 +25,10 @@ Grants:
   endpoint.
 
 Credentials minted by Console's OAuth flows use their OAuth app's client
-credentials and the provider's rules in `providers.json`: whether the refresh
-re-requests the granted scopes, and whether the client authenticates in the
-form or with HTTP Basic authentication. A Console test fails until every
+credentials and the provider's rules in
+[`providers.json`](../../crates/centaur-token-broker/providers.json): whether
+the refresh re-requests the granted scopes, and whether the client
+authenticates in the form or with HTTP Basic authentication. A Console test fails until every
 Console provider is listed there. A credential whose provider is not listed is
 retried with backoff.
 
@@ -114,6 +115,6 @@ tests at it:
 ```bash
 cd services/console
 RAILS_ENV=test CENTAUR_CONSOLE_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/token_broker_test bin/rails db:prepare
-cd ../token-broker
-TOKEN_BROKER_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/token_broker_test cargo test
+cd ../..
+TOKEN_BROKER_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/token_broker_test cargo test -p centaur-token-broker
 ```

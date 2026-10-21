@@ -295,8 +295,11 @@ projected row's `source` or `external_id`, delete it and insert it again.
 
 ## Development
 
+The service's code lives in `crates/centaur-company-context`. From the
+repository root:
+
 ```bash
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo fmt -p centaur-company-context --check
+cargo clippy --locked -p centaur-company-context --all-targets -- -D warnings
+cargo test --locked -p centaur-company-context
 ```
