@@ -114,6 +114,9 @@ pub struct PrincipalIdentity {
     pub role_ids: Vec<i64>,
     pub role_foreign_ids: Vec<String>,
     pub slack_user_id: Option<String>,
+    /// The workspace `slack_user_id` belongs to; Slack user IDs are scoped to
+    /// a workspace.
+    pub slack_team_id: Option<String>,
     pub google_subjects: Vec<String>,
     pub granola_subjects: Vec<String>,
 }
@@ -588,6 +591,7 @@ impl ConsoleCredentials {
                        SELECT 1 FROM oauth_apps app
                        WHERE app.provider = 'slack' AND app.slug = $4 AND app.enabled = TRUE
                    ) THEN NULLIF(BTRIM(p.slack_user_id), '') END AS slack_user_id,
+                   NULLIF(BTRIM(p.slack_team_id), '') AS slack_team_id,
                    ARRAY(
                        SELECT DISTINCT provider_subject FROM granted
                        WHERE provider = 'google' AND slug = $2
@@ -707,7 +711,7 @@ mod tests {
             r#"
             CREATE TABLE principals (
                 id bigint PRIMARY KEY, labels jsonb NOT NULL DEFAULT '{}', slack_user_id text,
-                foreign_id text
+                slack_team_id text, foreign_id text
             );
             CREATE TABLE roles (id bigint PRIMARY KEY, foreign_id text);
             CREATE TABLE principal_roles (principal_id bigint, role_id bigint);
@@ -723,8 +727,8 @@ mod tests {
             CREATE TABLE grants (principal_id bigint, role_id bigint, static_secret_id bigint);
 
             INSERT INTO principals VALUES
-                (1, '{}', 'U-ADA', 'ada'),
-                (2, '{"google_subject": "G-BOB"}', NULL, NULL);
+                (1, '{}', 'U-ADA', 'T1', 'ada'),
+                (2, '{"google_subject": "G-BOB"}', NULL, NULL, NULL);
             INSERT INTO roles VALUES (1, 'eng'), (2, NULL);
             INSERT INTO principal_roles VALUES (2, 1), (2, 2);
             INSERT INTO oauth_apps VALUES
@@ -749,6 +753,7 @@ mod tests {
 
         let ada = credentials.principal_identity(1).await.unwrap().unwrap();
         assert_eq!(ada.slack_user_id.as_deref(), Some("U-ADA"));
+        assert_eq!(ada.slack_team_id.as_deref(), Some("T1"));
         assert_eq!(ada.google_subjects, ["G-ADA"]);
         assert_eq!(ada.granola_subjects, ["GR-ADA", "GR-ADA-2"]);
         assert_eq!(ada.principal_foreign_id.as_deref(), Some("ada"));

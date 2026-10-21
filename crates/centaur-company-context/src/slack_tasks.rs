@@ -370,7 +370,7 @@ async fn sync_conversation(
                 break;
             }
         }
-        record_members(&state.pool, conversation_id, &members).await?;
+        record_members(&state.pool, conversation_id, &params.team_id, &members).await?;
 
         let oldest = format!(
             "{}.{:06}",
@@ -819,8 +819,14 @@ async fn record_discovery(
     Ok(())
 }
 
-/// Replaces a conversation's members with those Slack listed.
-async fn record_members(pool: &PgPool, conversation_id: &str, members: &[String]) -> Result<()> {
+/// Replaces a conversation's members with those Slack listed to a credential
+/// in workspace `team_id`.
+async fn record_members(
+    pool: &PgPool,
+    conversation_id: &str,
+    team_id: &str,
+    members: &[String],
+) -> Result<()> {
     let mut tx = pool.begin().await?;
     // Lock the conversation so reconciliation cannot remove it meanwhile.
     let observed: Option<bool> = sqlx::query_scalar(
@@ -852,14 +858,18 @@ async fn record_members(pool: &PgPool, conversation_id: &str, members: &[String]
     .await?;
     sqlx::query(
         r#"
-        INSERT INTO company_context_data.slack_conversation_members (conversation_id, user_id)
-        SELECT $1, user_id
-        FROM unnest($2::text[]) AS listed(user_id)
+        INSERT INTO company_context_data.slack_conversation_members
+            (conversation_id, team_id, user_id)
+        SELECT $1, $2, user_id
+        FROM unnest($3::text[]) AS listed(user_id)
         WHERE user_id <> ''
-        ON CONFLICT DO NOTHING
+        ON CONFLICT (conversation_id, user_id) DO UPDATE
+        SET team_id = EXCLUDED.team_id
+        WHERE slack_conversation_members.team_id <> EXCLUDED.team_id
         "#,
     )
     .bind(conversation_id)
+    .bind(team_id)
     .bind(members)
     .execute(&mut *tx)
     .await?;
@@ -1332,19 +1342,19 @@ mod tests {
         };
         let listed = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
 
-        record_members(pool, "C1", &listed(&["U1", "U2"]))
+        record_members(pool, "C1", "T1", &listed(&["U1", "U2"]))
             .await
             .unwrap();
         assert_eq!(members().await, ["U1", "U2"]);
         // A member who left loses membership at the next sync.
-        record_members(pool, "C1", &listed(&["U1", "U3"]))
+        record_members(pool, "C1", "T1", &listed(&["U1", "U3"]))
             .await
             .unwrap();
         assert_eq!(members().await, ["U1", "U3"]);
 
         remove_unobserved(pool, &[]).await.unwrap();
         assert!(members().await.is_empty());
-        let error = record_members(pool, "C1", &listed(&["U1"]))
+        let error = record_members(pool, "C1", "T1", &listed(&["U1"]))
             .await
             .unwrap_err();
         assert!(is_rejected(&error));

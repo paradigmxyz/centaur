@@ -161,8 +161,10 @@ indexed PDFs are not downloaded again.
 Both query endpoints are authenticated with the same principal API JWT the
 Console mints for api-rs (`Authorization: Bearer <jwt>`); iron-proxy injects it
 into sandbox requests to this service. The token's subject names the principal,
-whose Slack user ID and granted broker credentials are looked up in the Rails
-Console database. The principal's Google and Granola identities are the
+whose Slack workspace and user ID and granted broker credentials are looked up
+in the Rails Console database. Slack user IDs are workspace-scoped, so a
+principal's Slack identity matches only when both its workspace and user ID do;
+a principal without a Slack workspace ID sees no Slack documents. The principal's Google and Granola identities are the
 subjects of the live Google and Granola broker credentials (from
 `COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG` and
 `COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG`) granted directly to it; role grants
