@@ -91,8 +91,15 @@ class SkillsClient:
             raise RuntimeError("centaur-skills response did not include a data object")
         return result
 
-    def create(self, name: str, description: str, instructions: str) -> dict[str, Any]:
-        """Create a shared Console skill owned by the current Console user."""
+    def create(
+        self,
+        name: str,
+        description: str,
+        instructions: str,
+        *,
+        visibility: str = "shared",
+    ) -> dict[str, Any]:
+        """Create a Console skill owned by the current user with the selected visibility."""
         result = self._request(
             SANDBOX_SKILLS_PATH,
             method="POST",
@@ -101,6 +108,7 @@ class SkillsClient:
                     "name": name,
                     "description": description,
                     "instructions": instructions,
+                    "visibility": visibility,
                 }
             },
         )
