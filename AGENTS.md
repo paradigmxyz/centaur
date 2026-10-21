@@ -61,7 +61,10 @@ The durable request path is:
 Ownership by tree:
 
 - `services/api-rs/`: Rust control plane, durable sessions, sandbox backends,
-  workflows, auth integration, and telemetry.
+  workflows, auth integration, and telemetry. Its crates live in `crates/`.
+- `crates/`: Rust crates shared through the single repository-root Cargo
+  workspace (`Cargo.toml`, `Cargo.lock`), which also includes the Rust services
+  under `services/`. Run `cargo` from the repository root.
 - `services/slackbotv2/`, `discordbot/`, `githubbot/`, `linearbot/`,
   `teamsbot/`: platform transport, policy gates, session forwarding, and
   platform rendering.

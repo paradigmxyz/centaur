@@ -77,67 +77,7 @@ updates:
           - "*"
 
   - package-ecosystem: cargo
-    directory: /services/api-rs
-    cooldown:
-      default-days: 7
-    allow:
-      - dependency-type: all
-    schedule:
-      interval: weekly
-      day: monday
-      time: "09:00"
-      timezone: America/Denver
-    commit-message:
-      prefix: chore
-      include: scope
-    open-pull-requests-limit: 5
-    groups:
-      api-rs-dependencies:
-        patterns:
-          - "*"
-
-  - package-ecosystem: cargo
-    directory: /crates/absurd-sdk
-    cooldown:
-      default-days: 7
-    allow:
-      - dependency-type: all
-    schedule:
-      interval: weekly
-      day: monday
-      time: "09:00"
-      timezone: America/Denver
-    commit-message:
-      prefix: chore
-      include: scope
-    open-pull-requests-limit: 5
-    groups:
-      absurd-sdk-dependencies:
-        patterns:
-          - "*"
-
-  - package-ecosystem: cargo
-    directory: /crates/active-record-encryption
-    cooldown:
-      default-days: 7
-    allow:
-      - dependency-type: all
-    schedule:
-      interval: weekly
-      day: monday
-      time: "09:00"
-      timezone: America/Denver
-    commit-message:
-      prefix: chore
-      include: scope
-    open-pull-requests-limit: 5
-    groups:
-      active-record-encryption-dependencies:
-        patterns:
-          - "*"
-
-  - package-ecosystem: cargo
-    directory: /crates/harness-server
+    directory: /
     cooldown:
       default-days: 7
     allow:
@@ -152,11 +92,11 @@ updates:
       include: scope
     open-pull-requests-limit: 5
     ignore:
-      # Starlark 0.13 uses hashbrown 0.14, which allocative 0.3.6+ no longer supports.
+      # harness-server: Starlark 0.13 uses hashbrown 0.14, which allocative 0.3.6+ no longer supports.
       - dependency-name: allocative
         versions:
           - ">= 0.3.6"
-      # The codex git dependency pins rama-core 0.3.0-alpha.4, whose caret requirements
+      # harness-server: the codex git dependency pins rama-core 0.3.0-alpha.4, whose caret requirements
       # on these crates also match the incompatible 0.3.0 prereleases and stable release.
       - dependency-name: rama-error
         versions:
@@ -168,7 +108,7 @@ updates:
         versions:
           - "> 0.3.0-alpha.4"
     groups:
-      harness-server-dependencies:
+      rust-dependencies:
         patterns:
           - "*"
 

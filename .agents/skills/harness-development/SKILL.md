@@ -10,7 +10,7 @@ description: "Add, modify, or debug Centaur harness-server backends in crates/ha
 `crates/harness-server` is the only layer that translates harness output. It is
 built into the sandbox image and is the sandbox's PID 1: api-rs launches
 `harness-server <subcommand>` (`harness_server_subcommand` in
-`services/api-rs/crates/centaur-session-runtime/src/lib.rs`). Don't add harness
+`crates/centaur-session-runtime/src/lib.rs`). Don't add harness
 output parsing in Python, TypeScript, api-rs, or the ingresses.
 
 - **Input:** By default (`--mode blocks`) stdin carries Centaur blocks NDJSON:
@@ -87,12 +87,12 @@ Backends:
 
 ## Tests
 
-From `crates/harness-server`, run what CI runs:
+From the repository root:
 
 ```bash
-cargo fmt --all --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
+cargo fmt -p harness-server --check
+cargo clippy --locked -p harness-server --all-targets -- -D warnings
+cargo test --locked -p harness-server
 ```
 
 - **Unit tests** in each module: stdin generation, stdout parsing, and event
@@ -107,7 +107,7 @@ cargo test --locked
   and make network calls. Run them when native behavior is the question:
 
 ```bash
-cargo test --manifest-path crates/harness-server/Cargo.toml \
+cargo test -p harness-server \
   real_harnesses_basic_steer_and_resume -- --ignored --nocapture
 ```
 

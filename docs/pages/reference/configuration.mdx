@@ -348,7 +348,7 @@ From the repository root, run:
 
 ```sh
 psql -X --set ON_ERROR_STOP=1 \
-  --file services/api-rs/crates/centaur-session-sqlx/manual-migrations/session_events_retention_index.sql
+  --file crates/centaur-session-sqlx/manual-migrations/session_events_retention_index.sql
 ```
 
 The script creates a partial index concurrently. Run it outside a transaction;

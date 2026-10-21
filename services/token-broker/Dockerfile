@@ -20,16 +20,18 @@ ENV CARGO_INCREMENTAL=0 \
     RUSTC_WRAPPER=/usr/local/bin/sccache \
     SCCACHE_DIR=/var/cache/sccache
 WORKDIR /build
-COPY crates/active-record-encryption/ crates/active-record-encryption/
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+COPY services/company-context/ services/company-context/
+COPY services/proxy-sync/ services/proxy-sync/
 COPY services/token-broker/ services/token-broker/
-WORKDIR /build/services/token-broker
 ARG RUST_BUILD_PROFILE=release
 RUN --mount=type=cache,id=token-broker-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=token-broker-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=token-broker-sccache-${TARGETARCH},target=/var/cache/sccache,sharing=locked \
     case "$RUST_BUILD_PROFILE" in \
-      release) cargo build --release && cp target/release/centaur-token-broker /usr/local/bin/centaur-token-broker ;; \
-      debug|dev) cargo build && cp target/debug/centaur-token-broker /usr/local/bin/centaur-token-broker ;; \
+      release) cargo build --release --locked -p centaur-token-broker && cp target/release/centaur-token-broker /usr/local/bin/centaur-token-broker ;; \
+      debug|dev) cargo build --locked -p centaur-token-broker && cp target/debug/centaur-token-broker /usr/local/bin/centaur-token-broker ;; \
       *) echo "unsupported RUST_BUILD_PROFILE=$RUST_BUILD_PROFILE" >&2; exit 2 ;; \
     esac && \
     sccache --show-stats

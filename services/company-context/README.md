@@ -296,7 +296,7 @@ projected row's `source` or `external_id`, delete it and insert it again.
 ## Development
 
 ```bash
-cargo fmt --all --check
+cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 ```
