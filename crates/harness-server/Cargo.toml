@@ -14,7 +14,6 @@ path = "src/main.rs"
 allocative = "=0.3.4"
 base64 = "0.23"
 clap = { version = "4.5", features = ["derive"] }
-codex-utils-stream-parser = { git = "https://github.com/openai/codex", rev = "e93dc98a48d597df322436ffe8d03bfd7ec63b3b", package = "codex-utils-stream-parser" }
 # Decode + downscale oversized image attachments so they stay under the model
 # provider's per-image caps (Bedrock/mantle rejects images past ~5 MB / 8000 px).
 # Scoped to the formats chat clients actually paste to keep the build lean.
@@ -32,13 +31,3 @@ thiserror = "2.0"
 tokio = { version = "1.49", features = ["rt-multi-thread", "signal", "sync"] }
 url = "2.5"
 uuid = { version = "1.19", features = ["v4"] }
-
-[features]
-# Tests check app-server output against the Codex JSON Schemas at the pinned
-# revision, fetched from GitHub.
-codex-schema = []
-
-[dev-dependencies]
-jsonschema = { version = "0.59", default-features = false }
-# Already built with these features for opentelemetry-otlp.
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
