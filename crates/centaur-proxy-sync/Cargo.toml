@@ -24,5 +24,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
 [dev-dependencies]
-rand = "0.10"
 tower = { version = "0.5", features = ["util"] }
