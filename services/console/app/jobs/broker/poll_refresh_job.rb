@@ -13,6 +13,8 @@ module Broker
     queue_as :default
 
     def perform
+      return if Broker.external_refresh?
+
       ids = BrokerCredential.transaction do
         BrokerCredential.refreshable.lock("FOR UPDATE SKIP LOCKED").pluck(:id)
       end

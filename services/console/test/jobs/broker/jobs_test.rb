@@ -60,6 +60,19 @@ module Broker
       assert_equal "missing_initial_refresh_token", bc.dead_reason
     end
 
+    test "refresh jobs do nothing while token-broker refreshes credentials" do
+      bc = make_credential(refresh_token: nil)
+      bc.update_columns(next_attempt_at: 1.minute.ago)
+
+      with_env("CENTAUR_CONSOLE_TOKEN_BROKER_ENABLED" => "true") do
+        Broker::PollRefreshJob.perform_now
+        Broker::RefreshCredentialJob.perform_now(bc.id)
+      end
+
+      assert_no_enqueued_jobs only: Broker::RefreshCredentialJob
+      refute bc.reload.dead?
+    end
+
     test "RefreshCredentialJob is a no-op for a missing credential" do
       assert_nothing_raised { Broker::RefreshCredentialJob.perform_now(-1) }
     end

@@ -120,6 +120,14 @@ Docs, and Granola sync jobs, including jobs already queued, without deleting
 synced data. It defaults to enabled; Google Docs sync also still requires
 `CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED`.
 
+## Broker Credential Refresh
+
+The Console worker refreshes broker credentials unless
+`CENTAUR_CONSOLE_TOKEN_BROKER_ENABLED=true`, which hands refresh to
+`centaur-token-broker` and makes the Console's refresh jobs, including jobs
+already queued, exit without work. The Helm chart sets it from
+`tokenBroker.enabled`.
+
 ## Encryption Keys
 
 `iron-control` uses ActiveRecord encryption to protect secrets stored in the control plane (for example, the `control_plane` secret source type). The following environment variables configure the encryption keys:
