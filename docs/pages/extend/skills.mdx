@@ -90,7 +90,8 @@ credentials or grants.
 
 ## Author Skills From A Sandbox
 
-Console users can create private or shared skills and edit skills they own from a sandbox:
+Console users can create private or shared skills and edit skills they own
+from a sandbox:
 
 ```bash
 centaur-skills create deployment-checks \
@@ -106,18 +107,16 @@ centaur-skills edit skl_example \
 centaur-skills delete skl_example
 ```
 
-Use `--instructions` instead of `--instructions-file` for a short inline
-Markdown body. `edit` accepts partial changes and targets skills by OID. Pass
-the current `lock_version` with `--lock-version` when an edit should fail if
-another writer changed the skill first. New skills default to shared (public).
-Pass `--visibility private` to create a skill privately in the initial request,
-without publishing it first. Deploy the Console API support before using this
-flag with an updated CLI: older Console servers ignore `visibility` on creation
-and still create a shared skill. Visibility is a creation option; later visibility
-changes remain owner-only through Console or the share/unshare API endpoints.
-Edits to public skills are visible to agents immediately. `delete` archives an
-owned skill by OID, removing it from the active catalog without deleting its
-stored record.
+New skills default to shared (public). Pass `--visibility private` to keep a
+skill private from creation. Use `--instructions` instead of
+`--instructions-file` for a short inline Markdown body.
+
+`edit` accepts partial changes and targets skills by OID. Pass the current
+`lock_version` with `--lock-version` when an edit should fail if another writer
+changed the skill first. Edits to shared skills are visible to agents immediately.
+
+`delete` archives an owned skill by OID, removing it from the active catalog
+without deleting its stored record.
 
 ## Verify Builtin Skills
 
