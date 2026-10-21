@@ -19,6 +19,7 @@ from client import (
     SkillsCatalog,
     SkillsClient,
 )
+from rich.text import Text
 from typer.testing import CliRunner
 
 
@@ -538,7 +539,7 @@ def test_cli_create_rejects_invalid_visibility_before_request(monkeypatch):
     )
 
     assert result.exit_code == 2
-    assert "Invalid value for '--visibility'" in result.output
+    assert "Invalid value for '--visibility'" in Text.from_ansi(result.output).plain
 
 
 def test_cli_edit_sends_partial_fields(monkeypatch, capsys):
