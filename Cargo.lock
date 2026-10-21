@@ -530,6 +530,7 @@ dependencies = [
  "centaur-telemetry",
  "centaur-workflows",
  "clap",
+ "console-db",
  "eventsource-stream",
  "futures-util",
  "hex",
@@ -592,10 +593,12 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "centaur-iron-proxy",
+ "console-db",
  "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sqlx",
  "thiserror 2.0.21",
  "tokio",
  "urlencoding",
@@ -1005,6 +1008,7 @@ dependencies = [
  "sha2 0.11.1",
  "sqids",
  "sqlx",
+ "tokio",
 ]
 
 [[package]]

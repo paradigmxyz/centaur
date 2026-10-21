@@ -103,7 +103,7 @@ impl SessionRegistrar {
         let slack_permission = session_slack_permission(thread_key, &input, existing.is_some());
         let record = match principal_write(existing, create_if_missing) {
             PrincipalWrite::UseExisting(record) => record,
-            PrincipalWrite::Upsert => self.client.upsert_principal(&input).await?,
+            PrincipalWrite::Upsert => self.client.refresh_principal(&input).await?,
             PrincipalWrite::Reject => {
                 return Err(IronControlError::SessionPrincipalNotPreapproved {
                     foreign_id: input.foreign_id,
@@ -112,7 +112,7 @@ impl SessionRegistrar {
         };
         if let Some(permission) = slack_permission {
             self.client
-                .upsert_slack_channel_permission(&record.id, &permission)
+                .refresh_slack_channel_permission(&record.id, &permission)
                 .await?;
         }
         Ok(record)
@@ -166,7 +166,9 @@ impl SessionRegistrar {
                 let existing = self.merge_existing_labels(&mut input).await?;
                 match principal_write(existing, create_if_missing) {
                     PrincipalWrite::UseExisting(principal) => Ok(Some(principal)),
-                    PrincipalWrite::Upsert => Ok(Some(self.client.upsert_principal(&input).await?)),
+                    PrincipalWrite::Upsert => {
+                        Ok(Some(self.client.refresh_principal(&input).await?))
+                    }
                     PrincipalWrite::Reject => Ok(None),
                 }
             }
@@ -183,7 +185,7 @@ impl SessionRegistrar {
     async fn merge_existing_labels(&self, input: &mut PrincipalInput) -> Result<Option<Principal>> {
         let existing = match self.client.get_principal(&input.foreign_id).await {
             Ok(existing) => existing,
-            Err(error) if is_status(&error, 404) => return Ok(None),
+            Err(error) if error.is_not_found() => return Ok(None),
             Err(error) => return Err(error),
         };
         merge_labels(&existing.labels, input);
@@ -349,10 +351,6 @@ fn slack_permission(channel_id: String) -> SlackChannelPermissionInput {
         download_enabled: true,
         history_enabled: true,
     }
-}
-
-fn is_status(err: &IronControlError, code: u16) -> bool {
-    matches!(err, IronControlError::Status { status, .. } if *status == code)
 }
 
 #[cfg(test)]
@@ -581,7 +579,7 @@ mod tests {
             .await
             .expect_err("a console requester the console never provisioned must fail");
 
-        assert!(is_status(&error, 404), "{error:?}");
+        assert!(error.is_not_found(), "{error:?}");
         server.abort();
     }
 

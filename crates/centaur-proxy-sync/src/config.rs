@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use console_db::{Subject, models::Config, oid};
+use console_db::{SecretValues, Subject, models::Config, oid};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -25,7 +25,7 @@ pub(crate) async fn build_config(
     };
     let mut config = console_db::build_config(
         &state.pool,
-        &state.encryption,
+        SecretValues::Live(&state.encryption),
         &subject,
         proxy.requester_principal_id,
     )

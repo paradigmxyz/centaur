@@ -4,9 +4,12 @@
 //! [iron-proxy](https://docs.iron.sh) egress: secrets, the roles that bundle
 //! them, the principals that hold roles, and the proxies that sync an
 //! effective configuration. This crate is the typed HTTP client the API uses
-//! to register that model — it does not run the proxy sync itself.
+//! to register that model — it does not run the proxy sync itself. Given a
+//! connection to Console's database, the client reads principals and their
+//! effective config from it directly instead.
 
 mod client;
+mod database;
 mod error;
 mod models;
 mod principal;

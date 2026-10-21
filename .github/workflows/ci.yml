@@ -153,7 +153,9 @@ jobs:
           set_output rust_api \
             '^Cargo\.(toml|lock)$' \
             '^crates/absurd-sdk/' \
+            '^crates/active-record-encryption/' \
             '^crates/centaur-' \
+            '^crates/console-db/' \
             '^services/api-rs/' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^services/workflow-python/' \
@@ -359,6 +361,8 @@ jobs:
         run: bin/rails db:prepare
 
       - name: Test Console database crate
+        env:
+          CONSOLE_DB_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/proxy_sync_test
         run: cargo test --locked -p console-db
 
       - name: Test

@@ -29,6 +29,15 @@ pub enum IronControlError {
         status: u16,
         body: String,
     },
+    /// A direct read of Console's database failed.
+    #[error("console database read failed: {0}")]
+    ConsoleDb(#[from] console_db::Error),
+    /// A direct read of Console's database found no such record.
+    #[error("iron-control {resource} {ident} not found")]
+    NotFound {
+        resource: &'static str,
+        ident: String,
+    },
     /// A 2xx response body did not deserialize into the expected shape.
     #[error("iron-control {path} response did not match the expected schema: {source}")]
     Decode {
@@ -36,6 +45,17 @@ pub enum IronControlError {
         #[source]
         source: reqwest::Error,
     },
+}
+
+impl IronControlError {
+    /// Whether the requested record does not exist, whether the admin API or
+    /// Console's database reported it.
+    pub fn is_not_found(&self) -> bool {
+        matches!(
+            self,
+            Self::NotFound { .. } | Self::Status { status: 404, .. }
+        )
+    }
 }
 
 pub type Result<T> = std::result::Result<T, IronControlError>;

@@ -10,7 +10,9 @@ use reqwest::{Client as HttpClient, Method, Response};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use sqlx::PgPool;
 
+use crate::database;
 use crate::error::{IronControlError, Result};
 use crate::models::{
     AwsAuthSecretInput, BrokerCredentialInput, BrokerCredentialRecord, DataEnvelope,
@@ -28,6 +30,7 @@ pub struct IronControlClient {
     http: HttpClient,
     base_url: String,
     api_key: String,
+    console_db: Option<PgPool>,
 }
 
 impl IronControlClient {
@@ -47,7 +50,15 @@ impl IronControlClient {
             http,
             base_url: base_url.into().trim_end_matches('/').to_owned(),
             api_key: api_key.into(),
+            console_db: None,
         }
+    }
+
+    /// Read principals and their effective config from Console's database
+    /// instead of the admin API. Writes still go through the admin API.
+    pub fn with_console_db(mut self, pool: PgPool) -> Self {
+        self.console_db = Some(pool);
+        self
     }
 
     // ----- principals & roles ---------------------------------------------
@@ -60,6 +71,17 @@ impl IronControlClient {
             input,
         )
         .await
+    }
+
+    /// Upsert a principal unless Console already stores exactly `input` for
+    /// it. Without a Console database connection this always upserts.
+    pub async fn refresh_principal(&self, input: &PrincipalInput) -> Result<Principal> {
+        if let Some(pool) = &self.console_db
+            && let Some(principal) = database::unchanged_principal(pool, input).await?
+        {
+            return Ok(principal);
+        }
+        self.upsert_principal(input).await
     }
 
     /// Upsert a role by ``foreign_id``.
@@ -132,6 +154,9 @@ impl IronControlClient {
     /// through the canonical lookup endpoint). api-rs reads this to wire the sandbox's env for
     /// operator-managed secrets.
     pub async fn effective_config(&self, principal: &str) -> Result<EffectiveConfig> {
+        if let Some(pool) = &self.console_db {
+            return database::effective_config(pool, principal).await;
+        }
         let path = resource_path("principals", "prn_", principal, "/effective_config");
         let resp = self.send(Method::GET, &path, None::<&Value>).await?;
         decode_data(resp, Method::GET, &path).await
@@ -142,6 +167,9 @@ impl IronControlClient {
     /// is resolved through the canonical lookup endpoint, since the bare
     /// ``/:id`` route only matches OIDs.
     pub async fn get_principal(&self, principal: &str) -> Result<Principal> {
+        if let Some(pool) = &self.console_db {
+            return database::principal(pool, principal).await;
+        }
         let path = resource_path("principals", "prn_", principal, "");
         let resp = self.send(Method::GET, &path, None::<&Value>).await?;
         decode_data(resp, Method::GET, &path).await
@@ -169,6 +197,23 @@ impl IronControlClient {
             urlencoding::encode(principal_id)
         );
         self.write_unit(Method::POST, &path, input).await
+    }
+
+    /// Upsert a Slack channel permission unless the principal already holds
+    /// exactly `input` directly. Without a Console database connection this
+    /// always upserts.
+    pub async fn refresh_slack_channel_permission(
+        &self,
+        principal_id: &str,
+        input: &SlackChannelPermissionInput,
+    ) -> Result<()> {
+        if let Some(pool) = &self.console_db
+            && database::slack_channel_permission_is_current(pool, principal_id, input).await?
+        {
+            return Ok(());
+        }
+        self.upsert_slack_channel_permission(principal_id, input)
+            .await
     }
 
     /// List the roles assigned to a principal (by OID; this sub-resource route

@@ -65,7 +65,7 @@ for the operator workflow.
 
 | Env var or value | Set from | Controls |
 | --- | --- | --- |
-| `IRON_CONTROL_DATABASE_URL` | `secretManager.existingSecretName`. | Console database connection. Keep it separate from the api-rs logical database. |
+| `IRON_CONTROL_DATABASE_URL` | `secretManager.existingSecretName`. | Console database connection. api-rs reads principals and their effective config through it in read-only sessions. Keep it separate from the api-rs logical database. |
 | `IRON_CONTROL_INITIAL_USER_EMAIL`, `IRON_CONTROL_INITIAL_USER_PASSWORD` | `secretManager.existingSecretName`; local bootstrap generates defaults when absent. | Creates the initial Console admin when no user exists. |
 | `IRON_CONTROL_INITIAL_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Admin API key used by api-rs and `centaur-perms`. |
 | `IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY`, `IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY`, `IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT` | `secretManager.existingSecretName`; local bootstrap generates them when absent. | Encrypts credential material at rest. Keep these stable after first boot. |

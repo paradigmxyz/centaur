@@ -15,6 +15,18 @@ use crate::{
     oid::oid,
 };
 
+/// How stored secret values appear in a built configuration.
+#[derive(Clone, Copy, Debug)]
+pub enum SecretValues<'a> {
+    /// Decrypted: the configuration a proxy receives.
+    Live(&'a ActiveRecordEncryption),
+    /// Every inline value replaced with `[redacted]`, decrypting nothing.
+    Redacted,
+}
+
+/// Stand-in for an inline secret value, matching Console's redaction.
+pub const REDACTED: &str = "[redacted]";
+
 /// The principal a configuration is built for, with the attributes Postgres
 /// session settings can reference.
 #[derive(Clone, Copy, Debug)]
@@ -44,7 +56,7 @@ impl Subject<'_> {
 /// caller mints are not included: append them to `secrets`.
 pub async fn build_config(
     pool: &PgPool,
-    encryption: &ActiveRecordEncryption,
+    values: SecretValues<'_>,
     subject: &Subject<'_>,
     requester_id: Option<i64>,
 ) -> Result<Config> {
@@ -53,7 +65,7 @@ pub async fn build_config(
     for credential in loaded {
         let deliverable = if credential.kind == CredentialKind::Static {
             match credential.sources.first() {
-                Some(source) => source_value(source, encryption)?.is_some(),
+                Some(source) => source_value(source, values)?.is_some(),
                 None => false,
             }
         } else {
@@ -73,7 +85,7 @@ pub async fn build_config(
         let CredentialData::Static(data) = &credential.data else {
             return Err(mismatched_data(credential));
         };
-        if let Some(source) = source_value(&credential.sources[0], encryption)? {
+        if let Some(source) = source_value(&credential.sources[0], values)? {
             let mut entry = Map::new();
             entry.insert("source".to_owned(), source);
             entry.insert("rules".to_owned(), proxy_rules(&credential.rules));
@@ -93,32 +105,34 @@ pub async fn build_config(
             .iter()
             .filter(|credential| credential.kind == kind)
         {
-            config.transforms.push(transform(credential, encryption)?);
+            config.transforms.push(transform(credential, values)?);
         }
     }
     let oauth: Vec<Value> = credentials
         .iter()
         .filter(|credential| credential.kind == CredentialKind::OauthToken)
-        .map(|credential| oauth_entry(credential, encryption))
+        .map(|credential| oauth_entry(credential, values))
         .collect::<Result<_>>()?;
     if !oauth.is_empty() {
         config
             .transforms
             .push(json!({ "name": "oauth_token", "config": { "tokens": oauth } }));
     }
-    append_postgres(subject, &credentials, encryption, &mut config)?;
+    append_postgres(subject, &credentials, values, &mut config)?;
     Ok(config)
 }
 
-fn source_value(
-    source: &SecretSource,
-    encryption: &ActiveRecordEncryption,
-) -> Result<Option<Value>> {
+fn source_value(source: &SecretSource, values: SecretValues<'_>) -> Result<Option<Value>> {
     if source.source_type == "token_broker" {
+        // A credential that has not minted an access token yet delivers nothing.
         let Some(raw) = source.broker_access_token.as_deref() else {
             return Ok(None);
         };
-        let value = encryption.decrypt(raw)?;
+        let value = match values {
+            SecretValues::Live(encryption) => encryption.decrypt(raw)?,
+            // Without decrypting, any stored token counts as deliverable.
+            SecretValues::Redacted => REDACTED.to_owned(),
+        };
         if value.is_empty() {
             return Ok(None);
         }
@@ -132,7 +146,11 @@ fn source_value(
             .secret
             .as_deref()
             .ok_or_else(|| Error::InvalidData("control_plane source has no secret".to_owned()))?;
-        result.insert("value".to_owned(), Value::String(encryption.decrypt(raw)?));
+        let value = match values {
+            SecretValues::Live(encryption) => encryption.decrypt(raw)?,
+            SecretValues::Redacted => REDACTED.to_owned(),
+        };
+        result.insert("value".to_owned(), Value::String(value));
     }
     Ok(Some(Value::Object(result)))
 }
@@ -153,13 +171,13 @@ fn proxy_rules(rules: &[RequestRule]) -> Value {
     )
 }
 
-fn transform(credential: &Credential, encryption: &ActiveRecordEncryption) -> Result<Value> {
+fn transform(credential: &Credential, values: SecretValues<'_>) -> Result<Value> {
     let rules = proxy_rules(&credential.rules);
     match &credential.data {
         CredentialData::GcpAuth(data) => {
             let mut config = Map::new();
             if let Some(source) = credential.sources.first()
-                && let Some(value) = source_value(source, encryption)?
+                && let Some(value) = source_value(source, values)?
             {
                 config.insert("keyfile".to_owned(), value);
             }
@@ -181,7 +199,7 @@ fn transform(credential: &Credential, encryption: &ActiveRecordEncryption) -> Re
             let mut config = Map::new();
             config.insert(
                 "keyfile".to_owned(),
-                source_value(source, encryption)?.ok_or_else(|| {
+                source_value(source, values)?.ok_or_else(|| {
                     Error::InvalidData("gcp_id_token source unavailable".to_owned())
                 })?,
             );
@@ -194,7 +212,7 @@ fn transform(credential: &Credential, encryption: &ActiveRecordEncryption) -> Re
             let mut config = Map::new();
             for source in &credential.sources {
                 if let Some(role) = source.role.as_deref()
-                    && let Some(value) = source_value(source, encryption)?
+                    && let Some(value) = source_value(source, values)?
                 {
                     config.insert(role.to_owned(), value);
                 }
@@ -208,7 +226,7 @@ fn transform(credential: &Credential, encryption: &ActiveRecordEncryption) -> Re
             let mut credentials = Map::new();
             for source in &credential.sources {
                 if let Some(role) = source.role.as_deref()
-                    && let Some(value) = source_value(source, encryption)?
+                    && let Some(value) = source_value(source, values)?
                 {
                     credentials.insert(role.to_owned(), value);
                 }
@@ -234,7 +252,7 @@ fn transform(credential: &Credential, encryption: &ActiveRecordEncryption) -> Re
     }
 }
 
-fn oauth_entry(credential: &Credential, encryption: &ActiveRecordEncryption) -> Result<Value> {
+fn oauth_entry(credential: &Credential, values: SecretValues<'_>) -> Result<Value> {
     let CredentialData::OauthToken(data) = &credential.data else {
         return Err(mismatched_data(credential));
     };
@@ -249,7 +267,7 @@ fn oauth_entry(credential: &Credential, encryption: &ActiveRecordEncryption) -> 
         let Some(role) = source.role.as_deref() else {
             continue;
         };
-        let Some(value) = source_value(source, encryption)? else {
+        let Some(value) = source_value(source, values)? else {
             continue;
         };
         if source.role_kind.as_deref() == Some("endpoint_header") {
@@ -272,7 +290,7 @@ fn oauth_entry(credential: &Credential, encryption: &ActiveRecordEncryption) -> 
 fn append_postgres(
     subject: &Subject<'_>,
     credentials: &[Credential],
-    encryption: &ActiveRecordEncryption,
+    values: SecretValues<'_>,
     config: &mut Config,
 ) -> Result<()> {
     let mut positions: HashMap<String, usize> = HashMap::new();
@@ -286,7 +304,7 @@ fn append_postgres(
         let Some(source) = credential.sources.first() else {
             continue;
         };
-        let Some(dsn) = source_value(source, encryption)? else {
+        let Some(dsn) = source_value(source, values)? else {
             continue;
         };
         let mut entry = Map::new();

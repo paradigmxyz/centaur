@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
     process::Command,
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -38,6 +38,10 @@ use centaur_session_runtime::{
 use centaur_session_sqlx::TextSearchBackend;
 use centaur_workflows::{WorkflowHostSandboxRuntime, WorkflowPrincipalRegistrar};
 use clap::{Args as ClapArgs, Parser, ValueEnum};
+use sqlx::{
+    PgPool,
+    postgres::{PgConnectOptions, PgPoolOptions},
+};
 use tracing::{info, warn};
 
 use crate::{ServerError, activity_summary::ActivitySummaryConfig};
@@ -509,6 +513,29 @@ struct IronControlArgs {
     proxy_sync_url: Option<String>,
     #[arg(long = "iron-control-api-key", env = "IRON_CONTROL_API_KEY")]
     api_key: Option<String>,
+    /// Console's database. When set, principals and their effective config are
+    /// read from it directly instead of through the Console API.
+    #[arg(
+        long = "iron-control-database-url",
+        env = "IRON_CONTROL_DATABASE_URL",
+        hide_env_values = true
+    )]
+    console_database_url: Option<String>,
+    /// Database name overriding the one in `IRON_CONTROL_DATABASE_URL`.
+    #[arg(
+        long = "iron-control-database-name",
+        env = "IRON_CONTROL_DATABASE_NAME"
+    )]
+    console_database_name: Option<String>,
+    #[arg(
+        long = "iron-control-database-max-connections",
+        env = "IRON_CONTROL_DATABASE_MAX_CONNECTIONS",
+        default_value_t = 5
+    )]
+    console_database_max_connections: u32,
+    /// The Console database pool shared by every client built from these args.
+    #[arg(skip)]
+    console_db: OnceLock<Option<PgPool>>,
 }
 
 impl IronControlArgs {
@@ -520,12 +547,34 @@ impl IronControlArgs {
     }
 
     fn required_client(&self) -> Result<IronControlClient, ServerError> {
-        self.client().ok_or_else(|| {
+        let client = self.client().ok_or_else(|| {
             ServerError::UnsupportedConfig(
                 "iron-control is required: set IRON_CONTROL_URL and IRON_CONTROL_API_KEY"
                     .to_owned(),
             )
+        })?;
+        Ok(match self.console_db()? {
+            Some(pool) => client.with_console_db(pool),
+            None => client,
         })
+    }
+
+    fn console_db(&self) -> Result<Option<PgPool>, ServerError> {
+        if let Some(pool) = self.console_db.get() {
+            return Ok(pool.clone());
+        }
+        let pool = non_empty(self.console_database_url.as_deref())
+            .map(|url| {
+                console_db_options(url, non_empty(self.console_database_name.as_deref())).map(
+                    |options| {
+                        PgPoolOptions::new()
+                            .max_connections(self.console_database_max_connections)
+                            .connect_lazy_with(options)
+                    },
+                )
+            })
+            .transpose()?;
+        Ok(self.console_db.get_or_init(|| pool).clone())
     }
 
     /// Required backend sync settings (admin client + proxy-sync URL).
@@ -543,6 +592,24 @@ impl IronControlArgs {
             control_url: control_url.to_owned(),
         })
     }
+}
+
+/// Connection options for Console's database. Sessions are read-only:
+/// Console owns every write to its schema.
+fn console_db_options(
+    url: &str,
+    database_name: Option<&str>,
+) -> Result<PgConnectOptions, ServerError> {
+    let options = PgConnectOptions::from_str(url).map_err(|_| {
+        ServerError::UnsupportedConfig(
+            "IRON_CONTROL_DATABASE_URL is not a valid PostgreSQL URL".to_owned(),
+        )
+    })?;
+    let options = match database_name {
+        Some(name) => options.database(name),
+        None => options,
+    };
+    Ok(options.options([("default_transaction_read_only", "on")]))
 }
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
@@ -1536,7 +1603,11 @@ fn should_retry_iron_control_register(error: &RegisterError) -> bool {
         RegisterError::Control(IronControlError::PrincipalDerivation(_))
         | RegisterError::Control(IronControlError::SessionPrincipalNotPreapproved { .. }) => false,
         RegisterError::Control(IronControlError::Transport { .. }) => true,
-        RegisterError::Control(IronControlError::Decode { .. }) => false,
+        RegisterError::Control(IronControlError::Decode { .. })
+        | RegisterError::Control(IronControlError::NotFound { .. }) => false,
+        RegisterError::Control(IronControlError::ConsoleDb(error)) => {
+            matches!(error, console_db::Error::Database(_))
+        }
         RegisterError::Control(IronControlError::Status { status, .. }) => {
             *status == 429 || (500..600).contains(status)
         }
@@ -2800,6 +2871,25 @@ mod tests {
                 .get("app.kubernetes.io/component"),
             Some(&"console".to_owned())
         );
+    }
+
+    #[test]
+    fn console_database_sessions_are_read_only() {
+        let options = console_db_options(
+            "postgresql://console:secret@postgres.example:5432",
+            Some("console_production"),
+        )
+        .unwrap();
+
+        assert_eq!(options.get_database(), Some("console_production"));
+        assert!(
+            options
+                .get_options()
+                .is_some_and(|options| options.contains("default_transaction_read_only=on")),
+            "{:?}",
+            options.get_options()
+        );
+        assert!(console_db_options("not a url", None).is_err());
     }
 
     #[test]

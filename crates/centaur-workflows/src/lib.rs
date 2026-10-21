@@ -330,7 +330,7 @@ impl WorkflowPrincipalRegistrar {
                 WorkflowPrincipalDeclaration::Managed => {
                     let foreign_id = canonical_workflow_principal_foreign_id(workflow_name);
                     self.client
-                        .upsert_principal(&PrincipalInput {
+                        .refresh_principal(&PrincipalInput {
                             foreign_id,
                             name: format!("Workflow {workflow_name}"),
                             labels: workflow_principal_labels(workflow_name),
