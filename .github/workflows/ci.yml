@@ -120,6 +120,7 @@ jobs:
             '^\.github/workflows/ci\.yml$'
           set_output harness_server_checks \
             '^crates/harness-server/' \
+            '^crates/harness-server-conformance/' \
             '^\.github/workflows/ci\.yml$'
           set_output company_context_checks \
             '^crates/absurd-sdk/' \
@@ -234,9 +235,37 @@ jobs:
         working-directory: crates/harness-server
         run: cargo test --locked
 
-      - name: Codex protocol conformance
-        working-directory: crates/harness-server
-        run: cargo test --locked --features codex-schema --test app_server_stdio
+  harness-server-conformance:
+    name: Harness server Codex protocol conformance
+    runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.harness_server_checks == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: crates/harness-server-conformance
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Format
+        working-directory: crates/harness-server-conformance
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        working-directory: crates/harness-server-conformance
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        working-directory: crates/harness-server-conformance
+        run: cargo test --locked
 
   company-context-checks:
     name: Company context fmt, clippy, and tests
@@ -765,6 +794,7 @@ jobs:
       - ci_changes
       - migration-order
       - harness-server-checks
+      - harness-server-conformance
       - company-context-checks
       - proxy-sync-checks
       - token-broker-checks
@@ -782,5 +812,5 @@ jobs:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
-          allowed-skips: migration-order, harness-server-checks, company-context-checks, proxy-sync-checks, token-broker-checks, rust-api, rust-api-postgres, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
+          allowed-skips: migration-order, harness-server-checks, harness-server-conformance, company-context-checks, proxy-sync-checks, token-broker-checks, rust-api, rust-api-postgres, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
           jobs: ${{ toJSON(needs) }}

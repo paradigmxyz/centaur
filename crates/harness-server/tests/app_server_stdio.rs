@@ -3,12 +3,10 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::LazyLock;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use jsonschema::Validator;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -1572,11 +1570,6 @@ struct BridgeProcess {
     stdout_reader: JoinHandle<()>,
     stderr_reader: JoinHandle<String>,
     stdout_lines: Vec<String>,
-    /// Whether responses are harness-server's own rather than relayed from an
-    /// upstream app-server stub, and so must match the Codex schemas.
-    check_response_schemas: bool,
-    /// Methods of sent requests by id, to pick the schema for each response.
-    pending_methods: HashMap<i64, String>,
 }
 
 impl BridgeProcess {
@@ -1655,9 +1648,7 @@ impl BridgeProcess {
             command.env(key, value);
         }
 
-        let mut process = Self::spawn_command(command);
-        process.check_response_schemas = harness != Harness::Codex;
-        process
+        Self::spawn_command(command)
     }
 
     fn spawn_command(mut command: Command) -> Self {
@@ -1687,8 +1678,6 @@ impl BridgeProcess {
             stdout_reader,
             stderr_reader,
             stdout_lines: Vec::new(),
-            check_response_schemas: false,
-            pending_methods: HashMap::new(),
         }
     }
 
@@ -2192,14 +2181,6 @@ impl BridgeProcess {
 
     fn send(&mut self, value: Value) {
         eprintln!("stdin JSON: {value}");
-        if self.check_response_schemas
-            && let (Some(id), Some(method)) = (
-                response_id(&value),
-                value.get("method").and_then(Value::as_str),
-            )
-        {
-            self.pending_methods.insert(id, method.to_string());
-        }
         let stdin = self.stdin.as_mut().expect("stdin still open");
         serde_json::to_writer(&mut *stdin, &value).expect("write JSON");
         stdin.write_all(b"\n").expect("write newline");
@@ -2227,9 +2208,7 @@ impl BridgeProcess {
                     self.stdout_lines.push(line.clone());
                     let value: Value =
                         serde_json::from_str(line.trim()).expect("valid JSON stdout line");
-                    let request_method =
-                        response_id(&value).and_then(|id| self.pending_methods.remove(&id));
-                    validate_jsonrpc_value(&value, request_method.as_deref(), allow_error);
+                    validate_jsonrpc_value(&value, allow_error);
                     return value;
                 }
                 Ok(Err(error)) => panic!("read app-server stdout: {error}"),
@@ -2538,82 +2517,24 @@ impl RawProcess {
     }
 }
 
-/// Codex App Server JSON Schemas at the openai/codex revision Cargo.toml pins,
-/// fetched from GitHub. Checking against them needs network access, so it runs
-/// only with `--features codex-schema`.
-static CODEX_SCHEMAS: LazyLock<Option<HashMap<&'static str, Validator>>> = LazyLock::new(|| {
-    if !cfg!(feature = "codex-schema") {
-        return None;
-    }
-    let rev = pinned_codex_rev();
-    let schemas = [
-        ("notification", "ServerNotification.json"),
-        ("initialize", "v1/InitializeResponse.json"),
-        ("thread/start", "v2/ThreadStartResponse.json"),
-        ("thread/resume", "v2/ThreadResumeResponse.json"),
-        ("turn/start", "v2/TurnStartResponse.json"),
-        ("turn/steer", "v2/TurnSteerResponse.json"),
-        ("turn/interrupt", "v2/TurnInterruptResponse.json"),
-    ]
-    .into_iter()
-    .map(|(key, file)| {
-        let url = format!(
-            "https://raw.githubusercontent.com/openai/codex/{rev}/codex-rs/app-server-protocol/schema/json/{file}"
-        );
-        let schema: Value = reqwest::blocking::get(&url)
-            .and_then(reqwest::blocking::Response::error_for_status)
-            .and_then(reqwest::blocking::Response::json)
-            .unwrap_or_else(|error| panic!("fetch {url}: {error}"));
-        let validator = jsonschema::validator_for(&schema)
-            .unwrap_or_else(|error| panic!("compile {url}: {error}"));
-        (key, validator)
-    })
-    .collect();
-    Some(schemas)
-});
-
-/// The openai/codex revision of the codex crates in Cargo.toml.
-fn pinned_codex_rev() -> String {
-    include_str!("../Cargo.toml")
-        .lines()
-        .filter(|line| line.contains("https://github.com/openai/codex"))
-        .find_map(|line| line.split("rev = \"").nth(1)?.split('"').next())
-        .expect("Cargo.toml pins an openai/codex git revision")
-        .to_string()
-}
-
-fn assert_matches_codex_schema(schema: &str, instance: &Value, value: &Value) {
-    let Some(schemas) = CODEX_SCHEMAS.as_ref() else {
-        return;
-    };
-    let errors: Vec<String> = schemas[schema]
-        .iter_errors(instance)
-        .map(|error| format!("{} at {}", error, error.instance_path()))
-        .collect();
-    assert!(
-        errors.is_empty(),
-        "output does not match the Codex App Server `{schema}` schema: {errors:?}; value={value}"
-    );
-}
-
-/// Checks a line of app-server stdout against the pinned Codex protocol.
-/// `request_method` is the method of the request a response answers.
-fn validate_jsonrpc_value(value: &Value, request_method: Option<&str>, allow_error: bool) {
+/// Checks the JSON-RPC envelope of a line of app-server stdout. Payload shapes
+/// are checked against the Codex types in `crates/harness-server-conformance`.
+fn validate_jsonrpc_value(value: &Value, allow_error: bool) {
     let has_id = value.get("id").is_some();
     if value.get("method").is_some() {
         assert!(!has_id, "app-server emitted unexpected request: {value}");
-        assert_matches_codex_schema("notification", value, value);
+        assert!(
+            value.get("params").is_some_and(Value::is_object),
+            "notification without params: {value}"
+        );
     } else if let Some(error) = value.get("error") {
         assert!(has_id, "JSON-RPC error without id: {value}");
         assert!(allow_error, "app-server returned JSON-RPC error: {error}");
     } else {
-        let result = value
-            .get("result")
-            .unwrap_or_else(|| panic!("not a JSON-RPC message: {value}"));
-        assert!(has_id, "JSON-RPC response without id: {value}");
-        if let Some(method) = request_method {
-            assert_matches_codex_schema(method, result, value);
-        }
+        assert!(
+            has_id && value.get("result").is_some(),
+            "not a JSON-RPC message: {value}"
+        );
     }
 }
 
