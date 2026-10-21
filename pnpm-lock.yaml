@@ -179,8 +179,8 @@ importers:
         specifier: 4.31.0
         version: 4.31.0(patch_hash=69262b03c278ca9d4af0bed7b4e05f9d7a5a36d3d79fad31df2a85da4d349274)(zod@4.6.7)
       '@linear/sdk':
-        specifier: ^97.1.0
-        version: 97.1.0(graphql@17.0.0)
+        specifier: ^97.2.0
+        version: 97.2.0(graphql@17.0.0)
       chat:
         specifier: 4.31.0
         version: 4.31.0(zod@4.6.7)
@@ -253,8 +253,8 @@ importers:
         specifier: ^7.0.0-dev.20260707.2
         version: 7.0.0-dev.20260707.2
       emulate:
-        specifier: ^0.12.1
-        version: 0.12.1
+        specifier: ^0.12.2
+        version: 0.12.2
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
@@ -277,8 +277,8 @@ importers:
         specifier: 4.31.0
         version: 4.31.0(zod@4.6.7)
       dotenv:
-        specifier: ^18.0.7
-        version: 18.0.7
+        specifier: ^18.0.8
+        version: 18.0.8
       express:
         specifier: 5.3.0
         version: 5.3.0
@@ -409,8 +409,8 @@ packages:
     resolution: {integrity: sha512-Xt0x5Kl6qBoWhGFypb8ykyP+c5kT7scmRPs1uJidSPOaRgkMJ/4y41QpmZCWCBUMmZtf/O0VktgQio6rLXT94w==}
     engines: {node: '>=18.x'}
 
-  '@linear/sdk@97.1.0':
-    resolution: {integrity: sha512-HPk0zY8+SAOEoUEPxZZgqTU7xpNJ5BYcN3grngaWsesecaGMUrn2bzhmWtsQ0jOtTvLImZKHxgiL3hqEjb6oig==}
+  '@linear/sdk@97.2.0':
+    resolution: {integrity: sha512-X/bFimpb2PnEY1jt1NjWXf25t6XEOxici0+D1xmYAcriliTTeGGjzNPT+H5A8ZdCHGjxCQ/nGTUszokzXLyaXA==}
     engines: {node: ^20.19.0 || >=22.12.0}
 
   '@microsoft/teams.api@2.1.0':
@@ -1082,8 +1082,8 @@ packages:
     resolution: {integrity: sha512-qHbFlFG2N7y3LjPySYsL6A1+BnX6bkTVgo842EX0CqVPk/KTMwZkojPHEXKsQUpWZNyz5BISNHK1cPpQw0+m4A==}
     engines: {node: '>=18'}
 
-  dotenv@18.0.7:
-    resolution: {integrity: sha512-QEvMEF8ca3GNZJJnAbOgxpj5ULhBvnMcURp+XKrtvqFNPgjBvYoswQ0Jl2cO7JzCjxZjJhr9ZuIEhlrRxMft/Q==}
+  dotenv@18.0.8:
+    resolution: {integrity: sha512-2KDeoFoK/zRtcnbunCDlLG5VWVMcyqeQc6iK65o231nfNAcuGrKoqUQfJFUtBI+QlShk5HKIHxwebBtUl3rEfA==}
     engines: {node: '>=12'}
     hasBin: true
 
@@ -1097,8 +1097,8 @@ packages:
   ee-first@1.1.1:
     resolution: {integrity: sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow==}
 
-  emulate@0.12.1:
-    resolution: {integrity: sha512-xhjdA1/9i39UZEggLj4MzUqSqGkv5v/ei8yCxHZje2O0QCaQEylUAfyu20jXcnY3GEHARKj05cI7qKR+WGor/A==}
+  emulate@0.12.2:
+    resolution: {integrity: sha512-cHz1ITT3xm3HJM6qSks7+ME5Bw/W7zp7ky2Ve4M4ANls46EfeAy0m/nWOjTLJEgLEQcA9gW+L3cWjuUcklJxtQ==}
     hasBin: true
 
   encodeurl@2.0.0:
@@ -2194,7 +2194,7 @@ snapshots:
     transitivePeerDependencies:
       - graphql
 
-  '@linear/sdk@97.1.0(graphql@17.0.0)':
+  '@linear/sdk@97.2.0(graphql@17.0.0)':
     dependencies:
       '@graphql-typed-document-node/core': 3.2.0(graphql@17.0.0)
     transitivePeerDependencies:
@@ -2827,7 +2827,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  dotenv@18.0.7: {}
+  dotenv@18.0.8: {}
 
   dunder-proto@1.0.1:
     dependencies:
@@ -2841,7 +2841,7 @@ snapshots:
 
   ee-first@1.1.1: {}
 
-  emulate@0.12.1:
+  emulate@0.12.2:
     dependencies:
       commander: 14.0.3
       picocolors: 1.1.1
