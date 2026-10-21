@@ -1,16 +1,23 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone};
 use reqwest::{Client, StatusCode, header::CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::Mutex as AsyncMutex;
 use tracing::warn;
 
 use crate::{config::Config, credentials::GranolaCredential, errors::rejected, telemetry};
 
 const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// Granola reports a tool-level rate limit as an MCP tool error with this text.
+const RATE_LIMIT_MESSAGE: &str = "Rate limit reached";
 
 /// Talks to Granola's MCP server with a user's broker credential. The MCP
 /// server exposes meetings as XML-like text inside tool results.
@@ -18,6 +25,9 @@ const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct GranolaClient {
     http: Client,
     mcp_url: String,
+    /// Serializes `get_meetings` per credential: Granola rate-limits each
+    /// user, and a backfill queues many fetch batches at once.
+    get_meetings_locks: Arc<Mutex<HashMap<i64, Arc<AsyncMutex<()>>>>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -45,6 +55,7 @@ impl Meeting {
 
 pub struct McpSession<'a> {
     client: &'a GranolaClient,
+    credential_id: i64,
     access_token: String,
     session_id: Option<String>,
     rpc_id: u64,
@@ -55,12 +66,23 @@ impl GranolaClient {
         Ok(Self {
             http: Client::builder().timeout(MCP_REQUEST_TIMEOUT).build()?,
             mcp_url: config.granola_mcp_url.clone(),
+            get_meetings_locks: Arc::default(),
         })
+    }
+
+    fn get_meetings_lock(&self, credential_id: i64) -> Arc<AsyncMutex<()>> {
+        self.get_meetings_locks
+            .lock()
+            .expect("Granola lock map poisoned")
+            .entry(credential_id)
+            .or_default()
+            .clone()
     }
 
     pub async fn session(&self, credential: &GranolaCredential) -> Result<McpSession<'_>> {
         let mut session = McpSession {
             client: self,
+            credential_id: credential.id,
             access_token: credential.access_token.clone(),
             session_id: None,
             rpc_id: 0,
@@ -108,6 +130,8 @@ impl McpSession<'_> {
     }
 
     pub async fn get_meetings(&mut self, meeting_ids: &[String]) -> Result<Vec<Meeting>> {
+        let lock = self.client.get_meetings_lock(self.credential_id);
+        let _guard = lock.lock().await;
         let text = self
             .call_tool("get_meetings", json!({ "meeting_ids": meeting_ids }))
             .await?;
@@ -161,7 +185,12 @@ impl McpSession<'_> {
             } else {
                 format!(": {detail}")
             };
-            return Err(rejected(format!("Granola MCP tool {name} failed{suffix}")));
+            let message = format!("Granola MCP tool {name} failed{suffix}");
+            // Rate limits clear on their own, so leave them retryable.
+            if detail.contains(RATE_LIMIT_MESSAGE) {
+                bail!(message);
+            }
+            return Err(rejected(message));
         }
         Ok(text)
     }
@@ -472,6 +501,12 @@ mod tests {
         assert_eq!(parse("tomorrow"), None);
     }
 
+    /// Concurrent `slow` get_meetings calls seen by the fake MCP server.
+    static SLOW_CALLS_IN_FLIGHT: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    static MAX_SLOW_CALLS_IN_FLIGHT: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
     /// Serves a minimal Granola MCP endpoint that requires the session ID it issues.
     async fn fake_mcp(
         headers: axum::http::HeaderMap,
@@ -505,6 +540,21 @@ mod tests {
                 "isError": true,
                 "content": [{ "type": "text", "text": "Invalid meeting_ids:\n maximum 10" }]
             }),
+            "get_meetings" if params["arguments"]["meeting_ids"][0] == "rate-limited" => json!({
+                "isError": true,
+                "content": [{
+                    "type": "text",
+                    "text": "Rate limit reached. Wait at least 1 second before retrying this tool."
+                }]
+            }),
+            "get_meetings" if params["arguments"]["meeting_ids"][0] == "slow" => {
+                use std::sync::atomic::Ordering::SeqCst;
+                let in_flight = SLOW_CALLS_IN_FLIGHT.fetch_add(1, SeqCst) + 1;
+                MAX_SLOW_CALLS_IN_FLIGHT.fetch_max(in_flight, SeqCst);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                SLOW_CALLS_IN_FLIGHT.fetch_sub(1, SeqCst);
+                json!({ "content": [{ "type": "text", "text": "" }] })
+            }
             "list_meetings" => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
             _ => return StatusCode::UNAUTHORIZED.into_response(),
         };
@@ -525,6 +575,7 @@ mod tests {
         let client = GranolaClient {
             http: Client::new(),
             mcp_url: format!("http://{address}/mcp"),
+            get_meetings_locks: Arc::default(),
         };
         let credential = GranolaCredential {
             id: 1,
@@ -543,6 +594,25 @@ mod tests {
         assert_eq!(
             tool_error.to_string(),
             "Granola MCP tool get_meetings failed: Invalid meeting_ids: maximum 10"
+        );
+        let rate_limited = session
+            .get_meetings(&["rate-limited".to_owned()])
+            .await
+            .unwrap_err();
+        assert!(!is_rejected(&rate_limited), "rate limits are retried");
+
+        // Calls with the same credential run one at a time, even across sessions.
+        let mut other_session = client.session(&credential).await.unwrap();
+        let slow = ["slow".to_owned()];
+        let (first, second) = tokio::join!(
+            session.get_meetings(&slow),
+            other_session.get_meetings(&slow)
+        );
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(
+            MAX_SLOW_CALLS_IN_FLIGHT.load(std::sync::atomic::Ordering::SeqCst),
+            1
         );
         let date = NaiveDate::from_ymd_opt(2026, 7, 8).unwrap();
         let unavailable = session.list_meetings(date, date).await.unwrap_err();

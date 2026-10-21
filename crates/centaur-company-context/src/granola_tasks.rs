@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use absurd::{SpawnOptions, TaskContext};
+use absurd::{RetryKind, RetryStrategy, SpawnOptions, TaskContext};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -262,6 +262,14 @@ async fn sync_account(
                             params.bucket,
                             hex_sha256(ids.as_bytes())
                         )),
+                        // Back off so a rate-limited batch is retried after
+                        // Granola's limit clears.
+                        retry_strategy: Some(RetryStrategy {
+                            kind: RetryKind::Exponential,
+                            base_seconds: Some(5.0),
+                            factor: Some(2.0),
+                            max_seconds: Some(300.0),
+                        }),
                         ..SpawnOptions::default()
                     },
                 )
