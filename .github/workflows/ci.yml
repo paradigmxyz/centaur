@@ -139,7 +139,7 @@ jobs:
             '^Cargo\.(toml|lock)$' \
             '^crates/active-record-encryption/' \
             '^crates/centaur-proxy-sync/' \
-            '^crates/console-db/' \
+            '^crates/centaur-console-db/' \
             '^services/console/' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
@@ -155,7 +155,6 @@ jobs:
             '^crates/absurd-sdk/' \
             '^crates/active-record-encryption/' \
             '^crates/centaur-' \
-            '^crates/console-db/' \
             '^services/api-rs/' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^services/workflow-python/' \
@@ -363,7 +362,7 @@ jobs:
       - name: Test Console database crate
         env:
           CONSOLE_DB_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/proxy_sync_test
-        run: cargo test --locked -p console-db
+        run: cargo test --locked -p centaur-console-db
 
       - name: Test
         env:
@@ -469,7 +468,7 @@ jobs:
             --exclude centaur-company-context \
             --exclude centaur-proxy-sync \
             --exclude centaur-token-broker \
-            --exclude console-db
+            --exclude centaur-console-db
 
           PGPASSWORD=postgres createdb --host localhost --username postgres session_runtime
           SESSION_RUNTIME_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/session_runtime \

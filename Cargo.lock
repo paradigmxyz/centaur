@@ -519,6 +519,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.23.1",
+ "centaur-console-db",
  "centaur-iron-control",
  "centaur-iron-proxy",
  "centaur-sandbox-agent-k8s",
@@ -530,7 +531,6 @@ dependencies = [
  "centaur-telemetry",
  "centaur-workflows",
  "clap",
- "console-db",
  "eventsource-stream",
  "futures-util",
  "hex",
@@ -588,12 +588,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "centaur-console-db"
+version = "0.1.0"
+dependencies = [
+ "active-record-encryption",
+ "hex",
+ "rand 0.10.3",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "sqids",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "centaur-iron-control"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "centaur-console-db",
  "centaur-iron-proxy",
- "console-db",
  "reqwest",
  "serde",
  "serde_json",
@@ -635,8 +650,8 @@ version = "0.1.0"
 dependencies = [
  "active-record-encryption",
  "axum",
+ "centaur-console-db",
  "chrono",
- "console-db",
  "crc32fast",
  "hex",
  "jsonwebtoken",
@@ -994,21 +1009,6 @@ dependencies = [
  "rustversion",
  "ryu",
  "static_assertions",
-]
-
-[[package]]
-name = "console-db"
-version = "0.1.0"
-dependencies = [
- "active-record-encryption",
- "hex",
- "rand 0.10.3",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "sqids",
- "sqlx",
- "tokio",
 ]
 
 [[package]]

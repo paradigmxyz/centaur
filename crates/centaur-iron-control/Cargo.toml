@@ -7,8 +7,8 @@ repository.workspace = true
 
 [dependencies]
 base64.workspace = true
+centaur-console-db.workspace = true
 centaur-iron-proxy.workspace = true
-console-db.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

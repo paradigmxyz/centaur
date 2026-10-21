@@ -1606,7 +1606,7 @@ fn should_retry_iron_control_register(error: &RegisterError) -> bool {
         RegisterError::Control(IronControlError::Decode { .. })
         | RegisterError::Control(IronControlError::NotFound { .. }) => false,
         RegisterError::Control(IronControlError::ConsoleDb(error)) => {
-            matches!(error, console_db::Error::Database(_))
+            matches!(error, centaur_console_db::Error::Database(_))
         }
         RegisterError::Control(IronControlError::Status { status, .. }) => {
             *status == 429 || (500..600).contains(status)

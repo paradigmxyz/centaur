@@ -7,7 +7,7 @@ license = "MIT"
 [dependencies]
 active-record-encryption = { path = "../active-record-encryption" }
 axum = "0.8"
-console-db = { path = "../console-db" }
+centaur-console-db = { path = "../centaur-console-db" }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 crc32fast = "1"
 hex = "0.4"

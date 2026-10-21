@@ -33,7 +33,7 @@ pub(crate) async fn load_proxy(
     .bind(token_hash)
     .fetch_optional(pool)
     .await
-    .map_err(console_db::Error::Database)?;
+    .map_err(centaur_console_db::Error::Database)?;
     Ok(row.map(|row| ProxyRecord {
         id: row.get("id"),
         name: row.get("name"),

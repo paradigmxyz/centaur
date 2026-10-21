@@ -4,7 +4,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::Serialize;
 use serde_json::json;
 
-use console_db::{models::Config, oid, slack_channels};
+use centaur_console_db::{models::Config, oid, slack_channels};
 
 use crate::{
     ApiError,

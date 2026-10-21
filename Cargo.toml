@@ -24,6 +24,7 @@ absurd-sdk = { path = "crates/absurd-sdk" }
 axum = "0.8.9"
 bytes = { version = "1", features = ["serde"] }
 centaur-api-server = { path = "crates/centaur-api-server" }
+centaur-console-db = { path = "crates/centaur-console-db" }
 centaur-iron-control = { path = "crates/centaur-iron-control" }
 centaur-iron-proxy = { path = "crates/centaur-iron-proxy" }
 centaur-sandbox-core = { path = "crates/centaur-sandbox-core" }
@@ -34,7 +35,6 @@ centaur-session-runtime = { path = "crates/centaur-session-runtime" }
 centaur-session-sqlx = { path = "crates/centaur-session-sqlx" }
 centaur-telemetry = { path = "crates/centaur-telemetry" }
 centaur-workflows = { path = "crates/centaur-workflows" }
-console-db = { path = "crates/console-db" }
 clap = { version = "4.6.1", features = ["derive", "env"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
 chrono-tz = "0.10.4"

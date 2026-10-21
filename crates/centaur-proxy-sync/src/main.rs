@@ -20,9 +20,9 @@ use axum::{
     routing::{get, post},
 };
 use cache::SyncCache;
+use centaur_console_db::{models::Config, oid};
 use chrono::Utc;
 use config::{build_config, config_hash};
-use console_db::{models::Config, oid};
 use database::load_proxy;
 use models::AppState;
 use serde::{Deserialize, Serialize};
@@ -72,8 +72,8 @@ impl ApiError {
     }
 }
 
-impl From<console_db::Error> for ApiError {
-    fn from(error: console_db::Error) -> Self {
+impl From<centaur_console_db::Error> for ApiError {
+    fn from(error: centaur_console_db::Error) -> Self {
         Self::internal(error.to_string())
     }
 }

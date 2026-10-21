@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use console_db::{decode_oid, find_principal, find_principal_by_foreign_id};
+use centaur_console_db::{decode_oid, find_principal, find_principal_by_foreign_id};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
@@ -25,7 +25,7 @@ pub(crate) async fn principal(pool: &PgPool, ident: &str) -> Result<Principal> {
 /// returns it for api-rs.
 pub(crate) async fn effective_config(pool: &PgPool, ident: &str) -> Result<EffectiveConfig> {
     let row = find(pool, ident).await?.ok_or_else(|| not_found(ident))?;
-    let config = console_db::effective_config(pool, row.id)
+    let config = centaur_console_db::effective_config(pool, row.id)
         .await?
         .ok_or_else(|| not_found(ident))?;
     serde_json::from_value(json!({ "secrets": config.secrets, "postgres": config.postgres }))
@@ -42,7 +42,7 @@ pub(crate) async fn unchanged_principal(
         return Ok(None);
     };
     let linked_user = match slack_dm_email(&row, input) {
-        Some(email) => Some(console_db::find_user_id_by_email(pool, &email).await?),
+        Some(email) => Some(centaur_console_db::find_user_id_by_email(pool, &email).await?),
         None => None,
     };
     if !upsert_changes_nothing(&row, input, linked_user) {
@@ -53,7 +53,7 @@ pub(crate) async fn unchanged_principal(
 
 /// The normalized email Console links a `slack_dm` principal's user by when
 /// `input` is upserted, if it does.
-fn slack_dm_email(row: &console_db::Principal, input: &PrincipalInput) -> Option<String> {
+fn slack_dm_email(row: &centaur_console_db::Principal, input: &PrincipalInput) -> Option<String> {
     let email = input
         .slack_email
         .as_deref()
@@ -66,7 +66,7 @@ fn slack_dm_email(row: &console_db::Principal, input: &PrincipalInput) -> Option
 /// absent fields are kept, labels are replaced, and `linked_user` is
 /// `Some(user)` when the upsert links the principal to Console user `user`.
 fn upsert_changes_nothing(
-    row: &console_db::Principal,
+    row: &centaur_console_db::Principal,
     input: &PrincipalInput,
     linked_user: Option<Option<i64>>,
 ) -> bool {
@@ -110,7 +110,8 @@ pub(crate) async fn slack_channel_permission_is_current(
         return Ok(false);
     };
     let channel_id = input.channel_id.trim().to_uppercase();
-    let current = console_db::find_direct_slack_channel_permission(pool, id, &channel_id).await?;
+    let current =
+        centaur_console_db::find_direct_slack_channel_permission(pool, id, &channel_id).await?;
     Ok(current.is_some_and(|current| {
         current.upload_enabled == input.upload_enabled
             && current.download_enabled == input.download_enabled
@@ -120,7 +121,7 @@ pub(crate) async fn slack_channel_permission_is_current(
 
 /// Resolves an identifier the way the admin API routes it: anything with the
 /// OID prefix is an OID, everything else a `foreign_id`.
-async fn find(pool: &PgPool, ident: &str) -> Result<Option<console_db::Principal>> {
+async fn find(pool: &PgPool, ident: &str) -> Result<Option<centaur_console_db::Principal>> {
     if ident.starts_with("prn_") {
         return match decode_oid(PRINCIPAL_OID_PREFIX, ident) {
             Some(id) => Ok(find_principal(pool, id).await?),
@@ -130,7 +131,7 @@ async fn find(pool: &PgPool, ident: &str) -> Result<Option<console_db::Principal
     Ok(find_principal_by_foreign_id(pool, ident).await?)
 }
 
-fn principal_record(row: console_db::Principal) -> Result<Principal> {
+fn principal_record(row: centaur_console_db::Principal) -> Result<Principal> {
     let Value::Object(stored) = row.labels else {
         return Err(invalid_data(format!(
             "principal {} labels are not an object",
@@ -149,7 +150,7 @@ fn principal_record(row: console_db::Principal) -> Result<Principal> {
     }
     labels.insert(SANDBOX_REPO_CACHE_LABEL.to_owned(), row.sandbox_repo_cache);
     Ok(Principal {
-        id: console_db::oid(PRINCIPAL_OID_PREFIX, row.id),
+        id: centaur_console_db::oid(PRINCIPAL_OID_PREFIX, row.id),
         foreign_id: row.foreign_id,
         name: row.name.unwrap_or_default(),
         labels,
@@ -165,7 +166,7 @@ fn not_found(ident: &str) -> IronControlError {
 }
 
 fn invalid_data(message: String) -> IronControlError {
-    IronControlError::ConsoleDb(console_db::Error::InvalidData(message))
+    IronControlError::ConsoleDb(centaur_console_db::Error::InvalidData(message))
 }
 
 #[cfg(test)]
@@ -177,8 +178,8 @@ mod tests {
     use super::{principal_record, slack_dm_email, upsert_changes_nothing};
     use crate::models::PrincipalInput;
 
-    fn row() -> console_db::Principal {
-        console_db::Principal {
+    fn row() -> centaur_console_db::Principal {
+        centaur_console_db::Principal {
             id: 123,
             foreign_id: Some("slack-dm-u1".to_owned()),
             name: Some("Ada".to_owned()),

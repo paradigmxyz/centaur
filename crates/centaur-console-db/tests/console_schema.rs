@@ -7,7 +7,7 @@
 use std::env;
 
 use active_record_encryption::ActiveRecordEncryption;
-use console_db::{
+use centaur_console_db::{
     REDACTED, SecretValues, SlackChannelPermission, Subject, build_config,
     find_direct_slack_channel_permission, find_principal, find_principal_by_foreign_id,
     find_user_id_by_email, models::Config,
@@ -306,7 +306,7 @@ async fn effective_config_is_redacted_and_absent_for_missing_principals() {
     let principal = fixture.principal("principal").await;
     fixture.grant_secret_values(principal).await;
 
-    let config = console_db::effective_config(&fixture.pool, principal)
+    let config = centaur_console_db::effective_config(&fixture.pool, principal)
         .await
         .unwrap()
         .expect("principal exists");
@@ -323,7 +323,7 @@ async fn effective_config_is_redacted_and_absent_for_missing_principals() {
     );
 
     assert!(
-        console_db::effective_config(&fixture.pool, i64::MAX)
+        centaur_console_db::effective_config(&fixture.pool, i64::MAX)
             .await
             .unwrap()
             .is_none()

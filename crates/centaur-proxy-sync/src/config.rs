@@ -1,5 +1,5 @@
+use centaur_console_db::{SecretValues, Subject, models::Config, oid};
 use chrono::{DateTime, Utc};
-use console_db::{SecretValues, Subject, models::Config, oid};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -23,7 +23,7 @@ pub(crate) async fn build_config(
         slack_history_channel_ids: &proxy.slack_history_channel_ids,
         proxy_labels: &proxy.labels,
     };
-    let mut config = console_db::build_config(
+    let mut config = centaur_console_db::build_config(
         &state.pool,
         SecretValues::Live(&state.encryption),
         &subject,

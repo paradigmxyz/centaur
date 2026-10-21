@@ -1,5 +1,5 @@
 [package]
-name = "console-db"
+name = "centaur-console-db"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"

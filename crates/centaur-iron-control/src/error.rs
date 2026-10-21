@@ -31,7 +31,7 @@ pub enum IronControlError {
     },
     /// A direct read of Console's database failed.
     #[error("console database read failed: {0}")]
-    ConsoleDb(#[from] console_db::Error),
+    ConsoleDb(#[from] centaur_console_db::Error),
     /// A direct read of Console's database found no such record.
     #[error("iron-control {resource} {ident} not found")]
     NotFound {
