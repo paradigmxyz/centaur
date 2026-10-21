@@ -1,5 +1,5 @@
-//! Projection of imported documents: rows operators write to
-//! `company_context_system.imported_documents` are chunked, embedded, and
+//! Projection of custom documents: rows written directly to
+//! `company_context_system.custom_documents` are chunked, embedded, and
 //! published to `company_context_data` for retrieval. Each run projects rows
 //! whose chunks are missing or were projected from other content; deleting a
 //! row removes its chunks through a cascading foreign key.
@@ -13,7 +13,7 @@ use sqlx::{PgPool, types::Json};
 use tracing::{info, warn};
 
 use crate::{
-    config::{IMPORTED_DOCUMENT_ID_PREFIX, IMPORTED_PROJECT_TASK},
+    config::{CUSTOM_DOCUMENT_ID_PREFIX, CUSTOM_PROJECT_TASK},
     embeddings::EmbeddingsClient,
     errors::is_rejected,
     extraction::{chunk_text, hex_sha256},
@@ -26,7 +26,7 @@ const BATCH_SIZE: i64 = 50;
 const MAX_BATCHES_PER_RUN: usize = 20;
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct ImportedProjectParams {
+pub struct CustomProjectParams {
     pub bucket: u64,
 }
 
@@ -39,8 +39,8 @@ pub struct ProjectSummary {
 pub fn register(state: &TaskState) -> Result<()> {
     let project_state = state.clone();
     state.absurd.register_task(
-        IMPORTED_PROJECT_TASK,
-        move |params: ImportedProjectParams, ctx| {
+        CUSTOM_PROJECT_TASK,
+        move |params: CustomProjectParams, ctx| {
             let state = project_state.clone();
             async move { run_task(&ctx, project_task(&state, params, &ctx)).await }
         },
@@ -50,12 +50,12 @@ pub fn register(state: &TaskState) -> Result<()> {
 
 async fn project_task(
     state: &TaskState,
-    params: ImportedProjectParams,
+    params: CustomProjectParams,
     ctx: &TaskContext,
 ) -> Result<ProjectSummary> {
     let summary = project(&state.pool, &state.embeddings, state.config.chunk_chars).await?;
     info!(
-        event = "company_context_imported_documents_projected",
+        event = "company_context_custom_documents_projected",
         task_id = ctx.task_id(),
         bucket = params.bucket,
         projected = summary.projected,
@@ -89,7 +89,7 @@ impl Pending {
             .into_iter()
             .map(|chunk| Chunk {
                 document_id: format!(
-                    "{IMPORTED_DOCUMENT_ID_PREFIX}{}:{}:{}",
+                    "{CUSTOM_DOCUMENT_ID_PREFIX}{}:{}:{}",
                     self.source, self.external_id, chunk.chunk_id
                 ),
                 input: if self.title.is_empty() {
@@ -117,15 +117,15 @@ pub async fn project(
             r#"
             SELECT i.source, i.external_id, i.title, i.body, i.occurred_at,
                    i.metadata, i.content_hash
-            FROM company_context_system.imported_documents i
+            FROM company_context_system.custom_documents i
             WHERE NOT EXISTS (
-                SELECT 1 FROM company_context_data.imported_document_chunks c
+                SELECT 1 FROM company_context_data.custom_document_chunks c
                 WHERE c.source = i.source
                   AND c.external_id = i.external_id
                   AND c.item_hash = i.content_hash
             )
               AND NOT EXISTS (
-                SELECT 1 FROM company_context_system.imported_document_rejections r
+                SELECT 1 FROM company_context_system.custom_document_rejections r
                 WHERE r.source = i.source
                   AND r.external_id = i.external_id
                   AND r.content_hash = i.content_hash
@@ -203,7 +203,7 @@ async fn write(
     // Holds off concurrent updates and deletes of the row until committed.
     let current: Option<String> = sqlx::query_scalar(
         r#"
-        SELECT content_hash FROM company_context_system.imported_documents
+        SELECT content_hash FROM company_context_system.custom_documents
         WHERE source = $1 AND external_id = $2
         FOR SHARE
         "#,
@@ -218,7 +218,7 @@ async fn write(
     }
     sqlx::query(
         r#"
-        DELETE FROM company_context_data.imported_document_chunks
+        DELETE FROM company_context_data.custom_document_chunks
         WHERE source = $1 AND external_id = $2
         "#,
     )
@@ -230,7 +230,7 @@ async fn write(
         let content_hash = hex_sha256(chunk.input.as_bytes());
         sqlx::query(
             r#"
-            INSERT INTO company_context_data.imported_document_chunks (
+            INSERT INTO company_context_data.custom_document_chunks (
                 document_id, source, external_id, chunk_id, title, body,
                 occurred_at, metadata, item_hash, content_hash
             )
@@ -251,7 +251,7 @@ async fn write(
         .await?;
         sqlx::query(
             r#"
-            INSERT INTO company_context_data.imported_document_chunk_embeddings (
+            INSERT INTO company_context_data.custom_document_chunk_embeddings (
                 document_id, model, dimensions, content_hash, embedding
             )
             VALUES ($1, $2, $3, $4, $5::vector)
@@ -264,11 +264,11 @@ async fn write(
         .bind(serde_json::to_string(vector)?)
         .execute(&mut *tx)
         .await
-        .context("insert imported document chunk embedding")?;
+        .context("insert custom document chunk embedding")?;
     }
     sqlx::query(
         r#"
-        DELETE FROM company_context_system.imported_document_rejections
+        DELETE FROM company_context_system.custom_document_rejections
         WHERE source = $1 AND external_id = $2
         "#,
     )
@@ -284,17 +284,17 @@ async fn write(
 /// until it changes.
 async fn reject(pool: &PgPool, item: &Pending, error: &anyhow::Error) -> Result<()> {
     warn!(
-        event = "company_context_imported_document_rejected",
+        event = "company_context_custom_document_rejected",
         source = item.source,
         error = %error
     );
     // A row changed or deleted meanwhile is projected or removed instead.
     sqlx::query(
         r#"
-        INSERT INTO company_context_system.imported_document_rejections
+        INSERT INTO company_context_system.custom_document_rejections
             (source, external_id, content_hash, error)
         SELECT source, external_id, content_hash, $4
-        FROM company_context_system.imported_documents
+        FROM company_context_system.custom_documents
         WHERE source = $1 AND external_id = $2 AND content_hash = $3
         ON CONFLICT (source, external_id) DO UPDATE
         SET content_hash = EXCLUDED.content_hash,
@@ -401,19 +401,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn imported_rows_are_projected_public_and_follow_their_rows() {
+    async fn custom_rows_are_projected_public_and_follow_their_rows() {
         let Ok(database_url) = env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
             eprintln!("skipping: set COMPANY_CONTEXT_TEST_DATABASE_URL to a ParadeDB Postgres URL");
             return;
         };
-        let database = TestDatabase::create(&database_url, "imported").await;
+        let database = TestDatabase::create(&database_url, "custom").await;
         let pool = &database.pool;
         let (embeddings, server) = fake_embeddings().await;
         let project = || project(pool, &embeddings, 6000);
 
         pool.execute(
             r#"
-            INSERT INTO company_context_system.imported_documents
+            INSERT INTO company_context_system.custom_documents
                 (source, external_id, title, body, occurred_at, metadata)
             VALUES
                 ('archive', 'note/1', 'Falcon', 'falcon launch retro', '2020-01-02Z',
@@ -431,11 +431,11 @@ mod tests {
         assert_eq!(
             search(pool, json!({ "query": "falcon" })).await.unwrap(),
             [(
-                "imported:archive:note/1:000000".to_owned(),
+                "custom:archive:note/1:000000".to_owned(),
                 "falcon launch retro".to_owned()
             )]
         );
-        let document = query::document(pool, &anyone(), "imported:archive:note/1:000000")
+        let document = query::document(pool, &anyone(), "custom:archive:note/1:000000")
             .await
             .unwrap()
             .unwrap();
@@ -499,10 +499,10 @@ mod tests {
         // Changed rows are projected again, replacing their chunks.
         pool.execute(
             r#"
-            UPDATE company_context_system.imported_documents
+            UPDATE company_context_system.custom_documents
             SET body = 'falcon retro' || chr(10) || chr(10) || 'second part'
             WHERE external_id = 'note/1';
-            UPDATE company_context_system.imported_documents
+            UPDATE company_context_system.custom_documents
             SET body = 'falcon budget'
             WHERE external_id = 'note/2';
             "#,
@@ -511,7 +511,7 @@ mod tests {
         .unwrap();
         assert_eq!(project().await.unwrap(), summary(2, 0));
         let chunks: Vec<(String, String)> = sqlx::query_as(
-            "SELECT external_id, body FROM company_context_data.imported_document_chunks ORDER BY document_id",
+            "SELECT external_id, body FROM company_context_data.custom_document_chunks ORDER BY document_id",
         )
         .fetch_all(pool)
         .await
@@ -527,7 +527,7 @@ mod tests {
             ]
         );
         let rejections: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM company_context_system.imported_document_rejections",
+            "SELECT count(*) FROM company_context_system.custom_document_rejections",
         )
         .fetch_one(pool)
         .await
@@ -536,19 +536,19 @@ mod tests {
 
         // Deleting a row removes its chunks and their embeddings at once.
         pool.execute(
-            "DELETE FROM company_context_system.imported_documents WHERE external_id = 'note/1'",
+            "DELETE FROM company_context_system.custom_documents WHERE external_id = 'note/1'",
         )
         .await
         .unwrap();
         assert_eq!(
             search(pool, json!({ "query": "falcon" })).await.unwrap(),
             [(
-                "imported:archive:note/2:000000".to_owned(),
+                "custom:archive:note/2:000000".to_owned(),
                 "falcon budget".to_owned()
             )]
         );
         let embedded: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM company_context_data.imported_document_chunk_embeddings",
+            "SELECT count(*) FROM company_context_data.custom_document_chunk_embeddings",
         )
         .fetch_one(pool)
         .await
@@ -565,7 +565,7 @@ mod tests {
             let result = pool
                 .execute(
                     format!(
-                        "INSERT INTO company_context_system.imported_documents (source, external_id, body, metadata) VALUES {invalid}"
+                        "INSERT INTO company_context_system.custom_documents (source, external_id, body, metadata) VALUES {invalid}"
                     )
                     .as_str(),
                 )

@@ -11,14 +11,14 @@ use tracing::{error, info};
 use crate::{
     calendar_tasks::{CalendarDiscoverParams, CalendarReconcileParams},
     config::{
-        CALENDAR_CREDENTIALS_RECONCILE_TASK, CALENDAR_DISCOVER_TASK, Config,
+        CALENDAR_CREDENTIALS_RECONCILE_TASK, CALENDAR_DISCOVER_TASK, CUSTOM_PROJECT_TASK, Config,
         DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK, GRANOLA_CREDENTIALS_RECONCILE_TASK,
-        GRANOLA_SYNC_TASK, IMPORTED_PROJECT_TASK, SHARED_DRIVES_DISCOVER_TASK,
-        SLACK_CREDENTIALS_RECONCILE_TASK, SLACK_USER_DISCOVER_TASK, SLACK_USERS_SYNC_TASK,
+        GRANOLA_SYNC_TASK, SHARED_DRIVES_DISCOVER_TASK, SLACK_CREDENTIALS_RECONCILE_TASK,
+        SLACK_USER_DISCOVER_TASK, SLACK_USERS_SYNC_TASK,
     },
     credentials::{ConsoleCredentials, GoogleProduct},
+    custom_documents::CustomProjectParams,
     granola_tasks::{GranolaReconcileParams, GranolaSyncParams},
-    imported_documents::ImportedProjectParams,
     slack_tasks::{SlackDiscoverParams, SlackReconcileParams, UsersSyncParams},
     tasks::{DiscoverSharedDrivesParams, ReconcileCredentialsParams, ScanParams},
     telemetry,
@@ -218,9 +218,9 @@ pub async fn run_granola(
     }
 }
 
-/// Enqueues projection of imported documents.
-pub async fn run_imported(config: Arc<Config>, client: Client) {
-    let mut ticker = interval(config.imported_project_interval);
+/// Enqueues projection of custom documents.
+pub async fn run_custom(config: Arc<Config>, client: Client) {
+    let mut ticker = interval(config.custom_project_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         ticker.tick().await;
@@ -228,11 +228,11 @@ pub async fn run_imported(config: Arc<Config>, client: Client) {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let bucket = now / config.imported_project_interval.as_secs().max(1);
+        let bucket = now / config.custom_project_interval.as_secs().max(1);
         match client
             .spawn(
-                IMPORTED_PROJECT_TASK,
-                ImportedProjectParams { bucket },
+                CUSTOM_PROJECT_TASK,
+                CustomProjectParams { bucket },
                 SpawnOptions {
                     idempotency_key: Some(format!("imported.project:{bucket}")),
                     ..SpawnOptions::default()
@@ -240,10 +240,10 @@ pub async fn run_imported(config: Arc<Config>, client: Client) {
             )
             .await
         {
-            Ok(result) => telemetry::task_enqueued(IMPORTED_PROJECT_TASK, result.created),
+            Ok(result) => telemetry::task_enqueued(CUSTOM_PROJECT_TASK, result.created),
             Err(error) => {
-                telemetry::scheduler_error("imported", "enqueue");
-                error!(event = "company_context_imported_project_enqueue_failed", error = %error);
+                telemetry::scheduler_error("custom", "enqueue");
+                error!(event = "company_context_custom_project_enqueue_failed", error = %error);
             }
         }
     }

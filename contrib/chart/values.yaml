@@ -521,8 +521,8 @@ experimentalCompanyContext:
       enabled: true
     slack:
       enabled: true
-    # Projects rows imported into company_context_system.imported_documents.
-    imported:
+    # Projects rows written to company_context_system.custom_documents.
+    custom:
       enabled: true
   # Rails Console OAuth app whose live per-user Google broker credentials are
   # synchronized: those with drive.readonly for Drive and those with
@@ -539,7 +539,7 @@ experimentalCompanyContext:
   # lowering it removes the events that fall outside.
   calendarHistoryDays: 90
   granolaSyncIntervalSeconds: 1800
-  importedProjectIntervalSeconds: 60
+  customProjectIntervalSeconds: 60
   # Slack conversations are discovered through the same per-user Slack
   # credentials as the Console DM sync (console.slackDmSync.oauthAppSlug).
   # Workspace users are listed with SLACK_BOT_TOKEN from the shared Secret, so

@@ -87,8 +87,8 @@ spec:
               value: {{ $companyContext.indexers.granola.enabled | quote }}
             - name: COMPANY_CONTEXT_SLACK_ENABLED
               value: {{ $companyContext.indexers.slack.enabled | quote }}
-            - name: COMPANY_CONTEXT_IMPORTED_ENABLED
-              value: {{ $companyContext.indexers.imported.enabled | quote }}
+            - name: COMPANY_CONTEXT_CUSTOM_ENABLED
+              value: {{ $companyContext.indexers.custom.enabled | quote }}
             - name: COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG
               value: {{ $companyContext.googleOauthAppSlug | quote }}
             - name: COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG
@@ -99,8 +99,8 @@ spec:
               value: {{ $companyContext.calendarHistoryDays | quote }}
             - name: COMPANY_CONTEXT_GRANOLA_SYNC_INTERVAL_SECONDS
               value: {{ $companyContext.granolaSyncIntervalSeconds | quote }}
-            - name: COMPANY_CONTEXT_IMPORTED_PROJECT_INTERVAL_SECONDS
-              value: {{ $companyContext.importedProjectIntervalSeconds | quote }}
+            - name: COMPANY_CONTEXT_CUSTOM_PROJECT_INTERVAL_SECONDS
+              value: {{ $companyContext.customProjectIntervalSeconds | quote }}
             - name: COMPANY_CONTEXT_SLACK_OAUTH_APP_SLUG
               value: {{ $console.slackDmSync.oauthAppSlug | default "slack" | quote }}
             - name: COMPANY_CONTEXT_SLACK_DISCOVERY_INTERVAL_SECONDS

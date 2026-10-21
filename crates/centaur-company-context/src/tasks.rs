@@ -23,12 +23,13 @@ use crate::{
         SHARED_DRIVES_DISCOVER_TASK, SHARED_FOLDERS_BATCH_TASK,
     },
     credentials::{ConsoleCredentials, GoogleCredential, GoogleProduct},
+    custom_documents,
     drive::{DriveChange, DriveClient, DriveFile},
     embeddings::EmbeddingsClient,
     errors::{is_rejected, rejected},
     extraction::{chunk_text, extract_google_doc_text, extract_pdf_text, hex_sha256},
     granola::GranolaClient,
-    granola_tasks, imported_documents,
+    granola_tasks,
     slack::SlackClient,
     slack_documents, slack_files,
 };
@@ -121,7 +122,7 @@ pub struct TaskSummary {
 pub fn register(state: TaskState) -> Result<()> {
     calendar_tasks::register(&state)?;
     granola_tasks::register(&state)?;
-    imported_documents::register(&state)?;
+    custom_documents::register(&state)?;
     slack_documents::register(&state)?;
     slack_files::register(&state)?;
 

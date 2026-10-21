@@ -6,7 +6,7 @@
 //! Slack user ID, or for the subject of a Google or Granola credential granted
 //! to it, still reaches the document's file, conversation, or Granola note.
 //! Calendar events are stored per Google identity, as Google showed them to it,
-//! and are visible only to that identity. Imported documents are public.
+//! and are visible only to that identity. Custom documents are public.
 //! Queries run as [`QUERY_ROLE`], which can only read `company_context_data`.
 
 use std::{
@@ -34,8 +34,8 @@ use tracing::{error, warn};
 
 use crate::{
     config::{
-        Config, GOOGLE_CALENDAR_DOCUMENT_ID_PREFIX, GOOGLE_DRIVE_DOCUMENT_ID_PREFIX,
-        GRANOLA_DOCUMENT_ID_PREFIX, IMPORTED_DOCUMENT_ID_PREFIX, SLACK_DOCUMENT_ID_PREFIX,
+        CUSTOM_DOCUMENT_ID_PREFIX, Config, GOOGLE_CALENDAR_DOCUMENT_ID_PREFIX,
+        GOOGLE_DRIVE_DOCUMENT_ID_PREFIX, GRANOLA_DOCUMENT_ID_PREFIX, SLACK_DOCUMENT_ID_PREFIX,
         SLACK_FILE_DOCUMENT_ID_PREFIX,
     },
     credentials::{ConsoleCredentials, PrincipalIdentity},
@@ -46,7 +46,7 @@ const DEFAULT_LIMIT: usize = 10;
 const MAX_LIMIT: usize = 50;
 const MAX_QUERY_CHARS: usize = 2_000;
 const MAX_FILTER_IDS: usize = 100;
-/// Matches the size limit on imported documents' metadata.
+/// Matches the size limit on custom documents' metadata.
 const MAX_METADATA_FILTER_BYTES: usize = 65_536;
 /// Candidates each lane contributes to rank fusion.
 const MIN_CANDIDATES: usize = 20;
@@ -56,9 +56,9 @@ const EMBEDDING_TIMEOUT: Duration = Duration::from_secs(10);
 /// Database role with read-only access to `company_context_data` only.
 const QUERY_ROLE: &str = "centaur_company_context_v2_query";
 
-/// An imported document's metadata: the importer's, with its source and
+/// A custom document's metadata: the writer's, with its source and
 /// external ID.
-macro_rules! imported_metadata {
+macro_rules! custom_metadata {
     () => {
         "d.metadata || jsonb_build_object('source', d.source, 'external_id', d.external_id)"
     };
@@ -105,11 +105,11 @@ pub struct Filters {
     /// Slack or Drive file IDs. Limits the search to these files' documents.
     #[serde(default)]
     pub file_ids: Vec<String>,
-    /// Import sources. Limits the search to documents imported to them.
+    /// Custom document sources. Limits the search to documents in them.
     #[serde(default)]
     pub sources: Vec<String>,
-    /// A JSON object the returned metadata of imported documents must
-    /// contain. Limits the search to imported documents.
+    /// A JSON object the returned metadata of custom documents must
+    /// contain. Limits the search to custom documents.
     #[serde(default)]
     pub metadata: Map<String, Value>,
 }
@@ -122,7 +122,7 @@ pub enum DataType {
     DriveDoc,
     CalendarEvent,
     GranolaNote,
-    ImportedDoc,
+    CustomDoc,
 }
 
 /// How one data type's documents are selected. Queries bind the principal's
@@ -145,7 +145,7 @@ struct Source {
     in_channels: Option<&'static str>,
     /// The type's file ID column, or `None` if it has none.
     file_id: Option<&'static str>,
-    /// The type's import source column, or `None` if it has none.
+    /// The type's source column, or `None` if it has none.
     source: Option<&'static str>,
     /// The metadata expression `$9` must be contained in, or `None` if the
     /// type cannot be filtered by metadata.
@@ -190,7 +190,7 @@ impl DataType {
         Self::DriveDoc,
         Self::CalendarEvent,
         Self::GranolaNote,
-        Self::ImportedDoc,
+        Self::CustomDoc,
     ];
 
     /// The principal's identities the type's observations are keyed by, or
@@ -211,7 +211,7 @@ impl DataType {
                 .map(String::as_str)
                 .collect(),
             // Public: visible without an identity.
-            Self::ImportedDoc => return Some(Vec::new()),
+            Self::CustomDoc => return Some(Vec::new()),
         };
         (!subjects.is_empty()).then_some(subjects)
     }
@@ -360,13 +360,13 @@ impl DataType {
                 source: None,
                 metadata: None,
             },
-            Self::ImportedDoc => Source {
-                id_prefix: IMPORTED_DOCUMENT_ID_PREFIX,
-                documents: "company_context_data.imported_document_chunks",
-                embeddings: Some("company_context_data.imported_document_chunk_embeddings"),
+            Self::CustomDoc => Source {
+                id_prefix: CUSTOM_DOCUMENT_ID_PREFIX,
+                documents: "company_context_data.custom_document_chunks",
+                embeddings: Some("company_context_data.custom_document_chunk_embeddings"),
                 columns: concat!(
                     "d.document_id, d.title, d.body, NULL::text AS url, d.occurred_at, ",
-                    imported_metadata!(),
+                    custom_metadata!(),
                     " AS metadata"
                 ),
                 visible: "TRUE",
@@ -377,7 +377,7 @@ impl DataType {
                 file_id: None,
                 source: Some("d.source"),
                 // Filters match the metadata documents are returned with.
-                metadata: Some(imported_metadata!()),
+                metadata: Some(custom_metadata!()),
             },
         }
     }

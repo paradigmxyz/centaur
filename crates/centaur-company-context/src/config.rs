@@ -43,14 +43,15 @@ pub const SLACK_CHANNEL_DAY_EMBED_TASK: &str = "slack.channel_day.embed";
 /// run on the main queue too.
 pub const SLACK_FILE_EXTRACT_TASK: &str = "slack.file.extract";
 pub const SLACK_FILE_EMBED_TASK: &str = "slack.file.embed";
-pub const IMPORTED_PROJECT_TASK: &str = "imported.project";
+// Keep the original task name so projection runs queued by older versions remain runnable.
+pub const CUSTOM_PROJECT_TASK: &str = "imported.project";
 /// Document ID prefixes, which identify each published document's type.
 pub const GOOGLE_DRIVE_DOCUMENT_ID_PREFIX: &str = "google-drive:";
 pub const SLACK_DOCUMENT_ID_PREFIX: &str = "slack:";
 pub const SLACK_FILE_DOCUMENT_ID_PREFIX: &str = "slack-file:";
 pub const GRANOLA_DOCUMENT_ID_PREFIX: &str = "granola:";
 pub const GOOGLE_CALENDAR_DOCUMENT_ID_PREFIX: &str = "google-calendar:";
-pub const IMPORTED_DOCUMENT_ID_PREFIX: &str = "imported:";
+pub const CUSTOM_DOCUMENT_ID_PREFIX: &str = "custom:";
 /// Slack conversation types that can be synchronized.
 pub const SLACK_CONVERSATION_TYPES: [&str; 3] = ["public_channel", "private_channel", "im"];
 
@@ -139,15 +140,15 @@ pub struct Config {
         action = clap::ArgAction::Set
     )]
     pub slack_enabled: bool,
-    /// Schedules projection of imported documents. Disabling it pauses
+    /// Schedules projection of custom documents. Disabling it pauses
     /// projection and keeps projected documents searchable.
     #[arg(
         long,
-        env = "COMPANY_CONTEXT_IMPORTED_ENABLED",
+        env = "COMPANY_CONTEXT_CUSTOM_ENABLED",
         default_value_t = true,
         action = clap::ArgAction::Set
     )]
-    pub imported_enabled: bool,
+    pub custom_enabled: bool,
     /// Limits Google Drive sync to these credential emails. Unset syncs every user.
     #[arg(
         long,
@@ -336,12 +337,12 @@ pub struct Config {
     )]
     pub granola_initial_lookback_days: usize,
     #[arg(
-        long = "imported-project-interval-seconds",
-        env = "COMPANY_CONTEXT_IMPORTED_PROJECT_INTERVAL_SECONDS",
+        long = "custom-project-interval-seconds",
+        env = "COMPANY_CONTEXT_CUSTOM_PROJECT_INTERVAL_SECONDS",
         default_value = "60",
         value_parser = positive_duration
     )]
-    pub imported_project_interval: Duration,
+    pub custom_project_interval: Duration,
     #[arg(
         long = "slack-discovery-interval-seconds",
         env = "COMPANY_CONTEXT_SLACK_DISCOVERY_INTERVAL_SECONDS",

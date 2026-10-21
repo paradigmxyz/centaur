@@ -2,6 +2,7 @@ mod calendar;
 mod calendar_tasks;
 mod config;
 mod credentials;
+mod custom_documents;
 mod database;
 mod drive;
 mod embeddings;
@@ -9,7 +10,6 @@ mod errors;
 mod extraction;
 mod granola;
 mod granola_tasks;
-mod imported_documents;
 mod query;
 mod sampler;
 mod scheduler;
@@ -230,11 +230,8 @@ async fn main() -> Result<()> {
             credentials.clone(),
         )));
     }
-    if config.imported_enabled {
-        schedulers.push(tokio::spawn(scheduler::run_imported(
-            config.clone(),
-            absurd,
-        )));
+    if config.custom_enabled {
+        schedulers.push(tokio::spawn(scheduler::run_custom(config.clone(), absurd)));
     }
     if config.slack_enabled {
         schedulers.push(tokio::spawn(scheduler::run_slack(
@@ -262,7 +259,7 @@ async fn main() -> Result<()> {
         drive_enabled = config.drive_enabled,
         calendar_enabled = config.calendar_enabled,
         granola_enabled = config.granola_enabled,
-        imported_enabled = config.imported_enabled,
+        custom_enabled = config.custom_enabled,
         slack_enabled = config.slack_enabled
     );
     tokio::signal::ctrl_c().await?;
