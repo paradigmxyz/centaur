@@ -80,6 +80,7 @@ def test_search_posts_filters_and_returns_results(api_url):
         types=["drive_doc", "imported_doc"],
         occurred_after="2026-05-01T00:00:00Z",
         sources=["archive"],
+        metadata={"author": "Ada"},
     )
 
     assert result == {"status": "ok", "results": [{**DOCUMENT, "score": 0.03}]}
@@ -93,6 +94,7 @@ def test_search_posts_filters_and_returns_results(api_url):
                     "types": ["drive_doc", "imported_doc"],
                     "occurred_after": "2026-05-01T00:00:00Z",
                     "sources": ["archive"],
+                    "metadata": {"author": "Ada"},
                 },
                 "limit": 5,
             },

@@ -63,6 +63,7 @@ class CompanyContextV2Client:
         channel_ids: list[str] | None = None,
         file_ids: list[str] | None = None,
         sources: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> dict:
         """Search documents visible to the requester; the API validates every field."""
         filters = {
@@ -72,6 +73,7 @@ class CompanyContextV2Client:
             "channel_ids": channel_ids,
             "file_ids": file_ids,
             "sources": sources,
+            "metadata": metadata,
         }
         body: dict[str, Any] = {
             "query": query,

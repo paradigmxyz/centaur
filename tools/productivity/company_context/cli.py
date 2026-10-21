@@ -398,6 +398,18 @@ _V2_TYPES_HELP = (
 )
 
 
+def _json_object(value: str | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    try:
+        parsed = json.loads(value)
+    except ValueError as exc:
+        raise typer.BadParameter(f"must be a JSON object: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise typer.BadParameter("must be a JSON object")
+    return parsed
+
+
 @v2_app.command("search")
 def v2_search(
     query: str = typer.Argument(..., help="Search query."),
@@ -420,6 +432,15 @@ def v2_search(
     sources: list[str] | None = typer.Option(  # noqa: B008
         None, "--source", help="Only documents imported to this source; repeatable."
     ),
+    metadata: str | None = typer.Option(
+        None,
+        "--metadata",
+        callback=_json_object,
+        help=(
+            "Only imported documents whose metadata contains this JSON object, "
+            """e.g. '{"author": "Ada"}'. Matches exactly and case-sensitively."""
+        ),
+    ),
     json_output: bool = typer.Option(
         True,
         "--json/--table",
@@ -436,6 +457,7 @@ def v2_search(
         channel_ids=channel_ids,
         file_ids=file_ids,
         sources=sources,
+        metadata=metadata,
     )
     _require_ok(result)
     if json_output:

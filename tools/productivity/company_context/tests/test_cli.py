@@ -96,6 +96,8 @@ def test_v2_search_forwards_filters(monkeypatch):
             "slack_file",
             "--source",
             "archive",
+            "--metadata",
+            '{"author": "Ada"}',
             "-n",
             "5",
         ],
@@ -112,5 +114,16 @@ def test_v2_search_forwards_filters(monkeypatch):
             "channel_ids": None,
             "file_ids": None,
             "sources": ["archive"],
+            "metadata": {"author": "Ada"},
         }
     ]
+
+
+def test_v2_search_rejects_metadata_that_is_not_a_json_object(monkeypatch):
+    monkeypatch.setattr(cli, "CompanyContextV2Client", None)
+
+    for metadata in ["author=Ada", '["Ada"]']:
+        result = CliRunner().invoke(cli.app, ["v2", "search", "roadmap", "--metadata", metadata])
+
+        assert result.exit_code == 2, result.output
+        assert "JSON object" in result.output
