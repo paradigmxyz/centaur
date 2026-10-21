@@ -2560,17 +2560,10 @@ static CODEX_SCHEMAS: LazyLock<Option<HashMap<&'static str, Validator>>> = LazyL
         let url = format!(
             "https://raw.githubusercontent.com/openai/codex/{rev}/codex-rs/app-server-protocol/schema/json/{file}"
         );
-        let output = Command::new("curl")
-            .args(["--fail", "--silent", "--show-error", "--location", "--retry", "3"])
-            .arg(&url)
-            .output()
-            .expect("run curl");
-        assert!(
-            output.status.success(),
-            "fetch {url}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let schema: Value = serde_json::from_slice(&output.stdout).expect("parse Codex schema");
+        let schema: Value = reqwest::blocking::get(&url)
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .and_then(reqwest::blocking::Response::json)
+            .unwrap_or_else(|error| panic!("fetch {url}: {error}"));
         let validator = jsonschema::validator_for(&schema)
             .unwrap_or_else(|error| panic!("compile {url}: {error}"));
         (key, validator)

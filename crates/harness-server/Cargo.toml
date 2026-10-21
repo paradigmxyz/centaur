@@ -40,3 +40,5 @@ codex-schema = []
 
 [dev-dependencies]
 jsonschema = { version = "0.59", default-features = false }
+# Already built with these features for opentelemetry-otlp.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
