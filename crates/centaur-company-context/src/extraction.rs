@@ -258,7 +258,7 @@ pub fn chunk_text(text: &str, max_chars: usize) -> Vec<Chunk> {
 }
 
 pub fn hex_sha256(value: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(value))
+    hex::encode(Sha256::digest(value))
 }
 
 pub(crate) fn split_long_text(text: &str, max_chars: usize, output: &mut Vec<String>) {

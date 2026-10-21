@@ -191,7 +191,7 @@ fn present(value: &serde_json::Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{RngExt, SeedableRng, rngs::StdRng};
     use serde_json::{Value, json};
 
     use super::suppress;

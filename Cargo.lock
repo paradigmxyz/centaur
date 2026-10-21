@@ -566,6 +566,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures-util",
+ "hex",
  "http",
  "jsonwebtoken",
  "metrics",

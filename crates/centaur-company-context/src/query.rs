@@ -886,10 +886,7 @@ fn principal_id(oid: &str) -> Option<i64> {
                 .chars()
                 .collect();
         alphabet.sort_by_cached_key(|character| {
-            format!(
-                "{:x}",
-                Sha256::digest(format!("prn:{character}").as_bytes())
-            )
+            hex::encode(Sha256::digest(format!("prn:{character}").as_bytes()))
         });
         Sqids::builder()
             .alphabet(alphabet)
