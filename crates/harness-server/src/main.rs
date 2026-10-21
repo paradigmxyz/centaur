@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand, ValueEnum};
 use harness_server::{
     HarnessKind, Result, run_blocks_server, run_harness_server, run_hermes_blocks_server,
-    run_nanocodex_blocks_server, run_validate_agent_deltas,
+    run_nanocodex_blocks_server,
 };
 
 #[derive(Debug, Parser)]
@@ -32,7 +32,6 @@ enum CliCommand {
     Pi(HarnessCommand),
     /// Drive OMP's long-lived RPC mode with native session continuation.
     Omp(HarnessCommand),
-    ValidateAgentDeltas,
 }
 
 #[derive(Debug, Parser)]
@@ -68,7 +67,6 @@ fn run() -> Result<()> {
         CliCommand::Nanocodex => run_nanocodex_blocks_server(),
         CliCommand::Hermes => run_hermes_blocks_server(),
         CliCommand::Omp(command) => run_mode(HarnessKind::Omp, command.mode),
-        CliCommand::ValidateAgentDeltas => run_validate_agent_deltas(),
     }
 }
 
