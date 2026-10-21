@@ -17,7 +17,7 @@ app = typer.Typer(
 console = Console()
 admin_app = typer.Typer(
     help=(
-        "Manage principal roles, secret grants, Slack permissions, sandbox access, "
+        "Create Slack principals and manage their roles, secret grants, Slack permissions, sandbox access, "
         "and allowed Slack Connect workspaces. "
         "Works only in an active Console admin's Slack DM."
     )
@@ -227,6 +227,34 @@ def admin_principals(
     """List principals."""
     with get_client(url=url, bearer_token=bearer_token) as client:
         result = client.admin_principals(slack_channel_id=slack_channel_id)
+    console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("create-principal")
+def admin_create_principal(
+    slack_channel_id: str | None = typer.Option(
+        None,
+        "--slack-channel",
+        help="Slack channel ID (C… or G…) to create a channel principal for",
+    ),
+    slack_user_id: str | None = typer.Option(
+        None,
+        "--slack-user",
+        help="Slack user ID in your workspace to create a user (DM) principal for",
+    ),
+    name: str | None = typer.Option(
+        None, "--name", help="Channel or user display name, without # or @"
+    ),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Create a Slack channel or user principal before Centaur's first session there."""
+    if (slack_channel_id is None) == (slack_user_id is None):
+        raise typer.BadParameter("pass exactly one of --slack-channel or --slack-user")
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_create_principal(
+            slack_channel_id=slack_channel_id, slack_user_id=slack_user_id, name=name
+        )
     console.print_json(json.dumps({"data": result}, default=str))
 
 

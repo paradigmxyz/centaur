@@ -373,3 +373,30 @@ def test_admin_slack_external_teams_add_and_remove_one_team_id():
         ("POST", SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH, {"data": {"team_id": "T0PARTNER"}}),
         ("DELETE", f"{SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH}/E0GRID", None),
     ]
+
+
+def test_admin_create_principal_posts_a_slack_channel_or_user_identity():
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path, json.loads(request.content)))
+        return json_response({"data": {"id": "prn_new"}}, 201)
+
+    client = make_client(handler)
+    assert client.admin_create_principal(slack_channel_id="C0NEW", name="launch") == {
+        "id": "prn_new"
+    }
+    client.admin_create_principal(slack_user_id="U0NEW")
+
+    assert requests == [
+        (
+            "POST",
+            SANDBOX_ADMIN_PRINCIPALS_PATH,
+            {"data": {"kind": "slack_channel", "slack_channel_id": "C0NEW", "name": "launch"}},
+        ),
+        (
+            "POST",
+            SANDBOX_ADMIN_PRINCIPALS_PATH,
+            {"data": {"kind": "slack_dm", "slack_user_id": "U0NEW"}},
+        ),
+    ]
