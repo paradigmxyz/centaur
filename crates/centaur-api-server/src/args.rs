@@ -513,8 +513,8 @@ struct IronControlArgs {
     proxy_sync_url: Option<String>,
     #[arg(long = "iron-control-api-key", env = "IRON_CONTROL_API_KEY")]
     api_key: Option<String>,
-    /// Console's database. When set, principals and their effective config are
-    /// read from it directly instead of through the Console API.
+    /// Console's database. Principals and their effective config are read from
+    /// it directly instead of through the Console API.
     #[arg(
         long = "iron-control-database-url",
         env = "IRON_CONTROL_DATABASE_URL",
@@ -535,7 +535,7 @@ struct IronControlArgs {
     console_database_max_connections: u32,
     /// The Console database pool shared by every client built from these args.
     #[arg(skip)]
-    console_db: OnceLock<Option<PgPool>>,
+    console_db: OnceLock<PgPool>,
 }
 
 impl IronControlArgs {
@@ -553,27 +553,24 @@ impl IronControlArgs {
                     .to_owned(),
             )
         })?;
-        Ok(match self.console_db()? {
-            Some(pool) => client.with_console_db(pool),
-            None => client,
-        })
+        Ok(client.with_console_db(self.console_db()?))
     }
 
-    fn console_db(&self) -> Result<Option<PgPool>, ServerError> {
+    /// The shared Console database pool. Call it within a Tokio runtime: the
+    /// pool spawns its maintenance task on creation.
+    fn console_db(&self) -> Result<PgPool, ServerError> {
         if let Some(pool) = self.console_db.get() {
             return Ok(pool.clone());
         }
-        let pool = non_empty(self.console_database_url.as_deref())
-            .map(|url| {
-                console_db_options(url, non_empty(self.console_database_name.as_deref())).map(
-                    |options| {
-                        PgPoolOptions::new()
-                            .max_connections(self.console_database_max_connections)
-                            .connect_lazy_with(options)
-                    },
-                )
-            })
-            .transpose()?;
+        let url = non_empty(self.console_database_url.as_deref()).ok_or_else(|| {
+            ServerError::UnsupportedConfig(
+                "the Console database is required: set IRON_CONTROL_DATABASE_URL".to_owned(),
+            )
+        })?;
+        let options = console_db_options(url, non_empty(self.console_database_name.as_deref()))?;
+        let pool = PgPoolOptions::new()
+            .max_connections(self.console_database_max_connections)
+            .connect_lazy_with(options);
         Ok(self.console_db.get_or_init(|| pool).clone())
     }
 
@@ -2715,8 +2712,8 @@ mod tests {
         assert_eq!(config.api_key, "sk-mounted");
     }
 
-    #[test]
-    fn session_sandbox_state_volume_requires_opt_in() {
+    #[tokio::test]
+    async fn session_sandbox_state_volume_requires_opt_in() {
         for flags in [
             vec![],
             vec![
@@ -2739,6 +2736,8 @@ mod tests {
                     "http://proxy-sync.local:8080",
                     "--iron-control-api-key",
                     "iak_test",
+                    "--iron-control-database-url",
+                    "postgres://console@localhost/console",
                 ]
                 .into_iter()
                 .chain(flags),
@@ -2750,8 +2749,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parses_session_sandbox_state_volume() {
+    #[tokio::test]
+    async fn parses_session_sandbox_state_volume() {
         for (storage_class, expected) in [("", None), ("fast", Some("fast"))] {
             let args = Args::try_parse_from([
                 "centaur-api-server",
@@ -2763,6 +2762,8 @@ mod tests {
                 "http://proxy-sync.local:8080",
                 "--iron-control-api-key",
                 "iak_test",
+                "--iron-control-database-url",
+                "postgres://console@localhost/console",
                 "--session-sandbox-state-volume-enabled",
                 "true",
                 "--session-sandbox-state-volume-size",
@@ -2812,8 +2813,8 @@ mod tests {
         assert_eq!(config.orphan_sweep_grace, Duration::from_secs(600));
     }
 
-    #[test]
-    fn agent_k8s_config_converts_from_sandbox_args() {
+    #[tokio::test]
+    async fn agent_k8s_config_converts_from_sandbox_args() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -2832,6 +2833,8 @@ mod tests {
             "http://proxy-sync.local:8080",
             "--iron-control-api-key",
             "iak_test",
+            "--iron-control-database-url",
+            "postgres://console@localhost/console",
         ])
         .unwrap();
 
@@ -2846,8 +2849,8 @@ mod tests {
         assert!(config.iron_proxy.is_some());
     }
 
-    #[test]
-    fn proxy_sync_url_is_separate_from_console_url_and_egress_selector() {
+    #[tokio::test]
+    async fn proxy_sync_url_is_separate_from_console_url_and_egress_selector() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -2858,6 +2861,8 @@ mod tests {
             "http://proxy-sync.local:8080",
             "--iron-control-api-key",
             "iak_test",
+            "--iron-control-database-url",
+            "postgres://console@localhost/console",
         ])
         .unwrap();
 
@@ -2893,7 +2898,28 @@ mod tests {
     }
 
     #[test]
-    fn agent_sandboxes_require_proxy_sync_url() {
+    fn agent_sandboxes_require_the_console_database() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--iron-control-url",
+            "http://console.local:3000",
+            "--iron-control-proxy-sync-url",
+            "http://proxy-sync.local:8080",
+            "--iron-control-api-key",
+            "iak_test",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            args.sandbox.iron_control.settings(),
+            Err(ServerError::UnsupportedConfig(message)) if message.contains("IRON_CONTROL_DATABASE_URL")
+        ));
+    }
+
+    #[tokio::test]
+    async fn agent_sandboxes_require_proxy_sync_url() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -2902,6 +2928,8 @@ mod tests {
             "http://console.local:3000",
             "--iron-control-api-key",
             "iak_test",
+            "--iron-control-database-url",
+            "postgres://console@localhost/console",
         ])
         .unwrap();
 
@@ -2911,8 +2939,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn tools_config_read_from_flags() {
+    #[tokio::test]
+    async fn tools_config_read_from_flags() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -2923,6 +2951,8 @@ mod tests {
             "http://proxy-sync.local:8080",
             "--iron-control-api-key",
             "iak_test",
+            "--iron-control-database-url",
+            "postgres://console@localhost/console",
             "--kubernetes-tools-repo",
             "paradigmxyz/centaur",
             "--kubernetes-tools-ref",
@@ -3608,8 +3638,8 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn parses_pod_resource_json_for_all_managed_pods() {
+    #[tokio::test]
+    async fn parses_pod_resource_json_for_all_managed_pods() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -3626,6 +3656,8 @@ mod tests {
             "http://proxy-sync.local:8080",
             "--iron-control-api-key",
             "iak_test",
+            "--iron-control-database-url",
+            "postgres://console@localhost/console",
         ])
         .unwrap();
 
@@ -3671,8 +3703,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn treats_blank_pod_resource_values_as_unset() {
+    #[tokio::test]
+    async fn treats_blank_pod_resource_values_as_unset() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -3685,6 +3717,8 @@ mod tests {
             "http://proxy-sync.local:8080",
             "--iron-control-api-key",
             "iak_test",
+            "--iron-control-database-url",
+            "postgres://console@localhost/console",
         ])
         .unwrap();
 
