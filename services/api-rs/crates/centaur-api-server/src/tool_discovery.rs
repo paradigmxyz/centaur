@@ -678,6 +678,9 @@ struct HttpSecret {
     inject_header: String,
     inject_formatter: String,
     inject_query_param: String,
+    /// Console broker credential (foreign ID) whose access token iron-proxy
+    /// injects; empty for a secret resolved from `secret_ref`.
+    broker_credential: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -801,6 +804,7 @@ fn parse_secret(
             inject_header: String::new(),
             inject_formatter: String::new(),
             inject_query_param: String::new(),
+            broker_credential: String::new(),
         }));
     }
     let table = value.as_table().ok_or_else(|| {
@@ -817,7 +821,8 @@ fn parse_secret(
         "gcp_id_token" => parse_gcp_id_token_secret(table, name, secret_ref, labels),
         "pg_dsn" => parse_pg_dsn_secret(table, name, secret_ref, labels),
         "aws_auth" => parse_aws_auth_secret(table, name, labels),
-        "brokered_token" | "hmac_sign" => Err(ToolDiscoveryError::Invalid(format!(
+        "brokered_token" => parse_brokered_token_secret(table, name, default_hosts, labels),
+        "hmac_sign" => Err(ToolDiscoveryError::Invalid(format!(
             "api-rs iron-control tool discovery does not yet support secret type {:?}",
             optional_str(table, "type").unwrap_or("unknown")
         ))),
@@ -869,6 +874,7 @@ fn parse_http_secret(
                 inject_header: String::new(),
                 inject_formatter: String::new(),
                 inject_query_param: String::new(),
+                broker_credential: String::new(),
             }))
         }
         "inject" => {
@@ -904,12 +910,65 @@ fn parse_http_secret(
                 inject_header,
                 inject_formatter,
                 inject_query_param,
+                broker_credential: String::new(),
             }))
         }
         other => Err(ToolDiscoveryError::Invalid(format!(
             "unknown HTTP secret mode {other:?}"
         ))),
     }
+}
+
+/// The default injection for a `brokered_token` secret, matching
+/// `centaur-perms`: the broker's current access token as a Bearer
+/// `Authorization` header.
+const BROKERED_TOKEN_DEFAULT_HEADER: &str = "Authorization";
+const BROKERED_TOKEN_DEFAULT_FORMATTER: &str = "Bearer {{.Value}}";
+
+/// Parse a `type = "brokered_token"` entry: the consumer side of a Console
+/// broker credential, which is created out of band (`centaur-perms broker
+/// create`). It becomes an inject-mode HTTP secret sourced from the credential
+/// named by `credential` (default `name`). Legacy `fields`, `token_endpoint`,
+/// and `scopes` keys are ignored, as in `centaur-perms`.
+fn parse_brokered_token_secret(
+    table: &toml::Table,
+    name: String,
+    default_hosts: &[String],
+    labels: &BTreeMap<String, String>,
+) -> Result<ToolSecret, ToolDiscoveryError> {
+    let hosts =
+        optional_string_array(table.get("hosts"))?.unwrap_or_else(|| default_hosts.to_vec());
+    if hosts.is_empty() || hosts.iter().any(String::is_empty) {
+        return Err(ToolDiscoveryError::Invalid(format!(
+            "brokered_token secret {name:?} 'hosts' must be a non-empty array of non-empty \
+             strings (entry-level or tool-level); a secret without hosts would be unscoped \
+             in iron-proxy"
+        )));
+    }
+    let broker_credential = optional_str(table, "credential")
+        .unwrap_or(&name)
+        .to_owned();
+    let inject_header = optional_str(table, "inject_header")
+        .unwrap_or(BROKERED_TOKEN_DEFAULT_HEADER)
+        .to_owned();
+    let inject_formatter = optional_str(table, "inject_formatter")
+        .unwrap_or(BROKERED_TOKEN_DEFAULT_FORMATTER)
+        .to_owned();
+    Ok(ToolSecret::Http(HttpSecret {
+        secret_ref: name.clone(),
+        name,
+        labels: labels.clone(),
+        mode: HttpSecretMode::Inject,
+        hosts,
+        replacer: String::new(),
+        match_headers: Vec::new(),
+        match_path: false,
+        match_query: false,
+        inject_header,
+        inject_formatter,
+        inject_query_param: String::new(),
+        broker_credential,
+    }))
 }
 
 fn parse_oauth_token_secret(
@@ -1165,7 +1224,14 @@ fn http_secret_transform(secrets: &[ToolSecret]) -> Result<Option<Transform>, To
         let mut extra = BTreeMap::new();
         let mut entry = Secret {
             id: Some(key.name.clone()),
-            source: Some(yaml_map([("placeholder", yaml_string(&key.secret_ref))])?),
+            source: Some(if key.broker_credential.is_empty() {
+                yaml_map([("placeholder", yaml_string(&key.secret_ref))])?
+            } else {
+                yaml_map([
+                    ("type", yaml_string("token_broker")),
+                    ("credential_id", yaml_string(&key.broker_credential)),
+                ])?
+            }),
             rules: host_rules(hosts)?,
             ..Default::default()
         };
@@ -1222,6 +1288,7 @@ struct HttpSecretKey {
     inject_header: String,
     inject_formatter: String,
     inject_query_param: String,
+    broker_credential: String,
 }
 
 impl From<&HttpSecret> for HttpSecretKey {
@@ -1237,6 +1304,7 @@ impl From<&HttpSecret> for HttpSecretKey {
             inject_header: secret.inject_header.clone(),
             inject_formatter: secret.inject_formatter.clone(),
             inject_query_param: secret.inject_query_param.clone(),
+            broker_credential: secret.broker_credential.clone(),
         }
     }
 }
@@ -2012,6 +2080,87 @@ secrets = [
         assert_eq!(config["rules"].as_sequence().unwrap().len(), 1);
         assert_eq!(config["labels"]["centaur-tool"].as_str(), Some("cloudrun"));
 
+        let placeholders =
+            centaur_iron_proxy::placeholder_env(std::slice::from_ref(&discovered.fragment));
+        assert!(placeholders.is_empty());
+
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn discovers_brokered_token_tool_as_token_broker_secret() {
+        let temp = temp_dir("api-rs-tools-brokered-token");
+        let base = temp.join("base");
+        write_tool(
+            &base.join("productivity").join("issues"),
+            r#"
+[project]
+description = "issues"
+
+[tool.centaur]
+hosts = ["api.example.com"]
+secrets = [
+  { type = "brokered_token", name = "ISSUES_TOKEN", credential = "issues-app" },
+  { type = "brokered_token", name = "UPLOADS_TOKEN", hosts = ["uploads.example.com"], inject_header = "X-Token", inject_formatter = "{{.Value}}" },
+]
+"#,
+        );
+
+        let discovered = discover_tool_proxy_fragment(std::slice::from_ref(&base)).unwrap();
+
+        assert_eq!(discovered.tool_count, 1);
+        assert_eq!(discovered.secret_count, 2);
+        let inputs = centaur_iron_control::secret_inputs_from_fragment(
+            "tool-issues",
+            &discovered.fragment,
+            &centaur_iron_proxy::SourcePolicy::env(),
+        )
+        .unwrap();
+        let statics = inputs
+            .iter()
+            .map(|input| match input {
+                centaur_iron_control::SecretInput::Static(input) => input,
+                other => panic!("expected a static secret, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(statics.len(), 2);
+
+        // `credential` names the broker credential; the entry inherits the
+        // tool-level hosts and the default Bearer Authorization injection.
+        let issues = statics
+            .iter()
+            .find(|input| input.name == "ISSUES_TOKEN")
+            .unwrap();
+        assert_eq!(issues.source.source_type, "token_broker");
+        assert_eq!(
+            issues.source.config,
+            serde_json::json!({ "credential_id": "issues-app" })
+        );
+        let inject = issues.inject_config.as_ref().unwrap();
+        assert_eq!(inject.header.as_deref(), Some("Authorization"));
+        assert_eq!(inject.formatter.as_deref(), Some("Bearer {{.Value}}"));
+        assert!(issues.replace_config.is_none());
+        assert_eq!(issues.rules[0].host.as_deref(), Some("api.example.com"));
+
+        // `credential` defaults to `name`; entry hosts and inject overrides win.
+        let uploads = statics
+            .iter()
+            .find(|input| input.name == "UPLOADS_TOKEN")
+            .unwrap();
+        assert_eq!(
+            uploads.source.config,
+            serde_json::json!({ "credential_id": "UPLOADS_TOKEN" })
+        );
+        let inject = uploads.inject_config.as_ref().unwrap();
+        assert_eq!(inject.header.as_deref(), Some("X-Token"));
+        assert_eq!(inject.formatter.as_deref(), Some("{{.Value}}"));
+        assert_eq!(
+            uploads.rules[0].host.as_deref(),
+            Some("uploads.example.com")
+        );
+
+        // Inject-mode secrets add no sandbox env; the SDK placeholder is the
+        // key name, which the proxy overwrites.
         let placeholders =
             centaur_iron_proxy::placeholder_env(std::slice::from_ref(&discovered.fragment));
         assert!(placeholders.is_empty());
