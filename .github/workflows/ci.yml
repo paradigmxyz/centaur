@@ -234,6 +234,10 @@ jobs:
         working-directory: crates/harness-server
         run: cargo test --locked
 
+      - name: Codex protocol conformance
+        working-directory: crates/harness-server
+        run: cargo test --locked --features codex-schema --test app_server_stdio
+
   company-context-checks:
     name: Company context fmt, clippy, and tests
     runs-on: depot-ubuntu-24.04-16

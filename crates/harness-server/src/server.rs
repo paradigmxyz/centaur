@@ -27,11 +27,11 @@ use crate::omp::OmpHarness;
 use crate::otel::{TraceContext, TurnStatus as TelemetryTurnStatus, TurnTelemetry};
 use crate::pi::PiHarness;
 use crate::protocol::{
-    InitializeResponse, JSONRPCError, JSONRPCErrorError, JSONRPCMessage, JSONRPCRequest,
-    JSONRPCResponse, RequestId, SandboxPolicy, ServerNotification, ThreadResumeParams,
-    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, Turn, TurnInterruptParams,
-    TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnStatus, TurnSteerParams,
-    TurnSteerResponse, UserInput,
+    ApprovalsReviewer, AskForApproval, InitializeResponse, JSONRPCError, JSONRPCErrorError,
+    JSONRPCMessage, JSONRPCRequest, JSONRPCResponse, RequestId, SandboxPolicy, ServerNotification,
+    ThreadResumeParams, ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, Turn,
+    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnStatus,
+    TurnSteerParams, TurnSteerResponse, UserInput,
 };
 use crate::traits::{
     AppServerNormalizer, AppServerRuntime, HarnessChild, HarnessKind, HarnessServer,
@@ -893,8 +893,8 @@ fn handle_request<H: HarnessServer, W: Write>(
                 cwd: absolute_path(cwd)?,
                 runtime_workspace_roots: Vec::new(),
                 instruction_sources: Vec::new(),
-                approval_policy: "never",
-                approvals_reviewer: "user",
+                approval_policy: AskForApproval::Never,
+                approvals_reviewer: ApprovalsReviewer::User,
                 sandbox: SandboxPolicy::DangerFullAccess,
                 active_permission_profile: None,
                 reasoning_effort: None,
@@ -926,8 +926,8 @@ fn handle_request<H: HarnessServer, W: Write>(
                     cwd: absolute_path(state.cwd.clone())?,
                     runtime_workspace_roots: Vec::new(),
                     instruction_sources: Vec::new(),
-                    approval_policy: "never",
-                    approvals_reviewer: "user",
+                    approval_policy: AskForApproval::Never,
+                    approvals_reviewer: ApprovalsReviewer::User,
                     sandbox: SandboxPolicy::DangerFullAccess,
                     active_permission_profile: None,
                     reasoning_effort: None,

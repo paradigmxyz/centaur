@@ -21,9 +21,9 @@ output parsing in Python, TypeScript, api-rs, or the ingresses.
   protocol testing.
 - **Output:** stdout carries only Codex App Server V2 notifications
   (`thread/started`, `item/*`, `turn/completed`, `error`), typed in
-  `src/protocol.rs` and checked in tests against the pinned Codex JSON Schemas
-  in `tests/fixtures/codex-app-server-schema/`. Harness stderr may be logged,
-  but nothing else may reach stdout.
+  `src/protocol.rs`. `cargo test --features codex-schema` checks output
+  against the JSON Schemas of the Codex revision pinned in `Cargo.toml`.
+  Harness stderr may be logged, but nothing else may reach stdout.
 
 Backends:
 

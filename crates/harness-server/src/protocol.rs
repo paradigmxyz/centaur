@@ -1,8 +1,8 @@
 //! The subset of the Codex App Server protocol that harness-server speaks.
 //!
-//! These types mirror `codex-app-server-protocol` field for field so the wire
-//! format is unchanged; `tests/app_server_stdio.rs` validates everything they
-//! emit against the JSON Schema of a pinned Codex revision.
+//! These types mirror `codex-app-server-protocol` field for field, with only
+//! the variants harness-server uses. `crates/harness-server-conformance`
+//! round-trips them through the upstream types at a pinned Codex revision.
 
 use std::path::PathBuf;
 
@@ -213,8 +213,8 @@ pub struct ThreadStartResponse {
     pub cwd: PathBuf,
     pub runtime_workspace_roots: Vec<PathBuf>,
     pub instruction_sources: Vec<PathBuf>,
-    pub approval_policy: &'static str,
-    pub approvals_reviewer: &'static str,
+    pub approval_policy: AskForApproval,
+    pub approvals_reviewer: ApprovalsReviewer,
     pub sandbox: SandboxPolicy,
     pub active_permission_profile: Option<Value>,
     pub reasoning_effort: Option<ReasoningEffort>,
@@ -226,6 +226,18 @@ pub struct ThreadResumeResponse {
     #[serde(flatten)]
     pub response: ThreadStartResponse,
     pub initial_turns_page: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AskForApproval {
+    Never,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalsReviewer {
+    User,
 }
 
 #[derive(Debug, Clone, Serialize)]

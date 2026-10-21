@@ -33,5 +33,10 @@ tokio = { version = "1.49", features = ["rt-multi-thread", "signal", "sync"] }
 url = "2.5"
 uuid = { version = "1.19", features = ["v4"] }
 
+[features]
+# Tests check app-server output against the Codex JSON Schemas at the pinned
+# revision, fetched from GitHub.
+codex-schema = []
+
 [dev-dependencies]
 jsonschema = { version = "0.59", default-features = false }
