@@ -452,6 +452,49 @@ mod tests {
             .unwrap()
             .is_empty()
         );
+        // Metadata filters match the metadata documents are returned with.
+        let metadata =
+            |metadata: Value| json!({ "query": "falcon", "filters": { "metadata": metadata } });
+        for matching in [
+            json!({ "author": "Ada" }),
+            json!({ "author": "Ada", "source": "archive" }),
+            json!({ "external_id": "note/1" }),
+        ] {
+            assert_eq!(
+                search(pool, metadata(matching.clone()))
+                    .await
+                    .unwrap()
+                    .len(),
+                1,
+                "{matching}"
+            );
+        }
+        for missing in [
+            json!({ "author": "Bob" }),
+            json!({ "author": "ada" }),
+            json!({ "source": "spoofed" }),
+        ] {
+            assert!(
+                search(pool, metadata(missing.clone()))
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "{missing}"
+            );
+        }
+        assert!(
+            search(
+                pool,
+                json!({ "query": "falcon", "filters": {
+                    "types": ["drive_doc"],
+                    "metadata": { "author": "Ada" },
+                } })
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("no requested type supports every filter")
+        );
 
         // Changed rows are projected again, replacing their chunks.
         pool.execute(

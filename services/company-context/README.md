@@ -197,7 +197,8 @@ documents, Calendar events, Granola notes, and imported documents.
     "occurred_before": "2024-02-01T00:00:00Z",
     "channel_ids": ["C0123456789"],
     "file_ids": ["F0123456789"],
-    "sources": ["archive"]
+    "sources": ["archive"],
+    "metadata": { "author": "Ada" }
   },
   "limit": 10
 }
@@ -222,8 +223,13 @@ Filters combine with AND:
   documents.
 - `sources`: import sources, at most 100. Searches only documents imported to
   them.
+- `metadata`: a JSON object of at most 65,536 bytes. Searches only imported
+  documents whose returned `metadata`, including `source` and `external_id`,
+  contains it, as Postgres `@>` defines: values match exactly, nested objects
+  match recursively, and an array matches when it contains every listed
+  element. An empty object is ignored.
 
-`channel_ids`, `file_ids`, and `sources` restrict the search to the types they apply to; a
+`channel_ids`, `file_ids`, `sources`, and `metadata` restrict the search to the types they apply to; a
 request whose types cannot satisfy every filter is rejected. `limit` defaults
 to 10 and is at most 50; there is no pagination, so narrow the filters instead.
 Keyword (BM25) and embedding similarity ranks are combined with reciprocal rank
@@ -274,7 +280,7 @@ the table, for example with `INSERT ... ON CONFLICT` or `\copy`:
 | `title` | At most 1,000 characters. |
 | `body` | Required, not blank, at most 1,000,000 bytes. |
 | `occurred_at` | When the document's content occurred; used by time filters. |
-| `metadata` | A JSON object of at most 65,536 bytes, such as a link or author. Returned with the document but not searched; `source` and `external_id` keys are overridden. |
+| `metadata` | A JSON object of at most 65,536 bytes, such as a link or author. Returned with the document and matched by the `metadata` query filter, but not searched by text; `source` and `external_id` keys are overridden. |
 
 Check constraints reject invalid rows on write. A trigger maintains
 `content_hash`, `created_at`, and `updated_at`.

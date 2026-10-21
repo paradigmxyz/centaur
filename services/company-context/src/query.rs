@@ -26,7 +26,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use sqids::Sqids;
 use sqlx::{PgPool, Postgres, Transaction, types::Json as SqlJson};
@@ -46,6 +46,8 @@ const DEFAULT_LIMIT: usize = 10;
 const MAX_LIMIT: usize = 50;
 const MAX_QUERY_CHARS: usize = 2_000;
 const MAX_FILTER_IDS: usize = 100;
+/// Matches the size limit on imported documents' metadata.
+const MAX_METADATA_FILTER_BYTES: usize = 65_536;
 /// Candidates each lane contributes to rank fusion.
 const MIN_CANDIDATES: usize = 20;
 const RRF_K: f64 = 60.0;
@@ -53,6 +55,14 @@ const JWT_LEEWAY_SECONDS: u64 = 30;
 const EMBEDDING_TIMEOUT: Duration = Duration::from_secs(10);
 /// Database role with read-only access to `company_context_data` only.
 const QUERY_ROLE: &str = "centaur_company_context_v2_query";
+
+/// An imported document's metadata: the importer's, with its source and
+/// external ID.
+macro_rules! imported_metadata {
+    () => {
+        "d.metadata || jsonb_build_object('source', d.source, 'external_id', d.external_id)"
+    };
+}
 
 #[derive(Clone)]
 pub struct QueryState {
@@ -98,6 +108,10 @@ pub struct Filters {
     /// Import sources. Limits the search to documents imported to them.
     #[serde(default)]
     pub sources: Vec<String>,
+    /// A JSON object the returned metadata of imported documents must
+    /// contain. Limits the search to imported documents.
+    #[serde(default)]
+    pub metadata: Map<String, Value>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -112,7 +126,7 @@ pub enum DataType {
 }
 
 /// How one data type's documents are selected. Queries bind the principal's
-/// subjects to `$2` and the filters to `$4` through `$8`.
+/// subjects to `$2` and the filters to `$4` through `$9`.
 struct Source {
     /// Prefix of the type's document IDs.
     id_prefix: &'static str,
@@ -133,6 +147,9 @@ struct Source {
     file_id: Option<&'static str>,
     /// The type's import source column, or `None` if it has none.
     source: Option<&'static str>,
+    /// The metadata expression `$9` must be contained in, or `None` if the
+    /// type cannot be filtered by metadata.
+    metadata: Option<&'static str>,
 }
 
 impl Source {
@@ -148,12 +165,17 @@ impl Source {
             .source
             .map(|column| format!("{column} = ANY($8)"))
             .unwrap_or_else(|| "FALSE".to_owned());
+        let in_metadata = self
+            .metadata
+            .map(|expression| format!("({expression}) @> $9"))
+            .unwrap_or_else(|| "FALSE".to_owned());
         format!(
             r#"($4::timestamptz IS NULL OR {ends_at} {ends_after} $4)
                AND ($5::timestamptz IS NULL OR {starts_at} < $5)
                AND ($6::text[] IS NULL OR {in_channels})
                AND ($7::text[] IS NULL OR {in_files})
-               AND ($8::text[] IS NULL OR {in_sources})"#,
+               AND ($8::text[] IS NULL OR {in_sources})
+               AND ($9::jsonb IS NULL OR {in_metadata})"#,
             ends_at = self.ends_at,
             ends_after = if self.end_exclusive { ">" } else { ">=" },
             starts_at = self.starts_at,
@@ -222,6 +244,7 @@ impl DataType {
                 in_channels: Some("d.conversation_id = ANY($6)"),
                 file_id: None,
                 source: None,
+                metadata: None,
             },
             Self::SlackFile => Source {
                 id_prefix: SLACK_FILE_DOCUMENT_ID_PREFIX,
@@ -259,6 +282,7 @@ impl DataType {
                 ),
                 file_id: Some("d.file_id"),
                 source: None,
+                metadata: None,
             },
             Self::DriveDoc => Source {
                 id_prefix: GOOGLE_DRIVE_DOCUMENT_ID_PREFIX,
@@ -285,6 +309,7 @@ impl DataType {
                 in_channels: None,
                 file_id: Some("d.file_id"),
                 source: None,
+                metadata: None,
             },
             Self::CalendarEvent => Source {
                 id_prefix: GOOGLE_CALENDAR_DOCUMENT_ID_PREFIX,
@@ -308,6 +333,7 @@ impl DataType {
                 in_channels: None,
                 file_id: None,
                 source: None,
+                metadata: None,
             },
             Self::GranolaNote => Source {
                 id_prefix: GRANOLA_DOCUMENT_ID_PREFIX,
@@ -332,18 +358,17 @@ impl DataType {
                 in_channels: None,
                 file_id: None,
                 source: None,
+                metadata: None,
             },
             Self::ImportedDoc => Source {
                 id_prefix: IMPORTED_DOCUMENT_ID_PREFIX,
                 documents: "company_context_data.imported_document_chunks",
                 embeddings: Some("company_context_data.imported_document_chunk_embeddings"),
-                // The importer's metadata, with the source and external ID.
-                columns: r#"d.document_id, d.title, d.body, NULL::text AS url,
-                   d.occurred_at,
-                   d.metadata || jsonb_build_object(
-                       'source', d.source,
-                       'external_id', d.external_id
-                   ) AS metadata"#,
+                columns: concat!(
+                    "d.document_id, d.title, d.body, NULL::text AS url, d.occurred_at, ",
+                    imported_metadata!(),
+                    " AS metadata"
+                ),
                 visible: "TRUE",
                 starts_at: "d.occurred_at",
                 ends_at: "d.occurred_at",
@@ -351,6 +376,8 @@ impl DataType {
                 in_channels: None,
                 file_id: None,
                 source: Some("d.source"),
+                // Filters match the metadata documents are returned with.
+                metadata: Some(imported_metadata!()),
             },
         }
     }
@@ -368,6 +395,7 @@ impl DataType {
         (filters.channel_ids.is_empty() || source.in_channels.is_some())
             && (filters.file_ids.is_empty() || source.file_id.is_some())
             && (filters.sources.is_empty() || source.source.is_some())
+            && (filters.metadata.is_empty() || source.metadata.is_some())
     }
 }
 
@@ -515,13 +543,14 @@ fn invalid(message: impl Into<String>) -> anyhow::Error {
     InvalidQuery(message.into()).into()
 }
 
-/// Bound filter parameters `$4` through `$8`.
+/// Bound filter parameters `$4` through `$9`.
 struct FilterParams {
     occurred_after: Option<DateTime<Utc>>,
     occurred_before: Option<DateTime<Utc>>,
     channel_ids: Option<Vec<String>>,
     file_ids: Option<Vec<String>>,
     sources: Option<Vec<String>>,
+    metadata: Option<SqlJson<Map<String, Value>>>,
 }
 
 impl FilterParams {
@@ -531,12 +560,18 @@ impl FilterParams {
         {
             return Err(invalid("occurred_after must be before occurred_before"));
         }
+        if serde_json::to_vec(&filters.metadata)?.len() > MAX_METADATA_FILTER_BYTES {
+            return Err(invalid(format!(
+                "metadata must be at most {MAX_METADATA_FILTER_BYTES} bytes"
+            )));
+        }
         Ok(Self {
             occurred_after: filters.occurred_after,
             occurred_before: filters.occurred_before,
             channel_ids: ids(&filters.channel_ids, "channel_ids")?,
             file_ids: ids(&filters.file_ids, "file_ids")?,
             sources: ids(&filters.sources, "sources")?,
+            metadata: (!filters.metadata.is_empty()).then(|| SqlJson(filters.metadata.clone())),
         })
     }
 }
@@ -642,7 +677,7 @@ pub async fn search(
                 SELECT {columns}
                 FROM {embeddings} e
                 JOIN {documents} d ON d.document_id = e.document_id
-                WHERE e.model = $9
+                WHERE e.model = $10
                   AND {visible}
                   AND {filters}
                 ORDER BY e.embedding <=> $1::text::vector, d.document_id
@@ -734,7 +769,7 @@ async fn query_vector(embeddings: &EmbeddingsClient, query: &str) -> Option<(Str
 }
 
 /// Runs one ranked lane: `$1` is the query text or vector, `$2` the subjects,
-/// `$3` the limit, `$4`..`$8` the filters, and `$9` the embedding model.
+/// `$3` the limit, `$4`..`$9` the filters, and `$10` the embedding model.
 async fn lane(
     tx: &mut Transaction<'_, Postgres>,
     sql: &str,
@@ -752,7 +787,8 @@ async fn lane(
         .bind(params.occurred_before)
         .bind(params.channel_ids.as_deref())
         .bind(params.file_ids.as_deref())
-        .bind(params.sources.as_deref());
+        .bind(params.sources.as_deref())
+        .bind(params.metadata.as_ref());
     if let Some(model) = model {
         query = query.bind(model);
     }
