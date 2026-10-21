@@ -47,7 +47,11 @@ def test_submit_refuses_a_quote_over_max_spend():
 
 def test_submit_approves_the_exact_quoted_total():
     def handler(tool, arguments):
-        return {"totalAmount": "0.006"} if tool == "quote_plan" else {"job": {"status": "pending"}}
+        return (
+            {"totalAmount": "0.006", "quoteToken": "signed-quote"}
+            if tool == "quote_plan"
+            else {"job": {"status": "pending"}}
+        )
 
     client, calls = _mercator(handler)
 
@@ -56,8 +60,42 @@ def test_submit_approves_the_exact_quoted_total():
     assert result == {"job": {"status": "pending"}}
     assert calls[-1][1:] == (
         "create_job",
-        {"plan": PLAN, "approved_total": "0.006", "idempotency_key": "job-0001"},
+        {
+            "plan": PLAN,
+            "approved_total": "0.006",
+            "idempotency_key": "job-0001",
+            "quote_token": "signed-quote",
+        },
     )
+
+
+@pytest.mark.parametrize("token", [None, "", 123])
+def test_submit_refuses_a_quote_without_a_valid_token(token):
+    client, calls = _mercator(lambda tool, arguments: {"totalAmount": "0.006", "quoteToken": token})
+
+    with pytest.raises(ValueError, match="quoteToken; nothing was paid"):
+        client.submit(PLAN, max_spend=0.01, idempotency_key="job-0001")
+
+    assert [tool for _, tool, _ in calls] == ["quote_plan"]
+
+
+def test_submit_preserves_search_id_beside_the_unchanged_plan():
+    client, calls = _mercator(
+        lambda tool, arguments: {"totalAmount": "0.006", "quoteToken": "signed-quote"}
+    )
+    search_id = "11111111-1111-4111-8111-111111111111"
+
+    client.submit(PLAN, max_spend=0.01, idempotency_key="job-0001", search_id=search_id)
+
+    assert calls[0][1:] == ("quote_plan", {"plan": PLAN, "id": search_id})
+    assert calls[1][2] == {
+        "plan": PLAN,
+        "id": search_id,
+        "approved_total": "0.006",
+        "idempotency_key": "job-0001",
+        "quote_token": "signed-quote",
+    }
+    assert "id" not in PLAN
 
 
 def test_call_reads_a_response_sent_as_an_event_stream():
