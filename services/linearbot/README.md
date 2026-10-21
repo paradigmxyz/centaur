@@ -84,6 +84,9 @@ and live-edit comments, add reactions, and move workflow status on owned issues.
   | `app:mentionable` | puts the bot in the `@`-mention autocomplete — without it the bot can't be mentioned at all, and mentioning is the primary trigger |
   | `app:assignable` | lets an issue be assigned/delegated to the bot (it becomes the issue *delegate*, not assignee) — the ownership/assignment trigger |
 
+  Instead of a hand-minted token, set the app's `LINEAR_CLIENT_CREDENTIALS_CLIENT_ID` / `_SECRET`
+  (client credentials grant enabled): linearbot mints the token itself and refreshes it before expiry.
+
 Webhook subscriptions needed: **Comments** and **Issues**. Do **not** subscribe to **Agent session
 events** — `app:mentionable` / `app:assignable` make Linear auto-create a native agent session on
 every mention/delegate (this can't be turned off), but we never subscribe to those events and drive
@@ -96,7 +99,8 @@ mentionable and assignable in the first place, not an agent-session add-on.
 | Var | Required | Notes |
 |-----|----------|-------|
 | `LINEARBOT_WEBHOOK_SECRET` | ✅ | Signing secret from the linearbot webhook's settings page. Distinct from the api-rs `linear_webhook` workflow's `LINEAR_WEBHOOK_SECRET` (separate Linear webhook → separate secret). |
-| `LINEAR_ACCESS_TOKEN` | ✅* | actor=app OAuth token (*or `LINEAR_API_KEY`). |
+| `LINEAR_ACCESS_TOKEN` | ✅* | actor=app OAuth token (*or client credentials, or `LINEAR_API_KEY`). |
+| `LINEAR_CLIENT_CREDENTIALS_CLIENT_ID` / `_SECRET` / `_SCOPES` | — | OAuth app client credentials; take precedence over `LINEAR_ACCESS_TOKEN`. Scopes are comma-separated, defaulting to the four above plus `comments:create,issues:create`. |
 | `LINEARBOT_DATABASE_URL` | ✅ | Postgres for chat-SDK state (falls back to `DATABASE_URL`). |
 | `CENTAUR_API_URL` | — | api-rs control plane, default `http://127.0.0.1:8080`. |
 | `LINEARBOT_API_KEY` | — | Dedicated bearer sent to api-rs. |

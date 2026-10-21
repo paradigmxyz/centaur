@@ -6,12 +6,35 @@ const apiUrl = stringEnv("CENTAUR_API_URL", "http://127.0.0.1:8080");
 // linearbot is a separate Linear webhook (different URL → different signing
 // secret), so it gets its own key to avoid clobbering the workflow's.
 const linearWebhookSecret = requiredEnv("LINEARBOT_WEBHOOK_SECRET");
-// actor=app OAuth token (the bot runs as an app); a personal API key runs the
-// same comment-thread model as a regular user, without an OAuth install.
+// OAuth app client credentials (the adapter mints and refreshes its own
+// actor=app token), else a static actor=app OAuth token; a personal API key runs
+// the same comment-thread model as a regular user, without an OAuth install.
+const linearClientId = optionalEnv("LINEAR_CLIENT_CREDENTIALS_CLIENT_ID");
+const linearClientSecret = optionalEnv(
+  "LINEAR_CLIENT_CREDENTIALS_CLIENT_SECRET",
+);
+if (Boolean(linearClientId) !== Boolean(linearClientSecret)) {
+  throw new Error(
+    "LINEAR_CLIENT_CREDENTIALS_CLIENT_ID and LINEAR_CLIENT_CREDENTIALS_CLIENT_SECRET must be set together",
+  );
+}
+const linearClientCredentials =
+  linearClientId && linearClientSecret
+    ? {
+        clientId: linearClientId,
+        clientSecret: linearClientSecret,
+        scopes: optionalEnv("LINEAR_CLIENT_CREDENTIALS_SCOPES")
+          ?.split(",")
+          .map((scope) => scope.trim())
+          .filter(Boolean),
+      }
+    : undefined;
 const linearAccessToken = optionalEnv("LINEAR_ACCESS_TOKEN");
 const linearApiKey = optionalEnv("LINEAR_API_KEY");
-if (!linearAccessToken && !linearApiKey) {
-  throw new Error("LINEAR_ACCESS_TOKEN (or LINEAR_API_KEY) is required");
+if (!linearClientCredentials && !linearAccessToken && !linearApiKey) {
+  throw new Error(
+    "LINEAR_CLIENT_CREDENTIALS_CLIENT_ID/_SECRET, LINEAR_ACCESS_TOKEN, or LINEAR_API_KEY is required",
+  );
 }
 
 // Default to info: the chat adapter logs raw webhook bodies at debug, and
@@ -52,6 +75,7 @@ const options: LinearbotOptions = {
   idleTimeoutMs: optionalNumberEnv("SESSION_IDLE_TIMEOUT_MS"),
   linearAccessToken,
   linearApiKey,
+  linearClientCredentials,
   linearApiUrl: optionalEnv("LINEAR_API_URL"),
   linearWebhookSecret,
   maxDurationMs: optionalNumberEnv("SESSION_MAX_DURATION_MS"),

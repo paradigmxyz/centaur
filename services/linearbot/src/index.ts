@@ -37,6 +37,7 @@ import {
   formatIssueContextHeader,
   OWNERSHIP_CONTEXT,
 } from "./linear-context";
+import { linearAdapterAuth } from "./linear-auth";
 import { ackWorking } from "./linear-narrator";
 import {
   addCommentReaction,
@@ -119,11 +120,7 @@ export function createLinearbot(options: LinearbotOptions): Linearbot {
   const userName = options.userName ?? "centaur";
   const logger = options.logger ?? noopLogger;
   const linear = createLinearAdapter({
-    ...(options.linearAccessToken
-      ? { accessToken: options.linearAccessToken }
-      : options.linearApiKey
-        ? { apiKey: options.linearApiKey }
-        : {}),
+    ...linearAdapterAuth(options),
     ...(options.linearApiUrl ? { apiUrl: options.linearApiUrl } : {}),
     // The chat SDK runs the adapter in agent-sessions mode: it settles the
     // (vestigial) agent session an @-mention opens and ignores Comment webhooks,
@@ -504,8 +501,10 @@ function handleCommentMention(
         event.commentId,
       ].slice(-200),
     });
-    const client = (thread.adapter as unknown as LinearSessionCapableAdapter)
-      .linearClient;
+    const adapter = thread.adapter as unknown as LinearSessionCapableAdapter;
+    // The turn holds this client throughout; refresh a near-expiry token first.
+    await adapter.ensureValidToken?.();
+    const client = adapter.linearClient;
     const serialized = await serializeMessage(
       issueCommentMessage(event, threadKey),
     );
@@ -689,8 +688,10 @@ function handleIssueAssignment(
       return;
     }
     await thread.setState({ lastAssignmentTrigger: event.updatedAt });
-    const client = (thread.adapter as unknown as LinearSessionCapableAdapter)
-      .linearClient;
+    const adapter = thread.adapter as unknown as LinearSessionCapableAdapter;
+    // The turn holds this client throughout; refresh a near-expiry token first.
+    await adapter.ensureValidToken?.();
+    const client = adapter.linearClient;
     backgroundWaitUntil(
       runThreadTurn({
         announceStart: true,

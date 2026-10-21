@@ -114,6 +114,15 @@ export type LinearbotOptions = {
   /** OAuth access token from an actor=app install (the bot runs as an app). */
   linearAccessToken?: string;
   /**
+   * OAuth app client credentials: the adapter mints its own actor=app token and
+   * refreshes it before expiry. Takes precedence over linearAccessToken.
+   */
+  linearClientCredentials?: {
+    clientId: string;
+    clientSecret: string;
+    scopes?: string[];
+  };
+  /**
    * Personal API key fallback: runs the same comment-thread model as a regular
    * Linear user instead of an app (no OAuth install required).
    */
@@ -231,6 +240,8 @@ export type LinearActivityClient = {
 export type LinearSessionCapableAdapter = {
   /** App user id of the bot; the getter throws before initialize. */
   botUserId?: string;
+  /** Re-mints a client-credentials token near expiry; no-op for static auth. */
+  ensureValidToken?(): Promise<void>;
   linearClient?: LinearActivityClient & LinearRawRequestClient;
   startTyping?(threadId: string, status?: string): Promise<void>;
 };

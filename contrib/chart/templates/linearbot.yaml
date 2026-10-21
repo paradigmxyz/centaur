@@ -37,12 +37,27 @@ spec:
             - name: LINEARBOT_DEFAULT_HARNESS
               value: {{ .Values.sandbox.harnessEngine | quote }}
             # actor=app OAuth token from the Linear agent install; agent
-            # sessions are unavailable on a plain personal API key.
+            # sessions are unavailable on a plain personal API key. The client
+            # credentials, when set, take precedence: linearbot mints and
+            # refreshes its own token instead.
             - name: LINEAR_ACCESS_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sLINEAR_ACCESS_TOKEN" .Values.secretManager.envPrefix }}
+                  optional: true
+            - name: LINEAR_CLIENT_CREDENTIALS_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sLINEAR_CLIENT_CREDENTIALS_CLIENT_ID" .Values.secretManager.envPrefix }}
+                  optional: true
+            - name: LINEAR_CLIENT_CREDENTIALS_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sLINEAR_CLIENT_CREDENTIALS_CLIENT_SECRET" .Values.secretManager.envPrefix }}
+                  optional: true
             # linearbot's own webhook signing secret — distinct from the api-rs
             # linear_webhook workflow's LINEAR_WEBHOOK_SECRET (separate Linear
             # webhook, separate signing secret).
