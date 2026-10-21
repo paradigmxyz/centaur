@@ -57,7 +57,7 @@ fn slack_dm_email(row: &centaur_console_db::Principal, input: &PrincipalInput) -
     let email = input
         .slack_email
         .as_deref()
-        .filter(|email| !email.is_empty())?;
+        .filter(|email| !email.trim().is_empty())?;
     (input.kind.as_deref().unwrap_or(&row.kind) == SLACK_DM_KIND)
         .then(|| email.trim().to_lowercase())
 }
@@ -276,6 +276,13 @@ mod tests {
             Some("ada@example.com")
         );
         input.kind = Some("user".to_owned());
+        assert_eq!(slack_dm_email(&row(), &input), None);
+    }
+
+    #[test]
+    fn blank_slack_dm_emails_link_no_user() {
+        let mut input = input();
+        input.slack_email = Some("  ".to_owned());
         assert_eq!(slack_dm_email(&row(), &input), None);
     }
 
