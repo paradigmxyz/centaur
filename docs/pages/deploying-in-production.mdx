@@ -75,7 +75,7 @@ component. Add these keys to the same infra Secret:
 
 | Secret | Required for | Notes |
 |--------|--------------|-------|
-| `IRON_CONTROL_DATABASE_URL` | Console database | May use the bundled Postgres server. Keep the Console in its own logical database. |
+| `IRON_CONTROL_DATABASE_URL` | Console database, also read by api-rs and proxy-sync | May use the bundled Postgres server. Keep the Console in its own logical database. |
 | `IRON_CONTROL_INITIAL_USER_EMAIL` | Initial Console admin | Used only to create the first user when no user exists. |
 | `IRON_CONTROL_INITIAL_USER_PASSWORD` | Initial Console admin | Minimum 12 characters. Use a generated break-glass password. |
 | `IRON_CONTROL_INITIAL_API_KEY` | api-rs and `centaur-perms` | Must be `iak_` followed by 64 lowercase hexadecimal characters. |
@@ -472,7 +472,7 @@ The deployment uses these databases on the server:
 | Database | Used by | Connection |
 | --- | --- | --- |
 | Any name, for example `centaur` | api-rs, Slackbot, and ETL workflows | `DATABASE_URL`, including the database name. |
-| `iron_control_production`, plus `_cache`, `_queue`, and `_cable` variants | Console | `IRON_CONTROL_DATABASE_URL` without a database name; the Console selects each database itself. The Console init container creates missing databases with the `DATABASE_URL` credentials. |
+| `iron_control_production`, plus `_cache`, `_queue`, and `_cable` variants | Console; api-rs and proxy-sync read `iron_control_production` | `IRON_CONTROL_DATABASE_URL` without a database name; the Console selects each database itself. The Console init container creates missing databases with the `DATABASE_URL` credentials. |
 
 Managed servers usually require TLS, so add `sslmode=require` to both URLs.
 `POSTGRES_PASSWORD` is not needed. Tools that declare `pg_dsn` secrets connect
