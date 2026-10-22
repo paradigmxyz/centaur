@@ -570,6 +570,7 @@ impl IronControlArgs {
         let options = console_db_options(url, non_empty(self.console_database_name.as_deref()))?;
         let pool = PgPoolOptions::new()
             .max_connections(self.console_database_max_connections)
+            .acquire_timeout(CONSOLE_DB_ACQUIRE_TIMEOUT)
             .connect_lazy_with(options);
         Ok(self.console_db.get_or_init(|| pool).clone())
     }
@@ -590,6 +591,11 @@ impl IronControlArgs {
         })
     }
 }
+
+/// How long a Console database read waits for a connection. The pool connects
+/// lazily, so an unreachable or misconfigured database first shows up here and
+/// should fail the turn promptly rather than after sqlx's 30 second default.
+const CONSOLE_DB_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Connection options for Console's database. Sessions are read-only:
 /// Console owns every write to its schema.
@@ -2897,8 +2903,8 @@ mod tests {
         assert!(console_db_options("not a url", None).is_err());
     }
 
-    #[test]
-    fn agent_sandboxes_require_the_console_database() {
+    #[tokio::test]
+    async fn agent_sandboxes_require_the_console_database() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
