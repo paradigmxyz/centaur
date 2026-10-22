@@ -290,25 +290,42 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
-  test "an admin's Slack DM sandbox creates and edits a static secret without handling its value" do
+  test "an admin's Slack DM sandbox creates a Postgres DSN secret from another's source under another role" do
+    original = pg_dsn_secrets(:acme_analytics_pg)
+
     with_token(dm_proxy_for(users(:acme_admin))) do |headers|
-      post "/api/v1/sandbox/admin/static_secrets",
-           params: { data: { foreign_id: "partner-api-key", name: "partner-api-key", inject_config: { header: "X-Api-Key" },
-                             rules: [ { host: "api.partner.example" } ] } },
+      get "/api/v1/sandbox/admin/pg_dsn_secrets/#{original.oid}", headers: headers
+      assert_response :ok
+      dsn = json_body.dig("data", "dsn")
+
+      post "/api/v1/sandbox/admin/pg_dsn_secrets",
+           params: { data: { foreign_id: "pg-analytics-writer", name: "analytics writer", database: "analytics",
+                             role: "writer", dsn: dsn } },
            headers: headers, as: :json
       assert_response :created
-      secret = StaticSecret.find_by_oid!(json_body.dig("data", "id"))
-      assert_equal users(:acme_admin), secret.created_by
-      assert_equal "http://www.example.com/console/secrets/static/#{secret.oid}/edit", json_body.dig("data", "console_url")
+      copy = PgDsnSecret.find_by_oid!(json_body.dig("data", "id"))
+      assert_equal [ "writer", "env", { "var" => "PG_ANALYTICS_DSN" }, users(:acme_admin) ],
+                   [ copy.role, copy.dsn_source.source_type, copy.dsn_source.config, copy.created_by ]
 
-      # The admin sets the inline value in the Console UI; a later edit keeps it.
-      secret.create_source!(source_type: "control_plane", secret: "value-set-in-console")
+      patch "/api/v1/sandbox/admin/pg_dsn_secrets/#{copy.oid}", params: { data: { role: "auditor" } },
+                                                                 headers: headers, as: :json
+      assert_response :ok
+      copy.reload
+      assert_equal [ "auditor", "analytics", "env" ], [ copy.role, copy.database, copy.dsn_source.source_type ]
+    end
+  end
+
+  test "an admin's Slack DM sandbox edits a static secret's fields and keeps its source" do
+    secret = static_secrets(:acme_staging_api_key)
+    secret.create_source!(source_type: "control_plane", secret: "value-set-by-operator")
+
+    with_token(dm_proxy_for(users(:acme_admin))) do |headers|
       patch "/api/v1/sandbox/admin/static_secrets/#{secret.oid}",
-            params: { data: { description: "Partner API", rules: [ { host: "api.partner.example" }, { host: "eu.partner.example" } ] } },
+            params: { data: { description: "Partner API", rules: [ { host: "api.partner.example" } ] } },
             headers: headers, as: :json
       assert_response :ok
       secret.reload
-      assert_equal [ "Partner API", { "header" => "X-Api-Key" }, %w[api.partner.example eu.partner.example] ],
+      assert_equal [ "Partner API", { "header" => "X-Api-Key", "formatter" => "{{ .Value }}" }, %w[api.partner.example] ],
                    [ secret.description, secret.inject_config, secret.rules.map(&:host) ]
       assert_equal "control_plane", secret.source.source_type
 
@@ -320,19 +337,21 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
-  test "sandbox admin secret writes refuse inline values and OAuth credential secrets" do
+  test "sandbox admin secret writes refuse inline values and OAuth credentials" do
     secret = static_secrets(:acme_staging_api_key)
+    oauth_secret = static_secrets(:acme_managed_gmail_secret)
 
     with_token(dm_proxy_for(users(:acme_admin))) do |headers|
-      %w[control_plane token_broker].each do |source_type|
-        patch "/api/v1/sandbox/admin/static_secrets/#{secret.oid}",
-              params: { data: { source: { source_type: source_type, secret: "pasted", config: {} } } },
-              headers: headers, as: :json
-        assert_response :forbidden
+      [
+        { source: { source_type: "control_plane", secret: "pasted", config: {} } },
+        { source: { source_type: "token_broker", config: { credential_id: "managed-gmail" } } }
+      ].each do |data|
+        patch "/api/v1/sandbox/admin/static_secrets/#{secret.oid}", params: { data: data }, headers: headers, as: :json
+        assert_response :forbidden, data.inspect
       end
       assert_nil secret.reload.source
 
-      patch "/api/v1/sandbox/admin/static_secrets/#{static_secrets(:acme_managed_gmail_secret).oid}",
+      patch "/api/v1/sandbox/admin/static_secrets/#{oauth_secret.oid}",
             params: { data: { rules: [ { host: "elsewhere.example" } ] } }, headers: headers, as: :json
       assert_response :forbidden
     end

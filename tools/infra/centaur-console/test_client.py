@@ -4,11 +4,11 @@ import httpx
 import pytest
 from client import (
     SANDBOX_ADMIN_GRANTS_PATH,
+    SANDBOX_ADMIN_PG_DSN_SECRETS_PATH,
     SANDBOX_ADMIN_PRINCIPALS_PATH,
     SANDBOX_ADMIN_ROLES_PATH,
     SANDBOX_ADMIN_SECRETS_PATH,
     SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH,
-    SANDBOX_ADMIN_STATIC_SECRETS_PATH,
     SANDBOX_OAUTH_APPS_PATH,
     SANDBOX_PERMISSIONS_PATH,
     SANDBOX_SCHEDULED_TASKS_PATH,
@@ -401,7 +401,7 @@ def test_admin_create_principal_posts_a_slack_channel_or_user_identity():
     ]
 
 
-def test_admin_update_static_secret_patches_only_the_given_fields_by_oid():
+def test_admin_update_secret_patches_only_the_given_fields_at_its_kind_path():
     requests = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -411,16 +411,16 @@ def test_admin_update_static_secret_patches_only_the_given_fields_by_oid():
             return json_response(
                 {
                     "data": [
-                        {"id": "ssr_1", "grant_key": "static_secret_id", "foreign_id": "partner"}
+                        {"id": "pgs_1", "grant_key": "pg_dsn_secret_id", "foreign_id": "partner"}
                     ]
                 }
             )
-        return json_response({"data": {"id": "ssr_1"}})
+        return json_response({"data": {"id": "pgs_1"}})
 
-    make_client(handler).admin_update_static_secret("partner", {"description": "Partner API"})
+    make_client(handler).admin_update_secret("partner", {"role": "writer"})
 
     assert requests[-1] == (
         "PATCH",
-        f"{SANDBOX_ADMIN_STATIC_SECRETS_PATH}/ssr_1",
-        {"data": {"description": "Partner API"}},
+        f"{SANDBOX_ADMIN_PG_DSN_SECRETS_PATH}/pgs_1",
+        {"data": {"role": "writer"}},
     )

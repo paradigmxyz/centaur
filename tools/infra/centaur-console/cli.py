@@ -17,7 +17,7 @@ app = typer.Typer(
 console = Console()
 admin_app = typer.Typer(
     help=(
-        "Create Slack and workflow principals and static secrets, and manage roles, "
+        "Create Slack and workflow principals and static or pg_dsn secrets, and manage roles, "
         "secret grants, Slack permissions, sandbox access, "
         "and allowed Slack Connect workspaces. "
         "Works only in an active Console admin's Slack DM."
@@ -350,44 +350,39 @@ def _json_object(value: str) -> dict:
 
 @admin_app.command("secret")
 def admin_secret(
-    secret: str = typer.Argument(..., help="Static secret OID, foreign ID, or name"),
+    secret: str = typer.Argument(..., help="Static or pg_dsn secret OID, foreign ID, or name"),
     url: str | None = URL_OPTION,
     bearer_token: str | None = BEARER_TOKEN_OPTION,
 ) -> None:
-    """Show a static secret's config, source reference, and rules (never its value)."""
+    """Show a static or pg_dsn secret's document, including its source reference (never its value)."""
     with get_client(url=url, bearer_token=bearer_token) as client:
-        result = client.admin_static_secret(secret)
+        result = client.admin_secret_document(secret)
     console.print_json(json.dumps({"data": result}, default=str))
 
 
 @admin_app.command("create-secret")
 def admin_create_secret(
-    data: str = typer.Option(
-        ...,
-        "--data",
-        help='JSON document, e.g. {"foreign_id": "x", "name": "x", "inject_config": '
-        '{"header": "Authorization", "formatter": "Bearer {{ .Value }}"}, '
-        '"rules": [{"host": "api.example.com"}]}',
-    ),
+    kind: str = typer.Option("static", "--kind", help="static or pg_dsn"),
+    data: str = typer.Option(..., "--data", help="JSON Console API document for the secret"),
     url: str | None = URL_OPTION,
     bearer_token: str | None = BEARER_TOKEN_OPTION,
 ) -> None:
-    """Create a static secret. Inline values are set in the Console UI at console_url."""
+    """Create a static or pg_dsn secret. Sources must reference an external store."""
     with get_client(url=url, bearer_token=bearer_token) as client:
-        result = client.admin_create_static_secret(_json_object(data))
+        result = client.admin_create_secret(kind, _json_object(data))
     console.print_json(json.dumps({"data": result}, default=str))
 
 
 @admin_app.command("update-secret")
 def admin_update_secret(
-    secret: str = typer.Argument(..., help="Static secret OID, foreign ID, or name"),
+    secret: str = typer.Argument(..., help="Static or pg_dsn secret OID, foreign ID, or name"),
     data: str = typer.Option(..., "--data", help="JSON object of fields to replace"),
     url: str | None = URL_OPTION,
     bearer_token: str | None = BEARER_TOKEN_OPTION,
 ) -> None:
-    """Replace the given fields of a static secret; omitted fields and the source are kept."""
+    """Replace the given fields of a secret; omitted fields, including its source, are kept."""
     with get_client(url=url, bearer_token=bearer_token) as client:
-        result = client.admin_update_static_secret(secret, _json_object(data))
+        result = client.admin_update_secret(secret, _json_object(data))
     console.print_json(json.dumps({"data": result}, default=str))
 
 
