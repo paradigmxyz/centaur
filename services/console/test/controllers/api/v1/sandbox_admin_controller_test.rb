@@ -275,6 +275,76 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
     assert_not Principal.exists?(foreign_id: "slack-channel-c0new12345")
   end
 
+  test "an admin's Slack DM sandbox creates a workflow principal with the WORKFLOW_PRINCIPAL foreign ID" do
+    with_token(dm_proxy_for(users(:acme_admin))) do |headers|
+      post "/api/v1/sandbox/admin/principals",
+           params: { data: { kind: "workflow", workflow_name: "Nightly_Report" } }, headers: headers, as: :json
+      assert_response :created
+      principal = Principal.find_by_oid!(json_body.dig("data", "id"))
+      assert_equal [ "workflow-nightly-report", "workflow", "Workflow Nightly_Report" ],
+                   [ principal.foreign_id, principal.kind, principal.name ]
+      assert_equal "Nightly_Report", principal.labels["workflow_name"]
+
+      post "/api/v1/sandbox/admin/principals", params: { data: { kind: "workflow" } }, headers: headers, as: :json
+      assert_response :bad_request
+    end
+  end
+
+  test "an admin's Slack DM sandbox creates and edits a static secret without handling its value" do
+    with_token(dm_proxy_for(users(:acme_admin))) do |headers|
+      post "/api/v1/sandbox/admin/static_secrets",
+           params: { data: { foreign_id: "partner-api-key", name: "partner-api-key", inject_config: { header: "X-Api-Key" },
+                             rules: [ { host: "api.partner.example" } ] } },
+           headers: headers, as: :json
+      assert_response :created
+      secret = StaticSecret.find_by_oid!(json_body.dig("data", "id"))
+      assert_equal users(:acme_admin), secret.created_by
+      assert_equal "http://www.example.com/console/secrets/static/#{secret.oid}/edit", json_body.dig("data", "console_url")
+
+      # The admin sets the inline value in the Console UI; a later edit keeps it.
+      secret.create_source!(source_type: "control_plane", secret: "value-set-in-console")
+      patch "/api/v1/sandbox/admin/static_secrets/#{secret.oid}",
+            params: { data: { description: "Partner API", rules: [ { host: "api.partner.example" }, { host: "eu.partner.example" } ] } },
+            headers: headers, as: :json
+      assert_response :ok
+      secret.reload
+      assert_equal [ "Partner API", { "header" => "X-Api-Key" }, %w[api.partner.example eu.partner.example] ],
+                   [ secret.description, secret.inject_config, secret.rules.map(&:host) ]
+      assert_equal "control_plane", secret.source.source_type
+
+      patch "/api/v1/sandbox/admin/static_secrets/#{secret.oid}",
+            params: { data: { source: { source_type: "aws_sm", config: { secret_id: "partner/api-key" } } } },
+            headers: headers, as: :json
+      assert_response :ok
+      assert_equal [ "aws_sm", { "secret_id" => "partner/api-key" } ], [ secret.reload.source.source_type, secret.source.config ]
+    end
+  end
+
+  test "sandbox admin secret writes refuse inline values and OAuth credential secrets" do
+    secret = static_secrets(:acme_staging_api_key)
+
+    with_token(dm_proxy_for(users(:acme_admin))) do |headers|
+      %w[control_plane token_broker].each do |source_type|
+        patch "/api/v1/sandbox/admin/static_secrets/#{secret.oid}",
+              params: { data: { source: { source_type: source_type, secret: "pasted", config: {} } } },
+              headers: headers, as: :json
+        assert_response :forbidden
+      end
+      assert_nil secret.reload.source
+
+      patch "/api/v1/sandbox/admin/static_secrets/#{static_secrets(:acme_managed_gmail_secret).oid}",
+            params: { data: { rules: [ { host: "elsewhere.example" } ] } }, headers: headers, as: :json
+      assert_response :forbidden
+    end
+
+    with_token(dm_proxy_for(users(:member_user))) do |headers|
+      patch "/api/v1/sandbox/admin/static_secrets/#{secret.oid}",
+            params: { data: { description: "changed" } }, headers: headers, as: :json
+    end
+    assert_response :forbidden
+    assert_equal "Staging API key", secret.reload.description
+  end
+
   test "admin endpoints reject requests without a sandbox token" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       get "/api/v1/sandbox/admin/roles", headers: { "Authorization" => "Bearer iak_acme-ci-token" }

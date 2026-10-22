@@ -15,6 +15,7 @@ SANDBOX_ADMIN_PRINCIPALS_PATH = "/api/v1/sandbox/admin/principals"
 SANDBOX_ADMIN_ROLES_PATH = "/api/v1/sandbox/admin/roles"
 SANDBOX_ADMIN_GRANTS_PATH = "/api/v1/sandbox/admin/grants"
 SANDBOX_ADMIN_SECRETS_PATH = "/api/v1/sandbox/admin/secrets"
+SANDBOX_ADMIN_STATIC_SECRETS_PATH = "/api/v1/sandbox/admin/static_secrets"
 SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH = "/api/v1/sandbox/admin/slack_external_teams"
 ADMIN_PAGE_LIMIT = 200
 
@@ -214,15 +215,23 @@ class ConsoleClient:
         self,
         slack_channel_id: str | None = None,
         slack_user_id: str | None = None,
+        workflow_name: str | None = None,
     ) -> dict[str, Any]:
-        """Create a Slack channel or Slack user principal; the Console derives its foreign ID."""
-        if (slack_channel_id is None) == (slack_user_id is None):
-            raise ValueError("pass exactly one of slack_channel_id or slack_user_id")
-        data = (
-            {"kind": "slack_channel", "slack_channel_id": slack_channel_id}
-            if slack_channel_id is not None
-            else {"kind": "slack_dm", "slack_user_id": slack_user_id}
-        )
+        """Create a Slack channel, Slack user, or workflow principal; the Console derives its foreign ID."""
+        identities = {
+            "slack_channel": ("slack_channel_id", slack_channel_id),
+            "slack_dm": ("slack_user_id", slack_user_id),
+            "workflow": ("workflow_name", workflow_name),
+        }
+        given = [
+            (kind, key, value) for kind, (key, value) in identities.items() if value is not None
+        ]
+        if len(given) != 1:
+            raise ValueError(
+                "pass exactly one of slack_channel_id, slack_user_id, or workflow_name"
+            )
+        kind, key, value = given[0]
+        data = {"kind": kind, key: value}
         return self._admin_object(SANDBOX_ADMIN_PRINCIPALS_PATH, method="POST", json={"data": data})
 
     def admin_principal(self, principal: str) -> dict[str, Any]:
@@ -265,6 +274,26 @@ class ConsoleClient:
     def admin_secrets(self, query: str | None = None) -> list[dict[str, Any]]:
         """List grantable secrets, optionally filtered by name or foreign ID."""
         return self._admin_list(SANDBOX_ADMIN_SECRETS_PATH, {"q": query} if query else None)
+
+    def admin_static_secret(self, secret: str) -> dict[str, Any]:
+        """Read a static secret's document (never its value) by OID, foreign ID, or name."""
+        return self._admin_object(
+            f"{SANDBOX_ADMIN_STATIC_SECRETS_PATH}/{self._admin_static_secret_id(secret)}"
+        )
+
+    def admin_create_static_secret(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Create a static secret from a Console API document, without an inline value."""
+        return self._admin_object(
+            SANDBOX_ADMIN_STATIC_SECRETS_PATH, method="POST", json={"data": data}
+        )
+
+    def admin_update_static_secret(self, secret: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Update the given fields of a static secret; omitted fields, including its source, are kept."""
+        return self._admin_object(
+            f"{SANDBOX_ADMIN_STATIC_SECRETS_PATH}/{self._admin_static_secret_id(secret)}",
+            method="PATCH",
+            json={"data": data},
+        )
 
     def admin_grant_secret(self, principal: str, secret: str) -> dict[str, Any]:
         """Grant a secret (OID, foreign ID, or name) directly to a principal."""
@@ -367,6 +396,12 @@ class ConsoleClient:
             found = "no secret" if not matches else "several secrets"
             raise RuntimeError(f"{found} matched {secret}; pass the secret OID")
         return matches[0]
+
+    def _admin_static_secret_id(self, secret: str) -> str:
+        match = self._admin_secret(secret)
+        if match["grant_key"] != "static_secret_id":
+            raise RuntimeError(f"{secret} is not a static secret; edit it in the Console UI")
+        return match["id"]
 
     def _admin_principal_and_role_ids(self, principal: str, role: str) -> tuple[str, str]:
         role_path = self._admin_ref_path(SANDBOX_ADMIN_ROLES_PATH, role, "role_")

@@ -61,7 +61,9 @@ module Api
         end
       end
 
-      def assign_and_save!(ref, attrs)
+      # keep_source leaves the current source untouched instead of replacing it
+      # with the body's source, for callers that cannot resend an inline value.
+      def assign_and_save!(ref, attrs, keep_source: false)
         ss_attrs = permit_document(
           ref, attrs, :name, :description, :kind,
           labels: {}, inject_config: {}, replace_config: {}
@@ -75,7 +77,11 @@ module Api
           attrs.require(:source).permit(:source_type, :secret, config: {})
         end
 
-        source = source_attrs ? SecretSource.new(source_attrs.to_h) : nil
+        source = if keep_source
+          ref.source
+        elsif source_attrs
+          SecretSource.new(source_attrs.to_h)
+        end
         rules = build_rules(attrs)
 
         # Resolve profile defaults before the replacement guard so a repeated
@@ -96,10 +102,12 @@ module Api
             ref.kind_rules_for_validation = rules
             ref.save!
 
-            ref.source&.destroy!
-            if source
-              source.static_secret = ref
-              source.save!
+            unless keep_source
+              ref.source&.destroy!
+              if source
+                source.static_secret = ref
+                source.save!
+              end
             end
 
             ref.rules.destroy_all

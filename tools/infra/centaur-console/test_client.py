@@ -8,6 +8,7 @@ from client import (
     SANDBOX_ADMIN_ROLES_PATH,
     SANDBOX_ADMIN_SECRETS_PATH,
     SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH,
+    SANDBOX_ADMIN_STATIC_SECRETS_PATH,
     SANDBOX_OAUTH_APPS_PATH,
     SANDBOX_PERMISSIONS_PATH,
     SANDBOX_SCHEDULED_TASKS_PATH,
@@ -398,3 +399,28 @@ def test_admin_create_principal_posts_a_slack_channel_or_user_identity():
             {"data": {"kind": "slack_dm", "slack_user_id": "U0NEW"}},
         ),
     ]
+
+
+def test_admin_update_static_secret_patches_only_the_given_fields_by_oid():
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else None
+        requests.append((request.method, request.url.path, body))
+        if request.url.path == SANDBOX_ADMIN_SECRETS_PATH:
+            return json_response(
+                {
+                    "data": [
+                        {"id": "ssr_1", "grant_key": "static_secret_id", "foreign_id": "partner"}
+                    ]
+                }
+            )
+        return json_response({"data": {"id": "ssr_1"}})
+
+    make_client(handler).admin_update_static_secret("partner", {"description": "Partner API"})
+
+    assert requests[-1] == (
+        "PATCH",
+        f"{SANDBOX_ADMIN_STATIC_SECRETS_PATH}/ssr_1",
+        {"data": {"description": "Partner API"}},
+    )

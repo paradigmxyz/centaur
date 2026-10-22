@@ -24,9 +24,10 @@ module Api
 
           # POST /api/v1/sandbox/admin/principals
           #
-          # Creates only Slack channel and Slack user principals, with the
-          # foreign ID api-rs derives at session start, so the caller cannot
-          # choose a foreign ID, kind, or Console-user link.
+          # Creates only Slack channel, Slack user, and workflow principals, with
+          # the foreign ID api-rs derives at session start or for
+          # WORKFLOW_PRINCIPAL = True, so the caller cannot choose a foreign ID,
+          # kind, or Console-user link.
           def create
             principal = case data_params[:kind]
             when "slack_channel"
@@ -40,8 +41,14 @@ module Api
               team = current_proxy.principal.slack_team_id
               Principal.new(kind: "slack_dm", foreign_id: "slack-user-#{team.downcase}-#{id.downcase}",
                             name: "Slack User #{id} (team #{team})", slack_user_id: id, slack_team_id: team)
+            when "workflow"
+              name = data_params[:workflow_name]
+              raise ActionController::BadRequest, "workflow_name must be a WORKFLOW_NAME" unless name.is_a?(String) && name.present?
+
+              Principal.new(kind: "workflow", foreign_id: "workflow-#{workflow_slug(name)}", name: "Workflow #{name}",
+                            labels: { "managed-by" => "centaur", "workflow_name" => name })
             else
-              raise ActionController::BadRequest, "kind must be slack_channel or slack_dm"
+              raise ActionController::BadRequest, "kind must be slack_channel, slack_dm, or workflow"
             end
             principal.created_by = current_user
 
@@ -104,6 +111,11 @@ module Api
           end
 
           private
+
+          # Matches api-rs's slugify for workflow principal foreign IDs.
+          def workflow_slug(name)
+            name.downcase.gsub(/[^a-z0-9]+/, "-").delete_prefix("-").delete_suffix("-").presence || "x"
+          end
 
           def effective_grant_payload(kind, secret, sources)
             roles = sources.filter_map { |source| source[:role] }.uniq

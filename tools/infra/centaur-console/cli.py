@@ -17,7 +17,8 @@ app = typer.Typer(
 console = Console()
 admin_app = typer.Typer(
     help=(
-        "Create Slack principals and manage their roles, secret grants, Slack permissions, sandbox access, "
+        "Create Slack and workflow principals and static secrets, and manage roles, "
+        "secret grants, Slack permissions, sandbox access, "
         "and allowed Slack Connect workspaces. "
         "Works only in an active Console admin's Slack DM."
     )
@@ -242,15 +243,22 @@ def admin_create_principal(
         "--slack-user",
         help="Slack user ID in your workspace to create a user (DM) principal for",
     ),
+    workflow_name: str | None = typer.Option(
+        None,
+        "--workflow",
+        help="WORKFLOW_NAME to create the workflow-<name> principal for",
+    ),
     url: str | None = URL_OPTION,
     bearer_token: str | None = BEARER_TOKEN_OPTION,
 ) -> None:
-    """Create a Slack channel or user principal before Centaur's first session there."""
-    if (slack_channel_id is None) == (slack_user_id is None):
-        raise typer.BadParameter("pass exactly one of --slack-channel or --slack-user")
+    """Create a Slack channel, Slack user, or workflow principal."""
+    if sum(value is not None for value in (slack_channel_id, slack_user_id, workflow_name)) != 1:
+        raise typer.BadParameter("pass exactly one of --slack-channel, --slack-user, or --workflow")
     with get_client(url=url, bearer_token=bearer_token) as client:
         result = client.admin_create_principal(
-            slack_channel_id=slack_channel_id, slack_user_id=slack_user_id
+            slack_channel_id=slack_channel_id,
+            slack_user_id=slack_user_id,
+            workflow_name=workflow_name,
         )
     console.print_json(json.dumps({"data": result}, default=str))
 
@@ -327,6 +335,59 @@ def admin_secrets(
     """List secrets that can be granted."""
     with get_client(url=url, bearer_token=bearer_token) as client:
         result = client.admin_secrets(query)
+    console.print_json(json.dumps({"data": result}, default=str))
+
+
+def _json_object(value: str) -> dict:
+    try:
+        data = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"--data is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise typer.BadParameter("--data must be a JSON object")
+    return data
+
+
+@admin_app.command("secret")
+def admin_secret(
+    secret: str = typer.Argument(..., help="Static secret OID, foreign ID, or name"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Show a static secret's config, source reference, and rules (never its value)."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_static_secret(secret)
+    console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("create-secret")
+def admin_create_secret(
+    data: str = typer.Option(
+        ...,
+        "--data",
+        help='JSON document, e.g. {"foreign_id": "x", "name": "x", "inject_config": '
+        '{"header": "Authorization", "formatter": "Bearer {{ .Value }}"}, '
+        '"rules": [{"host": "api.example.com"}]}',
+    ),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Create a static secret. Inline values are set in the Console UI at console_url."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_create_static_secret(_json_object(data))
+    console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("update-secret")
+def admin_update_secret(
+    secret: str = typer.Argument(..., help="Static secret OID, foreign ID, or name"),
+    data: str = typer.Option(..., "--data", help="JSON object of fields to replace"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Replace the given fields of a static secret; omitted fields and the source are kept."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_update_static_secret(secret, _json_object(data))
     console.print_json(json.dumps({"data": result}, default=str))
 
 
