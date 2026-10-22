@@ -1498,7 +1498,7 @@ async function ensureApiOk(response: Response, action: string): Promise<void> {
   throw new SessionApiError({
     action,
     body,
-    retryable: isRetryableApiStatus(response.status),
+    retryable: isRetryableApiStatus(response.status) || isActiveExecutionConflict(body),
     status: response.status,
     statusText: response.statusText
   })
@@ -1506,6 +1506,17 @@ async function ensureApiOk(response: Response, action: string): Promise<void> {
 
 function isRetryableApiStatus(status: number): boolean {
   return status === 408 || status === 425 || status === 429 || status >= 500
+}
+
+// api-rs answers 409 when the session already has a queued or running
+// execution. Retrying lets the handoff downgrade to an append, or start once
+// the active execution ends.
+function isActiveExecutionConflict(body: string): boolean {
+  try {
+    return JSON.parse(body)?.code === 'active_execution_conflict'
+  } catch {
+    return false
+  }
 }
 
 async function streamSessionNotifications(

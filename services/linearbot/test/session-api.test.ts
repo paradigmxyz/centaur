@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   forwardToSessionApi,
   harnessRestartPreamble,
+  isRetryableSessionApiError,
 } from "../src/session-api";
 import type {
   ForwardSessionInput,
@@ -260,6 +261,35 @@ describe("forwardToSessionApi overrides", () => {
     expect(thrown?.message).toContain("create session failed: 500");
     // The body is logged server-side only; the user-facing message stays generic.
     expect(thrown?.message).not.toContain("internal hostname leaked");
+  });
+});
+
+describe("forwardToSessionApi execute conflicts", () => {
+  async function executeError(body: unknown): Promise<unknown> {
+    const fetchFn = async (input: RequestInfo | URL): Promise<Response> =>
+      String(input).endsWith("/execute")
+        ? Response.json(body, { status: 409 })
+        : Response.json({ ok: true });
+    try {
+      await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage("hi")));
+    } catch (error) {
+      return error;
+    }
+    throw new Error("expected execute to fail");
+  }
+
+  test("retries an execute rejected because another execution is active", async () => {
+    const error = await executeError({
+      code: "active_execution_conflict",
+      error: "session already has a queued or running execution",
+      ok: false,
+    });
+    expect(isRetryableSessionApiError(error)).toBe(true);
+  });
+
+  test("does not retry other execute conflicts", async () => {
+    const error = await executeError({ error: "conflict", ok: false });
+    expect(isRetryableSessionApiError(error)).toBe(false);
   });
 });
 

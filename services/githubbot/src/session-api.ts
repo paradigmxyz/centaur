@@ -554,7 +554,8 @@ async function ensureApiOk(
   throw new SessionApiError({
     action,
     body,
-    retryable: isRetryableApiStatus(response.status),
+    retryable:
+      isRetryableApiStatus(response.status) || isActiveExecutionConflict(body),
     status: response.status,
     statusText: response.statusText,
   });
@@ -580,6 +581,17 @@ function logApiErrorBody(
 
 function isRetryableApiStatus(status: number): boolean {
   return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+// api-rs answers 409 when the session already has a queued or running
+// execution. Retry it like a transient failure so the turn can start once the
+// active execution ends.
+function isActiveExecutionConflict(body: string): boolean {
+  try {
+    return JSON.parse(body)?.code === "active_execution_conflict";
+  } catch {
+    return false;
+  }
 }
 
 async function streamSessionNotifications(
