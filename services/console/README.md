@@ -122,11 +122,8 @@ synced data. It defaults to enabled; Google Docs sync also still requires
 
 ## Broker Credential Refresh
 
-The Console worker refreshes broker credentials unless
-`CENTAUR_CONSOLE_TOKEN_BROKER_ENABLED=true`, which hands refresh to
-`centaur-token-broker` and makes the Console's refresh jobs, including jobs
-already queued, exit without work. The Helm chart sets it from
-`tokenBroker.enabled`.
+[`centaur-token-broker`](../token-broker/README.md) refreshes broker
+credentials; the Console only creates and administers them.
 
 ## Encryption Keys
 
