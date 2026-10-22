@@ -407,6 +407,60 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     refute bc.dead?
   end
 
+  test "Linear client credentials preserve comma separated scopes on acquisition and renewal" do
+    scopes = %w[read write app:mentionable app:assignable]
+    app = build_app(provider: "linear", allowed_scopes: scopes)
+    bc = create_credential(grant: "client_credentials", refresh_token: nil,
+                           oauth_app: app, scopes: scopes,
+                           token_endpoint: Oauth::Providers::Linear::TOKEN_ENDPOINT)
+    client = Minitest::Mock.new
+    %w[AT-first AT-renewed].each do |token|
+      expect_refresh(client, returns: result(access_token: token, refresh_token: nil)) do |request|
+        assert_equal "client_credentials", request_grant(request)
+        assert_equal app.client_id, request[:form]["client_id"]
+        assert_equal app.client_secret, request[:form]["client_secret"]
+        assert_equal "read,write,app:mentionable,app:assignable", request[:form]["scope"]
+        refute request[:form].key?("refresh_token")
+      end
+    end
+    bc.refresh_client = client
+    bc.refresh!
+    assert_equal "AT-first", bc.reload.access_token
+    bc.refresh!(now: bc.next_attempt_at + 1.second)
+
+    client.verify
+    assert_equal "AT-renewed", bc.reload.access_token
+    assert_equal scopes, bc.scopes
+    assert_nil bc.refresh_token
+    refute bc.dead?
+  end
+
+  test "Linear user token refresh keeps space separated scopes" do
+    app = build_app(provider: "linear", allowed_scopes: %w[read write])
+    bc = create_credential(oauth_app: app, scopes: %w[read write])
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result) do |request|
+      assert_equal "refresh_token", request_grant(request)
+      assert_equal "read write", request[:form]["scope"]
+    end
+    bc.refresh_client = client
+    bc.refresh!
+    client.verify
+    refute bc.reload.dead?
+  end
+
+  test "standalone client credentials keep space separated scopes" do
+    bc = create_credential(grant: "client_credentials", refresh_token: nil, scopes: %w[read write])
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result(refresh_token: nil)) do |request|
+      assert_equal "read write", request[:form]["scope"]
+    end
+    bc.refresh_client = client
+    bc.refresh!
+    client.verify
+    refute bc.reload.dead?
+  end
+
   test "password grant prefers a stored refresh_token" do
     client = Minitest::Mock.new
     expect_refresh(client, returns: result(access_token: "AT", refresh_token: nil)) do |request|
