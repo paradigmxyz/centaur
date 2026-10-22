@@ -24,28 +24,38 @@ module Api
 
           # POST /api/v1/sandbox/admin/principals
           #
-          # Only Slack channel and Slack user principals, with the identity
-          # api-rs derives at session start. A user principal is scoped to the
-          # admin's own workspace. Replaces the operator API's free-form create.
+          # Creates only Slack channel and Slack user principals, with the
+          # foreign ID api-rs derives at session start, so the caller cannot
+          # choose a foreign ID, kind, or Console-user link.
           def create
-            data = data_params
-            raise ActionController::BadRequest, "data must be an object" unless data.is_a?(ActionController::Parameters)
+            principal = case data_params[:kind]
+            when "slack_channel"
+              id = data_params[:slack_channel_id].to_s.strip.upcase
+              raise ActionController::BadRequest, "slack_channel_id must be a C… or G… channel ID" unless id.start_with?("C", "G")
 
-            id_key = data[:kind] == "slack_dm" ? :slack_user_id : :slack_channel_id
-            values = { kind: data[:kind], id: data[id_key], name: data[:name] }
-            invalid = values.reject { |key, value| value.is_a?(String) || (key == :name && value.nil?) }
-            raise ActionController::BadRequest, "kind, #{id_key}, and name must be strings" if invalid.any?
+              Principal.new(kind: "slack_channel", foreign_id: "slack-channel-#{id.downcase}",
+                            name: "Slack Channel #{id}", slack_channel_id: id)
+            when "slack_dm"
+              id = data_params[:slack_user_id].to_s.strip.upcase
+              team = current_proxy.principal.slack_team_id
+              Principal.new(kind: "slack_dm", foreign_id: "slack-user-#{team.downcase}-#{id.downcase}",
+                            name: "Slack User #{id} (team #{team})", slack_user_id: id, slack_team_id: team)
+            else
+              raise ActionController::BadRequest, "kind must be slack_channel or slack_dm"
+            end
+            principal.created_by = current_user
 
-            principal = SlackPrincipalProvisioner.new(
-              kind: values[:kind], slack_id: values[:id], display_name: values[:name],
-              slack_team_id: current_proxy.principal.slack_team_id, created_by: current_user
-            ).call
+            Principal.transaction do
+              principal.apply_default_sandbox_capabilities!
+              principal.save!
+              # api-rs adds this only to principals it creates itself.
+              if principal.slack_channel_id
+                principal.slack_channel_permissions.create!(
+                  channel_id: principal.slack_channel_id, **SlackChannelPermission::DEFAULT_ENABLED_ATTRIBUTES
+                )
+              end
+            end
             render status: :created, json: { data: record_payload(principal) }
-          rescue SlackPrincipalProvisioner::InvalidRequest => e
-            render_error(status: :bad_request, message: e.message)
-          rescue SlackPrincipalProvisioner::Conflict => e
-            render_error(status: :conflict, message: e.message,
-                         details: { id: e.principal.oid, foreign_id: e.principal.foreign_id })
           rescue ActiveRecord::RecordInvalid => e
             render_validation_error(e.record)
           end

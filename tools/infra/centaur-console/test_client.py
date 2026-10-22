@@ -383,16 +383,14 @@ def test_admin_create_principal_posts_a_slack_channel_or_user_identity():
         return json_response({"data": {"id": "prn_new"}}, 201)
 
     client = make_client(handler)
-    assert client.admin_create_principal(slack_channel_id="C0NEW", name="launch") == {
-        "id": "prn_new"
-    }
+    assert client.admin_create_principal(slack_channel_id="C0NEW") == {"id": "prn_new"}
     client.admin_create_principal(slack_user_id="U0NEW")
 
     assert requests == [
         (
             "POST",
             SANDBOX_ADMIN_PRINCIPALS_PATH,
-            {"data": {"kind": "slack_channel", "slack_channel_id": "C0NEW", "name": "launch"}},
+            {"data": {"kind": "slack_channel", "slack_channel_id": "C0NEW"}},
         ),
         (
             "POST",

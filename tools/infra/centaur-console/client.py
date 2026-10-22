@@ -214,18 +214,15 @@ class ConsoleClient:
         self,
         slack_channel_id: str | None = None,
         slack_user_id: str | None = None,
-        name: str | None = None,
     ) -> dict[str, Any]:
         """Create a Slack channel or Slack user principal; the Console derives its foreign ID."""
         if (slack_channel_id is None) == (slack_user_id is None):
             raise ValueError("pass exactly one of slack_channel_id or slack_user_id")
-        data: dict[str, Any] = (
+        data = (
             {"kind": "slack_channel", "slack_channel_id": slack_channel_id}
             if slack_channel_id is not None
             else {"kind": "slack_dm", "slack_user_id": slack_user_id}
         )
-        if name is not None:
-            data["name"] = name
         return self._admin_object(SANDBOX_ADMIN_PRINCIPALS_PATH, method="POST", json={"data": data})
 
     def admin_principal(self, principal: str) -> dict[str, Any]:

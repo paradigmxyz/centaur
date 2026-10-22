@@ -32,8 +32,8 @@ centaur-console permissions                                # this sandbox's prin
 centaur-console admin principals --slack-channel <C…|G…>   # find a channel's principal
 centaur-console admin principals                           # list all (large); prefer lookup by foreign ID
 centaur-console admin principal <prn_…|foreign-id>         # roles, direct grants, Slack perms, sandbox access
-centaur-console admin create-principal --slack-channel <C…|G…> [--name <channel-name>]
-centaur-console admin create-principal --slack-user <U…|W…> [--name <display-name>]
+centaur-console admin create-principal --slack-channel <C…|G…>
+centaur-console admin create-principal --slack-user <U…|W…>
 centaur-console admin effective-grants <principal>         # every secret held, directly or through roles
 centaur-console admin roles                                # assignable roles
 centaur-console admin assign-role <principal> <role>
@@ -68,11 +68,11 @@ Principals and roles accept an OID (`prn_…`, `role_…`) or a foreign ID. A se
 
 Create a principal only when the admin asks for one, such as "set up #launch for Centaur" or "preapprove @alice". The Console derives the foreign ID, kind, and Slack identity fields from the ID you pass. It uses the same rules as a session that starts there, so later sessions reuse the principal. Never pick or build a foreign ID yourself.
 
-- **Slack channel:** run `create-principal --slack-channel <id>` with the ID from the `<#C…|name>` mention, and pass the mention's name as `--name`. This creates `slack-channel-<channel>` (kind `slack_channel`) with full Slack access to its own channel. DM IDs (`D…`) are refused. A user's DM is reached through their user principal.
-- **Slack user:** run `create-principal --slack-user <id>` with the ID from the `<@U…>` mention, and pass their display name as `--name` if you know it. This creates `slack-user-<team>-<user>` (kind `slack_dm`) in the admin's own workspace. You cannot create a principal for a user in another workspace.
+- **Slack channel:** run `create-principal --slack-channel <id>` with the ID from the `<#C…|name>` mention. This creates `slack-channel-<channel>` (kind `slack_channel`) with full Slack access to its own channel. DM IDs (`D…`) are refused. A user's DM is reached through their user principal.
+- **Slack user:** run `create-principal --slack-user <id>` with the ID from the `<@U…>` mention. This creates `slack-user-<team>-<user>` (kind `slack_dm`) in the admin's own workspace. You cannot create a principal for a user in another workspace.
 - Other kinds, such as Discord, Teams, Linear, GitHub, Console-user, and workflow principals, cannot be created here. Send the admin to the Console UI.
-- A `409` means the principal already exists. Its `id` is in the error details. Use that principal and do not retry.
-- A new principal gets the namespace's default roles and sandbox access, as if a session had created it. Run `admin principal <id>` and report its foreign ID and default roles before making any further changes the admin requested.
+- A `422` with `foreign_id` "has already been taken" means the principal already exists. Look it up with `admin principal <foreign-id>` and do not retry.
+- A new principal gets the namespace's default roles and sandbox access, as if a session had created it. Its display name is replaced with the channel or user name on its first session. Run `admin principal <id>` and report its foreign ID and default roles before making any further changes the admin requested.
 
 ## Mapping requests
 

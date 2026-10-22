@@ -242,9 +242,6 @@ def admin_create_principal(
         "--slack-user",
         help="Slack user ID in your workspace to create a user (DM) principal for",
     ),
-    name: str | None = typer.Option(
-        None, "--name", help="Channel or user display name, without # or @"
-    ),
     url: str | None = URL_OPTION,
     bearer_token: str | None = BEARER_TOKEN_OPTION,
 ) -> None:
@@ -253,7 +250,7 @@ def admin_create_principal(
         raise typer.BadParameter("pass exactly one of --slack-channel or --slack-user")
     with get_client(url=url, bearer_token=bearer_token) as client:
         result = client.admin_create_principal(
-            slack_channel_id=slack_channel_id, slack_user_id=slack_user_id, name=name
+            slack_channel_id=slack_channel_id, slack_user_id=slack_user_id
         )
     console.print_json(json.dumps({"data": result}, default=str))
 
