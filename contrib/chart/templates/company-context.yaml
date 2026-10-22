@@ -31,6 +31,8 @@ metadata:
 {{ include "centaur.componentLabels" (dict "root" . "component" "company-context") | nindent 4 }}
 spec:
   replicas: {{ $companyContext.replicaCount }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "company-context") | nindent 6 }}
