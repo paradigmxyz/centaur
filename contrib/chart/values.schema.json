@@ -232,6 +232,8 @@
       "type": "object",
       "properties": {
         "nodeSelector": { "type": "object" },
+        "hostUsers": { "type": ["boolean", "null"] },
+        "containerSecurityContext": { "type": "object" },
         "tolerations": { "type": "array" },
         "runtimeClassName": { "type": "string" },
         "serviceAccountName": { "type": "string" },
