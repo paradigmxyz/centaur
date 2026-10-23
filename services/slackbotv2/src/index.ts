@@ -147,6 +147,11 @@ type WaitUntilContext = {
 }
 
 type SlackAssistantAdapter = {
+  setSessionStatus?(
+    channelId: string,
+    threadTs: string,
+    status: 'processing' | 'active'
+  ): Promise<void>
   setAssistantStatus?(
     channelId: string,
     threadTs: string,
@@ -4261,14 +4266,20 @@ async function setAssistantStatus(
   const normalizedStatus = normalizeAssistantStatus(status)
   const target = slackAssistantTarget(thread)
   const adapter = thread.adapter as SlackAssistantAdapter
+  // Keep shared-channel status behavior unchanged; use native lifecycle in DMs.
+  const nativeSessionStatus = options?.agentViewEnabled === true && target !== null
+    && thread.adapter.isDM?.(thread.id) === true
+  const hasStatusAdapter = nativeSessionStatus
+    ? Boolean(adapter.setSessionStatus)
+    : Boolean(adapter.setAssistantStatus)
   const fields = {
-    has_adapter: Boolean(adapter.setAssistantStatus),
+    has_adapter: hasStatusAdapter,
     has_target: Boolean(target),
     operation: normalizedStatus ? 'set' : 'clear',
     status_empty: !normalizedStatus
   }
   if (options) traceLog(options, 'slackbotv2_assistant_status_started', trace, fields)
-  if (!target || !adapter.setAssistantStatus) {
+  if (!target || !hasStatusAdapter) {
     if (options) {
       traceLog(options, 'slackbotv2_assistant_status_complete', trace, {
         ...fields,
@@ -4290,12 +4301,18 @@ async function setAssistantStatus(
   try {
     const visible = await withSlackApiTimeout(options, 'set assistant status', () => {
       const request = ignoreAssistantError(() =>
-        adapter.setAssistantStatus!(
-          target.channel,
-          target.threadTs,
-          normalizedStatus,
-          normalizedStatus ? [normalizedStatus] : undefined
-        )
+        nativeSessionStatus
+          ? adapter.setSessionStatus!(
+              target.channel,
+              target.threadTs,
+              normalizedStatus ? 'processing' : 'active'
+            )
+          : adapter.setAssistantStatus!(
+              target.channel,
+              target.threadTs,
+              normalizedStatus,
+              normalizedStatus ? [normalizedStatus] : undefined
+            )
       )
       onRequest?.(request)
       return request
