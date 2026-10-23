@@ -1134,6 +1134,15 @@ fn normalize_model_name(model: &str) -> String {
 }
 
 fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
+    if model.contains("fable-5-1") || model.contains("mythos-5-1") {
+        return Some(TokenPricing {
+            input_per_mtok: 10.0,
+            cache_creation_per_mtok: 12.5,
+            cache_read_per_mtok: 0.25,
+            output_per_mtok: 50.0,
+            source: "centaur_estimate:anthropic:fable-mythos-5-1:5m-cache-write",
+        });
+    }
     if model.contains("fable-5") || model.contains("mythos-5") {
         return Some(TokenPricing {
             input_per_mtok: 10.0,
@@ -1184,6 +1193,15 @@ fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
             source: "centaur_estimate:anthropic:opus-4-deprecated:5m-cache-write",
         });
     }
+    if model.contains("sonnet-5-5") {
+        return Some(TokenPricing {
+            input_per_mtok: 2.0,
+            cache_creation_per_mtok: 2.5,
+            cache_read_per_mtok: 0.1,
+            output_per_mtok: 10.0,
+            source: "centaur_estimate:anthropic:sonnet-5-5:5m-cache-write",
+        });
+    }
     if model.contains("sonnet-5") {
         return Some(TokenPricing {
             input_per_mtok: 2.0,
@@ -1200,6 +1218,15 @@ fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
             cache_read_per_mtok: 0.3,
             output_per_mtok: 15.0,
             source: "centaur_estimate:anthropic:sonnet-4:5m-cache-write",
+        });
+    }
+    if model.contains("haiku-5-5") {
+        return Some(TokenPricing {
+            input_per_mtok: 0.1,
+            cache_creation_per_mtok: 0.125,
+            cache_read_per_mtok: 0.01,
+            output_per_mtok: 0.5,
+            source: "centaur_estimate:anthropic:haiku-5-5:5m-cache-write",
         });
     }
     if model.contains("haiku-4-5") {
@@ -1931,6 +1958,50 @@ mod tests {
                 4.225,
                 2.5,
                 "centaur_estimate:anthropic:opus-4.5-plus:5m-cache-write",
+            ),
+        ] {
+            let cost = estimate_usage_cost(HarnessKind::ClaudeCode, "anthropic", model, &usage)
+                .expect("cost");
+            assert!((cost.input_cost - input_cost).abs() < 1e-9, "{model}");
+            assert!((cost.output_cost - output_cost).abs() < 1e-9, "{model}");
+            assert_eq!(cost.source, source);
+        }
+    }
+
+    #[test]
+    fn current_claude_models_are_priced_on_their_own_tiers() {
+        let usage = NormalizedTokenUsage {
+            input_tokens: Some(1_000_000),
+            cache_creation_input_tokens: Some(100_000),
+            cache_read_input_tokens: Some(200_000),
+            output_tokens: Some(100_000),
+            ..Default::default()
+        };
+
+        for (model, input_cost, output_cost, source) in [
+            (
+                "claude-fable-5-1",
+                8.3,
+                5.0,
+                "centaur_estimate:anthropic:fable-mythos-5-1:5m-cache-write",
+            ),
+            (
+                "claude-sonnet-5-5",
+                1.67,
+                1.0,
+                "centaur_estimate:anthropic:sonnet-5-5:5m-cache-write",
+            ),
+            (
+                "claude-haiku-5-5",
+                0.0845,
+                0.05,
+                "centaur_estimate:anthropic:haiku-5-5:5m-cache-write",
+            ),
+            (
+                "claude-haiku-4-5",
+                0.845,
+                0.5,
+                "centaur_estimate:anthropic:haiku-4.5:5m-cache-write",
             ),
         ] {
             let cost = estimate_usage_cost(HarnessKind::ClaudeCode, "anthropic", model, &usage)

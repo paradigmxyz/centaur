@@ -211,6 +211,8 @@ describe('modelDisplayName', () => {
   test('formats Claude and GPT IDs as product names and uppercases other models', () => {
     expect(modelDisplayName('claude-opus-5-5')).toBe('Opus 5.5')
     expect(modelDisplayName('claude-fable-5')).toBe('Fable 5')
+    expect(modelDisplayName('claude-fable-5-1')).toBe('Fable 5.1')
+    expect(modelDisplayName('claude-sonnet-5-5')).toBe('Sonnet 5.5')
     expect(modelDisplayName('claude-haiku-4-5-20251001')).toBe('Haiku 4.5')
     expect(modelDisplayName('claude-opus-5-fast')).toBe('Opus 5 Fast')
     expect(modelDisplayName('gpt-5.6-sol')).toBe('Sol 5.6')
