@@ -633,12 +633,15 @@ enum ChangeAction {
 /// Each file is scanned by exactly one corpus: My Drive (`None`) or its Shared
 /// Drive. Files in another corpus are left to that corpus's scan.
 fn classify_change(change: DriveChange, shared_drive_id: Option<&str>) -> ChangeAction {
+    let Some(file_id) = change.file_id else {
+        return ChangeAction::Skip;
+    };
     match change.file {
         Some(file) if !file.belongs_to(shared_drive_id) => ChangeAction::Skip,
         Some(file) if !change.removed && file.is_active_document() => {
             ChangeAction::Observe(Box::new(file))
         }
-        _ => ChangeAction::Remove(change.file_id),
+        _ => ChangeAction::Remove(file_id),
     }
 }
 
@@ -1761,7 +1764,7 @@ mod tests {
 
     fn change(file_id: &str, removed: bool, file: Option<DriveFile>) -> DriveChange {
         DriveChange {
-            file_id: file_id.to_owned(),
+            file_id: Some(file_id.to_owned()),
             removed,
             file,
         }
@@ -1849,6 +1852,27 @@ mod tests {
         assert!(matches!(
             classify_change(change("file-1", false, Some(trashed)), shared),
             ChangeAction::Remove(_)
+        ));
+    }
+
+    #[test]
+    fn shared_drive_changes_are_skipped() {
+        let page: crate::drive::ChangePage = serde_json::from_value(json!({
+            "newStartPageToken": "next",
+            "changes": [
+                {"changeType": "drive", "driveId": "shared-drive-1", "removed": false},
+                {"fileId": "file-1", "removed": true},
+            ],
+        }))
+        .unwrap();
+        let actions = page
+            .changes
+            .into_iter()
+            .map(|change| classify_change(change, Some("shared-drive-1")))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            actions.as_slice(),
+            [ChangeAction::Skip, ChangeAction::Remove(id)] if id == "file-1"
         ));
     }
 

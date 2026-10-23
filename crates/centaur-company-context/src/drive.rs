@@ -133,7 +133,8 @@ pub struct ChangePage {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DriveChange {
-    pub file_id: String,
+    /// Absent for changes to a Shared Drive itself (`changeType: "drive"`).
+    pub file_id: Option<String>,
     #[serde(default)]
     pub removed: bool,
     pub file: Option<DriveFile>,
