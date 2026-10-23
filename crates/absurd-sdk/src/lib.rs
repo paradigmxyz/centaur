@@ -1055,7 +1055,7 @@ impl Client {
             }
             Ok(Err(Error::Suspend | Error::Cancelled | Error::FailedRun)) => Ok(()),
             Ok(Err(err)) => {
-                eprintln!("[absurd] task execution failed: {err}");
+                eprintln!("[absurd] task execution failed: {}", error_chain(&err));
                 let failure = serialize_error(&err);
                 match fail_task_run(&self.pool, &self.queue_name, &task.run_id, failure).await {
                     Err(Error::Cancelled | Error::FailedRun) => Ok(()),
@@ -2061,9 +2061,9 @@ fn map_task_state_error(err: sqlx::Error) -> Error {
     Error::Sqlx(err)
 }
 
-fn serialize_error(err: &Error) -> Value {
-    // Persist the full source chain: the failure payload is often the only
-    // forensic artifact of a failed run.
+/// Renders an error with its full source chain, skipping causes already
+/// included in an outer message.
+fn error_chain(err: &Error) -> String {
     let mut message = err.to_string();
     let mut source = std::error::Error::source(err);
     while let Some(cause) = source {
@@ -2074,6 +2074,12 @@ fn serialize_error(err: &Error) -> Value {
         }
         source = cause.source();
     }
+    message
+}
+
+fn serialize_error(err: &Error) -> Value {
+    // Persist the full source chain: the failure payload is often the only
+    // forensic artifact of a failed run.
     json!({
         "name": match err {
             Error::Timeout(_) => "TimeoutError",
@@ -2082,7 +2088,7 @@ fn serialize_error(err: &Error) -> Value {
             Error::Suspend => "SuspendTask",
             _ => "Error",
         },
-        "message": message,
+        "message": error_chain(err),
     })
 }
 
