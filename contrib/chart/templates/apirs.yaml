@@ -408,6 +408,14 @@ spec:
             - name: SESSION_SANDBOX_POD_ANNOTATIONS
               value: {{ toJson .Values.sandbox.podAnnotations | quote }}
 {{- end }}
+{{- if and (kindIs "bool" .Values.sandbox.hostUsers) (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_HOST_USERS")) }}
+            - name: SESSION_SANDBOX_HOST_USERS
+              value: {{ .Values.sandbox.hostUsers | quote }}
+{{- end }}
+{{- if and .Values.sandbox.containerSecurityContext (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_CONTAINER_SECURITY_CONTEXT")) }}
+            - name: SESSION_SANDBOX_CONTAINER_SECURITY_CONTEXT
+              value: {{ toJson .Values.sandbox.containerSecurityContext | quote }}
+{{- end }}
 {{- if and .Values.sandbox.tolerations (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_TOLERATIONS")) }}
             - name: SESSION_SANDBOX_TOLERATIONS
               value: {{ toJson .Values.sandbox.tolerations | quote }}

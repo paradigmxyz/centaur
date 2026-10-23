@@ -26,7 +26,7 @@ use centaur_iron_proxy::{
 };
 use centaur_sandbox_agent_k8s::{
     AgentSandboxBackend, AgentSandboxConfig, GitHubTokenRef, IronControlSettings, IronProxyConfig,
-    OtlpEgressTarget, StateVolumeConfig, Toleration, ToolSource, ToolsConfig,
+    OtlpEgressTarget, SecurityContext, StateVolumeConfig, Toleration, ToolSource, ToolsConfig,
 };
 use centaur_sandbox_core::{Mount, MountKind, ResourceRequirements, SandboxSpec};
 use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
@@ -891,6 +891,20 @@ struct SandboxArgs {
         env = "SESSION_SANDBOX_POD_ANNOTATIONS"
     )]
     pod_annotations_json: Option<String>,
+    /// `hostUsers` for sandbox pods only. Set false to request Kubernetes Pod
+    /// user namespaces; unset preserves the cluster default.
+    #[arg(
+        long = "session-sandbox-host-users",
+        env = "SESSION_SANDBOX_HOST_USERS",
+        action = clap::ArgAction::Set
+    )]
+    host_users: Option<bool>,
+    /// Kubernetes SecurityContext JSON applied to the agent container only.
+    #[arg(
+        long = "session-sandbox-container-security-context",
+        env = "SESSION_SANDBOX_CONTAINER_SECURITY_CONTEXT"
+    )]
+    container_security_context_json: Option<String>,
     /// Sandbox/proxy pod tolerations as a JSON array in the Kubernetes
     /// toleration shape. The chart renders `sandbox.tolerations` into this.
     #[arg(
@@ -1030,11 +1044,11 @@ impl SandboxArgs {
             self.kube_client().await?,
             AgentSandboxConfig::try_from(self)?,
         ));
-        let stopped = backend.drain_service_account_mismatches().await?;
+        let stopped = backend.drain_pod_config_mismatches().await?;
         if !stopped.is_empty() {
             info!(
                 stopped_count = stopped.len(),
-                "drained sandboxes with stale service accounts before enabling reuse"
+                "drained sandboxes with stale pod identity or agent security contexts before enabling reuse"
             );
         }
         let artifact_backend = backend.clone();
@@ -1331,6 +1345,27 @@ impl SandboxArgs {
                  key/value pairs: {error}"
             ))
         })
+    }
+
+    /// Parse the agent container's security context without silently dropping
+    /// malformed settings. Empty or unset preserves the existing behavior.
+    fn container_security_context(&self) -> Result<Option<SecurityContext>, ServerError> {
+        let Some(raw) = self
+            .container_security_context_json
+            .as_deref()
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+        else {
+            return Ok(None);
+        };
+        serde_json::from_str::<SecurityContext>(raw)
+            .map(Some)
+            .map_err(|error| {
+                ServerError::UnsupportedConfig(format!(
+                    "SESSION_SANDBOX_CONTAINER_SECURITY_CONTEXT must be a Kubernetes \
+                     SecurityContext JSON object: {error}"
+                ))
+            })
     }
 
     /// `SESSION_SANDBOX_TOLERATIONS` parsed as a JSON array of Kubernetes
@@ -1693,6 +1728,9 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
             .unwrap_or_default(),
         );
         config.pod_annotations = args.pod_annotations()?;
+        config.host_users = args.host_users;
+        config.container_security_context = args.container_security_context()?;
+        config.validate()?;
         config.tolerations = args.tolerations()?;
         config.runtime_class_name = args
             .runtime_class_name
@@ -3306,6 +3344,89 @@ mod tests {
                 port: 8000,
             })
         );
+    }
+
+    #[test]
+    fn sandbox_security_context_rejects_malformed_json_and_types() {
+        for raw in ["not-json", "[]", "null", r#"{"runAsUser":"root"}"#] {
+            let args = Args::try_parse_from([
+                "centaur-api-server",
+                "--database-url",
+                "postgres://postgres:postgres@localhost/centaur",
+                "--session-sandbox-container-security-context",
+                raw,
+            ])
+            .unwrap();
+            assert!(args.sandbox.container_security_context().is_err(), "{raw}");
+        }
+    }
+
+    #[tokio::test]
+    async fn sandbox_security_options_parse_into_backend_config() {
+        let parse = |flags: Vec<&str>| {
+            Args::try_parse_from(
+                [
+                    "centaur-api-server",
+                    "--database-url",
+                    "postgres://postgres:postgres@localhost/centaur",
+                    "--iron-control-url",
+                    "http://console.local",
+                    "--iron-control-proxy-sync-url",
+                    "http://proxy-sync.local:8080",
+                    "--iron-control-api-key",
+                    "iak_test",
+                    "--iron-control-database-url",
+                    "postgres://console@localhost/console",
+                ]
+                .into_iter()
+                .chain(flags),
+            )
+            .unwrap()
+        };
+        let defaults = parse(vec![]);
+        let config = AgentSandboxConfig::try_from(&defaults.sandbox).unwrap();
+        assert_eq!(config.host_users, None);
+        assert_eq!(config.container_security_context, None);
+
+        for raw in ["", "  ", "{}"] {
+            let args = parse(vec!["--session-sandbox-container-security-context", raw]);
+            assert!(AgentSandboxConfig::try_from(&args.sandbox).is_ok());
+        }
+
+        for host_users in ["true", "false"] {
+            let args = parse(vec![
+                "--session-sandbox-host-users",
+                host_users,
+                "--session-sandbox-container-security-context",
+                r#"{"runAsNonRoot":true,"runAsUser":1001}"#,
+            ]);
+            let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
+            assert_eq!(config.host_users, Some(host_users == "true"));
+            let security = config.container_security_context.unwrap();
+            assert_eq!(security.run_as_non_root, Some(true));
+            assert_eq!(security.run_as_user, Some(1001));
+        }
+
+        for host_flags in [
+            vec![],
+            vec!["--session-sandbox-host-users", "true"],
+            vec!["--session-sandbox-host-users", "false"],
+        ] {
+            let isolated = host_flags.last() == Some(&"false");
+            let args = parse(
+                host_flags
+                    .into_iter()
+                    .chain([
+                        "--session-sandbox-container-security-context",
+                        r#"{"procMount":"Unmasked"}"#,
+                    ])
+                    .collect(),
+            );
+            assert_eq!(
+                AgentSandboxConfig::try_from(&args.sandbox).is_ok(),
+                isolated
+            );
+        }
     }
 
     #[test]

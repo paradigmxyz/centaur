@@ -445,6 +445,40 @@ sandbox:
 Malformed selector/toleration JSON fails api-rs startup. Empty values keep
 default scheduling.
 
+### Configure Sandbox User Namespaces and Container Security
+
+`sandbox.hostUsers` and `sandbox.containerSecurityContext` are passed through
+api-rs as `SESSION_SANDBOX_HOST_USERS` and
+`SESSION_SANDBOX_CONTAINER_SECURITY_CONTEXT`. The former sets the sandbox
+Pod's `hostUsers`; the latter accepts a Kubernetes `SecurityContext` for the
+agent container. Neither changes the paired iron-proxy pod, and the container
+setting does not change bootstrap init containers. Defaults omit both fields.
+
+For example, request an isolated Pod user namespace and a non-root agent:
+
+```yaml
+sandbox:
+  hostUsers: false
+  containerSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+```
+
+The cluster's Kubernetes version, container runtime, and volume filesystems
+must support Pod user namespaces. Setting `procMount: Unmasked` requires
+`hostUsers: false`; malformed security-context JSON or that incompatible
+combination fails api-rs startup. Cluster admission policies still apply.
+Enabling nested containers also requires a compatible image, UID/GID maps,
+device access, and node configuration; these settings alone do not provide a
+Docker daemon.
+
+These Pod settings are immutable. Before enabling reuse, api-rs stops retained
+sandboxes whose user namespace or agent security context differs from the
+configured profile, using the same reconciliation as ServiceAccount changes.
+This includes warm pods and active sessions, and applies when reverting a
+profile as well. Schedule these changes after active turns finish. Leaving
+both options unset preserves existing default sandboxes.
+
 ### Use an External PostgreSQL
 
 By default the chart runs a bundled PostgreSQL built on ParadeDB. To use a

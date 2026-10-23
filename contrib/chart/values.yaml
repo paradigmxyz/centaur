@@ -308,6 +308,14 @@ sandbox:
   # `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`). Empty adds none.
   podAnnotations: {}
   #   karpenter.sh/do-not-disrupt: "true"
+  # Sandbox pods only: false enables Pod user namespaces on supported nodes.
+  # null omits hostUsers and preserves the Kubernetes default.
+  hostUsers: null
+  # Kubernetes SecurityContext for the agent container only. Bootstrap init
+  # containers and iron-proxy are unaffected. procMount: Unmasked requires
+  # hostUsers: false. Changing either option drains incompatible retained
+  # sandbox pods at api-rs startup, including warm and active pods.
+  containerSecurityContext: {}
   tolerations: []
   # - key: centaur.ai/sandbox
   #   operator: Exists
