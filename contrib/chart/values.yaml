@@ -457,11 +457,8 @@ proxySync:
 # Refreshes the console's broker credentials (OAuth access tokens) before they
 # expire. It serves only /healthz and /metrics; its egress is Postgres and
 # HTTPS to token endpoints. Replicas coordinate through row locks, so a rolling
-# update never refreshes a credential twice. Off by default until deployments
-# set its image; the console's refresh jobs refresh credentials only while it is
-# off.
+# update never refreshes a credential twice.
 tokenBroker:
-  enabled: false
   replicaCount: 1
   nodeSelector: {}
   affinity: {}

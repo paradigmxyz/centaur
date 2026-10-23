@@ -10,8 +10,7 @@ module Broker
   # token endpoint from the provider strategy.
   #
   # SECURITY: this class never logs the code, tokens, client_secret, or the
-  # response body. Callers must keep the same discipline. Mirrors RefreshClient's
-  # injectable-HTTP design and 64 KiB body cap.
+  # response body. Callers must keep the same discipline.
   class AuthorizationCodeClient
     # Normalized success result. scope is the granted-scope string in the
     # provider's native format (nil if omitted); id_token is the raw JWT (nil if
