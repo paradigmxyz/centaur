@@ -64,14 +64,8 @@ jobs:
       - name: Lint chart
         run: helm lint contrib/chart
 
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.27.3'
-          cache: false
-
       - name: Install yq
-        run: go install github.com/mikefarah/yq/v4@v4.54.1
+        uses: mikefarah/yq@504fc38780cc46be8444ea1b72fb55919fc0bfb0 # v4.54.1
 
       - name: Validate chart version bump
         run: |
