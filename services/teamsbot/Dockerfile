@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM oven/bun:1.4.3-slim
+FROM oven/bun:1.4.4-slim
 
 WORKDIR /repo
 ENV NODE_ENV=production
