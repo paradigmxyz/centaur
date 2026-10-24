@@ -88,6 +88,17 @@ pub struct DocumentRequest {
     pub metadata: Map<String, Value>,
 }
 
+impl DocumentRequest {
+    /// The table accepts bodies of only whitespace other than spaces, which
+    /// have no text to index.
+    fn validate(&self) -> Result<(), ApiError> {
+        if self.body.trim().is_empty() {
+            return Err(ApiError::BadRequest("body must not be blank".to_owned()));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListParams {
@@ -187,6 +198,7 @@ pub async fn create(
     request: &DocumentRequest,
 ) -> Result<CustomDocument, ApiError> {
     let source = valid_source(source)?;
+    request.validate()?;
     let writer = writer(identity)?;
     let readers = readers(identity, &writer, request.readers.as_deref())?;
     sqlx::query_as(&format!(
@@ -300,6 +312,7 @@ pub async fn replace(
 ) -> Result<CustomDocument, ApiError> {
     let source = valid_source(source)?;
     let external_id = document_id(external_id)?;
+    request.validate()?;
     let writer = writer(identity)?;
     let readers = readers(identity, &writer, request.readers.as_deref())?;
     sqlx::query_as(&format!(
@@ -543,7 +556,11 @@ mod tests {
             pool,
             &ada(),
             "memory",
-            &request(json!({ "title": "Editor", "body": "Ada prefers Neovim" })),
+            &request(json!({
+                "title": "Editor",
+                "body": "Ada prefers Neovim",
+                "metadata": { "written_by": "prn_xUC2fVYG" },
+            })),
         )
         .await
         .unwrap();
@@ -561,6 +578,12 @@ mod tests {
         let memory = get_document(pool, &ada(), "memory", id).await.unwrap();
         assert_eq!(memory.status, "projected");
         assert_eq!(found(pool, &ada(), "neovim").await, ["Ada prefers Neovim"]);
+        // Results name the writer, whatever the writer's metadata says.
+        let document = query::document(pool, &ada(), &format!("custom:memory:{id}:000000"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(document.metadata["written_by"], "prn_5CO4fITZ");
         assert!(found(pool, &bob(), "neovim").await.is_empty());
 
         // Other principals cannot reach it, even when they can read it.
@@ -703,6 +726,7 @@ mod tests {
         for (source, body) in [
             ("Memory", json!({ "body": "note" })),
             ("memory", json!({ "body": "  " })),
+            ("memory", json!({ "body": "\n\t" })),
             ("memory", json!({ "body": "a\u{0}b" })),
             (
                 "memory",

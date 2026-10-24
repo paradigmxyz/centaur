@@ -73,6 +73,7 @@ struct Pending {
     occurred_at: Option<DateTime<Utc>>,
     metadata: Json<Value>,
     content_hash: String,
+    written_by: Option<String>,
 }
 
 /// A chunk ready to embed: document ID, chunk ID, body, and embedding input.
@@ -116,7 +117,7 @@ pub async fn project(
         let batch: Vec<Pending> = sqlx::query_as(
             r#"
             SELECT i.source, i.external_id, i.title, i.body, i.occurred_at,
-                   i.metadata, i.content_hash
+                   i.metadata, i.content_hash, i.written_by
             FROM company_context_system.custom_documents i
             WHERE NOT EXISTS (
                 SELECT 1 FROM company_context_data.custom_document_chunks c
@@ -138,13 +139,19 @@ pub async fn project(
         .fetch_all(pool)
         .await?;
         let done = (batch.len() as i64) < BATCH_SIZE;
-        let items: Vec<(Pending, Vec<Chunk>)> = batch
-            .into_iter()
-            .map(|item| {
-                let chunks = item.chunks(chunk_chars);
-                (item, chunks)
-            })
-            .collect();
+        let mut items: Vec<(Pending, Vec<Chunk>)> = Vec::with_capacity(batch.len());
+        for item in batch {
+            let chunks = item.chunks(chunk_chars);
+            // A body of only whitespace the table's check lets through has
+            // nothing to publish; rejecting it keeps it from being selected
+            // again ahead of every other row.
+            if chunks.is_empty() {
+                reject(pool, &item, &anyhow::anyhow!("body has no text to index")).await?;
+                summary.rejected += 1;
+            } else {
+                items.push((item, chunks));
+            }
+        }
         let inputs: Vec<String> = items
             .iter()
             .flat_map(|(_, chunks)| chunks.iter().map(|chunk| chunk.input.clone()))
@@ -238,9 +245,9 @@ async fn write(
             r#"
             INSERT INTO company_context_data.custom_document_chunks (
                 document_id, source, external_id, chunk_id, title, body,
-                occurred_at, metadata, item_hash, content_hash, readers
+                occurred_at, metadata, item_hash, content_hash, readers, written_by
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             "#,
         )
         .bind(&chunk.document_id)
@@ -254,6 +261,7 @@ async fn write(
         .bind(&item.content_hash)
         .bind(&content_hash)
         .bind(&readers)
+        .bind(&item.written_by)
         .execute(&mut *tx)
         .await?;
         sqlx::query(
@@ -381,13 +389,15 @@ mod tests {
             VALUES
                 ('archive', 'note/1', 'Falcon', 'falcon launch retro', '2020-01-02Z',
                  '{"author": "Ada", "source": "spoofed"}', '{public}'),
-                ('archive', 'note/2', '', 'falcon budget REJECT', NULL, '{}', '{public}');
+                ('archive', 'note/2', '', 'falcon budget REJECT', NULL, '{}', '{public}'),
+                ('archive', 'blank', '', E'\t\n', NULL, '{}', '{public}');
             "#,
         )
         .await
         .unwrap();
-        // A rejected row does not hold back the rest of its batch.
-        assert_eq!(project().await.unwrap(), summary(1, 1));
+        // A rejected row does not hold back the rest of its batch, and a row
+        // without text to index is rejected rather than selected again.
+        assert_eq!(project().await.unwrap(), summary(1, 2));
         assert_eq!(project().await.unwrap(), summary(0, 0));
 
         // Any principal finds and reads a public row, even without identities.
@@ -404,7 +414,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             document.metadata,
-            json!({ "author": "Ada", "source": "archive", "external_id": "note/1" })
+            json!({
+                "author": "Ada",
+                "source": "archive",
+                "external_id": "note/1",
+                "written_by": null
+            })
         );
         assert!(
             search(
@@ -490,7 +505,7 @@ mod tests {
             ]
         );
         let rejections: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM company_context_system.custom_document_rejections",
+            "SELECT count(*) FROM company_context_system.custom_document_rejections WHERE external_id = 'note/2'",
         )
         .fetch_one(pool)
         .await

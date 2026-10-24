@@ -11,3 +11,8 @@ alter table company_context_system.custom_documents
 create index custom_documents_written_by_idx
     on company_context_system.custom_documents (written_by, source, external_id)
     where written_by is not null;
+
+-- Chunks carry their row's writer so query results can show who wrote them.
+-- A row's writer never changes.
+alter table company_context_data.custom_document_chunks
+    add column written_by text;

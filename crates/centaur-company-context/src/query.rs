@@ -59,11 +59,12 @@ const EMBEDDING_TIMEOUT: Duration = Duration::from_secs(10);
 /// Database role with read-only access to `company_context_data` only.
 const QUERY_ROLE: &str = "centaur_company_context_v2_query";
 
-/// A custom document's metadata: the writer's, with its source and
-/// external ID.
+/// A custom document's metadata: the writer's, with its source, external
+/// ID, and the principal that wrote it through the API (null for rows
+/// written directly).
 macro_rules! custom_metadata {
     () => {
-        "d.metadata || jsonb_build_object('source', d.source, 'external_id', d.external_id)"
+        "d.metadata || jsonb_build_object('source', d.source, 'external_id', d.external_id, 'written_by', d.written_by)"
     };
 }
 

@@ -233,8 +233,8 @@ Filters combine with AND:
 - `sources`: custom document sources, at most 100. Searches only custom
   documents in them.
 - `metadata`: a JSON object of at most 65,536 bytes. Searches only custom
-  documents whose returned `metadata`, including `source` and `external_id`,
-  contains it, as Postgres `@>` defines: values match exactly, nested objects
+  documents whose returned `metadata`, including `source`, `external_id`, and
+  `written_by`, contains it, as Postgres `@>` defines: values match exactly, nested objects
   match recursively, and an array matches when it contains every listed
   element. An empty object is ignored.
 
@@ -269,7 +269,10 @@ conversation, channel, and message times for `slack_message`; file ID and file
 type for `slack_file`; file ID, document type, MIME type, and pages for
 `drive_doc`; calendar ID, event ID, start and end times, and organizer for
 `calendar_event`; note ID, owner, and attendees for `granola_note`; the
-custom metadata with the source and external ID for `custom_doc`.
+custom metadata with the source, external ID, and `written_by` for
+`custom_doc`: the principal (`prn_...`) that wrote the document through the
+[custom documents API](#custom-documents-api), or null for rows written
+directly.
 
 ### `GET /documents/{document_id}`
 
@@ -300,7 +303,7 @@ one and returns it:
 }
 ```
 
-`body` is required; the other fields are optional and unknown fields are
+`body` is required and must not be blank; the other fields are optional and unknown fields are
 rejected. `readers` defaults to the writer alone, and may name only the writer
 and its roles, by opaque or foreign ID, never `public`. The table's limits
 apply. The service names each document by a UUIDv7, its `external_id`:
@@ -350,7 +353,7 @@ or `\copy`:
 | `body` | Required, not blank, at most 1,000,000 bytes. |
 | `occurred_at` | When the document's content occurred; used by time filters. |
 | `readers` | Required. Who can read the document; see below. |
-| `metadata` | A JSON object of at most 65,536 bytes, such as a link or author. Returned with the document and matched by the `metadata` query filter, but not searched by text; `source` and `external_id` keys are overridden. |
+| `metadata` | A JSON object of at most 65,536 bytes, such as a link or author. Returned with the document and matched by the `metadata` query filter, but not searched by text; `source`, `external_id`, and `written_by` keys are overridden. |
 
 Check constraints reject invalid rows on write. A trigger maintains
 `content_hash`, `created_at`, and `updated_at`. `written_by` names the
@@ -376,7 +379,8 @@ the message.
 Every `COMPANY_CONTEXT_CUSTOM_PROJECT_INTERVAL_SECONDS`, the service chunks
 and embeds new and changed rows, title and body together, and publishes them as
 `custom_doc` documents. A run projects at most 1,000 rows, so a large import
-is projected over several runs. Rows the embeddings API rejects are recorded in
+is projected over several runs. Rows the embeddings API rejects, and rows
+whose body has no text to index, such as only tabs or newlines, are recorded in
 `company_context_system.custom_document_rejections` and retried only once
 they change. Deleting a row removes its documents immediately. To change a
 projected row's `source` or `external_id`, delete it and insert it again.
