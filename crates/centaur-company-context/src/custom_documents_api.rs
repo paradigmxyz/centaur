@@ -1,5 +1,5 @@
 //! `/custom-documents`: lets principals create custom documents, such as
-//! memories, and read, replace, list, and delete the ones they created.
+//! memories, and list, replace, and delete the ones they created.
 //!
 //! Any principal can create a document in any source. The service names it
 //! by a UUIDv7 and records the principal as its writer; only the writer can
@@ -19,7 +19,7 @@ use axum::{
         rejection::{JsonRejection, QueryRejection},
     },
     http::{HeaderMap, StatusCode},
-    routing::{get, post},
+    routing::{post, put},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -69,7 +69,7 @@ pub fn router(state: QueryState) -> Router {
         )
         .route(
             "/custom-documents/{source}/{external_id}",
-            get(handle_get).put(handle_replace).delete(handle_delete),
+            put(handle_replace).delete(handle_delete),
         )
         .with_state(state)
 }
@@ -154,17 +154,6 @@ async fn handle_list(
     let Query(params) = params.map_err(|rejection| ApiError::BadRequest(rejection.body_text()))?;
     let documents = list(&state.pool, &identity, &source, &params).await?;
     Ok(Json(ListResponse { documents }))
-}
-
-async fn handle_get(
-    State(state): State<QueryState>,
-    headers: HeaderMap,
-    Path((source, external_id)): Path<(String, String)>,
-) -> Result<Json<CustomDocument>, ApiError> {
-    let identity = authenticate(&state, &headers).await?;
-    Ok(Json(
-        get_document(&state.pool, &identity, &source, &external_id).await?,
-    ))
 }
 
 async fn handle_replace(
@@ -273,33 +262,6 @@ pub async fn list(
     .map_err(database_error(
         "company_context_custom_document_list_failed",
     ))
-}
-
-/// Returns a document `identity` wrote.
-pub async fn get_document(
-    pool: &PgPool,
-    identity: &PrincipalIdentity,
-    source: &str,
-    external_id: &str,
-) -> Result<CustomDocument, ApiError> {
-    let source = valid_source(source)?;
-    let external_id = document_id(external_id)?;
-    sqlx::query_as(&format!(
-        r#"
-        WITH d AS (
-            SELECT * FROM company_context_system.custom_documents
-            WHERE source = $1 AND external_id = $2 AND written_by = $3
-        )
-        {SELECT}
-        "#
-    ))
-    .bind(source)
-    .bind(external_id)
-    .bind(writer(identity)?)
-    .fetch_optional(pool)
-    .await
-    .map_err(database_error("company_context_custom_document_get_failed"))?
-    .ok_or(ApiError::NotFound)
 }
 
 /// Replaces the content and readers of a document `identity` wrote.
@@ -539,6 +501,23 @@ mod tests {
             .collect()
     }
 
+    /// The document `identity` lists with `id`, if any.
+    async fn listed(
+        pool: &PgPool,
+        identity: &PrincipalIdentity,
+        id: &str,
+    ) -> Option<CustomDocument> {
+        let all = ListParams {
+            limit: Some(MAX_LIST_LIMIT),
+            before: None,
+        };
+        list(pool, identity, "memory", &all)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|document| document.external_id == id)
+    }
+
     #[tokio::test]
     async fn principals_reach_only_the_documents_they_created() {
         let Ok(database_url) = env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
@@ -575,8 +554,7 @@ mod tests {
         assert_eq!(memory.status, "pending");
         let id = memory.external_id.as_str();
         project().await.unwrap();
-        let memory = get_document(pool, &ada(), "memory", id).await.unwrap();
-        assert_eq!(memory.status, "projected");
+        assert_eq!(listed(pool, &ada(), id).await.unwrap().status, "projected");
         assert_eq!(found(pool, &ada(), "neovim").await, ["Ada prefers Neovim"]);
         // Results name the writer, whatever the writer's metadata says.
         let document = query::document(pool, &ada(), &format!("custom:memory:{id}:000000"))
@@ -605,9 +583,9 @@ mod tests {
         assert_eq!(found(pool, &bob(), "helix").await, ["Ada prefers Helix"]);
         assert!(found(pool, &carol(), "helix").await.is_empty());
         for result in [
-            get_document(pool, &bob(), "memory", id).await.map(|_| ()),
             delete(pool, &bob(), "memory", id).await,
-            get_document(pool, &ada(), "notes", id).await.map(|_| ()),
+            delete(pool, &ada(), "notes", id).await,
+            delete(pool, &ada(), "memory", "not-a-uuid").await,
         ] {
             assert_eq!(result.unwrap_err(), ApiError::NotFound);
         }
@@ -631,9 +609,7 @@ mod tests {
         .await
         .unwrap();
         project().await.unwrap();
-        let rejected = get_document(pool, &ada(), "memory", &rejected.external_id)
-            .await
-            .unwrap();
+        let rejected = listed(pool, &ada(), &rejected.external_id).await.unwrap();
         assert_eq!(rejected.status, "rejected");
         assert!(rejected.error.is_some());
 
@@ -661,10 +637,7 @@ mod tests {
         // Deleting removes the document from search at once.
         delete(pool, &ada(), "memory", id).await.unwrap();
         assert!(found(pool, &bob(), "helix").await.is_empty());
-        assert_eq!(
-            get_document(pool, &ada(), "memory", id).await.unwrap_err(),
-            ApiError::NotFound
-        );
+        assert!(listed(pool, &ada(), id).await.is_none());
 
         // Rows written directly to the table have no writer to reach them.
         let imported = Uuid::now_v7().to_string();
@@ -741,12 +714,6 @@ mod tests {
                 "{source} {body}"
             );
         }
-        assert_eq!(
-            get_document(pool, &ada(), "memory", "not-a-uuid")
-                .await
-                .unwrap_err(),
-            ApiError::NotFound
-        );
         let limit = ListParams {
             limit: Some(0),
             before: None,

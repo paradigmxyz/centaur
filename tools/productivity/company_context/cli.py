@@ -25,7 +25,7 @@ app = typer.Typer(
         "Preview: `company_context v2 search|read` query Slack messages and files, "
         "Google Docs and PDFs, Google Calendar events, Granola notes, and custom "
         "documents through the company-context service's API, where it is deployed; "
-        "`company_context v2 create|get|update|delete|list` manage the custom "
+        "`company_context v2 create|update|delete|list` manage the custom "
         "documents, such as memories, that you create."
     ),
 )
@@ -532,17 +532,6 @@ def v2_create(
     result = CompanyContextV2Client().create_document(
         source, body, title=title, occurred_at=occurred_at, readers=readers, metadata=metadata
     )
-    _require_ok(result)
-    _print_json(result)
-
-
-@v2_app.command("get")
-def v2_get(
-    source: str = typer.Argument(..., help=_SOURCE_HELP),
-    external_id: str = typer.Argument(..., help="Document ID returned by v2 create."),
-) -> None:
-    """Get a custom document you created, with its status: pending, projected, or rejected."""
-    result = CompanyContextV2Client().get_document(source, external_id)
     _require_ok(result)
     _print_json(result)
 

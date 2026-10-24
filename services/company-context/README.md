@@ -160,7 +160,7 @@ indexed PDFs are not downloaded again.
 - `POST /query`
 - `GET /documents/{document_id}`
 - `POST /custom-documents/{source}` and `GET /custom-documents/{source}`
-- `GET`, `PUT`, and `DELETE /custom-documents/{source}/{external_id}`
+- `PUT` and `DELETE /custom-documents/{source}/{external_id}`
 
 The query and custom document endpoints are authenticated with the same principal API JWT the
 Console mints for api-rs (`Authorization: Bearer <jwt>`); iron-proxy injects it
@@ -282,7 +282,7 @@ same shape as a query result without `score`.
 ### Custom documents API
 
 Principals create [custom documents](#custom-documents), such as memories, and
-read, replace, list, and delete the ones they created. Any principal can create
+list, replace, and delete the ones they created. Any principal can create
 a document in any source; only the principal that created a document can reach
 it through these endpoints, and every other principal gets 404. Documents
 written directly to the table cannot be reached through them. Documents are
@@ -330,8 +330,8 @@ then `projected`, or `rejected` with an `error` if it cannot be embedded. Each
 write enqueues a projection, so documents are usually searchable within
 seconds; while `COMPANY_CONTEXT_CUSTOM_ENABLED` is false they stay pending.
 
-`GET /custom-documents/{source}/{external_id}` returns one document, and
-`DELETE` deletes it and its published documents immediately, returning 204.
+`DELETE /custom-documents/{source}/{external_id}` deletes a document and its
+published documents immediately, returning 204.
 `GET /custom-documents/{source}?limit=20&before={external_id}` returns the
 documents the principal created in the source as `{"documents": [...]}`,
 newest first; `limit` defaults to 20 and is at most 100, and `before` pages

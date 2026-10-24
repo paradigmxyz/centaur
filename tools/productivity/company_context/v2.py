@@ -107,10 +107,6 @@ class CompanyContextV2Client:
             _document(body, title, occurred_at, readers, metadata),
         )
 
-    def get_document(self, source: str, external_id: str) -> dict:
-        """Get a custom document the requester created, with its projection status."""
-        return self._request("GET", _documents_path(source, external_id))
-
     def update_document(
         self,
         source: str,
