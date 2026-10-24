@@ -3743,6 +3743,97 @@ describe('slackbotv2', () => {
     )
   })
 
+  describe('render index append conflicts', () => {
+    const postgresError = (code: string, message: string): Error =>
+      Object.assign(new Error(message), { code })
+
+    async function runWithFailingIndexAppend(
+      failures: Array<Error | undefined>,
+      answer: string
+    ): Promise<{ appendCalls: number; logs: CapturedLog[]; parentTs: string }> {
+      const sharedState = createMemoryState()
+      await sharedState.connect()
+      const logs: CapturedLog[] = []
+      let appendCalls = 0
+      const flakyState = new Proxy(sharedState, {
+        get(target, prop, receiver) {
+          if (prop !== 'appendToList') return Reflect.get(target, prop, receiver)
+          return async (key: string, value: unknown, options?: unknown) => {
+            if (key === 'slackbotv2:render:index') {
+              const failure = failures[appendCalls++]
+              if (failure) throw failure
+            }
+            return target.appendToList(key, value, options as never)
+          }
+        }
+      })
+      bot = createTestBot({ state: flakyState, logger: captureLogger(logs) })
+      codexApi.autoRespond = false
+
+      const parent = await postUserMessage('Context before the index conflict.')
+      const mentionText = `<@${BOT_USER_ID}> start despite the index conflict`
+      const mention = await postUserMessage(mentionText, parent.ts)
+      const key = threadKey(parent.ts)
+      const delivery = await deliverEvent({
+        type: 'app_mention',
+        user: USER_ID,
+        channel: CHANNEL_ID,
+        team: TEAM_ID,
+        ts: mention.ts,
+        thread_ts: parent.ts,
+        text: mentionText
+      })
+      expect(delivery.response.status).toBe(200)
+      await waitFor(() => codexApi.executes.length === 1, 2000)
+      await waitFor(() => hasLog(logs, 'slackbotv2_forward_execution_committed'), 5000)
+      const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+      expect(threadState?.activeExecution).toBe(true)
+
+      codexApi.emitOutputLines(key, sampleCodexOutputLines(answer))
+      await delivery.finished()
+      expect(await threadText(parent.ts)).toContain(answer)
+      expect(await threadText(parent.ts)).not.toContain('Execution failed')
+      return { appendCalls, logs, parentTs: parent.ts }
+    }
+
+    it('retries a deadlocked render index append and indexes the thread', async () => {
+      const deadlock = postgresError('40P01', 'deadlock detected')
+      const { appendCalls, logs } = await runWithFailingIndexAppend(
+        [deadlock, deadlock],
+        'Indexed after retries.'
+      )
+      expect(appendCalls).toBe(3)
+      expect(hasLog(logs, 'slackbotv2_render_obligation_indexed')).toBe(true)
+      expect(hasLog(logs, 'slackbotv2_render_obligation_index_failed')).toBe(false)
+    })
+
+    it('continues the execution when the render index append keeps deadlocking', async () => {
+      const deadlock = postgresError('40P01', 'deadlock detected')
+      const { appendCalls, logs, parentTs } = await runWithFailingIndexAppend(
+        [deadlock, deadlock, deadlock, deadlock, deadlock],
+        'Answered without the index.'
+      )
+      expect(appendCalls).toBe(4)
+      expect(hasLog(logs, 'slackbotv2_render_obligation_indexed')).toBe(false)
+      const warning = logs.find(log => log.event === 'slackbotv2_render_obligation_index_failed')
+      expect(warning?.level).toBe('warn')
+      expect(warning?.data).toMatchObject({
+        attempts: 4,
+        error: 'deadlock detected',
+        thread_id: `slack:${CHANNEL_ID}:${parentTs}`
+      })
+    })
+
+    it('does not retry a non-conflict index error but still continues the execution', async () => {
+      const { appendCalls, logs } = await runWithFailingIndexAppend(
+        [postgresError('57P01', 'terminating connection')],
+        'Answered after a hard index error.'
+      )
+      expect(appendCalls).toBe(1)
+      expect(hasLog(logs, 'slackbotv2_render_obligation_index_failed')).toBe(true)
+    })
+  })
+
   it('does not duplicate the live render while the recovery sweep is cycling', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()

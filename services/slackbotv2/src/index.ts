@@ -164,6 +164,8 @@ type StateConnectionStatus = {
 const requestContext = new AsyncLocalStorage<SlackbotV2RequestContext>()
 const RENDER_OBLIGATION_INDEX_KEY = 'slackbotv2:render:index'
 const RENDER_OBLIGATION_INDEX_MAX_LENGTH = 2000
+const RENDER_INDEX_APPEND_MAX_ATTEMPTS = 4
+const RENDER_INDEX_APPEND_BACKOFF_MS = 100
 const RENDER_INDEX_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const RENDER_RECOVERY_LEASE_TTL_MS = 2 * 60 * 1000
 const RENDER_LEASE_REFRESH_INTERVAL_MS = 60 * 1000
@@ -2677,6 +2679,8 @@ async function recoverRenderObligation(
   return false
 }
 
+// The index only aids the recovery sweep; a failed append must not fail an execution that
+// api-rs already started.
 async function indexRenderObligation(
   state: StateAdapter,
   input: {
@@ -2685,12 +2689,33 @@ async function indexRenderObligation(
     trace?: SlackbotV2Trace
   }
 ): Promise<void> {
-  await state.appendToList(RENDER_OBLIGATION_INDEX_KEY, input.threadId, {
-    maxLength: RENDER_OBLIGATION_INDEX_MAX_LENGTH,
-    ttlMs: RENDER_INDEX_TTL_MS
-  })
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await state.appendToList(RENDER_OBLIGATION_INDEX_KEY, input.threadId, {
+        maxLength: RENDER_OBLIGATION_INDEX_MAX_LENGTH,
+        ttlMs: RENDER_INDEX_TTL_MS
+      })
+      break
+    } catch (error) {
+      if (isRetryablePostgresConflict(error) && attempt < RENDER_INDEX_APPEND_MAX_ATTEMPTS) {
+        await sleep(RENDER_INDEX_APPEND_BACKOFF_MS * attempt * (0.5 + Math.random()))
+        continue
+      }
+      traceWarn(input.options, 'slackbotv2_render_obligation_index_failed', input.trace, {
+        attempts: attempt,
+        error: errorMessage(error),
+        thread_id: input.threadId
+      })
+      return
+    }
+  }
   slackbotMetrics.renderObligationsIndexed.inc()
   traceLog(input.options, 'slackbotv2_render_obligation_indexed', input.trace)
+}
+
+function isRetryablePostgresConflict(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code
+  return code === '40P01' || code === '40001'
 }
 
 async function* streamOpenedSession(
