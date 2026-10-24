@@ -8,9 +8,11 @@ It also indexes Granola meeting notes (title, summary, owner, and attendees) thr
 
 It also discovers the public and private Slack channels (and, when enabled, direct messages) each user belongs to, through the same per-user Slack broker credentials the Rails Console Slack DM sync uses. The app's bot token (`SLACK_BOT_TOKEN`) is synced as one more credential: it discovers the public and private channels the bot is a member of and can sync their history and files, but never its direct messages. While `COMPANY_CONTEXT_SLACK_USER_IDS` is set, the bot is synced only if the limit lists the bot's Slack user ID. Each discovery records the credential's Slack identity and its channel memberships; channels that no live Slack credential still observes are removed, along with their messages. The first discovery each cycle to list a conversation syncs its members and message history. Each sync replaces the conversation's members with those `conversations.members` lists, so everyone in a conversation can read it, including users without a Slack credential of their own and channels only the bot observes. A sync reads the conversation's configured history days (`COMPANY_CONTEXT_SLACK_HISTORY_DAYS`, overridden per conversation by `COMPANY_CONTEXT_SLACK_CHANNEL_HISTORY_DAYS`) whenever part of that span has not been synchronized yet, so raising a value backfills the older history; lowering one keeps messages already synchronized. Otherwise it reads from its previous sync, always rereading the last 72 hours so edits within that window are picked up. Threads are synced whenever a parent message read this way shows a new reply; replies to threads started more than 72 hours earlier are not picked up. Only one sync reads a conversation at a time. Messages are stored privately in the system schema. Each discovery cycle also lists the workspace users through the app's bot token (`SLACK_BOT_TOKEN`), so documents show names instead of user IDs; the bot token needs the `users:read` scope and belongs to the same Slack app, so it shares the same rate-limit schedule. Users are removed once no live credential in their workspace remains. Slack tasks run on their own `company_context_slack` queue and worker, except thread syncs, which run in order on the `company_context_slack_threads` queue so a large backlog of threads does not delay discovery and history syncs.
 
-It also projects documents written directly to the database, such as imports,
-notes, and memory (see [Custom documents](#custom-documents)). Each custom
-document is visible only to the principals, roles, or everyone its readers name.
+It also projects custom documents, such as imports, notes, and memory, that
+principals write through the [custom documents API](#custom-documents-api) or
+operators write directly to the database (see [Custom documents](#custom-documents)).
+Each custom document is visible only to the principals, roles, or everyone its
+readers name.
 
 After each sync, the conversation's history is projected into documents on the main queue. Each channel's UTC day is rendered as a transcript in which thread replies follow their parent, in the day the thread started. Joins, topic changes, and similar system messages are left out. The transcript is split into chunks of at most `COMPANY_CONTEXT_CHUNK_CHARS` characters that together cover the whole day: chunks break between messages, a thread split across chunks repeats the start of its parent, and only a single message longer than a chunk is split. Each chunk starts with its channel, date, and time range, and is published as its own document with its own embedding. A day is rendered again when its messages, its channel's name, or the name of a user it mentions changes, and republished only when its content changes; vectors are reused for chunks whose text is unchanged. Slack documents are exposed to retrieval only through the query endpoints.
 
@@ -157,8 +159,10 @@ indexed PDFs are not downloaded again.
 - `GET /metrics`
 - `POST /query`
 - `GET /documents/{document_id}`
+- `POST /custom-documents/{source}` and `GET /custom-documents/{source}`
+- `GET`, `PUT`, and `DELETE /custom-documents/{source}/{external_id}`
 
-Both query endpoints are authenticated with the same principal API JWT the
+The query and custom document endpoints are authenticated with the same principal API JWT the
 Console mints for api-rs (`Authorization: Bearer <jwt>`); iron-proxy injects it
 into sandbox requests to this service. The token's subject names the principal,
 whose Slack workspace and user ID and granted broker credentials are looked up
@@ -184,8 +188,9 @@ visible to the principals whose credentials once observed it until those
 credentials are dead or deleted.
 
 Errors return `{"error": "..."}` with status 400 for an invalid request, 401
-for a missing or invalid token, 403 for a principal unknown to the Console, and
-404 for a document that does not exist or is not visible.
+for a missing or invalid token, 403 for a principal unknown to the Console or
+readers it cannot grant, and 404 for a document that does not exist or is not
+visible.
 
 ### `POST /query`
 
@@ -271,12 +276,71 @@ custom metadata with the source and external ID for `custom_doc`.
 Returns one visible document, by a `document_id` from `POST /query`, in the
 same shape as a query result without `score`.
 
+### Custom documents API
+
+Principals create [custom documents](#custom-documents), such as memories, and
+read, replace, list, and delete the ones they created. Any principal can create
+a document in any source; only the principal that created a document can reach
+it through these endpoints, and every other principal gets 404. Documents
+written directly to the table cannot be reached through them. Documents are
+searched and read like every other document, through `POST /query` and
+`GET /documents/{document_id}`.
+
+`POST /custom-documents/{source}` creates a document and returns it with
+status 201, and `PUT /custom-documents/{source}/{external_id}` replaces all of
+one and returns it:
+
+```json
+{
+  "title": "Editor",
+  "body": "Ada prefers Neovim over VS Code for Rust work.",
+  "occurred_at": "2024-01-02T09:00:00Z",
+  "readers": ["principal:prn_5CO4fITZ", "role:eng"],
+  "metadata": { "topic": "tools" }
+}
+```
+
+`body` is required; the other fields are optional and unknown fields are
+rejected. `readers` defaults to the writer alone, and may name only the writer
+and its roles, by opaque or foreign ID, never `public`. The table's limits
+apply. The service names each document by a UUIDv7, its `external_id`:
+
+```json
+{
+  "source": "memory",
+  "external_id": "0190f0c4-7a6e-7cc3-8d3b-2f1e7c9a4b10",
+  "title": "Editor",
+  "body": "Ada prefers Neovim over VS Code for Rust work.",
+  "occurred_at": "2024-01-02T09:00:00Z",
+  "readers": ["principal:prn_5CO4fITZ", "role:eng"],
+  "metadata": { "topic": "tools" },
+  "written_by": "prn_5CO4fITZ",
+  "created_at": "2024-01-02T09:00:01Z",
+  "updated_at": "2024-01-02T09:00:01Z",
+  "status": "pending",
+  "error": null
+}
+```
+
+`status` is `pending` until the document's current content is searchable,
+then `projected`, or `rejected` with an `error` if it cannot be embedded. Each
+write enqueues a projection, so documents are usually searchable within
+seconds; while `COMPANY_CONTEXT_CUSTOM_ENABLED` is false they stay pending.
+
+`GET /custom-documents/{source}/{external_id}` returns one document, and
+`DELETE` deletes it and its published documents immediately, returning 204.
+`GET /custom-documents/{source}?limit=20&before={external_id}` returns the
+documents the principal created in the source as `{"documents": [...]}`,
+newest first; `limit` defaults to 20 and is at most 100, and `before` pages
+back from a returned document.
+
 ## Custom documents
 
 Custom documents are imported archives, notes, memory, and similar content.
-Add them by writing rows to `company_context_system.custom_documents` with any
-role that can write to the table, for example with `INSERT ... ON CONFLICT` or
-`\copy`:
+Principals write them through the [custom documents API](#custom-documents-api).
+Operators can also write rows to `company_context_system.custom_documents` with
+any role that can write to the table, for example with `INSERT ... ON CONFLICT`
+or `\copy`:
 
 | Column | |
 |---|---|
@@ -289,7 +353,9 @@ role that can write to the table, for example with `INSERT ... ON CONFLICT` or
 | `metadata` | A JSON object of at most 65,536 bytes, such as a link or author. Returned with the document and matched by the `metadata` query filter, but not searched by text; `source` and `external_id` keys are overridden. |
 
 Check constraints reject invalid rows on write. A trigger maintains
-`content_hash`, `created_at`, and `updated_at`.
+`content_hash`, `created_at`, and `updated_at`. `written_by` names the
+principal that created a row through the API, and is null for rows written
+directly.
 
 `readers` is an array, and a principal can read the document when any element
 matches it. An empty array hides the document from everyone. Each element is
