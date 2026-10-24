@@ -172,6 +172,61 @@ describe('slackbotv2', () => {
     expect(codexApi.executes.at(-1)?.threadKey).toBe(`slack:${channel}:${roots[0]}`)
     expect(slackApi.calls.some(call => call.method === 'chat.stopStream')).toBe(true)
     expect(slackApi.calls.some(call => call.method === 'agents.sessions.rename')).toBe(true)
+    const statuses = slackApi.calls
+      .filter(call => call.method === 'agents.sessions.setStatus')
+      .map(call => stringField(call.body.status))
+    expect(statuses).toContain('processing')
+    expect(statuses.at(-1)).toBe('active')
+    expect(slackApi.calls.some(call => call.method === 'assistant.threads.setStatus')).toBe(false)
+  })
+
+  it('uses native session lifecycle for agent-view channel mentions', async () => {
+    bot = createTestBot({ agentViewEnabled: true })
+    const parent = await postUserMessage('Channel context.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> check the deployment`, {
+      threadTs: parent.ts
+    })
+    await mention.finished()
+    const statuses = slackApi.calls
+      .filter(call => call.method === 'agents.sessions.setStatus')
+    expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(true)
+    expect(statuses.some(call => call.body.status === 'processing')).toBe(true)
+    expect(statuses.at(-1)?.body).toMatchObject({
+      channel_id: CHANNEL_ID, thread_ts: parent.ts, status: 'active'
+    })
+    expect(slackApi.calls.some(call => call.method === 'assistant.threads.setStatus')).toBe(false)
+    expect(await threadText(parent.ts)).toContain('Executed request 1.')
+  })
+
+  it.each([
+    ['legacy channel', false, false],
+    ['agent-view DM', true, true],
+    ['agent-view channel', true, false]
+  ] as const)('still renders the answer when status fails (%s)', async (_, agentViewEnabled, directMessage) => {
+    const logs: CapturedLog[] = []
+    bot = createTestBot({ agentViewEnabled, logger: captureLogger(logs) })
+    Object.assign(bot.chat.getAdapter('slack'), {
+      [agentViewEnabled ? 'setSessionStatus' : 'setAssistantStatus']: async () => {
+        throw new Error('Slack status rejected')
+      }
+    })
+    const dm = directMessage ? await sendDirectMessage('Answer despite the status failure.') : null
+    const parent = dm ?? await postUserMessage('Context before the status failure.')
+    const delivery = dm ?? await sendMessage(`<@${BOT_USER_ID}> answer despite the status failure`, {
+      threadTs: parent.ts
+    })
+    await delivery.finished()
+    const replies = await slackBot.conversations.replies({
+      channel: dm?.channel ?? CHANNEL_ID, ts: parent.ts
+    })
+    expect((replies.messages ?? []).map(message => message.text ?? '').join('\n'))
+      .toContain('Executed request 1.')
+    expect(logData(logs, 'slackbotv2_forward_initial_status_set')).toEqual(
+      expect.objectContaining({ visible: false })
+    )
+    if (agentViewEnabled) {
+      expect(slackApi.calls.some(call => call.method === 'assistant.threads.setStatus')).toBe(false)
+    }
   })
 
   it('interrupts the active execution when Slack sends agent_session_stopped', async () => {
@@ -3566,22 +3621,32 @@ describe('slackbotv2', () => {
     )
   })
 
-  it('clears a status write that lands after its render cleared the status', async () => {
+  it.each([
+    ['legacy channel', false, false],
+    ['agent-view DM', true, true],
+    ['agent-view channel', true, false]
+  ] as const)('clears a late status write (%s)', async (_, agentViewEnabled, directMessage) => {
     const logs: CapturedLog[] = []
-    bot = createProductionDefaultTestBot({ logger: captureLogger(logs), slackApiTimeoutMs: 25 })
+    bot = createProductionDefaultTestBot({
+      agentViewEnabled, logger: captureLogger(logs), slackApiTimeoutMs: 25
+    })
     codexApi.autoRespond = false
 
-    const parent = await postUserMessage('Context before a slow status write.')
-    const mention = await sendMessage(`<@${BOT_USER_ID}> check the deploy`, {
+    const dm = directMessage ? await sendDirectMessage('Check the deploy.') : null
+    const parent = dm ?? await postUserMessage('Context before a slow status write.')
+    const mention = dm ?? await sendMessage(`<@${BOT_USER_ID}> check the deploy`, {
       threadTs: parent.ts
     })
     expect(mention.response.status).toBe(200)
     await waitFor(() => codexApi.streamCount === 1)
 
-    const key = threadKey(parent.ts)
+    const key = `slack:${dm?.channel ?? CHANNEL_ID}:${parent.ts}`
+    const method = agentViewEnabled ? 'agents.sessions.setStatus' : 'assistant.threads.setStatus'
+    const processing = agentViewEnabled ? 'processing' : 'Thinking...'
+    const active = agentViewEnabled ? 'active' : ''
     const statuses = () =>
       slackApi.calls
-        .filter(call => call.method === 'assistant.threads.setStatus')
+        .filter(call => call.method === method)
         .map(call => stringField(call.body.status))
     // Hold the next non-empty status request: the steering restore reaches
     // Slack, outlives the 25ms Slack API timeout, and lands only after the
@@ -3595,7 +3660,7 @@ describe('slackbotv2', () => {
       await waitFor(() => statuses().length === 2)
       codexApi.emitOutputLine(key, JSON.stringify({ type: 'turn.done', result: 'Deploy is fine.' }))
       await mention.finished()
-      expect(statuses()).toEqual(['Thinking...', 'Thinking...', ''])
+      expect(statuses()).toEqual([processing, processing, active])
       expect(hasLog(logs, 'slackbotv2_assistant_status_late_write_reverted')).toBe(false)
     } finally {
       releaseStatus()
@@ -3603,7 +3668,7 @@ describe('slackbotv2', () => {
 
     await waitFor(() => hasLog(logs, 'slackbotv2_assistant_status_late_write_reverted'))
     await waitFor(() => statuses().length === 4)
-    expect(statuses()).toEqual(['Thinking...', 'Thinking...', '', ''])
+    expect(statuses()).toEqual([processing, processing, active, active])
     expect(logData(logs, 'slackbotv2_assistant_status_late_write_reverted')).toEqual(
       expect.objectContaining({ restored_newer_render_status: false })
     )
@@ -5003,6 +5068,20 @@ async function sendMessage(
   return { ...posted, ...delivery }
 }
 
+async function sendDirectMessage(text: string): Promise<{ channel: string; ts: string } & Delivery> {
+  const members = await slackBot.users.list({})
+  const userId = members.members?.find(member => member.name === 'tester')?.id
+  expect(userId).toBeDefined()
+  const dm = await slackBot.conversations.open({ users: userId! })
+  const channel = dm.channel!.id!
+  const posted = await slackBot.chat.postMessage({ channel, text })
+  const ts = String(posted.ts)
+  const delivery = await deliverEvent({
+    type: 'message', channel_type: 'im', channel, user: USER_ID, ts, text
+  })
+  return { channel, ts, ...delivery }
+}
+
 function waitUntilContext(waits: Promise<unknown>[]) {
   return {
     waitUntil(promise: Promise<unknown>) {
@@ -5693,6 +5772,10 @@ async function handlePatchedSlackRequest(
   if (path === '/api/agents.sessions.setStatus' || path === '/api/agents.sessions.rename') {
     const body = await requestBody(request)
     input.calls.push({ method: path.slice('/api/'.length) as StreamCall['method'], body })
+    if (path === '/api/agents.sessions.setStatus' && body.status === 'processing') {
+      const gate = input.assistantStatusGate('processing')
+      if (gate) await gate
+    }
     await sendWebResponse(res, Response.json({ ok: true }))
     return
   }
