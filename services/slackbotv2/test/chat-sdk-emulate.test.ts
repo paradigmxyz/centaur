@@ -4088,6 +4088,39 @@ describe('slackbotv2', () => {
     expect(codexApi.appends).toHaveLength(1)
   })
 
+  it('locally retries an execute rejected because another execution is active', async () => {
+    let rejectNextExecute = true
+    bot = createTestBot({
+      fetch: async (input, init) => {
+        if (rejectNextExecute && String(input).endsWith('/execute')) {
+          rejectNextExecute = false
+          return Response.json(
+            {
+              code: 'active_execution_conflict',
+              error: 'session already has a queued or running execution',
+              ok: false
+            },
+            { status: 409, statusText: 'Conflict' }
+          )
+        }
+        return globalThis.fetch(input, init)
+      },
+      handoffRetryDelaysMs: [50]
+    })
+
+    const parent = await postUserMessage('Context before a busy session.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> busy try`, { threadTs: parent.ts })
+    expect(mention.response.status).toBe(200)
+    await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 1.'), 3000)
+    await mention.finished()
+
+    // The 409 never reached the fake API; the retry is the one execute it saw.
+    expect(rejectNextExecute).toBe(false)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(codexApi.appends).toHaveLength(1)
+    expect(await threadText(parent.ts)).not.toContain('409')
+  })
+
   it('keeps a steering reaction when an append retry starts an execution', async () => {
     let failNextAppend = false
     bot = createTestBot({

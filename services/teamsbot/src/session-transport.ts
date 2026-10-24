@@ -82,10 +82,21 @@ export async function ensureSessionResponseOk(response: Response, action: string
   throw new SessionApiError({
     action,
     body,
-    retryable: response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500,
+    retryable: response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500 || isActiveExecutionConflict(body),
     status: response.status,
     statusText: response.statusText,
   });
+}
+
+// api-rs answers 409 when the session already has a queued or running
+// execution. Retry it like a transient failure so the turn can start once the
+// active execution ends.
+function isActiveExecutionConflict(body: string): boolean {
+  try {
+    return JSON.parse(body)?.code === "active_execution_conflict";
+  } catch {
+    return false;
+  }
 }
 
 export async function streamSessionEvents(input: {

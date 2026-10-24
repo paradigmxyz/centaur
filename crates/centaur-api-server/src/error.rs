@@ -67,6 +67,9 @@ impl IntoResponse for ApiError {
             Self::Runtime(SessionRuntimeError::Store(SessionStoreError::PrincipalConflict {
                 ..
             })) => StatusCode::CONFLICT,
+            Self::Runtime(SessionRuntimeError::Store(
+                SessionStoreError::ActiveExecutionConflict { .. },
+            )) => StatusCode::CONFLICT,
             Self::Runtime(SessionRuntimeError::IronControl(
                 centaur_iron_control::IronControlError::PrincipalDerivation(_),
             )) => StatusCode::BAD_REQUEST,
@@ -121,6 +124,12 @@ impl IntoResponse for ApiError {
             body["code"] = json!("principal_conflict");
             body["existing_principal"] = json!(existing);
             body["requested_principal"] = json!(requested);
+        }
+        if let Self::Runtime(SessionRuntimeError::Store(
+            SessionStoreError::ActiveExecutionConflict { .. },
+        )) = &self
+        {
+            body["code"] = json!("active_execution_conflict");
         }
         if let Self::Runtime(SessionRuntimeError::IronControl(
             centaur_iron_control::IronControlError::SessionPrincipalNotPreapproved { .. },
@@ -206,5 +215,22 @@ mod tests {
         assert_eq!(body["code"], json!("principal_conflict"));
         assert_eq!(body["existing_principal"], json!("prn_finance"));
         assert_eq!(body["requested_principal"], json!("prn_support"));
+    }
+
+    #[tokio::test]
+    async fn active_execution_conflicts_are_conflicts_with_a_stable_code() {
+        let response = ApiError::Runtime(SessionRuntimeError::Store(
+            SessionStoreError::ActiveExecutionConflict {
+                thread_key: "console:thread".to_owned(),
+            },
+        ))
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("decode response body");
+        assert_eq!(body["code"], json!("active_execution_conflict"));
     }
 }

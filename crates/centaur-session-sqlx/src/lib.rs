@@ -464,7 +464,17 @@ impl PgSessionStore {
         .bind(metadata)
         .bind(request)
         .fetch_one(&self.pool)
-        .await?;
+        .await
+        .map_err(|error| match &error {
+            sqlx::Error::Database(database_error)
+                if database_error.constraint() == Some("session_executions_one_active_idx") =>
+            {
+                SessionStoreError::ActiveExecutionConflict {
+                    thread_key: thread_key.to_string(),
+                }
+            }
+            _ => error.into(),
+        })?;
 
         row.try_into()
     }
@@ -1798,6 +1808,8 @@ pub enum SessionStoreError {
         existing: String,
         requested: String,
     },
+    #[error("session {thread_key} already has a queued or running execution")]
+    ActiveExecutionConflict { thread_key: String },
     #[error("invalid persisted value: {0}")]
     InvalidPersistedValue(String),
     #[error("session execution not found for execution_id {execution_id}")]
@@ -2150,7 +2162,9 @@ mod tests {
     use time::{Duration as TimeDuration, OffsetDateTime};
     use uuid::Uuid;
 
-    use super::{IdleSandboxCandidateRow, PgSessionStore, SessionEventNotification};
+    use super::{
+        IdleSandboxCandidateRow, PgSessionStore, SessionEventNotification, SessionStoreError,
+    };
 
     async fn test_store() -> Option<PgSessionStore> {
         let Ok(url) = std::env::var("SESSION_RUNTIME_TEST_DATABASE_URL") else {
@@ -2469,6 +2483,52 @@ mod tests {
                 .expect("load persisted execution request"),
             first_request
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn second_active_execution_is_a_typed_conflict() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key =
+            ThreadKey::parse(format!("test:active-execution-{}", Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        let active = store
+            .create_execution(&thread_key, Some("message-1"), json!({}))
+            .await
+            .expect("create active execution");
+
+        let conflict = store
+            .create_execution(&thread_key, Some("message-2"), json!({}))
+            .await
+            .expect_err("a second active execution must be rejected");
+        assert!(
+            matches!(
+                &conflict,
+                SessionStoreError::ActiveExecutionConflict { thread_key: key }
+                    if key == thread_key.as_str()
+            ),
+            "unexpected error: {conflict:?}"
+        );
+
+        store
+            .complete_execution(&active.execution.execution_id)
+            .await
+            .expect("complete active execution");
+        let next = store
+            .create_execution(&thread_key, Some("message-2"), json!({}))
+            .await
+            .expect("create execution after the active one completes");
+        assert!(next.created);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

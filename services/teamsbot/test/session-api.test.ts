@@ -307,6 +307,34 @@ describe('session API serialization', () => {
 
     expect(calls).toEqual(['POST', 'POST']);
   });
+
+  it('retries an execute rejected because another execution is active, but not other conflicts', async () => {
+    const execute = async (conflictBody: unknown) => {
+      let calls = 0;
+      const client = new CentaurSessionClient({
+        apiUrl: 'http://mock-centaur.local',
+        fetch: async () => {
+          calls += 1;
+          if (calls === 1) {
+            return Response.json(conflictBody, { status: 409, statusText: 'Conflict' });
+          }
+          return Response.json({ execution_id: 'exec-1', ok: true, status: 'queued', thread_key: 'thread-1' });
+        },
+        requestMaxRetries: 1,
+        requestRetryDelayMs: 0,
+      });
+      const result = await client.executeSession('thread-1', messageFixture()).catch(error => error);
+      return { calls, result };
+    };
+
+    const active = await execute({ code: 'active_execution_conflict', error: 'busy', ok: false });
+    expect(active.calls).toBe(2);
+    expect(active.result).toMatchObject({ execution_id: 'exec-1' });
+
+    const other = await execute({ error: 'conflict', ok: false });
+    expect(other.calls).toBe(1);
+    expect(other.result).toBeInstanceOf(Error);
+  });
 });
 
 async function collectStream<T>(stream: AsyncIterable<T>): Promise<T[]> {

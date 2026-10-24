@@ -269,7 +269,10 @@ Execution rules:
 
 - A successful response means the opaque execution request is committed in
   Postgres and can be replayed after a control-plane restart.
-- Only one execution may run for a session at a time.
+- Only one execution may run for a session at a time. While one is queued or
+  running, a new request (other than an idempotent replay of it) is rejected
+  with `409 Conflict` and `code: "active_execution_conflict"`; ingresses retry
+  it like a transient failure.
 - Queued executions are claimed atomically, so the accepting process and the
   recovery scanner may safely race without writing the input twice.
 - If no sandbox is assigned, the API creates one and stores its `sandbox_id`.

@@ -191,6 +191,33 @@ describe("forwardToSessionApi principal naming", () => {
         (creates[0] as { metadata: object }).metadata,
     ).toBe(false);
   });
+
+  async function executeError(body: unknown): Promise<unknown> {
+    const fetchFn: DiscordbotFetch = async (input) =>
+      String(input).endsWith("/execute")
+        ? Response.json(body, { status: 409 })
+        : Response.json({ ok: true });
+    try {
+      await forwardToSessionApi(options(fetchFn), forwardInput());
+    } catch (error) {
+      return error;
+    }
+    throw new Error("expected execute to fail");
+  }
+
+  it("retries an execute rejected because another execution is active", async () => {
+    const error = await executeError({
+      code: "active_execution_conflict",
+      error: "session already has a queued or running execution",
+      ok: false,
+    });
+    expect(isRetryableSessionApiError(error)).toBe(true);
+  });
+
+  it("does not retry other execute conflicts", async () => {
+    const error = await executeError({ error: "conflict", ok: false });
+    expect(isRetryableSessionApiError(error)).toBe(false);
+  });
 });
 
 describe("isContentlessApiMessage", () => {
