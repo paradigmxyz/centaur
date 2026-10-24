@@ -25,6 +25,14 @@ DOCUMENT = {
     "metadata": {"file_id": "file-1"},
 }
 
+CUSTOM_DOCUMENT = {
+    "source": "memory",
+    "external_id": "0190f0c4-7a6e-7cc3-8000-000000000001",
+    "body": "Ada prefers Neovim",
+    "readers": ["principal:prn_5CO4fITZ"],
+    "status": "pending",
+}
+
 
 class _FakeApi(BaseHTTPRequestHandler):
     """Stands in for the company-context query API."""
@@ -42,15 +50,29 @@ class _FakeApi(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.requests.append(("POST", self.path, body))
-        if not body["query"].strip():
+        if self.path.startswith("/custom-documents/"):
+            self._reply(201, {**CUSTOM_DOCUMENT, **body})
+        elif not body["query"].strip():
             self._reply(400, {"error": "query cannot be empty"})
         else:
             self._reply(200, {"results": [{**DOCUMENT, "score": 0.03}]})
+
+    def do_PUT(self) -> None:
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        self.requests.append(("PUT", self.path, body))
+        self._reply(404, {"error": "document not found"})
+
+    def do_DELETE(self) -> None:
+        self.requests.append(("DELETE", self.path, None))
+        self.send_response(204)
+        self.end_headers()
 
     def do_GET(self) -> None:
         self.requests.append(("GET", self.path, None))
         if self.path == "/documents/google-drive%3Afile-1%3A0":
             self._reply(200, DOCUMENT)
+        elif self.path == "/custom-documents/memory?limit=2":
+            self._reply(200, {"documents": [CUSTOM_DOCUMENT]})
         else:
             self._reply(404, {"error": "document not found"})
 
@@ -126,3 +148,39 @@ def test_unconfigured_api_url_reports_error(monkeypatch):
 
     assert result["status"] == "error"
     assert "COMPANY_CONTEXT_API_URL is not configured" in result["error"]
+
+
+def test_custom_documents_are_created_listed_updated_and_deleted(api_url):
+    client = CompanyContextV2Client(api_url)
+    external_id = CUSTOM_DOCUMENT["external_id"]
+
+    created = client.create_document(
+        "memory", "Ada prefers Neovim", title="Editor", metadata={"topic": "tools"}
+    )
+    listed = client.list_documents("memory", limit=2)
+    updated = client.update_document("memory", external_id, "Ada prefers Helix", readers=[])
+    deleted = client.delete_document("memory", external_id)
+
+    assert created == {
+        "status": "ok",
+        **CUSTOM_DOCUMENT,
+        "title": "Editor",
+        "metadata": {"topic": "tools"},
+    }
+    assert listed == {"status": "ok", "documents": [CUSTOM_DOCUMENT]}
+    assert updated == {"status": "error", "error": "HTTP 404: document not found"}
+    assert deleted == {"status": "ok"}
+    assert _FakeApi.requests == [
+        (
+            "POST",
+            "/custom-documents/memory",
+            {"body": "Ada prefers Neovim", "title": "Editor", "metadata": {"topic": "tools"}},
+        ),
+        ("GET", "/custom-documents/memory?limit=2", None),
+        (
+            "PUT",
+            f"/custom-documents/memory/{external_id}",
+            {"body": "Ada prefers Helix", "readers": []},
+        ),
+        ("DELETE", f"/custom-documents/memory/{external_id}", None),
+    ]
