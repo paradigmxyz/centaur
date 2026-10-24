@@ -182,7 +182,7 @@ describe('slackbotv2', () => {
     expect(slackApi.calls.some(call => call.method === 'assistant.threads.setStatus')).toBe(false)
   })
 
-  it('preserves custom status for agent-view channel mentions', async () => {
+  it('uses native session lifecycle for agent-view channel mentions', async () => {
     bot = createTestBot({ agentViewEnabled: true })
     const parent = await postUserMessage('Channel context.')
     const mention = await sendMessage(`<@${BOT_USER_ID}> check the deployment`, {
@@ -191,29 +191,44 @@ describe('slackbotv2', () => {
     await mention.finished()
     const statuses = slackApi.calls
       .filter(call => call.method === 'agents.sessions.setStatus')
-    expect(statuses.some(call => call.body.status === 'processing')).toBe(false)
-    expect(statuses.at(-1)?.body.status).toBe('active')
-    expect(slackApi.calls.some(call =>
-      call.method === 'assistant.threads.setStatus' && call.body.status === 'Thinking...'
-    )).toBe(true)
+    expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(true)
+    expect(statuses.some(call => call.body.status === 'processing')).toBe(true)
+    expect(statuses.at(-1)?.body).toMatchObject({
+      channel_id: CHANNEL_ID, thread_ts: parent.ts, status: 'active'
+    })
+    expect(slackApi.calls.some(call => call.method === 'assistant.threads.setStatus')).toBe(false)
     expect(await threadText(parent.ts)).toContain('Executed request 1.')
   })
 
-  it('still renders the answer when native session status fails', async () => {
+  it.each([
+    ['legacy channel', false, false],
+    ['agent-view DM', true, true],
+    ['agent-view channel', true, false]
+  ] as const)('still renders the answer when status fails (%s)', async (_, agentViewEnabled, directMessage) => {
     const logs: CapturedLog[] = []
-    bot = createTestBot({ agentViewEnabled: true, logger: captureLogger(logs) })
+    bot = createTestBot({ agentViewEnabled, logger: captureLogger(logs) })
     Object.assign(bot.chat.getAdapter('slack'), {
-      setSessionStatus: async () => { throw new Error('Slack status rejected') }
+      [agentViewEnabled ? 'setSessionStatus' : 'setAssistantStatus']: async () => {
+        throw new Error('Slack status rejected')
+      }
     })
-    const dm = await sendDirectMessage('Answer despite the status failure.')
-    await dm.finished()
-    const replies = await slackBot.conversations.replies({ channel: dm.channel, ts: dm.ts })
+    const dm = directMessage ? await sendDirectMessage('Answer despite the status failure.') : null
+    const parent = dm ?? await postUserMessage('Context before the status failure.')
+    const delivery = dm ?? await sendMessage(`<@${BOT_USER_ID}> answer despite the status failure`, {
+      threadTs: parent.ts
+    })
+    await delivery.finished()
+    const replies = await slackBot.conversations.replies({
+      channel: dm?.channel ?? CHANNEL_ID, ts: parent.ts
+    })
     expect((replies.messages ?? []).map(message => message.text ?? '').join('\n'))
       .toContain('Executed request 1.')
     expect(logData(logs, 'slackbotv2_forward_initial_status_set')).toEqual(
       expect.objectContaining({ visible: false })
     )
-    expect(slackApi.calls.some(call => call.method === 'assistant.threads.setStatus')).toBe(false)
+    if (agentViewEnabled) {
+      expect(slackApi.calls.some(call => call.method === 'assistant.threads.setStatus')).toBe(false)
+    }
   })
 
   it('interrupts the active execution when Slack sends agent_session_stopped', async () => {
@@ -3631,14 +3646,18 @@ describe('slackbotv2', () => {
     )
   })
 
-  it.each([false, true])('clears a late status write (agent view %s)', async agentViewEnabled => {
+  it.each([
+    ['legacy channel', false, false],
+    ['agent-view DM', true, true],
+    ['agent-view channel', true, false]
+  ] as const)('clears a late status write (%s)', async (_, agentViewEnabled, directMessage) => {
     const logs: CapturedLog[] = []
     bot = createProductionDefaultTestBot({
       agentViewEnabled, logger: captureLogger(logs), slackApiTimeoutMs: 25
     })
     codexApi.autoRespond = false
 
-    const dm = agentViewEnabled ? await sendDirectMessage('Check the deploy.') : null
+    const dm = directMessage ? await sendDirectMessage('Check the deploy.') : null
     const parent = dm ?? await postUserMessage('Context before a slow status write.')
     const mention = dm ?? await sendMessage(`<@${BOT_USER_ID}> check the deploy`, {
       threadTs: parent.ts
