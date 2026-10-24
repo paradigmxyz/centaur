@@ -177,10 +177,10 @@ fn orphan_reap_eligible(sandbox: &ObservedSandbox, referenced: &BTreeSet<String>
     if sandbox.labels.get(COMPONENT_LABEL).map(String::as_str) == Some(WORKFLOW_RUN_COMPONENT) {
         return false;
     }
-    !matches!(
-        sandbox.status,
-        SandboxStatus::Created | SandboxStatus::Stopped | SandboxStatus::Gone
-    )
+    // A Stopped sandbox is reaped too: agent-k8s reports a workload pod that
+    // exited on its own (OOM, crash) as Stopped while its Sandbox, iron-proxy,
+    // and state volume still exist.
+    !matches!(sandbox.status, SandboxStatus::Created | SandboxStatus::Gone)
 }
 
 #[cfg(test)]
@@ -233,23 +233,33 @@ mod tests {
     }
 
     #[test]
-    fn created_and_terminal_sandboxes_are_not_reaped() {
+    fn created_and_gone_sandboxes_are_not_reaped() {
         let observed = [
             observed("asbx-created", SandboxStatus::Created),
-            observed("asbx-stopped", SandboxStatus::Stopped),
             observed("asbx-gone", SandboxStatus::Gone),
         ];
-        let mut pending = BTreeSet::from([
-            "asbx-created".to_owned(),
-            "asbx-stopped".to_owned(),
-            "asbx-gone".to_owned(),
-        ]);
+        let mut pending = BTreeSet::from(["asbx-created".to_owned(), "asbx-gone".to_owned()]);
 
         assert_eq!(
             select_orphan_reap_candidates(&observed, &referenced(&[]), &mut pending),
             Vec::<String>::new()
         );
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn stopped_orphan_is_reaped_after_two_passes() {
+        let observed = [observed("asbx-stopped", SandboxStatus::Stopped)];
+        let mut pending = BTreeSet::new();
+
+        assert_eq!(
+            select_orphan_reap_candidates(&observed, &referenced(&[]), &mut pending),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            select_orphan_reap_candidates(&observed, &referenced(&[]), &mut pending),
+            vec!["asbx-stopped".to_owned()]
+        );
     }
 
     #[test]
