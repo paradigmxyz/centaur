@@ -200,14 +200,15 @@ async fn write(
         anyhow::bail!("embeddings response omitted a chunk");
     }
     let mut tx = pool.begin().await?;
-    // Holds off concurrent updates and deletes of the row until committed.
+    // Holds off concurrent updates and deletes of the row, and concurrent
+    // projections of it (each API write enqueues one), until committed.
     // Readers are read here, not with the batch, since changing them does
     // not change the content hash.
     let current: Option<(String, Vec<String>)> = sqlx::query_as(
         r#"
         SELECT content_hash, readers FROM company_context_system.custom_documents
         WHERE source = $1 AND external_id = $2
-        FOR SHARE
+        FOR UPDATE
         "#,
     )
     .bind(&item.source)
@@ -321,63 +322,15 @@ async fn reject(pool: &PgPool, item: &Pending, error: &anyhow::Error) -> Result<
 mod tests {
     use std::env;
 
-    use axum::{Json as AxumJson, Router, http::StatusCode, routing::post};
-    use clap::Parser;
     use serde_json::json;
     use sqlx::Executor;
 
     use super::*;
     use crate::{
-        config::Config,
         credentials::PrincipalIdentity,
         query::{self, QueryRequest},
-        test_support::TestDatabase,
+        test_support::{TestDatabase, fake_embeddings},
     };
-
-    /// Serves embeddings, rejecting batches with an input containing "REJECT".
-    async fn fake_embeddings() -> (EmbeddingsClient, tokio::task::JoinHandle<()>) {
-        async fn embed(AxumJson(body): AxumJson<Value>) -> (StatusCode, AxumJson<Value>) {
-            let inputs = body["input"].as_array().unwrap();
-            if inputs
-                .iter()
-                .any(|input| input.as_str().unwrap().contains("REJECT"))
-            {
-                return (StatusCode::BAD_REQUEST, AxumJson(json!({})));
-            }
-            let data: Vec<Value> = (0..inputs.len())
-                .map(|index| json!({ "index": index, "embedding": vec![0.5; 1536] }))
-                .collect();
-            (StatusCode::OK, AxumJson(json!({ "data": data })))
-        }
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            axum::serve(listener, Router::new().route("/embeddings", post(embed)))
-                .await
-                .unwrap();
-        });
-        let config = Config::try_parse_from([
-            "centaur-company-context",
-            "--database-url",
-            "postgresql://context",
-            "--console-database-url",
-            "postgresql://console",
-            "--active-record-primary-key",
-            "primary",
-            "--active-record-key-derivation-salt",
-            "salt",
-            "--openai-api-key",
-            "test-key",
-            "--slack-bot-token",
-            "xoxb-test",
-            "--jwt-signing-secret",
-            "secret",
-            "--openai-base-url",
-            &base_url,
-        ])
-        .unwrap();
-        (EmbeddingsClient::new(&config).unwrap(), server)
-    }
 
     /// A principal without any source identity or role.
     fn anyone() -> PrincipalIdentity {

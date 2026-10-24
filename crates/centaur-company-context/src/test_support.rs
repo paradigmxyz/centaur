@@ -1,9 +1,12 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::{Json, Router, http::StatusCode, routing::post};
+use clap::Parser;
+use serde_json::{Value, json};
 use sqlx::{Connection, Executor, PgConnection, PgPool};
 use tokio::sync::Mutex;
 
-use crate::database;
+use crate::{config::Config, database, embeddings::EmbeddingsClient};
 
 /// Migrations create cluster-global roles with a check-then-create, so
 /// concurrently migrating test databases would race on `pg_authid`.
@@ -47,4 +50,49 @@ impl TestDatabase {
             .await
             .unwrap();
     }
+}
+
+/// Serves embeddings, rejecting batches with an input containing "REJECT".
+pub async fn fake_embeddings() -> (EmbeddingsClient, tokio::task::JoinHandle<()>) {
+    async fn embed(Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
+        let inputs = body["input"].as_array().unwrap();
+        if inputs
+            .iter()
+            .any(|input| input.as_str().unwrap().contains("REJECT"))
+        {
+            return (StatusCode::BAD_REQUEST, Json(json!({})));
+        }
+        let data: Vec<Value> = (0..inputs.len())
+            .map(|index| json!({ "index": index, "embedding": vec![0.5; 1536] }))
+            .collect();
+        (StatusCode::OK, Json(json!({ "data": data })))
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, Router::new().route("/embeddings", post(embed)))
+            .await
+            .unwrap();
+    });
+    let config = Config::try_parse_from([
+        "centaur-company-context",
+        "--database-url",
+        "postgresql://context",
+        "--console-database-url",
+        "postgresql://console",
+        "--active-record-primary-key",
+        "primary",
+        "--active-record-key-derivation-salt",
+        "salt",
+        "--openai-api-key",
+        "test-key",
+        "--slack-bot-token",
+        "xoxb-test",
+        "--jwt-signing-secret",
+        "secret",
+        "--openai-base-url",
+        &base_url,
+    ])
+    .unwrap();
+    (EmbeddingsClient::new(&config).unwrap(), server)
 }
