@@ -56,6 +56,13 @@ describe('normalizeSlackText', () => {
       '#eng-centaur (C0AJ07U8Z1N)'
     )
   })
+
+  it('decodes Slack escapes once, keeping escaped entities literal', () => {
+    expect(normalizeSlackText('a &lt; b &amp;&amp; c &gt; d')).toBe('a < b && c > d')
+    expect(normalizeSlackText('Write &amp;lt;br&amp;gt; or &amp;amp;')).toBe(
+      'Write &lt;br&gt; or &amp;'
+    )
+  })
 })
 
 let emulator: Emulator
