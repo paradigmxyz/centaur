@@ -650,17 +650,26 @@ impl PgSessionStore {
         })
     }
 
-    pub async fn requeue_execution_if_running_without_stdout_owner(
+    /// An expired lease counts as no owner: the process that held it is gone,
+    /// so its stale owner id is cleared along with the requeue.
+    pub async fn requeue_execution_if_running_without_live_stdout_owner(
         &self,
         execution_id: &str,
     ) -> Result<Option<SessionExecution>, SessionStoreError> {
         let row = sqlx::query_as::<_, SessionExecutionRow>(
             r#"
             update session_executions
-            set status = $2, started_at = null, updated_at = now()
+            set status = $2,
+                started_at = null,
+                stdout_owner_id = null,
+                stdout_owner_lease_expires_at = null,
+                updated_at = now()
             where execution_id = $1
               and status = $3
-              and stdout_owner_id is null
+              and (
+                stdout_owner_id is null
+                or stdout_owner_lease_expires_at < now()
+              )
             returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
             "#,
         )
@@ -849,13 +858,15 @@ impl PgSessionStore {
         Ok(u64::try_from(count).unwrap_or_default())
     }
 
-    /// Releases every active stdout-owner lease held by `owner_id` in one
-    /// statement, returning the affected executions. Used by a clean
-    /// control-plane shutdown so a peer's adoption scan can claim the
-    /// executions immediately instead of waiting out the lease TTL.
+    /// Releases every active stdout-owner lease held by `owner_id`, except
+    /// the executions listed in `retain`, in one statement, returning the
+    /// affected executions. Used by a clean control-plane shutdown so a
+    /// peer's adoption scan can claim the executions immediately instead of
+    /// waiting out the lease TTL.
     pub async fn release_stdout_owned_executions(
         &self,
         owner_id: &str,
+        retain: &[String],
     ) -> Result<Vec<ReleasedExecution>, SessionStoreError> {
         let rows = sqlx::query_as::<_, (String, String)>(
             r#"
@@ -863,13 +874,16 @@ impl PgSessionStore {
             set stdout_owner_id = null,
                 stdout_owner_lease_expires_at = null,
                 updated_at = now()
-            where stdout_owner_id = $1 and status in ($2, $3)
+            where stdout_owner_id = $1
+              and status in ($2, $3)
+              and execution_id <> all($4)
             returning execution_id, thread_key
             "#,
         )
         .bind(owner_id)
         .bind(ExecutionStatus::Queued.as_ref())
         .bind(ExecutionStatus::Running.as_ref())
+        .bind(retain)
         .fetch_all(&self.pool)
         .await?;
 
@@ -2989,7 +3003,7 @@ mod tests {
         );
 
         let released = store
-            .release_stdout_owned_executions(&owner)
+            .release_stdout_owned_executions(&owner, &[])
             .await
             .expect("release owned leases");
         assert_eq!(released.len(), 2);
@@ -3041,7 +3055,7 @@ mod tests {
         }
         assert!(
             store
-                .release_stdout_owned_executions(&peer)
+                .release_stdout_owned_executions(&peer, &[])
                 .await
                 .expect("release for peer")
                 .is_empty()
