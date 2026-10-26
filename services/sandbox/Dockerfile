@@ -93,7 +93,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 RUN useradd -m -s /bin/bash -u 1001 agent \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/agent
 
-ARG CLAUDE_CODE_VERSION=2.1.281
+ARG CLAUDE_CODE_VERSION=2.1.310
 ARG CODEX_VERSION=0.160.1
 ARG PI_CODING_AGENT_VERSION=1.0.0
 # Hermes Agent (NousResearch) — pinned by commit SHA per the dependency policy.
@@ -208,7 +208,7 @@ WORKDIR /home/agent
 ENV PATH="/home/agent/.cargo/bin:/home/agent/.local/bin:/home/agent/.foundry/bin:/home/agent/.bun/bin:${PATH}"
 
 ARG FOUNDRY_VERSION=v1.7.0
-ARG AMP_CLI_VERSION=0.0.1774529752-g94f44d
+ARG AMP_CLI_VERSION=0.0.1792995770-gba80ba
 ARG MANIM_VERSION=0.20.1
 ARG BUN_VERSION=bun-v1.4.4
 ARG OMP_VERSION=18.8.6
