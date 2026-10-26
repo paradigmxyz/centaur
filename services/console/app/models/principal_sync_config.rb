@@ -42,6 +42,13 @@ module PrincipalSyncConfig
   # serve.
   def self.served_credentials_for(principal)
     static = principal.granted_static_secrets.select { |ss| ss.source&.deliverable? }
+    # A personal Runlayer token serves only its owner, matching proxy-sync.
+    reconciliation = PrincipalCredentialReconciliation.new
+    static.select! do |secret|
+      credential = secret.broker_credential
+      credential&.oauth_app&.provider != "runlayer" ||
+        (!credential.oauth_app.shared? && reconciliation.runlayer_owner?(principal, credential) && principal.grants.exists?(static_secret: secret))
+    end
     gcp_auth = principal.granted_gcp_auth_secrets.to_a
     gcp_id_token = principal.granted_gcp_id_token_secrets.to_a
     aws_auth = principal.granted_aws_auth_secrets.to_a

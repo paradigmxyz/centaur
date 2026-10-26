@@ -28,6 +28,7 @@ pub(crate) async fn build_config(
         SecretValues::Live(&state.encryption),
         &subject,
         proxy.requester_principal_id,
+        state.runlayer_resource_url.as_deref(),
     )
     .await?;
     append_api_jwt(state, proxy, &mut config, now).await?;

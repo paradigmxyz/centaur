@@ -54,13 +54,22 @@ impl Subject<'_> {
 /// given, the always-available OAuth wrappers granted to `requester_id`.
 /// Credentials a stronger grant would overwrite are withheld. Tokens the
 /// caller mints are not included: append them to `secrets`.
+/// `runlayer_resource_url` must match Console's configured resource; `None`
+/// withholds Runlayer credentials.
 pub async fn build_config(
     pool: &PgPool,
     values: SecretValues<'_>,
     subject: &Subject<'_>,
     requester_id: Option<i64>,
+    runlayer_resource_url: Option<&str>,
 ) -> Result<Config> {
-    let loaded = load_credentials(pool, subject.principal_id, requester_id).await?;
+    let loaded = load_credentials(
+        pool,
+        subject.principal_id,
+        requester_id,
+        runlayer_resource_url,
+    )
+    .await?;
     let mut credentials = Vec::with_capacity(loaded.len());
     for credential in loaded {
         let deliverable = if credential.kind == CredentialKind::Static {

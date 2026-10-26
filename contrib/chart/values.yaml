@@ -100,6 +100,8 @@ toolServer:
 # on top of these `console` defaults (see the `centaur.consoleValues` helper), so
 # existing values files keep working. Prefer `console` for new configuration.
 console:
+  # Non-secret environment settings, applied to both web and worker processes.
+  extraEnv: {}
   replicaCount: 1
   # Node steering for the Console web pods. Use tolerations with a matching
   # nodeSelector to schedule onto a dedicated tainted node pool. Empty values
@@ -464,6 +466,8 @@ proxySync:
   # Example: [{host: "*.dev.example.com", path: /events/events, username: dev}]
   # Empty denies dynamic targets. Exact paths and TLS verification are mandatory.
   sshTargets: []
+  # Additional non-secret process environment settings.
+  extraEnv: {}
   # Two replicas keep sync available during pod restarts and rolling updates.
   replicaCount: 2
   nodeSelector: {}

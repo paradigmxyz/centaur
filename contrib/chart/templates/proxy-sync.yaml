@@ -96,6 +96,10 @@ spec:
               value: info
             - name: CENTAUR_SSH_TARGETS
               value: {{ .Values.proxySync.sshTargets | toJson | quote }}
+{{- range $name, $value := .Values.proxySync.extraEnv }}
+            - name: {{ $name }}
+              value: {{ $value | toString | quote }}
+{{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.proxySync.port }}

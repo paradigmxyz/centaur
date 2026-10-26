@@ -25,10 +25,12 @@ pub async fn load_credentials(
     pool: &PgPool,
     principal_id: i64,
     requester_id: Option<i64>,
+    runlayer_resource_url: Option<&str>,
 ) -> Result<Vec<Credential>> {
     let rows = sqlx::query(CREDENTIALS_SQL)
         .bind(principal_id)
         .bind(requester_id)
+        .bind(runlayer_resource_url)
         .fetch_all(pool)
         .await?;
     rows.into_iter()

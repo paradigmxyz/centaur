@@ -34,6 +34,9 @@ transforms:
         - "accept-encoding"
         - "accept-language"
         - "authorization"
+        # Streamable HTTP MCP sessions used by the personal Runlayer gateway.
+        - "mcp-protocol-version"
+        - "mcp-session-id"
         - "jwt"
         - "anthropic-version"
         - "anthropic-beta"

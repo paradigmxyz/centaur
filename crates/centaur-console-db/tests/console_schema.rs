@@ -283,10 +283,11 @@ async fn redacted_config_is_the_live_config_without_secret_values() {
         SecretValues::Live(&encryption),
         &subject,
         None,
+        None,
     )
     .await
     .unwrap();
-    let redacted = build_config(&fixture.pool, SecretValues::Redacted, &subject, None)
+    let redacted = build_config(&fixture.pool, SecretValues::Redacted, &subject, None, None)
         .await
         .unwrap();
 
@@ -306,7 +307,7 @@ async fn effective_config_is_redacted_and_absent_for_missing_principals() {
     let principal = fixture.principal("principal").await;
     fixture.grant_secret_values(principal).await;
 
-    let config = centaur_console_db::effective_config(&fixture.pool, principal)
+    let config = centaur_console_db::effective_config(&fixture.pool, principal, None)
         .await
         .unwrap()
         .expect("principal exists");
@@ -323,7 +324,7 @@ async fn effective_config_is_redacted_and_absent_for_missing_principals() {
     );
 
     assert!(
-        centaur_console_db::effective_config(&fixture.pool, i64::MAX)
+        centaur_console_db::effective_config(&fixture.pool, i64::MAX, None)
             .await
             .unwrap()
             .is_none()
