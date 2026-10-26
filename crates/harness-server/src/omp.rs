@@ -70,6 +70,15 @@ impl HarnessServer for OmpHarness {
         // harness-server reports this turn's telemetry; OMP would otherwise
         // export its own duplicate spans to the sandbox's OTLP endpoint.
         command.env("OTEL_SDK_DISABLED", "true");
+        // OMP sends Anthropic requests over node:https, which ignores
+        // HTTPS_PROXY since Bun 1.4 and dials the provider directly. Its
+        // per-provider proxy routes them through Bun's fetch and iron-proxy.
+        if env::var_os("PI_PROXY").is_none()
+            && env::var_os("PI_PROXY_ANTHROPIC").is_none()
+            && let Some(proxy) = env::var_os("HTTPS_PROXY").or_else(|| env::var_os("https_proxy"))
+        {
+            command.env("PI_PROXY_ANTHROPIC", proxy);
+        }
         command
     }
 
