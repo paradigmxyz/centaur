@@ -67,6 +67,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     && find /usr/local/lib/python3.12 /usr/lib/python3 -type d -name __pycache__ -prune -exec rm -rf '{}' +
 
 # ── GitHub CLI + Node.js 24 (LTS) + Docker CLI + Google Cloud CLI (cached) ──
+ARG NODE_VERSION=24.22.1
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -82,7 +83,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
       | tee /etc/apt/sources.list.d/google-cloud-sdk.list > /dev/null \
-    && apt-get update && apt-get install -y --no-install-recommends gh nodejs docker-ce-cli google-cloud-cli \
+    && apt-get update && apt-get install -y --no-install-recommends gh "nodejs=${NODE_VERSION}-1nodesource1" docker-ce-cli google-cloud-cli \
+    && node --version | grep -Fx "v${NODE_VERSION}" \
     && gcloud --version >/dev/null \
     && bq version >/dev/null \
     && rm -rf /usr/share/doc /usr/share/man /usr/share/info
@@ -208,7 +210,7 @@ ENV PATH="/home/agent/.cargo/bin:/home/agent/.local/bin:/home/agent/.foundry/bin
 ARG FOUNDRY_VERSION=v1.7.0
 ARG AMP_CLI_VERSION=0.0.1774529752-g94f44d
 ARG MANIM_VERSION=0.20.1
-ARG BUN_VERSION=bun-v1.3.14
+ARG BUN_VERSION=bun-v1.4.4
 ARG OMP_VERSION=18.8.6
 
 # ── Agent-scoped toolchains ─────────────────────────────────────────────────
@@ -278,7 +280,7 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
 # Keep Playwright in uv's image-backed cache so isolated tool environments do
 # not download its large Python driver package on first use. Browser binaries
 # are intentionally omitted because DocSend connects to Browserbase over CDP.
-ARG PLAYWRIGHT_VERSION=1.62.0
+ARG PLAYWRIGHT_VERSION=1.64.1
 RUN uv tool install "playwright==${PLAYWRIGHT_VERSION}" \
     && playwright --version | grep -F "${PLAYWRIGHT_VERSION}"
 
