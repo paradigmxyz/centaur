@@ -132,6 +132,38 @@ class PersonalRunlayerTest < ActionDispatch::IntegrationTest
     assert_equal [ "synthetic-reconnected" ], runlayer_entries.map { |entry| entry.dig("source", "value") }
   end
 
+  test "reconnect reloads a credential disconnected after the callback reads it" do
+    credential = connect(@alice, "synthetic-before")
+    lookup = BrokerCredential.method(:find_or_initialize_by)
+    revoke_http = HttpClient.new(http: ->(**) { HttpClient::Response.new(status: 200, body: "") })
+    interleaved = false
+    # Deterministically reproduce the concurrent ordering: the callback reads
+    # an active row, disconnect updates it, then the callback resumes with its
+    # stale instance. No sleeps or timing-dependent thread scheduling needed.
+    interleave_disconnect = lambda do |**attributes|
+      stale = lookup.call(**attributes)
+      assert_equal credential.id, stale.id
+      refute stale.dead?
+      Oauth::DisconnectRunlayer.new(http: revoke_http).call(BrokerCredential.find(credential.id))
+      assert credential.reload.dead?
+      interleaved = true
+      stale
+    end
+
+    BrokerCredential.stub(:find_or_initialize_by, interleave_disconnect) do
+      connect(@alice, "synthetic-after")
+    end
+
+    assert interleaved
+    credential.reload
+    refute credential.dead?
+    assert_nil credential.dead_reason
+    assert_equal "synthetic-after", credential.access_token
+    assert_equal "synthetic-refresh", credential.refresh_token
+    assert credential.next_attempt_at
+    assert_equal [ "synthetic-after" ], runlayer_entries.map { |entry| entry.dig("source", "value") }
+  end
+
   test "disconnect revokes both tokens and a queued refresh cannot reconnect" do
     credential = connect(@alice, "synthetic-alice")
     seen = []

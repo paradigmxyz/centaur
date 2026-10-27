@@ -1310,6 +1310,51 @@ async fn ssh_requests_are_limited_to_deployment_policy() {
 }
 
 #[tokio::test]
+async fn disabled_non_runlayer_apps_keep_existing_credentials_available() {
+    let Some(f) = Fixture::new().await else {
+        return;
+    };
+    let principal = f.principal("disabled-app-owner").await;
+    let app = f.oauth_app("disabled-github", true).await;
+    let credential = f.broker_credential("existing", Some(app), true).await;
+    let secret = f
+        .wrapper_secret("existing", credential, credential, "api.github.test")
+        .await;
+    f.grant(
+        Grantee::Principal(principal),
+        "static_secret_id",
+        secret,
+        DIRECT,
+    )
+    .await;
+    sqlx::query("UPDATE oauth_apps SET enabled = false WHERE id = $1")
+        .bind(app)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+
+    // Both the live DM/requester paths and api-rs' redacted reader must retain
+    // tokens for existing connections when only new consent is disabled.
+    let conversation = f.principal("disabled-app-conversation").await;
+    for (owner, requester) in [
+        (Some(principal), None),
+        (Some(conversation), Some(principal)),
+    ] {
+        let proxy = f.proxy(owner, requester, json!({})).await;
+        let config = f.sync(&proxy).await;
+        assert_eq!(secret_hosts(&config), vec!["api.github.test"]);
+        assert_eq!(config["secrets"][0]["source"]["value"], "known secret");
+    }
+    let redacted = centaur_console_db::effective_config(&f.pool, principal, None)
+        .await
+        .unwrap()
+        .unwrap();
+    let redacted = json!({ "secrets": redacted.secrets });
+    assert_eq!(secret_hosts(&redacted), vec!["api.github.test"]);
+    assert_eq!(redacted["secrets"][0]["source"]["value"], "[redacted]");
+}
+
+#[tokio::test]
 async fn personal_runlayer_credentials_follow_the_owner_and_stop_after_revocation() {
     let Some(mut f) = Fixture::new().await else {
         return;

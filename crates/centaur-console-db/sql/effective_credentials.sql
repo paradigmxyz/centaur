@@ -125,9 +125,8 @@ sources AS (
         jsonb_agg(
             sr.source || jsonb_strip_nulls(jsonb_build_object('broker_access_token',
                 CASE WHEN NOT bc.dead AND (bc.expires_at IS NULL OR bc.expires_at > CURRENT_TIMESTAMP)
-                     AND (bc.oauth_app_id IS NULL OR oa.enabled)
                      AND (oa.provider IS DISTINCT FROM 'runlayer' OR
-                          (credential_owner.status = 'active' AND $3::text = bc.labels->>'runlayer_resource'
+                          (oa.enabled AND credential_owner.status = 'active' AND $3::text = bc.labels->>'runlayer_resource'
                            AND sr.kind = 'static' AND EXISTS (
                                SELECT 1 FROM static_secrets wrapper
                                WHERE wrapper.id = sr.credential_id AND wrapper.broker_credential_id = bc.id

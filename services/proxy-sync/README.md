@@ -23,7 +23,7 @@ excluded from the HTTP request metrics.
 - `CENTAUR_JWT_SIGNING_SECRET` — optional shared key for generated API and sandbox-entitlement credentials.
 - `CENTAUR_CONSOLE_URL` — Console URL used for sandbox-entitlement rules.
 - `CENTAUR_API_URL` / `CENTAUR_API_SERVER_PROXY_HOSTS` — API hosts used for generated API credentials.
-- `RUNLAYER_MCP_URL` — optional exact HTTPS Plugin MCP URL; must match Console and sandbox configuration. Unset: no Runlayer credential delivery. Runlayer credentials follow the verified requester in DMs and channels.
+- `RUNLAYER_MCP_URL` — exact HTTPS MCP URL matching Console/sandboxes; unset disables Runlayer delivery.
 - `BIND_ADDR` — listen address; defaults to `0.0.0.0:8080`.
 - `DATABASE_MAX_CONNECTIONS` — SQLx pool limit; defaults to `5`.
 

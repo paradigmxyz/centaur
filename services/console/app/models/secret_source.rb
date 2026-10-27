@@ -122,8 +122,8 @@ class SecretSource < ApplicationRecord
     credential = brokered_credential
     return nil unless credential && !credential.dead?
     return nil if credential.expires_at && credential.expires_at <= Time.current
-    return nil if credential.oauth_app && !credential.oauth_app.enabled?
     if credential.oauth_app&.provider == "runlayer"
+      return nil unless credential.oauth_app.enabled?
       return nil unless static_secret&.broker_credential_id == credential.id
       return nil unless credential.created_by&.active? && credential.oauth_app.provider_strategy.credential_resource_matches?(credential)
     end

@@ -209,6 +209,9 @@ module Oauth
           end
         end
         credential = BrokerCredential.find_or_initialize_by(oauth_app: @app, provider_subject: identity[:subject])
+        # Reload under the same row lock used by disconnect/refresh before dirty
+        # tracking compares the new tokens and live state with the stored values.
+        credential.lock! if credential.persisted? && @provider.respond_to?(:identity_for_user)
         # Remember which user connected this account. The Integrations page
         # matches on it, so the card flips to "Connected" even when the provider
         # account's email differs from the console login email. Never
