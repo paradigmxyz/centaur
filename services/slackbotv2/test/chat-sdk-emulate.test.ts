@@ -938,26 +938,20 @@ describe('slackbotv2', () => {
         apiKey: 'test-key',
         fetch: (async () => {
           strategyRequestCount += 1
+          const guess = strategyRequestCount === 1
+          // Model the production false positive: an ordinary follow-up is
+          // classified as a different harness.
           return Response.json({
-            output: [
-              {
-                content: [
-                  {
-                    text: JSON.stringify({
-                      // Model the production false positive: an ordinary
-                      // follow-up is classified as a different harness.
-                      harness: strategyRequestCount === 1 ? 'codex' : null,
-                      model: strategyRequestCount === 1 ? 'gpt-5.6-sol' : null,
-                      provider: strategyRequestCount === 1 ? 'responses' : null,
-                      reasoning: 'max'
-                    })
-                  }
-                ]
-              }
+            answers: [
+              { name: 'selection_request', probability: 0.9, type: 'predicate' },
+              { choice: guess ? 'codex' : 'unspecified', name: 'harness', type: 'choice' },
+              { choice: guess ? 'gpt-5.6-sol' : 'unspecified', name: 'model', type: 'choice' },
+              { choice: guess ? 'responses' : 'unspecified', name: 'provider', type: 'choice' },
+              { choice: 'max', name: 'reasoning', type: 'choice' }
             ]
           })
         }) as unknown as typeof fetch,
-        model: 'gpt-5.4-nano'
+        model: 'gpt-6-luna'
       }),
       state: sharedState
     })
