@@ -1,19 +1,16 @@
 // Runs the candidate proactive-response classifier on a case's thread. Each
 // `thread` entry is a one-key map from author to text, oldest first; the last
-// entry is the newest message and the author `centaur` is the bot.
+// entry is the newest message and the author `centaur` is the bot. History is
+// built as slackbotv2 builds it: the latest earlier messages, bot replies
+// included, oldest first.
 import type { ApiProvider, CallApiContextParams, ProviderOptions, ProviderResponse } from 'promptfoo'
 import { classify, type ThreadMessage } from './classifier'
 
 const BOT_NAME = 'centaur'
-// Matches slackbotv2's cap on proactive classifier history.
+// slackbotv2's PROACTIVE_HISTORY_MESSAGES.
 const MAX_HISTORY_MESSAGES = 20
 
 type Config = {
-  /**
-   * `since-invocation` sends only messages since the bot was last invoked;
-   * `recent` sends the latest messages regardless. Both are capped.
-   */
-  history?: 'recent' | 'since-invocation'
   model?: string
   timeoutMs?: number
 }
@@ -47,10 +44,7 @@ export default class ProactiveResponseProvider implements ApiProvider {
       const decision = await classify(
         {
           botName: BOT_NAME,
-          history: (this.config.history === 'recent'
-            ? messages.slice(0, -1)
-            : historySinceLastInvocation(messages.slice(0, -1))
-          ).slice(-MAX_HISTORY_MESSAGES),
+          history: messages.slice(0, -1).slice(-MAX_HISTORY_MESSAGES),
           message: messages.at(-1)!
         },
         {
@@ -73,18 +67,6 @@ export default class ProactiveResponseProvider implements ApiProvider {
       return { error: (error as Error).message }
     }
   }
-}
-
-// Cases carry no execution ids, so the invocation is inferred: the later of
-// the last @-mention of the bot and the message the bot's latest reply (or
-// run of consecutive replies) answered.
-function historySinceLastInvocation(history: ThreadMessage[]): ThreadMessage[] {
-  const mention = new RegExp(`(?<![\\w])@${BOT_NAME}(?![\\w-])`, 'i')
-  let start = history.findLastIndex(message => !message.fromBot && mention.test(message.text))
-  let reply = history.findLastIndex(message => message.fromBot)
-  while (reply > 0 && history[reply - 1]!.fromBot) reply--
-  if (reply > 0) start = Math.max(start, reply - 1)
-  return history.slice(Math.max(start, 0))
 }
 
 function threadMessages(thread: unknown): ThreadMessage[] {
