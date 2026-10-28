@@ -69,6 +69,9 @@ The open-source tool inventory lives in this `tools/` tree and changes over time
   read-only with `DD_API_KEY` and `DD_APP_KEY`.
 - `preqin`: query Preqin Operational API fund and fund-manager data, with
   redacted auth diagnostics for `PREQIN_*` credentials.
+- `prose-lint`: score a draft from 0 to 1 for wordiness, mannered prose,
+  hedging, and citations with the OpenAI Decisions API; iron-proxy replaces
+  the `OPENAI_API_KEY` placeholder.
 
 ## Sandbox Tool Paths
 
