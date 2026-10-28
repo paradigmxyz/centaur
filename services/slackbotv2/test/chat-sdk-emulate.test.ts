@@ -4686,15 +4686,16 @@ describe('proactive replies', () => {
     expect(codexApi.creates).toHaveLength(0)
   })
 
-  it('skips replies addressed to another user without classifying them', async () => {
+  // Whether a person mention addresses that person ("Bob, can you...") or
+  // only copies them in ("do X, cc @name") is the classifier's call.
+  it('leaves replies that mention a person to the classifier', async () => {
     const calls = createProactiveBot(() => ({ respond: true }))
-    const threadTs = await mentionThread('Proactive addressed context.')
+    const threadTs = await mentionThread('Proactive cc context.')
 
-    const reply = await sendMessage(`<@${USER_B_ID}> can you check staging?`, { threadTs })
-    await reply.finished()
+    await reply(`retry the deploy, cc <@${USER_B_ID}>`, threadTs)
 
-    expect(calls).toHaveLength(0)
-    expect(codexApi.executes).toHaveLength(1)
+    expect(calls).toHaveLength(1)
+    expect(codexApi.executes).toHaveLength(2)
   })
 
   it('never appends to an execution that started while classifying', async () => {

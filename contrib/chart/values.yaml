@@ -836,7 +836,7 @@ slackbotv2:
   proactivity:
     enabled: false
     classifier: openai
-    model: gpt-5.4-nano
+    model: gpt-6-luna
     openaiBaseUrl: https://api.openai.com/v1
     channels: []
     timeoutMs: 2000

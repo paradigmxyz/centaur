@@ -956,7 +956,6 @@ function proactiveSkipReason(
   // collects them as thread context.
   if (state.activeExecution === true) return 'active_execution'
   if (!message.text.trim()) return 'empty'
-  if (mentionsOtherSlackUser(message, options.botUserId)) return 'addressed_elsewhere'
   return undefined
 }
 
@@ -967,14 +966,6 @@ function proactiveChannelAllowed(
   if (!proactivity.channels?.length) return true
   const channelId = channelIdFromThreadId(threadId)
   return channelId !== undefined && proactivity.channels.includes(channelId)
-}
-
-function mentionsOtherSlackUser(message: ChatMessage, botUserId: string | undefined): boolean {
-  const text = stringField(slackRawRecord(message).text)
-  for (const match of text.matchAll(/<@([A-Z0-9]+)(?:\|[^>]*)?>/g)) {
-    if (match[1] !== botUserId) return true
-  }
-  return false
 }
 
 async function proactiveThreadHistory(
