@@ -370,6 +370,10 @@ spec:
               value: {{ .Values.apiRs.activitySummary.maxOutputTokens | quote }}
             - name: SESSION_ACTIVITY_SUMMARY_REASONING_EFFORT
               value: {{ .Values.apiRs.activitySummary.reasoningEffort | default "" | quote }}
+            - name: SESSION_PROGRESS_UPDATE_AFTER_SECS
+              value: {{ .Values.apiRs.activitySummary.progressUpdateAfterSecs | quote }}
+            - name: SESSION_PROGRESS_UPDATE_INTERVAL_SECS
+              value: {{ .Values.apiRs.activitySummary.progressUpdateIntervalSecs | quote }}
 {{- end }}
             - name: SESSION_SANDBOX_K8S_NAMESPACE
               value: {{ .Release.Namespace | quote }}

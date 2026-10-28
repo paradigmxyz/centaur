@@ -1108,6 +1108,56 @@ impl PgSessionStore {
             .try_into()
     }
 
+    /// Appends an execution event unless one of the same type was appended for
+    /// that execution within `within`. The per-thread event lock serializes the
+    /// check with concurrent appends, so competing api-rs replicas publish once.
+    pub async fn append_execution_event_unless_recent(
+        &self,
+        thread_key: &ThreadKey,
+        execution_id: &str,
+        event_type: &str,
+        payload: Value,
+        within: Duration,
+    ) -> Result<Option<SessionEvent>, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "select pg_advisory_xact_lock(hashtextextended('centaur:session-events:' || $1::text, 0))",
+        )
+        .bind(thread_key.as_str())
+        .execute(&mut *tx)
+        .await?;
+        let recent = sqlx::query_scalar::<_, bool>(
+            r#"
+            select exists (
+                select 1
+                from session_events
+                where execution_id = $1
+                  and event_type = $2
+                  and created_at > clock_timestamp() - make_interval(secs => $3)
+            )
+            "#,
+        )
+        .bind(execution_id)
+        .bind(event_type)
+        .bind(within.as_secs_f64())
+        .fetch_one(&mut *tx)
+        .await?;
+        if recent {
+            tx.commit().await?;
+            return Ok(None);
+        }
+        let row = insert_session_event(
+            &mut *tx,
+            thread_key,
+            Some(execution_id),
+            event_type,
+            payload,
+        )
+        .await?;
+        tx.commit().await?;
+        row.try_into().map(Some)
+    }
+
     pub async fn append_event_if_stdout_owner(
         &self,
         thread_key: &ThreadKey,
@@ -2849,6 +2899,51 @@ mod tests {
             completed.status,
             centaur_session_core::ExecutionStatus::Completed
         );
+    }
+
+    #[tokio::test]
+    async fn execution_event_unless_recent_appends_once_per_window() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key =
+            ThreadKey::parse(format!("test:unless-recent-{}", Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution
+            .execution_id;
+        let append = |within| {
+            store.append_execution_event_unless_recent(
+                &thread_key,
+                &execution_id,
+                "session.progress_update",
+                json!({"text": "update"}),
+                within,
+            )
+        };
+
+        assert!(append(Duration::from_secs(60)).await.unwrap().is_some());
+        assert!(append(Duration::from_secs(60)).await.unwrap().is_none());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(append(Duration::from_millis(10)).await.unwrap().is_some());
+
+        sqlx::query("delete from sessions where thread_key = $1")
+            .bind(thread_key.as_str())
+            .execute(store.pool())
+            .await
+            .expect("delete test session");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

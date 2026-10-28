@@ -44,7 +44,10 @@ use sqlx::{
 };
 use tracing::{info, warn};
 
-use crate::{ServerError, activity_summary::ActivitySummaryConfig};
+use crate::{
+    ServerError,
+    activity_summary::{ActivitySummaryConfig, ProgressUpdateConfig},
+};
 
 const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
 const GITHUB_TOKEN_ENV: &str = "GITHUB_TOKEN";
@@ -227,6 +230,22 @@ struct ActivitySummaryArgs {
         default_value = "low"
     )]
     reasoning_effort: String,
+    /// Post a progress update to the chat thread once an execution has run
+    /// this long. 0 disables progress updates.
+    #[arg(
+        long = "session-progress-update-after-secs",
+        env = "SESSION_PROGRESS_UPDATE_AFTER_SECS",
+        default_value_t = 0
+    )]
+    progress_update_after_secs: u64,
+    /// Minimum time between progress updates for one execution.
+    #[arg(
+        long = "session-progress-update-interval-secs",
+        env = "SESSION_PROGRESS_UPDATE_INTERVAL_SECS",
+        default_value_t = 300,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    progress_update_interval_secs: u64,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -285,6 +304,10 @@ impl ActivitySummaryArgs {
             model: self.model.clone(),
             reasoning_effort: clean_optional_value(Some(self.reasoning_effort.as_str())),
             timeout: Duration::from_secs(self.timeout_secs),
+            progress: (self.progress_update_after_secs > 0).then(|| ProgressUpdateConfig {
+                after: Duration::from_secs(self.progress_update_after_secs),
+                interval: Duration::from_secs(self.progress_update_interval_secs),
+            }),
         })
     }
 }

@@ -9,10 +9,30 @@ use centaur_session_sqlx::{PgSessionStore, SessionEventNotification, SessionStor
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use thiserror::Error;
-use tokio::time::sleep;
+use tokio::{
+    sync::mpsc,
+    time::{MissedTickBehavior, interval, sleep},
+};
 use tracing::{debug, info, warn};
 
 pub(crate) const SESSION_ACTIVITY_SUMMARY_EVENT: &str = "session.activity_summary";
+pub(crate) const SESSION_PROGRESS_UPDATE_EVENT: &str = "session.progress_update";
+
+/// How often running executions are checked for a due progress update, so an
+/// update still lands while a long tool call produces no new events.
+const PROGRESS_UPDATE_TICK: Duration = Duration::from_secs(15);
+const PROGRESS_UPDATE_MAX_OUTPUT_TOKENS: u16 = 512;
+const PROGRESS_UPDATE_MAX_CHARS: usize = 500;
+
+const PROGRESS_UPDATE_PROMPT: &str = "\
+You write a short progress update that a software agent posts in a chat thread while it \
+is still working on a long request. Use only the supplied event facts. Write one or two \
+first-person sentences, at most 280 characters in total, as if you are the agent: say \
+what you have done or found so far and what you are doing now. Name specific things from \
+the facts (a service, PR, dataset, tool, or finding). Do not repeat the previous update; \
+if the facts add nothing new, output exactly SKIP. Do not promise a finish time. Do not \
+mention commands, paths, IDs, or flags. Do not refer to \"the agent\". No markdown \
+headings, no quotes, no event IDs, and no speculation.";
 
 const SYSTEM_PROMPT: &str = "\
 You write live status text for a software agent. Use only the supplied event facts. \
@@ -43,6 +63,16 @@ pub(crate) struct ActivitySummaryConfig {
     /// `None` omits the parameter, for servers that reject an unknown field.
     pub(crate) reasoning_effort: Option<String>,
     pub(crate) timeout: Duration,
+    /// `None` disables chat progress updates for long-running executions.
+    pub(crate) progress: Option<ProgressUpdateConfig>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ProgressUpdateConfig {
+    /// Execution age before the first progress update.
+    pub(crate) after: Duration,
+    /// Minimum time between progress updates for one execution.
+    pub(crate) interval: Duration,
 }
 
 pub(crate) struct ActivitySummaryWorker {
@@ -69,33 +99,99 @@ impl ActivitySummaryWorker {
         info!(
             model = %self.config.model,
             min_interval_ms = self.config.min_interval.as_millis(),
+            progress_after_ms = self.config.progress.map(|progress| progress.after.as_millis()),
             "session activity summary worker started"
         );
+        // The listener runs in its own task so the progress tick below never
+        // cancels a notification read midway.
+        let (sender, mut notifications) = mpsc::channel(1024);
+        tokio::spawn(forward_session_events(self.store.clone(), sender));
+        let mut progress_tick = interval(PROGRESS_UPDATE_TICK);
+        progress_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
-            let mut listener = match self.store.listen_session_events().await {
-                Ok(listener) => listener,
-                Err(error) => {
-                    warn!(%error, "failed to listen for session activity events");
-                    sleep(Duration::from_secs(5)).await;
-                    continue;
+            tokio::select! {
+                notification = notifications.recv() => {
+                    let Some(notification) = notification else { return };
+                    if let Err(error) = self.process_notification(notification).await {
+                        warn!(%error, "failed to process session activity event");
+                    }
                 }
-            };
-
-            loop {
-                match listener.recv().await {
-                    Ok(notification) => {
-                        if let Err(error) = self.process_notification(notification).await {
-                            warn!(%error, "failed to process session activity event");
-                        }
-                    }
-                    Err(error) => {
-                        warn!(%error, "session activity event listener failed; reconnecting");
-                        sleep(Duration::from_secs(1)).await;
-                        break;
-                    }
+                _ = progress_tick.tick(), if self.config.progress.is_some() => {
+                    self.publish_due_progress_updates().await;
                 }
             }
         }
+    }
+
+    async fn publish_due_progress_updates(&mut self) {
+        let Some(progress) = self.config.progress else {
+            return;
+        };
+        let now = Instant::now();
+        let due = self
+            .states
+            .iter_mut()
+            .filter_map(|(execution_id, state)| {
+                state
+                    .prepare_progress(now, progress)
+                    .map(|(prompt, elapsed)| (execution_id.clone(), prompt, elapsed))
+            })
+            .collect::<Vec<_>>();
+        for (execution_id, prompt, elapsed) in due {
+            if let Err(error) = self
+                .publish_progress_update(&execution_id, &prompt, elapsed, progress)
+                .await
+            {
+                warn!(%error, execution_id, "failed to publish session progress update");
+            }
+        }
+    }
+
+    async fn publish_progress_update(
+        &mut self,
+        execution_id: &str,
+        prompt: &str,
+        elapsed: Duration,
+        progress: ProgressUpdateConfig,
+    ) -> Result<(), ActivitySummaryError> {
+        let text = self
+            .client
+            .respond(
+                PROGRESS_UPDATE_PROMPT,
+                prompt,
+                PROGRESS_UPDATE_MAX_OUTPUT_TOKENS,
+            )
+            .await?;
+        let Some(text) = sanitize_progress_update(&text) else {
+            debug!(execution_id, "discarded empty session progress update");
+            return Ok(());
+        };
+        let Some(state) = self.states.get(execution_id) else {
+            return Ok(());
+        };
+        // Half the interval tolerates model latency between this worker's
+        // attempts while still collapsing a concurrent replica's update.
+        let appended = self
+            .store
+            .append_execution_event_unless_recent(
+                &state.thread_key,
+                execution_id,
+                SESSION_PROGRESS_UPDATE_EVENT,
+                json!({
+                    "elapsed_secs": elapsed.as_secs(),
+                    "execution_id": execution_id,
+                    "model": self.config.model.as_str(),
+                    "text": text,
+                }),
+                progress.interval / 2,
+            )
+            .await?;
+        if appended.is_some()
+            && let Some(state) = self.states.get_mut(execution_id)
+        {
+            state.last_progress = Some(text);
+        }
+        Ok(())
     }
 
     async fn process_notification(
@@ -149,7 +245,14 @@ impl ActivitySummaryWorker {
             let state = self
                 .states
                 .entry(execution_id.to_owned())
-                .or_insert_with(|| ExecutionActivity::new(self.config.max_facts, goal));
+                .or_insert_with(|| {
+                    ExecutionActivity::new(
+                        event.thread_key.clone(),
+                        self.config.max_facts,
+                        goal,
+                        now,
+                    )
+                });
             state.push(fact);
             state.prepare_publish(now, self.config.min_interval)
         };
@@ -158,7 +261,11 @@ impl ActivitySummaryWorker {
             return Ok(());
         };
 
-        let summary = match self.client.summarize(&prompt).await {
+        let summary = match self
+            .client
+            .respond(SYSTEM_PROMPT, &prompt, self.config.max_output_tokens)
+            .await
+        {
             Ok(summary) => summary,
             Err(error) => {
                 warn!(%error, "failed to generate session activity summary");
@@ -219,26 +326,112 @@ impl ActivitySummaryWorker {
     }
 }
 
+async fn forward_session_events(
+    store: PgSessionStore,
+    sender: mpsc::Sender<SessionEventNotification>,
+) {
+    loop {
+        let mut listener = match store.listen_session_events().await {
+            Ok(listener) => listener,
+            Err(error) => {
+                warn!(%error, "failed to listen for session activity events");
+                sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
+        loop {
+            match listener.recv().await {
+                Ok(notification) => {
+                    if sender.send(notification).await.is_err() {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    warn!(%error, "session activity event listener failed; reconnecting");
+                    sleep(Duration::from_secs(1)).await;
+                    break;
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ExecutionActivity {
     facts: VecDeque<ActivityFact>,
     goal: Option<String>,
     last_attempt_at: Option<Instant>,
+    last_progress: Option<String>,
+    last_progress_attempt_at: Option<Instant>,
+    last_progress_signature: Option<String>,
     last_published_signature: Option<String>,
     last_summary: Option<String>,
     max_facts: usize,
+    started_at: Instant,
+    thread_key: ThreadKey,
 }
 
 impl ExecutionActivity {
-    fn new(max_facts: usize, goal: Option<String>) -> Self {
+    fn new(
+        thread_key: ThreadKey,
+        max_facts: usize,
+        goal: Option<String>,
+        started_at: Instant,
+    ) -> Self {
         Self {
             facts: VecDeque::with_capacity(max_facts),
             goal,
             last_attempt_at: None,
+            last_progress: None,
+            last_progress_attempt_at: None,
+            last_progress_signature: None,
             last_published_signature: None,
             last_summary: None,
             max_facts,
+            started_at,
+            thread_key,
         }
+    }
+
+    /// Returns the progress prompt and execution age once the execution has
+    /// run past `after`, at most once per `interval`, and only when new
+    /// activity arrived since the previous attempt.
+    fn prepare_progress(
+        &mut self,
+        now: Instant,
+        config: ProgressUpdateConfig,
+    ) -> Option<(String, Duration)> {
+        let elapsed = now.saturating_duration_since(self.started_at);
+        if elapsed < config.after {
+            return None;
+        }
+        if self
+            .last_progress_attempt_at
+            .is_some_and(|last| now.saturating_duration_since(last) < config.interval)
+        {
+            return None;
+        }
+        if !self.facts.iter().any(ActivityFact::is_publishable) {
+            return None;
+        }
+        let signature = self.signature();
+        if self.last_progress_signature.as_ref() == Some(&signature) {
+            return None;
+        }
+        self.last_progress_attempt_at = Some(now);
+        self.last_progress_signature = Some(signature);
+        Some((self.progress_prompt(elapsed), elapsed))
+    }
+
+    fn progress_prompt(&self, elapsed: Duration) -> String {
+        let minutes = (elapsed.as_secs() / 60).max(1);
+        let mut lines = vec![format!("Time spent so far: about {minutes} minutes")];
+        if let Some(update) = self.last_progress.as_deref() {
+            lines.push(format!("Previous progress update: {update}"));
+        }
+        lines.push(self.prompt());
+        lines.join("\n")
     }
 
     fn push(&mut self, fact: ActivityFact) {
@@ -773,6 +966,17 @@ fn sanitize_summary(summary: &str) -> Option<String> {
     (!summary.is_empty()).then_some(summary)
 }
 
+fn sanitize_progress_update(text: &str) -> Option<String> {
+    let text = text.trim().trim_matches('"').trim();
+    if text.is_empty()
+        || text.eq_ignore_ascii_case("skip")
+        || text.chars().count() > PROGRESS_UPDATE_MAX_CHARS
+    {
+        return None;
+    }
+    Some(text.to_owned())
+}
+
 fn is_generic_summary(summary: &str) -> bool {
     let normalized = normalize_summary(summary);
     normalized.is_empty()
@@ -856,7 +1060,6 @@ fn is_terminal_session_event(event_type: &str) -> bool {
 struct ActivitySummaryClient {
     api_key: String,
     client: reqwest::Client,
-    max_output_tokens: u16,
     model: String,
     reasoning_effort: Option<String>,
     responses_url: String,
@@ -872,7 +1075,6 @@ impl ActivitySummaryClient {
         Ok(Self {
             api_key: config.api_key.clone(),
             client,
-            max_output_tokens: config.max_output_tokens,
             model: config.model.clone(),
             reasoning_effort: config.reasoning_effort.clone(),
             responses_url,
@@ -884,12 +1086,12 @@ impl ActivitySummaryClient {
     /// `incomplete` response with no message. Sending an explicit effort avoids
     /// depending on the server's default; `None` omits it for servers that
     /// reject the field.
-    fn request_body(&self, prompt: &str) -> Value {
+    fn request_body(&self, instructions: &str, prompt: &str, max_output_tokens: u16) -> Value {
         let mut body = json!({
             "model": self.model.as_str(),
-            "instructions": SYSTEM_PROMPT,
+            "instructions": instructions,
             "input": prompt,
-            "max_output_tokens": self.max_output_tokens,
+            "max_output_tokens": max_output_tokens,
             "store": false,
         });
         if let Some(effort) = &self.reasoning_effort
@@ -900,12 +1102,17 @@ impl ActivitySummaryClient {
         body
     }
 
-    async fn summarize(&self, prompt: &str) -> Result<String, ActivitySummaryError> {
+    async fn respond(
+        &self,
+        instructions: &str,
+        prompt: &str,
+        max_output_tokens: u16,
+    ) -> Result<String, ActivitySummaryError> {
         let response = self
             .client
             .post(&self.responses_url)
             .bearer_auth(&self.api_key)
-            .json(&self.request_body(prompt))
+            .json(&self.request_body(instructions, prompt, max_output_tokens))
             .send()
             .await?;
         let status = response.status();
@@ -1113,9 +1320,57 @@ mod tests {
         assert!(!redacted.contains("sk-svc-secret"));
     }
 
+    fn activity(started_at: Instant) -> ExecutionActivity {
+        ExecutionActivity::new(
+            ThreadKey::parse("test:thread").unwrap(),
+            4,
+            Some("Investigate USDG vault yield".to_owned()),
+            started_at,
+        )
+    }
+
+    const PROGRESS: ProgressUpdateConfig = ProgressUpdateConfig {
+        after: Duration::from_secs(120),
+        interval: Duration::from_secs(300),
+    };
+
+    #[test]
+    fn progress_waits_for_threshold_then_new_activity_and_interval() {
+        let start = Instant::now();
+        let at = |secs| start + Duration::from_secs(secs);
+        let mut state = activity(start);
+        state.push(ActivityFact::high("tool", "using websearch"));
+
+        assert!(state.prepare_progress(at(119), PROGRESS).is_none());
+        let (prompt, elapsed) = state.prepare_progress(at(120), PROGRESS).unwrap();
+        assert_eq!(elapsed, Duration::from_secs(120));
+        assert!(prompt.contains("Time spent so far: about 2 minutes"));
+        assert!(prompt.contains("- tool: using websearch"));
+        state.last_progress = Some("I'm searching for USDG yield sources.".to_owned());
+
+        assert!(state.prepare_progress(at(420), PROGRESS).is_none());
+        state.push(ActivityFact::high(
+            "commentary",
+            "The vault routes yield via Morpho.",
+        ));
+        assert!(state.prepare_progress(at(400), PROGRESS).is_none());
+        let (prompt, _) = state.prepare_progress(at(420), PROGRESS).unwrap();
+        assert!(prompt.contains("Previous progress update: I'm searching for USDG yield sources."));
+    }
+
+    #[test]
+    fn sanitizes_progress_updates() {
+        assert_eq!(sanitize_progress_update(" SKIP "), None);
+        assert_eq!(sanitize_progress_update(&"a".repeat(501)), None);
+        assert_eq!(
+            sanitize_progress_update("\"I found the vault contract; now tracing its yield.\""),
+            Some("I found the vault contract; now tracing its yield.".to_owned())
+        );
+    }
+
     #[test]
     fn throttles_unchanged_activity() {
-        let mut state = ExecutionActivity::new(4, Some("Investigate USDG vault yield".to_owned()));
+        let mut state = activity(Instant::now());
         let now = Instant::now();
         state.push(ActivityFact::high("tool", "using websearch"));
         assert!(state.prepare_publish(now, Duration::from_secs(8)).is_some());
@@ -1129,7 +1384,7 @@ mod tests {
 
     #[test]
     fn skips_low_signal_only_activity() {
-        let mut state = ExecutionActivity::new(4, Some("Investigate USDG vault yield".to_owned()));
+        let mut state = activity(Instant::now());
         let now = Instant::now();
         state.push(ActivityFact::low("command", "checking tool help"));
 
@@ -1138,7 +1393,7 @@ mod tests {
 
     #[test]
     fn prompt_includes_session_goal() {
-        let mut state = ExecutionActivity::new(4, Some("Investigate USDG vault yield".to_owned()));
+        let mut state = activity(Instant::now());
         state.push(ActivityFact::high("tool", "using websearch"));
 
         let prompt = state.prompt();
@@ -1190,13 +1445,14 @@ mod tests {
             model: "gpt-5.4-nano".to_owned(),
             reasoning_effort: effort.map(str::to_owned),
             timeout: Duration::from_secs(5),
+            progress: None,
         })
         .expect("client")
     }
 
     #[test]
     fn summary_request_carries_the_reasoning_effort() {
-        let body = client_with_effort(Some("low")).request_body("prompt");
+        let body = client_with_effort(Some("low")).request_body(SYSTEM_PROMPT, "prompt", 128);
         assert_eq!(body["reasoning"]["effort"], "low");
         assert_eq!(body["max_output_tokens"], 128);
     }
@@ -1205,7 +1461,7 @@ mod tests {
     /// set to something it also does not understand.
     #[test]
     fn summary_request_omits_the_effort_when_unset() {
-        let body = client_with_effort(None).request_body("prompt");
+        let body = client_with_effort(None).request_body(SYSTEM_PROMPT, "prompt", 128);
         assert!(body.get("reasoning").is_none());
     }
 }
