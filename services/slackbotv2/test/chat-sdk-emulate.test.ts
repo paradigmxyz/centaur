@@ -4602,8 +4602,7 @@ describe('slackbotv2', () => {
 describe('proactive replies', () => {
   function createProactiveBot(
     decide: (input: ProactiveClassifierInput) => ProactiveDecision | Promise<ProactiveDecision>,
-    overrides: Partial<Parameters<typeof createSlackbotV2>[0]> = {},
-    proactivity: { maxTurnsPerMention?: number } = {}
+    overrides: Partial<Parameters<typeof createSlackbotV2>[0]> = {}
   ): ProactiveClassifierInput[] {
     const calls: ProactiveClassifierInput[] = []
     bot = createTestBot({
@@ -4611,8 +4610,7 @@ describe('proactive replies', () => {
         classifier: async input => {
           calls.push(input)
           return decide(input)
-        },
-        ...proactivity
+        }
       },
       ...overrides
     })
@@ -4724,26 +4722,7 @@ describe('proactive replies', () => {
     expect(codexApi.executes).toHaveLength(1)
   })
 
-  it('stops after the turn limit until the next mention', async () => {
-    const calls = createProactiveBot(
-      () => ({ respond: true }),
-      {},
-      { maxTurnsPerMention: 1 }
-    )
-    const threadTs = await mentionThread('Proactive limit context.')
-
-    await reply('first follow-up?', threadTs)
-    await reply('second follow-up?', threadTs)
-    expect(calls).toHaveLength(1)
-    expect(codexApi.executes).toHaveLength(2)
-
-    await reply(`<@${BOT_USER_ID}> one more`, threadTs)
-    await reply('third follow-up?', threadTs)
-    expect(calls).toHaveLength(2)
-    expect(codexApi.executes).toHaveLength(4)
-  })
-
-  it('ends proactive replies when the thread is stopped', async () => {
+  it('ends proactive replies at a stop until the next mention', async () => {
     const calls = createProactiveBot(
       () => ({ respond: true }),
       {
@@ -4754,11 +4733,22 @@ describe('proactive replies', () => {
     )
     const threadTs = await mentionThread('Proactive stop context.')
 
-    await (await sendMessage(`<@${BOT_USER_ID}> stop`, { threadTs })).finished()
-    await (await sendMessage('are you still there?', { threadTs })).finished()
+    await reply('first follow-up?', threadTs)
+    await reply('second follow-up?', threadTs)
+    expect(calls).toHaveLength(2)
+    expect(codexApi.executes).toHaveLength(3)
 
-    expect(calls).toHaveLength(0)
-    expect(codexApi.executes).toHaveLength(1)
+    await reply(`<@${BOT_USER_ID}> stop`, threadTs)
+    await reply('are you still there?', threadTs)
+    expect(calls).toHaveLength(2)
+    expect(codexApi.executes).toHaveLength(3)
+
+    // Emulator timestamps have whole-second precision, so runs for messages in
+    // the stop's second are suppressed as stopped; only eligibility is checked.
+    await reply(`<@${BOT_USER_ID}> one more`, threadTs)
+    await reply('and after that?', threadTs)
+    expect(calls).toHaveLength(3)
+    expect(calls[2]!.message.text).toBe('and after that?')
   })
 })
 

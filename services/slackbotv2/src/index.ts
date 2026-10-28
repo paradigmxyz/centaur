@@ -196,8 +196,6 @@ const LATE_SLACK_FILE_IDLE_POLL_MS = 500
 const LATE_SLACK_FILE_MESSAGE_TEXT = 'Late Slack file attachment for the previous message.'
 const SLACK_BLOCK_ACTION_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000
 const SLACK_BLOCK_ACTION_LEASE_TTL_MS = 60 * 1000
-const PROACTIVE_ELIGIBILITY_WINDOW_MS = 24 * 60 * 60 * 1000
-const PROACTIVE_MAX_TURNS_PER_MENTION = 3
 const PROACTIVE_CLASSIFIER_TIMEOUT_MS = 2_000
 const PROACTIVE_HISTORY_MESSAGES = 20
 // Mentions that make a thread eligible; DMs already treat every message as a mention.
@@ -759,11 +757,7 @@ async function handleSlackMessageHandoff(
       && PROACTIVE_ELIGIBILITY_TRIGGERS.has(input.trigger)
       && proactiveChannelAllowed(proactivity, thread.id)
     ) {
-      await thread.setState({
-        proactiveEligibleUntil:
-          Date.now() + (proactivity.eligibilityWindowMs ?? PROACTIVE_ELIGIBILITY_WINDOW_MS),
-        proactiveTurns: 0
-      })
+      await thread.setState({ proactiveEligible: true })
     }
     // Assistant status is thread-wide. A mentioned follow-up that steers an
     // active execution must not clear or replace the status owned by that run.
@@ -845,7 +839,7 @@ async function interruptThreadExecution(
     // started yet sees it in its handoff (see stopRequestedFor), and one it
     // has started is visible to the interrupt below. A stop also ends
     // proactive replies until the next mention.
-    await thread.setState({ proactiveEligibleUntil: null, stopRequestedAt: Date.now() })
+    await thread.setState({ proactiveEligible: false, stopRequestedAt: Date.now() })
     const response = await interruptSessionExecution(options, thread.id, reason)
     // With nothing interrupted, a handoff may still own this state.
     if (response.interrupted) {
@@ -929,15 +923,13 @@ async function handleProactiveMessage(
     record('decline', decisionFields)
     return
   }
-  // A mention, stop, or another proactive reply may have landed while the
-  // classifier ran.
+  // A stop or another execution may have landed while the classifier ran.
   const latest = (await thread.state) ?? {}
   const lateSkipReason = proactiveSkipReason(proactivity, latest, thread, message, options)
   if (lateSkipReason) {
     record(`skip_${lateSkipReason}`, decisionFields)
     return
   }
-  await thread.setState({ proactiveTurns: (latest.proactiveTurns ?? 0) + 1 })
   record('respond', decisionFields)
   await handleSlackMessageHandoff(thread, message, {
     assistantStatusRequested: true,
@@ -959,9 +951,7 @@ function proactiveSkipReason(
   options: SlackbotV2Options
 ): string | undefined {
   if (!proactiveChannelAllowed(proactivity, thread.id)) return 'channel'
-  if ((state.proactiveEligibleUntil ?? 0) <= Date.now()) return 'not_eligible'
-  const maxTurns = proactivity.maxTurnsPerMention ?? PROACTIVE_MAX_TURNS_PER_MENTION
-  if ((state.proactiveTurns ?? 0) >= maxTurns) return 'turn_limit'
+  if (state.proactiveEligible !== true) return 'not_eligible'
   // Unmentioned replies never steer an active execution; the next turn
   // collects them as thread context.
   if (state.activeExecution === true) return 'active_execution'

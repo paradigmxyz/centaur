@@ -533,8 +533,6 @@
             "model": { "type": "string", "minLength": 1 },
             "openaiBaseUrl": { "type": "string" },
             "channels": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-            "eligibilityWindowMs": { "type": "integer", "minimum": 1 },
-            "maxTurnsPerMention": { "type": "integer", "minimum": 1 },
             "timeoutMs": { "type": "integer", "minimum": 1 }
           }
         },

@@ -234,10 +234,6 @@ export type SlackbotV2ProactivityOptions = {
   classifier: ProactiveClassifier
   /** Slack conversation ids where proactivity applies. Empty or unset means every channel. */
   channels?: readonly string[]
-  /** How long a mention keeps its thread eligible. Defaults to 24h. */
-  eligibilityWindowMs?: number
-  /** Unmentioned replies allowed per mention. Defaults to 3. */
-  maxTurnsPerMention?: number
   /** Deadline for one classifier decision; a late decision declines. Defaults to 2s. */
   timeoutMs?: number
 }
@@ -294,10 +290,8 @@ export type SlackbotV2ThreadState = {
   model?: string | null
   /** Persona pinned by the session API. Null means the thread is pinned without a persona. */
   personaId?: string | null
-  /** Unmentioned replies may get a proactive response until this time (ms). */
-  proactiveEligibleUntil?: number | null
-  /** Proactive responses since the last mention. */
-  proactiveTurns?: number
+  /** Set by a mention and cleared by a stop: unmentioned replies may get a proactive response. */
+  proactiveEligible?: boolean
   /** Last thread-level model provider selected by Slack flags. Null clears persisted state. */
   provider?: string | null
   renderObligation?: SlackbotV2RenderObligation | null

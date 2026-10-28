@@ -233,8 +233,6 @@ function createProactivityOptions(): SlackbotV2Options['proactivity'] {
   return {
     channels: splitEnvList(optionalEnv('SLACKBOTV2_PROACTIVITY_CHANNELS')),
     classifier: createProactiveClassifier(proactivityClassifierBackend()),
-    eligibilityWindowMs: optionalNumberEnv('SLACKBOTV2_PROACTIVITY_ELIGIBILITY_WINDOW_MS'),
-    maxTurnsPerMention: optionalNumberEnv('SLACKBOTV2_PROACTIVITY_MAX_TURNS'),
     timeoutMs: optionalNumberEnv('SLACKBOTV2_PROACTIVITY_TIMEOUT_MS')
   }
 }

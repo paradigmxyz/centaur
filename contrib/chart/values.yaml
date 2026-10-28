@@ -827,22 +827,18 @@ slackbotv2:
     model: gpt-6-luna
     openaiBaseUrl: https://api.openai.com/v1
     timeoutMs: 1500
-  # Proactive replies. A mention makes its thread eligible for
-  # eligibilityWindowMs; later unmentioned replies in that thread are
-  # classified and answered without a mention when the classifier says the
-  # bot should respond, at most maxTurnsPerMention times per mention. A stop
-  # command ends eligibility until the next mention. channels limits this to
-  # the listed Slack conversation ids (empty means every channel). The openai
-  # classifier reads OPENAI_API_KEY from the shared secret, or
-  # SLACKBOTV2_PROACTIVITY_OPENAI_API_KEY via extraEnv.
+  # Proactive replies. A mention makes its thread eligible until a stop
+  # command; later unmentioned replies in that thread are classified and
+  # answered without a mention when the classifier says the bot should
+  # respond. channels limits this to the listed Slack conversation ids (empty
+  # means every channel). The openai classifier reads OPENAI_API_KEY from the
+  # shared secret, or SLACKBOTV2_PROACTIVITY_OPENAI_API_KEY via extraEnv.
   proactivity:
     enabled: false
     classifier: openai
     model: gpt-5.4-nano
     openaiBaseUrl: https://api.openai.com/v1
     channels: []
-    eligibilityWindowMs: 86400000
-    maxTurnsPerMention: 3
     timeoutMs: 2000
   metrics:
     # slackbotv2 serves Prometheus text metrics at /metrics. This flag only

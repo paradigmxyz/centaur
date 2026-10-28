@@ -111,10 +111,6 @@ spec:
               value: {{ .Values.slackbotv2.proactivity.openaiBaseUrl | quote }}
             - name: SLACKBOTV2_PROACTIVITY_CHANNELS
               value: {{ join "," .Values.slackbotv2.proactivity.channels | quote }}
-            - name: SLACKBOTV2_PROACTIVITY_ELIGIBILITY_WINDOW_MS
-              value: {{ .Values.slackbotv2.proactivity.eligibilityWindowMs | int64 | quote }}
-            - name: SLACKBOTV2_PROACTIVITY_MAX_TURNS
-              value: {{ .Values.slackbotv2.proactivity.maxTurnsPerMention | quote }}
             - name: SLACKBOTV2_PROACTIVITY_TIMEOUT_MS
               value: {{ .Values.slackbotv2.proactivity.timeoutMs | quote }}
 {{- end }}
