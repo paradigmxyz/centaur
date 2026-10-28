@@ -308,3 +308,57 @@
 - description: thoroughness without a selector
   vars:
     text: be more thorough this time
+- description: question about the current model
+  vars:
+    text: "@bot what model are you?"
+- description: question about which harness ran
+  vars:
+    text: "@bot did you run this on codex or claude?"
+- description: asking for an opinion on models
+  vars:
+    text: "@bot is fable or opus better at long refactors? curious what you think"
+- description: summarizing a model launch
+  vars:
+    text: "@bot summarize the opus 5.5 launch post for the team"
+- description: ml model in a task
+  vars:
+    text: "@bot our churn model is overfitting on last quarter's data, can you take a look?"
+- description: harness name as a ci job
+  vars:
+    text: "@bot the codex-e2e CI job flaked again, can you find out why?"
+- description: reasoning as rationale
+  vars:
+    text: "@bot what's the reasoning behind the 30s timeout in the scheduler?"
+- description: effort as an estimate
+  vars:
+    text: "@bot give me an effort estimate for migrating the billing service to postgres 17"
+- description: mode as a product setting
+  vars:
+    text: "@bot set dark mode as the default in the dashboard settings"
+- description: provider as an incident subject
+  vars:
+    text: "@bot openrouter had an outage yesterday, draft a short postmortem from the incident channel"
+- description: think as an ordinary verb
+  vars:
+    text: "@bot think about whether we should split the monorepo and write up the tradeoffs"
+- description: model default in a feature request
+  vars:
+    text: "@bot add a model option to our CLI that defaults to sonnet"
+- description: provider as a billing subject
+  vars:
+    text: "@bot the bedrock bill doubled last month, break it down by service"
+- description: models as product features
+  vars:
+    text: "@bot can you write release notes for the new haiku and sonnet support in our SDK?"
+- description: model and effort in code to translate
+  vars:
+    text: "@bot translate this to python: `client.responses.create(model=\"gpt-5.5\", reasoning={\"effort\": \"high\"})`"
+- description: past harness used as feedback
+  vars:
+    text: "@bot last time you used claude it missed the edge cases, can you double check the parser tests?"
+- description: aliases as cluster names
+  vars:
+    text: "@bot luna and sol are the two staging clusters, which one is healthier right now?"
+- description: effort as a ticket label
+  vars:
+    text: "@bot high effort tickets should go to the platform team; can you triage the backlog?"
