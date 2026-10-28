@@ -1,0 +1,1279 @@
+# Multi-party threads, oldest first as {author: text}; the last entry is the
+# newest message. Each thread appears several times, cut at different points.
+# Whole threads are held out (descriptions prefixed holdout/) so prompt tuning
+# can be checked on threads it never saw. Tune with
+# --filter-pattern '^(?!holdout/)', then report both. Do not move a thread
+# between splits after tuning on it.
+
+- description: holdout/bakery-sales-review-04
+  vars:
+    respond: true
+    thread:
+    - priya: 'Weekend numbers are in for the Elm St bakery: 1,240 orders, about 8% under what we planned.'
+    - tomas: Rain on Saturday probably explains some of it. Curious how the new sourdough line did.
+    - priya: '@centaur how did actual weekend sales compare to our forecast by product?'
+    - centaur: Total sales were 8% under forecast. Pastries were on plan, bread was 15% under, and the new sourdough was 30% under.
+    - priya: where should we adjust the forecast for next weekend?
+- description: holdout/bakery-sales-review-05
+  vars:
+    respond: false
+    thread:
+    - priya: 'Weekend numbers are in for the Elm St bakery: 1,240 orders, about 8% under what we planned.'
+    - tomas: Rain on Saturday probably explains some of it. Curious how the new sourdough line did.
+    - priya: '@centaur how did actual weekend sales compare to our forecast by product?'
+    - centaur: Total sales were 8% under forecast. Pastries were on plan, bread was 15% under, and the new sourdough was 30% under.
+    - priya: where should we adjust the forecast for next weekend?
+    - tomas: '@priya For sourdough I assumed every regular would try it once. That was too optimistic, and we also sold out by 11am on Sunday.'
+- description: holdout/bakery-sales-review-06
+  vars:
+    respond: true
+    thread:
+    - priya: 'Weekend numbers are in for the Elm St bakery: 1,240 orders, about 8% under what we planned.'
+    - tomas: Rain on Saturday probably explains some of it. Curious how the new sourdough line did.
+    - priya: '@centaur how did actual weekend sales compare to our forecast by product?'
+    - centaur: Total sales were 8% under forecast. Pastries were on plan, bread was 15% under, and the new sourdough was 30% under.
+    - priya: where should we adjust the forecast for next weekend?
+    - tomas: '@priya For sourdough I assumed every regular would try it once. That was too optimistic, and we also sold out by 11am on Sunday.'
+    - tomas: keep going on Priya's question though
+- description: holdout/bakery-sales-review-08
+  vars:
+    respond: true
+    thread:
+    - priya: 'Weekend numbers are in for the Elm St bakery: 1,240 orders, about 8% under what we planned.'
+    - tomas: Rain on Saturday probably explains some of it. Curious how the new sourdough line did.
+    - priya: '@centaur how did actual weekend sales compare to our forecast by product?'
+    - centaur: Total sales were 8% under forecast. Pastries were on plan, bread was 15% under, and the new sourdough was 30% under.
+    - priya: where should we adjust the forecast for next weekend?
+    - tomas: '@priya For sourdough I assumed every regular would try it once. That was too optimistic, and we also sold out by 11am on Sunday.'
+    - tomas: keep going on Priya's question though
+    - centaur: Cut the sourdough trial-rate assumption in half, but raise Sunday bake volume, since the stockout hid some demand. Bread looks weather-driven, so I'd leave its baseline alone.
+    - priya: can you break down how much of the miss was the stockout vs. lower demand?
+- description: holdout/bakery-sales-review-10
+  vars:
+    respond: false
+    thread:
+    - priya: 'Weekend numbers are in for the Elm St bakery: 1,240 orders, about 8% under what we planned.'
+    - tomas: Rain on Saturday probably explains some of it. Curious how the new sourdough line did.
+    - priya: '@centaur how did actual weekend sales compare to our forecast by product?'
+    - centaur: Total sales were 8% under forecast. Pastries were on plan, bread was 15% under, and the new sourdough was 30% under.
+    - priya: where should we adjust the forecast for next weekend?
+    - tomas: '@priya For sourdough I assumed every regular would try it once. That was too optimistic, and we also sold out by 11am on Sunday.'
+    - tomas: keep going on Priya's question though
+    - centaur: Cut the sourdough trial-rate assumption in half, but raise Sunday bake volume, since the stockout hid some demand. Bread looks weather-driven, so I'd leave its baseline alone.
+    - priya: can you break down how much of the miss was the stockout vs. lower demand?
+    - centaur: Roughly 60% of the sourdough miss happened after the stockout, so lost sales from running out are about $900 of the $1,500 gap.
+    - priya: Lesson learned, bake more on Sundays
+- description: holdout/conference-budget-02
+  vars:
+    respond: true
+    thread:
+    - dana: '@centaur what''s our total venue cost for the spring user conference?'
+    - centaur: '$48,000 total: $40,000 for the hall rental plus an $8,000 AV package.'
+    - dana: The venue just sent a revised quote, it's $51,500 now. please update that
+- description: holdout/conference-budget-03
+  vars:
+    respond: true
+    thread:
+    - dana: '@centaur what''s our total venue cost for the spring user conference?'
+    - centaur: '$48,000 total: $40,000 for the hall rental plus an $8,000 AV package.'
+    - dana: The venue just sent a revised quote, it's $51,500 now. please update that
+    - dana: Here's the updated catering sheet too, add $3,000 for the extra coffee service on day 2. [attached spreadsheet]
+- description: holdout/conference-budget-04
+  vars:
+    respond: true
+    thread:
+    - dana: '@centaur what''s our total venue cost for the spring user conference?'
+    - centaur: '$48,000 total: $40,000 for the hall rental plus an $8,000 AV package.'
+    - dana: The venue just sent a revised quote, it's $51,500 now. please update that
+    - dana: Here's the updated catering sheet too, add $3,000 for the extra coffee service on day 2. [attached spreadsheet]
+    - marcus: ^ yeah make sure both of those are reflected
+- description: holdout/conference-budget-06
+  vars:
+    respond: false
+    thread:
+    - dana: '@centaur what''s our total venue cost for the spring user conference?'
+    - centaur: '$48,000 total: $40,000 for the hall rental plus an $8,000 AV package.'
+    - dana: The venue just sent a revised quote, it's $51,500 now. please update that
+    - dana: Here's the updated catering sheet too, add $3,000 for the extra coffee service on day 2. [attached spreadsheet]
+    - marcus: ^ yeah make sure both of those are reflected
+    - centaur: 'Updated: venue is $51,500 and catering goes up $3,000, so the total event budget is now $97,200.'
+    - marcus: thanks, that matches what finance has
+- description: community-garden-site-08
+  vars:
+    respond: true
+    thread:
+    - ines: Has anyone seen the thread about volunteer sign-ups dropping across neighborhood gardens?
+    - raj: Which thread?
+    - ines: 'This one: https://forum.example.org/t/volunteer-dropoff'
+    - raj: I think it's mostly a scheduling problem. People want to drop in, not commit to a weekly slot.
+    - ines: Agree. We should figure out how much people actually want to drop in, maybe with a simple page.
+    - raj: I'd love a map of plots plus open shifts that anyone can claim.
+    - ines: '@centaur can you put together a short research summary on drop-in volunteer models for community gardens? Pull a few examples.'
+    - centaur: Here's a summary of 12 programs. Drop-in models work best with a visible task board and a weekly anchor event. [file]
+    - leo: can you turn Raj's idea into a simple web page at garden.example.org/shifts?
+- description: community-garden-site-09
+  vars:
+    respond: false
+    thread:
+    - ines: Has anyone seen the thread about volunteer sign-ups dropping across neighborhood gardens?
+    - raj: Which thread?
+    - ines: 'This one: https://forum.example.org/t/volunteer-dropoff'
+    - raj: I think it's mostly a scheduling problem. People want to drop in, not commit to a weekly slot.
+    - ines: Agree. We should figure out how much people actually want to drop in, maybe with a simple page.
+    - raj: I'd love a map of plots plus open shifts that anyone can claim.
+    - ines: '@centaur can you put together a short research summary on drop-in volunteer models for community gardens? Pull a few examples.'
+    - centaur: Here's a summary of 12 programs. Drop-in models work best with a visible task board and a weekly anchor event. [file]
+    - leo: can you turn Raj's idea into a simple web page at garden.example.org/shifts?
+    - leo: also this is a nice example of a shift board another city built https://example.net/shiftboard
+- description: community-garden-site-11
+  vars:
+    respond: true
+    thread:
+    - ines: Has anyone seen the thread about volunteer sign-ups dropping across neighborhood gardens?
+    - raj: Which thread?
+    - ines: 'This one: https://forum.example.org/t/volunteer-dropoff'
+    - raj: I think it's mostly a scheduling problem. People want to drop in, not commit to a weekly slot.
+    - ines: Agree. We should figure out how much people actually want to drop in, maybe with a simple page.
+    - raj: I'd love a map of plots plus open shifts that anyone can claim.
+    - ines: '@centaur can you put together a short research summary on drop-in volunteer models for community gardens? Pull a few examples.'
+    - centaur: Here's a summary of 12 programs. Drop-in models work best with a visible task board and a weekly anchor event. [file]
+    - leo: can you turn Raj's idea into a simple web page at garden.example.org/shifts?
+    - leo: also this is a nice example of a shift board another city built https://example.net/shiftboard
+    - centaur: Built a prototype with a plot map, open shifts and a claim button. It isn't live yet because I don't have deploy access to the site.
+    - ines: make it look like our newsletter, green header and the serif font
+- description: community-garden-site-13
+  vars:
+    respond: true
+    thread:
+    - ines: Has anyone seen the thread about volunteer sign-ups dropping across neighborhood gardens?
+    - raj: Which thread?
+    - ines: 'This one: https://forum.example.org/t/volunteer-dropoff'
+    - raj: I think it's mostly a scheduling problem. People want to drop in, not commit to a weekly slot.
+    - ines: Agree. We should figure out how much people actually want to drop in, maybe with a simple page.
+    - raj: I'd love a map of plots plus open shifts that anyone can claim.
+    - ines: '@centaur can you put together a short research summary on drop-in volunteer models for community gardens? Pull a few examples.'
+    - centaur: Here's a summary of 12 programs. Drop-in models work best with a visible task board and a weekly anchor event. [file]
+    - leo: can you turn Raj's idea into a simple web page at garden.example.org/shifts?
+    - leo: also this is a nice example of a shift board another city built https://example.net/shiftboard
+    - centaur: Built a prototype with a plot map, open shifts and a claim button. It isn't live yet because I don't have deploy access to the site.
+    - ines: make it look like our newsletter, green header and the serif font
+    - centaur: Restyled it to match the newsletter. It still needs deploy access.
+    - raj: I just gave you access to the hosting account, try again
+- description: community-garden-site-15
+  vars:
+    respond: false
+    thread:
+    - ines: Has anyone seen the thread about volunteer sign-ups dropping across neighborhood gardens?
+    - raj: Which thread?
+    - ines: 'This one: https://forum.example.org/t/volunteer-dropoff'
+    - raj: I think it's mostly a scheduling problem. People want to drop in, not commit to a weekly slot.
+    - ines: Agree. We should figure out how much people actually want to drop in, maybe with a simple page.
+    - raj: I'd love a map of plots plus open shifts that anyone can claim.
+    - ines: '@centaur can you put together a short research summary on drop-in volunteer models for community gardens? Pull a few examples.'
+    - centaur: Here's a summary of 12 programs. Drop-in models work best with a visible task board and a weekly anchor event. [file]
+    - leo: can you turn Raj's idea into a simple web page at garden.example.org/shifts?
+    - leo: also this is a nice example of a shift board another city built https://example.net/shiftboard
+    - centaur: Built a prototype with a plot map, open shifts and a claim button. It isn't live yet because I don't have deploy access to the site.
+    - ines: make it look like our newsletter, green header and the serif font
+    - centaur: Restyled it to match the newsletter. It still needs deploy access.
+    - raj: I just gave you access to the hosting account, try again
+    - centaur: Access works and the deploy started, but DNS for garden.example.org isn't pointing at it yet.
+    - raj: hang on, I think I need to change a setting
+- description: community-garden-site-16
+  vars:
+    respond: true
+    thread:
+    - ines: Has anyone seen the thread about volunteer sign-ups dropping across neighborhood gardens?
+    - raj: Which thread?
+    - ines: 'This one: https://forum.example.org/t/volunteer-dropoff'
+    - raj: I think it's mostly a scheduling problem. People want to drop in, not commit to a weekly slot.
+    - ines: Agree. We should figure out how much people actually want to drop in, maybe with a simple page.
+    - raj: I'd love a map of plots plus open shifts that anyone can claim.
+    - ines: '@centaur can you put together a short research summary on drop-in volunteer models for community gardens? Pull a few examples.'
+    - centaur: Here's a summary of 12 programs. Drop-in models work best with a visible task board and a weekly anchor event. [file]
+    - leo: can you turn Raj's idea into a simple web page at garden.example.org/shifts?
+    - leo: also this is a nice example of a shift board another city built https://example.net/shiftboard
+    - centaur: Built a prototype with a plot map, open shifts and a claim button. It isn't live yet because I don't have deploy access to the site.
+    - ines: make it look like our newsletter, green header and the serif font
+    - centaur: Restyled it to match the newsletter. It still needs deploy access.
+    - raj: I just gave you access to the hosting account, try again
+    - centaur: Access works and the deploy started, but DNS for garden.example.org isn't pointing at it yet.
+    - raj: hang on, I think I need to change a setting
+    - raj: ok, DNS is updated. redeploy and check the page loads
+- description: community-garden-site-18
+  vars:
+    respond: false
+    thread:
+    - ines: Has anyone seen the thread about volunteer sign-ups dropping across neighborhood gardens?
+    - raj: Which thread?
+    - ines: 'This one: https://forum.example.org/t/volunteer-dropoff'
+    - raj: I think it's mostly a scheduling problem. People want to drop in, not commit to a weekly slot.
+    - ines: Agree. We should figure out how much people actually want to drop in, maybe with a simple page.
+    - raj: I'd love a map of plots plus open shifts that anyone can claim.
+    - ines: '@centaur can you put together a short research summary on drop-in volunteer models for community gardens? Pull a few examples.'
+    - centaur: Here's a summary of 12 programs. Drop-in models work best with a visible task board and a weekly anchor event. [file]
+    - leo: can you turn Raj's idea into a simple web page at garden.example.org/shifts?
+    - leo: also this is a nice example of a shift board another city built https://example.net/shiftboard
+    - centaur: Built a prototype with a plot map, open shifts and a claim button. It isn't live yet because I don't have deploy access to the site.
+    - ines: make it look like our newsletter, green header and the serif font
+    - centaur: Restyled it to match the newsletter. It still needs deploy access.
+    - raj: I just gave you access to the hosting account, try again
+    - centaur: Access works and the deploy started, but DNS for garden.example.org isn't pointing at it yet.
+    - raj: hang on, I think I need to change a setting
+    - raj: ok, DNS is updated. redeploy and check the page loads
+    - centaur: It's live at garden.example.org/shifts and loads correctly on desktop and mobile.
+    - raj: nice work on the design idea @leo
+- description: community-garden-site-19
+  vars:
+    respond: true
+    thread:
+    - ines: Has anyone seen the thread about volunteer sign-ups dropping across neighborhood gardens?
+    - raj: Which thread?
+    - ines: 'This one: https://forum.example.org/t/volunteer-dropoff'
+    - raj: I think it's mostly a scheduling problem. People want to drop in, not commit to a weekly slot.
+    - ines: Agree. We should figure out how much people actually want to drop in, maybe with a simple page.
+    - raj: I'd love a map of plots plus open shifts that anyone can claim.
+    - ines: '@centaur can you put together a short research summary on drop-in volunteer models for community gardens? Pull a few examples.'
+    - centaur: Here's a summary of 12 programs. Drop-in models work best with a visible task board and a weekly anchor event. [file]
+    - leo: can you turn Raj's idea into a simple web page at garden.example.org/shifts?
+    - leo: also this is a nice example of a shift board another city built https://example.net/shiftboard
+    - centaur: Built a prototype with a plot map, open shifts and a claim button. It isn't live yet because I don't have deploy access to the site.
+    - ines: make it look like our newsletter, green header and the serif font
+    - centaur: Restyled it to match the newsletter. It still needs deploy access.
+    - raj: I just gave you access to the hosting account, try again
+    - centaur: Access works and the deploy started, but DNS for garden.example.org isn't pointing at it yet.
+    - raj: hang on, I think I need to change a setting
+    - raj: ok, DNS is updated. redeploy and check the page loads
+    - centaur: It's live at garden.example.org/shifts and loads correctly on desktop and mobile.
+    - raj: nice work on the design idea @leo
+    - raj: why did you pick a map library instead of a static image?
+- description: community-garden-site-21
+  vars:
+    respond: false
+    thread:
+    - ines: Has anyone seen the thread about volunteer sign-ups dropping across neighborhood gardens?
+    - raj: Which thread?
+    - ines: 'This one: https://forum.example.org/t/volunteer-dropoff'
+    - raj: I think it's mostly a scheduling problem. People want to drop in, not commit to a weekly slot.
+    - ines: Agree. We should figure out how much people actually want to drop in, maybe with a simple page.
+    - raj: I'd love a map of plots plus open shifts that anyone can claim.
+    - ines: '@centaur can you put together a short research summary on drop-in volunteer models for community gardens? Pull a few examples.'
+    - centaur: Here's a summary of 12 programs. Drop-in models work best with a visible task board and a weekly anchor event. [file]
+    - leo: can you turn Raj's idea into a simple web page at garden.example.org/shifts?
+    - leo: also this is a nice example of a shift board another city built https://example.net/shiftboard
+    - centaur: Built a prototype with a plot map, open shifts and a claim button. It isn't live yet because I don't have deploy access to the site.
+    - ines: make it look like our newsletter, green header and the serif font
+    - centaur: Restyled it to match the newsletter. It still needs deploy access.
+    - raj: I just gave you access to the hosting account, try again
+    - centaur: Access works and the deploy started, but DNS for garden.example.org isn't pointing at it yet.
+    - raj: hang on, I think I need to change a setting
+    - raj: ok, DNS is updated. redeploy and check the page loads
+    - centaur: It's live at garden.example.org/shifts and loads correctly on desktop and mobile.
+    - raj: nice work on the design idea @leo
+    - raj: why did you pick a map library instead of a static image?
+    - centaur: Plots change every season, so an editable map means nobody has to redraw anything. A static image would load faster if you prefer that.
+    - leo: looks great!
+- description: community-garden-site-22
+  vars:
+    respond: true
+    thread:
+    - ines: Has anyone seen the thread about volunteer sign-ups dropping across neighborhood gardens?
+    - raj: Which thread?
+    - ines: 'This one: https://forum.example.org/t/volunteer-dropoff'
+    - raj: I think it's mostly a scheduling problem. People want to drop in, not commit to a weekly slot.
+    - ines: Agree. We should figure out how much people actually want to drop in, maybe with a simple page.
+    - raj: I'd love a map of plots plus open shifts that anyone can claim.
+    - ines: '@centaur can you put together a short research summary on drop-in volunteer models for community gardens? Pull a few examples.'
+    - centaur: Here's a summary of 12 programs. Drop-in models work best with a visible task board and a weekly anchor event. [file]
+    - leo: can you turn Raj's idea into a simple web page at garden.example.org/shifts?
+    - leo: also this is a nice example of a shift board another city built https://example.net/shiftboard
+    - centaur: Built a prototype with a plot map, open shifts and a claim button. It isn't live yet because I don't have deploy access to the site.
+    - ines: make it look like our newsletter, green header and the serif font
+    - centaur: Restyled it to match the newsletter. It still needs deploy access.
+    - raj: I just gave you access to the hosting account, try again
+    - centaur: Access works and the deploy started, but DNS for garden.example.org isn't pointing at it yet.
+    - raj: hang on, I think I need to change a setting
+    - raj: ok, DNS is updated. redeploy and check the page loads
+    - centaur: It's live at garden.example.org/shifts and loads correctly on desktop and mobile.
+    - raj: nice work on the design idea @leo
+    - raj: why did you pick a map library instead of a static image?
+    - centaur: Plots change every season, so an editable map means nobody has to redraw anything. A static image would load faster if you prefer that.
+    - leo: looks great!
+    - ines: walk us through how the claim flow works
+- description: holdout/podcast-audio-cleanup-03
+  vars:
+    respond: false
+    thread:
+    - sam: Episode 42 is recorded! Thanks everyone. The raw files are in the shared folder.
+    - nora: '@centaur grab the raw audio for episode 42 from https://files.example.com/ep42 and clean it up. Remove background hum and level the voices.'
+    - centaur: Processing now. The noise reduction pass takes a few minutes.
+    - nora: love how fast this stuff is now
+- description: holdout/podcast-audio-cleanup-04
+  vars:
+    respond: true
+    thread:
+    - sam: Episode 42 is recorded! Thanks everyone. The raw files are in the shared folder.
+    - nora: '@centaur grab the raw audio for episode 42 from https://files.example.com/ep42 and clean it up. Remove background hum and level the voices.'
+    - centaur: Processing now. The noise reduction pass takes a few minutes.
+    - nora: love how fast this stuff is now
+    - nora: how's it going?
+- description: holdout/podcast-audio-cleanup-05
+  vars:
+    respond: false
+    thread:
+    - sam: Episode 42 is recorded! Thanks everyone. The raw files are in the shared folder.
+    - nora: '@centaur grab the raw audio for episode 42 from https://files.example.com/ep42 and clean it up. Remove background hum and level the voices.'
+    - centaur: Processing now. The noise reduction pass takes a few minutes.
+    - nora: love how fast this stuff is now
+    - nora: how's it going?
+    - felix: '@nora before we publish can we have Jo listen through? She caught the clipping issues last time.'
+- description: holdout/podcast-audio-cleanup-06
+  vars:
+    respond: false
+    thread:
+    - sam: Episode 42 is recorded! Thanks everyone. The raw files are in the shared folder.
+    - nora: '@centaur grab the raw audio for episode 42 from https://files.example.com/ep42 and clean it up. Remove background hum and level the voices.'
+    - centaur: Processing now. The noise reduction pass takes a few minutes.
+    - nora: love how fast this stuff is now
+    - nora: how's it going?
+    - felix: '@nora before we publish can we have Jo listen through? She caught the clipping issues last time.'
+    - nora: for sure
+- description: holdout/podcast-audio-cleanup-07
+  vars:
+    respond: false
+    thread:
+    - sam: Episode 42 is recorded! Thanks everyone. The raw files are in the shared folder.
+    - nora: '@centaur grab the raw audio for episode 42 from https://files.example.com/ep42 and clean it up. Remove background hum and level the voices.'
+    - centaur: Processing now. The noise reduction pass takes a few minutes.
+    - nora: love how fast this stuff is now
+    - nora: how's it going?
+    - felix: '@nora before we publish can we have Jo listen through? She caught the clipping issues last time.'
+    - nora: for sure
+    - nora: mostly I just wanted a version I could share with guests early
+- description: holdout/podcast-audio-cleanup-08
+  vars:
+    respond: false
+    thread:
+    - sam: Episode 42 is recorded! Thanks everyone. The raw files are in the shared folder.
+    - nora: '@centaur grab the raw audio for episode 42 from https://files.example.com/ep42 and clean it up. Remove background hum and level the voices.'
+    - centaur: Processing now. The noise reduction pass takes a few minutes.
+    - nora: love how fast this stuff is now
+    - nora: how's it going?
+    - felix: '@nora before we publish can we have Jo listen through? She caught the clipping issues last time.'
+    - nora: for sure
+    - nora: mostly I just wanted a version I could share with guests early
+    - felix: The raw files are 96kHz WAV. Probably easier to have centaur run them through a standard podcast preset first.
+- description: holdout/podcast-audio-cleanup-09
+  vars:
+    respond: true
+    thread:
+    - sam: Episode 42 is recorded! Thanks everyone. The raw files are in the shared folder.
+    - nora: '@centaur grab the raw audio for episode 42 from https://files.example.com/ep42 and clean it up. Remove background hum and level the voices.'
+    - centaur: Processing now. The noise reduction pass takes a few minutes.
+    - nora: love how fast this stuff is now
+    - nora: how's it going?
+    - felix: '@nora before we publish can we have Jo listen through? She caught the clipping issues last time.'
+    - nora: for sure
+    - nora: mostly I just wanted a version I could share with guests early
+    - felix: The raw files are 96kHz WAV. Probably easier to have centaur run them through a standard podcast preset first.
+    - nora: ^ yeah do that
+- description: holdout/podcast-audio-cleanup-12
+  vars:
+    respond: true
+    thread:
+    - sam: Episode 42 is recorded! Thanks everyone. The raw files are in the shared folder.
+    - nora: '@centaur grab the raw audio for episode 42 from https://files.example.com/ep42 and clean it up. Remove background hum and level the voices.'
+    - centaur: Processing now. The noise reduction pass takes a few minutes.
+    - nora: love how fast this stuff is now
+    - nora: how's it going?
+    - felix: '@nora before we publish can we have Jo listen through? She caught the clipping issues last time.'
+    - nora: for sure
+    - nora: mostly I just wanted a version I could share with guests early
+    - felix: The raw files are 96kHz WAV. Probably easier to have centaur run them through a standard podcast preset first.
+    - nora: ^ yeah do that
+    - centaur: Running the podcast preset now; I'll post the file when it's done.
+    - centaur: '[uploads ep42_clean.mp3]'
+    - nora: yikes, that sounds like it's underwater
+- description: holdout/podcast-audio-cleanup-13
+  vars:
+    respond: true
+    thread:
+    - sam: Episode 42 is recorded! Thanks everyone. The raw files are in the shared folder.
+    - nora: '@centaur grab the raw audio for episode 42 from https://files.example.com/ep42 and clean it up. Remove background hum and level the voices.'
+    - centaur: Processing now. The noise reduction pass takes a few minutes.
+    - nora: love how fast this stuff is now
+    - nora: how's it going?
+    - felix: '@nora before we publish can we have Jo listen through? She caught the clipping issues last time.'
+    - nora: for sure
+    - nora: mostly I just wanted a version I could share with guests early
+    - felix: The raw files are 96kHz WAV. Probably easier to have centaur run them through a standard podcast preset first.
+    - nora: ^ yeah do that
+    - centaur: Running the podcast preset now; I'll post the file when it's done.
+    - centaur: '[uploads ep42_clean.mp3]'
+    - nora: yikes, that sounds like it's underwater
+    - felix: 'redo it: mono, 48kHz, -16 LUFS, light noise reduction only, no EQ changes'
+- description: holdout/podcast-audio-cleanup-15
+  vars:
+    respond: false
+    thread:
+    - sam: Episode 42 is recorded! Thanks everyone. The raw files are in the shared folder.
+    - nora: '@centaur grab the raw audio for episode 42 from https://files.example.com/ep42 and clean it up. Remove background hum and level the voices.'
+    - centaur: Processing now. The noise reduction pass takes a few minutes.
+    - nora: love how fast this stuff is now
+    - nora: how's it going?
+    - felix: '@nora before we publish can we have Jo listen through? She caught the clipping issues last time.'
+    - nora: for sure
+    - nora: mostly I just wanted a version I could share with guests early
+    - felix: The raw files are 96kHz WAV. Probably easier to have centaur run them through a standard podcast preset first.
+    - nora: ^ yeah do that
+    - centaur: Running the podcast preset now; I'll post the file when it's done.
+    - centaur: '[uploads ep42_clean.mp3]'
+    - nora: yikes, that sounds like it's underwater
+    - felix: 'redo it: mono, 48kHz, -16 LUFS, light noise reduction only, no EQ changes'
+    - centaur: Re-encoding with those settings. Pass 1 of 2 is running.
+    - nora: (we should write these settings down somewhere, Felix, so the whole team can reuse them)
+- description: holdout/podcast-audio-cleanup-16
+  vars:
+    respond: false
+    thread:
+    - sam: Episode 42 is recorded! Thanks everyone. The raw files are in the shared folder.
+    - nora: '@centaur grab the raw audio for episode 42 from https://files.example.com/ep42 and clean it up. Remove background hum and level the voices.'
+    - centaur: Processing now. The noise reduction pass takes a few minutes.
+    - nora: love how fast this stuff is now
+    - nora: how's it going?
+    - felix: '@nora before we publish can we have Jo listen through? She caught the clipping issues last time.'
+    - nora: for sure
+    - nora: mostly I just wanted a version I could share with guests early
+    - felix: The raw files are 96kHz WAV. Probably easier to have centaur run them through a standard podcast preset first.
+    - nora: ^ yeah do that
+    - centaur: Running the podcast preset now; I'll post the file when it's done.
+    - centaur: '[uploads ep42_clean.mp3]'
+    - nora: yikes, that sounds like it's underwater
+    - felix: 'redo it: mono, 48kHz, -16 LUFS, light noise reduction only, no EQ changes'
+    - centaur: Re-encoding with those settings. Pass 1 of 2 is running.
+    - nora: (we should write these settings down somewhere, Felix, so the whole team can reuse them)
+    - nora: if you have other recurring audio chores, list them and we'll automate them
+- description: holdout/podcast-audio-cleanup-18
+  vars:
+    respond: true
+    thread:
+    - sam: Episode 42 is recorded! Thanks everyone. The raw files are in the shared folder.
+    - nora: '@centaur grab the raw audio for episode 42 from https://files.example.com/ep42 and clean it up. Remove background hum and level the voices.'
+    - centaur: Processing now. The noise reduction pass takes a few minutes.
+    - nora: love how fast this stuff is now
+    - nora: how's it going?
+    - felix: '@nora before we publish can we have Jo listen through? She caught the clipping issues last time.'
+    - nora: for sure
+    - nora: mostly I just wanted a version I could share with guests early
+    - felix: The raw files are 96kHz WAV. Probably easier to have centaur run them through a standard podcast preset first.
+    - nora: ^ yeah do that
+    - centaur: Running the podcast preset now; I'll post the file when it's done.
+    - centaur: '[uploads ep42_clean.mp3]'
+    - nora: yikes, that sounds like it's underwater
+    - felix: 'redo it: mono, 48kHz, -16 LUFS, light noise reduction only, no EQ changes'
+    - centaur: Re-encoding with those settings. Pass 1 of 2 is running.
+    - nora: (we should write these settings down somewhere, Felix, so the whole team can reuse them)
+    - nora: if you have other recurring audio chores, list them and we'll automate them
+    - centaur: Here's a 60-second sample from the noisiest part of the episode. [file]
+    - felix: much better. do the full episode with the same settings
+- description: holdout/podcast-audio-cleanup-20
+  vars:
+    respond: false
+    thread:
+    - sam: Episode 42 is recorded! Thanks everyone. The raw files are in the shared folder.
+    - nora: '@centaur grab the raw audio for episode 42 from https://files.example.com/ep42 and clean it up. Remove background hum and level the voices.'
+    - centaur: Processing now. The noise reduction pass takes a few minutes.
+    - nora: love how fast this stuff is now
+    - nora: how's it going?
+    - felix: '@nora before we publish can we have Jo listen through? She caught the clipping issues last time.'
+    - nora: for sure
+    - nora: mostly I just wanted a version I could share with guests early
+    - felix: The raw files are 96kHz WAV. Probably easier to have centaur run them through a standard podcast preset first.
+    - nora: ^ yeah do that
+    - centaur: Running the podcast preset now; I'll post the file when it's done.
+    - centaur: '[uploads ep42_clean.mp3]'
+    - nora: yikes, that sounds like it's underwater
+    - felix: 'redo it: mono, 48kHz, -16 LUFS, light noise reduction only, no EQ changes'
+    - centaur: Re-encoding with those settings. Pass 1 of 2 is running.
+    - nora: (we should write these settings down somewhere, Felix, so the whole team can reuse them)
+    - nora: if you have other recurring audio chores, list them and we'll automate them
+    - centaur: Here's a 60-second sample from the noisiest part of the episode. [file]
+    - felix: much better. do the full episode with the same settings
+    - centaur: The full episode is done, but it's 140MB and the chat upload limit is 100MB.
+    - felix: '@nora let''s set up a shared drive for these next week'
+- description: holdout/podcast-audio-cleanup-21
+  vars:
+    respond: true
+    thread:
+    - sam: Episode 42 is recorded! Thanks everyone. The raw files are in the shared folder.
+    - nora: '@centaur grab the raw audio for episode 42 from https://files.example.com/ep42 and clean it up. Remove background hum and level the voices.'
+    - centaur: Processing now. The noise reduction pass takes a few minutes.
+    - nora: love how fast this stuff is now
+    - nora: how's it going?
+    - felix: '@nora before we publish can we have Jo listen through? She caught the clipping issues last time.'
+    - nora: for sure
+    - nora: mostly I just wanted a version I could share with guests early
+    - felix: The raw files are 96kHz WAV. Probably easier to have centaur run them through a standard podcast preset first.
+    - nora: ^ yeah do that
+    - centaur: Running the podcast preset now; I'll post the file when it's done.
+    - centaur: '[uploads ep42_clean.mp3]'
+    - nora: yikes, that sounds like it's underwater
+    - felix: 'redo it: mono, 48kHz, -16 LUFS, light noise reduction only, no EQ changes'
+    - centaur: Re-encoding with those settings. Pass 1 of 2 is running.
+    - nora: (we should write these settings down somewhere, Felix, so the whole team can reuse them)
+    - nora: if you have other recurring audio chores, list them and we'll automate them
+    - centaur: Here's a 60-second sample from the noisiest part of the episode. [file]
+    - felix: much better. do the full episode with the same settings
+    - centaur: The full episode is done, but it's 140MB and the chat upload limit is 100MB.
+    - felix: '@nora let''s set up a shared drive for these next week'
+    - felix: put it somewhere I can grab with a link. and what would it take to get it under 80MB without it sounding bad?
+- description: holdout/podcast-audio-cleanup-22
+  vars:
+    respond: false
+    thread:
+    - sam: Episode 42 is recorded! Thanks everyone. The raw files are in the shared folder.
+    - nora: '@centaur grab the raw audio for episode 42 from https://files.example.com/ep42 and clean it up. Remove background hum and level the voices.'
+    - centaur: Processing now. The noise reduction pass takes a few minutes.
+    - nora: love how fast this stuff is now
+    - nora: how's it going?
+    - felix: '@nora before we publish can we have Jo listen through? She caught the clipping issues last time.'
+    - nora: for sure
+    - nora: mostly I just wanted a version I could share with guests early
+    - felix: The raw files are 96kHz WAV. Probably easier to have centaur run them through a standard podcast preset first.
+    - nora: ^ yeah do that
+    - centaur: Running the podcast preset now; I'll post the file when it's done.
+    - centaur: '[uploads ep42_clean.mp3]'
+    - nora: yikes, that sounds like it's underwater
+    - felix: 'redo it: mono, 48kHz, -16 LUFS, light noise reduction only, no EQ changes'
+    - centaur: Re-encoding with those settings. Pass 1 of 2 is running.
+    - nora: (we should write these settings down somewhere, Felix, so the whole team can reuse them)
+    - nora: if you have other recurring audio chores, list them and we'll automate them
+    - centaur: Here's a 60-second sample from the noisiest part of the episode. [file]
+    - felix: much better. do the full episode with the same settings
+    - centaur: The full episode is done, but it's 140MB and the chat upload limit is 100MB.
+    - felix: '@nora let''s set up a shared drive for these next week'
+    - felix: put it somewhere I can grab with a link. and what would it take to get it under 80MB without it sounding bad?
+    - nora: sounds good
+- description: holdout/podcast-audio-cleanup-23
+  vars:
+    respond: false
+    thread:
+    - sam: Episode 42 is recorded! Thanks everyone. The raw files are in the shared folder.
+    - nora: '@centaur grab the raw audio for episode 42 from https://files.example.com/ep42 and clean it up. Remove background hum and level the voices.'
+    - centaur: Processing now. The noise reduction pass takes a few minutes.
+    - nora: love how fast this stuff is now
+    - nora: how's it going?
+    - felix: '@nora before we publish can we have Jo listen through? She caught the clipping issues last time.'
+    - nora: for sure
+    - nora: mostly I just wanted a version I could share with guests early
+    - felix: The raw files are 96kHz WAV. Probably easier to have centaur run them through a standard podcast preset first.
+    - nora: ^ yeah do that
+    - centaur: Running the podcast preset now; I'll post the file when it's done.
+    - centaur: '[uploads ep42_clean.mp3]'
+    - nora: yikes, that sounds like it's underwater
+    - felix: 'redo it: mono, 48kHz, -16 LUFS, light noise reduction only, no EQ changes'
+    - centaur: Re-encoding with those settings. Pass 1 of 2 is running.
+    - nora: (we should write these settings down somewhere, Felix, so the whole team can reuse them)
+    - nora: if you have other recurring audio chores, list them and we'll automate them
+    - centaur: Here's a 60-second sample from the noisiest part of the episode. [file]
+    - felix: much better. do the full episode with the same settings
+    - centaur: The full episode is done, but it's 140MB and the chat upload limit is 100MB.
+    - felix: '@nora let''s set up a shared drive for these next week'
+    - felix: put it somewhere I can grab with a link. and what would it take to get it under 80MB without it sounding bad?
+    - nora: sounds good
+    - nora: this is going to save us hours
+- description: holdout/podcast-audio-cleanup-25
+  vars:
+    respond: false
+    thread:
+    - sam: Episode 42 is recorded! Thanks everyone. The raw files are in the shared folder.
+    - nora: '@centaur grab the raw audio for episode 42 from https://files.example.com/ep42 and clean it up. Remove background hum and level the voices.'
+    - centaur: Processing now. The noise reduction pass takes a few minutes.
+    - nora: love how fast this stuff is now
+    - nora: how's it going?
+    - felix: '@nora before we publish can we have Jo listen through? She caught the clipping issues last time.'
+    - nora: for sure
+    - nora: mostly I just wanted a version I could share with guests early
+    - felix: The raw files are 96kHz WAV. Probably easier to have centaur run them through a standard podcast preset first.
+    - nora: ^ yeah do that
+    - centaur: Running the podcast preset now; I'll post the file when it's done.
+    - centaur: '[uploads ep42_clean.mp3]'
+    - nora: yikes, that sounds like it's underwater
+    - felix: 'redo it: mono, 48kHz, -16 LUFS, light noise reduction only, no EQ changes'
+    - centaur: Re-encoding with those settings. Pass 1 of 2 is running.
+    - nora: (we should write these settings down somewhere, Felix, so the whole team can reuse them)
+    - nora: if you have other recurring audio chores, list them and we'll automate them
+    - centaur: Here's a 60-second sample from the noisiest part of the episode. [file]
+    - felix: much better. do the full episode with the same settings
+    - centaur: The full episode is done, but it's 140MB and the chat upload limit is 100MB.
+    - felix: '@nora let''s set up a shared drive for these next week'
+    - felix: put it somewhere I can grab with a link. and what would it take to get it under 80MB without it sounding bad?
+    - nora: sounds good
+    - nora: this is going to save us hours
+    - centaur: Testing a 96kbps version to see whether it stays clean under 80MB.
+    - nora: and if anything breaks it's on me, I set up the folder permissions
+- description: holdout/podcast-audio-cleanup-27
+  vars:
+    respond: true
+    thread:
+    - sam: Episode 42 is recorded! Thanks everyone. The raw files are in the shared folder.
+    - nora: '@centaur grab the raw audio for episode 42 from https://files.example.com/ep42 and clean it up. Remove background hum and level the voices.'
+    - centaur: Processing now. The noise reduction pass takes a few minutes.
+    - nora: love how fast this stuff is now
+    - nora: how's it going?
+    - felix: '@nora before we publish can we have Jo listen through? She caught the clipping issues last time.'
+    - nora: for sure
+    - nora: mostly I just wanted a version I could share with guests early
+    - felix: The raw files are 96kHz WAV. Probably easier to have centaur run them through a standard podcast preset first.
+    - nora: ^ yeah do that
+    - centaur: Running the podcast preset now; I'll post the file when it's done.
+    - centaur: '[uploads ep42_clean.mp3]'
+    - nora: yikes, that sounds like it's underwater
+    - felix: 'redo it: mono, 48kHz, -16 LUFS, light noise reduction only, no EQ changes'
+    - centaur: Re-encoding with those settings. Pass 1 of 2 is running.
+    - nora: (we should write these settings down somewhere, Felix, so the whole team can reuse them)
+    - nora: if you have other recurring audio chores, list them and we'll automate them
+    - centaur: Here's a 60-second sample from the noisiest part of the episode. [file]
+    - felix: much better. do the full episode with the same settings
+    - centaur: The full episode is done, but it's 140MB and the chat upload limit is 100MB.
+    - felix: '@nora let''s set up a shared drive for these next week'
+    - felix: put it somewhere I can grab with a link. and what would it take to get it under 80MB without it sounding bad?
+    - nora: sounds good
+    - nora: this is going to save us hours
+    - centaur: Testing a 96kbps version to see whether it stays clean under 80MB.
+    - nora: and if anything breaks it's on me, I set up the folder permissions
+    - centaur: Here's a sample of the 96kbps version (74MB for the full episode). [file]
+    - felix: sounds good to me, go ahead with the full thing
+- description: holdout/podcast-audio-cleanup-28
+  vars:
+    respond: true
+    thread:
+    - sam: Episode 42 is recorded! Thanks everyone. The raw files are in the shared folder.
+    - nora: '@centaur grab the raw audio for episode 42 from https://files.example.com/ep42 and clean it up. Remove background hum and level the voices.'
+    - centaur: Processing now. The noise reduction pass takes a few minutes.
+    - nora: love how fast this stuff is now
+    - nora: how's it going?
+    - felix: '@nora before we publish can we have Jo listen through? She caught the clipping issues last time.'
+    - nora: for sure
+    - nora: mostly I just wanted a version I could share with guests early
+    - felix: The raw files are 96kHz WAV. Probably easier to have centaur run them through a standard podcast preset first.
+    - nora: ^ yeah do that
+    - centaur: Running the podcast preset now; I'll post the file when it's done.
+    - centaur: '[uploads ep42_clean.mp3]'
+    - nora: yikes, that sounds like it's underwater
+    - felix: 'redo it: mono, 48kHz, -16 LUFS, light noise reduction only, no EQ changes'
+    - centaur: Re-encoding with those settings. Pass 1 of 2 is running.
+    - nora: (we should write these settings down somewhere, Felix, so the whole team can reuse them)
+    - nora: if you have other recurring audio chores, list them and we'll automate them
+    - centaur: Here's a 60-second sample from the noisiest part of the episode. [file]
+    - felix: much better. do the full episode with the same settings
+    - centaur: The full episode is done, but it's 140MB and the chat upload limit is 100MB.
+    - felix: '@nora let''s set up a shared drive for these next week'
+    - felix: put it somewhere I can grab with a link. and what would it take to get it under 80MB without it sounding bad?
+    - nora: sounds good
+    - nora: this is going to save us hours
+    - centaur: Testing a 96kbps version to see whether it stays clean under 80MB.
+    - nora: and if anything breaks it's on me, I set up the folder permissions
+    - centaur: Here's a sample of the 96kbps version (74MB for the full episode). [file]
+    - felix: sounds good to me, go ahead with the full thing
+    - felix: post the link when it's ready
+- description: inventory-question-01
+  vars:
+    respond: false
+    thread:
+    - hugo: '@centaur how many of the blue ceramic mugs do we have left across both warehouses?'
+    - amara: About 300 last I checked; the north warehouse count hasn't been entered yet though
+- description: inventory-question-02
+  vars:
+    respond: false
+    thread:
+    - hugo: '@centaur how many of the blue ceramic mugs do we have left across both warehouses?'
+    - amara: About 300 last I checked; the north warehouse count hasn't been entered yet though
+    - hugo: ok cool, mostly wanted to see if centaur could find it
+- description: inventory-question-03
+  vars:
+    respond: false
+    thread:
+    - hugo: '@centaur how many of the blue ceramic mugs do we have left across both warehouses?'
+    - amara: About 300 last I checked; the north warehouse count hasn't been entered yet though
+    - hugo: ok cool, mostly wanted to see if centaur could find it
+    - amara: We sell around 40 a week, so that's roughly 7 weeks of stock
+- description: inventory-question-04
+  vars:
+    respond: false
+    thread:
+    - hugo: '@centaur how many of the blue ceramic mugs do we have left across both warehouses?'
+    - amara: About 300 last I checked; the north warehouse count hasn't been entered yet though
+    - hugo: ok cool, mostly wanted to see if centaur could find it
+    - amara: We sell around 40 a week, so that's roughly 7 weeks of stock
+    - amara: I'll reorder when we drop under 150
+- description: inventory-question-06
+  vars:
+    respond: true
+    thread:
+    - hugo: '@centaur how many of the blue ceramic mugs do we have left across both warehouses?'
+    - amara: About 300 last I checked; the north warehouse count hasn't been entered yet though
+    - hugo: ok cool, mostly wanted to see if centaur could find it
+    - amara: We sell around 40 a week, so that's roughly 7 weeks of stock
+    - amara: I'll reorder when we drop under 150
+    - centaur: The inventory system shows 212 blue ceramic mugs, all in the south warehouse. The north warehouse has no count for this item since March.
+    - amara: check the last physical count spreadsheet for the north warehouse
+- description: inventory-question-07
+  vars:
+    respond: false
+    thread:
+    - hugo: '@centaur how many of the blue ceramic mugs do we have left across both warehouses?'
+    - amara: About 300 last I checked; the north warehouse count hasn't been entered yet though
+    - hugo: ok cool, mostly wanted to see if centaur could find it
+    - amara: We sell around 40 a week, so that's roughly 7 weeks of stock
+    - amara: I'll reorder when we drop under 150
+    - centaur: The inventory system shows 212 blue ceramic mugs, all in the south warehouse. The north warehouse has no count for this item since March.
+    - amara: check the last physical count spreadsheet for the north warehouse
+    - ken: I've been out this week. Next week I'll connect centaur to the warehouse scanner data so it stops relying on stale counts.
+- description: inventory-question-09
+  vars:
+    respond: false
+    thread:
+    - hugo: '@centaur how many of the blue ceramic mugs do we have left across both warehouses?'
+    - amara: About 300 last I checked; the north warehouse count hasn't been entered yet though
+    - hugo: ok cool, mostly wanted to see if centaur could find it
+    - amara: We sell around 40 a week, so that's roughly 7 weeks of stock
+    - amara: I'll reorder when we drop under 150
+    - centaur: The inventory system shows 212 blue ceramic mugs, all in the south warehouse. The north warehouse has no count for this item since March.
+    - amara: check the last physical count spreadsheet for the north warehouse
+    - ken: I've been out this week. Next week I'll connect centaur to the warehouse scanner data so it stops relying on stale counts.
+    - centaur: The March spreadsheet lists 95 mugs at the north warehouse, so the total is about 307, close to Amara's estimate.
+    - zoe: '@ken when you set that up, loop me in so we decide what it should be able to see'
+- description: inventory-question-10
+  vars:
+    respond: false
+    thread:
+    - hugo: '@centaur how many of the blue ceramic mugs do we have left across both warehouses?'
+    - amara: About 300 last I checked; the north warehouse count hasn't been entered yet though
+    - hugo: ok cool, mostly wanted to see if centaur could find it
+    - amara: We sell around 40 a week, so that's roughly 7 weeks of stock
+    - amara: I'll reorder when we drop under 150
+    - centaur: The inventory system shows 212 blue ceramic mugs, all in the south warehouse. The north warehouse has no count for this item since March.
+    - amara: check the last physical count spreadsheet for the north warehouse
+    - ken: I've been out this week. Next week I'll connect centaur to the warehouse scanner data so it stops relying on stale counts.
+    - centaur: The March spreadsheet lists 95 mugs at the north warehouse, so the total is about 307, close to Amara's estimate.
+    - zoe: '@ken when you set that up, loop me in so we decide what it should be able to see'
+    - ken: will do, let's talk tomorrow
+- description: inventory-question-11
+  vars:
+    respond: false
+    thread:
+    - hugo: '@centaur how many of the blue ceramic mugs do we have left across both warehouses?'
+    - amara: About 300 last I checked; the north warehouse count hasn't been entered yet though
+    - hugo: ok cool, mostly wanted to see if centaur could find it
+    - amara: We sell around 40 a week, so that's roughly 7 weeks of stock
+    - amara: I'll reorder when we drop under 150
+    - centaur: The inventory system shows 212 blue ceramic mugs, all in the south warehouse. The north warehouse has no count for this item since March.
+    - amara: check the last physical count spreadsheet for the north warehouse
+    - ken: I've been out this week. Next week I'll connect centaur to the warehouse scanner data so it stops relying on stale counts.
+    - centaur: The March spreadsheet lists 95 mugs at the north warehouse, so the total is about 307, close to Amara's estimate.
+    - zoe: '@ken when you set that up, loop me in so we decide what it should be able to see'
+    - ken: will do, let's talk tomorrow
+    - zoe: great
+- description: sports-standings-02
+  vars:
+    respond: true
+    thread:
+    - ollie: '@centaur based on last week''s standings, can the Hawks still make the playoffs?'
+    - centaur: Yes. They're 2 games back with 4 left, so winning out clinches a spot.
+    - bea: you should check the tiebreaker rules, head-to-head record matters here and they lost both games to the Owls
+- description: holdout/locked-report-02
+  vars:
+    respond: true
+    thread:
+    - gwen: '@centaur https://reports.example.com/market-survey-2025 can you pull the key findings from this?'
+    - centaur: I can't open it because it needs a login. The public summary says 62% of respondents plan to switch vendors.
+    - gwen: don't we have a team account for that site?
+- description: holdout/locked-report-04
+  vars:
+    respond: false
+    thread:
+    - gwen: '@centaur https://reports.example.com/market-survey-2025 can you pull the key findings from this?'
+    - centaur: I can't open it because it needs a login. The public summary says 62% of respondents plan to switch vendors.
+    - gwen: don't we have a team account for that site?
+    - centaur: I don't see any saved login for that site. If someone shares the PDF, I can summarize it.
+    - gwen: '@arjun do we have a login for the reports site?'
+- description: holdout/locked-report-05
+  vars:
+    respond: false
+    thread:
+    - gwen: '@centaur https://reports.example.com/market-survey-2025 can you pull the key findings from this?'
+    - centaur: I can't open it because it needs a login. The public summary says 62% of respondents plan to switch vendors.
+    - gwen: don't we have a team account for that site?
+    - centaur: I don't see any saved login for that site. If someone shares the PDF, I can summarize it.
+    - gwen: '@arjun do we have a login for the reports site?'
+    - arjun: '[shares a password-manager link]'
+- description: holdout/locked-report-06
+  vars:
+    respond: true
+    thread:
+    - gwen: '@centaur https://reports.example.com/market-survey-2025 can you pull the key findings from this?'
+    - centaur: I can't open it because it needs a login. The public summary says 62% of respondents plan to switch vendors.
+    - gwen: don't we have a team account for that site?
+    - centaur: I don't see any saved login for that site. If someone shares the PDF, I can summarize it.
+    - gwen: '@arjun do we have a login for the reports site?'
+    - arjun: '[shares a password-manager link]'
+    - vik: check the shared research folder, someone may have saved it already
+- description: holdout/locked-report-09
+  vars:
+    respond: true
+    thread:
+    - gwen: '@centaur https://reports.example.com/market-survey-2025 can you pull the key findings from this?'
+    - centaur: I can't open it because it needs a login. The public summary says 62% of respondents plan to switch vendors.
+    - gwen: don't we have a team account for that site?
+    - centaur: I don't see any saved login for that site. If someone shares the PDF, I can summarize it.
+    - gwen: '@arjun do we have a login for the reports site?'
+    - arjun: '[shares a password-manager link]'
+    - vik: check the shared research folder, someone may have saved it already
+    - arjun: '[uploads market-survey-2025.pdf]'
+    - centaur: It's not in the research folder. Want me to use the shared login to get it from the site?
+    - vik: did you look at the PDF Arjun just posted?
+- description: holdout/locked-report-11
+  vars:
+    respond: false
+    thread:
+    - gwen: '@centaur https://reports.example.com/market-survey-2025 can you pull the key findings from this?'
+    - centaur: I can't open it because it needs a login. The public summary says 62% of respondents plan to switch vendors.
+    - gwen: don't we have a team account for that site?
+    - centaur: I don't see any saved login for that site. If someone shares the PDF, I can summarize it.
+    - gwen: '@arjun do we have a login for the reports site?'
+    - arjun: '[shares a password-manager link]'
+    - vik: check the shared research folder, someone may have saved it already
+    - arjun: '[uploads market-survey-2025.pdf]'
+    - centaur: It's not in the research folder. Want me to use the shared login to get it from the site?
+    - vik: did you look at the PDF Arjun just posted?
+    - centaur: 'Yes, the PDF has it. Key findings: 62% plan to switch vendors, price is the top reason, and support quality ranked second.'
+    - vik: ha, it nearly missed that. I'll add a note to always check thread attachments first.
+- description: holdout/locked-report-12
+  vars:
+    respond: false
+    thread:
+    - gwen: '@centaur https://reports.example.com/market-survey-2025 can you pull the key findings from this?'
+    - centaur: I can't open it because it needs a login. The public summary says 62% of respondents plan to switch vendors.
+    - gwen: don't we have a team account for that site?
+    - centaur: I don't see any saved login for that site. If someone shares the PDF, I can summarize it.
+    - gwen: '@arjun do we have a login for the reports site?'
+    - arjun: '[shares a password-manager link]'
+    - vik: check the shared research folder, someone may have saved it already
+    - arjun: '[uploads market-survey-2025.pdf]'
+    - centaur: It's not in the research folder. Want me to use the shared login to get it from the site?
+    - vik: did you look at the PDF Arjun just posted?
+    - centaur: 'Yes, the PDF has it. Key findings: 62% plan to switch vendors, price is the top reason, and support quality ranked second.'
+    - vik: ha, it nearly missed that. I'll add a note to always check thread attachments first.
+    - arjun: Related coverage here https://news.example.com/vendor-switching
+- description: newsletter-metrics-02
+  vars:
+    respond: true
+    thread:
+    - maya: '@centaur pull open and click rates for all our newsletter sends this quarter, we''re doing a recap'
+    - centaur: 'Uploaded a sheet: 13 sends, 41% average open rate, 3.2% click rate. Unsubscribes by send aren''t available from the API, only in the dashboard.'
+    - theo: do the same for last quarter and compare them
+- description: newsletter-metrics-04
+  vars:
+    respond: false
+    thread:
+    - maya: '@centaur pull open and click rates for all our newsletter sends this quarter, we''re doing a recap'
+    - centaur: 'Uploaded a sheet: 13 sends, 41% average open rate, 3.2% click rate. Unsubscribes by send aren''t available from the API, only in the dashboard.'
+    - theo: do the same for last quarter and compare them
+    - centaur: Uploaded the comparison. Open rate is up 4 points, but clicks fell from 3.9% to 3.2%.
+    - theo: '@maya can you grab the unsubscribe numbers from the dashboard? centaur can''t see those.'
+- description: recipe-scaling-03
+  vars:
+    respond: false
+    thread:
+    - lucia: '@centaur scale this chili recipe to feed 60 people https://recipes.example.com/chili'
+    - centaur: The page wouldn't load for me, so this is based on the preview text. Multiply everything by 7.5. ...
+    - omar: '@centaur'
+    - omar: (the page blocks bots, I'll paste the full ingredient list in a sec)
+- description: holdout/timesheet-totals-02
+  vars:
+    respond: true
+    thread:
+    - eva: '@centaur total billable hours by client for October, sorted by most hours'
+    - centaur: '1,180 billable hours across 14 clients. Top three: Northbeam 310, Larkspur 205, Cobalt Labs 160. Full list in the sheet.'
+    - eva: for the top 5, can you show which projects drove the hours?
+- description: holdout/timesheet-totals-04
+  vars:
+    respond: true
+    thread:
+    - eva: '@centaur total billable hours by client for October, sorted by most hours'
+    - centaur: '1,180 billable hours across 14 clients. Top three: Northbeam 310, Larkspur 205, Cobalt Labs 160. Full list in the sheet.'
+    - eva: for the top 5, can you show which projects drove the hours?
+    - centaur: For Northbeam, the migration project was 70% of its hours. The other four are spread across ongoing retainers.
+    - jon: did you include the contractor timesheets too?
+- description: holdout/timesheet-totals-06
+  vars:
+    respond: true
+    thread:
+    - eva: '@centaur total billable hours by client for October, sorted by most hours'
+    - centaur: '1,180 billable hours across 14 clients. Top three: Northbeam 310, Larkspur 205, Cobalt Labs 160. Full list in the sheet.'
+    - eva: for the top 5, can you show which projects drove the hours?
+    - centaur: For Northbeam, the migration project was 70% of its hours. The other four are spread across ongoing retainers.
+    - jon: did you include the contractor timesheets too?
+    - centaur: Not at first. Including them adds 42 hours, mostly to Larkspur, and doesn't change the order.
+    - eva: Ran the same report in the billing tool and got slightly different numbers. Northbeam is 6 hours higher there and Cobalt is 3 lower
+- description: holdout/timesheet-totals-07
+  vars:
+    respond: true
+    thread:
+    - eva: '@centaur total billable hours by client for October, sorted by most hours'
+    - centaur: '1,180 billable hours across 14 clients. Top three: Northbeam 310, Larkspur 205, Cobalt Labs 160. Full list in the sheet.'
+    - eva: for the top 5, can you show which projects drove the hours?
+    - centaur: For Northbeam, the migration project was 70% of its hours. The other four are spread across ongoing retainers.
+    - jon: did you include the contractor timesheets too?
+    - centaur: Not at first. Including them adds 42 hours, mostly to Larkspur, and doesn't change the order.
+    - eva: Ran the same report in the billing tool and got slightly different numbers. Northbeam is 6 hours higher there and Cobalt is 3 lower
+    - eva: can you figure out why they differ?
+- description: holdout/timesheet-totals-09
+  vars:
+    respond: false
+    thread:
+    - eva: '@centaur total billable hours by client for October, sorted by most hours'
+    - centaur: '1,180 billable hours across 14 clients. Top three: Northbeam 310, Larkspur 205, Cobalt Labs 160. Full list in the sheet.'
+    - eva: for the top 5, can you show which projects drove the hours?
+    - centaur: For Northbeam, the migration project was 70% of its hours. The other four are spread across ongoing retainers.
+    - jon: did you include the contractor timesheets too?
+    - centaur: Not at first. Including them adds 42 hours, mostly to Larkspur, and doesn't change the order.
+    - eva: Ran the same report in the billing tool and got slightly different numbers. Northbeam is 6 hours higher there and Cobalt is 3 lower
+    - eva: can you figure out why they differ?
+    - centaur: The billing tool rounds each entry up to 15 minutes and counts Halloween as a working day for Cobalt. That explains both gaps.
+    - eva: Also it didn't seem to see the internal notes on entries, is that expected?
+- description: holdout/timesheet-totals-10
+  vars:
+    respond: false
+    thread:
+    - eva: '@centaur total billable hours by client for October, sorted by most hours'
+    - centaur: '1,180 billable hours across 14 clients. Top three: Northbeam 310, Larkspur 205, Cobalt Labs 160. Full list in the sheet.'
+    - eva: for the top 5, can you show which projects drove the hours?
+    - centaur: For Northbeam, the migration project was 70% of its hours. The other four are spread across ongoing retainers.
+    - jon: did you include the contractor timesheets too?
+    - centaur: Not at first. Including them adds 42 hours, mostly to Larkspur, and doesn't change the order.
+    - eva: Ran the same report in the billing tool and got slightly different numbers. Northbeam is 6 hours higher there and Cobalt is 3 lower
+    - eva: can you figure out why they differ?
+    - centaur: The billing tool rounds each entry up to 15 minutes and counts Halloween as a working day for Cobalt. That explains both gaps.
+    - eva: Also it didn't seem to see the internal notes on entries, is that expected?
+    - jon: I'll check with Rosa about what it should have access to
+- description: holdout/timesheet-totals-11
+  vars:
+    respond: false
+    thread:
+    - eva: '@centaur total billable hours by client for October, sorted by most hours'
+    - centaur: '1,180 billable hours across 14 clients. Top three: Northbeam 310, Larkspur 205, Cobalt Labs 160. Full list in the sheet.'
+    - eva: for the top 5, can you show which projects drove the hours?
+    - centaur: For Northbeam, the migration project was 70% of its hours. The other four are spread across ongoing retainers.
+    - jon: did you include the contractor timesheets too?
+    - centaur: Not at first. Including them adds 42 hours, mostly to Larkspur, and doesn't change the order.
+    - eva: Ran the same report in the billing tool and got slightly different numbers. Northbeam is 6 hours higher there and Cobalt is 3 lower
+    - eva: can you figure out why they differ?
+    - centaur: The billing tool rounds each entry up to 15 minutes and counts Halloween as a working day for Cobalt. That explains both gaps.
+    - eva: Also it didn't seem to see the internal notes on entries, is that expected?
+    - jon: I'll check with Rosa about what it should have access to
+    - rosa: '@eva notes are private to each person''s manager by design'
+- description: article-explainer-02
+  vars:
+    respond: true
+    thread:
+    - kai: https://journal.example.org/urban-heat-islands.pdf @centaur explain this to me like I'm new to it
+    - centaur: The paper shows city neighborhoods with little tree cover run 4-7°C hotter in summer, and that adding street trees reduces this more than reflective roofs do.
+    - mei: are any cities actually doing this at scale?
+- description: gym-membership-analysis-02
+  vars:
+    respond: true
+    thread:
+    - rafa: '@centaur using our membership export, how have signups and cancellations changed since we launched the student plan? data is in the attached csv'
+    - centaur: Since the launch, signups are up 22% and cancellations are flat. The student plan is 30% of new signups. Chart uploaded.
+    - rafa: chart weekly signups before and after the launch
+- description: gym-membership-analysis-04
+  vars:
+    respond: true
+    thread:
+    - rafa: '@centaur using our membership export, how have signups and cancellations changed since we launched the student plan? data is in the attached csv'
+    - centaur: Since the launch, signups are up 22% and cancellations are flat. The student plan is 30% of new signups. Chart uploaded.
+    - rafa: chart weekly signups before and after the launch
+    - centaur: Launch week had 3x the usual signups, then it settled about 20% above baseline. Chart uploaded.
+    - rafa: now break signups down by location
+- description: gym-membership-analysis-06
+  vars:
+    respond: true
+    thread:
+    - rafa: '@centaur using our membership export, how have signups and cancellations changed since we launched the student plan? data is in the attached csv'
+    - centaur: Since the launch, signups are up 22% and cancellations are flat. The student plan is 30% of new signups. Chart uploaded.
+    - rafa: chart weekly signups before and after the launch
+    - centaur: Launch week had 3x the usual signups, then it settled about 20% above baseline. Chart uploaded.
+    - rafa: now break signups down by location
+    - centaur: Downtown accounts for most of the increase. Chart uploaded.
+    - rafa: compare cancellation rates across plans
+- description: gym-membership-analysis-08
+  vars:
+    respond: true
+    thread:
+    - rafa: '@centaur using our membership export, how have signups and cancellations changed since we launched the student plan? data is in the attached csv'
+    - centaur: Since the launch, signups are up 22% and cancellations are flat. The student plan is 30% of new signups. Chart uploaded.
+    - rafa: chart weekly signups before and after the launch
+    - centaur: Launch week had 3x the usual signups, then it settled about 20% above baseline. Chart uploaded.
+    - rafa: now break signups down by location
+    - centaur: Downtown accounts for most of the increase. Chart uploaded.
+    - rafa: compare cancellation rates across plans
+    - centaur: Student plans cancel at 9% a month vs 4% for standard plans. Chart uploaded.
+    - sofia: give me the short version for the ops meeting
+- description: gym-membership-analysis-10
+  vars:
+    respond: true
+    thread:
+    - rafa: '@centaur using our membership export, how have signups and cancellations changed since we launched the student plan? data is in the attached csv'
+    - centaur: Since the launch, signups are up 22% and cancellations are flat. The student plan is 30% of new signups. Chart uploaded.
+    - rafa: chart weekly signups before and after the launch
+    - centaur: Launch week had 3x the usual signups, then it settled about 20% above baseline. Chart uploaded.
+    - rafa: now break signups down by location
+    - centaur: Downtown accounts for most of the increase. Chart uploaded.
+    - rafa: compare cancellation rates across plans
+    - centaur: Student plans cancel at 9% a month vs 4% for standard plans. Chart uploaded.
+    - sofia: give me the short version for the ops meeting
+    - centaur: The student plan is bringing in new members without cannibalizing standard plans, but churn is high. A semester-length option could help.
+    - rafa: 'test this idea: the January signup spike last year was mostly New Year''s resolutions, so we should expect the same this year regardless of the student plan'
+- description: gym-membership-analysis-12
+  vars:
+    respond: true
+    thread:
+    - rafa: '@centaur using our membership export, how have signups and cancellations changed since we launched the student plan? data is in the attached csv'
+    - centaur: Since the launch, signups are up 22% and cancellations are flat. The student plan is 30% of new signups. Chart uploaded.
+    - rafa: chart weekly signups before and after the launch
+    - centaur: Launch week had 3x the usual signups, then it settled about 20% above baseline. Chart uploaded.
+    - rafa: now break signups down by location
+    - centaur: Downtown accounts for most of the increase. Chart uploaded.
+    - rafa: compare cancellation rates across plans
+    - centaur: Student plans cancel at 9% a month vs 4% for standard plans. Chart uploaded.
+    - sofia: give me the short version for the ops meeting
+    - centaur: The student plan is bringing in new members without cannibalizing standard plans, but churn is high. A semester-length option could help.
+    - rafa: 'test this idea: the January signup spike last year was mostly New Year''s resolutions, so we should expect the same this year regardless of the student plan'
+    - centaur: The data partly supports it. Last January was +35%, but two-thirds of that came from a promo running at the same time. Chart uploaded.
+    - rafa: add the promo period as a shaded band on the chart
+- description: gym-membership-analysis-14
+  vars:
+    respond: true
+    thread:
+    - rafa: '@centaur using our membership export, how have signups and cancellations changed since we launched the student plan? data is in the attached csv'
+    - centaur: Since the launch, signups are up 22% and cancellations are flat. The student plan is 30% of new signups. Chart uploaded.
+    - rafa: chart weekly signups before and after the launch
+    - centaur: Launch week had 3x the usual signups, then it settled about 20% above baseline. Chart uploaded.
+    - rafa: now break signups down by location
+    - centaur: Downtown accounts for most of the increase. Chart uploaded.
+    - rafa: compare cancellation rates across plans
+    - centaur: Student plans cancel at 9% a month vs 4% for standard plans. Chart uploaded.
+    - sofia: give me the short version for the ops meeting
+    - centaur: The student plan is bringing in new members without cannibalizing standard plans, but churn is high. A semester-length option could help.
+    - rafa: 'test this idea: the January signup spike last year was mostly New Year''s resolutions, so we should expect the same this year regardless of the student plan'
+    - centaur: The data partly supports it. Last January was +35%, but two-thirds of that came from a promo running at the same time. Chart uploaded.
+    - rafa: add the promo period as a shaded band on the chart
+    - centaur: Added the shaded band.
+    - rafa: label the downtown location separately
+- description: gym-membership-analysis-16
+  vars:
+    respond: true
+    thread:
+    - rafa: '@centaur using our membership export, how have signups and cancellations changed since we launched the student plan? data is in the attached csv'
+    - centaur: Since the launch, signups are up 22% and cancellations are flat. The student plan is 30% of new signups. Chart uploaded.
+    - rafa: chart weekly signups before and after the launch
+    - centaur: Launch week had 3x the usual signups, then it settled about 20% above baseline. Chart uploaded.
+    - rafa: now break signups down by location
+    - centaur: Downtown accounts for most of the increase. Chart uploaded.
+    - rafa: compare cancellation rates across plans
+    - centaur: Student plans cancel at 9% a month vs 4% for standard plans. Chart uploaded.
+    - sofia: give me the short version for the ops meeting
+    - centaur: The student plan is bringing in new members without cannibalizing standard plans, but churn is high. A semester-length option could help.
+    - rafa: 'test this idea: the January signup spike last year was mostly New Year''s resolutions, so we should expect the same this year regardless of the student plan'
+    - centaur: The data partly supports it. Last January was +35%, but two-thirds of that came from a promo running at the same time. Chart uploaded.
+    - rafa: add the promo period as a shaded band on the chart
+    - centaur: Added the shaded band.
+    - rafa: label the downtown location separately
+    - centaur: Updated the chart with downtown broken out.
+    - rafa: also overlay average daily check-ins
+- description: gym-membership-analysis-18
+  vars:
+    respond: false
+    thread:
+    - rafa: '@centaur using our membership export, how have signups and cancellations changed since we launched the student plan? data is in the attached csv'
+    - centaur: Since the launch, signups are up 22% and cancellations are flat. The student plan is 30% of new signups. Chart uploaded.
+    - rafa: chart weekly signups before and after the launch
+    - centaur: Launch week had 3x the usual signups, then it settled about 20% above baseline. Chart uploaded.
+    - rafa: now break signups down by location
+    - centaur: Downtown accounts for most of the increase. Chart uploaded.
+    - rafa: compare cancellation rates across plans
+    - centaur: Student plans cancel at 9% a month vs 4% for standard plans. Chart uploaded.
+    - sofia: give me the short version for the ops meeting
+    - centaur: The student plan is bringing in new members without cannibalizing standard plans, but churn is high. A semester-length option could help.
+    - rafa: 'test this idea: the January signup spike last year was mostly New Year''s resolutions, so we should expect the same this year regardless of the student plan'
+    - centaur: The data partly supports it. Last January was +35%, but two-thirds of that came from a promo running at the same time. Chart uploaded.
+    - rafa: add the promo period as a shaded band on the chart
+    - centaur: Added the shaded band.
+    - rafa: label the downtown location separately
+    - centaur: Updated the chart with downtown broken out.
+    - rafa: also overlay average daily check-ins
+    - centaur: Added check-ins as a top panel. Check-ins rise with signups but fall off faster in February.
+    - rafa: Yeah, my guess is the promo mostly pulled forward people who would have joined anyway
+- description: gym-membership-analysis-19
+  vars:
+    respond: false
+    thread:
+    - rafa: '@centaur using our membership export, how have signups and cancellations changed since we launched the student plan? data is in the attached csv'
+    - centaur: Since the launch, signups are up 22% and cancellations are flat. The student plan is 30% of new signups. Chart uploaded.
+    - rafa: chart weekly signups before and after the launch
+    - centaur: Launch week had 3x the usual signups, then it settled about 20% above baseline. Chart uploaded.
+    - rafa: now break signups down by location
+    - centaur: Downtown accounts for most of the increase. Chart uploaded.
+    - rafa: compare cancellation rates across plans
+    - centaur: Student plans cancel at 9% a month vs 4% for standard plans. Chart uploaded.
+    - sofia: give me the short version for the ops meeting
+    - centaur: The student plan is bringing in new members without cannibalizing standard plans, but churn is high. A semester-length option could help.
+    - rafa: 'test this idea: the January signup spike last year was mostly New Year''s resolutions, so we should expect the same this year regardless of the student plan'
+    - centaur: The data partly supports it. Last January was +35%, but two-thirds of that came from a promo running at the same time. Chart uploaded.
+    - rafa: add the promo period as a shaded band on the chart
+    - centaur: Added the shaded band.
+    - rafa: label the downtown location separately
+    - centaur: Updated the chart with downtown broken out.
+    - rafa: also overlay average daily check-ins
+    - centaur: Added check-ins as a top panel. Check-ins rise with signups but fall off faster in February.
+    - rafa: Yeah, my guess is the promo mostly pulled forward people who would have joined anyway
+    - sofia: + the weather was mild
+- description: gym-membership-analysis-20
+  vars:
+    respond: false
+    thread:
+    - rafa: '@centaur using our membership export, how have signups and cancellations changed since we launched the student plan? data is in the attached csv'
+    - centaur: Since the launch, signups are up 22% and cancellations are flat. The student plan is 30% of new signups. Chart uploaded.
+    - rafa: chart weekly signups before and after the launch
+    - centaur: Launch week had 3x the usual signups, then it settled about 20% above baseline. Chart uploaded.
+    - rafa: now break signups down by location
+    - centaur: Downtown accounts for most of the increase. Chart uploaded.
+    - rafa: compare cancellation rates across plans
+    - centaur: Student plans cancel at 9% a month vs 4% for standard plans. Chart uploaded.
+    - sofia: give me the short version for the ops meeting
+    - centaur: The student plan is bringing in new members without cannibalizing standard plans, but churn is high. A semester-length option could help.
+    - rafa: 'test this idea: the January signup spike last year was mostly New Year''s resolutions, so we should expect the same this year regardless of the student plan'
+    - centaur: The data partly supports it. Last January was +35%, but two-thirds of that came from a promo running at the same time. Chart uploaded.
+    - rafa: add the promo period as a shaded band on the chart
+    - centaur: Added the shaded band.
+    - rafa: label the downtown location separately
+    - centaur: Updated the chart with downtown broken out.
+    - rafa: also overlay average daily check-ins
+    - centaur: Added check-ins as a top panel. Check-ins rise with signups but fall off faster in February.
+    - rafa: Yeah, my guess is the promo mostly pulled forward people who would have joined anyway
+    - sofia: + the weather was mild
+    - rafa: true, February was warm last year
+- description: holdout/form-responses-02
+  vars:
+    respond: true
+    thread:
+    - ana: '@centaur add everyone''s t-shirt size to the RSVP sheet: https://forms.example.com/share/xyz789'
+    - centaur: I haven't added anything yet. That's a share link and needs someone signed in to accept it.
+    - ana: try again https://forms.example.com/share/xyz789
+- description: holdout/form-responses-04
+  vars:
+    respond: true
+    thread:
+    - ana: '@centaur add everyone''s t-shirt size to the RSVP sheet: https://forms.example.com/share/xyz789'
+    - centaur: I haven't added anything yet. That's a share link and needs someone signed in to accept it.
+    - ana: try again https://forms.example.com/share/xyz789
+    - centaur: It failed the same way. Paste the direct sheet URL, or share the sheet with my account.
+    - ana: try again, match the names in the Name column to the survey responses and fill in the Size column
+- description: holdout/form-responses-06
+  vars:
+    respond: true
+    thread:
+    - ana: '@centaur add everyone''s t-shirt size to the RSVP sheet: https://forms.example.com/share/xyz789'
+    - centaur: I haven't added anything yet. That's a share link and needs someone signed in to accept it.
+    - ana: try again https://forms.example.com/share/xyz789
+    - centaur: It failed the same way. Paste the direct sheet URL, or share the sheet with my account.
+    - ana: try again, match the names in the Name column to the survey responses and fill in the Size column
+    - centaur: Filled in sizes for 41 of 47 people and re-read the sheet to confirm. Six names had no matching survey response.
+    - ben: what was the error with the share link?
+- description: energy-usage-02
+  vars:
+    respond: true
+    thread:
+    - ravi: '@centaur chart office electricity use by month since we moved in. When was it highest and lowest?'
+    - centaur: Chart posted. The highest was August of last year at 18,400 kWh, and the lowest was April at 6,100 kWh.
+    - jules: what's the cap in our lease before we pay overage?
+- description: energy-usage-03
+  vars:
+    respond: true
+    thread:
+    - ravi: '@centaur chart office electricity use by month since we moved in. When was it highest and lowest?'
+    - centaur: Chart posted. The highest was August of last year at 18,400 kWh, and the lowest was April at 6,100 kWh.
+    - jules: what's the cap in our lease before we pay overage?
+    - jules: I don't buy the 18,400, that's way higher than the bill I saw
+- description: energy-usage-04
+  vars:
+    respond: false
+    thread:
+    - ravi: '@centaur chart office electricity use by month since we moved in. When was it highest and lowest?'
+    - centaur: Chart posted. The highest was August of last year at 18,400 kWh, and the lowest was April at 6,100 kWh.
+    - jules: what's the cap in our lease before we pay overage?
+    - jules: I don't buy the 18,400, that's way higher than the bill I saw
+    - jules: '@ops_bot can you double check?'
+- description: energy-usage-08
+  vars:
+    respond: true
+    thread:
+    - ravi: '@centaur chart office electricity use by month since we moved in. When was it highest and lowest?'
+    - centaur: Chart posted. The highest was August of last year at 18,400 kWh, and the lowest was April at 6,100 kWh.
+    - jules: what's the cap in our lease before we pay overage?
+    - jules: I don't buy the 18,400, that's way higher than the bill I saw
+    - jules: '@ops_bot can you double check?'
+    - ops_bot: Checking against the utility bills. Back in a minute.
+    - centaur: The lease caps usage at 15,000 kWh a month. Overage is billed at 1.2x the standard rate.
+    - ops_bot: The bills show 12,900 kWh for August, not 18,400. Centaur's source double-counted the HVAC sub-meter.
+    - jules: so what happened with your first number?
+- description: travel-budget-check-02
+  vars:
+    respond: false
+    thread:
+    - lin: '@centaur how much of the team travel budget have we used this year, and what trips are booked?'
+    - centaur: '$38,000 of $60,000 used. Booked trips: Denver offsite (Nov 12), Austin customer visit (Nov 20), Boston conference (Dec 3).'
+    - pat: yep that's right
+- description: travel-budget-check-03
+  vars:
+    respond: false
+    thread:
+    - lin: '@centaur how much of the team travel budget have we used this year, and what trips are booked?'
+    - centaur: '$38,000 of $60,000 used. Booked trips: Denver offsite (Nov 12), Austin customer visit (Nov 20), Boston conference (Dec 3).'
+    - pat: yep that's right
+    - pat: ok here's a harder one, let's see
+- description: travel-budget-check-04
+  vars:
+    respond: true
+    thread:
+    - lin: '@centaur how much of the team travel budget have we used this year, and what trips are booked?'
+    - centaur: '$38,000 of $60,000 used. Booked trips: Denver offsite (Nov 12), Austin customer visit (Nov 20), Boston conference (Dec 3).'
+    - pat: yep that's right
+    - pat: ok here's a harder one, let's see
+    - pat: explain how per diem and mileage reimbursements work for the Denver offsite. What are the rates, how are they calculated, what did we pay out last time, and what's still pending?
+- description: travel-budget-check-06
+  vars:
+    respond: false
+    thread:
+    - lin: '@centaur how much of the team travel budget have we used this year, and what trips are booked?'
+    - centaur: '$38,000 of $60,000 used. Booked trips: Denver offsite (Nov 12), Austin customer visit (Nov 20), Boston conference (Dec 3).'
+    - pat: yep that's right
+    - pat: ok here's a harder one, let's see
+    - pat: explain how per diem and mileage reimbursements work for the Denver offsite. What are the rates, how are they calculated, what did we pay out last time, and what's still pending?
+    - centaur: Per diem is $70 a day plus lodging at cost, and mileage is 67¢ a mile. The last offsite paid out $4,200. Two claims from the Denver trip are still pending.
+    - pat: nice, that looks right. @ops_bot verify the rates
+- description: travel-budget-check-08
+  vars:
+    respond: false
+    thread:
+    - lin: '@centaur how much of the team travel budget have we used this year, and what trips are booked?'
+    - centaur: '$38,000 of $60,000 used. Booked trips: Denver offsite (Nov 12), Austin customer visit (Nov 20), Boston conference (Dec 3).'
+    - pat: yep that's right
+    - pat: ok here's a harder one, let's see
+    - pat: explain how per diem and mileage reimbursements work for the Denver offsite. What are the rates, how are they calculated, what did we pay out last time, and what's still pending?
+    - centaur: Per diem is $70 a day plus lodging at cost, and mileage is 67¢ a mile. The last offsite paid out $4,200. Two claims from the Denver trip are still pending.
+    - pat: nice, that looks right. @ops_bot verify the rates
+    - ops_bot: Checking the policy doc now.
+    - pat: good test of whether it actually reads the policy doc

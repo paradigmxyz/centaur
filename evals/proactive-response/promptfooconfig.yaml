@@ -6,19 +6,27 @@ description: Slack proactive-response classifier for unmentioned replies in ment
 prompts:
   - '{{thread | dump}}'
 
-# Add entries to compare classifier models side by side.
+# Add entries to compare classifier models or history modes side by side.
 providers:
   - id: file://provider.ts
-    label: gpt-6-luna
-    config:
+    label: gpt-6-luna since-invocation
+    config: &luna
       # Same Decisions model as slackbotv2.messageOverridesStrategy.model.
       model: gpt-6-luna
+      # Messages since the bot was last invoked.
+      history: since-invocation
       # Production uses 2s; a longer timeout separates accuracy from latency,
       # which promptfoo reports per case.
       timeoutMs: 10000
+  - id: file://provider.ts
+    label: gpt-6-luna recent
+    config:
+      <<: *luna
+      # The latest 20 messages, as the proactivity PR sends today.
+      history: recent
 
 # Every case reaches the classifier: the newest message is non-empty, does not
-# @-mention anyone, and arrives in an eligible thread with no active execution.
+# mention the bot, and arrives in an eligible thread with no active execution.
 # Positives score under should_respond (recall) and negatives under
 # should_decline (1 - false-positive rate), so a prompt change that trades one
 # for the other is visible.
@@ -28,4 +36,6 @@ defaultTest:
       metric: '{{ "should_respond" if respond else "should_decline" }}'
       value: 'output.respond === context.vars.respond'
 
-tests: file://cases.yaml
+tests:
+  - file://cases.yaml
+  - file://threads.yaml

@@ -2,8 +2,8 @@
 # the newest, unmentioned message being classified. The author `centaur` is
 # the bot. Earlier mentions appear as "@centaur", as Chat SDK renders them.
 #
-# The newest message never @-mentions another user: the bot skips those before
-# classifying, so they would not measure the classifier.
+# The newest message never mentions the bot; that takes the mention path.
+# These cases were used for prompt tuning (split: tune by default).
 
 # Follow-ups to the bot's answer
 - description: follow-up question about the bot's answer
@@ -319,6 +319,43 @@
       - Alice Chen: '@centaur when was the last Friday deploy that caused an incident?'
       - centaur: 'Three weeks ago: the cache eviction change (INC-2190).'
       - Bob Martinez: lol so we're due
+
+# @-mentions of people
+- description: request for the bot that copies a person in
+  vars:
+    respond: true
+    thread:
+      - Alice Chen: '@centaur what changed in the billing service this week?'
+      - centaur: 'Three merged PRs: #881 (tax rounding), #884 (invoice PDF fonts), and #890 (Stripe SDK bump).'
+      - Alice Chen: open a revert PR for #890, cc @Bob Martinez
+- description: instruction for the bot with a heads-up to a person
+  vars:
+    respond: true
+    thread:
+      - Sam Ortiz: '@centaur why is the nightly export failing?'
+      - centaur: 'The export job''s service account lost read access to the `analytics` dataset on Tuesday.'
+      - Sam Ortiz: 'rerun it once access is back and post the row counts. @Priya Natarajan heads up, this is your dataset'
+- description: question to a mentioned person about the bot's answer
+  vars:
+    respond: false
+    thread:
+      - Alice Chen: '@centaur what''s the error rate on the payments API?'
+      - centaur: '0.4% over the last hour, mostly 502s from the card processor.'
+      - Alice Chen: '@Bob Martinez does that match the processor dashboard?'
+- description: mentioned person asked to do work after the bot's answer
+  vars:
+    respond: false
+    thread:
+      - Jordan Lee: '@centaur find where we still call the v1 billing API'
+      - centaur: '`exports/invoices.py` and `jobs/reconcile.ts` still call `/v1/charges`.'
+      - Jordan Lee: '@Marcus Webb can you take the reconcile one?'
+- description: FYI to a mentioned person about the bot's finding
+  vars:
+    respond: false
+    thread:
+      - Priya Natarajan: '@centaur why are the email jobs delayed?'
+      - centaur: 'The `mailer` queue has 48k pending jobs; the consumer deployment is scaled to 0.'
+      - Priya Natarajan: '@Marcus Webb fyi, looks like the scale-down from last night''s drill never got reverted'
 
 # Telling the bot to stop
 - description: dismissing the bot in words

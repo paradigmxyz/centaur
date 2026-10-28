@@ -5,8 +5,15 @@ import type { ApiProvider, CallApiContextParams, ProviderOptions, ProviderRespon
 import { classify, type ThreadMessage } from './classifier'
 
 const BOT_NAME = 'centaur'
+// Matches slackbotv2's cap on proactive classifier history.
+const MAX_HISTORY_MESSAGES = 20
 
 type Config = {
+  /**
+   * `since-invocation` sends only messages since the bot was last invoked;
+   * `recent` sends the latest messages regardless. Both are capped.
+   */
+  history?: 'recent' | 'since-invocation'
   model?: string
   timeoutMs?: number
 }
@@ -38,7 +45,14 @@ export default class ProactiveResponseProvider implements ApiProvider {
     const tokenUsage = { completion: 0, prompt: 0, total: 0 }
     try {
       const decision = await classify(
-        { botName: BOT_NAME, history: messages.slice(0, -1), message: messages.at(-1)! },
+        {
+          botName: BOT_NAME,
+          history: (this.config.history === 'recent'
+            ? messages.slice(0, -1)
+            : historySinceLastInvocation(messages.slice(0, -1))
+          ).slice(-MAX_HISTORY_MESSAGES),
+          message: messages.at(-1)!
+        },
         {
           apiKey,
           baseUrl: process.env.OPENAI_BASE_URL,
@@ -59,6 +73,18 @@ export default class ProactiveResponseProvider implements ApiProvider {
       return { error: (error as Error).message }
     }
   }
+}
+
+// Cases carry no execution ids, so the invocation is inferred: the later of
+// the last @-mention of the bot and the message the bot's latest reply (or
+// run of consecutive replies) answered.
+function historySinceLastInvocation(history: ThreadMessage[]): ThreadMessage[] {
+  const mention = new RegExp(`(?<![\\w])@${BOT_NAME}(?![\\w-])`, 'i')
+  let start = history.findLastIndex(message => !message.fromBot && mention.test(message.text))
+  let reply = history.findLastIndex(message => message.fromBot)
+  while (reply > 0 && history[reply - 1]!.fromBot) reply--
+  if (reply > 0) start = Math.max(start, reply - 1)
+  return history.slice(Math.max(start, 0))
 }
 
 function threadMessages(thread: unknown): ThreadMessage[] {
