@@ -100,6 +100,24 @@ spec:
               value: {{ .Values.slackbotv2.messageOverridesStrategy.openaiBaseUrl | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_TIMEOUT_MS
               value: {{ .Values.slackbotv2.messageOverridesStrategy.timeoutMs | quote }}
+            - name: SLACKBOTV2_PROACTIVITY_ENABLED
+              value: {{ .Values.slackbotv2.proactivity.enabled | quote }}
+{{- if .Values.slackbotv2.proactivity.enabled }}
+            - name: SLACKBOTV2_PROACTIVITY_CLASSIFIER
+              value: {{ .Values.slackbotv2.proactivity.classifier | quote }}
+            - name: SLACKBOTV2_PROACTIVITY_MODEL
+              value: {{ .Values.slackbotv2.proactivity.model | quote }}
+            - name: SLACKBOTV2_PROACTIVITY_OPENAI_BASE_URL
+              value: {{ .Values.slackbotv2.proactivity.openaiBaseUrl | quote }}
+            - name: SLACKBOTV2_PROACTIVITY_CHANNELS
+              value: {{ join "," .Values.slackbotv2.proactivity.channels | quote }}
+            - name: SLACKBOTV2_PROACTIVITY_ELIGIBILITY_WINDOW_MS
+              value: {{ .Values.slackbotv2.proactivity.eligibilityWindowMs | int64 | quote }}
+            - name: SLACKBOTV2_PROACTIVITY_MAX_TURNS
+              value: {{ .Values.slackbotv2.proactivity.maxTurnsPerMention | quote }}
+            - name: SLACKBOTV2_PROACTIVITY_TIMEOUT_MS
+              value: {{ .Values.slackbotv2.proactivity.timeoutMs | quote }}
+{{- end }}
 {{- if .Values.slackbotv2.assistantStatus }}
             - name: SLACKBOTV2_ASSISTANT_STATUS
               value: {{ .Values.slackbotv2.assistantStatus | quote }}
