@@ -28,6 +28,8 @@ product-specific defaults solely to make them neutral unless the user asks.
   a parallel one.
 - Keep clients thin and changes focused. If a contract changes, update every
   producer, consumer, test fixture, and chart value affected by it.
+- ALWAYS bump `version` in `contrib/chart/Chart.yaml` when changing anything
+  under `contrib/chart/`, even for small template or values edits.
 - Never expose credentials in output, logs, fixtures, commits, or command-line
   arguments. Use placeholders and configured secret paths.
 - Do not mutate a remote environment unless the user explicitly asks. Local
