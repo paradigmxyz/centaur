@@ -1,10 +1,11 @@
-// Runs the candidate proactive-response classifier on a case's thread. Each
+// Runs the production Slack proactive-response classifier on a case's thread. Each
 // `thread` entry is a one-key map from author to text, oldest first; the last
 // entry is the newest message and the author `centaur` is the bot. History is
 // built as slackbotv2 builds it: the latest earlier messages, bot replies
 // included, oldest first.
 import type { ApiProvider, CallApiContextParams, ProviderOptions, ProviderResponse } from 'promptfoo'
-import { classify, type ThreadMessage } from './classifier'
+import { createOpenAiProactiveClassifier } from '../../services/slackbotv2/src/proactive-classifier'
+import type { ProactiveThreadMessage as ThreadMessage } from '../../services/slackbotv2/src/types'
 
 const BOT_NAME = 'centaur'
 // slackbotv2's PROACTIVE_HISTORY_MESSAGES.
@@ -41,24 +42,24 @@ export default class ProactiveResponseProvider implements ApiProvider {
 
     const tokenUsage = { completion: 0, prompt: 0, total: 0 }
     try {
+      const classify = createOpenAiProactiveClassifier({
+        apiKey,
+        baseUrl: process.env.OPENAI_BASE_URL,
+        fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+          const response = await fetch(input, init)
+          const usage = response.ok ? (await response.clone().json()).usage : undefined
+          tokenUsage.prompt += usage?.input_tokens ?? 0
+          tokenUsage.completion += usage?.output_tokens ?? 0
+          tokenUsage.total += usage?.total_tokens ?? 0
+          return response
+        }) as typeof fetch,
+        model: this.config.model ?? 'gpt-6-luna'
+      })
       const decision = await classify(
         {
           botName: BOT_NAME,
           history: messages.slice(0, -1).slice(-MAX_HISTORY_MESSAGES),
           message: messages.at(-1)!
-        },
-        {
-          apiKey,
-          baseUrl: process.env.OPENAI_BASE_URL,
-          fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
-            const response = await fetch(input, init)
-            const usage = response.ok ? (await response.clone().json()).usage : undefined
-            tokenUsage.prompt += usage?.input_tokens ?? 0
-            tokenUsage.completion += usage?.output_tokens ?? 0
-            tokenUsage.total += usage?.total_tokens ?? 0
-            return response
-          }) as typeof fetch,
-          model: this.config.model ?? 'gpt-6-luna'
         },
         AbortSignal.timeout(this.config.timeoutMs ?? 10_000)
       )

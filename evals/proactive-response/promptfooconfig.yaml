@@ -11,7 +11,7 @@ providers:
   - id: file://provider.ts
     label: gpt-6-luna
     config:
-      # Same Decisions model as slackbotv2.messageOverridesStrategy.model.
+      # Same default as slackbotv2.proactivity.model.
       model: gpt-6-luna
       # Production uses 2s; a longer timeout separates accuracy from latency,
       # which promptfoo reports per case.
