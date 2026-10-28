@@ -3613,6 +3613,61 @@ describe('slackbotv2', () => {
     expect(await threadText(parent.ts)).toContain('Deploy is fine.')
   })
 
+  it('posts progress updates as separate thread messages once, even when recovery replays them', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createProductionDefaultTestBot({ activitySummaryStatusEnabled: true, state: sharedState })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before a long task.')
+    const mentionText = `<@${BOT_USER_ID}> audit every service`
+    const mention = await sendMessage(mentionText, { threadTs: parent.ts })
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    const key = threadKey(parent.ts)
+    const summary = "I'm auditing the billing service"
+    const progress = 'I audited billing and found two stale configs; now checking the search service.'
+    codexApi.emitSessionEvent(key, 'session.activity_summary', { summary })
+    codexApi.emitSessionEvent(key, 'session.progress_update', { elapsed_secs: 120, text: progress })
+    await waitFor(async () => (await threadTexts(parent.ts)).includes(progress))
+    codexApi.emitOutputLine(key, JSON.stringify({ type: 'turn.done', result: 'Audit complete.' }))
+    await mention.finished()
+
+    const texts = await threadTexts(parent.ts)
+    expect(texts.filter(text => text === progress)).toHaveLength(1)
+    expect(texts.indexOf(progress)).toBeLessThan(
+      texts.findIndex(text => text.includes('Audit complete.'))
+    )
+    // Posting in the thread clears Slack's assistant status, so it is restored.
+    const statuses = slackApi.calls
+      .filter(call => call.method === 'assistant.threads.setStatus')
+      .map(call => stringField(call.body.status))
+    expect(statuses).toEqual(['Thinking...', summary, summary, ''])
+
+    // A recovery render replays the execution from its start.
+    const stopStreams = () => slackApi.calls.filter(call => call.method === 'chat.stopStream').length
+    const stopStreamsBeforeRecovery = stopStreams()
+    await sharedState.set(`thread-state:${key}`, {
+      activeExecution: true,
+      renderObligation: {
+        afterEventId: 0,
+        executionId: 'exe-progress-replay',
+        message: apiMessageFromSlackEvent({
+          isMention: true,
+          text: mentionText,
+          threadId: key,
+          ts: mention.ts
+        })
+      }
+    })
+    await sharedState.appendToList('slackbotv2:render:index', key)
+    bot = createProductionDefaultTestBot({ activitySummaryStatusEnabled: true, state: sharedState })
+    await waitFor(() => stopStreams() > stopStreamsBeforeRecovery, 2000)
+
+    expect((await threadTexts(parent.ts)).filter(text => text === progress)).toHaveLength(1)
+  })
+
   it('restores the default status after a steering message when no summary was published', async () => {
     bot = createProductionDefaultTestBot()
     codexApi.autoRespond = false

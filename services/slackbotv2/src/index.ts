@@ -52,6 +52,7 @@ import {
   serializeAttachment,
   serializeMessageLinks,
   serializeMessage,
+  SESSION_PROGRESS_UPDATE_EVENT,
   SESSION_STEERING_DELIVERED_EVENT,
   SESSION_STEERING_FAILED_EVENT,
   sessionStreamError,
@@ -189,6 +190,8 @@ const RENDER_RECOVERY_MAX_THREAD_FAILURES = 5
 const RENDER_RETRY_INITIAL_DELAY_MS = 250
 const RENDER_RETRY_MAX_DELAY_MS = 5_000
 const ASSISTANT_STATUS_MAX_CHARS = 50
+// Outlives render recovery, which only replays obligations up to a day old.
+const PROGRESS_UPDATE_DEDUPE_TTL_MS = 2 * 24 * 60 * 60 * 1000
 const SLACK_TASK_DETAILS_MAX_CHARS = 256
 const SLACK_FALLBACK_TEXT_MAX_CHARS = 35_000
 // Leave room below Slack's 12,000-character limit for adapter mention and emoji expansion.
@@ -357,6 +360,8 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     logger
   })
   const state = options.state ?? createDefaultState(options, logger)
+  // Renders dedupe replayed progress updates through the shared state.
+  options = { ...options, state }
   const chat = new Chat<{ slack: typeof slack }, SlackbotV2ThreadState>({
     userName,
     adapters: { slack },
@@ -4359,6 +4364,10 @@ async function* restoreAssistantStatusAfterSteering(
   trace?: SlackbotV2Trace
 ): AsyncIterable<SlackbotV2RendererSource> {
   for await (const event of stream) {
+    if (sessionEventKind(event) === SESSION_PROGRESS_UPDATE_EVENT) {
+      await postProgressUpdate(thread, event, tracker, options, trace)
+      continue
+    }
     const steeringEvent = steeringEventKind(event)
     if (steeringEvent) {
       traceLog(
@@ -4377,11 +4386,51 @@ async function* restoreAssistantStatusAfterSteering(
 }
 
 function steeringEventKind(event: SlackbotV2RendererSource): string | null {
-  if (!event || typeof event !== 'object') return null
-  const eventKind = 'eventKind' in event ? event.eventKind : 'event' in event ? event.event : ''
+  const eventKind = sessionEventKind(event)
   return eventKind === SESSION_STEERING_DELIVERED_EVENT || eventKind === SESSION_STEERING_FAILED_EVENT
     ? eventKind
     : null
+}
+
+function sessionEventKind(event: SlackbotV2RendererSource): unknown {
+  if (!event || typeof event !== 'object') return null
+  return 'eventKind' in event ? event.eventKind : 'event' in event ? event.event : ''
+}
+
+/**
+ * Posts an api-rs progress update as its own thread message. Render recovery
+ * replays the whole execution, so each durable event posts at most once.
+ */
+async function postProgressUpdate(
+  thread: Thread,
+  event: SlackbotV2RendererSource,
+  tracker: AssistantStatusTracker,
+  options: SlackbotV2Options,
+  trace?: SlackbotV2Trace
+): Promise<void> {
+  const data = 'data' in event ? event.data : undefined
+  const eventId = 'eventId' in event ? event.eventId : undefined
+  const text = isJsonObject(data) ? stringValue(data.text) : undefined
+  if (!text || typeof eventId !== 'number' || !options.state) return
+  const fields = { event_id: eventId }
+  try {
+    const claimed = await options.state.setIfNotExists(
+      `slackbotv2:progress:${thread.id}:${eventId}`,
+      true,
+      PROGRESS_UPDATE_DEDUPE_TTL_MS
+    )
+    if (!claimed) {
+      traceLog(options, 'slackbotv2_progress_update_duplicate_skipped', trace, fields)
+      return
+    }
+    await withSlackApiTimeout(options, 'post progress update', () => thread.post({ markdown: text }))
+    traceLog(options, 'slackbotv2_progress_update_posted', trace, fields)
+  } catch (error) {
+    traceWarn(options, 'slackbotv2_progress_update_failed', trace, { ...fields, error: errorMessage(error) })
+    return
+  }
+  // Slack clears the assistant status when the app replies in the thread.
+  await setTrackedAssistantStatus(thread, tracker, tracker.current, options, trace)
 }
 
 function rendererOptions(
