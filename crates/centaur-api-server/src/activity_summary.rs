@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -10,7 +11,7 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::{
-    sync::mpsc,
+    sync::{Semaphore, mpsc},
     time::{MissedTickBehavior, interval, sleep},
 };
 use tracing::{debug, info, warn};
@@ -21,6 +22,8 @@ pub(crate) const SESSION_PROGRESS_UPDATE_EVENT: &str = "session.progress_update"
 /// How often running executions are checked for a due progress update, so an
 /// update still lands while a long tool call produces no new events.
 const PROGRESS_UPDATE_TICK: Duration = Duration::from_secs(15);
+/// Progress model calls run off the event loop; this bounds how many run at once.
+const PROGRESS_UPDATE_CONCURRENCY: usize = 4;
 const PROGRESS_UPDATE_MAX_OUTPUT_TOKENS: u16 = 512;
 const PROGRESS_UPDATE_MAX_CHARS: usize = 500;
 
@@ -106,92 +109,90 @@ impl ActivitySummaryWorker {
         // cancels a notification read midway.
         let (sender, mut notifications) = mpsc::channel(1024);
         tokio::spawn(forward_session_events(self.store.clone(), sender));
+        let (progress_sender, mut progress_outcomes) = mpsc::unbounded_channel();
+        let progress_permits = Arc::new(Semaphore::new(PROGRESS_UPDATE_CONCURRENCY));
         let mut progress_tick = interval(PROGRESS_UPDATE_TICK);
         progress_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 notification = notifications.recv() => {
-                    let Some(notification) = notification else { return };
+                    let Some(notification) = notification else {
+                        warn!("session activity event forwarder stopped; activity summary worker exiting");
+                        return;
+                    };
                     if let Err(error) = self.process_notification(notification).await {
                         warn!(%error, "failed to process session activity event");
                     }
                 }
+                Some(outcome) = progress_outcomes.recv() => self.apply_progress_outcome(outcome),
                 _ = progress_tick.tick(), if self.config.progress.is_some() => {
-                    self.publish_due_progress_updates().await;
+                    self.spawn_due_progress_updates(&progress_sender, &progress_permits);
                 }
             }
         }
     }
 
-    async fn publish_due_progress_updates(&mut self) {
+    /// Starts a background update for each execution that is due, so model
+    /// latency never delays event processing or the live status summaries.
+    fn spawn_due_progress_updates(
+        &mut self,
+        outcomes: &mpsc::UnboundedSender<ProgressOutcome>,
+        permits: &Arc<Semaphore>,
+    ) {
         let Some(progress) = self.config.progress else {
             return;
         };
         let now = Instant::now();
-        let due = self
-            .states
-            .iter_mut()
-            .filter_map(|(execution_id, state)| {
-                state
-                    .prepare_progress(now, progress)
-                    .map(|(prompt, elapsed)| (execution_id.clone(), prompt, elapsed))
-            })
-            .collect::<Vec<_>>();
-        for (execution_id, prompt, elapsed) in due {
-            if let Err(error) = self
-                .publish_progress_update(&execution_id, &prompt, elapsed, progress)
-                .await
-            {
-                warn!(%error, execution_id, "failed to publish session progress update");
-            }
+        for (execution_id, state) in &mut self.states {
+            let Some((prompt, elapsed)) = state.prepare_progress(now, progress) else {
+                continue;
+            };
+            let job = ProgressJob {
+                client: self.client.clone(),
+                elapsed,
+                execution_id: execution_id.clone(),
+                model: self.config.model.clone(),
+                prompt,
+                store: self.store.clone(),
+                thread_key: state.thread_key.clone(),
+                // Half the interval tolerates model latency between this
+                // worker's attempts while still collapsing a concurrent
+                // replica's update.
+                window: progress.interval / 2,
+            };
+            let outcomes = outcomes.clone();
+            let permits = Arc::clone(permits);
+            tokio::spawn(async move {
+                let Ok(_permit) = permits.acquire_owned().await else {
+                    return;
+                };
+                let execution_id = job.execution_id.clone();
+                match job.run().await {
+                    Ok(Some(outcome)) => {
+                        let _ = outcomes.send(outcome);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(%error, execution_id, "failed to publish session progress update");
+                    }
+                }
+            });
         }
     }
 
-    async fn publish_progress_update(
-        &mut self,
-        execution_id: &str,
-        prompt: &str,
-        elapsed: Duration,
-        progress: ProgressUpdateConfig,
-    ) -> Result<(), ActivitySummaryError> {
-        let text = self
-            .client
-            .respond(
-                PROGRESS_UPDATE_PROMPT,
-                prompt,
-                PROGRESS_UPDATE_MAX_OUTPUT_TOKENS,
-            )
-            .await?;
-        let Some(text) = sanitize_progress_update(&text) else {
-            debug!(execution_id, "discarded empty session progress update");
-            return Ok(());
-        };
-        let Some(state) = self.states.get(execution_id) else {
-            return Ok(());
-        };
-        // Half the interval tolerates model latency between this worker's
-        // attempts while still collapsing a concurrent replica's update.
-        let appended = self
-            .store
-            .append_execution_event_unless_recent(
-                &state.thread_key,
-                execution_id,
-                SESSION_PROGRESS_UPDATE_EVENT,
-                json!({
-                    "elapsed_secs": elapsed.as_secs(),
-                    "execution_id": execution_id,
-                    "model": self.config.model.as_str(),
-                    "text": text,
-                }),
-                progress.interval / 2,
-            )
-            .await?;
-        if appended.is_some()
-            && let Some(state) = self.states.get_mut(execution_id)
-        {
-            state.last_progress = Some(text);
+    fn apply_progress_outcome(&mut self, outcome: ProgressOutcome) {
+        match outcome {
+            ProgressOutcome::Published { execution_id, text } => {
+                if let Some(state) = self.states.get_mut(&execution_id) {
+                    state.last_progress = Some(text);
+                }
+            }
+            // Also drops state whose terminal notification was missed while
+            // the listener reconnected.
+            ProgressOutcome::Inactive { execution_id } => {
+                self.states.remove(&execution_id);
+            }
         }
-        Ok(())
     }
 
     async fn process_notification(
@@ -323,6 +324,73 @@ impl ActivitySummaryWorker {
             .find(|message| message.role == MessageRole::User)
             .and_then(|message| message_parts_text(&message.parts));
         Ok(goal.and_then(|goal| clean_goal_text(&goal)))
+    }
+}
+
+struct ProgressJob {
+    client: ActivitySummaryClient,
+    elapsed: Duration,
+    execution_id: String,
+    model: String,
+    prompt: String,
+    store: PgSessionStore,
+    thread_key: ThreadKey,
+    window: Duration,
+}
+
+#[derive(Debug)]
+enum ProgressOutcome {
+    Inactive { execution_id: String },
+    Published { execution_id: String, text: String },
+}
+
+impl ProgressJob {
+    async fn run(self) -> Result<Option<ProgressOutcome>, ActivitySummaryError> {
+        let active = self
+            .store
+            .active_execution_for_thread(&self.thread_key)
+            .await?;
+        if active.is_none_or(|execution| execution.execution_id != self.execution_id) {
+            return Ok(Some(ProgressOutcome::Inactive {
+                execution_id: self.execution_id,
+            }));
+        }
+        let text = self
+            .client
+            .respond(
+                PROGRESS_UPDATE_PROMPT,
+                &self.prompt,
+                PROGRESS_UPDATE_MAX_OUTPUT_TOKENS,
+            )
+            .await?;
+        let Some(text) = sanitize_progress_update(&text) else {
+            debug!(
+                execution_id = self.execution_id,
+                "discarded empty session progress update"
+            );
+            return Ok(None);
+        };
+        // The store re-checks under the thread event lock that the execution
+        // is still active, so an update never lands after its terminal event.
+        let appended = self
+            .store
+            .append_active_execution_event_unless_recent(
+                &self.thread_key,
+                &self.execution_id,
+                SESSION_PROGRESS_UPDATE_EVENT,
+                json!({
+                    "elapsed_secs": self.elapsed.as_secs(),
+                    "execution_id": self.execution_id,
+                    "model": self.model,
+                    "text": text,
+                }),
+                self.window,
+            )
+            .await?;
+        Ok(appended.map(|_| ProgressOutcome::Published {
+            execution_id: self.execution_id,
+            text,
+        }))
     }
 }
 

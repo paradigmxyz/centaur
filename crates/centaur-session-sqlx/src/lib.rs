@@ -1108,10 +1108,11 @@ impl PgSessionStore {
             .try_into()
     }
 
-    /// Appends an execution event unless one of the same type was appended for
-    /// that execution within `within`. The per-thread event lock serializes the
-    /// check with concurrent appends, so competing api-rs replicas publish once.
-    pub async fn append_execution_event_unless_recent(
+    /// Appends an event for a queued or running execution unless one of the
+    /// same type was appended for it within `within`. The per-thread event lock
+    /// serializes the check with concurrent appends, so competing api-rs
+    /// replicas publish once and nothing lands after the terminal event.
+    pub async fn append_active_execution_event_unless_recent(
         &self,
         thread_key: &ThreadKey,
         execution_id: &str,
@@ -1126,9 +1127,15 @@ impl PgSessionStore {
         .bind(thread_key.as_str())
         .execute(&mut *tx)
         .await?;
-        let recent = sqlx::query_scalar::<_, bool>(
+        let allowed = sqlx::query_scalar::<_, bool>(
             r#"
             select exists (
+                select 1
+                from session_executions
+                where execution_id = $1
+                  and thread_key = $4
+                  and status in ($5, $6)
+            ) and not exists (
                 select 1
                 from session_events
                 where execution_id = $1
@@ -1140,9 +1147,12 @@ impl PgSessionStore {
         .bind(execution_id)
         .bind(event_type)
         .bind(within.as_secs_f64())
+        .bind(thread_key.as_str())
+        .bind(ExecutionStatus::Queued.as_ref())
+        .bind(ExecutionStatus::Running.as_ref())
         .fetch_one(&mut *tx)
         .await?;
-        if recent {
+        if !allowed {
             tx.commit().await?;
             return Ok(None);
         }
@@ -2902,7 +2912,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execution_event_unless_recent_appends_once_per_window() {
+    async fn active_execution_event_unless_recent_appends_once_per_window() {
         let Some(store) = test_store().await else {
             return;
         };
@@ -2925,7 +2935,7 @@ mod tests {
             .execution
             .execution_id;
         let append = |within| {
-            store.append_execution_event_unless_recent(
+            store.append_active_execution_event_unless_recent(
                 &thread_key,
                 &execution_id,
                 "session.progress_update",
@@ -2938,6 +2948,12 @@ mod tests {
         assert!(append(Duration::from_secs(60)).await.unwrap().is_none());
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(append(Duration::from_millis(10)).await.unwrap().is_some());
+        store
+            .complete_execution(&execution_id)
+            .await
+            .expect("complete execution");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(append(Duration::from_millis(10)).await.unwrap().is_none());
 
         sqlx::query("delete from sessions where thread_key = $1")
             .bind(thread_key.as_str())
