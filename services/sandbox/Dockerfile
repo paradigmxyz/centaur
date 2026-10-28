@@ -44,11 +44,11 @@ ENV LIBCLANG_PATH=/usr/lib/llvm-22/lib
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip3 install --break-system-packages --no-compile --ignore-installed "packaging>=24.2.0" \
     && pip3 install --break-system-packages --no-compile \
-    python-docx==1.2.0 lxml==6.0.2 docx-revisions==0.1.4 \
-    matplotlib==3.10.8 numpy==2.4.4 pandas==3.0.2 \
-    python-pptx==1.0.2 openpyxl==3.1.5 PyMuPDF==1.27.2 mammoth==1.12.0 \
+    python-docx==1.2.0 lxml==6.1.3 docx-revisions==0.1.5 \
+    matplotlib==3.11.2 numpy==2.5.4 pandas==3.0.6 \
+    python-pptx==1.0.2 openpyxl==3.1.5 PyMuPDF==1.28.2 mammoth==1.13.0 \
     faster-whisper \
-    asyncpg==0.30.0 \
+    asyncpg==0.32.0 \
     boto3>=1.40.0 \
     google-api-python-client>=2.100.0 \
     google-auth-httplib2>=0.2.0 \
@@ -62,7 +62,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     "githubkit>=0.16.1" \
     pysocks>=1.7.1 \
     rich>=13.0.0 \
-    slack-sdk==3.39.0 \
+    slack-sdk==3.45.0 \
     tomli-w==1.2.0 \
     && find /usr/local/lib/python3.12 /usr/lib/python3 -type d -name __pycache__ -prune -exec rm -rf '{}' +
 
@@ -98,15 +98,15 @@ ARG CODEX_VERSION=0.165.0
 ARG PI_CODING_AGENT_VERSION=1.4.0
 # Hermes Agent (NousResearch) — pinned by commit SHA per the dependency policy.
 ARG HERMES_AGENT_REF=e5e2fb8b2dbe1cae85aa5ad6ce45aef376016e43
-ARG NUSHELL_VERSION=0.112.2
-ARG KUBECTL_VERSION=v1.34.2
-ARG KACHE_VERSION=v0.7.0
+ARG NUSHELL_VERSION=0.116.1
+ARG KUBECTL_VERSION=v1.37.1
+ARG KACHE_VERSION=v0.28.1
 # Bootstrap pnpm for agents working in JS monorepos. The exact baked version
 # doesn't constrain repos: when a repo's `packageManager` field declares a
 # different version, pnpm downloads and runs that one (v11 `pmOnFail=download`
 # default; `manage-package-manager-versions` in v10) over the same registry
 # egress a dependency install already needs.
-ARG PNPM_VERSION=11.5.3
+ARG PNPM_VERSION=11.28.6
 
 # ── kubectl ──────────────────────────────────────────────────────────────────
 RUN set -eux; \
@@ -157,7 +157,7 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
       "@openai/codex@${CODEX_VERSION}" \
       "@earendil-works/pi-coding-agent@${PI_CODING_AGENT_VERSION}" \
       "pnpm@${PNPM_VERSION}" \
-      agent-browser@0.26.0 \
+      agent-browser@0.39.1 \
     && find /usr/lib/node_modules -type f \( -name '*.map' -o -name '*.tsbuildinfo' \) -delete \
     && claude --version | grep -F "${CLAUDE_CODE_VERSION}" \
     && codex --version | grep -F "${CODEX_VERSION}" \
@@ -207,9 +207,9 @@ WORKDIR /home/agent
 
 ENV PATH="/home/agent/.cargo/bin:/home/agent/.local/bin:/home/agent/.foundry/bin:/home/agent/.bun/bin:${PATH}"
 
-ARG FOUNDRY_VERSION=v1.7.0
+ARG FOUNDRY_VERSION=v1.8.5
 ARG AMP_CLI_VERSION=0.0.1792995770-gba80ba
-ARG MANIM_VERSION=0.20.1
+ARG MANIM_VERSION=0.22.0
 ARG BUN_VERSION=bun-v1.4.4
 ARG OMP_VERSION=18.13.2
 
