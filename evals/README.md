@@ -18,7 +18,7 @@ the service lockfile.
 cd evals
 pnpm install --frozen-lockfile
 export OPENAI_API_KEY=<key>      # optional: OPENAI_BASE_URL
-pnpm run eval:message-overrides
+pnpm run eval:message-overrides  # or another eval:<name> script
 pnpm run view                    # browse results locally
 ```
 
@@ -39,6 +39,7 @@ failure, is reported as an error rather than a failed case.
 | Directory | Measures |
 | --- | --- |
 | `message-overrides/` | The Slackbot v2 classifier that turns a message into harness, model, provider, and reasoning overrides. Scores each field separately. |
+| `proactive-response/` | Whether Slackbot v2 should reply to an unmentioned message in a thread where it was mentioned. Scores positives (`should_respond`) and negatives (`should_decline`) separately. The classifier under test lives in the eval until it ships. |
 
 ## Adding an eval
 
