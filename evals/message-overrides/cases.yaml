@@ -118,7 +118,7 @@
 - description: fuzzy low effort
   vars:
     text: use cheap reasoning, just rename the variable
-    reasoning: [low, minimal]
+    reasoning: low|minimal
 - description: fuzzy maximum effort
   vars:
     text: turn the reasoning way up for this one, superduper effort

@@ -16,21 +16,22 @@ providers:
       # which promptfoo reports per case.
       timeoutMs: 10000
 
-# Cases list only the fields they expect; omitted fields expect null. A list
-# accepts any of its values for intentionally fuzzy mappings.
+# Cases list only the fields they expect; omitted fields expect null.
+# "a|b" accepts either value for intentionally fuzzy mappings. (promptfoo
+# expands list-valued vars into separate cases, so lists cannot be used.)
 defaultTest:
   assert:
     - type: javascript
       metric: harness
-      value: '[].concat(context.vars.harness ?? null).includes(output.harness)'
+      value: '(context.vars.harness ?? "").split("|").includes(output.harness ?? "")'
     - type: javascript
       metric: model
-      value: '[].concat(context.vars.model ?? null).includes(output.model)'
+      value: '(context.vars.model ?? "").split("|").includes(output.model ?? "")'
     - type: javascript
       metric: provider
-      value: '[].concat(context.vars.provider ?? null).includes(output.provider)'
+      value: '(context.vars.provider ?? "").split("|").includes(output.provider ?? "")'
     - type: javascript
       metric: reasoning
-      value: '[].concat(context.vars.reasoning ?? null).includes(output.reasoning)'
+      value: '(context.vars.reasoning ?? "").split("|").includes(output.reasoning ?? "")'
 
 tests: file://cases.yaml
