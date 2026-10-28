@@ -106,7 +106,7 @@ ARG KACHE_VERSION=v0.28.1
 # different version, pnpm downloads and runs that one (v11 `pmOnFail=download`
 # default; `manage-package-manager-versions` in v10) over the same registry
 # egress a dependency install already needs.
-ARG PNPM_VERSION=11.28.6
+ARG PNPM_VERSION=11.28.7
 
 # ── kubectl ──────────────────────────────────────────────────────────────────
 RUN set -eux; \
