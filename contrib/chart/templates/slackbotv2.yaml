@@ -80,6 +80,10 @@ spec:
               value: {{ .Values.slackbotv2.autoJoinCreatedChannels | quote }}
             - name: SLACKBOTV2_AGENT_VIEW_ENABLED
               value: {{ .Values.slackbotv2.agentViewEnabled | quote }}
+            - name: SLACKBOTV2_ACK_REACTION_ENABLED
+              value: {{ .Values.slackbotv2.ackReactionEnabled | quote }}
+            - name: SLACKBOTV2_ACK_REACTION
+              value: {{ .Values.slackbotv2.ackReaction | quote }}
             - name: SLACKBOTV2_STEERING_REACTION_ENABLED
               value: {{ .Values.slackbotv2.steeringReactionEnabled | quote }}
             - name: SLACKBOTV2_STEERING_REACTION

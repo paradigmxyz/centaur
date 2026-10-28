@@ -200,6 +200,10 @@ export type SlackbotV2Options = {
   slackApiTimeoutMs?: number
   state?: StateAdapter
   stateKeyPrefix?: string
+  /** React to mentioned messages that start an execution until the response is posted. */
+  ackReactionEnabled?: boolean
+  /** Slack emoji name used for turn-start acknowledgements. */
+  ackReactionName?: string
   /** React to mentioned messages that are forwarded into an active execution. */
   steeringReactionEnabled?: boolean
   /** Slack emoji name used for active-execution acknowledgements. */

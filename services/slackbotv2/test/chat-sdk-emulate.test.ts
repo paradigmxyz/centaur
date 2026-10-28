@@ -1625,6 +1625,35 @@ describe('slackbotv2', () => {
     )
   })
 
+  it('acknowledges a turn-starting mention until its response is posted', async () => {
+    bot = createTestBot({ ackReactionEnabled: true })
+    codexApi.autoRespond = false
+
+    const mention = await sendMessage(`<@${BOT_USER_ID}> take a while`)
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.streamCount === 1)
+    const reactionCalls = () =>
+      slackApi.calls
+        .filter(call => call.method === 'reactions.add' || call.method === 'reactions.remove')
+        .map(call => ({
+          method: call.method,
+          name: stringField(call.body.name),
+          timestamp: stringField(call.body.timestamp)
+        }))
+    expect(reactionCalls()).toEqual([
+      { method: 'reactions.add', name: 'eyes', timestamp: mention.ts }
+    ])
+
+    codexApi.emitOutputLines(threadKey(mention.ts), sampleCodexOutputLines('Done thinking.'))
+    await mention.finished()
+    await waitFor(() => slackApi.calls.some(call => call.method === 'reactions.remove'), 3000)
+    expect(reactionCalls()).toEqual([
+      { method: 'reactions.add', name: 'eyes', timestamp: mention.ts },
+      { method: 'reactions.remove', name: 'eyes', timestamp: mention.ts }
+    ])
+    expect(await threadText(mention.ts)).toContain('Done thinking.')
+  })
+
   it('auto-disables steering reactions when reactions:write is missing', async () => {
     const logs: CapturedLog[] = []
     bot = createTestBot({

@@ -98,6 +98,8 @@ const options: SlackbotV2Options = {
   slackApiUrl,
   slackApiTimeoutMs,
   stateKeyPrefix: optionalEnv('SLACKBOTV2_STATE_KEY_PREFIX'),
+  ackReactionEnabled: booleanEnv('SLACKBOTV2_ACK_REACTION_ENABLED', true),
+  ackReactionName: stringEnv('SLACKBOTV2_ACK_REACTION', 'eyes'),
   steeringReactionEnabled: booleanEnv('SLACKBOTV2_STEERING_REACTION_ENABLED', false),
   steeringReactionName: stringEnv(
     'SLACKBOTV2_STEERING_REACTION',
@@ -129,6 +131,8 @@ console.log(
       messageOverridesStrategyMode !== 'llm' || Boolean(messageOverridesStrategyApiKey),
     response_metadata_mode: options.responseMetadataMode,
     response_service_tier_enabled: options.responseServiceTierEnabled,
+    ack_reaction_enabled: options.ackReactionEnabled,
+    ack_reaction_name: options.ackReactionName,
     steering_reaction_enabled: options.steeringReactionEnabled,
     steering_reaction_name: options.steeringReactionName,
     port: server.port,

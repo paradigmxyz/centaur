@@ -4,9 +4,13 @@ import { fetchWithTimeout, slackApiTimeoutMs } from './session-api'
 import type { SlackbotV2Options, SlackbotV2Trace } from './types'
 import { elapsedMs, errorMessage, nowMs, stringValue, traceLog, traceWarn } from './utils'
 
+/** `ack` marks a message that starts a turn; `steering` marks a follow-up into one. */
+export type ReactionKind = 'ack' | 'steering'
+
 export type SteeringReactionAck = {
   added: Promise<boolean>
   channel: string
+  name: string
   timestamp: string
   threadId: string
 }
@@ -15,6 +19,7 @@ export type SteeringReactionController = {
   begin(
     thread: Thread,
     message: ChatMessage,
+    kind: ReactionKind,
     trace?: SlackbotV2Trace
   ): SteeringReactionAck | undefined
   complete(ack: SteeringReactionAck, trace?: SlackbotV2Trace): Promise<void>
@@ -25,10 +30,19 @@ export type SteeringReactionController = {
 export function createSteeringReactionController(
   options: SlackbotV2Options
 ): SteeringReactionController {
-  let enabled = options.steeringReactionEnabled === true
-  const name = normalizeSlackReactionName(
-    options.steeringReactionName ?? 'hourglass_flowing_sand'
-  )
+  // One controller owns both reactions so a missing reactions:write scope
+  // disables both, and a thread's final render clears both.
+  let scopeMissing = false
+  const kinds: Record<ReactionKind, { enabled: boolean; name: string }> = {
+    ack: {
+      enabled: options.ackReactionEnabled === true,
+      name: normalizeSlackReactionName(options.ackReactionName, 'eyes')
+    },
+    steering: {
+      enabled: options.steeringReactionEnabled === true,
+      name: normalizeSlackReactionName(options.steeringReactionName, 'hourglass_flowing_sand')
+    }
+  }
   // Deliberately process-local: reactions are best-effort UI state. A restart
   // may leave an old reaction behind instead of coupling render recovery to
   // Slack reaction bookkeeping.
@@ -38,11 +52,12 @@ export function createSteeringReactionController(
     operation: 'add' | 'remove',
     channel: string,
     timestamp: string,
+    name: string,
     trace?: SlackbotV2Trace
   ): Promise<boolean> => {
     // Once an add succeeds, still attempt its paired cleanup if another
     // concurrent acknowledgement has since disabled future adds.
-    if (!enabled && operation === 'add') return false
+    if (scopeMissing && operation === 'add') return false
     const method = operation === 'add' ? 'reactions.add' : 'reactions.remove'
     const startedAtMs = nowMs()
     try {
@@ -79,7 +94,7 @@ export function createSteeringReactionController(
         return true
       }
       if (slackError === 'missing_scope') {
-        enabled = false
+        scopeMissing = true
         traceWarn(options, 'slackbotv2_steering_reaction_auto_disabled', trace, {
           error: slackError,
           needed: stringValue(payload.needed),
@@ -110,18 +125,20 @@ export function createSteeringReactionController(
     trace?: SlackbotV2Trace
   ): Promise<void> => {
     if (!(await ack.added)) return
-    await updateReaction('remove', ack.channel, ack.timestamp, trace)
+    await updateReaction('remove', ack.channel, ack.timestamp, ack.name, trace)
   }
 
   return {
-    begin(thread, message, trace) {
-      if (!enabled) return undefined
+    begin(thread, message, kind, trace) {
+      const { enabled, name } = kinds[kind]
+      if (!enabled || scopeMissing) return undefined
       const target = slackMessageReactionTarget(thread, message)
       if (!target) return undefined
-      const added = updateReaction('add', target.channel, target.timestamp, trace)
+      const added = updateReaction('add', target.channel, target.timestamp, name, trace)
       return {
         added,
         ...target,
+        name,
         threadId: thread.id
       }
     },
@@ -148,8 +165,8 @@ function steeringReactionAckKey(ack: SteeringReactionAck): string {
   return `${ack.channel}:${ack.timestamp}`
 }
 
-function normalizeSlackReactionName(value: string): string {
-  return value.trim().replace(/^:+|:+$/g, '') || 'hourglass_flowing_sand'
+function normalizeSlackReactionName(value: string | undefined, fallback: string): string {
+  return value?.trim().replace(/^:+|:+$/g, '') || fallback
 }
 
 function slackMessageReactionTarget(

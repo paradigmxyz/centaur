@@ -715,6 +715,7 @@ async function handleSlackMessageHandoff(
   })
   let initialAssistantStatusVisible = false
   let assistantStatus = Promise.resolve(false)
+  let syncInput: SyncThreadMessageInput | undefined
   try {
     if (await handleStopCommand(thread, message, input.options, input.trigger)) {
       return
@@ -741,7 +742,7 @@ async function handleSlackMessageHandoff(
       initial_assistant_status_visible: initialAssistantStatusVisible,
       trigger: input.trigger
     })
-    await syncThreadMessageToSession(thread, message, {
+    syncInput = {
       initialAssistantStatus: assistantStatus,
       initialAssistantStatusRequested: assistantStatusRequested,
       initialAssistantStatusVisible,
@@ -749,7 +750,8 @@ async function handleSlackMessageHandoff(
       options: input.options,
       state: input.state,
       steeringReactions: input.steeringReactions
-    })
+    }
+    await syncThreadMessageToSession(thread, message, syncInput)
     traceLog(input.options, 'slackbotv2_handoff_complete', trace, {
       trigger: input.trigger
     })
@@ -758,6 +760,7 @@ async function handleSlackMessageHandoff(
       error: errorMessage(error),
       trigger: input.trigger
     })
+    if (syncInput) finishSteeringReaction(syncInput, trace)
     backgroundWaitUntil(
       assistantStatus
         .then(async visible => {
@@ -1292,6 +1295,11 @@ async function syncThreadMessageToSession(
     ? input.initialAssistantStatusVisible === true ||
       input.initialAssistantStatusRequested === true
     : false
+  // Acknowledge the turn before slower serialization, context, and sandbox
+  // startup; a handoff retry carries the same acknowledgement forward.
+  if (shouldStartExecution && !input.steeringReactionAck) {
+    input.steeringReactionAck = input.steeringReactions.begin(thread, message, 'ack', trace)
+  }
   if (shouldStartExecution && input.initialAssistantStatusVisible === undefined) {
     backgroundWaitUntil(
       setInitialAssistantStatus(thread, input.options, trace)
@@ -1504,7 +1512,7 @@ async function syncThreadMessageToSession(
     && messagesToAppend.some(item => item.id === message.id)
     && !input.steeringReactionAck
   ) {
-    input.steeringReactionAck = input.steeringReactions.begin(thread, message, trace)
+    input.steeringReactionAck = input.steeringReactions.begin(thread, message, 'steering', trace)
   }
 
   const forwardInput: ForwardSessionInput = {
