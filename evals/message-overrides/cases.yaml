@@ -75,6 +75,71 @@
       ```
     harness: claudecode
     model: claude-sonnet-5-5
+- description: bare opus before a short task
+  vars:
+    text: "@bot opus redo it"
+    harness: claudecode
+    model: claude-opus-5-5
+- description: astra prefix without punctuation
+  vars:
+    text: "@bot using astra code review the pr"
+    harness: codex
+    model: gpt-6-astra
+- description: versioned opus at the end of a request
+  vars:
+    text: "@bot can you perform that market sizing analysis for the developer tools space again but using Opus 5.5?"
+    harness: claudecode
+    model: claude-opus-5-5
+- description: claude suffix on a follow-up
+  vars:
+    text: "@bot ^ do the above missing stuff on claude"
+    harness: claudecode
+    model: claude-opus-5-5
+- description: fable after long notes
+  vars:
+    text: "@bot ok so my high level thoughts after reading this are: the rollout plan is too aggressive and the rollback story is thin. can we just show a series of tradeoffs within a set of tables? one table per rollout stage, with risk and mitigation columns. continue using fable"
+    harness: claudecode
+    model: claude-fable-5-1
+- description: versioned fable at the end
+  vars:
+    text: "@bot can you rerun the load test scenarios at 2x and 5x traffic, showing both p50 / p99 latency? keep the same regions but make your best judgment use fable 5.1"
+    harness: claudecode
+    model: claude-fable-5-1
+- description: fable after a quote
+  vars:
+    text: "\"the smaller model was distilled from the larger one\" - what does that mean? @bot use fable also curious if there is any way to test for forms of distillation that isn't comparing probability distributions to a specific model, but any tells (e.g., breaking on novel / strange / longer-horizon tasks outside of the training set)"
+    harness: claudecode
+    model: claude-fable-5-1
+- description: fable at the end of a run-on sentence
+  vars:
+    text: "@bot what are the best public sources of data for us to understand enterprise adoption of postgres vs mysql? e.g., survey data is helpful one use fable"
+    harness: claudecode
+    model: claude-fable-5-1
+- description: bare fable prefix
+  vars:
+    text: "@bot using fable: what model are you?"
+    harness: claudecode
+    model: claude-fable-5-1
+- description: claude prefix after a mention
+  vars:
+    text: "@bot using claude: what model are you?"
+    harness: claudecode
+    model: claude-opus-5-5
+- description: claude fable prefix with a short task
+  vars:
+    text: "@bot using claude fable: takeaways?"
+    harness: claudecode
+    model: claude-fable-5-1
+- description: claude fable alongside a persona
+  vars:
+    text: "@bot Using the reviewer persona and claude fable... generate a design review for the billing service based on: the design docs you can find in this slack channel"
+    harness: claudecode
+    model: claude-fable-5-1
+- description: codex with a version
+  vars:
+    text: "@bot retry with codex 5.5"
+    harness: codex
+    model: gpt-5.5
 
 # Harness only
 - description: codex harness
@@ -93,6 +158,22 @@
   vars:
     text: switch to nanocodex and rerun the tests
     harness: nanocodex
+- description: codex feature request
+  vars:
+    text: "@bot can you use Codex's /goal?"
+    harness: codex
+- description: codex feature with a retry
+  vars:
+    text: "@bot use /goal on codex and retry the task in this thread"
+    harness: codex
+- description: codex feature at the end
+  vars:
+    text: "@bot provide periodic updates, use /goal in Codex"
+    harness: codex
+- description: codex feature in a question
+  vars:
+    text: "@bot can you use /goal with codex in this chat?"
+    harness: codex
 
 # Amp modes
 - description: amp deep model
@@ -145,6 +226,22 @@
     text: use opus with high effort
     harness: claudecode
     model: claude-opus-5-5
+- description: effort and versioned model shorthand
+  vars:
+    text: "@bot how does this compare to the infrastructure costs of similar platform teams? Use xhigh/5.6 sol"
+    harness: codex
+    model: gpt-5.6-sol
+    reasoning: xhigh
+- description: claude model with xhigh suffix
+  vars:
+    text: "@bot can you help us understand how much of our CI time is going to builds vs. tests vs. deploys and how that has been changing over the last 8 weeks? fable xhigh"
+    harness: claudecode
+    model: claude-fable-5-1
+- description: claude model with high suffix
+  vars:
+    text: "@bot can u figure out what the key debates are on the auth service redesign RFC? use fable high"
+    harness: claudecode
+    model: claude-fable-5-1
 
 # Providers
 - description: bedrock provider
