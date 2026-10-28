@@ -14,11 +14,14 @@ const UNSPECIFIED = 'unspecified'
 
 const INSTRUCTIONS = [
   'You evaluate a Slack message sent to an AI coding bot and decide whether it asks to choose the AI harness, model, provider, or reasoning effort used to answer it.',
-  'A selection is an explicit instruction to the bot about how to run, such as "use X", "switch to X", "run this on X", "with high effort", or a leading "using X:" prefix.',
+  'A selection is an explicit instruction to the bot about how to run, such as "use X", "switch to X", "run this on X", "retry with X", "with high effort", or a leading "using X:" prefix.',
+  'A selection counts wherever it appears: at the start, mid-sentence, or at the end of a long request, after quoted text, or alongside other setup such as "Using the reviewer persona and claude fable...". Only the quoted or pasted material itself is excluded.',
+  'Asking to use a feature of a specific harness, such as Codex\'s /goal, selects that harness.',
   '"using claude:" or "use claude" with no other Claude model named selects the default Claude model, Opus 5.5.',
   'Only explicit requests count. Words in quoted text, pasted output, code, config values like reasoning=high, task requirements, questions about the bot, or ordinary discussion of model names are not selection requests.',
-  'Words merely evoking speed or depth, such as "think deeply", "deep analysis", "quick question", or "a fast answer", select neither a model nor a reasoning effort.',
-  'Reasoning effort is selected only when the user explicitly mentions reasoning, effort, or thinking level; then map magnitude words to the nearest level.'
+  'Words merely evoking speed or depth, such as "think deeply", "deep analysis", "quick question", or "a fast answer", select neither a model nor a reasoning effort. "Fast mode", "deep mode", "the fast model", and "the deep model" are explicit Amp model selections.',
+  'Reasoning effort is selected only when the user explicitly sets reasoning, effort, or a thinking level, such as "high effort" or "xhigh thinking"; then map magnitude words to the nearest level. Asking the bot to think hard or use its best or strongest thinking does not select a reasoning effort.',
+  'A version number always selects that exact model and overrides the default for a family name: "5.6 sol" is gpt-5.6-sol, not the default sol model, and "codex 5.5" or "gpt 5.5" is gpt-5.5. An effort word after a family name, such as "fable xhigh", is not a version.'
 ].join('\n')
 
 // Only messages that mention a model name or selection term can ask for an
@@ -70,17 +73,17 @@ const MODEL_CHOICES: Choice[] = [
   { value: 'claude-sonnet-5-5', description: 'Sonnet: plain "sonnet" or "sonnet 5.5".' },
   {
     value: 'deep',
-    description: 'Amp deep model. Only when Amp is named or the user asks for "the deep model/mode".'
+    description: 'Amp deep model. Only when the user asks for "the deep model" or "deep mode"; naming Amp alone does not select it.'
   },
   {
     value: 'fast',
-    description: 'Amp fast model. Only when Amp is named or the user asks for "the fast model/mode".'
+    description: 'Amp fast model. Only when the user asks for "the fast model" or "fast mode"; naming Amp alone does not select it.'
   },
-  { value: 'gpt-5.4', description: 'Only when the user says "5.4" with no suffix.' },
+  { value: 'gpt-5.4', description: 'Only when the user says "5.4", "gpt 5.4", or "codex 5.4" with no suffix.' },
   { value: 'gpt-5.4-mini', description: 'Only when the user says "5.4 mini".' },
   { value: 'gpt-5.4-nano', description: 'Only when the user says "5.4 nano".' },
   { value: 'gpt-5.4-pro', description: 'Only when the user says "5.4 pro".' },
-  { value: 'gpt-5.5', description: 'Only when the user says "5.5" with no suffix.' },
+  { value: 'gpt-5.5', description: 'Only when the user says "5.5", "gpt 5.5", or "codex 5.5" with no suffix.' },
   { value: 'gpt-5.5-pro', description: 'Only when the user says "5.5 pro".' },
   { value: 'gpt-5.6-luna', description: 'Only when the user says "5.6 luna".' },
   { value: 'gpt-5.6-sol', description: 'Only when the user says "5.6 sol".' },
