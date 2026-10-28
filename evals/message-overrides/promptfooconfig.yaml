@@ -1,0 +1,36 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+description: Slack message harness/model/provider/reasoning override classifier
+
+# The provider sends the raw Slack text through the production strategy, which
+# owns the real system prompt and output schema.
+prompts:
+  - '{{text}}'
+
+# Add entries to compare classifier models side by side.
+providers:
+  - id: file://provider.ts
+    label: gpt-5.4-nano
+    config:
+      model: gpt-5.4-nano
+      # Production uses 2s; a longer timeout separates accuracy from latency,
+      # which promptfoo reports per case.
+      timeoutMs: 10000
+
+# Cases list only the fields they expect; omitted fields expect null. A list
+# accepts any of its values for intentionally fuzzy mappings.
+defaultTest:
+  assert:
+    - type: javascript
+      metric: harness
+      value: '[].concat(context.vars.harness ?? null).includes(output.harness)'
+    - type: javascript
+      metric: model
+      value: '[].concat(context.vars.model ?? null).includes(output.model)'
+    - type: javascript
+      metric: provider
+      value: '[].concat(context.vars.provider ?? null).includes(output.provider)'
+    - type: javascript
+      metric: reasoning
+      value: '[].concat(context.vars.reasoning ?? null).includes(output.reasoning)'
+
+tests: file://cases.yaml
