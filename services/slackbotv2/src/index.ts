@@ -68,7 +68,7 @@ import {
   reasoningForModel,
   type SlackContextBlock
 } from './response-context'
-import { resolveChannelDefault } from './channel-defaults'
+import { channelIdFromThreadId, resolveChannelDefault } from './channel-defaults'
 import {
   extractMessageOverrides,
   extractPersonaOverride,
@@ -93,6 +93,8 @@ import {
 import type {
   ForwardSessionInput,
   JsonObject,
+  ProactiveDecision,
+  ProactiveThreadMessage,
   SlackbotV2,
   SlackbotV2ApiAttachment,
   SlackbotV2BlockActionPayload,
@@ -100,6 +102,7 @@ import type {
   SlackbotV2ExecuteSessionResponse,
   SlackbotV2MessageMode,
   SlackbotV2Options,
+  SlackbotV2ProactivityOptions,
   SlackbotV2RenderObligation,
   SlackbotV2RendererSource,
   SlackbotV2ThreadState,
@@ -119,6 +122,10 @@ import {
 } from './utils'
 
 export type {
+  ProactiveClassifier,
+  ProactiveClassifierInput,
+  ProactiveDecision,
+  ProactiveThreadMessage,
   SlackbotV2,
   SlackbotV2ApiAttachment,
   SlackbotV2ApiAuthor,
@@ -130,6 +137,7 @@ export type {
   SlackbotV2ExecuteSessionResponse,
   SlackbotV2Fetch,
   SlackbotV2Options,
+  SlackbotV2ProactivityOptions,
   SlackbotV2SessionMessage,
   SlackbotV2SessionMessageRole
 } from './types'
@@ -188,6 +196,12 @@ const LATE_SLACK_FILE_IDLE_POLL_MS = 500
 const LATE_SLACK_FILE_MESSAGE_TEXT = 'Late Slack file attachment for the previous message.'
 const SLACK_BLOCK_ACTION_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000
 const SLACK_BLOCK_ACTION_LEASE_TTL_MS = 60 * 1000
+const PROACTIVE_ELIGIBILITY_WINDOW_MS = 24 * 60 * 60 * 1000
+const PROACTIVE_MAX_TURNS_PER_MENTION = 3
+const PROACTIVE_CLASSIFIER_TIMEOUT_MS = 2_000
+const PROACTIVE_HISTORY_MESSAGES = 20
+// Mentions that make a thread eligible; DMs already treat every message as a mention.
+const PROACTIVE_ELIGIBILITY_TRIGGERS = new Set(['new_mention', 'subscribed_message'])
 
 type PendingLateSlackFileMention = {
   channel: string
@@ -504,6 +518,23 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     if (!(await isAllowedSlackMessage(message, options, logger))) return
     if (slackRichTextMentionsUser(message.raw, options.botUserId)) message.isMention = true
     if (message.isMention !== true) {
+      const proactivity = options.proactivity
+      if (proactivity) {
+        // Classify after acknowledging Slack: a decision can take seconds and
+        // a declined or failed one leaves nothing to retry.
+        backgroundWaitUntil(
+          handleProactiveMessage(thread, message, {
+            options,
+            proactivity,
+            state,
+            steeringReactions
+          }).catch(error => {
+            const trace = createHandoffTrace(thread, message, 'execute')
+            traceWarn(options, 'slackbotv2_proactive_failed', trace, { error: errorMessage(error) })
+          })
+        )
+        return
+      }
       traceLog(
         options,
         'slackbotv2_subscribed_message_without_mention_ignored',
@@ -704,6 +735,8 @@ async function handleSlackMessageHandoff(
     state: StateAdapter
     steeringReactions: SteeringReactionController
     subscribe?: boolean
+    /** An unmentioned message the proactive classifier chose to answer. */
+    proactive?: boolean
     trigger: string
   }
 ): Promise<void> {
@@ -719,6 +752,18 @@ async function handleSlackMessageHandoff(
   try {
     if (await handleStopCommand(thread, message, input.options, input.trigger)) {
       return
+    }
+    const proactivity = input.options.proactivity
+    if (
+      proactivity
+      && PROACTIVE_ELIGIBILITY_TRIGGERS.has(input.trigger)
+      && proactiveChannelAllowed(proactivity, thread.id)
+    ) {
+      await thread.setState({
+        proactiveEligibleUntil:
+          Date.now() + (proactivity.eligibilityWindowMs ?? PROACTIVE_ELIGIBILITY_WINDOW_MS),
+        proactiveTurns: 0
+      })
     }
     // Assistant status is thread-wide. A mentioned follow-up that steers an
     // active execution must not clear or replace the status owned by that run.
@@ -748,6 +793,7 @@ async function handleSlackMessageHandoff(
       initialAssistantStatusVisible,
       mode: input.mode,
       options: input.options,
+      proactive: input.proactive,
       state: input.state,
       steeringReactions: input.steeringReactions
     }
@@ -797,8 +843,9 @@ async function interruptThreadExecution(
   try {
     // Record the stop before interrupting: an execution api-rs has not
     // started yet sees it in its handoff (see stopRequestedFor), and one it
-    // has started is visible to the interrupt below.
-    await thread.setState({ stopRequestedAt: Date.now() })
+    // has started is visible to the interrupt below. A stop also ends
+    // proactive replies until the next mention.
+    await thread.setState({ proactiveEligibleUntil: null, stopRequestedAt: Date.now() })
     const response = await interruptSessionExecution(options, thread.id, reason)
     // With nothing interrupted, a handoff may still own this state.
     if (response.interrupted) {
@@ -826,6 +873,139 @@ async function interruptThreadExecution(
 /** Whether a stop was requested after this message was sent. */
 function stopRequestedFor(state: SlackbotV2ThreadState, message: ChatMessage): boolean {
   return (state.stopRequestedAt ?? 0) >= message.metadata.dateSent.getTime()
+}
+
+async function handleProactiveMessage(
+  thread: Thread<SlackbotV2ThreadState>,
+  message: ChatMessage,
+  input: {
+    options: SlackbotV2Options
+    proactivity: SlackbotV2ProactivityOptions
+    state: StateAdapter
+    steeringReactions: SteeringReactionController
+  }
+): Promise<void> {
+  const { options, proactivity } = input
+  const trace = createHandoffTrace(thread, message, 'execute')
+  const startedAtMs = nowMs()
+  const record = (outcome: string, fields: JsonObject = {}) => {
+    slackbotMetrics.proactiveDecisions.inc({ outcome })
+    traceLog(options, 'slackbotv2_proactive_decision', trace, {
+      outcome,
+      phase_ms: elapsedMs(startedAtMs),
+      ...fields
+    })
+  }
+  const skipReason = proactiveSkipReason(proactivity, (await thread.state) ?? {}, thread, message, options)
+  if (skipReason) {
+    record(`skip_${skipReason}`)
+    return
+  }
+  let decision: ProactiveDecision
+  try {
+    const history = await withSlackApiTimeout(options, 'collect proactive thread history', () =>
+      proactiveThreadHistory(thread, message)
+    )
+    const signal = AbortSignal.timeout(proactivity.timeoutMs ?? PROACTIVE_CLASSIFIER_TIMEOUT_MS)
+    decision = await Promise.race([
+      proactivity.classifier(
+        {
+          botName: options.userName ?? 'centaur',
+          history,
+          message: proactiveThreadMessage(message)
+        },
+        signal
+      ),
+      new Promise<never>((_, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+      })
+    ])
+  } catch (error) {
+    record('error', { error: errorMessage(error) })
+    return
+  }
+  const decisionFields = { probability: decision.probability }
+  if (!decision.respond) {
+    record('decline', decisionFields)
+    return
+  }
+  // A mention, stop, or another proactive reply may have landed while the
+  // classifier ran.
+  const latest = (await thread.state) ?? {}
+  const lateSkipReason = proactiveSkipReason(proactivity, latest, thread, message, options)
+  if (lateSkipReason) {
+    record(`skip_${lateSkipReason}`, decisionFields)
+    return
+  }
+  await thread.setState({ proactiveTurns: (latest.proactiveTurns ?? 0) + 1 })
+  record('respond', decisionFields)
+  await handleSlackMessageHandoff(thread, message, {
+    assistantStatusRequested: true,
+    mode: 'execute',
+    options,
+    proactive: true,
+    state: input.state,
+    steeringReactions: input.steeringReactions,
+    trigger: 'proactive'
+  })
+}
+
+/** Why an unmentioned message gets no proactive reply, or undefined when it may. */
+function proactiveSkipReason(
+  proactivity: SlackbotV2ProactivityOptions,
+  state: SlackbotV2ThreadState,
+  thread: Thread<SlackbotV2ThreadState>,
+  message: ChatMessage,
+  options: SlackbotV2Options
+): string | undefined {
+  if (!proactiveChannelAllowed(proactivity, thread.id)) return 'channel'
+  if ((state.proactiveEligibleUntil ?? 0) <= Date.now()) return 'not_eligible'
+  const maxTurns = proactivity.maxTurnsPerMention ?? PROACTIVE_MAX_TURNS_PER_MENTION
+  if ((state.proactiveTurns ?? 0) >= maxTurns) return 'turn_limit'
+  // Unmentioned replies never steer an active execution; the next turn
+  // collects them as thread context.
+  if (state.activeExecution === true) return 'active_execution'
+  if (!message.text.trim()) return 'empty'
+  if (mentionsOtherSlackUser(message, options.botUserId)) return 'addressed_elsewhere'
+  return undefined
+}
+
+function proactiveChannelAllowed(
+  proactivity: SlackbotV2ProactivityOptions,
+  threadId: string
+): boolean {
+  if (!proactivity.channels?.length) return true
+  const channelId = channelIdFromThreadId(threadId)
+  return channelId !== undefined && proactivity.channels.includes(channelId)
+}
+
+function mentionsOtherSlackUser(message: ChatMessage, botUserId: string | undefined): boolean {
+  const text = stringField(slackRawRecord(message).text)
+  for (const match of text.matchAll(/<@([A-Z0-9]+)(?:\|[^>]*)?>/g)) {
+    if (match[1] !== botUserId) return true
+  }
+  return false
+}
+
+async function proactiveThreadHistory(
+  thread: Thread<SlackbotV2ThreadState>,
+  current: ChatMessage
+): Promise<ProactiveThreadMessage[]> {
+  const history: ProactiveThreadMessage[] = []
+  for await (const item of thread.messages) {
+    if (item.id === current.id || compareSlackTs(item.id, current.id) > 0) continue
+    history.push(proactiveThreadMessage(item))
+    if (history.length >= PROACTIVE_HISTORY_MESSAGES) break
+  }
+  return history.reverse()
+}
+
+function proactiveThreadMessage(message: ChatMessage): ProactiveThreadMessage {
+  return {
+    author: message.author.fullName || message.author.userName || message.author.userId,
+    fromBot: message.author.isMe === true,
+    text: message.text
+  }
 }
 
 async function subscribeSlackThreadForHandoff(
@@ -1177,6 +1357,8 @@ type SyncThreadMessageInput = {
   initialAssistantStatusVisible?: boolean
   mode: SlackbotV2MessageMode
   options: SlackbotV2Options
+  /** Start an execution or do nothing; never append to an active one. */
+  proactive?: boolean
   /** Number of in-process retries already spent on this message's handoff. */
   retryAttempt?: number
   /** Resolved once per local handoff chain so retryable failures stay idempotent. */
@@ -1277,6 +1459,18 @@ async function syncThreadMessageToSession(
     slackUserId: slackUserIdForMessage(message),
     startedAtMs: traceStartedAtMs,
     threadId: thread.id
+  }
+  if (input.proactive && !shouldStartExecution) {
+    // An execution started (or this message already ran) after the
+    // classifier decided; the next turn collects this message as context.
+    traceLog(input.options, 'slackbotv2_proactive_handoff_skipped', trace, {
+      active_execution: state.activeExecution === true
+    })
+    if (input.initialAssistantStatusVisible && state.activeExecution !== true) {
+      await setAssistantStatus(thread, '', input.options, trace)
+    }
+    recordForward(input.mode, 'proactive_skipped', traceStartedAtMs)
+    return
   }
   if (isDuplicateIncrementalMessage) {
     traceLog(input.options, 'slackbotv2_forward_duplicate_skipped', trace)

@@ -172,6 +172,11 @@ export type SlackbotV2Options = {
   /** Strategy for resolving message-level harness/model/provider/reasoning overrides. */
   messageOverridesStrategy?: MessageOverridesStrategy
   /**
+   * Reply without a mention in threads where the bot was recently mentioned,
+   * when the classifier decides a message calls for a response. Off when unset.
+   */
+  proactivity?: SlackbotV2ProactivityOptions
+  /**
    * Backoff delays between in-process retries of a Slack handoff after a
    * retryable session API failure. Slack's own webhook redelivery cannot
    * drive these retries: Slack times deliveries out after ~3s, so its
@@ -225,6 +230,48 @@ export type MessageOverridesStrategy = (
   input: MessageOverridesStrategyInput
 ) => Promise<MessageOverridesStrategyResult>
 
+export type SlackbotV2ProactivityOptions = {
+  classifier: ProactiveClassifier
+  /** Slack conversation ids where proactivity applies. Empty or unset means every channel. */
+  channels?: readonly string[]
+  /** How long a mention keeps its thread eligible. Defaults to 24h. */
+  eligibilityWindowMs?: number
+  /** Unmentioned replies allowed per mention. Defaults to 3. */
+  maxTurnsPerMention?: number
+  /** Deadline for one classifier decision; a late decision declines. Defaults to 2s. */
+  timeoutMs?: number
+}
+
+export type ProactiveThreadMessage = {
+  author: string
+  /** Whether this bot wrote the message. */
+  fromBot: boolean
+  text: string
+}
+
+export type ProactiveClassifierInput = {
+  botName: string
+  /** Earlier thread messages, oldest first. */
+  history: ProactiveThreadMessage[]
+  message: ProactiveThreadMessage
+}
+
+export type ProactiveDecision = {
+  respond: boolean
+  /** The backend's probability that the bot should reply, when it reports one. */
+  probability?: number
+}
+
+/**
+ * Decides whether an unmentioned message in an eligible thread should get a
+ * reply. Implementations wrap one model backend; a thrown error or an aborted
+ * signal declines.
+ */
+export type ProactiveClassifier = (
+  input: ProactiveClassifierInput,
+  signal: AbortSignal
+) => Promise<ProactiveDecision>
+
 export type SlackbotV2 = {
   app: Hono
   chat: Chat
@@ -247,6 +294,10 @@ export type SlackbotV2ThreadState = {
   model?: string | null
   /** Persona pinned by the session API. Null means the thread is pinned without a persona. */
   personaId?: string | null
+  /** Unmentioned replies may get a proactive response until this time (ms). */
+  proactiveEligibleUntil?: number | null
+  /** Proactive responses since the last mention. */
+  proactiveTurns?: number
   /** Last thread-level model provider selected by Slack flags. Null clears persisted state. */
   provider?: string | null
   renderObligation?: SlackbotV2RenderObligation | null

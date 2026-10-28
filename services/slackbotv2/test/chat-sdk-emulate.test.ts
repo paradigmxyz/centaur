@@ -15,6 +15,8 @@ import type { ServerNotification } from '@centaur/harness-events'
 import {
   createSlackbotV2,
   normalizeSlackText,
+  type ProactiveClassifierInput,
+  type ProactiveDecision,
   type SlackbotV2,
   type SlackbotV2AppendMessagesRequest,
   type SlackbotV2ApiMessage,
@@ -4594,6 +4596,169 @@ describe('slackbotv2', () => {
     expect(slackApi.botInfoRequestCount('BOTHERBOT')).toBe(1)
     expect(await threadText(botTrigger.ts)).toContain('Executed request 1.')
     expect(hasLog(logs, 'slackbotv2_render_failed')).toBe(false)
+  })
+})
+
+describe('proactive replies', () => {
+  function createProactiveBot(
+    decide: (input: ProactiveClassifierInput) => ProactiveDecision | Promise<ProactiveDecision>,
+    overrides: Partial<Parameters<typeof createSlackbotV2>[0]> = {},
+    proactivity: { maxTurnsPerMention?: number } = {}
+  ): ProactiveClassifierInput[] {
+    const calls: ProactiveClassifierInput[] = []
+    bot = createTestBot({
+      proactivity: {
+        classifier: async input => {
+          calls.push(input)
+          return decide(input)
+        },
+        ...proactivity
+      },
+      ...overrides
+    })
+    return calls
+  }
+
+  // A proactive turn renders after the webhook's scheduled work settles, so
+  // wait for the thread to go idle before the next message.
+  async function reply(text: string, threadTs: string): Promise<void> {
+    const delivery = await sendMessage(text, { threadTs })
+    expect(delivery.response.status).toBe(200)
+    await delivery.finished()
+    await waitFor(async () =>
+      (await bot.chat.getState().get<Record<string, unknown>>(`thread-state:${threadKey(threadTs)}`))
+        ?.activeExecution !== true
+    )
+  }
+
+  async function mentionThread(parentText: string): Promise<string> {
+    const parent = await postUserMessage(parentText)
+    const mention = await sendMessage(`<@${BOT_USER_ID}> check the deploy`, { threadTs: parent.ts })
+    expect(mention.response.status).toBe(200)
+    await mention.finished()
+    expect(codexApi.executes).toHaveLength(1)
+    return parent.ts
+  }
+
+  it('answers an unmentioned follow-up the classifier accepts', async () => {
+    const calls = createProactiveBot(() => ({ respond: true }))
+    const threadTs = await mentionThread('Proactive accept context.')
+
+    await reply('what about staging?', threadTs)
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.message).toMatchObject({ fromBot: false, text: 'what about staging?' })
+    expect(calls[0]!.history.map(item => item.text)).toContain('Proactive accept context.')
+    expect(calls[0]!.history.some(item => item.fromBot)).toBe(true)
+    expect(codexApi.executes).toHaveLength(2)
+    expect(sessionMessageTexts(codexApi.appends.flatMap(append => append.body.messages)))
+      .toContain('what about staging?')
+    expect(await threadText(threadTs)).toContain('Executed request 2.')
+  })
+
+  it('stays quiet when the classifier declines or fails', async () => {
+    let fail = false
+    const calls = createProactiveBot(() => {
+      if (fail) throw new Error('backend unavailable')
+      return { respond: false }
+    })
+    const threadTs = await mentionThread('Proactive decline context.')
+
+    const declined = await sendMessage('thanks, looks good', { threadTs })
+    await declined.finished()
+    fail = true
+    const failed = await sendMessage('anything else?', { threadTs })
+    await failed.finished()
+
+    expect(calls).toHaveLength(2)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(sessionMessageTexts(codexApi.appends.flatMap(append => append.body.messages)))
+      .not.toContain('thanks, looks good')
+  })
+
+  it('only classifies replies in threads eligible since a mention', async () => {
+    const calls = createProactiveBot(() => ({ respond: true }))
+    const parent = await postUserMessage('Subscribed before proactivity.')
+    await bot.chat.getState().subscribe(threadKey(parent.ts))
+
+    const reply = await sendMessage('can someone check this?', { threadTs: parent.ts })
+    await reply.finished()
+
+    expect(calls).toHaveLength(0)
+    expect(codexApi.creates).toHaveLength(0)
+  })
+
+  it('skips replies addressed to another user without classifying them', async () => {
+    const calls = createProactiveBot(() => ({ respond: true }))
+    const threadTs = await mentionThread('Proactive addressed context.')
+
+    const reply = await sendMessage(`<@${USER_B_ID}> can you check staging?`, { threadTs })
+    await reply.finished()
+
+    expect(calls).toHaveLength(0)
+    expect(codexApi.executes).toHaveLength(1)
+  })
+
+  it('never appends to an execution that started while classifying', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    let threadTs = ''
+    const calls = createProactiveBot(
+      async () => {
+        await sharedState.set(`thread-state:${threadKey(threadTs)}`, {
+          ...(await sharedState.get<Record<string, unknown>>(`thread-state:${threadKey(threadTs)}`)),
+          activeExecution: true
+        })
+        return { respond: true }
+      },
+      { state: sharedState }
+    )
+    threadTs = await mentionThread('Proactive race context.')
+    const appendCount = codexApi.appends.length
+
+    const reply = await sendMessage('and the rollback?', { threadTs })
+    await reply.finished()
+
+    expect(calls).toHaveLength(1)
+    expect(codexApi.appends).toHaveLength(appendCount)
+    expect(codexApi.executes).toHaveLength(1)
+  })
+
+  it('stops after the turn limit until the next mention', async () => {
+    const calls = createProactiveBot(
+      () => ({ respond: true }),
+      {},
+      { maxTurnsPerMention: 1 }
+    )
+    const threadTs = await mentionThread('Proactive limit context.')
+
+    await reply('first follow-up?', threadTs)
+    await reply('second follow-up?', threadTs)
+    expect(calls).toHaveLength(1)
+    expect(codexApi.executes).toHaveLength(2)
+
+    await reply(`<@${BOT_USER_ID}> one more`, threadTs)
+    await reply('third follow-up?', threadTs)
+    expect(calls).toHaveLength(2)
+    expect(codexApi.executes).toHaveLength(4)
+  })
+
+  it('ends proactive replies when the thread is stopped', async () => {
+    const calls = createProactiveBot(
+      () => ({ respond: true }),
+      {
+        fetch: async (input, init) => String(input).endsWith('/interrupt')
+          ? Response.json({ ok: true, interrupted: false, thread_key: 'unused' })
+          : globalThis.fetch(input, init)
+      }
+    )
+    const threadTs = await mentionThread('Proactive stop context.')
+
+    await (await sendMessage(`<@${BOT_USER_ID}> stop`, { threadTs })).finished()
+    await (await sendMessage('are you still there?', { threadTs })).finished()
+
+    expect(calls).toHaveLength(0)
+    expect(codexApi.executes).toHaveLength(1)
   })
 })
 

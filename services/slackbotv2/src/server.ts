@@ -7,6 +7,8 @@ import {
   createFlagMessageOverridesStrategy,
   createOpenAiMessageOverridesStrategy
 } from './message-overrides-strategy'
+import { createOpenAiProactiveClassifier } from './proactive-classifier'
+import { splitEnvList } from './slack-events'
 
 const port = numberEnv('PORT', 3002)
 const apiUrl = stringEnv('CENTAUR_API_URL', 'http://127.0.0.1:8080')
@@ -86,6 +88,7 @@ const options: SlackbotV2Options = {
   idleTimeoutMs: optionalNumberEnv('SESSION_IDLE_TIMEOUT_MS'),
   maxDurationMs: optionalNumberEnv('SESSION_MAX_DURATION_MS'),
   messageOverridesStrategy: createMessageOverridesStrategy(),
+  proactivity: createProactivityOptions(),
   postgresUrl:
     optionalEnv('SLACKBOTV2_DATABASE_URL') ??
     optionalEnv('DATABASE_URL') ??
@@ -127,6 +130,7 @@ console.log(
     auto_join_created_channels_enabled: options.autoJoinCreatedChannels,
     message_overrides_strategy: messageOverridesStrategyMode,
     enabled_harnesses: enabledHarnesses,
+    proactivity_classifier: options.proactivity ? proactivityClassifierBackend() : undefined,
     message_overrides_strategy_enabled:
       messageOverridesStrategyMode !== 'llm' || Boolean(messageOverridesStrategyApiKey),
     response_metadata_mode: options.responseMetadataMode,
@@ -218,6 +222,46 @@ function createMessageOverridesStrategy(): SlackbotV2Options['messageOverridesSt
     model: stringEnv('SLACKBOTV2_MESSAGE_OVERRIDES_MODEL', 'gpt-6-luna'),
     timeoutMs: optionalNumberEnv('SLACKBOTV2_MESSAGE_OVERRIDES_TIMEOUT_MS')
   })
+}
+
+function proactivityClassifierBackend(): string {
+  return stringEnv('SLACKBOTV2_PROACTIVITY_CLASSIFIER', 'openai').toLowerCase()
+}
+
+function createProactivityOptions(): SlackbotV2Options['proactivity'] {
+  if (!booleanEnv('SLACKBOTV2_PROACTIVITY_ENABLED', false)) return undefined
+  return {
+    channels: splitEnvList(optionalEnv('SLACKBOTV2_PROACTIVITY_CHANNELS')),
+    classifier: createProactiveClassifier(proactivityClassifierBackend()),
+    eligibilityWindowMs: optionalNumberEnv('SLACKBOTV2_PROACTIVITY_ELIGIBILITY_WINDOW_MS'),
+    maxTurnsPerMention: optionalNumberEnv('SLACKBOTV2_PROACTIVITY_MAX_TURNS'),
+    timeoutMs: optionalNumberEnv('SLACKBOTV2_PROACTIVITY_TIMEOUT_MS')
+  }
+}
+
+// Each model backend implements ProactiveClassifier (see proactive-classifier.ts
+// for the shared prompt and schema); add one by adding a case here.
+function createProactiveClassifier(
+  backend: string
+): NonNullable<SlackbotV2Options['proactivity']>['classifier'] {
+  switch (backend) {
+    case 'openai': {
+      const apiKey =
+        optionalEnv('SLACKBOTV2_PROACTIVITY_OPENAI_API_KEY') ?? optionalEnv('OPENAI_API_KEY')
+      if (!apiKey) {
+        throw new Error(
+          'SLACKBOTV2_PROACTIVITY_OPENAI_API_KEY or OPENAI_API_KEY is required for the openai proactivity classifier'
+        )
+      }
+      return createOpenAiProactiveClassifier({
+        apiKey,
+        baseUrl: optionalEnv('SLACKBOTV2_PROACTIVITY_OPENAI_BASE_URL'),
+        model: stringEnv('SLACKBOTV2_PROACTIVITY_MODEL', 'gpt-6-luna')
+      })
+    }
+    default:
+      throw new Error(`SLACKBOTV2_PROACTIVITY_CLASSIFIER must be "openai" (got "${backend}")`)
+  }
 }
 
 function optionalNumberEnv(name: string): number | undefined {

@@ -263,6 +263,11 @@ export const slackbotMetrics = {
     labelNames: ['source'],
     name: 'slackbotv2_last_successful_render_timestamp_seconds'
   }),
+  proactiveDecisions: counter({
+    help: 'Unmentioned replies in subscribed threads by proactive decision outcome.',
+    labelNames: ['outcome'],
+    name: 'slackbotv2_proactive_decisions_total'
+  }),
   renderAnswerDivergence: counter({
     help: 'Live renders where the recomposed answer diverged from already-streamed text, so a delta was suppressed to avoid interleaving the message (once per render).',
     name: 'slackbotv2_render_answer_divergence_total'
