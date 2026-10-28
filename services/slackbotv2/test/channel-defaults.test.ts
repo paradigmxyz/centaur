@@ -59,11 +59,17 @@ describe('parseChannelDefaults', () => {
       parseChannelDefaults(
         JSON.stringify({
           C0A: { model: 'opus' },
+          C0F: { model: 'fable' },
+          C0S: { model: 'sonnet' },
+          C0H: { model: 'haiku' },
           C0B: { model: 'gpt-5.2' }
         })
       )
     ).toEqual({
       C0A: { model: 'claude-opus-5-5' },
+      C0F: { model: 'claude-fable-5-1' },
+      C0S: { model: 'claude-sonnet-5-5' },
+      C0H: { model: 'claude-haiku-5-5' },
       C0B: { model: 'gpt-5.2' }
     })
   })

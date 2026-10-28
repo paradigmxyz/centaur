@@ -74,8 +74,8 @@ const scenarios: Record<string, Scenario> = {
   },
   'a model flag sticks to the thread': {
     steps: [
-      { say: '--codex --model gpt-5.4 hello', harness: 'codex', model: 'gpt-5.4', effort: CODEX_EFFORT, footer: 'GPT 5.4 · Codex · Medium' },
-      { say: 'again', harness: 'codex', model: 'gpt-5.4', effort: CODEX_EFFORT, sandbox: 'same' }
+      { say: '--codex --model gpt-6.1-terra hello', harness: 'codex', model: 'gpt-6.1-terra', effort: CODEX_EFFORT, footer: 'Terra 6.1 · Codex · Medium' },
+      { say: 'again', harness: 'codex', model: 'gpt-6.1-terra', effort: CODEX_EFFORT, sandbox: 'same' }
     ]
   },
   'a harness switch drops the sticky model': {

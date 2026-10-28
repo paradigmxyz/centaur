@@ -89,6 +89,7 @@ const CODEX_REASONING_EFFORTS_BY_MODEL: Record<string, ReadonlySet<string>> = {
   'gpt-6-astra': GPT_6_ULTRA_REASONING_EFFORTS,
   'gpt-6-sol': GPT_5_6_REASONING_EFFORTS,
   'gpt-6.1-sol': GPT_6_ULTRA_REASONING_EFFORTS,
+  'gpt-6.1-terra': GPT_6_ULTRA_REASONING_EFFORTS,
   'gpt-6-luna': GPT_5_6_REASONING_EFFORTS
 }
 

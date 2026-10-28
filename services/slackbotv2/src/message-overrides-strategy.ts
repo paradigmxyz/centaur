@@ -21,7 +21,7 @@ const SYSTEM_PROMPT = [
   'Only return reasoning when the user explicitly asks to change model reasoning or effort. A reasoning word appearing incidentally, in quoted text, pasted model output, code, or task requirements is not a selection request.',
   'When the user explicitly requests a reasoning or effort change, map fuzzy magnitude words to the nearest reasoning value. Examples: tiny/cheap/fast -> low or minimal; normal/default -> medium; deep/strong/intense -> high or xhigh; maximum/superduper/biggest -> max.',
   'Return reasoning even when the requested model is not Codex; validation will ignore reasoning that cannot apply.',
-  'Map OpenAI model aliases to canonical IDs: astra -> gpt-6-astra, sol -> gpt-6.1-sol, 6.1 sol -> gpt-6.1-sol, 6 sol -> gpt-6-sol, luna -> gpt-6-luna, terra -> gpt-5.6-terra, 5.6 sol -> gpt-5.6-sol, 5.6 luna -> gpt-5.6-luna, 5.5 -> gpt-5.5, 5.5 pro -> gpt-5.5-pro, 5.4 -> gpt-5.4, 5.4 pro -> gpt-5.4-pro, 5.4 mini -> gpt-5.4-mini, 5.4 nano -> gpt-5.4-nano. Preserve explicitly requested model generations; there is no GPT-6 Terra in the supported catalog.',
+  'Map OpenAI model aliases to canonical IDs: astra -> gpt-6-astra, sol -> gpt-6.1-sol, 6.1 sol -> gpt-6.1-sol, 6 sol -> gpt-6-sol, luna -> gpt-6-luna, 6 luna -> gpt-6-luna, terra -> gpt-6.1-terra, 6.1 terra -> gpt-6.1-terra, 5.6 sol -> gpt-5.6-sol, 5.6 terra -> gpt-5.6-terra, 5.6 luna -> gpt-5.6-luna, 5.5 -> gpt-5.5, 5.5 pro -> gpt-5.5-pro, 5.4 -> gpt-5.4, 5.4 pro -> gpt-5.4-pro, 5.4 mini -> gpt-5.4-mini, 5.4 nano -> gpt-5.4-nano. Preserve explicitly requested model generations; there is no gpt-6-terra model ID in the supported catalog.',
   'Map Claude model aliases to canonical IDs: fable -> claude-fable-5-1, fable 5 -> claude-fable-5, fable 5.1 -> claude-fable-5-1, opus -> claude-opus-5-5, opus 4.8 -> claude-opus-4-8, opus 4.7 -> claude-opus-4-7, opus 5 -> claude-opus-5, opus 5 fast -> claude-opus-5-fast, opus 5.5 -> claude-opus-5-5, sonnet -> claude-sonnet-5-5, sonnet 4.6 -> claude-sonnet-4-6, sonnet 5 -> claude-sonnet-5, sonnet 5.5 -> claude-sonnet-5-5, haiku -> claude-haiku-5-5, haiku 4.5 -> claude-haiku-4-5, haiku 5.5 -> claude-haiku-5-5.',
   'Map Amp model aliases to canonical IDs: deep -> deep, fast -> fast. Select an Amp model only when the user explicitly names Amp or clearly asks for the deep or fast model/mode. Requests such as "use the deep model" and "switch to fast mode" select the corresponding Amp model. Do not infer Amp from superlatives, coined terms, or casual requests to be more intelligent, thorough, or fast.',
   'Words containing or merely evoking model aliases are not model requests. For example, "think deeply", "do a deep analysis", "use your strongest thinking", and "give me a fast answer" do not select Amp. Unless another explicit selector is present, return null for every field.',
@@ -63,6 +63,7 @@ const MODEL_VALUES = [
   'gpt-6-astra',
   'gpt-6-sol',
   'gpt-6.1-sol',
+  'gpt-6.1-terra',
   'gpt-6-luna',
   null
 ] as const

@@ -380,7 +380,7 @@ describe('normalizeHarnessOverrides', () => {
 })
 
 describe('validateStrategyOverrides', () => {
-  for (const model of ['gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna']) {
+  for (const model of ['gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-sol', 'gpt-6-luna']) {
     test(`accepts ${model} and routes it to Codex`, () => {
       expect(validateStrategyOverrides({ model, reasoning: 'max' })).toEqual({
         harnessType: 'codex',
@@ -479,12 +479,14 @@ describe('validateStrategyOverrides', () => {
       provider: undefined,
       reasoning: undefined
     })
-    expect(validateStrategyOverrides({ model: 'claude-sonnet-5-5' })).toEqual({
-      harnessType: 'claudecode',
-      model: 'claude-sonnet-5-5',
-      provider: undefined,
-      reasoning: undefined
-    })
+    for (const model of ['claude-fable-5-1', 'claude-sonnet-5-5', 'claude-haiku-5-5']) {
+      expect(validateStrategyOverrides({ model })).toEqual({
+        harnessType: 'claudecode',
+        model,
+        provider: undefined,
+        reasoning: undefined
+      })
+    }
   })
 
   test('rejects aliases and arbitrary model ids from the strategy path', () => {
@@ -831,9 +833,18 @@ describe('messageOverridesForText strategy invocation', () => {
     expect(requestBody?.instructions).toContain('sol -> gpt-6.1-sol')
     expect(requestBody?.instructions).toContain('6 sol -> gpt-6-sol')
     expect(requestBody?.instructions).toContain('luna -> gpt-6-luna')
+    for (const mapping of [
+      'terra -> gpt-6.1-terra', '6.1 terra -> gpt-6.1-terra', '5.6 terra -> gpt-5.6-terra',
+      'fable -> claude-fable-5-1', 'fable 5 -> claude-fable-5', 'fable 5.1 -> claude-fable-5-1',
+      'sonnet -> claude-sonnet-5-5', 'sonnet 5 -> claude-sonnet-5', 'sonnet 5.5 -> claude-sonnet-5-5',
+      'haiku -> claude-haiku-5-5', 'haiku 4.5 -> claude-haiku-4-5', 'haiku 5.5 -> claude-haiku-5-5'
+    ]) expect(requestBody?.instructions).toContain(mapping)
     const format = (requestBody?.text as {
       format: { schema: { properties: { model: { enum: (string | null)[] } } } }
     }).format
+    for (const model of ['gpt-6.1-terra', 'claude-fable-5-1', 'claude-sonnet-5-5', 'claude-haiku-5-5']) {
+      expect(format.schema.properties.model.enum).toContain(model)
+    }
     expect(format.schema.properties.model.enum).toContain('gpt-6.1-sol')
     expect(format.schema.properties.model.enum).toContain('gpt-6-sol')
     expect(format.schema.properties.model.enum).toContain('gpt-6-luna')
