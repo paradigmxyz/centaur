@@ -1,5 +1,6 @@
 // Runs the production Slack message-overrides classifier so the eval measures
-// the prompt, schema, selector pre-filter, and validation the bot ships.
+// the Decisions instructions and questions, selector pre-filter, and validation
+// the bot ships.
 import type { ApiProvider, ProviderOptions, ProviderResponse } from 'promptfoo'
 import { createOpenAiMessageOverridesStrategy } from '../../services/slackbotv2/src/message-overrides-strategy'
 
@@ -51,7 +52,7 @@ export default class MessageOverridesProvider implements ApiProvider {
           failure = `${message}: ${fields?.error ?? 'unknown error'}`
         }
       },
-      model: this.config.model ?? 'gpt-5.4-nano',
+      model: this.config.model ?? 'gpt-6-luna',
       timeoutMs: this.config.timeoutMs
     })
 
