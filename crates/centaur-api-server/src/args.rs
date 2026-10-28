@@ -230,12 +230,21 @@ struct ActivitySummaryArgs {
         default_value = "low"
     )]
     reasoning_effort: String,
-    /// Post a progress update to the chat thread once an execution has run
-    /// this long. 0 disables progress updates.
+    /// Post model-written progress updates to the chat thread while a
+    /// long-running execution is still working.
+    #[arg(
+        long = "session-progress-update-enabled",
+        env = "SESSION_PROGRESS_UPDATE_ENABLED",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    progress_update_enabled: bool,
+    /// Execution age before the first progress update.
     #[arg(
         long = "session-progress-update-after-secs",
         env = "SESSION_PROGRESS_UPDATE_AFTER_SECS",
-        default_value_t = 0
+        default_value_t = 120,
+        value_parser = clap::value_parser!(u64).range(1..)
     )]
     progress_update_after_secs: u64,
     /// Minimum time between progress updates for one execution.
@@ -304,7 +313,7 @@ impl ActivitySummaryArgs {
             model: self.model.clone(),
             reasoning_effort: clean_optional_value(Some(self.reasoning_effort.as_str())),
             timeout: Duration::from_secs(self.timeout_secs),
-            progress: (self.progress_update_after_secs > 0).then(|| ProgressUpdateConfig {
+            progress: self.progress_update_enabled.then(|| ProgressUpdateConfig {
                 after: Duration::from_secs(self.progress_update_after_secs),
                 interval: Duration::from_secs(self.progress_update_interval_secs),
             }),
@@ -2726,6 +2735,32 @@ mod tests {
 
         let config = args.activity_summary_config().unwrap();
         assert_eq!(config.api_key, "sk-test");
+    }
+
+    #[test]
+    fn progress_updates_require_their_feature_flag() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[("OPENAI_API_KEY", "sk-test")]);
+        let parse = |extra: &[&str]| {
+            let mut argv = vec![
+                "centaur-api-server",
+                "--database-url",
+                "postgres://postgres:postgres@localhost/centaur",
+                "--session-activity-summary-enabled",
+                "true",
+            ];
+            argv.extend_from_slice(extra);
+            Args::try_parse_from(argv)
+                .unwrap()
+                .activity_summary_config()
+                .unwrap()
+                .progress
+        };
+
+        assert!(parse(&[]).is_none());
+        let progress = parse(&["--session-progress-update-enabled", "true"]).unwrap();
+        assert_eq!(progress.after, Duration::from_secs(120));
+        assert_eq!(progress.interval, Duration::from_secs(300));
     }
 
     #[test]
