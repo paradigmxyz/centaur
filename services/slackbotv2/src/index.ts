@@ -199,6 +199,8 @@ const SLACK_BLOCK_ACTION_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000
 const SLACK_BLOCK_ACTION_LEASE_TTL_MS = 60 * 1000
 const PROACTIVE_CLASSIFIER_TIMEOUT_MS = 2_000
 const PROACTIVE_HISTORY_MESSAGES = 20
+// Bounds a crashed handoff's claim; a live one releases it once its execution starts.
+const PROACTIVE_CLAIM_TTL_MS = 60 * 1000
 // Mentions and proactive replies make a thread eligible; DMs already treat
 // every message as a mention.
 const PROACTIVE_ELIGIBILITY_TRIGGERS = new Set(['new_mention', 'proactive', 'subscribed_message'])
@@ -965,24 +967,41 @@ async function handleProactiveMessage(
     return
   }
   decisionFields.layer = respondingLayer
-  // A stop or another execution may have landed while the classifier ran.
-  const lateSkipReason = proactiveSkipReason(prompt, (await thread.state) ?? {}, message)
-  if (lateSkipReason) {
-    record(`skip_${lateSkipReason}`, decisionFields)
+  // Until a handoff records its execution as active, another accepted message
+  // in this thread would queue a second turn; the claim makes it wait for the
+  // next turn as context instead, across replicas.
+  const claimKey = proactiveClaimKey(thread.id)
+  const claimToken = randomUUID()
+  if (!(await input.state.setIfNotExists(claimKey, claimToken, PROACTIVE_CLAIM_TTL_MS))) {
+    record('skip_claimed', decisionFields)
     return
   }
-  record('respond', decisionFields)
-  await handleSlackMessageHandoff(thread, message, {
-    assistantStatusRequested: true,
-    mode: 'execute',
-    options,
-    proactive: true,
-    state: input.state,
-    steeringReactions: input.steeringReactions,
-    // A prompt match may start a thread under a top-level message.
-    subscribe: true,
-    trigger: 'proactive'
-  })
+  try {
+    // A stop or another execution may have landed while the classifier ran.
+    const lateSkipReason = proactiveSkipReason(prompt, (await thread.state) ?? {}, message)
+    if (lateSkipReason) {
+      record(`skip_${lateSkipReason}`, decisionFields)
+      return
+    }
+    record('respond', decisionFields)
+    await handleSlackMessageHandoff(thread, message, {
+      assistantStatusRequested: true,
+      mode: 'execute',
+      options,
+      proactive: true,
+      state: input.state,
+      steeringReactions: input.steeringReactions,
+      // A prompt match may start a thread under a top-level message.
+      subscribe: true,
+      trigger: 'proactive'
+    })
+  } finally {
+    if ((await input.state.get(claimKey)) === claimToken) await input.state.delete(claimKey)
+  }
+}
+
+function proactiveClaimKey(threadId: string): string {
+  return `slackbotv2:proactive:claim:${threadId}`
 }
 
 type ProactiveLayer = 'mentioned' | 'prompt'

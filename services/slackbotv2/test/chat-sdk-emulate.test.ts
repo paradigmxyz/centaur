@@ -4779,6 +4779,30 @@ describe('proactive replies', () => {
     expect(codexApi.executes).toHaveLength(1)
   })
 
+  it('starts one turn when two replies are accepted at once', async () => {
+    let releaseClassifiers = () => {}
+    const bothClassifying = new Promise<void>(resolve => {
+      releaseClassifiers = resolve
+    })
+    const calls = createProactiveBot(async () => {
+      if (calls.length === 2) releaseClassifiers()
+      await bothClassifying
+      return { respond: true }
+    })
+    const threadTs = await mentionThread('Proactive concurrent context.')
+
+    const first = await sendMessage('is staging deployed?', { threadTs })
+    const second = await sendMessage('and production?', { threadTs })
+    await Promise.all([first.finished(), second.finished()])
+    await waitFor(async () =>
+      (await bot.chat.getState().get<Record<string, unknown>>(`thread-state:${threadKey(threadTs)}`))
+        ?.activeExecution !== true
+    )
+
+    expect(calls).toHaveLength(2)
+    expect(codexApi.executes).toHaveLength(2)
+  })
+
   it('ends proactive replies at a stop until the next mention', async () => {
     const calls = createProactiveBot(
       () => ({ respond: true }),
