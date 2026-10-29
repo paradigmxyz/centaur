@@ -139,6 +139,10 @@ spec:
 {{- if .Values.slackbotv2.proactivity.enabled }}
             - name: SLACKBOTV2_PROACTIVITY_CLASSIFIER
               value: {{ .Values.slackbotv2.proactivity.classifier | quote }}
+{{- if gt (int .Values.slackbotv2.proactivity.debounceMs) 0 }}
+            - name: SLACKBOTV2_PROACTIVITY_DEBOUNCE_MS
+              value: {{ .Values.slackbotv2.proactivity.debounceMs | quote }}
+{{- end }}
             - name: SLACKBOTV2_PROACTIVITY_MODEL
               value: {{ .Values.slackbotv2.proactivity.model | quote }}
             - name: SLACKBOTV2_PROACTIVITY_OPENAI_BASE_URL

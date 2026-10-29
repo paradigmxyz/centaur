@@ -842,6 +842,12 @@ slackbotv2:
     model: gpt-6-luna
     openaiBaseUrl: https://api.openai.com/v1
     timeoutMs: 2000
+    # Milliseconds of quiet an idle thread waits for before classifying, so a
+    # message sent in parts (a name, then context) gets one decision and one
+    # turn that sees every part. Every proactive reply waits this long; 0
+    # classifies each message at once. Later parts steer the turn when the
+    # classifier accepts them.
+    debounceMs: 0
     # Rules are mounted from a ConfigMap, so `when` and `context` can be long
     # and span lines. Rules for every channel; empty means no rule matching by
     # default.

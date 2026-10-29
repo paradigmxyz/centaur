@@ -546,6 +546,7 @@
             "model": { "type": "string", "minLength": 1 },
             "openaiBaseUrl": { "type": "string" },
             "timeoutMs": { "type": "integer", "minimum": 1 },
+            "debounceMs": { "type": "integer", "minimum": 0 },
             "defaultRules": { "$ref": "#/definitions/slackbotv2ProactivityRules" },
             "channelRules": {
               "type": "object",
