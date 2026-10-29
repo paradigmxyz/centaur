@@ -2,6 +2,19 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "definitions": {
+    "slackbotv2ProactivityRules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "when"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "when": { "type": "string", "minLength": 1 },
+          "context": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
     "podScheduling": {
       "type": "object",
       "properties": {
@@ -532,13 +545,14 @@
             "model": { "type": "string", "minLength": 1 },
             "openaiBaseUrl": { "type": "string" },
             "timeoutMs": { "type": "integer", "minimum": 1 },
-            "defaultPrompt": { "type": "string" },
-            "channelPrompts": {
+            "defaultRules": { "$ref": "#/definitions/slackbotv2ProactivityRules" },
+            "channelRules": {
               "type": "object",
               "propertyNames": { "pattern": "^[A-Z0-9]+$" },
-              "additionalProperties": { "type": "string" }
+              "additionalProperties": { "$ref": "#/definitions/slackbotv2ProactivityRules" }
             }
-          }
+          },
+          "additionalProperties": false
         },
         "metrics": {
           "type": "object",

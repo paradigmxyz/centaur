@@ -1,29 +1,29 @@
 {{- if .Values.slackbotv2.enabled }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
 {{- $proactivity := .Values.slackbotv2.proactivity -}}
-{{- $proactivityPrompts := and $proactivity.enabled (or $proactivity.defaultPrompt $proactivity.channelPrompts) -}}
+{{- $proactivityRules := and $proactivity.enabled (or $proactivity.defaultRules $proactivity.channelRules) -}}
 {{- $console := include "centaur.consoleValues" . | fromYaml -}}
 {{- $slackbotV2MetricsAnnotations := dict -}}
 {{- if .Values.slackbotv2.metrics.scrapeAnnotations -}}
 {{- $slackbotV2MetricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" .Values.slackbotv2.metrics.path "prometheus.io/port" "3001" -}}
 {{- $slackbotV2MetricsAnnotations = mergeOverwrite $slackbotV2MetricsAnnotations (.Values.slackbotv2.metrics.annotations | default dict) -}}
 {{- end -}}
-{{- if $proactivityPrompts }}
-# Proactivity prompts as files the bot reads at boot from
-# SLACKBOTV2_PROACTIVITY_PROMPTS_DIR: default.md for every channel and
-# <CHANNEL_ID>.md per channel (an empty file turns prompt matching off there).
+{{- if $proactivityRules }}
+# Proactivity rules as JSON files the bot reads at boot from
+# SLACKBOTV2_PROACTIVITY_RULES_DIR: default.json for every channel and
+# <CHANNEL_ID>.json per channel (an empty list turns rule matching off there).
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2") }}-proactivity-prompts
+  name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2") }}-proactivity-rules
   labels:
 {{ include "centaur.componentLabels" (dict "root" . "component" "slackbotv2") | nindent 4 }}
 data:
-{{- if $proactivity.defaultPrompt }}
-  default.md: {{ $proactivity.defaultPrompt | quote }}
+{{- if $proactivity.defaultRules }}
+  default.json: {{ $proactivity.defaultRules | toJson | quote }}
 {{- end }}
-{{- range $channel, $prompt := $proactivity.channelPrompts }}
-  {{ printf "%s.md" $channel }}: {{ $prompt | default "" | quote }}
+{{- range $channel, $rules := $proactivity.channelRules }}
+  {{ printf "%s.json" $channel }}: {{ $rules | default list | toJson | quote }}
 {{- end }}
 ---
 {{- end }}
@@ -42,8 +42,8 @@ spec:
     metadata:
       annotations:
         checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
-{{- if $proactivityPrompts }}
-        checksum/proactivity-prompts: {{ dict "default" $proactivity.defaultPrompt "channels" $proactivity.channelPrompts | toJson | sha256sum }}
+{{- if $proactivityRules }}
+        checksum/proactivity-rules: {{ dict "default" $proactivity.defaultRules "channels" $proactivity.channelRules | toJson | sha256sum }}
 {{- end }}
 {{- with $slackbotV2MetricsAnnotations }}
 {{ toYaml . | nindent 8 }}
@@ -133,9 +133,9 @@ spec:
               value: {{ .Values.slackbotv2.proactivity.model | quote }}
             - name: SLACKBOTV2_PROACTIVITY_OPENAI_BASE_URL
               value: {{ .Values.slackbotv2.proactivity.openaiBaseUrl | quote }}
-{{- if $proactivityPrompts }}
-            - name: SLACKBOTV2_PROACTIVITY_PROMPTS_DIR
-              value: /etc/slackbotv2/proactivity-prompts
+{{- if $proactivityRules }}
+            - name: SLACKBOTV2_PROACTIVITY_RULES_DIR
+              value: /etc/slackbotv2/proactivity-rules
 {{- end }}
             - name: SLACKBOTV2_PROACTIVITY_TIMEOUT_MS
               value: {{ .Values.slackbotv2.proactivity.timeoutMs | quote }}
@@ -205,15 +205,15 @@ spec:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:
 {{ toYaml .Values.slackbotv2.resources | nindent 12 }}
-{{- if $proactivityPrompts }}
+{{- if $proactivityRules }}
           volumeMounts:
-            - name: proactivity-prompts
-              mountPath: /etc/slackbotv2/proactivity-prompts
+            - name: proactivity-rules
+              mountPath: /etc/slackbotv2/proactivity-rules
               readOnly: true
       volumes:
-        - name: proactivity-prompts
+        - name: proactivity-rules
           configMap:
-            name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2") }}-proactivity-prompts
+            name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2") }}-proactivity-rules
 {{- end }}
 ---
 apiVersion: v1
