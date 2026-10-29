@@ -3,6 +3,7 @@ import json
 import httpx
 import pytest
 from client import (
+    SANDBOX_ADMIN_GCP_ID_TOKEN_SECRETS_PATH,
     SANDBOX_ADMIN_GRANTS_PATH,
     SANDBOX_ADMIN_PG_DSN_SECRETS_PATH,
     SANDBOX_ADMIN_PRINCIPALS_PATH,
@@ -424,3 +425,16 @@ def test_admin_update_secret_patches_only_the_given_fields_at_its_kind_path():
         f"{SANDBOX_ADMIN_PG_DSN_SECRETS_PATH}/pgs_1",
         {"data": {"role": "writer"}},
     )
+
+
+def test_admin_create_secret_posts_gcp_id_token_documents_to_their_kind_path():
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path, json.loads(request.content)))
+        return json_response({"data": {"id": "gid_1"}}, 201)
+
+    data = {"audience": "https://run.example", "keyfile": {"source_type": "env"}}
+    assert make_client(handler).admin_create_secret("gcp_id_token", data) == {"id": "gid_1"}
+
+    assert requests == [("POST", SANDBOX_ADMIN_GCP_ID_TOKEN_SECRETS_PATH, {"data": data})]

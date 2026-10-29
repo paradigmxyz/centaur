@@ -315,6 +315,38 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "an admin's Slack DM sandbox creates a GCP ID token secret from another's keyfile and edits its audience" do
+    original = gcp_id_token_secrets(:acme_cloud_run)
+
+    with_token(dm_proxy_for(users(:acme_admin))) do |headers|
+      get "/api/v1/sandbox/admin/gcp_id_token_secrets/#{original.oid}", headers: headers
+      assert_response :ok
+      keyfile = json_body.dig("data", "keyfile")
+
+      post "/api/v1/sandbox/admin/gcp_id_token_secrets",
+           params: { data: { foreign_id: "cloud-run-other", name: "other cloud run", audience: "https://other.example",
+                             keyfile: keyfile, rules: [ { host: "other.example" } ] } },
+           headers: headers, as: :json
+      assert_response :created
+      copy = GcpIdTokenSecret.find_by_oid!(json_body.dig("data", "id"))
+      assert_equal [ "env", { "var" => "CLOUD_RUN_SA_KEYFILE" }, users(:acme_admin) ],
+                   [ copy.keyfile_source.source_type, copy.keyfile_source.config, copy.created_by ]
+
+      patch "/api/v1/sandbox/admin/gcp_id_token_secrets/#{copy.oid}",
+            params: { data: { audience: "https://renamed.example" } }, headers: headers, as: :json
+      assert_response :ok
+      copy.reload
+      assert_equal [ "https://renamed.example", %w[other.example], "env" ],
+                   [ copy.audience, copy.rules.map(&:host), copy.keyfile_source.source_type ]
+
+      post "/api/v1/sandbox/admin/gcp_id_token_secrets",
+           params: { data: { audience: "https://x.example", rules: [ { host: "x.example" } ],
+                             keyfile: { source_type: "control_plane", secret: "pasted", config: {} } } },
+           headers: headers, as: :json
+      assert_response :forbidden
+    end
+  end
+
   test "an admin's Slack DM sandbox edits a static secret's fields and keeps its source" do
     secret = static_secrets(:acme_staging_api_key)
     secret.create_source!(source_type: "control_plane", secret: "value-set-by-operator")
