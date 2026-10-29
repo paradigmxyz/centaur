@@ -27,6 +27,7 @@ import {
 } from '../src/index'
 import { clearRequesterIdentityCacheForTests } from '../src/session-api'
 import { slackbotMetrics } from '../src/metrics'
+import type { ProactivityPrompts } from '../src/proactivity-prompts'
 import { createOpenAiMessageOverridesStrategy } from '../src/message-overrides-strategy'
 import { modelDisplayName } from '../src/response-context'
 import claudeSettings from '../../../harness/claude/settings.json'
@@ -4602,7 +4603,8 @@ describe('slackbotv2', () => {
 describe('proactive replies', () => {
   function createProactiveBot(
     decide: (input: ProactiveClassifierInput) => ProactiveDecision | Promise<ProactiveDecision>,
-    overrides: Partial<Parameters<typeof createSlackbotV2>[0]> = {}
+    overrides: Partial<Parameters<typeof createSlackbotV2>[0]> = {},
+    prompts?: ProactivityPrompts
   ): ProactiveClassifierInput[] {
     const calls: ProactiveClassifierInput[] = []
     bot = createTestBot({
@@ -4610,7 +4612,8 @@ describe('proactive replies', () => {
         classifier: async input => {
           calls.push(input)
           return decide(input)
-        }
+        },
+        prompts
       },
       ...overrides
     })
@@ -4674,6 +4677,50 @@ describe('proactive replies', () => {
       .not.toContain('thanks, looks good')
   })
 
+  it('answers a top-level message that matches the channel prompt', async () => {
+    const calls = createProactiveBot(() => ({ respond: true }), {}, {
+      default: 'Questions about anything.',
+      channels: { [CHANNEL_ID]: 'Questions about deploys.' }
+    })
+
+    const message = await sendMessage('is staging deployed?')
+    await message.finished()
+    await waitFor(async () => (await threadText(message.ts)).includes('Executed request 1.'))
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({ history: [], prompt: 'Questions about deploys.' })
+    expect(codexApi.executes).toHaveLength(1)
+    expect(codexApi.executes[0]!.threadKey).toBe(threadKey(message.ts))
+  })
+
+  it('treats a thread it answered on a prompt match as mentioned', async () => {
+    const calls = createProactiveBot(input => ({ respond: input.prompt !== undefined }), {}, {
+      default: 'Questions about deploys.'
+    })
+    const message = await sendMessage('is staging deployed?')
+    await message.finished()
+    await waitFor(async () => (await threadText(message.ts)).includes('Executed request 1.'))
+    expect(calls.map(call => call.prompt)).toEqual(['Questions about deploys.'])
+
+    await reply('and production?', message.ts)
+
+    expect(calls.slice(1).map(call => call.prompt).sort()).toEqual(['Questions about deploys.', undefined])
+    expect(codexApi.executes).toHaveLength(2)
+  })
+
+  it('ignores top-level messages in a channel whose prompt is empty', async () => {
+    const calls = createProactiveBot(() => ({ respond: true }), {}, {
+      default: 'Questions about deploys.',
+      channels: { [CHANNEL_ID]: '' }
+    })
+
+    const message = await sendMessage('is staging deployed?')
+    await message.finished()
+
+    expect(calls).toHaveLength(0)
+    expect(codexApi.creates).toHaveLength(0)
+  })
+
   it('only classifies replies in threads eligible since a mention', async () => {
     const calls = createProactiveBot(() => ({ respond: true }))
     const parent = await postUserMessage('Subscribed before proactivity.')
@@ -4681,6 +4728,8 @@ describe('proactive replies', () => {
 
     const reply = await sendMessage('can someone check this?', { threadTs: parent.ts })
     await reply.finished()
+    const topLevel = await sendMessage('can someone check this too?')
+    await topLevel.finished()
 
     expect(calls).toHaveLength(0)
     expect(codexApi.creates).toHaveLength(0)

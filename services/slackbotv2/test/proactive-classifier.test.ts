@@ -53,6 +53,21 @@ describe('OpenAI proactive classifier', () => {
     ].join('\n'))
   })
 
+  test('asks whether the message meets the prompt-match criteria', async () => {
+    const requests: Array<{ body: Record<string, unknown>; url: string }> = []
+    const classifier = classifierReturning(
+      () => Response.json({ answers: [{ name: 'respond', probability: 0.9, type: 'predicate' }] }),
+      requests
+    )
+
+    await classifier({ ...input, prompt: 'Questions about deploys.' }, new AbortController().signal)
+
+    const messages = requests[0]!.body.input as Array<{ content: string; role: string }>
+    expect(messages[0]!.content).toContain('Questions about deploys.')
+    expect(messages[0]!.content).not.toContain('was mentioned earlier')
+    expect(messages[1]!.content).not.toContain('Questions about deploys.')
+  })
+
   test('declines below the probability threshold', async () => {
     const classifier = classifierReturning(() =>
       Response.json({ answers: [{ name: 'respond', probability: 0.2, type: 'predicate' }] })

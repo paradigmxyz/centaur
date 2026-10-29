@@ -2,7 +2,8 @@
 // `thread` entry is a one-key map from author to text, oldest first; the last
 // entry is the newest message and the author `centaur` is the bot. History is
 // built as slackbotv2 builds it: the latest earlier messages, bot replies
-// included, oldest first.
+// included, oldest first. An optional `prompt` var runs a prompt-match decision
+// with that proactivity prompt instead of the mentioned-thread rules.
 import type { ApiProvider, CallApiContextParams, ProviderOptions, ProviderResponse } from 'promptfoo'
 import { createOpenAiProactiveClassifier } from '../../services/slackbotv2/src/proactive-classifier'
 import type { ProactiveThreadMessage as ThreadMessage } from '../../services/slackbotv2/src/types'
@@ -59,7 +60,8 @@ export default class ProactiveResponseProvider implements ApiProvider {
         {
           botName: BOT_NAME,
           history: messages.slice(0, -1).slice(-MAX_HISTORY_MESSAGES),
-          message: messages.at(-1)!
+          message: messages.at(-1)!,
+          ...(typeof context?.vars.prompt === 'string' ? { prompt: context.vars.prompt } : {})
         },
         AbortSignal.timeout(this.config.timeoutMs ?? 10_000)
       )

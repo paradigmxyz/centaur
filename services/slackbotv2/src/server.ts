@@ -8,7 +8,7 @@ import {
   createOpenAiMessageOverridesStrategy
 } from './message-overrides-strategy'
 import { createOpenAiProactiveClassifier } from './proactive-classifier'
-import { splitEnvList } from './slack-events'
+import { loadProactivityPrompts } from './proactivity-prompts'
 
 const port = numberEnv('PORT', 3002)
 const apiUrl = stringEnv('CENTAUR_API_URL', 'http://127.0.0.1:8080')
@@ -131,6 +131,10 @@ console.log(
     message_overrides_strategy: messageOverridesStrategyMode,
     enabled_harnesses: enabledHarnesses,
     proactivity_classifier: options.proactivity ? proactivityClassifierBackend() : undefined,
+    proactivity_default_prompt: options.proactivity ? Boolean(options.proactivity.prompts?.default) : undefined,
+    proactivity_prompt_channels: options.proactivity
+      ? Object.keys(options.proactivity.prompts?.channels ?? {})
+      : undefined,
     message_overrides_strategy_enabled:
       messageOverridesStrategyMode !== 'llm' || Boolean(messageOverridesStrategyApiKey),
     response_metadata_mode: options.responseMetadataMode,
@@ -231,9 +235,25 @@ function proactivityClassifierBackend(): string {
 function createProactivityOptions(): SlackbotV2Options['proactivity'] {
   if (!booleanEnv('SLACKBOTV2_PROACTIVITY_ENABLED', false)) return undefined
   return {
-    channels: splitEnvList(optionalEnv('SLACKBOTV2_PROACTIVITY_CHANNELS')),
     classifier: createProactiveClassifier(proactivityClassifierBackend()),
+    prompts: proactivityPrompts(),
     timeoutMs: optionalNumberEnv('SLACKBOTV2_PROACTIVITY_TIMEOUT_MS')
+  }
+}
+
+function proactivityPrompts(): NonNullable<SlackbotV2Options['proactivity']>['prompts'] {
+  const dir = optionalEnv('SLACKBOTV2_PROACTIVITY_PROMPTS_DIR')
+  if (!dir) return undefined
+  try {
+    return loadProactivityPrompts(dir)
+  } catch (error) {
+    // Run without any prompt rather than a partial set: a missing empty
+    // channel file would otherwise let the default prompt apply there.
+    consoleLogger.warn('slackbotv2_proactivity_prompts_unreadable', {
+      dir,
+      error: error instanceof Error ? error.message : String(error)
+    })
+    return undefined
   }
 }
 

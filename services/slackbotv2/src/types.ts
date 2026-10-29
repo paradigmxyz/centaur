@@ -3,6 +3,7 @@ import type { CodexAppServerToChatStreamOptions } from '@centaur/rendering'
 import type { Attachment, Chat, Logger, StateAdapter } from 'chat'
 import type { Hono } from 'hono'
 import type { ChannelDefaults } from './channel-defaults'
+import type { ProactivityPrompts } from './proactivity-prompts'
 import type { HarnessOverrides } from './overrides'
 import type { SlackDisplayTextSource } from './slack-display-text'
 
@@ -172,8 +173,9 @@ export type SlackbotV2Options = {
   /** Strategy for resolving message-level harness/model/provider/reasoning overrides. */
   messageOverridesStrategy?: MessageOverridesStrategy
   /**
-   * Reply without a mention in threads where the bot was recently mentioned,
-   * when the classifier decides a message calls for a response. Off when unset.
+   * Reply without a mention in threads where the bot was mentioned, and to
+   * messages that match a prompt, when the classifier decides a message calls
+   * for a response. Off when unset.
    */
   proactivity?: SlackbotV2ProactivityOptions
   /**
@@ -232,8 +234,8 @@ export type MessageOverridesStrategy = (
 
 export type SlackbotV2ProactivityOptions = {
   classifier: ProactiveClassifier
-  /** Slack conversation ids where proactivity applies. Empty or unset means every channel. */
-  channels?: readonly string[]
+  /** Prompts that remove the need for a mention. See proactivity-prompts.ts. */
+  prompts?: ProactivityPrompts
   /** Deadline for one classifier decision; a late decision declines. Defaults to 2s. */
   timeoutMs?: number
 }
@@ -247,6 +249,11 @@ export type ProactiveThreadMessage = {
 
 export type ProactiveClassifierInput = {
   botName: string
+  /**
+   * The channel's prompt-match criteria. When set, decide whether the message
+   * meets them; otherwise apply the built-in mentioned-thread rules.
+   */
+  prompt?: string
   /** Earlier thread messages, oldest first. */
   history: ProactiveThreadMessage[]
   message: ProactiveThreadMessage
@@ -290,7 +297,10 @@ export type SlackbotV2ThreadState = {
   model?: string | null
   /** Persona pinned by the session API. Null means the thread is pinned without a persona. */
   personaId?: string | null
-  /** Set by a mention and cleared by a stop: unmentioned replies may get a proactive response. */
+  /**
+   * Set when the bot joins the thread (a mention or a proactive reply) and
+   * false after a stop, which silences proactive replies until a mention.
+   */
   proactiveEligible?: boolean
   /** Last thread-level model provider selected by Slack flags. Null clears persisted state. */
   provider?: string | null

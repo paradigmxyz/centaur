@@ -68,7 +68,8 @@ import {
   reasoningForModel,
   type SlackContextBlock
 } from './response-context'
-import { channelIdFromThreadId, resolveChannelDefault } from './channel-defaults'
+import { resolveChannelDefault } from './channel-defaults'
+import { resolveProactivityPrompt } from './proactivity-prompts'
 import {
   extractMessageOverrides,
   extractPersonaOverride,
@@ -198,8 +199,9 @@ const SLACK_BLOCK_ACTION_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000
 const SLACK_BLOCK_ACTION_LEASE_TTL_MS = 60 * 1000
 const PROACTIVE_CLASSIFIER_TIMEOUT_MS = 2_000
 const PROACTIVE_HISTORY_MESSAGES = 20
-// Mentions that make a thread eligible; DMs already treat every message as a mention.
-const PROACTIVE_ELIGIBILITY_TRIGGERS = new Set(['new_mention', 'subscribed_message'])
+// Mentions and proactive replies make a thread eligible; DMs already treat
+// every message as a mention.
+const PROACTIVE_ELIGIBILITY_TRIGGERS = new Set(['new_mention', 'proactive', 'subscribed_message'])
 
 type PendingLateSlackFileMention = {
   channel: string
@@ -494,11 +496,43 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     })
   })
 
+  // Classify after acknowledging Slack: a decision can take seconds and a
+  // declined or failed one leaves nothing to retry.
+  const scheduleProactiveMessage = (
+    thread: Thread<SlackbotV2ThreadState>,
+    message: ChatMessage,
+    proactivity: SlackbotV2ProactivityOptions
+  ) => {
+    backgroundWaitUntil(
+      handleProactiveMessage(thread, message, {
+        options,
+        proactivity,
+        state,
+        steeringReactions
+      }).catch(error => {
+        const trace = createHandoffTrace(thread, message, 'execute')
+        traceWarn(options, 'slackbotv2_proactive_failed', trace, { error: errorMessage(error) })
+      })
+    )
+  }
+
   // Slack does not classify mentions inside Block Kit or legacy attachments as
   // app_mention events. Alertmanager uses attachment.pretext, so inspect rich
   // payloads after Chat SDK has verified the webhook and before executing.
   chat.onNewMessage(/^.*$/s, async (thread, message) => {
-    if (!slackRichTextMentionsUser(message.raw, options.botUserId)) return
+    if (!slackRichTextMentionsUser(message.raw, options.botUserId)) {
+      // Outside subscribed threads only a prompt match can reply. Check for a
+      // prompt first so other channels' traffic is neither gated nor counted.
+      const proactivity = options.proactivity
+      if (
+        proactivity
+        && resolveProactivityPrompt(proactivity.prompts, thread.id) !== undefined
+        && (await isAllowedSlackMessage(message, options, logger))
+      ) {
+        scheduleProactiveMessage(thread, message, proactivity)
+      }
+      return
+    }
     if (!(await isAllowedSlackMessage(message, options, logger))) return
     message.isMention = true
     await handleSlackMessageHandoff(thread, message, {
@@ -518,19 +552,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     if (message.isMention !== true) {
       const proactivity = options.proactivity
       if (proactivity) {
-        // Classify after acknowledging Slack: a decision can take seconds and
-        // a declined or failed one leaves nothing to retry.
-        backgroundWaitUntil(
-          handleProactiveMessage(thread, message, {
-            options,
-            proactivity,
-            state,
-            steeringReactions
-          }).catch(error => {
-            const trace = createHandoffTrace(thread, message, 'execute')
-            traceWarn(options, 'slackbotv2_proactive_failed', trace, { error: errorMessage(error) })
-          })
-        )
+        scheduleProactiveMessage(thread, message, proactivity)
         return
       }
       traceLog(
@@ -751,12 +773,7 @@ async function handleSlackMessageHandoff(
     if (await handleStopCommand(thread, message, input.options, input.trigger)) {
       return
     }
-    const proactivity = input.options.proactivity
-    if (
-      proactivity
-      && PROACTIVE_ELIGIBILITY_TRIGGERS.has(input.trigger)
-      && proactiveChannelAllowed(proactivity, thread.id)
-    ) {
+    if (input.options.proactivity && PROACTIVE_ELIGIBILITY_TRIGGERS.has(input.trigger)) {
       await thread.setState({ proactiveEligible: true })
     }
     // Assistant status is thread-wide. A mentioned follow-up that steers an
@@ -890,42 +907,63 @@ async function handleProactiveMessage(
       ...fields
     })
   }
-  const skipReason = proactiveSkipReason(proactivity, (await thread.state) ?? {}, thread, message, options)
+  const prompt = resolveProactivityPrompt(proactivity.prompts, thread.id)
+  const state = (await thread.state) ?? {}
+  const skipReason = proactiveSkipReason(prompt, state, message)
   if (skipReason) {
     record(`skip_${skipReason}`)
     return
   }
-  let decision: ProactiveDecision
+  // Each applicable layer asks its own question; any acceptance replies.
+  const layers = proactiveLayers(prompt, state)
+  let decisions: Array<PromiseSettledResult<ProactiveDecision>>
   try {
     const history = await withSlackApiTimeout(options, 'collect proactive thread history', () =>
       proactiveThreadHistory(thread, message)
     )
     const signal = AbortSignal.timeout(proactivity.timeoutMs ?? PROACTIVE_CLASSIFIER_TIMEOUT_MS)
-    decision = await Promise.race([
+    const aborted = new Promise<never>((_, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+    })
+    decisions = await Promise.allSettled(layers.map(layer => Promise.race([
       proactivity.classifier(
         {
           botName: options.userName ?? 'centaur',
           history,
-          message: proactiveThreadMessage(message)
+          message: proactiveThreadMessage(message),
+          ...(layer === 'prompt' ? { prompt } : {})
         },
         signal
       ),
-      new Promise<never>((_, reject) => {
-        signal.addEventListener('abort', () => reject(signal.reason), { once: true })
-      })
-    ])
+      aborted
+    ])))
   } catch (error) {
     record('error', { error: errorMessage(error) })
     return
   }
-  const decisionFields = { probability: decision.probability }
-  if (!decision.respond) {
-    record('decline', decisionFields)
+  const decisionFields: JsonObject = {}
+  layers.forEach((layer, index) => {
+    const result = decisions[index]!
+    if (result.status === 'fulfilled' && result.value.probability !== undefined) {
+      decisionFields[`${layer}_probability`] = result.value.probability
+    }
+  })
+  const respondingLayer = layers.find((_, index) => {
+    const result = decisions[index]!
+    return result.status === 'fulfilled' && result.value.respond
+  })
+  if (!respondingLayer) {
+    const failure = decisions.find(result => result.status === 'rejected')
+    if (failure) {
+      record('error', { ...decisionFields, error: errorMessage(failure.reason) })
+    } else {
+      record('decline', decisionFields)
+    }
     return
   }
+  decisionFields.layer = respondingLayer
   // A stop or another execution may have landed while the classifier ran.
-  const latest = (await thread.state) ?? {}
-  const lateSkipReason = proactiveSkipReason(proactivity, latest, thread, message, options)
+  const lateSkipReason = proactiveSkipReason(prompt, (await thread.state) ?? {}, message)
   if (lateSkipReason) {
     record(`skip_${lateSkipReason}`, decisionFields)
     return
@@ -938,34 +976,35 @@ async function handleProactiveMessage(
     proactive: true,
     state: input.state,
     steeringReactions: input.steeringReactions,
+    // A prompt match may start a thread under a top-level message.
+    subscribe: true,
     trigger: 'proactive'
   })
 }
 
+type ProactiveLayer = 'mentioned' | 'prompt'
+
+/** The kinds of proactivity that may answer an unmentioned message in this thread. */
+function proactiveLayers(prompt: string | undefined, state: SlackbotV2ThreadState): ProactiveLayer[] {
+  const layers: ProactiveLayer[] = []
+  if (state.proactiveEligible === true) layers.push('mentioned')
+  // A stop silences prompt matches in its thread until the next mention.
+  if (prompt !== undefined && state.proactiveEligible !== false) layers.push('prompt')
+  return layers
+}
+
 /** Why an unmentioned message gets no proactive reply, or undefined when it may. */
 function proactiveSkipReason(
-  proactivity: SlackbotV2ProactivityOptions,
+  prompt: string | undefined,
   state: SlackbotV2ThreadState,
-  thread: Thread<SlackbotV2ThreadState>,
-  message: ChatMessage,
-  options: SlackbotV2Options
+  message: ChatMessage
 ): string | undefined {
-  if (!proactiveChannelAllowed(proactivity, thread.id)) return 'channel'
-  if (state.proactiveEligible !== true) return 'not_eligible'
+  if (proactiveLayers(prompt, state).length === 0) return 'not_eligible'
   // Unmentioned replies never steer an active execution; the next turn
   // collects them as thread context.
   if (state.activeExecution === true) return 'active_execution'
   if (!message.text.trim()) return 'empty'
   return undefined
-}
-
-function proactiveChannelAllowed(
-  proactivity: SlackbotV2ProactivityOptions,
-  threadId: string
-): boolean {
-  if (!proactivity.channels?.length) return true
-  const channelId = channelIdFromThreadId(threadId)
-  return channelId !== undefined && proactivity.channels.includes(channelId)
 }
 
 async function proactiveThreadHistory(
