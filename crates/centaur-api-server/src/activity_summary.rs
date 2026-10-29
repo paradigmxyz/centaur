@@ -34,8 +34,9 @@ first-person sentences, at most 280 characters in total, as if you are the agent
 what you have done or found so far and what you are doing now. Name specific things from \
 the facts (a service, PR, dataset, tool, or finding). Do not repeat the previous update; \
 if the facts add nothing new, output exactly SKIP. Do not promise a finish time. Do not \
-mention commands, paths, IDs, or flags. Do not refer to \"the agent\". No markdown \
-headings, no quotes, no event IDs, and no speculation.";
+mention commands, paths, IDs, or flags. Never mention or tag a person, group, or \
+channel. Do not refer to \"the agent\". No markdown headings, no quotes, no event IDs, \
+and no speculation.";
 
 const SYSTEM_PROMPT: &str = "\
 You write live status text for a software agent. Use only the supplied event facts. \
@@ -52,8 +53,8 @@ repeating the session goal word for word. Each status must say something new \
 compared to the previous status sentence; if you cannot, output exactly SKIP. If the \
 facts only show setup, help output, dependency installs, builds, command output, \
 logs, tests, or other mechanics, output exactly SKIP. Do not mention commands, \
-paths, IDs, or flags. Do not refer to \"the agent\". No markdown, no quotes, no \
-event IDs, and no speculation.";
+paths, IDs, or flags. Never mention or tag a person, group, or channel. Do not refer \
+to \"the agent\". No markdown, no quotes, no event IDs, and no speculation.";
 
 #[derive(Clone)]
 pub(crate) struct ActivitySummaryConfig {
@@ -1018,6 +1019,7 @@ fn one_line(value: &str, max_chars: usize) -> String {
 }
 
 fn sanitize_summary(summary: &str) -> Option<String> {
+    let summary = strip_mentions(summary);
     let summary = summary
         .trim()
         .trim_matches('"')
@@ -1035,6 +1037,7 @@ fn sanitize_summary(summary: &str) -> Option<String> {
 }
 
 fn sanitize_progress_update(text: &str) -> Option<String> {
+    let text = strip_mentions(text);
     let text = text.trim().trim_matches('"').trim();
     if text.is_empty()
         || text.eq_ignore_ascii_case("skip")
@@ -1043,6 +1046,30 @@ fn sanitize_progress_update(text: &str) -> Option<String> {
         return None;
     }
     Some(text.to_owned())
+}
+
+/// Removes chat mention syntax so status text can never notify anyone. Slack
+/// and Discord tokens such as `<@U123>`, `<!here>`, and `<#C123>` are dropped,
+/// and the `@` is removed from handles such as `@channel` or `@octocat`.
+/// An `@` inside a word, as in an email address, is kept.
+fn strip_mentions(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut previous: Option<char> = None;
+    while let Some(ch) = chars.next() {
+        if ch == '<' && matches!(chars.peek(), Some('@' | '!' | '#')) {
+            chars.by_ref().find(|&next| next == '>');
+            out.push(' ');
+            previous = Some(' ');
+            continue;
+        }
+        if ch == '@' && !previous.is_some_and(char::is_alphanumeric) {
+            continue;
+        }
+        out.push(ch);
+        previous = Some(ch);
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn is_generic_summary(summary: &str) -> bool {
@@ -1424,6 +1451,26 @@ mod tests {
         assert!(state.prepare_progress(at(400), PROGRESS).is_none());
         let (prompt, _) = state.prepare_progress(at(420), PROGRESS).unwrap();
         assert!(prompt.contains("Previous progress update: I'm searching for USDG yield sources."));
+    }
+
+    #[test]
+    fn strips_mentions_from_status_text() {
+        assert_eq!(
+            strip_mentions("<!here> I asked <@U123|alice> in <#C456|ops> and @channel, cc @@bob"),
+            "I asked in and channel, cc bob"
+        );
+        assert_eq!(
+            strip_mentions("I emailed ops@example.com about <@&789> and <!subteam^S1>"),
+            "I emailed ops@example.com about and"
+        );
+        assert_eq!(
+            sanitize_summary("I'm pinging @here on the deploy"),
+            Some("I'm pinging here on the deploy".to_owned())
+        );
+        assert_eq!(
+            sanitize_progress_update("I found the bug; <!channel> @octocat should review."),
+            Some("I found the bug; octocat should review.".to_owned())
+        );
     }
 
     #[test]
