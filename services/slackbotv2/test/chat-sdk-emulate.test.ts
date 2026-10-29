@@ -4718,23 +4718,51 @@ describe('proactive replies', () => {
     expect(codexApi.executes).toHaveLength(2)
   })
 
-  it('tells the agent how to respond only on the turn a rule match starts', async () => {
-    createProactiveBot(input => ({ respond: true, ...(input.rules ? { rule: 'deploy' } : {}) }), {}, {
-      default: [{ context: 'Link the deploy dashboard.', name: 'deploy', when: 'Questions about deploys.' }]
-    })
+  describe('rule context', () => {
+    const rules = [
+      { context: 'Link the deploy dashboard.', name: 'deploy', when: 'Questions about deploys.' },
+      { context: 'Page the on-call engineer.', name: 'incident', when: 'An active incident.' }
+    ]
     const executeText = (index: number) => JSON.stringify(
       JSON.parse(codexApi.executes[index]!.body.input_lines.at(-1)!).message.content
     )
-    const message = await sendMessage('is staging deployed?')
-    await message.finished()
-    await waitFor(async () => (await threadText(message.ts)).includes('Executed request 1.'))
-    expect(executeText(0)).toContain('proactive reply rule \\"deploy\\"')
-    expect(executeText(0)).toContain('Link the deploy dashboard.')
 
-    await reply('is production deployed too?', message.ts)
+    // Messages mentioning an outage match the incident rule; others match deploy.
+    async function startRuleThread(): Promise<string> {
+      createProactiveBot(input => {
+        if (!input.rules) return { respond: true }
+        return { respond: true, rule: input.message.text.includes('outage') ? 'incident' : 'deploy' }
+      }, {}, { default: rules })
+      const message = await sendMessage('is staging deployed?')
+      await message.finished()
+      await waitFor(async () => (await threadText(message.ts)).includes('Executed request 1.'))
+      expect(executeText(0)).toContain('proactive reply rule \\"deploy\\"')
+      expect(executeText(0)).toContain('Link the deploy dashboard.')
+      return message.ts
+    }
 
-    expect(codexApi.executes).toHaveLength(2)
-    expect(executeText(1)).not.toContain('Link the deploy dashboard.')
+    it('sends each rule\'s context only on the first turn it starts in a thread', async () => {
+      const threadTs = await startRuleThread()
+
+      await reply('is production deployed too?', threadTs)
+      await reply('is there an outage on staging?', threadTs)
+
+      expect(codexApi.executes).toHaveLength(3)
+      expect(executeText(1)).not.toContain('Link the deploy dashboard.')
+      expect(executeText(2)).toContain('Page the on-call engineer.')
+      expect(executeText(2)).not.toContain('Link the deploy dashboard.')
+    })
+
+    it('resends the matched rule\'s context after a harness restart', async () => {
+      const threadTs = await startRuleThread()
+      codexApi.queueCreateResponse({ harness_switched: true, harness_type: 'claudecode' })
+
+      await reply('is production deployed too? --claude', threadTs)
+
+      expect(codexApi.executes).toHaveLength(2)
+      expect(executeText(1)).toContain('restarted on a different agent harness')
+      expect(executeText(1)).toContain('Link the deploy dashboard.')
+    })
   })
 
   it('ignores top-level messages in a channel whose rule list is empty', async () => {

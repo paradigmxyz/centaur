@@ -1785,7 +1785,7 @@ async function syncThreadMessageToSession(
 
   // A rule's context rides only on the first turn it starts in this thread;
   // later turns have it in the session's context.
-  const proactiveRule =
+  let proactiveRule =
     shouldStartExecution
     && input.proactiveRule
     && !(state.proactiveRulesSent ?? []).includes(input.proactiveRule.name)
@@ -1838,6 +1838,13 @@ async function syncThreadMessageToSession(
       }
     }
     forwardInput.contextPreamble = harnessRestartPreamble(history, serializedMessage.id)
+    // The restart preamble replays Slack messages only, so rule contexts the
+    // old harness saw are gone: forget them and resend the current one.
+    await thread.setState({ proactiveRulesSent: [] })
+    if (shouldStartExecution && input.proactiveRule) {
+      proactiveRule = input.proactiveRule
+      forwardInput.proactiveContext = proactiveRuleContext(proactiveRule)
+    }
     traceLog(input.options, 'slackbotv2_forward_restart_context_built', trace, {
       degraded: restartContextDegraded,
       history_message_count: history.length,

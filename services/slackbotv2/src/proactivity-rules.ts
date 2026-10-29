@@ -33,6 +33,9 @@ export type ProactivityRules = {
 }
 
 const DEFAULT_RULES_NAME = 'default'
+// Each rule is a question in one classifier request, so the list bounds its
+// size and latency. Keep in sync with the chart schema's maxItems.
+const MAX_PROACTIVITY_RULES = 20
 const RULES_FILE_SUFFIX = '.json'
 
 /** Reads the rule files in a directory. Throws when any cannot be read or parsed. */
@@ -69,6 +72,9 @@ export function resolveProactivityRules(
 function parseRules(raw: string, file: string): ProactivityRule[] {
   const parsed: unknown = raw.trim() ? JSON.parse(raw) : []
   if (!Array.isArray(parsed)) throw new Error(`${file}: expected a JSON array of rules`)
+  if (parsed.length > MAX_PROACTIVITY_RULES) {
+    throw new Error(`${file}: more than ${MAX_PROACTIVITY_RULES} rules`)
+  }
   const names = new Set<string>()
   return parsed.map((item, index) => {
     const name = isJsonObject(item) && typeof item.name === 'string' ? item.name.trim() : ''

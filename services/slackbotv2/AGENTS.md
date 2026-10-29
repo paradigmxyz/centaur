@@ -41,7 +41,7 @@ lifecycle, harness formatting, and durable execution state belong in `api-rs`.
   steers the active one, but never stops it; only a mention can. Only one proactive handoff per thread may start an
   execution at a time. A failed or timed-out classifier decision means no
   reply. A matched rule's context rides only on the first execution it starts
-  in a thread, never on a steer.
+  in a thread, never on a steer; a harness restart resets that record.
 
 ## Validation
 

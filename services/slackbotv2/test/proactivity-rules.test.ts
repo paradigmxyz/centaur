@@ -50,6 +50,8 @@ describe('proactivity rules', () => {
       '{"name": "x", "when": "y"}',
       '[{"name": "x"}]',
       '[{"name": "x", "when": "y"}, {"name": "x", "when": "z"}]',
+      '[{"name": " ", "when": "y"}]',
+      JSON.stringify(Array.from({ length: 21 }, (_, index) => ({ name: `r${index}`, when: 'y' }))),
       'not json'
     ]) {
       writeRules({ 'C0BAD.json': content })
