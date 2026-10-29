@@ -123,7 +123,7 @@ export class CodexAppServerRendererEventMapper
 
   flush(): RendererEvent[] {
     if (this.state.done) return []
-    promoteLastUnphasedMessage(this.state)
+    promoteUnphasedMessages(this.state)
     this.state.done = true
     const out: RendererEvent[] = []
     completeOpenTasks(this.state)
@@ -141,7 +141,7 @@ export class CodexAppServerRendererEventMapper
 
   private complete(resultText?: string): RendererEvent[] {
     if (this.state.done) return []
-    promoteLastUnphasedMessage(this.state)
+    promoteUnphasedMessages(this.state)
     const normalized = resultText?.trim() ?? ''
     if (normalized && !this.state.answerText.trim()) {
       const out: RendererEvent[] = []
@@ -320,7 +320,7 @@ export class CodexAppServerRendererEventMapper
     }
 
     if (isTerminalCodexAppServerEvent(event)) {
-      promoteLastUnphasedMessage(this.state)
+      promoteUnphasedMessages(this.state)
       const resultText = terminalResultText(event)
       const willClose = Boolean(resultText || event?.type !== 'result')
       this.logCodexTerminalEventReceived(event, {
@@ -826,14 +826,7 @@ function prepareUnphasedMessage(event: any, state: CodexMapperState): void {
   if (event?.type !== 'item.started') return
   const itemType = event?.item?.type
   if (itemType !== 'agentMessage' && itemType !== 'agent_message') return
-  if (agentMessageItemPhase(event?.item)) {
-    state.unphasedByItemId.clear()
-    return
-  }
-  const id = agentMessageEventId(event)
-  for (const candidateId of state.unphasedByItemId.keys()) {
-    if (candidateId !== id) state.unphasedByItemId.delete(candidateId)
-  }
+  if (agentMessageItemPhase(event?.item)) state.unphasedByItemId.clear()
 }
 
 function eventContinuesTurn(event: any): boolean {
@@ -859,13 +852,14 @@ function eventContinuesTurn(event: any): boolean {
   )
 }
 
-function promoteLastUnphasedMessage(state: CodexMapperState): void {
-  const id = lastInsertedKey(state.unphasedByItemId)
-  if (!id) return
-  const text = state.unphasedByItemId.get(id) ?? ''
+// Work events discard buffered unphased messages, so every message still
+// buffered at the end of the turn came after the last tool call: the answer.
+function promoteUnphasedMessages(state: CodexMapperState): void {
+  if (state.unphasedByItemId.size === 0) return
+  for (const [id, text] of state.unphasedByItemId) {
+    if (text) state.answerByItemId.set(id, text)
+  }
   state.unphasedByItemId.clear()
-  if (!text) return
-  state.answerByItemId.set(id, text)
   recomposeBuffers(state)
 }
 

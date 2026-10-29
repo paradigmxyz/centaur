@@ -3426,6 +3426,78 @@ describe('slackbotv2', () => {
     expect(text).not.toContain('Thinking')
   })
 
+  it('posts only the terminal answer when unphased agent messages surround tool calls', async () => {
+    bot = createProductionDefaultTestBot({ activitySummaryStatusEnabled: true })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before unphased narration.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> update the config`, {
+      threadTs: parent.ts
+    })
+
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    // OpenRouter models leave agentMessage phase unset, so narration before a
+    // tool call arrives exactly like the final answer.
+    const key = threadKey(parent.ts)
+    const narration = ['Let me read the config.', 'I found the setting. Let me run the tests.']
+    const finalAnswer = 'The tests pass and the config change is ready.'
+    const agentMessage = (id: string, text: string) => [
+      {
+        method: 'item/agentMessage/delta',
+        params: { threadId: 'thread-1', turnId: 'turn-1', itemId: id, delta: text }
+      },
+      {
+        method: 'item/completed',
+        params: {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          item: { type: 'agentMessage', id, text, memoryCitation: null }
+        }
+      }
+    ]
+    const command = (id: string) => [
+      {
+        method: 'item/started',
+        params: {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          item: { type: 'commandExecution', id, command: 'pnpm test', status: 'inProgress' }
+        }
+      },
+      {
+        method: 'item/completed',
+        params: {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          item: { type: 'commandExecution', id, command: 'pnpm test', status: 'completed', exitCode: 0 }
+        }
+      }
+    ]
+    codexApi.emitOutputLines(
+      key,
+      [
+        ...agentMessage('msg-1', narration[0]!),
+        ...command('cmd-1'),
+        ...agentMessage('msg-2', narration[1]!),
+        ...command('cmd-2'),
+        ...agentMessage('msg-3', finalAnswer)
+      ].map(notification => JSON.stringify(notification))
+    )
+    codexApi.emitSessionEvent(key, 'session.execution_completed', {
+      execution_id: 'exe-unphased-narration',
+      status: 'completed',
+      result_text: finalAnswer
+    })
+
+    await mention.finished()
+    const text = await threadText(parent.ts)
+    expect(text).toContain(finalAnswer)
+    for (const line of narration) expect(text).not.toContain(line)
+  })
+
   it('restores the latest activity summary status after a steering message is delivered', async () => {
     bot = createProductionDefaultTestBot({ activitySummaryStatusEnabled: true })
     codexApi.autoRespond = false

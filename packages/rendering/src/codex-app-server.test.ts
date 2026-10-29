@@ -163,6 +163,32 @@ describe('CodexAppServerRendererEventMapper', () => {
     })
   })
 
+  it('keeps every unphased message after the last tool call', () => {
+    const mapper = new CodexAppServerRendererEventMapper({ preStreamGraceMs: 0 })
+    const output: Array<ReturnType<typeof mapper.process>[number]> = []
+    const process = (event: unknown) => output.push(...mapper.process(event))
+    const message = (id: string, text: string) => {
+      process({ type: 'item.started', item: { id, type: 'agentMessage' } })
+      process({ type: 'item.agentMessage.delta', itemId: id, delta: text })
+      process({ type: 'item.completed', item: { id, type: 'agentMessage', text } })
+    }
+
+    message('progress-1', 'Let me run the tests.')
+    process({ type: 'item.started', item: { id: 'cmd-1', type: 'commandExecution', command: 'pnpm test' } })
+    process({
+      type: 'item.completed',
+      item: { id: 'cmd-1', type: 'commandExecution', command: 'pnpm test', status: 'completed' }
+    })
+    message('final-1', 'The tests pass.')
+    message('final-2', 'The fix is ready for review.')
+    process({ type: 'turn.completed', turn: { status: 'completed' } })
+
+    expect(output.at(-1)).toMatchObject({
+      type: 'renderer.done',
+      answerMarkdown: 'The tests pass.\n\nThe fix is ready for review.'
+    })
+  })
+
   it('suppresses reasoning thinking blocks', () => {
     const mapper = new CodexAppServerRendererEventMapper()
 
