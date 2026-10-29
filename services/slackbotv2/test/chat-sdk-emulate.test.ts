@@ -189,8 +189,7 @@ describe('slackbotv2', () => {
       threadTs: parent.ts
     })
     await mention.finished()
-    const statuses = slackApi.calls
-      .filter(call => call.method === 'agents.sessions.setStatus')
+    const statuses = slackApi.calls.filter(call => call.method === 'agents.sessions.setStatus')
     expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(true)
     expect(statuses.some(call => call.body.status === 'processing')).toBe(true)
     expect(statuses.at(-1)?.body).toMatchObject({

@@ -769,6 +769,8 @@ slackbotv2:
     tag: latest
     pullPolicy: Always
   userName: centaur
+  # Legacy Assistant loading text. With agentViewEnabled, Slack shows its
+  # native working indicator and Stop button instead.
   assistantStatus: ""
   # Match Slack's features.agent_view manifest setting. Changing Slack's
   # manifest is irreversible; this switch only controls the service behavior.
