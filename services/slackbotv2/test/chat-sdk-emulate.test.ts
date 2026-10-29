@@ -4889,6 +4889,25 @@ describe('proactive replies', () => {
     expect(codexApi.executes).toHaveLength(1)
   })
 
+  it('keeps a decided burst out of the next one in its thread', async () => {
+    const calls = createProactiveBot(() => ({ respond: false }), {}, { default: deployRules }, 300)
+    const sendBurst = async (messages: Array<[string, string?]>) => {
+      const deliveries = []
+      for (const [text, threadTs] of messages) deliveries.push(await sendMessage(text, { threadTs }))
+      await Promise.all(deliveries.map(delivery => delivery.finished()))
+    }
+
+    const name = await postUserMessage('checkout-api')
+    await sendBurst([['the deploy to staging is stuck', name.ts], ['since the 2pm release', name.ts]])
+    await sendBurst([['never mind', name.ts], ['is production stuck too?', name.ts]])
+
+    expect(calls.map(call => call.message.text)).toEqual(['since the 2pm release', 'is production stuck too?'])
+    expect(calls[1]!.burst).toEqual([expect.objectContaining({ text: 'never mind' })])
+    expect(calls[1]!.history.map(item => item.text)).toEqual([
+      'checkout-api', 'the deploy to staging is stuck', 'since the 2pm release'
+    ])
+  })
+
   it('leaves a debounced message to a mention\'s turn that already carries it', async () => {
     const calls = createProactiveBot(
       () => ({ respond: true, rule: 'deploy' }),

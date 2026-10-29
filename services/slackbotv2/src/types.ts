@@ -319,8 +319,6 @@ export type SlackbotV2ThreadState = {
    * false after a stop, which silences proactive replies until a mention.
    */
   proactiveEligible?: boolean
-  /** The newest message whose debounced burst was decided; earlier ones are done. */
-  proactiveBurstEndId?: string
   /** Proactivity rules whose context a turn in this thread already carried. */
   proactiveRulesSent?: string[]
   /** Last thread-level model provider selected by Slack flags. Null clears persisted state. */

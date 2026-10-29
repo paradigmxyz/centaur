@@ -210,8 +210,7 @@ const PROACTIVE_CLAIM_TTL_MS = 60 * 1000
 const PROACTIVE_CLAIM_WAIT_MS = 30 * 1000
 const PROACTIVE_CLAIM_POLL_MS = 250
 // Pending burst messages outlive the debounce by this much, covering handler
-// latency between recording a message and reading the burst. Older entries
-// are told apart by the thread's proactiveBurstEndId.
+// latency between recording a message and reading the burst.
 const PROACTIVE_PENDING_GRACE_MS = 60 * 1000
 const PROACTIVE_PENDING_MAX = 50
 // Mentions and proactive replies make a thread eligible; DMs already treat
@@ -1115,7 +1114,8 @@ function proactiveSkipReason(
  * earlier pending messages it ends the burst of, or undefined when a newer one
  * is pending or a burst already ended at or after it. Pending messages are
  * ordered by Slack timestamp, not by when their handlers ran, so a slow
- * handler cannot hide a newer message.
+ * handler cannot hide a newer message. Both keys live outside thread state so
+ * that writing them never races its read-merge-write updates.
  */
 async function waitForBurstEnd(
   thread: Thread<SlackbotV2ThreadState>,
@@ -1123,20 +1123,23 @@ async function waitForBurstEnd(
   state: StateAdapter,
   debounceMs: number
 ): Promise<string[] | undefined> {
-  const key = `slackbotv2:proactive:pending:${thread.id}`
-  await state.appendToList(key, message.id, {
-    maxLength: PROACTIVE_PENDING_MAX,
-    ttlMs: debounceMs + PROACTIVE_PENDING_GRACE_MS
-  })
+  const pendingKey = `slackbotv2:proactive:pending:${thread.id}`
+  const endKey = `slackbotv2:proactive:burst-end:${thread.id}`
+  const ttlMs = debounceMs + PROACTIVE_PENDING_GRACE_MS
+  await state.appendToList(pendingKey, message.id, { maxLength: PROACTIVE_PENDING_MAX, ttlMs })
   await sleep(debounceMs)
-  const pending = await state.getList<string>(key)
+  const pending = await state.getList<string>(pendingKey)
   if (pending.some(id => compareSlackTs(id, message.id) > 0)) return undefined
-  const lastEnd = (await thread.state)?.proactiveBurstEndId
-  if (lastEnd !== undefined && compareSlackTs(lastEnd, message.id) >= 0) return undefined
-  await thread.setState({ proactiveBurstEndId: message.id })
+  const lastEnd = await state.get<string>(endKey)
+  if (lastEnd && compareSlackTs(lastEnd, message.id) >= 0) return undefined
+  await state.set(endKey, message.id, ttlMs)
+  // Some adapters keep expired list entries, so older bursts are excluded by
+  // age as well as by the last burst end.
+  const oldestMs = slackTsToMs(message.id) - ttlMs
   return pending.filter(id =>
     compareSlackTs(id, message.id) < 0
-    && (lastEnd === undefined || compareSlackTs(id, lastEnd) > 0)
+    && slackTsToMs(id) >= oldestMs
+    && (!lastEnd || compareSlackTs(id, lastEnd) > 0)
   )
 }
 
