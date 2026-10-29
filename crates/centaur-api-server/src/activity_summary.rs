@@ -588,11 +588,13 @@ struct ActivityFact {
 }
 
 impl ActivityFact {
+    // Facts and the goal feed the model prompt, so mentions are stripped
+    // before the model can see and repeat them.
     fn high(kind: &'static str, text: impl Into<String>) -> Self {
         Self {
             kind,
             signal: ActivitySignal::High,
-            text: text.into(),
+            text: strip_mentions(&text.into()),
         }
     }
 
@@ -600,7 +602,7 @@ impl ActivityFact {
         Self {
             kind,
             signal: ActivitySignal::Low,
-            text: text.into(),
+            text: strip_mentions(&text.into()),
         }
     }
 
@@ -628,7 +630,7 @@ fn message_part_text(part: &Value) -> Option<String> {
 }
 
 fn clean_goal_text(value: &str) -> Option<String> {
-    let text = one_line(value, 160);
+    let text = one_line(&strip_mentions(value), 160);
     let lower = text.to_ascii_lowercase();
     if lower.is_empty()
         || matches!(
@@ -1471,6 +1473,37 @@ mod tests {
             sanitize_progress_update("I found the bug; <!channel> @octocat should review."),
             Some("I found the bug; octocat should review.".to_owned())
         );
+    }
+
+    #[test]
+    fn progress_prompt_has_no_mentions() {
+        let mut state = ExecutionActivity::new(
+            ThreadKey::parse("test:thread").unwrap(),
+            4,
+            clean_goal_text("<@U123> audit billing with @alice"),
+            Instant::now(),
+        );
+        state.push(
+            activity_fact_from_output_event(&event(json!({
+                "method": "item/completed",
+                "params": {
+                    "item": {
+                        "id": "msg-1",
+                        "phase": "commentary",
+                        "text": "I'll ask <!here> and @bob about billing.",
+                        "type": "agentMessage"
+                    }
+                }
+            })))
+            .unwrap(),
+        );
+
+        let prompt = state.progress_prompt(Duration::from_secs(180));
+
+        assert!(prompt.contains("Session goal: audit billing with alice"));
+        assert!(prompt.contains("- commentary: I'll ask and bob about billing."));
+        assert!(!prompt.contains('@'));
+        assert!(!prompt.contains("<!"));
     }
 
     #[test]
