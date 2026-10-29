@@ -81,17 +81,31 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
     assert rows.find { |row| row["id"] == static_secrets(:github_token_inject).oid }["direct"]
   end
 
-  test "sandbox admin grants cannot change role grants" do
+  test "an admin's Slack DM sandbox grants a secret to a role and revokes it" do
+    secret = static_secrets(:acme_staging_api_key)
+
     with_token(dm_proxy_for(users(:acme_admin))) do |headers|
       post "/api/v1/sandbox/admin/grants",
-           params: { data: { role_id: @role.oid, static_secret_id: static_secrets(:acme_staging_api_key).oid } },
-           headers: headers, as: :json
-      assert_response :forbidden
+           params: { data: { role_id: @role.oid, static_secret_id: secret.oid } }, headers: headers, as: :json
+      assert_response :created
+      grant_id = json_body.dig("data", "id")
+      assert_includes @role.reload.grants.map(&:static_secret), secret
 
-      delete "/api/v1/sandbox/admin/grants/#{grants(:acme_infra_prod_api_key).oid}", headers: headers
-      assert_response :not_found
+      get "/api/v1/sandbox/admin/roles/#{@role.oid}/grants", headers: headers
+      assert_response :ok
+      assert_includes json_body.fetch("data").map { |grant| grant["id"] }, grant_id
+
+      delete "/api/v1/sandbox/admin/grants/#{grant_id}", headers: headers
+      assert_response :no_content
+      assert_not_includes @role.reload.grants.map(&:static_secret), secret
     end
-    assert Grant.exists?(grants(:acme_infra_prod_api_key).id)
+
+    with_token(dm_proxy_for(users(:member_user))) do |headers|
+      post "/api/v1/sandbox/admin/grants",
+           params: { data: { role_id: @role.oid, static_secret_id: secret.oid } }, headers: headers, as: :json
+    end
+    assert_response :forbidden
+    assert_not_includes @role.reload.grants.map(&:static_secret), secret
   end
 
   test "an admin's Slack DM sandbox changes Slack permissions and sandbox capabilities" do

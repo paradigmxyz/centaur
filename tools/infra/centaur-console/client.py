@@ -303,23 +303,23 @@ class ConsoleClient:
 
     def admin_grant_secret(self, principal: str, secret: str) -> dict[str, Any]:
         """Grant a secret (OID, foreign ID, or name) directly to a principal."""
-        principal_id = self._admin_principal_id(principal)
-        match = self._admin_secret(secret)
-        return self._admin_object(
-            SANDBOX_ADMIN_GRANTS_PATH,
-            method="POST",
-            json={"data": {"principal_id": principal_id, match["grant_key"]: match["id"]}},
-        )
+        return self._admin_grant("principal_id", self._admin_principal_id(principal), secret)
 
     def admin_revoke_secret(self, principal: str, secret: str) -> None:
         """Revoke a secret granted directly to a principal."""
         principal_id = self._admin_principal_id(principal)
-        match = self._admin_secret(secret)
-        grants = self._admin_list_all(f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/{principal_id}/grants")
-        grant = next((g for g in grants if g.get(match["grant_key"]) == match["id"]), None)
-        if grant is None:
-            raise RuntimeError(f"{secret} is not granted directly to {principal}")
-        self._admin_request(f"{SANDBOX_ADMIN_GRANTS_PATH}/{grant['id']}", method="DELETE")
+        self._admin_revoke(
+            f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/{principal_id}/grants", secret, principal
+        )
+
+    def admin_grant_role_secret(self, role: str, secret: str) -> dict[str, Any]:
+        """Grant a secret to a role, and so to every principal that holds the role."""
+        return self._admin_grant("role_id", self._admin_role_id(role), secret)
+
+    def admin_revoke_role_secret(self, role: str, secret: str) -> None:
+        """Revoke a secret granted to a role."""
+        role_id = self._admin_role_id(role)
+        self._admin_revoke(f"{SANDBOX_ADMIN_ROLES_PATH}/{role_id}/grants", secret, role)
 
     def admin_set_slack_permission(
         self,
@@ -410,9 +410,28 @@ class ConsoleClient:
             raise RuntimeError(f"{secret} is a {kind} secret; edit it in the Console UI")
         return f"{ADMIN_WRITABLE_SECRET_PATHS[kind]}/{match['id']}"
 
+    def _admin_role_id(self, role: str) -> str:
+        path = self._admin_ref_path(SANDBOX_ADMIN_ROLES_PATH, role, "role_")
+        return self._admin_object(path)["id"]
+
     def _admin_principal_and_role_ids(self, principal: str, role: str) -> tuple[str, str]:
-        role_path = self._admin_ref_path(SANDBOX_ADMIN_ROLES_PATH, role, "role_")
-        return self._admin_principal_id(principal), self._admin_object(role_path)["id"]
+        return self._admin_principal_id(principal), self._admin_role_id(role)
+
+    def _admin_grant(self, grantee_key: str, grantee_id: str, secret: str) -> dict[str, Any]:
+        match = self._admin_secret(secret)
+        return self._admin_object(
+            SANDBOX_ADMIN_GRANTS_PATH,
+            method="POST",
+            json={"data": {grantee_key: grantee_id, match["grant_key"]: match["id"]}},
+        )
+
+    def _admin_revoke(self, grants_path: str, secret: str, grantee: str) -> None:
+        match = self._admin_secret(secret)
+        grants = self._admin_list_all(grants_path)
+        grant = next((g for g in grants if g.get(match["grant_key"]) == match["id"]), None)
+        if grant is None:
+            raise RuntimeError(f"{secret} is not granted directly to {grantee}")
+        self._admin_request(f"{SANDBOX_ADMIN_GRANTS_PATH}/{grant['id']}", method="DELETE")
 
     @staticmethod
     def _admin_ref_path(collection: str, ref: str, oid_prefix: str) -> str:

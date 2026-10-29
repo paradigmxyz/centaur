@@ -18,7 +18,7 @@ console = Console()
 admin_app = typer.Typer(
     help=(
         "Create Slack and workflow principals and static, pg_dsn, or gcp_id_token secrets, "
-        "and manage roles, secret grants, Slack permissions, sandbox access, "
+        "and manage roles, principal and role secret grants, Slack permissions, sandbox access, "
         "and allowed Slack Connect workspaces. "
         "Works only in an active Console admin's Slack DM."
     )
@@ -416,6 +416,32 @@ def admin_revoke_secret(
     console.print_json(
         json.dumps({"data": {"principal": principal, "secret": secret, "revoked": True}})
     )
+
+
+@admin_app.command("grant-role-secret")
+def admin_grant_role_secret(
+    role: str = typer.Argument(..., help="Role OID or foreign ID, such as tool-github"),
+    secret: str = typer.Argument(..., help="Secret OID, foreign ID, or name"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Grant a secret to a role, and so to every principal that holds the role."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        result = client.admin_grant_role_secret(role, secret)
+    console.print_json(json.dumps({"data": result}, default=str))
+
+
+@admin_app.command("revoke-role-secret")
+def admin_revoke_role_secret(
+    role: str = typer.Argument(..., help="Role OID or foreign ID"),
+    secret: str = typer.Argument(..., help="Secret OID, foreign ID, or name"),
+    url: str | None = URL_OPTION,
+    bearer_token: str | None = BEARER_TOKEN_OPTION,
+) -> None:
+    """Revoke a secret granted to a role."""
+    with get_client(url=url, bearer_token=bearer_token) as client:
+        client.admin_revoke_role_secret(role, secret)
+    console.print_json(json.dumps({"data": {"role": role, "secret": secret, "revoked": True}}))
 
 
 @admin_app.command("set-slack-permission")
