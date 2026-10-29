@@ -45,6 +45,7 @@ class ConsoleController < ApplicationController
 
   def principal
     @principal = Principal.find_by_oid!(params[:id])
+    @channel_persona_id = SlackChannelDefaults.current.persona_for_channel(@principal.slack_channel_id) if @principal.slack_channel_id.present?
     load_slack_channel_permission_form(@principal)
     @inherited_slack_channel_permissions = @principal.inherited_slack_channel_permissions_payload
     load_principal_roles

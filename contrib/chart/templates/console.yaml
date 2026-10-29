@@ -280,6 +280,12 @@ spec:
               value: "1"
             - name: RAILS_SERVE_STATIC_FILES
               value: "1"
+{{- if .Values.slackbotv2.channelDefaults }}
+            # Same map Slackbot reads; the Agents page shows which channels
+            # default to each persona.
+            - name: CENTAUR_CONSOLE_SLACK_CHANNEL_DEFAULTS
+              value: {{ .Values.slackbotv2.channelDefaults | toJson | quote }}
+{{- end }}
 {{- if .Values.apiRs.enabled }}
             - name: CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}

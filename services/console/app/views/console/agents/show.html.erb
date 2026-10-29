@@ -1,0 +1,88 @@
+<% content_for :title, "#{@persona_id} · Agents · Centaur Console" %>
+
+<div class="mb-8">
+  <a href="<%= console_agents_path %>" class="back-link">← back to agents</a>
+  <div class="mt-2 flex flex-wrap items-center gap-3">
+    <h1 class="page-title"><%= @persona_id %></h1>
+    <% if @persona&.dig("is_default") %>
+      <span class="role-pill">default</span>
+    <% end %>
+  </div>
+</div>
+
+<% if @api_unavailable %>
+  <div class="console-amber-note mb-4 rounded border border-amber-500/30 bg-amber-500/[0.08] px-4 py-3 text-sm text-amber-200">
+    The Centaur API is unavailable, so this persona cannot be loaded.
+  </div>
+<% elsif @persona.nil? %>
+  <div class="empty-state mb-8">
+    The API did not load a persona named <span class="text-zinc-300"><%= @persona_id %></span>.
+    <% if @channels.any? %>
+      Channels that default to it start sessions without a persona.
+    <% end %>
+  </div>
+<% else %>
+  <section class="mb-8">
+    <h2 class="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">Overview</h2>
+    <% models = @persona["models"].is_a?(Hash) ? @persona["models"] : {} %>
+    <dl class="console-panel divide-y divide-ink-700">
+      <% [
+        [ "Source", @persona["source_path"] ],
+        [ "Prompt hash", tag.span(@persona["prompt_hash"], class: "font-mono") ],
+        [ "Pinned harness", @persona["harness"] ],
+        ([ "Pinned models", models.map { |harness, model| "#{harness}: #{model}" }.join(", ") ] if models.any?),
+        [ "Public repo cache", @persona["public"] ? "available" : "not available" ]
+      ].compact.each do |label, value| %>
+        <div class="flex flex-col gap-1 px-5 py-3 sm:flex-row sm:gap-4">
+          <dt class="w-48 shrink-0 text-xs uppercase tracking-wider text-zinc-500"><%= label %></dt>
+          <dd class="min-w-0 break-all text-xs text-zinc-200"><%= value.presence || tag.span("—", class: "text-zinc-600") %></dd>
+        </div>
+      <% end %>
+    </dl>
+  </section>
+<% end %>
+
+<section class="mb-8">
+  <h2 class="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">Slack channels</h2>
+  <% if @channels.any? %>
+    <div class="console-scroll-panel">
+      <table class="console-table">
+        <thead class="console-table-head">
+          <tr>
+            <th class="console-th">Channel</th>
+            <th class="console-th">Harness</th>
+            <th class="console-th">Model</th>
+            <th class="console-th">Reasoning</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-ink-700">
+          <% @channels.each do |channel_id, fields| %>
+            <tr>
+              <td class="console-td"><%= render "console/agents/channel", channel_id: channel_id, principals: @channel_principals %></td>
+              <% %w[harness model reasoning].each do |field| %>
+                <td class="console-td-nowrap text-xs text-zinc-400"><%= fields[field].presence || tag.span("—", class: "text-zinc-600") %></td>
+              <% end %>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+  <% else %>
+    <div class="empty-state">
+      <%= @persona&.dig("is_default") ? "No channel names this persona; it is the default for channels without one." : "No Slack channel defaults to this persona." %>
+    </div>
+  <% end %>
+</section>
+
+<% if @persona.present? %>
+  <section class="mb-8 max-w-3xl" aria-labelledby="agent-prompt-heading">
+    <h2 id="agent-prompt-heading" class="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">System prompt</h2>
+    <article class="console-markdown text-sm leading-6">
+      <%= console_markdown(@persona["prompt"]) %>
+    </article>
+    <details class="mt-4">
+      <summary class="cursor-pointer text-xs text-zinc-500 hover:text-zinc-300">Raw text</summary>
+      <pre class="mt-2 max-h-[32rem] overflow-auto whitespace-pre-wrap rounded bg-ink-900/80 p-3 text-xs leading-5 text-zinc-300"><%= @persona["prompt"] %></pre>
+    </details>
+  </section>
+<% end %>

@@ -18,6 +18,12 @@
       <span class="text-zinc-600">·</span>
       <span class="text-zinc-400">foreign_id: <span class="text-zinc-200"><%= @principal.foreign_id %></span></span>
     <% end %>
+    <% if @channel_persona_id.present? %>
+      <span class="text-zinc-600">·</span>
+      <span class="text-zinc-400">agent:
+        <%= link_to @channel_persona_id, console_agent_path(@channel_persona_id), class: "console-link" %>
+      </span>
+    <% end %>
   </div>
   <% display_labels = @principal.labels_with_sandbox_capabilities %>
   <% if display_labels.present? %>

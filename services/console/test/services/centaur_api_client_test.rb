@@ -201,6 +201,24 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     http.verify
   end
 
+  test "lists personas and fetches one by encoded id" do
+    http = Minitest::Mock.new
+    expect_request(http, status: 200, body: { ok: true, personas: [] }.to_json) do |request|
+      assert_equal :get, request[:method]
+      assert_equal "http://api.internal:8080/api/admin/personas", request[:url]
+    end
+    expect_request(http, status: 200, body: { ok: true, persona: {} }.to_json) do |request|
+      assert_equal :get, request[:method]
+      assert_equal "http://api.internal:8080/api/admin/personas/ops.v2", request[:url]
+    end
+    client = api_client(base_url: "http://api.internal:8080", http: http)
+
+    client.list_personas
+    client.get_persona("ops.v2")
+
+    http.verify
+  end
+
   test "lists workflow schedules and fetches run details" do
     http = Minitest::Mock.new
     expect_request(http, status: 200, body: { ok: true, schedules: [] }.to_json) do |request|

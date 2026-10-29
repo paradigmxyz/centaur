@@ -663,6 +663,108 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    fn persona_router() -> axum::Router {
+        let persona = |id: &str, prompt: &str| centaur_session_runtime::PersonaDefinition {
+            id: id.to_owned(),
+            source_root: "/repo/overlay/tools".to_owned(),
+            source_path: format!("/repo/overlay/tools/personas/{id}"),
+            source_ref: None,
+            prompt_hash: format!("sha256:{id}"),
+            prompt: prompt.to_owned(),
+            models: Default::default(),
+            harness: None,
+        };
+        let registry = centaur_session_runtime::PersonaRegistry::new(
+            [persona("ops", "ops prompt"), persona("eng", "eng prompt")],
+            Some("eng".to_owned()),
+            vec!["/repo/overlay/tools".to_owned()],
+        )
+        .unwrap();
+        let pool =
+            PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
+        let state = AppState::unready(test_auth());
+        state.mark_ready(
+            centaur_session_runtime::SessionRuntime::new(
+                PgSessionStore::new(pool),
+                SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
+                TestSessionPrincipalRegistrar,
+            )
+            .with_personas(registry),
+            None,
+            None,
+        );
+        build_router_with_app_state(state)
+    }
+
+    async fn get_json(app: axum::Router, uri: &str, token: &str) -> (StatusCode, Value) {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn persona_list_omits_prompts_and_marks_the_default() {
+        let (status, body) =
+            get_json(persona_router(), "/api/admin/personas", &console_token()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["default_persona_id"], "eng");
+        assert_eq!(body["overlay_chain"], json!(["/repo/overlay/tools"]));
+        let personas = body["personas"].as_array().unwrap();
+        let ids = personas
+            .iter()
+            .map(|p| p["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["eng", "ops"]);
+        assert_eq!(personas[0]["is_default"], true);
+        assert_eq!(personas[1]["is_default"], false);
+        assert_eq!(personas[0]["prompt_hash"], "sha256:eng");
+        assert!(personas.iter().all(|p| p.get("prompt").is_none()));
+    }
+
+    #[tokio::test]
+    async fn persona_detail_returns_the_prompt_or_not_found() {
+        let (status, body) = get_json(
+            persona_router(),
+            "/api/admin/personas/ops",
+            &console_token(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["persona"]["id"], "ops");
+        assert_eq!(body["persona"]["prompt"], "ops prompt");
+        assert_eq!(
+            body["persona"]["source_path"],
+            "/repo/overlay/tools/personas/ops"
+        );
+
+        let (status, _) = get_json(
+            persona_router(),
+            "/api/admin/personas/missing",
+            &console_token(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn persona_routes_reject_principal_tokens() {
+        let principal = principal_token("prn_sandbox");
+        for uri in ["/api/admin/personas", "/api/admin/personas/eng"] {
+            let (status, _) = get_json(persona_router(), uri, &principal).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
+        }
+    }
+
     #[tokio::test]
     async fn runtime_routes_report_unavailable_until_runtime_is_ready() {
         for mut request in [
@@ -730,6 +832,11 @@ mod tests {
                 .uri("/api/workflows/events")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"event_name":"test.event","payload":{}}"#))
+                .unwrap(),
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/admin/personas")
+                .body(Body::empty())
                 .unwrap(),
             Request::builder()
                 .method(Method::POST)

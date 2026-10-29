@@ -908,6 +908,7 @@
   <% scheduled_tasks_view = request.path.start_with?("/console/scheduled_tasks") %>
   <% workflows_view = request.path.start_with?("/console/workflows") %>
   <% skills_view = request.path.start_with?("/console/skills") %>
+  <% agents_view = request.path.start_with?("/console/agents") %>
   <%# The Control section is admin-only (each controller enforces
       require_admin server-side); Integrations is for everyone -- it lists the
       public consent start links any team member can use. %>
@@ -981,6 +982,15 @@
                  title="Workflows">
                 <span class="console-nav-icon"><%= console_icon("workflow", classes: "size-4") %></span>
                 <span class="console-nav-label">Workflows</span>
+              </a>
+            </div>
+
+            <div class="console-thread-group">
+              <a href="<%= console_agents_path %>"
+                 class="console-thread-group-title <%= "console-thread-group-title-active" if agents_view %>"
+                 title="Agents">
+                <span class="console-nav-icon"><%= console_icon("id-badge", classes: "size-4") %></span>
+                <span class="console-nav-label">Agents</span>
               </a>
             </div>
           <% end %>

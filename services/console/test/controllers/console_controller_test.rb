@@ -268,6 +268,23 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "a Slack channel principal links to the agent its channel defaults to" do
+    principal = principals(:acme_channel)
+    with_env("CENTAUR_CONSOLE_SLACK_CHANNEL_DEFAULTS" => { principal.slack_channel_id => { "persona" => "eng" } }.to_json) do
+      get console_principal_url(principal.oid)
+    end
+    assert_response :ok
+    assert_select "a[href=?]", console_agent_path("eng"), text: "eng"
+  end
+
+  test "a principal without a channel default shows no agent link" do
+    with_env("CENTAUR_CONSOLE_SLACK_CHANNEL_DEFAULTS" => nil) do
+      get console_principal_url(principals(:acme_channel).oid)
+    end
+    assert_response :ok
+    assert_select "a[href^=?]", "/console/agents/", count: 0
+  end
+
   test "principal detail page offers delete" do
     principal = principals(:acme_channel)
     get console_principal_url(principal.oid)

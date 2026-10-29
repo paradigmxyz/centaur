@@ -120,6 +120,16 @@ Docs, and Granola sync jobs, including jobs already queued, without deleting
 synced data. It defaults to enabled; Google Docs sync also still requires
 `CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED`.
 
+## Agents
+
+The admin-only **Agents** page lists the personas api-rs loaded at startup
+(`GET /api/admin/personas`) and shows each one's system prompt. It also shows
+which Slack channels default to each persona, read from
+`CENTAUR_CONSOLE_SLACK_CHANNEL_DEFAULTS`, which takes the same JSON as
+Slackbot's `SLACKBOTV2_CHANNEL_DEFAULTS`. The Helm chart sets both from
+`slackbotv2.channelDefaults`. Prompts are read-only here. A merged prompt change
+appears after api-rs restarts.
+
 ## Broker Credential Refresh
 
 The Console worker refreshes broker credentials unless

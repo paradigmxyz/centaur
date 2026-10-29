@@ -56,8 +56,8 @@ use crate::{
         DiscordThreadContext, EmitWorkflowEventRequest, EventsQuery, ExecuteSessionRequest,
         ExecuteSessionResponse, GithubThreadContext, InterruptSessionExecutionRequest,
         InterruptSessionExecutionResponse, LinearThreadContext, ListWorkflowRunsQuery,
-        OnHarnessConflict, SessionContextResponse, SessionSseEvent, SlackThreadContext,
-        stream_error_sse,
+        OnHarnessConflict, PersonaSummary, SessionContextResponse, SessionSseEvent,
+        SlackThreadContext, stream_error_sse,
     },
 };
 
@@ -277,6 +277,8 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
             "/api/admin/granola/sync/batch",
             post(ingest_granola_sync_batch).layer(DefaultBodyLimit::disable()),
         )
+        .route("/api/admin/personas", get(list_personas))
+        .route("/api/admin/personas/{persona_id}", get(get_persona))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             authorize_api_request,
@@ -518,6 +520,10 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
         }
         (_, route) if route.starts_with("/api/admin/granola/sync/") => {
             capability(Capability::AdminSync)
+        }
+        (&Method::GET, "/api/admin/personas")
+        | (&Method::GET, "/api/admin/personas/{persona_id}") => {
+            capability(Capability::PersonasRead)
         }
         _ => None,
     }
@@ -2464,6 +2470,44 @@ async fn list_workflow_schedules(
     let workflows = workflow_runtime(&state)?;
     let schedules = workflows.list_schedules();
     Ok(Json(json!({ "ok": true, "schedules": schedules })))
+}
+
+async fn list_personas(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let runtime = state.runtime()?;
+    let Some(registry) = runtime.personas() else {
+        return Ok(Json(json!({
+            "ok": true,
+            "default_persona_id": null,
+            "overlay_chain": [],
+            "personas": [],
+        })));
+    };
+    let personas = registry
+        .iter()
+        .map(|persona| PersonaSummary::new(registry, persona, false))
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "ok": true,
+        "default_persona_id": registry.default_persona_id(),
+        "overlay_chain": registry.overlay_chain(),
+        "personas": personas,
+    })))
+}
+
+async fn get_persona(
+    State(state): State<AppState>,
+    Path(persona_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let runtime = state.runtime()?;
+    let persona = runtime
+        .personas()
+        .and_then(|registry| {
+            registry
+                .get(&persona_id)
+                .map(|persona| PersonaSummary::new(registry, persona, true))
+        })
+        .ok_or_else(|| ApiError::NotFound(format!("persona {persona_id:?} is not deployed")))?;
+    Ok(Json(json!({ "ok": true, "persona": persona })))
 }
 
 async fn get_workflow_run(

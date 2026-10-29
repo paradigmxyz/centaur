@@ -1,0 +1,9 @@
+<%# A Slack channel id, linked to its principal when the console has one. %>
+<% principal = principals[channel_id] %>
+<% chip_class = local_assigns.fetch(:chip_class, "label-chip") %>
+<% if principal %>
+  <%= link_to (principal.name.presence || channel_id), console_principal_path(principal.oid),
+              class: "#{chip_class} hover:underline", title: channel_id %>
+<% else %>
+  <span class="<%= chip_class %>" title="No console principal for this channel"><%= channel_id %></span>
+<% end %>

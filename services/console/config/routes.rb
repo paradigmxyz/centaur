@@ -46,6 +46,8 @@ Rails.application.routes.draw do
   end
   get "console/principals/:id", to: "console#principal", as: :console_principal
   namespace :console do
+    # Persona ids may contain dots, which Rails would otherwise read as a format.
+    resources :agents, only: %i[index show], constraints: { id: %r{[^/]+} }
     resources :workflows, only: %i[index show] do
       member do
         post :run, action: :force_start

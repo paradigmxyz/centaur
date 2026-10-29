@@ -1,0 +1,93 @@
+<% content_for :title, "Agents · Centaur Console" %>
+
+<div class="mb-6">
+  <h1 class="page-title">Agents</h1>
+  <p class="mt-2 max-w-3xl text-sm text-zinc-500">
+    The personas the API loaded when it last started, and the Slack channels that default to each.
+    Prompts live in the tool repos; a merged change appears here after the API restarts.
+  </p>
+</div>
+
+<% if @api_unavailable %>
+  <div class="console-amber-note mb-4 rounded border border-amber-500/30 bg-amber-500/[0.08] px-4 py-3 text-sm text-amber-200">
+    The Centaur API is unavailable, so deployed personas cannot be listed.
+  </div>
+<% end %>
+
+<% if @undeployed_channels.any? %>
+  <div class="console-amber-note mb-4 rounded border border-amber-500/30 bg-amber-500/[0.08] px-4 py-3 text-sm text-amber-200">
+    <p>These channels default to a persona the API did not load, so their sessions start without it:</p>
+    <ul class="mt-2 space-y-1">
+      <% @undeployed_channels.each do |channel_id, fields| %>
+        <li class="flex flex-wrap items-center gap-2">
+          <%= render "console/agents/channel", channel_id: channel_id, principals: @channel_principals, chip_class: "font-mono" %>
+          <span>→ <%= fields["persona"] %></span>
+        </li>
+      <% end %>
+    </ul>
+  </div>
+<% end %>
+
+<section class="console-scroll-panel">
+  <table class="console-table">
+    <thead class="console-table-head">
+      <tr>
+        <th class="console-th">Persona</th>
+        <th class="console-th">Slack channels</th>
+        <th class="console-th">Pinned harness</th>
+        <th class="console-th">Source</th>
+        <th class="console-th">Prompt hash</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-ink-700">
+      <% if @personas.empty? %>
+        <tr>
+          <td colspan="5" class="px-5 py-10 text-center text-zinc-600">
+            <%= @api_unavailable ? "No personas available." : "No personas are deployed." %>
+          </td>
+        </tr>
+      <% end %>
+
+      <% @personas.each do |persona| %>
+        <% persona_id = persona["id"].to_s %>
+        <% channels = @channel_defaults.channels_for_persona(persona_id) %>
+        <tr class="console-row-hover align-top">
+          <td class="console-td">
+            <div class="flex flex-wrap items-center gap-2">
+              <%= link_to persona_id, console_agent_path(persona_id),
+                          class: "whitespace-nowrap font-medium text-zinc-100 hover:text-centaur-300 hover:underline" %>
+              <% if persona["is_default"] %>
+                <span class="role-pill">default</span>
+              <% end %>
+            </div>
+          </td>
+          <td class="console-td">
+            <% if channels.any? %>
+              <div class="flex flex-wrap gap-1">
+                <% channels.each_key do |channel_id| %>
+                  <%= render "console/agents/channel", channel_id: channel_id, principals: @channel_principals %>
+                <% end %>
+              </div>
+            <% else %>
+              <span class="text-xs text-zinc-600"><%= persona["is_default"] ? "every other channel" : "—" %></span>
+            <% end %>
+          </td>
+          <td class="console-td-nowrap text-xs text-zinc-400">
+            <% models = persona["models"].is_a?(Hash) ? persona["models"] : {} %>
+            <% if persona["harness"].present? %>
+              <%= persona["harness"] %><% if models[persona["harness"]].present? %><span class="text-zinc-600"> · <%= models[persona["harness"]] %></span><% end %>
+            <% else %>
+              <span class="text-zinc-600">—</span>
+            <% end %>
+          </td>
+          <td class="console-td text-xs text-zinc-400" title="<%= persona["source_path"] %>">
+            <%= truncate_middle(persona["source_path"], max: 56) %>
+          </td>
+          <td class="console-td-nowrap font-mono text-xs text-zinc-500" title="<%= persona["prompt_hash"] %>">
+            <%= persona["prompt_hash"].to_s.delete_prefix("sha256:").first(12) %>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+</section>

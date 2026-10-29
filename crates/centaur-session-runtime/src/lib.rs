@@ -288,7 +288,7 @@ impl PersonaRegistry {
         self
     }
 
-    fn default_persona_id(&self) -> Option<&str> {
+    pub fn default_persona_id(&self) -> Option<&str> {
         self.default_persona_id.as_deref()
     }
 
@@ -302,8 +302,22 @@ impl PersonaRegistry {
         }
     }
 
-    fn get(&self, persona_id: &str) -> Option<&PersonaDefinition> {
+    pub fn get(&self, persona_id: &str) -> Option<&PersonaDefinition> {
         self.personas.get(persona_id)
+    }
+
+    /// Every deployed persona, ordered by id.
+    pub fn iter(&self) -> impl Iterator<Item = &PersonaDefinition> {
+        self.personas.values()
+    }
+
+    pub fn overlay_chain(&self) -> &[String] {
+        &self.overlay_chain
+    }
+
+    /// Whether sessions with public repo-cache access may use this persona.
+    pub fn is_public(&self, persona: &PersonaDefinition) -> bool {
+        self.public_source_roots.contains(&persona.source_root)
     }
 
     fn model_for(&self, persona_id: &str, harness: &HarnessType) -> Option<&str> {
@@ -830,6 +844,11 @@ impl SessionRuntime {
     pub fn with_personas(mut self, personas: PersonaRegistry) -> Self {
         self.personas = Some(Arc::new(personas));
         self
+    }
+
+    /// The persona registry loaded at startup, if personas are configured.
+    pub fn personas(&self) -> Option<&PersonaRegistry> {
+        self.personas.as_deref()
     }
 
     pub async fn session_title(

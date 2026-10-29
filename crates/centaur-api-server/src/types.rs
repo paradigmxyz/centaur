@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
+
 use axum::response::sse::Event;
 use centaur_session_core::{HarnessType, Session, SessionEvent, SessionMessageInput, ThreadKey};
-use centaur_session_runtime::SESSION_OUTPUT_LINE_EVENT;
+use centaur_session_runtime::{PersonaDefinition, PersonaRegistry, SESSION_OUTPUT_LINE_EVENT};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -42,6 +44,42 @@ pub struct CreateSessionResponse {
     /// it; requested models and providers are ignored.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub persona_model: Option<String>,
+}
+
+/// A deployed persona as reported to operators. The prompt text is included
+/// only when one persona is requested by id.
+#[derive(Clone, Debug, Serialize)]
+pub struct PersonaSummary {
+    pub id: String,
+    pub source_root: String,
+    pub source_path: String,
+    pub source_ref: Option<String>,
+    pub prompt_hash: String,
+    pub is_default: bool,
+    pub public: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harness: Option<HarnessType>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+}
+
+impl PersonaSummary {
+    pub fn new(registry: &PersonaRegistry, persona: &PersonaDefinition, with_prompt: bool) -> Self {
+        Self {
+            id: persona.id.clone(),
+            source_root: persona.source_root.clone(),
+            source_path: persona.source_path.clone(),
+            source_ref: persona.source_ref.clone(),
+            prompt_hash: persona.prompt_hash.clone(),
+            is_default: registry.default_persona_id() == Some(persona.id.as_str()),
+            public: registry.is_public(persona),
+            harness: persona.harness.clone(),
+            models: persona.models.clone(),
+            prompt: with_prompt.then(|| persona.prompt.clone()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]

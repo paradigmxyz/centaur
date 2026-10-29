@@ -96,6 +96,14 @@ class CentaurApiClient
     get("/api/workflows/schedules")
   end
 
+  def list_personas
+    get("/api/admin/personas")
+  end
+
+  def get_persona(persona_id)
+    get("/api/admin/personas/#{escape_path(persona_id)}")
+  end
+
   def get_workflow_run(run_id)
     get("/api/workflows/runs/#{escape_path(run_id)}")
   end
