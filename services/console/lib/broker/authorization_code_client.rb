@@ -39,7 +39,7 @@ module Broker
     # offline access and only needs the id_token to identify the operator.
     def exchange(token_endpoint:, client_id:, client_secret:, code:, redirect_uri:,
                  code_verifier:, client_auth_method: "client_secret_post",
-                 timeout: DEFAULT_TIMEOUT, require_refresh_token: true)
+                 timeout: DEFAULT_TIMEOUT, require_refresh_token: true, resource: nil)
       raise ArgumentError, "token endpoint is required" if token_endpoint.blank?
       raise ArgumentError, "client_id is required" if client_id.blank?
       raise ArgumentError, "code is required" if code.blank?
@@ -51,6 +51,7 @@ module Broker
       }
       headers = client_auth(client_auth_method, client_id, client_secret, form)
       form["code_verifier"] = code_verifier if code_verifier.present?
+      form["resource"] = resource if resource.present?
 
       response = perform(token_endpoint, form, headers, timeout)
 

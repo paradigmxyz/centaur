@@ -1,7 +1,7 @@
 <%# The form routes are named *_oauth_app_form* to avoid colliding with the
     read routes, so target them explicitly rather than via model polymorphism. %>
 <% form_url = app.new_record? ? console_oauth_app_forms_path : console_oauth_app_form_path(app) %>
-<%= form_with model: app, url: form_url, method: (app.new_record? ? :post : :patch), scope: :oauth_app, data: { turbo: false } do %>
+<%= form_with model: app, url: form_url, method: (app.new_record? ? :post : :patch), scope: :oauth_app, data: { turbo: false, controller: "oauth-app-policy" } do %>
   <div class="space-y-6">
     <section class="form-section">
       <h2 class="form-section-heading">Identity</h2>
@@ -27,7 +27,7 @@
           <label class="form-label" for="oauth_app_provider">Provider *</label>
           <%= select_tag "oauth_app[provider]",
                 options_for_select(Oauth::Providers.keys.map { |k| [ k.capitalize, k ] }, app.provider),
-                id: "oauth_app_provider", class: "form-input #{field_error_class(app, :provider)}" %>
+                data: { oauth_app_policy_target: "provider", action: "change->oauth-app-policy#update" }, id: "oauth_app_provider", class: "form-input #{field_error_class(app, :provider)}" %>
           <%= field_error(app, :provider) %>
         </div>
         <div>
@@ -59,17 +59,21 @@
           <label class="form-label mb-0" for="oauth_app_enabled">Enabled</label>
         </div>
         <p class="form-hint -mt-2">A disabled app rejects new consent flows; existing credentials keep refreshing.</p>
-        <div class="flex items-center gap-2">
-          <%= check_box_tag "oauth_app[shared]", "1", app.shared, id: "oauth_app_shared", class: "h-4 w-4", disabled: app.persisted? %>
-          <label class="form-label mb-0" for="oauth_app_shared">Shared: one admin-connected account; agents get access through roles.</label>
+        <div class="grid gap-5" data-oauth-app-policy-target="options" <%= "hidden" if app.provider == "runlayer" %>>
+          <div class="flex items-center gap-2">
+            <%= check_box_tag "oauth_app[shared]", "1", app.shared, id: "oauth_app_shared", class: "h-4 w-4", disabled: app.persisted? || app.provider == "runlayer", data: { oauth_app_policy_target: "shared", persisted: app.persisted? } %>
+            <label class="form-label mb-0" for="oauth_app_shared">Shared: one admin-connected account; agents get access through roles.</label>
+          </div>
+          <%= field_error(app, :shared) %>
+          <p class="form-hint -mt-2">Cannot be changed after the app is created.</p>
+          <div class="flex items-center gap-2">
+            <%= check_box_tag "oauth_app[always_available]", "1", app.always_available, id: "oauth_app_always_available", class: "h-4 w-4", disabled: app.provider == "runlayer", data: { oauth_app_policy_target: "alwaysAvailable" } %>
+            <label class="form-label mb-0" for="oauth_app_always_available">Always available to the connecting user</label>
+          </div>
+          <p class="form-hint -mt-2">Used automatically on any conversation turn they start, channels included. Off: automatic use covers only their DMs.</p>
         </div>
-        <%= field_error(app, :shared) %>
-        <p class="form-hint -mt-2">Cannot be changed after the app is created.</p>
-        <div class="flex items-center gap-2">
-          <%= check_box_tag "oauth_app[always_available]", "1", app.always_available, id: "oauth_app_always_available", class: "h-4 w-4" %>
-          <label class="form-label mb-0" for="oauth_app_always_available">Always available to the connecting user</label>
-        </div>
-        <p class="form-hint -mt-2">Used automatically on any conversation turn they start, channels included. Off: automatic use covers only their DMs.</p>
+        <p class="form-hint" data-oauth-app-policy-target="personal" <%= "hidden" unless app.provider == "runlayer" %>>Runlayer always uses your own connection in DMs and channels.</p>
+        <%= field_error(app, :always_available) %>
       </div>
     </section>
 

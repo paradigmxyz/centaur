@@ -30,6 +30,10 @@ class OauthApp < ApplicationRecord
 
   encrypts :client_secret
 
+  # Runlayer always follows the requester, including channel turns. This is
+  # fixed provider behavior, rather than an operator-selectable flow policy.
+  before_validation :set_runlayer_availability
+
   # The slug is the app's whole identity: globally unique and URL-safe. It both
   # addresses the app in the API (oid or slug) and names the consent links, so it
   # must not start with the opaque-id prefix or the two forms would collide.
@@ -42,6 +46,7 @@ class OauthApp < ApplicationRecord
   validate :labels_is_a_hash
   validate :allowed_scopes_valid
   validate :shared_configuration_valid
+  validate :runlayer_configuration_valid
 
   # The provider strategy backing this app, or nil if the provider column somehow
   # holds an unknown key (the inclusion validation normally prevents that).
@@ -59,10 +64,25 @@ class OauthApp < ApplicationRecord
   end
 
   def credential_needs_reconnect?(credential)
+    if provider == "runlayer" && !provider_strategy.credential_resource_matches?(credential)
+      return true
+    end
+
     credential.dead? || (required_scopes - Array(credential.scopes)).any?
   end
 
   private
+
+  def set_runlayer_availability
+    self.always_available = true if provider == Oauth::Providers::Runlayer::KEY
+  end
+
+  def runlayer_configuration_valid
+    return unless provider == Oauth::Providers::Runlayer::KEY
+
+    errors.add(:shared, "must be false for personal Runlayer connections") if shared?
+    errors.add(:base, "Set RUNLAYER_MCP_URL to an exact HTTPS Runlayer MCP URL") if enabled? && !provider_strategy.configured?
+  end
 
   def shared_configuration_valid
     errors.add(:shared, "cannot be changed after creation") if persisted? && will_save_change_to_shared?

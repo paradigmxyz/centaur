@@ -92,6 +92,15 @@ class PrincipalCredentialReconciliation
     end
   end
 
+  # Public for grant validation and proxy config assembly. Runlayer has no
+  # email fallback: the Console owner and verified Slack identity are the keys.
+  def runlayer_owner?(principal, credential)
+    return false unless principal && credential.created_by&.active?
+    return credential.created_by_id == principal.console_user_id if console_user_principal?(principal)
+
+    owner_identity_matches_principal?(principal, credential)
+  end
+
   private
 
   # Every registered OAuth-flow provider participates: a provider without
@@ -302,6 +311,9 @@ class PrincipalCredentialReconciliation
   def credential_matches_principal?(principal, credential, provider = nil)
     provider ||= credential.oauth_app&.provider
     return false unless supported_provider?(credential)
+    if provider == Oauth::Providers::Runlayer::KEY
+      return runlayer_owner?(principal, credential)
+    end
     return false if provider == SLACK_PROVIDER && !slack_team_matches?(principal, credential)
     if console_user_principal?(principal)
       return credential.created_by_id == principal.console_user_id ||

@@ -50,7 +50,9 @@ impl SyncCache {
     ) -> Option<String> {
         // Requester unions depend on OAuth-app eligibility that is intentionally
         // assembled live and is not covered by the principal cache version.
-        if proxy.requester_principal_id.is_some() {
+        if proxy.requester_principal_id.is_some()
+            || proxy.principal_field("has_runlayer_connection").as_bool() == Some(true)
+        {
             return None;
         }
         let generation = generation_fingerprint(proxy, token_windows)?;
@@ -68,7 +70,9 @@ impl SyncCache {
         token_windows: TokenWindows,
         config_hash: String,
     ) {
-        if proxy.requester_principal_id.is_some() {
+        if proxy.requester_principal_id.is_some()
+            || proxy.principal_field("has_runlayer_connection").as_bool() == Some(true)
+        {
             return;
         }
         let Some(generation) = generation_fingerprint(proxy, token_windows) else {

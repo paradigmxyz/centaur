@@ -15,6 +15,7 @@ pub(crate) struct AppState {
     pub(crate) jwt_secret: Option<String>,
     pub(crate) api_hosts: Vec<String>,
     pub(crate) console_host: Option<String>,
+    pub(crate) runlayer_resource_url: Option<String>,
     pub(crate) sync_cache: Arc<SyncCache>,
     pub(crate) metrics: PrometheusHandle,
 }

@@ -172,6 +172,8 @@ module Broker
           "refresh_token" => credential.refresh_token,
           "client_id" => credential.effective_client_id
         }
+        provider = credential.oauth_app&.provider_strategy
+        form["resource"] = provider.refresh_resource(credential) if provider.respond_to?(:refresh_resource)
         add_oauth_optional_fields(form, credential)
       end
 

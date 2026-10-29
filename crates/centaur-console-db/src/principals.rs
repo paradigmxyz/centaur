@@ -93,7 +93,11 @@ pub async fn find_direct_slack_channel_permission(
 /// The principal's own configuration with every secret value redacted: what
 /// its proxy is served, before requester credentials and minted tokens.
 /// `None` when the principal does not exist.
-pub async fn effective_config(pool: &PgPool, principal_id: i64) -> Result<Option<Config>> {
+pub async fn effective_config(
+    pool: &PgPool,
+    principal_id: i64,
+    runlayer_resource_url: Option<&str>,
+) -> Result<Option<Config>> {
     let Some(row) = sqlx::query(
         "SELECT to_jsonb(pr) AS principal, u.id AS console_user_id, u.email AS console_user_email, \
                 COALESCE(( \
@@ -128,9 +132,15 @@ pub async fn effective_config(pool: &PgPool, principal_id: i64) -> Result<Option
         slack_history_channel_ids: &slack_history_channel_ids,
         proxy_labels: &Value::Object(Default::default()),
     };
-    build_config(pool, SecretValues::Redacted, &subject, None)
-        .await
-        .map(Some)
+    build_config(
+        pool,
+        SecretValues::Redacted,
+        &subject,
+        None,
+        runlayer_resource_url,
+    )
+    .await
+    .map(Some)
 }
 
 fn principal(row: &PgRow) -> Result<Principal> {

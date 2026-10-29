@@ -35,6 +35,7 @@ class Grant < ApplicationRecord
 
   validate :exactly_one_grantee
   validate :exactly_one_grantable
+  validate :runlayer_personal_owner
   validates :priority, presence: true, numericality: { only_integer: true }
 
   # The grantee this grant attaches the secret to: a principal or a role.
@@ -48,6 +49,14 @@ class Grant < ApplicationRecord
   end
 
   private
+
+  def runlayer_personal_owner
+    credential = static_secret&.broker_credential
+    return unless credential&.oauth_app&.provider == "runlayer"
+    return if role.nil? && PrincipalCredentialReconciliation.new.runlayer_owner?(principal, credential)
+
+    errors.add(:principal, "must be the owner of this personal Runlayer connection")
+  end
 
   def sync_config_affected_principals
     return Principal.where(id: principal_id) if principal_id.present?

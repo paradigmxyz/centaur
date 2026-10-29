@@ -9,13 +9,25 @@
 class Console::IntegrationsController < ApplicationController
   layout "console"
 
+  class_attribute :disconnect_service_factory, default: -> { Oauth::DisconnectRunlayer.new }
+
+  def disconnect
+    credential = BrokerCredential.joins(:oauth_app)
+      .where(created_by: current_user, oauth_apps: { provider: "runlayer", shared: false })
+      .find_by_oid!(params[:id])
+    revoked = disconnect_service_factory.call.call(credential)
+    message = revoked ? "Runlayer disconnected." : "Runlayer disconnected from Centaur. Remote revocation failed; revoke the connection in Runlayer too."
+    redirect_to console_integrations_path, notice: message
+  end
+
   def index
     @oauth_apps = OauthApp.where(enabled: true).order(:slug)
     @oauth_apps = @oauth_apps.where(shared: false) unless acting_admin?
     @presets = if acting_admin?
       configured = OauthApp.distinct.pluck(:provider)
       Oauth::Providers.registry.values.select do |provider|
-        provider.respond_to?(:preset) && provider.respond_to?(:registration_endpoint) && !configured.include?(provider.key)
+        provider.respond_to?(:preset) && provider.respond_to?(:registration_endpoint) &&
+          (!provider.respond_to?(:configured?) || provider.configured?) && !configured.include?(provider.key)
       end
     else
       []

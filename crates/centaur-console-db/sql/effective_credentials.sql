@@ -1,4 +1,4 @@
-WITH effective_grants AS (
+WITH candidate_grants AS (
     SELECT g.*
     FROM grants AS g
     WHERE g.principal_id = $1
@@ -24,6 +24,34 @@ WITH effective_grants AS (
     WHERE $2::bigint IS NOT NULL
       AND g.principal_id = $2
       AND g.role_id IS NULL
+),
+effective_grants AS (
+    SELECT g.* FROM candidate_grants g
+    LEFT JOIN static_secrets ss ON ss.id = g.static_secret_id
+    LEFT JOIN broker_credentials bc ON bc.id = ss.broker_credential_id
+    LEFT JOIN oauth_apps oa ON oa.id = bc.oauth_app_id
+    LEFT JOIN principals actor ON actor.id = COALESCE($2, $1)
+    WHERE oa.provider IS DISTINCT FROM 'runlayer' OR (
+        NOT oa.shared AND g.role_id IS NULL AND g.principal_id = actor.id AND (
+            (actor.kind = 'console_user' AND actor.console_user_id = bc.created_by_id) OR
+            (actor.kind IS DISTINCT FROM 'console_user' AND EXISTS (
+                SELECT 1 FROM user_identities ui
+                WHERE ui.user_id = bc.created_by_id AND ui.provider = 'slack'
+                  AND ui.subject ~ '^([UW][A-Z0-9]{8,}|USLACK)$'
+                  AND ui.team_id ~ '^[TE][A-Z0-9]{8,}$'
+                  AND NULLIF(trim(actor.slack_user_id), '') IS NOT NULL
+                  AND NULLIF(trim(actor.slack_team_id), '') IS NOT NULL
+                  AND lower(trim(ui.subject)) = lower(trim(actor.slack_user_id))
+                  AND lower(trim(ui.team_id)) = lower(trim(actor.slack_team_id))
+                  AND NOT EXISTS (
+                      SELECT 1 FROM user_identities other
+                      WHERE other.user_id = ui.user_id AND other.provider = 'slack'
+                        AND (lower(trim(other.subject)) IS DISTINCT FROM lower(trim(ui.subject))
+                          OR lower(trim(other.team_id)) IS DISTINCT FROM lower(trim(ui.team_id)))
+                  )
+            ))
+        )
+    )
 ),
 credential_refs AS (
     SELECT
@@ -95,11 +123,21 @@ sources AS (
         sr.kind,
         sr.credential_id,
         jsonb_agg(
-            sr.source || jsonb_strip_nulls(jsonb_build_object('broker_access_token', bc.access_token))
+            sr.source || jsonb_strip_nulls(jsonb_build_object('broker_access_token',
+                CASE WHEN NOT bc.dead AND (bc.expires_at IS NULL OR bc.expires_at > CURRENT_TIMESTAMP)
+                     AND (oa.provider IS DISTINCT FROM 'runlayer' OR
+                          (oa.enabled AND credential_owner.status = 'active' AND $3::text = bc.labels->>'runlayer_resource'
+                           AND sr.kind = 'static' AND EXISTS (
+                               SELECT 1 FROM static_secrets wrapper
+                               WHERE wrapper.id = sr.credential_id AND wrapper.broker_credential_id = bc.id
+                           )))
+                THEN bc.access_token END))
             ORDER BY sr.source_id
         ) AS sources
     FROM source_rows AS sr
     LEFT JOIN broker_credentials AS bc ON bc.id = sr.broker_credential_id
+    LEFT JOIN oauth_apps AS oa ON oa.id = bc.oauth_app_id
+    LEFT JOIN users credential_owner ON credential_owner.id = bc.created_by_id
     GROUP BY sr.kind, sr.credential_id
 ),
 rule_rows AS (

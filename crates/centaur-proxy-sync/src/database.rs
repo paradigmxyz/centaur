@@ -13,7 +13,12 @@ pub(crate) async fn load_proxy(
                 p.principal_assigned_at AT TIME ZONE 'UTC' AS principal_assigned_at, \
                 p.requester_principal_assigned_at AT TIME ZONE 'UTC' AS requester_principal_assigned_at, \
                 pr.sync_config_cache_version AS principal_cache_version, \
-                to_jsonb(pr) AS principal, u.email AS console_user_email, u.id AS console_user_id, \
+                (to_jsonb(pr) || jsonb_build_object('has_runlayer_connection', EXISTS ( \
+                    SELECT 1 FROM grants rg JOIN static_secrets rs ON rs.id = rg.static_secret_id \
+                    JOIN broker_credentials rb ON rb.id = rs.broker_credential_id \
+                    JOIN oauth_apps ra ON ra.id = rb.oauth_app_id \
+                    WHERE rg.principal_id = p.principal_id AND ra.provider = 'runlayer' \
+                ))) AS principal, u.email AS console_user_email, u.id AS console_user_id, \
                 COALESCE(( \
                     SELECT jsonb_agg(effective.channel_id ORDER BY effective.channel_id) \
                     FROM ( \

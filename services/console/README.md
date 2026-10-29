@@ -147,3 +147,10 @@ Rotating any of these keys makes previously encrypted data unreadable. Treat the
 `iron-control` exposes a JSON API under `/api/v1`. All resource endpoints authenticate with an API key sent as a bearer token (`Authorization: Bearer iak_...`). `iron-proxy` instances fetch their configuration from the separate `proxy-sync` service with a proxy bearer token.
 
 See [docs/API.md](docs/API.md) for the full reference: authentication, request/response conventions, pagination, error formats, the shared secret-source and request-rule shapes, and detailed payloads for every endpoint (static secrets, GCP auth secrets, OAuth token secrets, principals, roles, grants, API keys, proxies, and proxy sync).
+
+## Personal Runlayer connections
+
+Set the same `RUNLAYER_MCP_URL` in Console web/workers, api-rs, proxy-sync and
+sandboxes. Each user connects through Integrations; verified Slack SSO links
+personal access in DMs and channels. Keep `tokenBroker.enabled: false` so Console
+refreshes tokens. See [setup and limits](../../tools/infra/runlayer/README.md).

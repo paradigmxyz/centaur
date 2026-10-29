@@ -37,6 +37,9 @@ module Console
       preset = provider.preset
       app = OauthApp.find_by(slug: preset.fetch(:slug))
       unless app
+        if provider.respond_to?(:configured?) && !provider.configured?
+          return redirect_to console_integrations_path, alert: "Configure the integration URL in the deployment environment."
+        end
         registration = registration_client_factory.call.register(
           endpoint: provider.registration_endpoint,
           redirect_uri: oauth_callback_redirect_uri(preset.fetch(:slug)),

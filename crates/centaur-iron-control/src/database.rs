@@ -25,9 +25,13 @@ pub(crate) async fn principal(pool: &PgPool, ident: &str) -> Result<Principal> {
 /// returns it for api-rs.
 pub(crate) async fn effective_config(pool: &PgPool, ident: &str) -> Result<EffectiveConfig> {
     let row = find(pool, ident).await?.ok_or_else(|| not_found(ident))?;
-    let config = centaur_console_db::effective_config(pool, row.id)
-        .await?
-        .ok_or_else(|| not_found(ident))?;
+    let runlayer_resource_url = std::env::var("RUNLAYER_MCP_URL")
+        .ok()
+        .map(|url| url.trim().to_owned());
+    let config =
+        centaur_console_db::effective_config(pool, row.id, runlayer_resource_url.as_deref())
+            .await?
+            .ok_or_else(|| not_found(ident))?;
     serde_json::from_value(json!({ "secrets": config.secrets, "postgres": config.postgres }))
         .map_err(|error| invalid_data(format!("effective config for {ident}: {error}")))
 }

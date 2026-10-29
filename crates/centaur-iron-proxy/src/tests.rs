@@ -176,6 +176,10 @@ fn shipped_proxy_allowlist_preserves_integration_headers() {
         .unwrap();
     let headers = header_allowlist["config"]["headers"].as_sequence().unwrap();
 
+    for header in ["mcp-protocol-version", "mcp-session-id"] {
+        assert!(headers.iter().any(|entry| entry.as_str() == Some(header)));
+    }
+
     assert!(
         headers
             .iter()

@@ -26,7 +26,7 @@
         <% if app.description.present? && !app.shared? %>
           <p class="line-clamp-2 text-xs text-zinc-500" title="<%= app.description %>"><%= app.description %></p>
         <% end %>
-        <p class="text-xs text-zinc-500"><%= app.shared? ? "Shared with your agents." : app.always_available? ? "Used automatically whenever you ask the bot." : "Used only in your DMs with the bot." %></p>
+        <p class="text-xs text-zinc-500"><%= app.provider == "runlayer" ? "Uses your own Runlayer account in DMs and channels." : app.shared? ? "Shared with your agents." : app.always_available? ? "Used automatically whenever you ask the bot." : "Used only in your DMs with the bot." %></p>
         <div class="mt-auto flex items-center justify-between gap-3 pt-1">
           <% credential = @credentials_by_app_id[app.id] %>
           <% if credential %>
@@ -34,6 +34,9 @@
             <div class="flex flex-wrap gap-2">
               <%= link_to "Manage", console_oauth_app_path(app.oid), class: "btn-secondary" if app.shared? %>
               <a href="<%= start_url %>" class="btn-secondary inline-block">Reconnect</a>
+              <% if app.provider == "runlayer" && credential.created_by_id == current_user.id && !credential.dead? %>
+                <%= button_to "Disconnect", console_integration_connection_path(credential.oid), method: :delete, class: "btn-secondary" %>
+              <% end %>
             </div>
             <span class="flex items-center gap-1.5 text-xs <%= needs_reconnect ? "text-amber-300" : "text-emerald-300" %>">
               <span class="size-1.5 rounded-full <%= needs_reconnect ? "bg-amber-400" : "bg-emerald-400" %>"></span>

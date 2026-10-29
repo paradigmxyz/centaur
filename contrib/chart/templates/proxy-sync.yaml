@@ -98,6 +98,10 @@ spec:
 {{- end }}
             - name: RUST_LOG
               value: info
+{{- range $name, $value := .Values.proxySync.extraEnv }}
+            - name: {{ $name }}
+              value: {{ $value | toString | quote }}
+{{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.proxySync.port }}

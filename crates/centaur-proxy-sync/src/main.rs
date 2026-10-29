@@ -132,6 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .filter(|value| !value.trim().is_empty()),
         api_hosts,
         console_host,
+        runlayer_resource_url: runlayer_resource_url()?,
         sync_cache: Arc::new(SyncCache::default()),
         metrics: metrics_handle,
     };
@@ -295,6 +296,28 @@ fn configured_hosts(list_env: &str, url_env: &str) -> Vec<String> {
 
 fn host_from_url(value: &str) -> Option<String> {
     Url::parse(value).ok()?.host_str().map(str::to_owned)
+}
+
+fn runlayer_resource_url() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let raw = env::var("RUNLAYER_MCP_URL").unwrap_or_default();
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let url = Url::parse(raw).map_err(|_| "RUNLAYER_MCP_URL must be an exact HTTPS MCP URL")?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || url.port_or_known_default() != Some(443)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !url.path().ends_with("/mcp")
+        || raw.contains(['*', '[', ']', '{', '}'])
+    {
+        return Err("RUNLAYER_MCP_URL must be an exact HTTPS MCP URL".into());
+    }
+    Ok(Some(raw.to_owned()))
 }
 
 fn database_connect_options(
