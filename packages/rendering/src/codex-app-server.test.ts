@@ -771,7 +771,7 @@ describe('CodexAppServerRendererEventMapper', () => {
           },
           {
             eventKind: 'session.execution_cancelled',
-            data: { error: 'Execution interrupted' }
+            data: { error: 'Execution interrupted.' }
           }
         ])
       )
@@ -780,7 +780,7 @@ describe('CodexAppServerRendererEventMapper', () => {
     expect(chunks.filter(chunk => chunk.type === 'markdown_text')).toEqual([
       {
         type: 'markdown_text',
-        text: 'Execution interrupted'
+        text: 'Execution interrupted.'
       }
     ])
   })
@@ -796,7 +796,7 @@ describe('CodexAppServerRendererEventMapper', () => {
           { type: 'turn.completed', turn: { id: 'turn-1', status: 'interrupted' } },
           {
             eventKind: 'session.execution_cancelled',
-            data: { error: 'Execution interrupted' }
+            data: { error: 'Execution interrupted.' }
           }
         ])
       )
@@ -805,7 +805,7 @@ describe('CodexAppServerRendererEventMapper', () => {
     expect(chunks.filter(chunk => chunk.type === 'markdown_text')).toEqual([
       {
         type: 'markdown_text',
-        text: 'Execution interrupted'
+        text: 'Execution interrupted.'
       }
     ])
   })

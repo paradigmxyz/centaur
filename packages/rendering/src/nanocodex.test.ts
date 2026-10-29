@@ -175,7 +175,7 @@ describe('NanocodexRendererEventMapper', () => {
     expect(mapper.process(native('run.failed', { status: 'cancelled' }, 2))).toEqual([
       {
         type: 'renderer.done',
-        answerMarkdown: 'Execution interrupted',
+        answerMarkdown: 'Execution interrupted.',
         streamFinalUpdates: true,
         threadId: 'nano-session'
       }

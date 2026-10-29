@@ -639,7 +639,7 @@ async function* renderChatSdkChunks(
   }
 }
 
-const INTERRUPTED_TEXT = 'Execution interrupted'
+const INTERRUPTED_TEXT = 'Execution interrupted.'
 
 export type RustSessionMappingResult =
   | { kind: 'notification'; notification: ServerNotification }

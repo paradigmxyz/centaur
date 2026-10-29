@@ -3326,7 +3326,7 @@ class SlackRenderFallback {
     return (
       this.text() ||
       (this.interrupted
-        ? 'Execution interrupted'
+        ? 'Execution interrupted.'
         : EMPTY_FINAL_ANSWER_TEXT)
     )
   }

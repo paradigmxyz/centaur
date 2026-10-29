@@ -1852,12 +1852,12 @@ describe('slackbotv2', () => {
     expect(markdownChunks).toEqual([
       {
         type: 'markdown_text',
-        text: 'Execution interrupted'
+        text: 'Execution interrupted.'
       }
     ])
     const renderedText = transcripts[0]!.chunks.map(chunkText).filter(Boolean).join('\n')
     expect(renderedText).toContain('Command execution')
-    expect(renderedText.trim().endsWith('Execution interrupted')).toBe(true)
+    expect(renderedText.trim().endsWith('Execution interrupted.')).toBe(true)
     expect(renderedText).not.toContain('Execution completed, but no final text was captured.')
   })
 
