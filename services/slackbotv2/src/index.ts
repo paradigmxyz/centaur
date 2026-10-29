@@ -923,22 +923,42 @@ async function handleProactiveMessage(
     })
   }
   const rules = resolveProactivityRules(proactivity.rules, thread.id)
-  const state = (await thread.state) ?? {}
-  const skipReason = proactiveSkipReason(rules, state, message)
+  let state = (await thread.state) ?? {}
+  let skipReason = proactiveSkipReason(rules, state, message)
   if (skipReason) {
     record(`skip_${skipReason}`)
     return
   }
+  // An idle thread waits for a pause so a message sent in parts is judged,
+  // and answered, once. An active turn takes messages as steers right away.
+  const debounceMs = state.activeExecution === true ? 0 : proactivity.debounceMs ?? 0
+  if (debounceMs > 0) {
+    if (await supersededDuringDebounce(thread, message, input.state, debounceMs)) {
+      record('skip_superseded')
+      return
+    }
+    state = (await thread.state) ?? {}
+    skipReason = proactiveSkipReason(rules, state, message)
+    if (skipReason) {
+      record(`skip_${skipReason}`)
+      return
+    }
+  }
   // Each applicable layer asks its own question; any acceptance replies.
   const layers = proactiveLayers(rules, state)
+  const decisionFields: JsonObject = {}
   let decisions: Array<PromiseSettledResult<ProactiveDecision>>
   try {
     // A top-level message starts its thread, so it has no earlier messages.
-    const history = isSlackThreadReply(message)
+    const earlier = isSlackThreadReply(message)
       ? await withSlackApiTimeout(options, 'collect proactive thread history', () =>
           proactiveThreadHistory(thread, message)
         )
       : []
+    const burstStart = debounceMs > 0 ? burstStartIndex(earlier, message, debounceMs) : earlier.length
+    const history = earlier.slice(0, burstStart).map(proactiveThreadMessage)
+    const burst = earlier.slice(burstStart).map(proactiveThreadMessage)
+    if (burst.length > 0) decisionFields.burst_messages = burst.length + 1
     const signal = AbortSignal.timeout(proactivity.timeoutMs ?? PROACTIVE_CLASSIFIER_TIMEOUT_MS)
     const aborted = new Promise<never>((_, reject) => {
       signal.addEventListener('abort', () => reject(signal.reason), { once: true })
@@ -947,6 +967,7 @@ async function handleProactiveMessage(
       proactivity.classifier(
         {
           botName: options.userName ?? 'centaur',
+          ...(burst.length > 0 ? { burst } : {}),
           history,
           message: proactiveThreadMessage(message),
           ...(layer === 'rules' ? { rules } : {})
@@ -956,10 +977,9 @@ async function handleProactiveMessage(
       aborted
     ])))
   } catch (error) {
-    record('error', { error: errorMessage(error) })
+    record('error', { ...decisionFields, error: errorMessage(error) })
     return
   }
-  const decisionFields: JsonObject = {}
   layers.forEach((layer, index) => {
     const result = decisions[index]!
     if (result.status === 'fulfilled' && result.value.probability !== undefined) {
@@ -1076,14 +1096,49 @@ function proactiveSkipReason(
   return undefined
 }
 
+/**
+ * Marks the message as its thread's latest, waits, and reports whether a later
+ * message took over. Only the last message of a burst goes on to be classified.
+ */
+async function supersededDuringDebounce(
+  thread: Thread<SlackbotV2ThreadState>,
+  message: ChatMessage,
+  state: StateAdapter,
+  debounceMs: number
+): Promise<boolean> {
+  const key = `slackbotv2:proactive:latest:${thread.id}`
+  await state.set(key, message.id, debounceMs + PROACTIVE_CLAIM_TTL_MS)
+  await sleep(debounceMs)
+  return (await state.get<string>(key)) !== message.id
+}
+
+/**
+ * Where the burst that ends with the current message starts in its history:
+ * the run of messages since the bot's last one, each sent within the debounce
+ * window of the next.
+ */
+function burstStartIndex(earlier: ChatMessage[], current: ChatMessage, debounceMs: number): number {
+  let start = earlier.length
+  let next = current
+  while (start > 0) {
+    const candidate = earlier[start - 1]!
+    if (candidate.author.isMe === true) break
+    const gapMs = next.metadata.dateSent.getTime() - candidate.metadata.dateSent.getTime()
+    if (gapMs >= debounceMs) break
+    start -= 1
+    next = candidate
+  }
+  return start
+}
+
 async function proactiveThreadHistory(
   thread: Thread<SlackbotV2ThreadState>,
   current: ChatMessage
-): Promise<ProactiveThreadMessage[]> {
-  const history: ProactiveThreadMessage[] = []
+): Promise<ChatMessage[]> {
+  const history: ChatMessage[] = []
   for await (const item of thread.messages) {
     if (item.id === current.id || compareSlackTs(item.id, current.id) > 0) continue
-    history.push(proactiveThreadMessage(item))
+    history.push(item)
     if (history.length >= PROACTIVE_HISTORY_MESSAGES) break
   }
   return history.reverse()

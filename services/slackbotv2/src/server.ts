@@ -131,6 +131,7 @@ console.log(
     message_overrides_strategy: messageOverridesStrategyMode,
     enabled_harnesses: enabledHarnesses,
     proactivity_classifier: options.proactivity ? proactivityClassifierBackend() : undefined,
+    proactivity_debounce_ms: options.proactivity?.debounceMs,
     proactivity_default_rules: options.proactivity ? options.proactivity.rules?.default?.length ?? 0 : undefined,
     proactivity_rule_channels: options.proactivity
       ? Object.keys(options.proactivity.rules?.channels ?? {})
@@ -236,6 +237,7 @@ function createProactivityOptions(): SlackbotV2Options['proactivity'] {
   if (!booleanEnv('SLACKBOTV2_PROACTIVITY_ENABLED', false)) return undefined
   return {
     classifier: createProactiveClassifier(proactivityClassifierBackend()),
+    debounceMs: optionalNumberEnv('SLACKBOTV2_PROACTIVITY_DEBOUNCE_MS'),
     rules: proactivityRules(),
     timeoutMs: optionalNumberEnv('SLACKBOTV2_PROACTIVITY_TIMEOUT_MS')
   }

@@ -234,6 +234,12 @@ export type MessageOverridesStrategy = (
 
 export type SlackbotV2ProactivityOptions = {
   classifier: ProactiveClassifier
+  /**
+   * Quiet period an idle thread waits for before classifying, so a message
+   * sent in parts gets one decision and one turn. 0 or unset classifies each
+   * message at once.
+   */
+  debounceMs?: number
   /** Rules that remove the need for a mention. See proactivity-rules.ts. */
   rules?: ProactivityRules
   /** Deadline for one classifier decision; a late decision declines. Defaults to 2s. */
@@ -257,6 +263,11 @@ export type ProactiveClassifierInput = {
   rules?: ProactivityRule[]
   /** Earlier thread messages, oldest first. */
   history: ProactiveThreadMessage[]
+  /**
+   * Messages sent in quick succession just before `message`, oldest first,
+   * judged together with it as the newest message.
+   */
+  burst?: ProactiveThreadMessage[]
   message: ProactiveThreadMessage
 }
 

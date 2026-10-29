@@ -5,6 +5,8 @@
 // included, oldest first. An optional `rules` var (a list of {name, when}) runs a
 // rule-match decision with those proactivity rules instead of the
 // mentioned-thread rules; the output's `rule` names the first rule matched.
+// An optional `burst` var (default 1) counts the trailing entries sent in quick
+// succession that slackbotv2's debounce judges together as the newest message.
 import type { ApiProvider, CallApiContextParams, ProviderOptions, ProviderResponse } from 'promptfoo'
 import { createOpenAiProactiveClassifier } from '../../services/slackbotv2/src/proactive-classifier'
 import type { ProactivityRule } from '../../services/slackbotv2/src/proactivity-rules'
@@ -58,10 +60,14 @@ export default class ProactiveResponseProvider implements ApiProvider {
         }) as typeof fetch,
         model: this.config.model ?? 'gpt-6-luna'
       })
+      const burstSize = Number(context?.vars.burst ?? 1)
+      const earlier = messages.slice(0, -1).slice(-MAX_HISTORY_MESSAGES)
+      const burst = earlier.slice(earlier.length - (burstSize - 1))
       const decision = await classify(
         {
           botName: BOT_NAME,
-          history: messages.slice(0, -1).slice(-MAX_HISTORY_MESSAGES),
+          ...(burstSize > 1 ? { burst } : {}),
+          history: earlier.slice(0, earlier.length - (burstSize - 1)),
           message: messages.at(-1)!,
           ...(Array.isArray(context?.vars.rules)
             ? { rules: context.vars.rules as ProactivityRule[] }

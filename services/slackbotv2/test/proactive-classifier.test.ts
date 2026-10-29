@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createOpenAiProactiveClassifier } from '../src/proactive-classifier'
+import { createOpenAiProactiveClassifier, proactiveDecisionTranscript } from '../src/proactive-classifier'
 import type { ProactiveClassifierInput } from '../src/types'
 
 const input: ProactiveClassifierInput = {
@@ -50,6 +50,22 @@ describe('OpenAI proactive classifier', () => {
       '',
       'Newest message:',
       '[Test User]: can you retry it?'
+    ].join('\n'))
+  })
+
+  test('presents a burst as one newest message', () => {
+    expect(proactiveDecisionTranscript({
+      botName: 'centaur',
+      burst: [{ author: 'Investor', fromBot: false, text: 'Acme Robotics' }],
+      history: [],
+      message: { author: 'Investor', fromBot: false, text: 'Series B, founder ex-Stripe' }
+    })).toBe([
+      'Latest thread messages, oldest first:',
+      '(no earlier messages)',
+      '',
+      'Newest message, sent in parts in quick succession, oldest first:',
+      '[Investor]: Acme Robotics',
+      '[Investor]: Series B, founder ex-Stripe'
     ].join('\n'))
   })
 

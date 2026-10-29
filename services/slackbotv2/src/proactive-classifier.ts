@@ -45,7 +45,13 @@ export function proactiveDecisionTranscript(input: ProactiveClassifierInput): st
   const lines = ['Latest thread messages, oldest first:']
   if (input.history.length === 0) lines.push('(no earlier messages)')
   for (const message of input.history) lines.push(transcriptLine(input.botName, message))
-  lines.push('', 'Newest message:', transcriptLine(input.botName, input.message))
+  const burst = input.burst ?? []
+  if (burst.length === 0) {
+    lines.push('', 'Newest message:', transcriptLine(input.botName, input.message))
+  } else {
+    lines.push('', 'Newest message, sent in parts in quick succession, oldest first:')
+    for (const message of [...burst, input.message]) lines.push(transcriptLine(input.botName, message))
+  }
   return lines.join('\n')
 }
 

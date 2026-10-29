@@ -457,3 +457,45 @@
       - Marcus Webb: '@centaur why is the search index rebuild slow?'
       - centaur: 'It rebuilds all 40 shards serially; each takes about 6 minutes.'
       - Marcus Webb: hmm
+
+# Messages sent in parts, judged together as the newest message (`burst`)
+- description: request split across quick messages after the bot's answer
+  vars:
+    respond: true
+    burst: 2
+    thread:
+      - Alice Chen: '@centaur is the checkout deploy healthy in us-east?'
+      - centaur: 'Yes. Error rate is 0.1% and p99 latency is 180ms since the 14:00 rollout.'
+      - Alice Chen: one more
+      - Alice Chen: can you check eu-west too
+- description: thanks split across quick messages
+  vars:
+    respond: false
+    burst: 2
+    thread:
+      - Sam Ortiz: '@centaur why is the nightly export failing?'
+      - centaur: 'The S3 credentials it uses expired yesterday; rotate `export-writer` and rerun.'
+      - Sam Ortiz: thanks
+      - Sam Ortiz: rotated it and the rerun passed
+- description: company name followed by deal context matches a research rule
+  vars:
+    respond: true
+    rule: company
+    burst: 3
+    rules:
+      - name: company
+        when: A company someone wants researched, such as a startup they are evaluating.
+    thread:
+      - Dana Park: Acme Robotics
+      - Dana Park: raising a $40M Series B, lead not set yet
+      - Dana Park: founder was ex-Stripe, met her at demo day
+- description: lunch plans split across quick messages match no rule
+  vars:
+    respond: false
+    burst: 2
+    rules:
+      - name: company
+        when: A company someone wants researched, such as a startup they are evaluating.
+    thread:
+      - Dana Park: lunch at noon?
+      - Dana Park: the usual place

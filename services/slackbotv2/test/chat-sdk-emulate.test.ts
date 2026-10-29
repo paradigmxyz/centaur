@@ -4668,7 +4668,8 @@ describe('proactive replies', () => {
   function createProactiveBot(
     decide: (input: ProactiveClassifierInput) => ProactiveDecision | Promise<ProactiveDecision>,
     overrides: Partial<Parameters<typeof createSlackbotV2>[0]> = {},
-    rules?: ProactivityRules
+    rules?: ProactivityRules,
+    debounceMs?: number
   ): ProactiveClassifierInput[] {
     const calls: ProactiveClassifierInput[] = []
     bot = createTestBot({
@@ -4677,6 +4678,7 @@ describe('proactive replies', () => {
           calls.push(input)
           return decide(input)
         },
+        debounceMs,
         rules
       },
       ...overrides
@@ -4827,6 +4829,33 @@ describe('proactive replies', () => {
       expect(executeText(1)).toContain('restarted on a different agent harness')
       expect(executeText(1)).toContain('Link the deploy dashboard.')
     })
+  })
+
+  it('debounces a message sent in parts into one decision and one turn', async () => {
+    const calls = createProactiveBot(
+      () => ({ respond: true, rule: 'deploy' }),
+      {},
+      { default: deployRules },
+      300
+    )
+
+    const name = await sendMessage('checkout-api')
+    const parts = [
+      await sendMessage('the deploy to staging is stuck', { threadTs: name.ts }),
+      await sendMessage('since the 2pm release', { threadTs: name.ts })
+    ]
+    await Promise.all([name, ...parts].map(delivery => delivery.finished()))
+    await waitFor(async () => (await threadText(name.ts)).includes('Executed request 1.'))
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({
+      burst: [{ text: 'checkout-api' }, { text: 'the deploy to staging is stuck' }],
+      history: [],
+      message: { text: 'since the 2pm release' }
+    })
+    expect(codexApi.executes).toHaveLength(1)
+    expect(sessionMessageTexts(codexApi.appends.flatMap(append => append.body.messages)))
+      .toEqual(['checkout-api', 'the deploy to staging is stuck', 'since the 2pm release'])
   })
 
   it('ignores top-level messages in a channel whose rule list is empty', async () => {
