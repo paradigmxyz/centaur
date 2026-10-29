@@ -4678,10 +4678,15 @@ describe('proactive replies', () => {
   })
 
   it('answers a top-level message that matches the channel prompt', async () => {
-    const calls = createProactiveBot(() => ({ respond: true }), {}, {
+    let repliesRequestsWhenClassified = -1
+    const calls = createProactiveBot(() => {
+      repliesRequestsWhenClassified = slackApi.repliesRequestCount()
+      return { respond: true }
+    }, {}, {
       default: 'Questions about anything.',
       channels: { [CHANNEL_ID]: 'Questions about deploys.' }
     })
+    const repliesRequestsBefore = slackApi.repliesRequestCount()
 
     const message = await sendMessage('is staging deployed?')
     await message.finished()
@@ -4689,6 +4694,8 @@ describe('proactive replies', () => {
 
     expect(calls).toHaveLength(1)
     expect(calls[0]).toMatchObject({ history: [], prompt: 'Questions about deploys.' })
+    // A top-level message has no earlier thread messages to read.
+    expect(repliesRequestsWhenClassified).toBe(repliesRequestsBefore)
     expect(codexApi.executes).toHaveLength(1)
     expect(codexApi.executes[0]!.threadKey).toBe(threadKey(message.ts))
   })
@@ -5672,6 +5679,7 @@ type PatchedSlackApi = {
   calls: StreamCall[]
   close(): Promise<void>
   failRepliesWithThreadNotFound(channel: string, ts: string): void
+  repliesRequestCount(): number
   failStreamAppendsAfter(count: number, error: string): void
   failStreamStopsLongerThan(maxChars: number): void
   failNextStreamStop(): void
@@ -5741,6 +5749,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
   const userProfiles = new Map<string, Record<string, unknown>>()
   const userProfileRequests = new Map<string, number>()
   const threadNotFoundReplies = new Set<string>()
+  const repliesRequests = { count: 0 }
   let assistantStatusGate: Promise<void> | null = null
   let releaseAssistantStatusGate: (() => void) | null = null
   let maxStreamStopChars: number | null = null
@@ -5775,6 +5784,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       reactionResponses,
       streams,
       threadNotFoundReplies,
+      repliesRequests,
       threadMessageFiles,
       userProfiles,
       userProfileRequests,
@@ -5797,6 +5807,9 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
     url: `http://127.0.0.1:${port}`,
     failRepliesWithThreadNotFound(channel: string, ts: string) {
       threadNotFoundReplies.add(slackReplyKey(channel, ts))
+    },
+    repliesRequestCount() {
+      return repliesRequests.count
     },
     failStreamAppendsAfter(count: number, error: string) {
       appendFailure.remaining = count
@@ -5830,6 +5843,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       conversationsJoinResponses.length = 0
       reactionResponses.length = 0
       threadNotFoundReplies.clear()
+      repliesRequests.count = 0
       threadMessageFiles.clear()
       fileInfo.clear()
       fileInfoRequests.clear()
@@ -5880,6 +5894,7 @@ async function handlePatchedSlackRequest(
     reactionResponses: QueuedSlackApiResponse[]
     streams: Map<string, StreamRecord>
     threadNotFoundReplies: Set<string>
+    repliesRequests: { count: number }
     threadMessageFiles: Map<string, Record<string, unknown>[]>
     userProfiles: Map<string, Record<string, unknown>>
     userProfileRequests: Map<string, number>
@@ -6085,6 +6100,7 @@ async function handlePatchedSlackRequest(
   }
   if (path === '/api/conversations.replies') {
     const body = await requestBody(request.clone())
+    input.repliesRequests.count += 1
     if (
       input.threadNotFoundReplies.has(
         slackReplyKey(stringField(body.channel), stringField(body.ts))

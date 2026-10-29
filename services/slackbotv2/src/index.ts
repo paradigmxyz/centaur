@@ -918,9 +918,12 @@ async function handleProactiveMessage(
   const layers = proactiveLayers(prompt, state)
   let decisions: Array<PromiseSettledResult<ProactiveDecision>>
   try {
-    const history = await withSlackApiTimeout(options, 'collect proactive thread history', () =>
-      proactiveThreadHistory(thread, message)
-    )
+    // A top-level message starts its thread, so it has no earlier messages.
+    const history = isSlackThreadReply(message)
+      ? await withSlackApiTimeout(options, 'collect proactive thread history', () =>
+          proactiveThreadHistory(thread, message)
+        )
+      : []
     const signal = AbortSignal.timeout(proactivity.timeoutMs ?? PROACTIVE_CLASSIFIER_TIMEOUT_MS)
     const aborted = new Promise<never>((_, reject) => {
       signal.addEventListener('abort', () => reject(signal.reason), { once: true })
