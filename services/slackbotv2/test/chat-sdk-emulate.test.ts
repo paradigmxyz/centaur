@@ -4754,7 +4754,7 @@ describe('proactive replies', () => {
     expect(codexApi.executes).toHaveLength(2)
   })
 
-  it('never appends to an execution that started while classifying', async () => {
+  it('steers an execution that started while classifying', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
     let threadTs = ''
@@ -4775,11 +4775,12 @@ describe('proactive replies', () => {
     await reply.finished()
 
     expect(calls).toHaveLength(1)
-    expect(codexApi.appends).toHaveLength(appendCount)
+    expect(sessionMessageTexts(codexApi.appends.slice(appendCount).flatMap(append => append.body.messages)))
+      .toEqual(['and the rollback?'])
     expect(codexApi.executes).toHaveLength(1)
   })
 
-  it('starts one turn when two replies are accepted at once', async () => {
+  it('steers one turn with two replies accepted at once', async () => {
     let releaseClassifiers = () => {}
     const bothClassifying = new Promise<void>(resolve => {
       releaseClassifiers = resolve
@@ -4790,17 +4791,24 @@ describe('proactive replies', () => {
       return { respond: true }
     })
     const threadTs = await mentionThread('Proactive concurrent context.')
+    // Keep the proactive turn running so the other reply finds it active.
+    codexApi.autoRespond = false
 
     const first = await sendMessage('is staging deployed?', { threadTs })
     const second = await sendMessage('and production?', { threadTs })
     await Promise.all([first.finished(), second.finished()])
+    await waitFor(() => codexApi.executes.length === 2 && codexApi.eventRequests.length >= 2, 3000)
+    codexApi.emitSessionEvent(threadKey(threadTs), 'session.execution_completed', {})
     await waitFor(async () =>
       (await bot.chat.getState().get<Record<string, unknown>>(`thread-state:${threadKey(threadTs)}`))
         ?.activeExecution !== true
     )
 
     expect(calls).toHaveLength(2)
+    // The mention's turn and one proactive turn; the other reply steers it.
     expect(codexApi.executes).toHaveLength(2)
+    expect(sessionMessageTexts(codexApi.appends.flatMap(append => append.body.messages)))
+      .toEqual(expect.arrayContaining(['is staging deployed?', 'and production?']))
   })
 
   it('ends proactive replies at a stop until the next mention', async () => {

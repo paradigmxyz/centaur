@@ -201,6 +201,9 @@ const PROACTIVE_CLASSIFIER_TIMEOUT_MS = 2_000
 const PROACTIVE_HISTORY_MESSAGES = 20
 // Bounds a crashed handoff's claim; a live one releases it once its execution starts.
 const PROACTIVE_CLAIM_TTL_MS = 60 * 1000
+// How long an accepted message waits for another handoff's turn to start.
+const PROACTIVE_CLAIM_WAIT_MS = 30 * 1000
+const PROACTIVE_CLAIM_POLL_MS = 250
 // Mentions and proactive replies make a thread eligible; DMs already treat
 // every message as a mention.
 const PROACTIVE_ELIGIBILITY_TRIGGERS = new Set(['new_mention', 'proactive', 'subscribed_message'])
@@ -757,7 +760,7 @@ async function handleSlackMessageHandoff(
     state: StateAdapter
     steeringReactions: SteeringReactionController
     subscribe?: boolean
-    /** An unmentioned message the proactive classifier chose to answer. */
+    /** An unmentioned message the proactive classifier accepted; it steers like a mention. */
     proactive?: boolean
     trigger: string
   }
@@ -967,12 +970,8 @@ async function handleProactiveMessage(
     return
   }
   decisionFields.layer = respondingLayer
-  // Until a handoff records its execution as active, another accepted message
-  // in this thread would queue a second turn; the claim makes it wait for the
-  // next turn as context instead, across replicas.
-  const claimKey = proactiveClaimKey(thread.id)
-  const claimToken = randomUUID()
-  if (!(await input.state.setIfNotExists(claimKey, claimToken, PROACTIVE_CLAIM_TTL_MS))) {
+  const releaseClaim = await claimProactiveHandoff(thread, input.state)
+  if (!releaseClaim) {
     record('skip_claimed', decisionFields)
     return
   }
@@ -996,12 +995,35 @@ async function handleProactiveMessage(
       trigger: 'proactive'
     })
   } finally {
-    if ((await input.state.get(claimKey)) === claimToken) await input.state.delete(claimKey)
+    await releaseClaim()
   }
 }
 
-function proactiveClaimKey(threadId: string): string {
-  return `slackbotv2:proactive:claim:${threadId}`
+/**
+ * Until a handoff records its execution as active, a second accepted message
+ * in the thread would queue a second turn. A claim in shared state lets one
+ * handoff start a turn at a time, across replicas; others wait until the turn
+ * is active and then steer it. Resolves to the release function, or undefined
+ * when the wait times out.
+ */
+async function claimProactiveHandoff(
+  thread: Thread<SlackbotV2ThreadState>,
+  state: StateAdapter
+): Promise<(() => Promise<void>) | undefined> {
+  const key = `slackbotv2:proactive:claim:${thread.id}`
+  const token = randomUUID()
+  const deadline = Date.now() + PROACTIVE_CLAIM_WAIT_MS
+  while (true) {
+    if (await state.setIfNotExists(key, token, PROACTIVE_CLAIM_TTL_MS)) {
+      return async () => {
+        if ((await state.get(key)) === token) await state.delete(key)
+      }
+    }
+    // Steering an active turn cannot start another one.
+    if ((await thread.state)?.activeExecution === true) return async () => {}
+    if (Date.now() >= deadline) return undefined
+    await sleep(PROACTIVE_CLAIM_POLL_MS)
+  }
 }
 
 type ProactiveLayer = 'mentioned' | 'prompt'
@@ -1022,9 +1044,6 @@ function proactiveSkipReason(
   message: ChatMessage
 ): string | undefined {
   if (proactiveLayers(prompt, state).length === 0) return 'not_eligible'
-  // Unmentioned replies never steer an active execution; the next turn
-  // collects them as thread context.
-  if (state.activeExecution === true) return 'active_execution'
   if (!message.text.trim()) return 'empty'
   return undefined
 }
@@ -1399,7 +1418,7 @@ type SyncThreadMessageInput = {
   initialAssistantStatusVisible?: boolean
   mode: SlackbotV2MessageMode
   options: SlackbotV2Options
-  /** Start an execution or do nothing; never append to an active one. */
+  /** An unmentioned message the proactive classifier accepted; it steers like a mention. */
   proactive?: boolean
   /** Number of in-process retries already spent on this message's handoff. */
   retryAttempt?: number
@@ -1501,18 +1520,6 @@ async function syncThreadMessageToSession(
     slackUserId: slackUserIdForMessage(message),
     startedAtMs: traceStartedAtMs,
     threadId: thread.id
-  }
-  if (input.proactive && !shouldStartExecution) {
-    // An execution started (or this message already ran) after the
-    // classifier decided; the next turn collects this message as context.
-    traceLog(input.options, 'slackbotv2_proactive_handoff_skipped', trace, {
-      active_execution: state.activeExecution === true
-    })
-    if (input.initialAssistantStatusVisible && state.activeExecution !== true) {
-      await setAssistantStatus(thread, '', input.options, trace)
-    }
-    recordForward(input.mode, 'proactive_skipped', traceStartedAtMs)
-    return
   }
   if (isDuplicateIncrementalMessage) {
     traceLog(input.options, 'slackbotv2_forward_duplicate_skipped', trace)
@@ -1744,7 +1751,7 @@ async function syncThreadMessageToSession(
 
   if (
     state.activeExecution === true
-    && message.isMention === true
+    && (message.isMention === true || input.proactive === true)
     && messagesToAppend.some(item => item.id === message.id)
     && !input.steeringReactionAck
   ) {
