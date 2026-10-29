@@ -27,7 +27,7 @@ import {
 } from '../src/index'
 import { clearRequesterIdentityCacheForTests } from '../src/session-api'
 import { slackbotMetrics } from '../src/metrics'
-import type { ProactivityPrompts } from '../src/proactivity-prompts'
+import type { ProactivityRules } from '../src/proactivity-rules'
 import { createOpenAiMessageOverridesStrategy } from '../src/message-overrides-strategy'
 import { modelDisplayName } from '../src/response-context'
 import claudeSettings from '../../../harness/claude/settings.json'
@@ -4604,7 +4604,7 @@ describe('proactive replies', () => {
   function createProactiveBot(
     decide: (input: ProactiveClassifierInput) => ProactiveDecision | Promise<ProactiveDecision>,
     overrides: Partial<Parameters<typeof createSlackbotV2>[0]> = {},
-    prompts?: ProactivityPrompts
+    rules?: ProactivityRules
   ): ProactiveClassifierInput[] {
     const calls: ProactiveClassifierInput[] = []
     bot = createTestBot({
@@ -4613,7 +4613,7 @@ describe('proactive replies', () => {
           calls.push(input)
           return decide(input)
         },
-        prompts
+        rules
       },
       ...overrides
     })
@@ -4677,14 +4677,16 @@ describe('proactive replies', () => {
       .not.toContain('thanks, looks good')
   })
 
-  it('answers a top-level message that matches the channel prompt', async () => {
+  const deployRules = [{ name: 'deploy', when: 'Questions about deploys.' }]
+
+  it('answers a top-level message that matches a channel rule', async () => {
     let repliesRequestsWhenClassified = -1
     const calls = createProactiveBot(() => {
       repliesRequestsWhenClassified = slackApi.repliesRequestCount()
-      return { respond: true }
+      return { respond: true, rule: 'deploy' }
     }, {}, {
-      default: 'Questions about anything.',
-      channels: { [CHANNEL_ID]: 'Questions about deploys.' }
+      default: [{ name: 'anything', when: 'Questions about anything.' }],
+      channels: { [CHANNEL_ID]: deployRules }
     })
     const repliesRequestsBefore = slackApi.repliesRequestCount()
 
@@ -4693,32 +4695,52 @@ describe('proactive replies', () => {
     await waitFor(async () => (await threadText(message.ts)).includes('Executed request 1.'))
 
     expect(calls).toHaveLength(1)
-    expect(calls[0]).toMatchObject({ history: [], prompt: 'Questions about deploys.' })
+    expect(calls[0]).toMatchObject({ history: [], rules: deployRules })
     // A top-level message has no earlier thread messages to read.
     expect(repliesRequestsWhenClassified).toBe(repliesRequestsBefore)
     expect(codexApi.executes).toHaveLength(1)
     expect(codexApi.executes[0]!.threadKey).toBe(threadKey(message.ts))
   })
 
-  it('treats a thread it answered on a prompt match as mentioned', async () => {
-    const calls = createProactiveBot(input => ({ respond: input.prompt !== undefined }), {}, {
-      default: 'Questions about deploys.'
+  it('treats a thread it answered on a rule match as mentioned', async () => {
+    const calls = createProactiveBot(input => ({ respond: input.rules !== undefined }), {}, {
+      default: deployRules
     })
     const message = await sendMessage('is staging deployed?')
     await message.finished()
     await waitFor(async () => (await threadText(message.ts)).includes('Executed request 1.'))
-    expect(calls.map(call => call.prompt)).toEqual(['Questions about deploys.'])
+    expect(calls.map(call => call.rules)).toEqual([deployRules])
 
     await reply('and production?', message.ts)
 
-    expect(calls.slice(1).map(call => call.prompt).sort()).toEqual(['Questions about deploys.', undefined])
+    expect(calls.slice(1).map(call => call.rules)).toContainEqual(deployRules)
+    expect(calls.slice(1).map(call => call.rules)).toContainEqual(undefined)
     expect(codexApi.executes).toHaveLength(2)
   })
 
-  it('ignores top-level messages in a channel whose prompt is empty', async () => {
+  it('tells the agent how to respond only on the turn a rule match starts', async () => {
+    createProactiveBot(input => ({ respond: true, ...(input.rules ? { rule: 'deploy' } : {}) }), {}, {
+      default: [{ context: 'Link the deploy dashboard.', name: 'deploy', when: 'Questions about deploys.' }]
+    })
+    const executeText = (index: number) => JSON.stringify(
+      JSON.parse(codexApi.executes[index]!.body.input_lines.at(-1)!).message.content
+    )
+    const message = await sendMessage('is staging deployed?')
+    await message.finished()
+    await waitFor(async () => (await threadText(message.ts)).includes('Executed request 1.'))
+    expect(executeText(0)).toContain('proactive reply rule \\"deploy\\"')
+    expect(executeText(0)).toContain('Link the deploy dashboard.')
+
+    await reply('is production deployed too?', message.ts)
+
+    expect(codexApi.executes).toHaveLength(2)
+    expect(executeText(1)).not.toContain('Link the deploy dashboard.')
+  })
+
+  it('ignores top-level messages in a channel whose rule list is empty', async () => {
     const calls = createProactiveBot(() => ({ respond: true }), {}, {
-      default: 'Questions about deploys.',
-      channels: { [CHANNEL_ID]: '' }
+      default: deployRules,
+      channels: { [CHANNEL_ID]: [] }
     })
 
     const message = await sendMessage('is staging deployed?')

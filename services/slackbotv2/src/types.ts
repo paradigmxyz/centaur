@@ -3,7 +3,7 @@ import type { CodexAppServerToChatStreamOptions } from '@centaur/rendering'
 import type { Attachment, Chat, Logger, StateAdapter } from 'chat'
 import type { Hono } from 'hono'
 import type { ChannelDefaults } from './channel-defaults'
-import type { ProactivityPrompts } from './proactivity-prompts'
+import type { ProactivityRule, ProactivityRules } from './proactivity-rules'
 import type { HarnessOverrides } from './overrides'
 import type { SlackDisplayTextSource } from './slack-display-text'
 
@@ -234,8 +234,8 @@ export type MessageOverridesStrategy = (
 
 export type SlackbotV2ProactivityOptions = {
   classifier: ProactiveClassifier
-  /** Prompts that remove the need for a mention. See proactivity-prompts.ts. */
-  prompts?: ProactivityPrompts
+  /** Rules that remove the need for a mention. See proactivity-rules.ts. */
+  rules?: ProactivityRules
   /** Deadline for one classifier decision; a late decision declines. Defaults to 2s. */
   timeoutMs?: number
 }
@@ -250,10 +250,11 @@ export type ProactiveThreadMessage = {
 export type ProactiveClassifierInput = {
   botName: string
   /**
-   * The channel's prompt-match criteria. When set, decide whether the message
-   * meets them; otherwise apply the built-in mentioned-thread rules.
+   * The channel's operator rules, in order. When set, decide which rule, if
+   * any, the message meets first; otherwise apply the built-in
+   * mentioned-thread rules.
    */
-  prompt?: string
+  rules?: ProactivityRule[]
   /** Earlier thread messages, oldest first. */
   history: ProactiveThreadMessage[]
   message: ProactiveThreadMessage
@@ -261,8 +262,13 @@ export type ProactiveClassifierInput = {
 
 export type ProactiveDecision = {
   respond: boolean
-  /** The backend's probability that the bot should reply, when it reports one. */
+  /**
+   * The backend's probability that the bot should reply, when it reports one.
+   * With rules, the matched rule's probability, else the highest.
+   */
   probability?: number
+  /** With rules, the name of the first rule the message meets. */
+  rule?: string
 }
 
 /**
@@ -302,6 +308,8 @@ export type SlackbotV2ThreadState = {
    * false after a stop, which silences proactive replies until a mention.
    */
   proactiveEligible?: boolean
+  /** Proactivity rules whose context a turn in this thread already carried. */
+  proactiveRulesSent?: string[]
   /** Last thread-level model provider selected by Slack flags. Null clears persisted state. */
   provider?: string | null
   renderObligation?: SlackbotV2RenderObligation | null
@@ -341,6 +349,11 @@ export type ForwardSessionInput = {
    * new harness still sees the thread history.
    */
   contextPreamble?: string
+  /**
+   * Added before the execute message's text. Set when an operator proactivity
+   * rule's match starts the turn, to say why and how to respond.
+   */
+  proactiveContext?: string
   executionId?: string
   executeMessage?: SlackbotV2ApiMessage
   /** Effective harness selected by sticky thread flags or channel defaults. */

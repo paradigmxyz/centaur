@@ -53,18 +53,47 @@ describe('OpenAI proactive classifier', () => {
     ].join('\n'))
   })
 
-  test('asks whether the message meets the prompt-match criteria', async () => {
+  test('picks the first rule, in order, that the message meets', async () => {
     const requests: Array<{ body: Record<string, unknown>; url: string }> = []
+    let probabilities = [0.3, 0.7, 0.95]
     const classifier = classifierReturning(
-      () => Response.json({ answers: [{ name: 'respond', probability: 0.9, type: 'predicate' }] }),
+      () => Response.json({
+        answers: probabilities.map((probability, index) => ({
+          name: `rule_${index + 1}`,
+          probability,
+          type: 'predicate'
+        }))
+      }),
       requests
     )
+    const rules = [
+      { name: 'incident', when: 'An active incident.' },
+      { context: 'Link the runbook.', name: 'deploy', when: 'Questions about deploys.' },
+      { name: 'anything', when: 'Any question.' }
+    ]
 
-    await classifier({ ...input, prompt: 'Questions about deploys.' }, new AbortController().signal)
+    await expect(classifier({ ...input, rules }, new AbortController().signal)).resolves.toEqual({
+      probability: 0.7,
+      respond: true,
+      rule: 'deploy'
+    })
+    probabilities = [0.3, 0.4, 0.1]
+    await expect(classifier({ ...input, rules }, new AbortController().signal)).resolves.toEqual({
+      probability: 0.4,
+      respond: false
+    })
 
+    expect(requests).toHaveLength(2)
+    expect(requests[0]!.body.questions).toMatchObject([
+      { name: 'rule_1', type: 'predicate' },
+      { name: 'rule_2', type: 'predicate' },
+      { name: 'rule_3', type: 'predicate' }
+    ])
     const messages = requests[0]!.body.input as Array<{ content: string; role: string }>
-    expect(messages[0]!.content).toContain('Questions about deploys.')
+    expect(messages[0]!.content).toContain('Rule 2 (deploy):\nQuestions about deploys.')
     expect(messages[0]!.content).not.toContain('was mentioned earlier')
+    // Rule context is for the agent, not the classifier.
+    expect(messages[0]!.content).not.toContain('Link the runbook.')
     expect(messages[1]!.content).not.toContain('Questions about deploys.')
   })
 
@@ -86,5 +115,8 @@ describe('OpenAI proactive classifier', () => {
 
     const malformed = classifierReturning(() => Response.json({ answers: [] }))
     await expect(malformed(input, new AbortController().signal)).rejects.toThrow('probability')
+    await expect(
+      malformed({ ...input, rules: [{ name: 'any', when: 'Any question.' }] }, new AbortController().signal)
+    ).rejects.toThrow('rule_1 probability')
   })
 })

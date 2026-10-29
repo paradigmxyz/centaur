@@ -69,7 +69,7 @@ import {
   type SlackContextBlock
 } from './response-context'
 import { resolveChannelDefault } from './channel-defaults'
-import { resolveProactivityPrompt } from './proactivity-prompts'
+import { resolveProactivityRules, type ProactivityRule } from './proactivity-rules'
 import {
   extractMessageOverrides,
   extractPersonaOverride,
@@ -526,12 +526,12 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   // payloads after Chat SDK has verified the webhook and before executing.
   chat.onNewMessage(/^.*$/s, async (thread, message) => {
     if (!slackRichTextMentionsUser(message.raw, options.botUserId)) {
-      // Outside subscribed threads only a prompt match can reply. Check for a
-      // prompt first so other channels' traffic is neither gated nor counted.
+      // Outside subscribed threads only a rule match can reply. Check for
+      // rules first so other channels' traffic is neither gated nor counted.
       const proactivity = options.proactivity
       if (
         proactivity
-        && resolveProactivityPrompt(proactivity.prompts, thread.id) !== undefined
+        && resolveProactivityRules(proactivity.rules, thread.id) !== undefined
         && (await isAllowedSlackMessage(message, options, logger))
       ) {
         scheduleProactiveMessage(thread, message, proactivity)
@@ -762,6 +762,8 @@ async function handleSlackMessageHandoff(
     subscribe?: boolean
     /** An unmentioned message the proactive classifier accepted; it steers like a mention. */
     proactive?: boolean
+    /** The operator rule this message matched, to tell the agent how to respond. */
+    proactiveRule?: ProactivityRule
     trigger: string
   }
 ): Promise<void> {
@@ -812,6 +814,7 @@ async function handleSlackMessageHandoff(
       mode: input.mode,
       options: input.options,
       proactive: input.proactive,
+      proactiveRule: input.proactiveRule,
       state: input.state,
       steeringReactions: input.steeringReactions
     }
@@ -914,15 +917,15 @@ async function handleProactiveMessage(
       ...fields
     })
   }
-  const prompt = resolveProactivityPrompt(proactivity.prompts, thread.id)
+  const rules = resolveProactivityRules(proactivity.rules, thread.id)
   const state = (await thread.state) ?? {}
-  const skipReason = proactiveSkipReason(prompt, state, message)
+  const skipReason = proactiveSkipReason(rules, state, message)
   if (skipReason) {
     record(`skip_${skipReason}`)
     return
   }
   // Each applicable layer asks its own question; any acceptance replies.
-  const layers = proactiveLayers(prompt, state)
+  const layers = proactiveLayers(rules, state)
   let decisions: Array<PromiseSettledResult<ProactiveDecision>>
   try {
     // A top-level message starts its thread, so it has no earlier messages.
@@ -941,7 +944,7 @@ async function handleProactiveMessage(
           botName: options.userName ?? 'centaur',
           history,
           message: proactiveThreadMessage(message),
-          ...(layer === 'prompt' ? { prompt } : {})
+          ...(layer === 'rules' ? { rules } : {})
         },
         signal
       ),
@@ -972,6 +975,13 @@ async function handleProactiveMessage(
     return
   }
   decisionFields.layer = respondingLayer
+  // A matching rule shapes the reply even when the mentioned-thread layer
+  // also accepted the message.
+  const rulesDecision = decisions[layers.indexOf('rules')]
+  const matchedRule = rulesDecision?.status === 'fulfilled' && rulesDecision.value.respond
+    ? rules?.find(rule => rule.name === rulesDecision.value.rule)
+    : undefined
+  if (matchedRule) decisionFields.rule = matchedRule.name
   const releaseClaim = await claimProactiveHandoff(thread, input.state)
   if (!releaseClaim) {
     record('skip_claimed', decisionFields)
@@ -979,7 +989,7 @@ async function handleProactiveMessage(
   }
   try {
     // A stop or another execution may have landed while the classifier ran.
-    const lateSkipReason = proactiveSkipReason(prompt, (await thread.state) ?? {}, message)
+    const lateSkipReason = proactiveSkipReason(rules, (await thread.state) ?? {}, message)
     if (lateSkipReason) {
       record(`skip_${lateSkipReason}`, decisionFields)
       return
@@ -990,9 +1000,10 @@ async function handleProactiveMessage(
       mode: 'execute',
       options,
       proactive: true,
+      proactiveRule: matchedRule,
       state: input.state,
       steeringReactions: input.steeringReactions,
-      // A prompt match may start a thread under a top-level message.
+      // A rule match may start a thread under a top-level message.
       subscribe: true,
       trigger: 'proactive'
     })
@@ -1028,24 +1039,34 @@ async function claimProactiveHandoff(
   }
 }
 
-type ProactiveLayer = 'mentioned' | 'prompt'
+type ProactiveLayer = 'mentioned' | 'rules'
 
 /** The kinds of proactivity that may answer an unmentioned message in this thread. */
-function proactiveLayers(prompt: string | undefined, state: SlackbotV2ThreadState): ProactiveLayer[] {
+function proactiveLayers(
+  rules: ProactivityRule[] | undefined,
+  state: SlackbotV2ThreadState
+): ProactiveLayer[] {
   const layers: ProactiveLayer[] = []
   if (state.proactiveEligible === true) layers.push('mentioned')
-  // A stop silences prompt matches in its thread until the next mention.
-  if (prompt !== undefined && state.proactiveEligible !== false) layers.push('prompt')
+  // A stop silences rule matches in its thread until the next mention.
+  if (rules !== undefined && state.proactiveEligible !== false) layers.push('rules')
   return layers
+}
+
+/** Tells the agent why it is replying unmentioned and how the operators want it to. */
+function proactiveRuleContext(rule: ProactivityRule): string {
+  const reason =
+    `You were not mentioned. This message matched the operators' proactive reply rule "${rule.name}".`
+  return rule.context ? `${reason} Their instructions for responding:\n${rule.context}` : reason
 }
 
 /** Why an unmentioned message gets no proactive reply, or undefined when it may. */
 function proactiveSkipReason(
-  prompt: string | undefined,
+  rules: ProactivityRule[] | undefined,
   state: SlackbotV2ThreadState,
   message: ChatMessage
 ): string | undefined {
-  if (proactiveLayers(prompt, state).length === 0) return 'not_eligible'
+  if (proactiveLayers(rules, state).length === 0) return 'not_eligible'
   if (!message.text.trim()) return 'empty'
   return undefined
 }
@@ -1422,6 +1443,8 @@ type SyncThreadMessageInput = {
   options: SlackbotV2Options
   /** An unmentioned message the proactive classifier accepted; it steers like a mention. */
   proactive?: boolean
+  /** The operator rule this message matched, to tell the agent how to respond. */
+  proactiveRule?: ProactivityRule
   /** Number of in-process retries already spent on this message's handoff. */
   retryAttempt?: number
   /** Resolved once per local handoff chain so retryable failures stay idempotent. */
@@ -1760,6 +1783,14 @@ async function syncThreadMessageToSession(
     input.steeringReactionAck = input.steeringReactions.begin(thread, message, 'steering', trace)
   }
 
+  // A rule's context rides only on the first turn it starts in this thread;
+  // later turns have it in the session's context.
+  const proactiveRule =
+    shouldStartExecution
+    && input.proactiveRule
+    && !(state.proactiveRulesSent ?? []).includes(input.proactiveRule.name)
+      ? input.proactiveRule
+      : undefined
   const forwardInput: ForwardSessionInput = {
     afterEventId: lastEventId,
     executeContextMessages:
@@ -1773,6 +1804,7 @@ async function syncThreadMessageToSession(
     model: shouldStartExecution ? resolvedModel : undefined,
     metadataModel: shouldStartExecution ? effectiveModel : undefined,
     personaId: shouldStartExecution ? resolvedPersonaId : undefined,
+    proactiveContext: proactiveRule && proactiveRuleContext(proactiveRule),
     provider: shouldStartExecution ? resolvedProvider : undefined,
     reasoning: resolvedReasoning,
     onEventId: eventId => {
@@ -1874,6 +1906,13 @@ async function syncThreadMessageToSession(
       activeExecution: true,
       executedMessageIds: Array.from(latestExecutedMessageIds).slice(-1000),
       lastEventId,
+      ...(proactiveRule
+        ? {
+            proactiveRulesSent: Array.from(
+              new Set([...(latest.proactiveRulesSent ?? []), proactiveRule.name])
+            )
+          }
+        : {}),
       renderObligation: {
         afterEventId: lastEventId,
         executionId: execution.execution_id,

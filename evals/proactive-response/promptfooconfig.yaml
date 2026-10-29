@@ -21,12 +21,13 @@ providers:
 # mention the bot, and arrives in an eligible thread with no active execution.
 # Positives score under should_respond (recall) and negatives under
 # should_decline (1 - false-positive rate), so a prompt change that trades one
-# for the other is visible.
+# for the other is visible. A case with `rules` may set `rule` to the rule
+# that should match first.
 defaultTest:
   assert:
     - type: javascript
       metric: '{{ "should_respond" if respond else "should_decline" }}'
-      value: 'output.respond === context.vars.respond'
+      value: 'output.respond === context.vars.respond && (context.vars.rule === undefined || output.rule === context.vars.rule)'
 
 tests:
   - file://cases.yaml

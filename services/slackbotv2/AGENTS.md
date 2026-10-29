@@ -36,11 +36,12 @@ lifecycle, harness formatting, and durable execution state belong in `api-rs`.
   to or interrupt an active execution; collect them when the next mention
   refreshes the Slack thread context. The only exception is proactivity: an
   unmentioned message the classifier accepts, in a thread a mention or
-  proactive reply made eligible or anywhere in a channel with a proactivity
-  prompt, is handled like a mentioned follow-up: it starts an execution or
+  proactive reply made eligible or anywhere in a channel with proactivity
+  rules, is handled like a mentioned follow-up: it starts an execution or
   steers the active one, but never stops it; only a mention can. Only one proactive handoff per thread may start an
   execution at a time. A failed or timed-out classifier decision means no
-  reply.
+  reply. A matched rule's context rides only on the first execution it starts
+  in a thread, never on a steer.
 
 ## Validation
 

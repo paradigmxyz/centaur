@@ -39,7 +39,7 @@ failure, is reported as an error rather than a failed case.
 | Directory | Measures |
 | --- | --- |
 | `message-overrides/` | The Slackbot v2 classifier that turns a message into harness, model, provider, and reasoning overrides. Scores each field separately. |
-| `proactive-response/` | Whether Slackbot v2 should reply to an unmentioned message in a thread where it was mentioned. Scores positives (`should_respond`) and negatives (`should_decline`) separately. Threads prefixed `holdout/` are not used for tuning: tune with `--filter-pattern '^(?!holdout/)'`, then report both. |
+| `proactive-response/` | Whether Slackbot v2 should reply to an unmentioned message in a thread where it was mentioned, or which operator rule an unmentioned message matches first. Scores positives (`should_respond`) and negatives (`should_decline`) separately. Threads prefixed `holdout/` are not used for tuning: tune with `--filter-pattern '^(?!holdout/)'`, then report both. |
 
 ## Adding an eval
 

@@ -8,7 +8,7 @@ import {
   createOpenAiMessageOverridesStrategy
 } from './message-overrides-strategy'
 import { createOpenAiProactiveClassifier } from './proactive-classifier'
-import { loadProactivityPrompts } from './proactivity-prompts'
+import { loadProactivityRules } from './proactivity-rules'
 
 const port = numberEnv('PORT', 3002)
 const apiUrl = stringEnv('CENTAUR_API_URL', 'http://127.0.0.1:8080')
@@ -131,9 +131,9 @@ console.log(
     message_overrides_strategy: messageOverridesStrategyMode,
     enabled_harnesses: enabledHarnesses,
     proactivity_classifier: options.proactivity ? proactivityClassifierBackend() : undefined,
-    proactivity_default_prompt: options.proactivity ? Boolean(options.proactivity.prompts?.default) : undefined,
-    proactivity_prompt_channels: options.proactivity
-      ? Object.keys(options.proactivity.prompts?.channels ?? {})
+    proactivity_default_rules: options.proactivity ? options.proactivity.rules?.default?.length ?? 0 : undefined,
+    proactivity_rule_channels: options.proactivity
+      ? Object.keys(options.proactivity.rules?.channels ?? {})
       : undefined,
     message_overrides_strategy_enabled:
       messageOverridesStrategyMode !== 'llm' || Boolean(messageOverridesStrategyApiKey),
@@ -236,20 +236,20 @@ function createProactivityOptions(): SlackbotV2Options['proactivity'] {
   if (!booleanEnv('SLACKBOTV2_PROACTIVITY_ENABLED', false)) return undefined
   return {
     classifier: createProactiveClassifier(proactivityClassifierBackend()),
-    prompts: proactivityPrompts(),
+    rules: proactivityRules(),
     timeoutMs: optionalNumberEnv('SLACKBOTV2_PROACTIVITY_TIMEOUT_MS')
   }
 }
 
-function proactivityPrompts(): NonNullable<SlackbotV2Options['proactivity']>['prompts'] {
-  const dir = optionalEnv('SLACKBOTV2_PROACTIVITY_PROMPTS_DIR')
+function proactivityRules(): NonNullable<SlackbotV2Options['proactivity']>['rules'] {
+  const dir = optionalEnv('SLACKBOTV2_PROACTIVITY_RULES_DIR')
   if (!dir) return undefined
   try {
-    return loadProactivityPrompts(dir)
+    return loadProactivityRules(dir)
   } catch (error) {
-    // Run without any prompt rather than a partial set: a missing empty
-    // channel file would otherwise let the default prompt apply there.
-    consoleLogger.warn('slackbotv2_proactivity_prompts_unreadable', {
+    // Run without any rules rather than a partial set: a missing empty
+    // channel file would otherwise let the default rules apply there.
+    consoleLogger.warn('slackbotv2_proactivity_rules_unreadable', {
       dir,
       error: error instanceof Error ? error.message : String(error)
     })

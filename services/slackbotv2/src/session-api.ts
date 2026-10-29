@@ -549,7 +549,8 @@ export async function forwardToSessionApi(
       input.reasoning,
       input.provider,
       input.metadataModel,
-      input.metadataHarnessType
+      input.metadataHarnessType,
+      input.proactiveContext
     ),
     sessionApiTimeoutMs(options),
     'execute session'
@@ -1392,7 +1393,8 @@ async function executeSession(
   reasoning?: string,
   provider?: string,
   metadataModel?: string,
-  metadataHarnessType?: string
+  metadataHarnessType?: string,
+  proactiveContext?: string
 ): Promise<SlackbotV2ExecuteSessionResponse> {
   const fetchFn = options.fetch ?? fetch
   const requesterIdentity = await resolveRequesterIdentity(options, message)
@@ -1424,7 +1426,8 @@ async function executeSession(
       contextMessages,
       contextPreamble,
       reasoning,
-      provider
+      provider,
+      proactiveContext
     ),
     idle_timeout_ms: idleTimeoutMs,
     ...(options.maxDurationMs === undefined ? {} : { max_duration_ms: options.maxDurationMs })
@@ -1654,7 +1657,8 @@ function toCodexInputLines(
   contextMessages?: SlackbotV2ApiMessage[],
   contextPreamble?: string,
   reasoning?: string,
-  provider?: string
+  provider?: string,
+  proactiveContext?: string
 ): string[] {
   const staged = new Map<SlackbotV2ApiAttachment, string>()
   const lines: string[] = []
@@ -1670,7 +1674,8 @@ function toCodexInputLines(
       contextMessages,
       contextPreamble,
       reasoning,
-      provider
+      provider,
+      proactiveContext
     )
     if (
       inlineLine.length <= MAX_CODEX_INPUT_LINE_CHARS
@@ -1693,7 +1698,8 @@ function toCodexInputLines(
       contextMessages,
       contextPreamble,
       reasoning,
-      provider
+      provider,
+      proactiveContext
     )
   )
   return lines
@@ -1722,7 +1728,8 @@ function toCodexInputLineWithStaged(
   contextMessages?: SlackbotV2ApiMessage[],
   contextPreamble?: string,
   reasoning?: string,
-  provider?: string
+  provider?: string,
+  proactiveContext?: string
 ): string {
   return JSON.stringify({
     type: 'user',
@@ -1738,7 +1745,8 @@ function toCodexInputLineWithStaged(
         staged,
         requesterIdentity,
         contextMessages,
-        contextPreamble
+        contextPreamble,
+        proactiveContext
       )
     }
   })
@@ -1839,7 +1847,8 @@ function codexInputContent(
   staged: Map<SlackbotV2ApiAttachment, string> = new Map(),
   requesterIdentity?: RequesterIdentity,
   contextMessages?: SlackbotV2ApiMessage[],
-  contextPreamble?: string
+  contextPreamble?: string,
+  proactiveContext?: string
 ): JsonValue[] {
   const content: JsonValue[] = []
   const slackSessionContext = slackUploadSessionContext(message.threadId)
@@ -1868,6 +1877,9 @@ function codexInputContent(
     content.push(
       codexAttachmentInput(contextAttachment.attachment, staged.get(contextAttachment.attachment))
     )
+  }
+  if (proactiveContext?.trim()) {
+    content.push({ type: 'text', text: proactiveContext })
   }
   const promptText = slackMessagePromptText(message)
   if (promptText.trim()) {
