@@ -569,6 +569,8 @@ export const WORKFLOW_ACTION_PREFIX = 'centaur.workflow.action:'
 export const SESSION_STEERING_DELIVERED_EVENT = 'session.steering_delivered'
 /** Emitted by api-rs when a follow-up could not reach the still-running execution. */
 export const SESSION_STEERING_FAILED_EVENT = 'session.steering_failed'
+/** Emitted by api-rs while a long execution is still running. */
+export const SESSION_PROGRESS_UPDATE_EVENT = 'session.progress_update'
 
 export async function dispatchSlackBlockAction(
   options: SlackbotV2Options,
@@ -2048,6 +2050,7 @@ async function* parseSessionEventStream(
     // Slack hides when a follow-up message lands in the thread.
     if (
       event.event === 'session.activity_summary' ||
+      event.event === SESSION_PROGRESS_UPDATE_EVENT ||
       event.event === SESSION_STEERING_DELIVERED_EVENT ||
       event.event === SESSION_STEERING_FAILED_EVENT
     ) {

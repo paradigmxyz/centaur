@@ -37,7 +37,7 @@ subtle.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 time.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
