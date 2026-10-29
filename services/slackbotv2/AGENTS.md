@@ -38,7 +38,7 @@ lifecycle, harness formatting, and durable execution state belong in `api-rs`.
   unmentioned message the classifier accepts, in a thread a mention or
   proactive reply made eligible or anywhere in a channel with a proactivity
   prompt, is handled like a mentioned follow-up: it starts an execution or
-  steers the active one. Only one proactive handoff per thread may start an
+  steers the active one, but never stops it; only a mention can. Only one proactive handoff per thread may start an
   execution at a time. A failed or timed-out classifier decision means no
   reply.
 

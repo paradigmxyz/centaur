@@ -775,7 +775,9 @@ async function handleSlackMessageHandoff(
   let assistantStatus = Promise.resolve(false)
   let syncInput: SyncThreadMessageInput | undefined
   try {
-    if (await handleStopCommand(thread, message, input.options, input.trigger)) {
+    // Only a mention can stop a run; an accepted unmentioned "stop that"
+    // steers it like any other message.
+    if (!input.proactive && await handleStopCommand(thread, message, input.options, input.trigger)) {
       return
     }
     if (input.options.proactivity && PROACTIVE_ELIGIBILITY_TRIGGERS.has(input.trigger)) {

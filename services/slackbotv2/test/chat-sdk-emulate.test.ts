@@ -4780,6 +4780,38 @@ describe('proactive replies', () => {
     expect(codexApi.executes).toHaveLength(1)
   })
 
+  it('steers instead of stopping on an accepted unmentioned stop phrase', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    let threadTs = ''
+    let interrupts = 0
+    createProactiveBot(
+      async () => {
+        await sharedState.set(`thread-state:${threadKey(threadTs)}`, {
+          ...(await sharedState.get<Record<string, unknown>>(`thread-state:${threadKey(threadTs)}`)),
+          activeExecution: true
+        })
+        return { respond: true }
+      },
+      {
+        fetch: async (input, init) => {
+          if (String(input).endsWith('/interrupt')) interrupts += 1
+          return globalThis.fetch(input, init)
+        },
+        state: sharedState
+      }
+    )
+    threadTs = await mentionThread('Proactive stop phrase context.')
+    const appendCount = codexApi.appends.length
+
+    const reply = await sendMessage('stop that', { threadTs })
+    await reply.finished()
+
+    expect(interrupts).toBe(0)
+    expect(sessionMessageTexts(codexApi.appends.slice(appendCount).flatMap(append => append.body.messages)))
+      .toEqual(['stop that'])
+  })
+
   it('steers one turn with two replies accepted at once', async () => {
     let releaseClassifiers = () => {}
     const bothClassifying = new Promise<void>(resolve => {
