@@ -9,6 +9,16 @@
 {{- $slackbotV2MetricsAnnotations = mergeOverwrite $slackbotV2MetricsAnnotations (.Values.slackbotv2.metrics.annotations | default dict) -}}
 {{- end -}}
 {{- if $proactivityRules }}
+{{- /* The bot runs with no rules at all if any list repeats a name, so fail here. */ -}}
+{{- $ruleLists := dict "default" ($proactivity.defaultRules | default list) -}}
+{{- range $channel, $rules := $proactivity.channelRules }}{{- $_ := set $ruleLists $channel ($rules | default list) -}}{{- end }}
+{{- range $key, $rules := $ruleLists }}
+{{- $names := dict -}}
+{{- range $rules }}
+{{- if hasKey $names (trim .name) }}{{- fail (printf "slackbotv2.proactivity: %s rules repeat the name %q" $key (trim .name)) }}{{- end }}
+{{- $_ := set $names (trim .name) true -}}
+{{- end }}
+{{- end }}
 # Proactivity rules as JSON files the bot reads at boot from
 # SLACKBOTV2_PROACTIVITY_RULES_DIR: default.json for every channel and
 # <CHANNEL_ID>.json per channel (an empty list turns rule matching off there).

@@ -4,12 +4,13 @@
   "definitions": {
     "slackbotv2ProactivityRules": {
       "type": "array",
+      "maxItems": 20,
       "items": {
         "type": "object",
         "required": ["name", "when"],
         "properties": {
-          "name": { "type": "string", "minLength": 1 },
-          "when": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "pattern": "\\S" },
+          "when": { "type": "string", "pattern": "\\S" },
           "context": { "type": "string" }
         },
         "additionalProperties": false

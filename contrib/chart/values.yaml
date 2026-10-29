@@ -845,7 +845,8 @@ slackbotv2:
     # default.
     defaultRules: []
     # Rules keyed by Slack conversation id. Each list replaces defaultRules in
-    # its channel; an empty list turns rule matching off there. Example:
+    # its channel; an empty list turns rule matching off there. A list holds at
+    # most 20 rules with unique names. Example:
     #   channelRules:
     #     C0123456789:
     #       - name: incident
