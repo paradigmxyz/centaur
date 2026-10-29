@@ -209,6 +209,11 @@ const PROACTIVE_CLAIM_TTL_MS = 60 * 1000
 // How long an accepted message waits for another handoff's turn to start.
 const PROACTIVE_CLAIM_WAIT_MS = 30 * 1000
 const PROACTIVE_CLAIM_POLL_MS = 250
+// Pending burst messages outlive the debounce by this much, covering handler
+// latency between recording a message and reading the burst. Older entries
+// are told apart by the thread's proactiveBurstEndId.
+const PROACTIVE_PENDING_GRACE_MS = 60 * 1000
+const PROACTIVE_PENDING_MAX = 50
 // Mentions and proactive replies make a thread eligible; DMs already treat
 // every message as a mention.
 const PROACTIVE_ELIGIBILITY_TRIGGERS = new Set(['new_mention', 'proactive', 'subscribed_message'])
@@ -932,17 +937,27 @@ async function handleProactiveMessage(
   // An idle thread waits for a pause so a message sent in parts is judged,
   // and answered, once. An active turn takes messages as steers right away.
   const debounceMs = state.activeExecution === true ? 0 : proactivity.debounceMs ?? 0
+  let burstIds = new Set<string>()
   if (debounceMs > 0) {
-    if (await supersededDuringDebounce(thread, message, input.state, debounceMs)) {
+    const earlierBurstIds = await waitForBurstEnd(thread, message, input.state, debounceMs)
+    if (!earlierBurstIds) {
       record('skip_superseded')
       return
     }
     state = (await thread.state) ?? {}
+    // A turn that started during the wait, such as a mention's, may already
+    // carry the message; its burst must not count what that turn has.
+    const forwarded = new Set(state.forwardedMessageIds ?? [])
+    if (forwarded.has(message.id)) {
+      record('skip_forwarded')
+      return
+    }
     skipReason = proactiveSkipReason(rules, state, message)
     if (skipReason) {
       record(`skip_${skipReason}`)
       return
     }
+    burstIds = new Set(earlierBurstIds.filter(id => !forwarded.has(id)))
   }
   // Each applicable layer asks its own question; any acceptance replies.
   const layers = proactiveLayers(rules, state)
@@ -955,9 +970,8 @@ async function handleProactiveMessage(
           proactiveThreadHistory(thread, message)
         )
       : []
-    const burstStart = debounceMs > 0 ? burstStartIndex(earlier, message, debounceMs) : earlier.length
-    const history = earlier.slice(0, burstStart).map(proactiveThreadMessage)
-    const burst = earlier.slice(burstStart).map(proactiveThreadMessage)
+    const history = earlier.filter(item => !burstIds.has(item.id)).map(proactiveThreadMessage)
+    const burst = earlier.filter(item => burstIds.has(item.id)).map(proactiveThreadMessage)
     if (burst.length > 0) decisionFields.burst_messages = burst.length + 1
     const signal = AbortSignal.timeout(proactivity.timeoutMs ?? PROACTIVE_CLASSIFIER_TIMEOUT_MS)
     const aborted = new Promise<never>((_, reject) => {
@@ -1097,38 +1111,33 @@ function proactiveSkipReason(
 }
 
 /**
- * Marks the message as its thread's latest, waits, and reports whether a later
- * message took over. Only the last message of a burst goes on to be classified.
+ * Records the message as pending in its thread, waits, and resolves to the
+ * earlier pending messages it ends the burst of, or undefined when a newer one
+ * is pending or a burst already ended at or after it. Pending messages are
+ * ordered by Slack timestamp, not by when their handlers ran, so a slow
+ * handler cannot hide a newer message.
  */
-async function supersededDuringDebounce(
+async function waitForBurstEnd(
   thread: Thread<SlackbotV2ThreadState>,
   message: ChatMessage,
   state: StateAdapter,
   debounceMs: number
-): Promise<boolean> {
-  const key = `slackbotv2:proactive:latest:${thread.id}`
-  await state.set(key, message.id, debounceMs + PROACTIVE_CLAIM_TTL_MS)
+): Promise<string[] | undefined> {
+  const key = `slackbotv2:proactive:pending:${thread.id}`
+  await state.appendToList(key, message.id, {
+    maxLength: PROACTIVE_PENDING_MAX,
+    ttlMs: debounceMs + PROACTIVE_PENDING_GRACE_MS
+  })
   await sleep(debounceMs)
-  return (await state.get<string>(key)) !== message.id
-}
-
-/**
- * Where the burst that ends with the current message starts in its history:
- * the run of messages since the bot's last one, each sent within the debounce
- * window of the next.
- */
-function burstStartIndex(earlier: ChatMessage[], current: ChatMessage, debounceMs: number): number {
-  let start = earlier.length
-  let next = current
-  while (start > 0) {
-    const candidate = earlier[start - 1]!
-    if (candidate.author.isMe === true) break
-    const gapMs = next.metadata.dateSent.getTime() - candidate.metadata.dateSent.getTime()
-    if (gapMs >= debounceMs) break
-    start -= 1
-    next = candidate
-  }
-  return start
+  const pending = await state.getList<string>(key)
+  if (pending.some(id => compareSlackTs(id, message.id) > 0)) return undefined
+  const lastEnd = (await thread.state)?.proactiveBurstEndId
+  if (lastEnd !== undefined && compareSlackTs(lastEnd, message.id) >= 0) return undefined
+  await thread.setState({ proactiveBurstEndId: message.id })
+  return pending.filter(id =>
+    compareSlackTs(id, message.id) < 0
+    && (lastEnd === undefined || compareSlackTs(id, lastEnd) > 0)
+  )
 }
 
 async function proactiveThreadHistory(

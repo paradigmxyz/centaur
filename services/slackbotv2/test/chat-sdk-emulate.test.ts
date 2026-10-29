@@ -4858,6 +4858,56 @@ describe('proactive replies', () => {
       .toEqual(['checkout-api', 'the deploy to staging is stuck', 'since the 2pm release'])
   })
 
+  it('ends a burst at its newest message whatever order the parts are handled in', async () => {
+    const calls = createProactiveBot(
+      () => ({ respond: true, rule: 'deploy' }),
+      {},
+      { default: deployRules },
+      300
+    )
+    const name = await postUserMessage('checkout-api')
+    const first = await postUserMessage('the deploy to staging is stuck', name.ts)
+    // Slack timestamps further apart than the window still form one burst
+    // when both messages arrive within it.
+    await sleep(1100)
+    const second = await postUserMessage('since the 2pm release', name.ts)
+    const replyEvent = (text: string, ts: string) => ({
+      type: 'message', user: USER_ID, channel: CHANNEL_ID, team: TEAM_ID, text, ts, thread_ts: name.ts
+    })
+
+    const later = await deliverEvent(replyEvent('since the 2pm release', second.ts))
+    const earlier = await deliverEvent(replyEvent('the deploy to staging is stuck', first.ts))
+    await Promise.all([later.finished(), earlier.finished()])
+    await waitFor(async () => (await threadText(name.ts)).includes('Executed request 1.'))
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({
+      burst: [{ text: 'the deploy to staging is stuck' }],
+      history: [{ text: 'checkout-api' }],
+      message: { text: 'since the 2pm release' }
+    })
+    expect(codexApi.executes).toHaveLength(1)
+  })
+
+  it('leaves a debounced message to a mention\'s turn that already carries it', async () => {
+    const calls = createProactiveBot(
+      () => ({ respond: true, rule: 'deploy' }),
+      {},
+      { default: deployRules },
+      500
+    )
+
+    const name = await sendMessage('checkout-api')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> check the deploy`, { threadTs: name.ts })
+    await Promise.all([name.finished(), mention.finished()])
+    await waitFor(async () => (await threadText(name.ts)).includes('Executed request 1.'))
+
+    expect(calls).toHaveLength(0)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(sessionMessageTexts(codexApi.appends.flatMap(append => append.body.messages)))
+      .toContain('checkout-api')
+  })
+
   it('ignores top-level messages in a channel whose rule list is empty', async () => {
     const calls = createProactiveBot(() => ({ respond: true }), {}, {
       default: deployRules,
