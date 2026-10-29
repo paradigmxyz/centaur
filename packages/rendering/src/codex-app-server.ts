@@ -317,8 +317,9 @@ export class CodexAppServerRendererEventMapper
         resultText,
         willClose
       })
-      if (resultText && !this.state.answerText.trim()) {
-        this.state.harnessAnswerText += resultText
+      const finalText = resultText || (isInterruptedTurn(event) ? INTERRUPTED_TEXT : '')
+      if (finalText && !this.state.answerText.trim()) {
+        this.state.harnessAnswerText += finalText
         recomposeBuffers(this.state)
         this.emitPendingAssistantText(out, { force: true })
       }
@@ -638,6 +639,8 @@ async function* renderChatSdkChunks(
   }
 }
 
+const INTERRUPTED_TEXT = 'Execution interrupted'
+
 export type RustSessionMappingResult =
   | { kind: 'notification'; notification: ServerNotification }
   | { kind: 'failed'; error: string }
@@ -688,7 +691,7 @@ export function rustSessionEventToServerNotification(source: unknown): RustSessi
   if (eventKind === 'session.execution_cancelled') {
     const data = isRecord(source.data) ? source.data : source
     const resultText =
-      terminalResultText(data).trim() || String(data.error ?? 'Execution interrupted').trim()
+      terminalResultText(data).trim() || String(data.error ?? INTERRUPTED_TEXT).trim()
     return {
       kind: 'completed',
       ...(resultText ? { resultText } : {})
@@ -789,6 +792,10 @@ export function isRetryableCodexErrorNotification(source: unknown): boolean {
   if (!event) return false
   if (String(event.type ?? '') !== 'error') return false
   return event.willRetry === true
+}
+
+function isInterruptedTurn(event: any): boolean {
+  return String(event?.turn?.status ?? event?.status ?? '').toLowerCase() === 'interrupted'
 }
 
 function isFailedTurn(event: any): boolean {
