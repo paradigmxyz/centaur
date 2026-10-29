@@ -1,11 +1,32 @@
 {{- if .Values.slackbotv2.enabled }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
+{{- $proactivity := .Values.slackbotv2.proactivity -}}
+{{- $proactivityPrompts := and $proactivity.enabled (or $proactivity.defaultPrompt $proactivity.channelPrompts) -}}
 {{- $console := include "centaur.consoleValues" . | fromYaml -}}
 {{- $slackbotV2MetricsAnnotations := dict -}}
 {{- if .Values.slackbotv2.metrics.scrapeAnnotations -}}
 {{- $slackbotV2MetricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" .Values.slackbotv2.metrics.path "prometheus.io/port" "3001" -}}
 {{- $slackbotV2MetricsAnnotations = mergeOverwrite $slackbotV2MetricsAnnotations (.Values.slackbotv2.metrics.annotations | default dict) -}}
 {{- end -}}
+{{- if $proactivityPrompts }}
+# Proactivity prompts as files the bot reads at boot from
+# SLACKBOTV2_PROACTIVITY_PROMPTS_DIR: default.md for every channel and
+# <CHANNEL_ID>.md per channel (an empty file turns prompt matching off there).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2") }}-proactivity-prompts
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "slackbotv2") | nindent 4 }}
+data:
+{{- if $proactivity.defaultPrompt }}
+  default.md: {{ $proactivity.defaultPrompt | quote }}
+{{- end }}
+{{- range $channel, $prompt := $proactivity.channelPrompts }}
+  {{ printf "%s.md" $channel }}: {{ $prompt | default "" | quote }}
+{{- end }}
+---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,6 +42,9 @@ spec:
     metadata:
       annotations:
         checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+{{- if $proactivityPrompts }}
+        checksum/proactivity-prompts: {{ dict "default" $proactivity.defaultPrompt "channels" $proactivity.channelPrompts | toJson | sha256sum }}
+{{- end }}
 {{- with $slackbotV2MetricsAnnotations }}
 {{ toYaml . | nindent 8 }}
 {{- end }}
@@ -109,8 +133,10 @@ spec:
               value: {{ .Values.slackbotv2.proactivity.model | quote }}
             - name: SLACKBOTV2_PROACTIVITY_OPENAI_BASE_URL
               value: {{ .Values.slackbotv2.proactivity.openaiBaseUrl | quote }}
-            - name: SLACKBOTV2_PROACTIVITY_CHANNELS
-              value: {{ join "," .Values.slackbotv2.proactivity.channels | quote }}
+{{- if $proactivityPrompts }}
+            - name: SLACKBOTV2_PROACTIVITY_PROMPTS_DIR
+              value: /etc/slackbotv2/proactivity-prompts
+{{- end }}
             - name: SLACKBOTV2_PROACTIVITY_TIMEOUT_MS
               value: {{ .Values.slackbotv2.proactivity.timeoutMs | quote }}
 {{- end }}
@@ -179,6 +205,16 @@ spec:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:
 {{ toYaml .Values.slackbotv2.resources | nindent 12 }}
+{{- if $proactivityPrompts }}
+          volumeMounts:
+            - name: proactivity-prompts
+              mountPath: /etc/slackbotv2/proactivity-prompts
+              readOnly: true
+      volumes:
+        - name: proactivity-prompts
+          configMap:
+            name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2") }}-proactivity-prompts
+{{- end }}
 ---
 apiVersion: v1
 kind: Service

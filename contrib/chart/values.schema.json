@@ -532,8 +532,13 @@
             "classifier": { "type": "string", "minLength": 1 },
             "model": { "type": "string", "minLength": 1 },
             "openaiBaseUrl": { "type": "string" },
-            "channels": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-            "timeoutMs": { "type": "integer", "minimum": 1 }
+            "timeoutMs": { "type": "integer", "minimum": 1 },
+            "defaultPrompt": { "type": "string" },
+            "channelPrompts": {
+              "type": "object",
+              "propertyNames": { "pattern": "^[A-Z0-9]+$" },
+              "additionalProperties": { "type": "string" }
+            }
           }
         },
         "metrics": {

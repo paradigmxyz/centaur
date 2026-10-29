@@ -827,19 +827,31 @@ slackbotv2:
     model: gpt-6-luna
     openaiBaseUrl: https://api.openai.com/v1
     timeoutMs: 1500
-  # Proactive replies. A mention makes its thread eligible until a stop
-  # command; later unmentioned replies in that thread are classified and
-  # answered without a mention when the classifier says the bot should
-  # respond. channels limits this to the listed Slack conversation ids (empty
-  # means every channel). The openai classifier reads OPENAI_API_KEY from the
-  # shared secret, or SLACKBOTV2_PROACTIVITY_OPENAI_API_KEY via extraEnv.
+  # Proactive replies without a mention. Once mentioned in a thread, the bot
+  # replies to later unmentioned messages there that its built-in rules
+  # accept. A prompt removes the need for a mention: the bot replies to any
+  # unmentioned message in the channel that meets the prompt's criteria,
+  # starting a thread under a top-level message. A stop command silences
+  # proactive replies in its thread until the next mention. The openai
+  # classifier reads OPENAI_API_KEY from the shared secret, or
+  # SLACKBOTV2_PROACTIVITY_OPENAI_API_KEY via extraEnv.
   proactivity:
     enabled: false
     classifier: openai
     model: gpt-6-luna
     openaiBaseUrl: https://api.openai.com/v1
-    channels: []
     timeoutMs: 2000
+    # Prompts are mounted from a ConfigMap, so they can be long and span lines.
+    # Prompt for every channel; empty means no prompt matching by default.
+    defaultPrompt: ""
+    # Prompts keyed by Slack conversation id. Each replaces defaultPrompt in
+    # its channel; an empty prompt turns prompt matching off there. Example:
+    #   channelPrompts:
+    #     C0123456789: |
+    #       Questions about an active incident: outages, rollbacks, and
+    #       alerts for services we own.
+    #     C0987654321: ""
+    channelPrompts: {}
   metrics:
     # slackbotv2 serves Prometheus text metrics at /metrics. This flag only
     # controls scrape annotations for Prometheus/VictoriaMetrics-style discovery.
