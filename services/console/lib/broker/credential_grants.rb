@@ -221,7 +221,7 @@ module Broker
         form["client_secret"] = credential.effective_client_secret if credential.effective_client_secret.present?
 
         scopes = credential.refresh_scopes_for_provider
-        form["scope"] = scopes.join(" ") if scopes.present?
+        form["scope"] = scopes.join(credential.token_scope_separator_for_provider(grant: form.fetch("grant_type"))) if scopes.present?
         form
       end
 

@@ -25,6 +25,9 @@ module Oauth
       def api_hosts = API_HOSTS
       def authorization_scope_param = "scope"
       def scope_separator = ","
+      # Client credentials require comma-separated scopes. Preserve the existing
+      # serialization for user refresh grants.
+      def token_scope_separator(grant:) = grant == "client_credentials" ? "," : " "
       def extra_authorization_params = {}
       def refreshable? = true
 
