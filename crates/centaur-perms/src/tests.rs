@@ -45,6 +45,47 @@ fn secret_type_routes_by_oid_prefix() {
     assert!(secret_type_for_oid("falconx-hmac").is_none());
 }
 
+#[test]
+fn undeclared_tool_grants_are_only_the_roles_own_stale_secrets() {
+    use crate::is_undeclared_tool_grant;
+    let keep = vec!["grant_declared".to_owned()];
+    // Granted by this registration: kept.
+    assert!(!is_undeclared_tool_grant(
+        "grant_declared",
+        Some("tool-slack-slack-search-token"),
+        "tool-slack",
+        &keep
+    ));
+    // Registered for the role before the tool stopped declaring it (#1927): revoked.
+    assert!(is_undeclared_tool_grant(
+        "grant_stale",
+        Some("tool-slack-slack-bot-token"),
+        "tool-slack",
+        &keep
+    ));
+    // An operator's own secret on the role: kept.
+    assert!(!is_undeclared_tool_grant(
+        "grant_operator",
+        Some("my-slack-token"),
+        "tool-slack",
+        &keep
+    ));
+    // Another tool's role whose id merely starts the same way: kept.
+    assert!(!is_undeclared_tool_grant(
+        "grant_other_tool",
+        Some("tool-slackbot-token"),
+        "tool-slack",
+        &keep
+    ));
+    // A secret with no foreign id: kept.
+    assert!(!is_undeclared_tool_grant(
+        "grant_anon",
+        None,
+        "tool-slack",
+        &keep
+    ));
+}
+
 // ----- parsing -------------------------------------------------------------
 
 #[test]
