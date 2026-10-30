@@ -123,6 +123,7 @@ struct WorkflowRuntimeInner {
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
     starter_registry: Arc<RwLock<WorkflowStarters>>,
+    default_harness: HarnessType,
 }
 
 /// API caller classes each workflow allows to start it, from
@@ -733,6 +734,8 @@ impl WorkflowRuntime {
                 }
             },
         )?;
+        let default_harness = session_runtime.default_harness();
+        let schedule_default_harness = default_harness.clone();
         let schedule_tick_client = schedule_client.clone();
         let workflow_clients_for_schedule = workflow_clients.clone();
         let schedule_registry_for_task = schedule_registry.clone();
@@ -742,9 +745,17 @@ impl WorkflowRuntime {
                 let schedule_client = schedule_tick_client.clone();
                 let workflow_clients = workflow_clients_for_schedule.clone();
                 let schedules = schedule_registry_for_task.clone();
+                let default_harness = schedule_default_harness.clone();
                 async move {
-                    run_schedule_tick(input, ctx, schedule_client, workflow_clients, schedules)
-                        .await
+                    run_schedule_tick(
+                        input,
+                        ctx,
+                        schedule_client,
+                        workflow_clients,
+                        schedules,
+                        default_harness,
+                    )
+                    .await
                 }
             },
         )?;
@@ -864,6 +875,7 @@ impl WorkflowRuntime {
                 webhook_registry,
                 schedule_registry,
                 starter_registry,
+                default_harness,
             }),
         })
     }
@@ -894,7 +906,9 @@ impl WorkflowRuntime {
                 WorkflowTaskInput {
                     workflow_name: workflow_name.to_owned(),
                     input: request.input,
-                    harness_type: request.harness_type.unwrap_or(HarnessType::Codex),
+                    harness_type: request
+                        .harness_type
+                        .unwrap_or_else(|| self.inner.default_harness.clone()),
                     slack_button_feedback: feedback,
                 },
                 SpawnOptions {
@@ -2464,6 +2478,7 @@ async fn run_schedule_tick(
     schedule_client: Client,
     workflow_clients: WorkflowQueueClients,
     schedules: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
+    default_harness: HarnessType,
 ) -> Result<Value, absurd::Error> {
     ctx.sleep_until("schedule_tick", input.scheduled_at).await?;
     let schedule = match schedules
@@ -2515,7 +2530,7 @@ async fn run_schedule_tick(
             WorkflowTaskInput {
                 workflow_name: schedule.workflow_name.clone(),
                 input: schedule.input.clone(),
-                harness_type: HarnessType::Codex,
+                harness_type: default_harness,
                 slack_button_feedback: None,
             },
             SpawnOptions {
