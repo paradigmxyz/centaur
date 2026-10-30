@@ -189,6 +189,58 @@ describe('CodexAppServerRendererEventMapper', () => {
     })
   })
 
+  it('discards unphased messages before any non-message work item', () => {
+    for (const item of [
+      { type: 'webSearch', query: 'release notes' },
+      { type: 'mcpToolCall', server: 'docs', tool: 'search' },
+      { type: 'collabAgentToolCall', tool: 'spawn_agent' }
+    ]) {
+      const mapper = new CodexAppServerRendererEventMapper({ preStreamGraceMs: 0 })
+      const output: Array<ReturnType<typeof mapper.process>[number]> = []
+      const process = (event: unknown) => output.push(...mapper.process(event))
+      const message = (id: string, text: string) => {
+        process({ type: 'item.started', item: { id, type: 'agentMessage' } })
+        process({ type: 'item.completed', item: { id, type: 'agentMessage', text } })
+      }
+
+      message('progress-1', 'Let me look that up.')
+      process({ type: 'item.started', item: { id: 'work-1', ...item } })
+      process({ type: 'item.completed', item: { id: 'work-1', ...item } })
+      message('final-1', 'Here is the answer.')
+      process({ type: 'turn.completed', turn: { status: 'completed' } })
+
+      expect(output.at(-1)).toMatchObject({
+        type: 'renderer.done',
+        answerMarkdown: 'Here is the answer.'
+      })
+    }
+  })
+
+  it('uses the phased completed text when the phase arrives after deltas', () => {
+    const mapper = new CodexAppServerRendererEventMapper({ preStreamGraceMs: 0 })
+    const output: Array<ReturnType<typeof mapper.process>[number]> = []
+    const process = (event: unknown) => output.push(...mapper.process(event))
+
+    process({ type: 'item.started', item: { id: 'narration', type: 'agentMessage' } })
+    process({ type: 'item.agentMessage.delta', itemId: 'narration', delta: 'Narration draft.' })
+    process({
+      type: 'item.completed',
+      item: { id: 'narration', type: 'agentMessage', phase: 'commentary', text: 'Narration.' }
+    })
+    process({ type: 'item.started', item: { id: 'answer', type: 'agentMessage' } })
+    process({ type: 'item.agentMessage.delta', itemId: 'answer', delta: 'Draft answer.' })
+    process({
+      type: 'item.completed',
+      item: { id: 'answer', type: 'agentMessage', phase: 'final_answer', text: 'Canonical answer.' }
+    })
+    process({ type: 'turn.completed', turn: { status: 'completed' } })
+
+    expect(output.at(-1)).toMatchObject({
+      type: 'renderer.done',
+      answerMarkdown: 'Canonical answer.'
+    })
+  })
+
   it('suppresses reasoning thinking blocks', () => {
     const mapper = new CodexAppServerRendererEventMapper()
 

@@ -819,7 +819,10 @@ function trackAgentMessageLifecycle(event: any, state: CodexMapperState): void {
   if (!phase) return
   state.agentMessagePhase = phase
   const id = agentMessageEventId(event)
-  if (id) state.agentMessagePhaseByItemId.set(id, phase)
+  if (!id) return
+  state.agentMessagePhaseByItemId.set(id, phase)
+  // Deltas received before the phase was known are superseded by the phased text.
+  state.unphasedByItemId.delete(id)
 }
 
 function prepareUnphasedMessage(event: any, state: CodexMapperState): void {
@@ -833,15 +836,15 @@ function eventContinuesTurn(event: any): boolean {
   const type = String(event?.type ?? '')
   if (type.startsWith('item.reasoning.')) return true
   if (type === 'item.started' || type === 'item.updated' || type === 'item.completed') {
-    const itemType = event?.item?.type
+    // Every item other than a message is work: commands, file changes, tool,
+    // MCP, web search and sub-agent calls, reasoning, compaction, and so on.
+    const itemType = String(event?.item?.type ?? '')
     return (
-      itemType === 'commandExecution' ||
-      itemType === 'command_execution' ||
-      itemType === 'fileChange' ||
-      itemType === 'file_change' ||
-      itemType === 'dynamicToolCall' ||
-      itemType === 'dynamic_tool_call' ||
-      itemType === 'reasoning'
+      itemType !== '' &&
+      itemType !== 'agentMessage' &&
+      itemType !== 'agent_message' &&
+      itemType !== 'userMessage' &&
+      itemType !== 'user_message'
     )
   }
   return (
