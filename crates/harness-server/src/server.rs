@@ -93,6 +93,28 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                             break;
                         }
                     }
+                    // As in the codex blocks server: a message steered into
+                    // the active execution joins the running turn. Queued as a
+                    // turn of its own, it would run after the execution ends.
+                    Ok(BlocksCommand::User {
+                        input,
+                        client_user_message_id,
+                        trace_context,
+                        ..
+                    }) if turn_active.load(Ordering::SeqCst)
+                        && trace_context.metadata.get("action").and_then(Value::as_str)
+                            == Some("steer_active_execution") =>
+                    {
+                        if request_tx
+                            .send(ActiveTurnRequest::BlocksSteer {
+                                input,
+                                client_user_message_id,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                     Ok(command @ BlocksCommand::User { .. }) => {
                         turn_active.store(true, Ordering::SeqCst);
                         if command_tx
@@ -219,8 +241,8 @@ pub(crate) fn run_app_server<H: HarnessServer>(harness: &H) -> Result<()> {
                     eprintln!("request failed: {error:#}");
                 }
             }
-            ActiveTurnRequest::BlocksInterrupt => {
-                eprintln!("blocks interrupt ignored: no active turn runs");
+            ActiveTurnRequest::BlocksInterrupt | ActiveTurnRequest::BlocksSteer { .. } => {
+                eprintln!("blocks input ignored: no active turn runs");
             }
         }
     }
@@ -270,6 +292,10 @@ enum BlocksReaderInput {
 enum ActiveTurnRequest {
     JsonRpc(JSONRPCRequest),
     BlocksInterrupt,
+    BlocksSteer {
+        input: Vec<UserInput>,
+        client_user_message_id: Option<String>,
+    },
 }
 
 fn drain_active_turn_requests(rx: &Receiver<ActiveTurnRequest>) {
@@ -1054,12 +1080,31 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
     harness: &H,
     process: &mut HarnessChild,
     normalizer: &mut CodexTurnNormalizer,
+    event_normalizer: &mut H::EventNormalizer,
     request: ActiveTurnRequest,
     stdout: &mut W,
 ) -> Result<bool> {
-    let ActiveTurnRequest::JsonRpc(request) = request else {
-        process.kill_and_wait()?;
-        return Ok(true);
+    let request = match request {
+        ActiveTurnRequest::JsonRpc(request) => request,
+        ActiveTurnRequest::BlocksInterrupt => {
+            process.kill_and_wait()?;
+            return Ok(true);
+        }
+        ActiveTurnRequest::BlocksSteer {
+            input,
+            client_user_message_id,
+        } => {
+            write_steer(
+                harness,
+                process,
+                normalizer,
+                event_normalizer,
+                input,
+                client_user_message_id,
+                stdout,
+            )?;
+            return Ok(false);
+        }
     };
 
     match request.method.as_str() {
@@ -1091,6 +1136,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                 .stdin
                 .write_all(&harness.stdin_for_steer(&params.input)?)?;
             process.stdin.flush()?;
+            harness.steer_sent(event_normalizer);
             write_response(
                 stdout,
                 request.id,
@@ -1143,6 +1189,24 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
             Ok(false)
         }
     }
+}
+
+fn write_steer<H: HarnessServer, W: Write>(
+    harness: &H,
+    process: &mut HarnessChild,
+    normalizer: &mut CodexTurnNormalizer,
+    event_normalizer: &mut H::EventNormalizer,
+    input: Vec<UserInput>,
+    client_user_message_id: Option<String>,
+    stdout: &mut W,
+) -> Result<()> {
+    process.stdin.write_all(&harness.stdin_for_steer(&input)?)?;
+    process.stdin.flush()?;
+    harness.steer_sent(event_normalizer);
+    for notification in normalizer.emit_user_message(client_user_message_id, input)? {
+        write_value(stdout, &notification_to_wire_value(&notification)?)?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1290,7 +1354,14 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
                 .process
                 .as_mut()
                 .ok_or(HarnessServerError::HarnessStdinUnavailable)?;
-            if handle_active_turn_request(harness, process, normalizer, request, stdout)? {
+            if handle_active_turn_request(
+                harness,
+                process,
+                normalizer,
+                &mut event_normalizer,
+                request,
+                stdout,
+            )? {
                 state.process = None;
                 return Err(HarnessServerError::TurnInterrupted {
                     kind: harness.kind(),
@@ -1344,10 +1415,17 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
                         _ => {}
                     }
                 }
-                hold_deadline = match harness.turn_hold(&event_normalizer) {
+                let hold = harness.turn_hold(&event_normalizer);
+                hold_deadline = match hold {
                     TurnHold::Idle(window) => Some(Instant::now() + window),
                     TurnHold::Released | TurnHold::Waiting => None,
                 };
+                // A held turn still owes output (e.g. the answer to a steer
+                // that arrived during the final message), so a terminal stop
+                // seen while held must not complete it via the fallback.
+                if hold != TurnHold::Released {
+                    settle_deadline = None;
+                }
             }
             Err(RecvTimeoutError::Timeout)
                 if hold_deadline.is_some_and(|deadline| Instant::now() >= deadline) =>
