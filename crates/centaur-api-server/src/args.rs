@@ -1913,6 +1913,18 @@ fn repository_visibility(value: Option<&str>) -> String {
 #[derive(Debug, ClapArgs)]
 struct IronProxyArgs {
     #[arg(
+        long = "kubernetes-iron-proxy-ssh-enabled",
+        env = "KUBERNETES_IRON_PROXY_SSH_ENABLED",
+        default_value_t = false
+    )]
+    ssh_enabled: bool,
+    #[arg(
+        long = "kubernetes-iron-proxy-ssh-workspace",
+        env = "KUBERNETES_IRON_PROXY_SSH_WORKSPACE",
+        default_value = "/workspace"
+    )]
+    ssh_workspace: String,
+    #[arg(
         long = "kubernetes-iron-proxy-image",
         env = "KUBERNETES_IRON_PROXY_IMAGE",
         default_value = "centaur-iron-proxy:latest"
@@ -2020,6 +2032,15 @@ impl IronProxyArgs {
             })
             .collect::<Result<_, ServerError>>()?;
         config.database_port = self.database_port;
+        if self.ssh_enabled {
+            config
+                .extra_env
+                .insert("IRON_SSH_ENABLED".into(), "1".into());
+            config
+                .extra_env
+                .insert("IRON_SSH_WORKSPACE".into(), self.ssh_workspace.clone());
+        }
+
         self.source.apply_to_config(&mut config);
         config.fragments = harness_fragments;
         config.env_from_secret_names = self.env_from_secret_names();

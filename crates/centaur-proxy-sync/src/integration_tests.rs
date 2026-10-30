@@ -70,6 +70,7 @@ impl Fixture {
         let pool = database().await?;
         let unique = format!("{:032x}", rand_suffix());
         let state = AppState {
+            ssh_targets: vec![],
             pool: pool.clone(),
             encryption: Arc::new(ActiveRecordEncryption::new(PRIMARY_KEY, SALT)),
             jwt_secret: enabled.then(|| JWT_SECRET.to_owned()),

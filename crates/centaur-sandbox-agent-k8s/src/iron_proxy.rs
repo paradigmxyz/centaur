@@ -166,6 +166,7 @@ impl IronProxyConfig {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedIronProxy {
+    ssh: Option<crate::ssh::Identity>,
     proxy_host: String,
     proxy_pod_name: String,
     proxy_port: u16,
@@ -263,7 +264,7 @@ impl AgentSandboxBackend {
                 replace_placeholders,
                 observability_enabled: spec.capabilities.observability_enabled,
             },
-        )))
+        )?))
     }
 
     /// Read the principal's effective config from iron-control for the
@@ -354,7 +355,7 @@ impl AgentSandboxBackend {
                 replace_placeholders,
                 observability_enabled,
             },
-        )))
+        )?))
     }
 
     fn resolved_iron_proxy_for_principal(
@@ -364,8 +365,28 @@ impl AgentSandboxBackend {
         requester_principal_id: Option<String>,
         labels: BTreeMap<String, String>,
         runtime: ResolvedIronProxyRuntime,
-    ) -> ResolvedIronProxy {
-        ResolvedIronProxy {
+    ) -> SandboxResult<ResolvedIronProxy> {
+        let ssh = self
+            .config
+            .iron_proxy
+            .as_ref()
+            .filter(|c| {
+                c.extra_env
+                    .get("IRON_SSH_ENABLED")
+                    .is_some_and(|v| v == "1")
+            })
+            .map(|c| {
+                crate::ssh::Identity::derive(
+                    &iron_proxy_service_name(id),
+                    c.extra_env
+                        .get("IRON_SSH_WORKSPACE")
+                        .map(String::as_str)
+                        .unwrap_or("/workspace"),
+                )
+            })
+            .transpose()?;
+        Ok(ResolvedIronProxy {
+            ssh,
             proxy_host: iron_proxy_service_name(id),
             proxy_pod_name: new_iron_proxy_pod_name(id),
             proxy_port: PROXY_TUNNEL_PORT,
@@ -377,7 +398,7 @@ impl AgentSandboxBackend {
             replace_placeholders: runtime.replace_placeholders,
             management_api_key: new_proxy_management_api_key(),
             observability_enabled: runtime.observability_enabled,
-        }
+        })
     }
 
     pub(crate) async fn create_iron_proxy_resources(
@@ -896,7 +917,7 @@ impl AgentSandboxBackend {
                 replace_placeholders,
                 observability_enabled,
             },
-        );
+        )?;
         self.create_iron_proxy_resources(id, Some(&resolved))
             .await?;
         if let Some(sandbox) = sandbox
@@ -1421,6 +1442,13 @@ fn new_proxy_management_api_key() -> String {
 }
 
 pub(crate) fn apply_proxy_env(spec: &mut SandboxSpec, resolved: &ResolvedIronProxy) {
+    if let Some(ssh) = &resolved.ssh {
+        set_env(
+            spec,
+            "CENTAUR_SSH",
+            &ssh.sandbox(&resolved.proxy_host).to_string(),
+        );
+    }
     let mut no_proxy_extra = current_env_values(spec, ["NO_PROXY", "no_proxy"]);
     // The harness exports OTLP traces (usage/cost spans) straight to the
     // collector; routing them through iron-proxy fails (plain-HTTP forwards
@@ -1687,6 +1715,16 @@ fn iron_proxy_env_vars(
             env.insert(name.to_owned(), env_var(name, value));
         }
     }
+    if let Some(ssh) = &resolved.ssh {
+        env.insert(
+            "IRON_SSH_CONFIG_JSON".into(),
+            env_var(
+                "IRON_SSH_CONFIG_JSON",
+                &ssh.proxy(&sync.control_url, &iron_proxy.upstream_deny_cidrs)
+                    .to_string(),
+            ),
+        );
+    }
     env.into_values().collect()
 }
 
@@ -1749,6 +1787,9 @@ fn secret_file_projection(secret_name: &str, key: &str, path: &str) -> VolumePro
 
 fn build_iron_proxy_service(id: &SandboxId, resolved: &ResolvedIronProxy) -> Service {
     let mut ports = vec![service_port("proxy", resolved.proxy_port)];
+    if resolved.ssh.is_some() {
+        ports.push(service_port("ssh", 2222));
+    }
     if let Some(pg) = &resolved.pg {
         ports.push(service_port("pg", pg.port));
     }
@@ -1829,6 +1870,7 @@ fn build_iron_proxy_network_policies(
 fn sandbox_to_proxy_ports(resolved: &ResolvedIronProxy) -> Vec<NetworkPolicyPort> {
     std::iter::once(network_port(resolved.proxy_port))
         .chain(resolved.pg.as_ref().map(|pg| network_port(pg.port)))
+        .chain(resolved.ssh.as_ref().map(|_| network_port(2222)))
         .collect()
 }
 
@@ -2461,6 +2503,7 @@ mod tests {
 
     fn resolved() -> ResolvedIronProxy {
         ResolvedIronProxy {
+            ssh: None,
             proxy_host: "asbx-test-iron-proxy".to_owned(),
             proxy_pod_name: "asbx-test-iron-proxy-1".to_owned(),
             proxy_port: 8080,

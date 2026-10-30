@@ -11,7 +11,7 @@ ARG CA_CERTIFICATES_VERSION=20260816ubuntu0.24.04.1
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-    git curl wget ca-certificates=${CA_CERTIFICATES_VERSION} gnupg lsb-release sudo \
+    openssh-client git curl wget ca-certificates=${CA_CERTIFICATES_VERSION} gnupg lsb-release sudo \
     build-essential pkg-config cmake ninja-build \
     ffmpeg ghostscript dvisvgm file \
     libssl-dev libclang-dev protobuf-compiler \
