@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import tempfile
 
 
 SEPARATOR = "\n\n---\n\n"
@@ -69,7 +70,15 @@ def compose_system_prompt(
         fragments.append(OBSERVABILITY_DISABLED_PROMPT)
 
     effective_prompt = SEPARATOR.join(fragments)
-    target_prompt.write_text(effective_prompt)
+    if target_prompt.is_file() and target_prompt.read_text() == effective_prompt:
+        return
+    # Running sandboxes recompose in place; harnesses must never read a partial prompt.
+    with tempfile.NamedTemporaryFile(
+        "w", dir=target_prompt.parent, prefix=f".{target_prompt.name}.", delete=False
+    ) as tmp:
+        tmp.write(effective_prompt)
+    os.chmod(tmp.name, 0o644)
+    os.replace(tmp.name, target_prompt)
 
 
 def main() -> int:
