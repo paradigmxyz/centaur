@@ -474,7 +474,18 @@ fn rules_from_values(role: &str, rules: &[YamlValue]) -> Result<Vec<RequestRule>
             Ok(RequestRule {
                 host,
                 cidr,
-                http_methods: yaml_string_array(yaml_get(rule, "http_methods")),
+                // Fragments use the proxy schema field `methods`; the console
+                // database column is `http_methods`. Tolerate `http_methods`
+                // here too so a previously-authored fragment keeps its
+                // restriction instead of silently becoming unrestricted.
+                http_methods: {
+                    let methods = yaml_string_array(yaml_get(rule, "methods"));
+                    if methods.is_empty() {
+                        yaml_string_array(yaml_get(rule, "http_methods"))
+                    } else {
+                        methods
+                    }
+                },
                 paths: yaml_string_array(yaml_get(rule, "paths")),
             })
         })
@@ -1204,7 +1215,7 @@ transforms:
       labels:
         centaur-tool: cloud-run
       rules:
-        - { host: my-service-abc123-uc.a.run.app, http_methods: [POST] }
+        - { host: my-service-abc123-uc.a.run.app, methods: [POST] }
 "#,
         )
         .unwrap();
@@ -1238,6 +1249,24 @@ transforms:
             Some("my-service-abc123-uc.a.run.app")
         );
         assert_eq!(input.rules[0].http_methods, vec!["POST".to_owned()]);
+    }
+
+    #[test]
+    fn fragment_rules_read_the_proxy_schema_methods_field() {
+        let rules: Vec<YamlValue> = serde_yaml::from_str(
+            r#"
+- { host: api.example.com, methods: [POST] }
+- { host: legacy.example.com, http_methods: [GET] }
+- { host: open.example.com }
+"#,
+        )
+        .unwrap();
+        let parsed = rules_from_values("infra", &rules).unwrap();
+        assert_eq!(parsed[0].http_methods, vec!["POST".to_owned()]);
+        // The console column name is tolerated so an old fragment keeps its
+        // restriction instead of silently broadening at upgrade.
+        assert_eq!(parsed[1].http_methods, vec!["GET".to_owned()]);
+        assert!(parsed[2].http_methods.is_empty());
     }
 
     #[test]
