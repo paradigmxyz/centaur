@@ -264,19 +264,18 @@ def _unsupported_warning(arguments: dict[str, object]) -> list[str]:
     return [f"websearch ignores unsupported arguments: {', '.join(used)}."] if used else []
 
 
-class WebSearchClient:
-    """Web search through the backend named by `WEBSEARCH_BACKEND`."""
+def _backend_name(backend: str | None) -> str:
+    configured = os.environ.get("WEBSEARCH_BACKEND")  # noqa: TID251  # deployment config, not a secret
+    name = (backend or configured or DEFAULT_BACKEND).strip().lower()
+    if name not in BACKENDS:
+        raise ValueError(f"backend must be one of {', '.join(BACKENDS)} (got {name!r}).")
+    return name
 
-    def __init__(
-        self, backend: str | None = None, *, transport: httpx.BaseTransport | None = None
-    ) -> None:
-        configured = os.environ.get("WEBSEARCH_BACKEND")  # noqa: TID251  # deployment config, not a secret
-        name = (backend or configured or DEFAULT_BACKEND).strip().lower()
-        if name not in BACKENDS:
-            raise ValueError(
-                f"WEBSEARCH_BACKEND must be one of {', '.join(BACKENDS)} (got {name!r})."
-            )
-        self.backend = name
+
+class WebSearchClient:
+    """Web search through Parallel, Exa, or Tako."""
+
+    def __init__(self, *, transport: httpx.BaseTransport | None = None) -> None:
         self._transport = transport
 
     def search(
@@ -291,16 +290,19 @@ class WebSearchClient:
         max_chars_total: int | None = None,
         session_id: str | None = None,
         timeout_seconds: float = 60.0,
+        backend: str | None = None,
         **unsupported: object,
     ) -> dict:
         """Search the web and return `{query, results, meta}`.
 
-        Each result has `title`, `url`, `snippet`, and `published_date`.
+        `backend` is `parallel`, `exa`, or `tako`; it defaults to
+        `WEBSEARCH_BACKEND`, then `parallel`. Each result has `title`, `url`, `snippet`, and `published_date`.
         `mode` is `basic` (faster) or `advanced`. `max_age_hours` is rounded
         down to a UTC date on Parallel and Tako. `session_id` is Parallel-only.
         Flags a backend cannot honor, and any other keyword arguments (such as
         the retired `synthesize`), are ignored and listed in `meta.warnings`.
         """
+        name = _backend_name(backend)
         text = query.strip()
         if not text:
             raise ValueError("query cannot be empty.")
@@ -319,7 +321,7 @@ class WebSearchClient:
             session_id=session_id,
         )
         with httpx.Client(timeout=timeout_seconds, transport=self._transport) as http:
-            page = SEARCHES[self.backend](http, q)
+            page = SEARCHES[name](http, q)
         meta: dict = {
             "backend": page.backend,
             "request_id": page.request_id,

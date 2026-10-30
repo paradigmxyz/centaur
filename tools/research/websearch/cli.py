@@ -66,6 +66,10 @@ def search(
         str | None, typer.Option(help="Stable ID reused across related searches (Parallel only)")
     ] = None,
     timeout_seconds: Annotated[float, typer.Option(help="Request timeout")] = 60.0,
+    backend: Annotated[
+        str | None,
+        typer.Option(help="parallel | exa | tako (default: $WEBSEARCH_BACKEND, then parallel)"),
+    ] = None,
     pretty: Annotated[bool, typer.Option(help="Print concise human-readable output")] = False,
     # Retired flags, accepted so older invocations keep working; reported in meta.warnings.
     synthesize: Annotated[
@@ -87,6 +91,7 @@ def search(
             max_chars_total=max_chars_total,
             session_id=session_id,
             timeout_seconds=timeout_seconds,
+            backend=backend,
             synthesize=synthesize,
             client_model=client_model,
             max_report_chars=max_report_chars,

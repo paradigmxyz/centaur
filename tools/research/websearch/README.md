@@ -1,9 +1,10 @@
 # Websearch Plugin
 
-Web search through one vendor, selected with the `WEBSEARCH_BACKEND` sandbox
-environment variable (for example through `SESSION_SANDBOX_EXTRA_ENV`):
+Web search through one vendor per call, chosen with `--backend` (Python:
+`backend=`). The default comes from the `WEBSEARCH_BACKEND` sandbox environment
+variable (for example through `SESSION_SANDBOX_EXTRA_ENV`), then `parallel`:
 
-| `WEBSEARCH_BACKEND`  | Credential                                                                  |
+| Backend              | Credential                                                                  |
 | -------------------- | --------------------------------------------------------------------------- |
 | `parallel` (default) | Optional `PARALLEL_API_KEY`. When the key is rejected, search uses the free anonymous Parallel Search MCP. |
 | `exa`                | `EXA_API_KEY`                                                               |
@@ -28,6 +29,7 @@ websearch search "Recent funding for AI search startups" \
 | `--max-chars-total` | Upper bound on total snippet characters |
 | `--session-id` | Stable ID reused across related searches. Parallel only. |
 | `--timeout-seconds` | Request timeout (default 60) |
+| `--backend` | `parallel`, `exa`, or `tako` |
 | `--pretty` | Print titles and URLs instead of JSON |
 
 The free Parallel path ignores the domain, recency, and mode filters. Any

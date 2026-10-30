@@ -135,8 +135,13 @@ def test_exa_maps_flags_and_caps_total_snippet_characters() -> None:
         requests,
     )
 
-    payload = WebSearchClient("exa", transport=transport).search(
-        "rust async", mode="advanced", max_age_hours=1, max_chars_total=8, session_id="s1"
+    payload = WebSearchClient(transport=transport).search(
+        "rust async",
+        backend="exa",
+        mode="advanced",
+        max_age_hours=1,
+        max_chars_total=8,
+        session_id="s1",
     )
 
     body = json.loads(requests[0].content)
@@ -151,7 +156,8 @@ def test_exa_maps_flags_and_caps_total_snippet_characters() -> None:
     assert payload["meta"]["warnings"] == ["Exa ignores session_id."]
 
 
-def test_tako_returns_data_cards_then_web_results() -> None:
+def test_tako_returns_data_cards_then_web_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEBSEARCH_BACKEND", "tako")
     requests: list[httpx.Request] = []
     transport = _recording_transport(
         {
@@ -175,7 +181,7 @@ def test_tako_returns_data_cards_then_web_results() -> None:
         requests,
     )
 
-    payload = WebSearchClient("tako", transport=transport).search(
+    payload = WebSearchClient(transport=transport).search(
         "us gdp", mode="basic", exclude_domains=["x.com"]
     )
 
@@ -198,7 +204,7 @@ def test_keyed_backend_reports_rejected_key() -> None:
     transport = httpx.MockTransport(lambda _request: httpx.Response(403))
 
     with pytest.raises(RuntimeError, match="TAKO_API_KEY was rejected"):
-        WebSearchClient("tako", transport=transport).search("us gdp")
+        WebSearchClient(transport=transport).search("us gdp", backend="tako")
 
 
 def _empty_parallel_transport() -> httpx.MockTransport:
@@ -241,11 +247,24 @@ def test_cli_accepts_retired_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     ]
 
 
-def test_unknown_backend_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("WEBSEARCH_BACKEND", "bing")
+def test_cli_backend_flag_overrides_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[httpx.Request] = []
+    transport = _recording_transport(
+        {"https://api.exa.ai/search": httpx.Response(200, json={"results": []})}, requests
+    )
+    monkeypatch.setenv("WEBSEARCH_BACKEND", "tako")
+    monkeypatch.setattr(cli, "_client", lambda: WebSearchClient(transport=transport))
 
+    result = CliRunner().invoke(cli.app, ["search", "rust async", "--backend", "exa"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["meta"]["backend"] == "exa"
+    assert [str(request.url) for request in requests] == ["https://api.exa.ai/search"]
+
+
+def test_unknown_backend_is_rejected() -> None:
     with pytest.raises(ValueError, match="parallel, exa, tako"):
-        WebSearchClient()
+        WebSearchClient().search("rust async", backend="bing")
 
 
 def test_cli_exits_zero_when_reader_closes_pipe() -> None:
