@@ -67,6 +67,13 @@ def search(
     ] = None,
     timeout_seconds: Annotated[float, typer.Option(help="Request timeout")] = 60.0,
     pretty: Annotated[bool, typer.Option(help="Print concise human-readable output")] = False,
+    # Retired flags, accepted so older invocations keep working; reported in meta.warnings.
+    synthesize: Annotated[
+        bool | None, typer.Option("--synthesize/--no-synthesize", hidden=True)
+    ] = None,
+    client_model: Annotated[str | None, typer.Option(hidden=True)] = None,
+    max_report_chars: Annotated[int | None, typer.Option(hidden=True)] = None,
+    search_type: Annotated[str | None, typer.Option(hidden=True)] = None,
 ):
     """Search the web. Prints JSON with results and meta."""
     try:
@@ -80,6 +87,10 @@ def search(
             max_chars_total=max_chars_total,
             session_id=session_id,
             timeout_seconds=timeout_seconds,
+            synthesize=synthesize,
+            client_model=client_model,
+            max_report_chars=max_report_chars,
+            search_type=search_type,
         )
     except Exception as exc:
         print(f"search failed: {exc}", file=sys.stderr)

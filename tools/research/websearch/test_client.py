@@ -7,7 +7,9 @@ import sys
 
 import httpx
 import pytest
+from centaur_tool_websearch import cli
 from centaur_tool_websearch.client import WebSearchClient
+from typer.testing import CliRunner
 
 from centaur_sdk.backends import StubBackend, configure
 
@@ -197,6 +199,46 @@ def test_keyed_backend_reports_rejected_key() -> None:
 
     with pytest.raises(RuntimeError, match="TAKO_API_KEY was rejected"):
         WebSearchClient("tako", transport=transport).search("us gdp")
+
+
+def _empty_parallel_transport() -> httpx.MockTransport:
+    return httpx.MockTransport(
+        lambda _request: httpx.Response(200, json={"search_id": "search_3", "results": []})
+    )
+
+
+def test_retired_arguments_are_ignored_with_a_warning() -> None:
+    payload = WebSearchClient(transport=_empty_parallel_transport()).search(
+        "rust async", synthesize=False, thread_context=["earlier"], client_model=None
+    )
+
+    assert payload["meta"]["warnings"] == [
+        "websearch ignores unsupported arguments: synthesize, thread_context."
+    ]
+
+
+def test_cli_accepts_retired_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        cli, "_client", lambda: WebSearchClient(transport=_empty_parallel_transport())
+    )
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "search",
+            "rust async",
+            "--no-synthesize",
+            "--client-model",
+            "m",
+            "--max-report-chars",
+            "5",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["meta"]["warnings"] == [
+        "websearch ignores unsupported arguments: client_model, max_report_chars, synthesize."
+    ]
 
 
 def test_unknown_backend_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:

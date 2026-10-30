@@ -259,6 +259,11 @@ def _dedupe_and_trim(
     return trimmed
 
 
+def _unsupported_warning(arguments: dict[str, object]) -> list[str]:
+    used = sorted(name for name, value in arguments.items() if value is not None)
+    return [f"websearch ignores unsupported arguments: {', '.join(used)}."] if used else []
+
+
 class WebSearchClient:
     """Web search through the backend named by `WEBSEARCH_BACKEND`."""
 
@@ -286,13 +291,15 @@ class WebSearchClient:
         max_chars_total: int | None = None,
         session_id: str | None = None,
         timeout_seconds: float = 60.0,
+        **unsupported: object,
     ) -> dict:
         """Search the web and return `{query, results, meta}`.
 
         Each result has `title`, `url`, `snippet`, and `published_date`.
         `mode` is `basic` (faster) or `advanced`. `max_age_hours` is rounded
         down to a UTC date on Parallel and Tako. `session_id` is Parallel-only.
-        Flags a backend cannot honor are listed in `meta.warnings`.
+        Flags a backend cannot honor, and any other keyword arguments (such as
+        the retired `synthesize`), are ignored and listed in `meta.warnings`.
         """
         text = query.strip()
         if not text:
@@ -316,7 +323,7 @@ class WebSearchClient:
         meta: dict = {
             "backend": page.backend,
             "request_id": page.request_id,
-            "warnings": page.warnings,
+            "warnings": page.warnings + _unsupported_warning(unsupported),
         }
         if page.attribution:
             meta["attribution"] = page.attribution
