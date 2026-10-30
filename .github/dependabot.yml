@@ -1,6 +1,8 @@
 version: 2
 updates:
   - package-ecosystem: github-actions
+    cooldown:
+      default-days: 7
     directory: /
     schedule:
       interval: weekly
@@ -16,7 +18,44 @@ updates:
         patterns:
           - "*"
 
+  - package-ecosystem: docker
+    cooldown:
+      default-days: 7
+    directories:
+      - /services/api-rs
+      - /services/company-context
+      - /services/console
+      - /services/discordbot
+      - /services/githubbot
+      - /services/iron-proxy
+      - /services/linearbot
+      - /services/proxy-sync
+      - /services/sandbox
+      - /services/slackbotv2
+      - /services/teamsbot
+      - /services/token-broker
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Denver
+    commit-message:
+      prefix: chore
+      include: scope
+    open-pull-requests-limit: 5
+    ignore:
+      # The sandbox/harness-server image stays pinned to ubuntu:24.04. Release
+      # upgrades change apt repo codenames and system Python paths, so they
+      # need a deliberate migration.
+      - dependency-name: ubuntu
+    groups:
+      docker-base-images:
+        patterns:
+          - "*"
+
   - package-ecosystem: bundler
+    cooldown:
+      default-days: 7
     directory: /services/console
     schedule:
       interval: weekly
@@ -27,13 +66,22 @@ updates:
       prefix: chore
       include: scope
     open-pull-requests-limit: 5
+    ignore:
+      # Rails 8.1.4 is broken; see the exclusion in services/console/Gemfile.
+      - dependency-name: rails
+        versions:
+          - "8.1.4"
     groups:
       ruby-dependencies:
         patterns:
           - "*"
 
   - package-ecosystem: cargo
-    directory: /services/api-rs
+    directory: /
+    cooldown:
+      default-days: 7
+    allow:
+      - dependency-type: all
     schedule:
       interval: weekly
       day: monday
@@ -43,28 +91,30 @@ updates:
       prefix: chore
       include: scope
     open-pull-requests-limit: 5
+    ignore:
+      # harness-server: Starlark 0.13 uses hashbrown 0.14, which allocative 0.3.6+ no longer supports.
+      - dependency-name: allocative
+        versions:
+          - ">= 0.3.6"
+      # harness-server: the codex git dependency pins rama-core 0.3.0-alpha.4, whose caret requirements
+      # on these crates also match the incompatible 0.3.0 prereleases and stable release.
+      - dependency-name: rama-error
+        versions:
+          - "> 0.3.0-alpha.4"
+      - dependency-name: rama-macros
+        versions:
+          - "> 0.3.0-alpha.4"
+      - dependency-name: rama-utils
+        versions:
+          - "> 0.3.0-alpha.4"
     groups:
-      api-rs-dependencies:
-        patterns:
-          - "*"
-
-  - package-ecosystem: cargo
-    directory: /crates/harness-server
-    schedule:
-      interval: weekly
-      day: monday
-      time: "09:00"
-      timezone: America/Denver
-    commit-message:
-      prefix: chore
-      include: scope
-    open-pull-requests-limit: 5
-    groups:
-      harness-server-dependencies:
+      rust-dependencies:
         patterns:
           - "*"
 
   - package-ecosystem: npm
+    cooldown:
+      default-days: 7
     directories:
       - /
       - /packages/*
@@ -82,12 +132,18 @@ updates:
       prefix: chore
       include: scope
     open-pull-requests-limit: 5
+    ignore:
+      # Chat SDK packages must stay aligned with the locally patched adapters.
+      - dependency-name: "@chat-adapter/*"
+      - dependency-name: chat
     groups:
       typescript-dependencies:
         patterns:
           - "*"
 
   - package-ecosystem: npm
+    cooldown:
+      default-days: 7
     directory: /docs
     schedule:
       interval: weekly
@@ -98,6 +154,9 @@ updates:
       prefix: chore
       include: scope
     open-pull-requests-limit: 5
+    ignore:
+      # The pinned Vocs snapshot depends on Waku's alpha plugin API.
+      - dependency-name: waku
     groups:
       docs-dependencies:
         patterns:

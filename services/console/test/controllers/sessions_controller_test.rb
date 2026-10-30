@@ -55,10 +55,10 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     ENV.delete("CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED")
   end
 
-  test "a non-admin lands on the threads view after login" do
+  test "a non-admin lands on integrations after login" do
     member = users(:member_user)
     post login_url, params: { email: member.email, password: "password123456" }
-    assert_redirected_to console_threads_path
+    assert_redirected_to console_integrations_path
     assert_equal member.id, session[:user_id]
   end
 

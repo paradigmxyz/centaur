@@ -1,0 +1,38 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+description: Slack message harness/model/provider/reasoning override classifier
+
+# The provider sends the raw Slack text through the production strategy, which
+# owns the real Decisions instructions and questions.
+prompts:
+  - '{{text}}'
+
+# Add entries to compare classifier models side by side.
+providers:
+  - id: file://provider.ts
+    label: gpt-6-luna
+    config:
+      # Keep in sync with slackbotv2.messageOverridesStrategy.model.
+      model: gpt-6-luna
+      # Production uses 1.5s; a longer timeout separates accuracy from latency,
+      # which promptfoo reports per case.
+      timeoutMs: 10000
+
+# Cases list only the fields they expect; omitted fields expect null.
+# "a|b" accepts either value for intentionally fuzzy mappings. (promptfoo
+# expands list-valued vars into separate cases, so lists cannot be used.)
+defaultTest:
+  assert:
+    - type: javascript
+      metric: harness
+      value: '(context.vars.harness ?? "").split("|").includes(output.harness ?? "")'
+    - type: javascript
+      metric: model
+      value: '(context.vars.model ?? "").split("|").includes(output.model ?? "")'
+    - type: javascript
+      metric: provider
+      value: '(context.vars.provider ?? "").split("|").includes(output.provider ?? "")'
+    - type: javascript
+      metric: reasoning
+      value: '(context.vars.reasoning ?? "").split("|").includes(output.reasoning ?? "")'
+
+tests: file://cases.yaml

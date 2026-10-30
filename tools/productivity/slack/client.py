@@ -1,5 +1,6 @@
 """Slack API client for bot-token Slack tool operations."""
 
+import asyncio
 import base64
 import binascii
 import json
@@ -11,17 +12,17 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import urlparse
 
+import asyncpg
 import structlog
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from centaur_sdk.tool_sdk import secret
+from centaur_sdk.tool_sdk import COMPANY_CONTEXT_DSN_ENV, company_context_database_url, secret
 
 # structlog so these lines render as JSON through the tool-server's
 # configure_structlog() pipeline, like the rest of the service's logs.
@@ -72,12 +73,149 @@ class SlackRateLimitError(RuntimeError):
         super().__init__(json.dumps(payload, sort_keys=True))
 
 
+class IndexedSlackClient:
+    """Search RLS-scoped Slack messages stored by the Slack sync."""
+
+    _DEFAULT_LIMIT = 20
+    _MAX_LIMIT = 50
+
+    def __init__(self, database_url: str | None = None):
+        value = company_context_database_url(database_url)
+        if not value:
+            raise RuntimeError(f"{COMPANY_CONTEXT_DSN_ENV} is not configured")
+        self.database_url = value
+
+    async def _search_messages(
+        self,
+        *,
+        query: str,
+        limit: int,
+        channels: list[str] | None,
+        from_user: str | None,
+    ) -> dict[str, Any]:
+        conn = await asyncpg.connect(self.database_url)
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    messages.channel_id,
+                    channels.channel_name,
+                    messages.message_ts,
+                    messages.occurred_at,
+                    messages.thread_ts,
+                    messages.user_id,
+                    messages.bot_id,
+                    messages.text,
+                    messages.permalink,
+                    messages.reply_count,
+                    COALESCE(
+                        NULLIF(users.display_name, ''),
+                        NULLIF(users.real_name, ''),
+                        NULLIF(users.user_name, ''),
+                        NULLIF(messages.user_id, ''),
+                        messages.bot_id
+                    ) AS author_name,
+                    ts_rank_cd(
+                        to_tsvector('english', COALESCE(messages.text, '')),
+                        websearch_to_tsquery('english', $1)
+                    ) AS score
+                FROM company_context_slack_messages messages
+                JOIN slack_sync_channels channels
+                  ON channels.channel_id = messages.channel_id
+                LEFT JOIN company_context_slack_users users
+                  ON users.user_id = messages.user_id
+                WHERE to_tsvector('english', COALESCE(messages.text, ''))
+                      @@ websearch_to_tsquery('english', $1)
+                  AND (
+                      $2::text[] IS NULL
+                      OR LOWER(messages.channel_id) = ANY($2::text[])
+                      OR LOWER(channels.channel_name) = ANY($2::text[])
+                  )
+                  AND (
+                      $3::text IS NULL
+                      OR LOWER(messages.user_id) = $3
+                      OR LOWER(users.user_name) = $3
+                      OR LOWER(users.real_name) = $3
+                      OR LOWER(users.display_name) = $3
+                  )
+                ORDER BY score DESC, messages.occurred_at DESC NULLS LAST
+                LIMIT $4
+                """,
+                query,
+                channels,
+                from_user,
+                limit,
+            )
+            return {
+                "status": "ok",
+                "query": query,
+                "results": [
+                    {
+                        "channel": str(row.get("channel_name") or ""),
+                        "channel_id": str(row.get("channel_id") or ""),
+                        "user": str(row.get("author_name") or ""),
+                        "user_id": str(row.get("user_id") or ""),
+                        "bot_id": str(row.get("bot_id") or ""),
+                        "text": str(row.get("text") or ""),
+                        "timestamp": str(row.get("message_ts") or ""),
+                        "occurred_at": self._isoformat(row.get("occurred_at")),
+                        "permalink": str(row.get("permalink") or ""),
+                        "thread_ts": str(row.get("thread_ts") or "") or None,
+                        "reply_count": int(row.get("reply_count") or 0),
+                        "score": float(row.get("score") or 0.0),
+                    }
+                    for row in rows
+                ],
+            }
+        finally:
+            await conn.close()
+
+    @staticmethod
+    def _isoformat(value: Any) -> str | None:
+        if value is None:
+            return None
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+        return str(value)
+
+    def search_messages(
+        self,
+        query: str,
+        limit: int = _DEFAULT_LIMIT,
+        channels: list[str] | None = None,
+        from_user: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_query = query.strip()
+        if not normalized_query:
+            return {"status": "error", "error": "query cannot be empty"}
+
+        normalized_channels = []
+        for channel in channels or []:
+            normalized = str(channel).strip()
+            if normalized.startswith("<#") and normalized.endswith(">"):
+                normalized = normalized[2:-1].split("|", 1)[0]
+            normalized = normalized.lstrip("#").strip().lower()
+            if normalized and normalized not in normalized_channels:
+                normalized_channels.append(normalized)
+
+        normalized_from_user = from_user.strip().lstrip("@").lower() if from_user else None
+        try:
+            return asyncio.run(
+                self._search_messages(
+                    query=normalized_query,
+                    limit=max(1, min(int(limit), self._MAX_LIMIT)),
+                    channels=normalized_channels or None,
+                    from_user=normalized_from_user or None,
+                )
+            )
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
+
 class SlackClient:
     """Slack API client.
 
-    Most operations use the bot token. Native Slack search and Slack ETL can
-    optionally use dedicated user tokens so workspace-wide reads stay separate
-    from the interactive bot's access model.
+    All operations use ``SLACK_BOT_TOKEN``.
     """
 
     # Cache settings
@@ -114,7 +252,6 @@ class SlackClient:
     def __init__(
         self,
         bot_token: str | None = None,
-        search_token: str | None = None,
     ):
         token = (bot_token or secret("SLACK_BOT_TOKEN", default="")).strip()
         if not token:
@@ -123,14 +260,7 @@ class SlackClient:
                 "Get one at https://api.slack.com/apps → OAuth & Permissions → Bot User OAuth Token"
             )
         self.token = token
-        self.search_token = (search_token or secret("SLACK_SEARCH_TOKEN", default="")).strip()
-        timeout = self._api_timeout_seconds()
-        self._client = WebClient(token=token, timeout=timeout)
-        self._search_client = (
-            WebClient(token=self.search_token, timeout=timeout)
-            if self.search_token
-            else self._client
-        )
+        self._client = WebClient(token=token, timeout=self._api_timeout_seconds())
         self._user_cache: dict[str, str] = {}
         self._ratelimit_deadlines: dict[str, float] = {}
 
@@ -421,8 +551,23 @@ class SlackClient:
         return body, headers
 
     def _message_permalink(self, channel_id: str, ts: str) -> str:
-        """Build a Slack permalink from channel and timestamp."""
+        """Build a generic fallback permalink from channel and timestamp."""
         return f"https://slack.com/archives/{channel_id}/p{ts.replace('.', '')}"
+
+    def _canonical_message_permalink(self, channel_id: str, ts: str) -> str:
+        """Ask Slack for the workspace-aware permalink for a message."""
+        try:
+            response = self._retry_on_ratelimit(
+                self._client.chat_getPermalink,
+                method_key="chat.getPermalink",
+                channel=channel_id,
+                message_ts=ts,
+            )
+        except (SlackApiError, SlackRateLimitError):
+            return self._message_permalink(channel_id, ts)
+
+        permalink = str(response.get("permalink") or "").strip()
+        return permalink or self._message_permalink(channel_id, ts)
 
     def _resolve_channel_name(self, channel: str, channel_id: str) -> str:
         """Resolve a human-readable channel name when callers passed an ID."""
@@ -586,7 +731,10 @@ class SlackClient:
     def _resolve_message_destination(self, channel: str) -> str:
         """Resolve a send_message destination from channel, channel ID, or user ID."""
         if self._looks_like_user_id(channel):
-            return self._open_dm_channel(channel)
+            # chat.postMessage accepts a user ID directly and opens the bot's
+            # one-on-one DM when needed. Calling conversations.open first adds
+            # an unnecessary im:write scope requirement.
+            return self._clean_user_ref(channel).upper()
         return self._resolve_channel(channel)
 
     def _resolve_mentions(self, text: str, user_cache: dict[str, str]) -> str:
@@ -669,7 +817,12 @@ class SlackClient:
             pass
         return user_cache
 
-    def list_bot_channels(self, limit: int = 500, force_refresh: bool = False) -> list[dict]:
+    def list_bot_channels(
+        self,
+        limit: int = 500,
+        force_refresh: bool = False,
+        query: str | None = None,
+    ) -> list[dict]:
         """List channels (public AND private) the bot is a member of.
 
         Bot membership is the relevant scope here, not just public visibility
@@ -677,9 +830,8 @@ class SlackClient:
         legal channels and search/history calls only work on channels the bot
         actually belongs to. Filtering to ``types="public_channel"`` silently
         drops every private channel from this list and from every caller
-        that depends on it (e.g. ``_search_messages_local`` scans this list
-        as the fallback when native search lacks ``search:read``, and
-        ``gather_context``'s Slack grab walks the bot's member channels).
+        that depends on it (including ``gather_context``'s Slack grab, which
+        walks the bot's member channels).
 
         Uses ``users.conversations``, which returns only the conversations the
         bot is a member of. ``conversations.list`` would instead page through
@@ -691,12 +843,16 @@ class SlackClient:
         Args:
             limit: Maximum channels to return
             force_refresh: Ignore cache and fetch fresh data
+            query: Optional case-insensitive channel-name filter
 
         Returns:
             List of channel dicts with id, name, is_private
         """
-        # Check cache first
-        if not force_refresh:
+        normalized_query = query.strip().lower() if query else None
+
+        # A cached result may have been capped by an earlier unfiltered call, so
+        # a filtered lookup must paginate Slack until it finds enough matches.
+        if not force_refresh and not normalized_query:
             cached = self._load_channel_cache()
             if cached:
                 channels, _ = cached
@@ -710,7 +866,7 @@ class SlackClient:
                 response = self._retry_on_ratelimit(
                     self._client.users_conversations,
                     types="public_channel,private_channel",
-                    limit=min(limit - len(channels), 200),
+                    limit=min(limit - len(channels), 200) if not normalized_query else 200,
                     cursor=cursor,
                     exclude_archived=True,
                 )
@@ -725,14 +881,17 @@ class SlackClient:
             # to, so membership is implied — no client-side is_member filter
             # (and no whole-workspace pagination) needed.
             for channel in response.get("channels", []):
+                name = channel.get("name", "")
+                if normalized_query and normalized_query not in name.lower():
+                    continue
                 channels.append(
                     {
                         "id": channel.get("id", ""),
-                        "name": channel.get("name", ""),
+                        "name": name,
                         "purpose": channel.get("purpose", {}).get("value", ""),
                         "topic": channel.get("topic", {}).get("value", ""),
                         "member_count": channel.get("num_members", 0),
-                        "is_private": channel.get("is_private", False),
+                        "is_private": channel.get("is_private", True),
                     }
                 )
 
@@ -740,199 +899,39 @@ class SlackClient:
             if not cursor or len(channels) >= limit:
                 break
 
-        result = sorted(channels, key=lambda x: x["name"])
-        self._save_channel_cache(result)
+        result = sorted(channels, key=lambda x: x["name"])[:limit]
+        if not normalized_query:
+            self._save_channel_cache(result)
         return result
 
-    def _fetch_channel_history_for_search(
-        self,
-        channel_id: str,
-        channel_name: str,
-        limit: int,
-        user_cache: dict[str, str],
-    ) -> list[dict]:
-        """Fetch history for a single search fallback channel."""
-        try:
-            response = self.get_channel_history_proxy(channel_id, limit=limit)
-        except (RuntimeError, ValueError):
-            return self._fetch_direct_channel_history_for_search(
-                channel_id,
-                channel_name,
-                limit,
-                user_cache,
-            )
-
-        messages = []
-        for msg in response.get("messages", []):
-            messages.append(
-                self._serialize_message(
-                    msg,
-                    channel_id,
-                    user_cache,
-                    channel_name=channel_name,
-                )
-            )
-
-        return messages
-
-    _MAX_SEARCH_DIRECT_THREADS = 10
-
-    def _fetch_direct_channel_history_for_search(
-        self,
-        channel_id: str,
-        channel_name: str,
-        limit: int,
-        user_cache: dict[str, str],
-    ) -> list[dict]:
-        """Fetch direct Slack history and expand a bounded number of threads."""
-        try:
-            page = self.get_channel_history_page(channel_id, limit=limit)
-        except (RuntimeError, ValueError):
-            return []
-
-        messages = [{**msg, "channel": channel_name} for msg in page.get("messages", [])]
-        seen_timestamps = {message.get("timestamp") for message in messages}
-        expanded_threads = 0
-
-        for message in list(messages):
-            if expanded_threads >= self._MAX_SEARCH_DIRECT_THREADS:
-                break
-            if int(message.get("reply_count") or 0) <= 0:
-                continue
-
-            thread_ts = message.get("thread_ts") or message.get("timestamp")
-            if not thread_ts:
-                continue
-
-            try:
-                thread_page = self.get_thread_replies_page(
-                    channel=channel_id,
-                    thread_ts=thread_ts,
-                    limit=min(limit, self._DEFAULT_THREAD_REPLY_LIMIT),
-                )
-            except (RuntimeError, ValueError):
-                continue
-
-            expanded_threads += 1
-            for reply in thread_page.get("messages", []):
-                timestamp = reply.get("timestamp")
-                if not timestamp or timestamp in seen_timestamps:
-                    continue
-                seen_timestamps.add(timestamp)
-                messages.append({**reply, "channel": channel_name})
-
-        return messages
-
-    _MAX_SEARCH_CHANNELS = 50  # Max channels to search when no filter specified
-
-    def _rank_channels_for_query(self, channels: list[dict], query_terms: list[str]) -> list[dict]:
-        """Rank channels by relevance to query terms. Most relevant first."""
-        scored = []
-        for ch in channels:
-            score = 0.0
-            name_lower = ch["name"].lower()
-            searchable = f"{name_lower} {ch.get('purpose', '')} {ch.get('topic', '')}".lower()
-            for term in query_terms:
-                if term in name_lower:
-                    score += 5.0
-                elif term in searchable:
-                    score += 2.0
-            # Boost by member count (more members = more likely relevant)
-            score += min(ch.get("member_count", 0) / 50, 3.0)
-            scored.append((score, ch))
-        scored.sort(key=lambda x: -x[0])
-        return [ch for _, ch in scored]
-
-    def _score_match(self, query_terms: list[str], text: str) -> float:
-        """Score how well text matches query terms. Higher = better match."""
-        text_lower = text.lower()
-        score = 0.0
-
-        # Exact phrase match (highest score)
-        full_query = " ".join(query_terms)
-        if full_query in text_lower:
-            score += 10.0
-
-        # Individual term matches
-        for term in query_terms:
-            if term in text_lower:
-                score += 1.0
-                # Bonus for word boundary matches
-                if f" {term} " in f" {text_lower} ":
-                    score += 0.5
-
-        # Penalty for very long messages (likely less relevant)
-        if len(text) > 500:
-            score *= 0.8
-
-        return score
-
-    def search_messages(
+    def search_messages_direct(
         self,
         query: str,
         max_results: int = 20,
         channels: list[str] | None = None,
         from_user: str | None = None,
-        messages_per_channel: int = 200,
     ) -> list[dict]:
-        """Search messages using Slack's native search.messages API.
+        """Search directly with Slack's native user-token search API.
 
-        Uses Slack's native search.messages API with the current principal's
-        user token for fast, workspace-wide search. Explicitly channel-scoped
-        searches use authorized channel history instead. When no user token is
-        linked, Slack rejects native search and the bot-scoped history path is
-        used as a compatibility fallback.
-
-        Supports Slack search modifiers in the query string:
-            in:#channel, from:@user, before:YYYY-MM-DD, after:YYYY-MM-DD,
-            has:link, has:reaction, is:thread, etc.
-
-        Args:
-            query: Search query (plain text or with Slack search modifiers)
-            max_results: Maximum results to return
-            channels: Optional list of channel names to filter by
-            from_user: Optional username to filter by
-            messages_per_channel: Messages per channel (only used in fallback)
-
-        Returns:
-            List of matching message dicts, sorted by relevance
+        This path never scans channel history. Channel and user filters are
+        translated into native Slack modifiers.
         """
-        local_query, local_channels, local_from_user = self._extract_local_search_filters(
-            query, channels, from_user
-        )
-        if local_channels:
-            return self._search_messages_local(
-                local_query,
-                max_results,
-                local_channels,
-                local_from_user,
-                messages_per_channel,
-            )
-
-        # Build the search query with modifiers
-        search_query = query
+        modifiers = []
+        for channel in channels or []:
+            normalized = self._clean_channel_ref(channel)
+            if normalized:
+                modifiers.append(f"in:{normalized}")
         if from_user:
-            search_query += f" from:@{from_user.lstrip('@')}"
+            modifiers.append(f"from:@{from_user.lstrip('@')}")
 
+        search_query = " ".join(part for part in [query.strip(), *modifiers] if part)
         try:
             return self._search_messages_native(search_query, max_results)
         except SlackApiError as error:
-            # search.messages does not accept bot tokens. Preserve the restricted
-            # bot-history path for principals without a linked Slack credential,
-            # but never turn a mis-scoped user token into a workspace-wide scan.
-            if self._slack_error_code(error) == "not_allowed_token_type":
-                return self._search_messages_local(
-                    local_query,
-                    max_results,
-                    local_channels,
-                    local_from_user,
-                    messages_per_channel,
-                )
-            access_path = "search_token" if self._search_client is not self._client else "bot_token"
             self._raise_slack_api_error(
                 error,
                 slack_method="search.messages",
-                access_path=access_path,
+                access_path="bot_token",
             )
 
     def _search_messages_native(
@@ -942,7 +941,7 @@ class SlackClient:
     ) -> list[dict]:
         """Search using Slack's native search.messages API."""
         response = self._retry_on_ratelimit(
-            self._search_client.api_call,
+            self._client.api_call,
             "search.messages",
             method_key="search.messages",
             params={"query": query, "count": max_results, "sort": "timestamp"},
@@ -979,150 +978,6 @@ class SlackClient:
             )
 
         return results
-
-    def _extract_local_search_filters(
-        self,
-        query: str,
-        channels: list[str] | None,
-        from_user: str | None,
-    ) -> tuple[str, list[str] | None, str | None]:
-        """Extract common Slack search modifiers for the local history scanner."""
-        local_channels = list(channels or [])
-        local_from_user = from_user
-
-        def channel_repl(match: re.Match) -> str:
-            local_channels.append(match.group("id") or match.group("name") or "")
-            return " "
-
-        query = re.sub(
-            r"(?<!\S)in:(?:<#(?P<id>[CGD][A-Z0-9]+)(?:\|[^>]+)?>|#?(?P<name>[A-Za-z0-9_-]+))",
-            channel_repl,
-            query,
-        )
-
-        def from_repl(match: re.Match) -> str:
-            nonlocal local_from_user
-            local_from_user = match.group("uid") or match.group("uname") or local_from_user
-            return " "
-
-        query = re.sub(
-            r"(?<!\S)from:(?:<@(?P<uid>[A-Z0-9]+)>|@?(?P<uname>[A-Za-z0-9._-]+))",
-            from_repl,
-            query,
-        )
-
-        deduped_channels = []
-        seen = set()
-        for channel in local_channels:
-            normalized = self._clean_channel_ref(channel)
-            if not normalized:
-                continue
-            key = normalized.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped_channels.append(normalized)
-
-        return " ".join(query.split()), deduped_channels or None, local_from_user
-
-    def _channel_refs_for_search(self, channels: list[str]) -> list[dict]:
-        """Resolve channel filters without listing channels when IDs are provided."""
-        resolved: dict[str, dict] = {}
-        unresolved_names: set[str] = set()
-
-        for channel in channels:
-            normalized = self._clean_channel_ref(channel)
-            if not normalized:
-                continue
-            if self._looks_like_channel_id(normalized):
-                channel_id = normalized.upper()
-                resolved[channel_id] = {
-                    "id": channel_id,
-                    "name": channel_id,
-                    "purpose": "",
-                    "topic": "",
-                    "member_count": 0,
-                    "is_private": channel_id.startswith("G"),
-                }
-            else:
-                unresolved_names.add(normalized.lower())
-
-        if unresolved_names:
-            for channel in self.list_channels_proxy(history_only=True):
-                if channel["name"].lower() in unresolved_names:
-                    resolved[channel["id"]] = channel
-
-        return list(resolved.values())
-
-    def _search_messages_local(
-        self,
-        query: str,
-        max_results: int = 20,
-        channels: list[str] | None = None,
-        from_user: str | None = None,
-        messages_per_channel: int = 200,
-    ) -> list[dict]:
-        """Search messages by scanning channel histories through the proxy."""
-        query_terms = [t.strip().lower() for t in query.split() if t.strip()]
-
-        if channels:
-            bot_channels = self._channel_refs_for_search(channels)
-        else:
-            bot_channels = self.list_channels_proxy(history_only=True)
-            bot_channels = self._rank_channels_for_query(bot_channels, query_terms)
-            bot_channels = bot_channels[: self._MAX_SEARCH_CHANNELS]
-
-        if not bot_channels:
-            return []
-
-        user_cache = self._get_user_cache()
-        effective_limit = max(1, min(int(messages_per_channel), self._MAX_PAGE_SIZE))
-        if len(bot_channels) > 30 and messages_per_channel > 100:
-            effective_limit = 100
-
-        all_messages = []
-        with ThreadPoolExecutor(max_workers=min(6, len(bot_channels))) as executor:
-            futures = {
-                executor.submit(
-                    self._fetch_channel_history_for_search,
-                    ch["id"],
-                    ch["name"],
-                    effective_limit,
-                    user_cache,
-                ): ch
-                for ch in bot_channels
-            }
-
-            for future in as_completed(futures):
-                try:
-                    messages = future.result()
-                    all_messages.extend(messages)
-                except Exception:
-                    pass
-
-        scored_results = []
-        for msg in all_messages:
-            text_lower = msg["text"].lower()
-            if query_terms and not any(term in text_lower for term in query_terms):
-                continue
-
-            if from_user:
-                username = user_cache.get(msg["user_id"], msg["user_id"])
-                normalized_user = from_user.lower().lstrip("@")
-                if normalized_user not in {username.lower(), msg["user_id"].lower()}:
-                    continue
-
-            score = self._score_match(query_terms, msg["text"])
-            msg["user"] = user_cache.get(msg["user_id"], msg["user_id"])
-            msg["text"] = self._resolve_mentions(msg["text"], user_cache)
-            msg["_score"] = score
-            scored_results.append(msg)
-
-        scored_results.sort(key=lambda x: (-x["_score"], -float(x["timestamp"])))
-        for msg in scored_results:
-            del msg["_score"]
-
-        return scored_results[:max_results]
 
     def get_channel_history_page(
         self,
@@ -1215,7 +1070,8 @@ class SlackClient:
         This maps to Slack's documented `conversations.history` arguments,
         except `token` is intentionally omitted because the API server supplies
         Slack credentials. `channel_id` must be an explicit Slack conversation
-        ID authorized by the principal's `slack.history_channels` claim.
+        ID that is either a bot-readable public channel or authorized by the
+        principal's `slack.history_channels` claim.
         """
         normalized_channel_id = self._clean_channel_ref(channel_id).upper()
         if len(normalized_channel_id) < 9 or not self._looks_like_channel_id(normalized_channel_id):
@@ -1450,7 +1306,7 @@ class SlackClient:
             "sync_state": next_state,
         }
 
-    def list_channels(self, limit: int = 200) -> list[dict]:
+    def list_channels(self, limit: int = 200, query: str | None = None) -> list[dict]:
         """List Slack channels visible to the bot (public and private).
 
         Bot-visible channels include any private channel the bot has been
@@ -1460,6 +1316,7 @@ class SlackClient:
         """
         channels = []
         cursor = None
+        normalized_query = query.strip().lower() if query else None
 
         while True:
             try:
@@ -1467,7 +1324,7 @@ class SlackClient:
                     self._client.conversations_list,
                     method_key="conversations.list",
                     types="public_channel,private_channel",
-                    limit=min(limit - len(channels), 200),
+                    limit=min(limit - len(channels), 200) if not normalized_query else 200,
                     cursor=cursor,
                     exclude_archived=True,
                 )
@@ -1481,18 +1338,27 @@ class SlackClient:
                 cached = self._load_channel_cache()
                 if cached:
                     cached_channels, _ = cached
+                    if normalized_query:
+                        cached_channels = [
+                            channel
+                            for channel in cached_channels
+                            if normalized_query in channel.get("name", "").lower()
+                        ]
                     return cached_channels[:limit]
                 raise
 
             for channel in response.get("channels", []):
+                name = channel.get("name", "")
+                if normalized_query and normalized_query not in name.lower():
+                    continue
                 channels.append(
                     {
                         "id": channel.get("id", ""),
-                        "name": channel.get("name", ""),
+                        "name": name,
                         "purpose": channel.get("purpose", {}).get("value", ""),
                         "topic": channel.get("topic", {}).get("value", ""),
                         "member_count": channel.get("num_members", 0),
-                        "is_private": channel.get("is_private", False),
+                        "is_private": channel.get("is_private", True),
                         "is_member": channel.get("is_member", False),
                     }
                 )
@@ -1501,14 +1367,33 @@ class SlackClient:
             if not cursor or len(channels) >= limit:
                 break
 
-        return sorted(channels, key=lambda x: x["name"])
+        return sorted(channels, key=lambda x: x["name"])[:limit]
 
-    def list_channels_proxy(self, limit: int = 200, history_only: bool = False) -> list[dict]:
-        """List Slack channels exposed by the Centaur API server proxy JWT."""
-        response = self._centaur_api_get_json("/api/slack/channels", {})
-        channels = response.get("channels", []) or []
-        if history_only:
-            channels = [channel for channel in channels if channel.get("can_read_history")]
+    def list_channels_proxy(
+        self,
+        limit: int = 200,
+        history_only: bool = False,
+        query: str | None = None,
+    ) -> list[dict]:
+        """List Slack channels exposed by the Centaur API server proxy."""
+        requested_limit = max(int(limit), 0)
+
+        def fetch_page(cursor: str | None, page_limit: int) -> dict[str, Any]:
+            return self._centaur_api_get_json(
+                "/api/slack/channels",
+                {
+                    "limit": page_limit,
+                    "cursor": cursor,
+                    "query": query,
+                    "history_only": history_only,
+                },
+            )
+
+        channels, _, _ = self._collect_cursor_pages(
+            fetch_page,
+            result_key="channels",
+            limit=requested_limit,
+        )
         normalized_channels = [
             {
                 "id": channel.get("id", ""),
@@ -1516,7 +1401,9 @@ class SlackClient:
                 "purpose": channel.get("purpose", ""),
                 "topic": channel.get("topic", ""),
                 "member_count": channel.get("member_count", 0),
-                "is_private": channel.get("is_private", False),
+                "is_private": channel.get("is_private", True),
+                "is_im": channel.get("is_im", False),
+                "is_mpim": channel.get("is_mpim", False),
                 "is_member": channel.get("is_member", False),
                 "can_upload": channel.get("can_upload", False),
                 "can_download": channel.get("can_download", False),
@@ -1525,7 +1412,7 @@ class SlackClient:
             for channel in channels
         ]
         normalized_channels.sort(key=lambda channel: (channel["name"].lower(), channel["id"]))
-        return normalized_channels[:limit]
+        return normalized_channels[:requested_limit]
 
     def list_files_proxy(
         self,
@@ -1848,13 +1735,91 @@ class SlackClient:
             if unfurl_media is not None:
                 kwargs["unfurl_media"] = unfurl_media
             response = self._client.chat_postMessage(**kwargs)
+            response_channel = str(response.get("channel") or channel_id)
+            response_ts = str(response.get("ts") or "")
             return {
-                "channel": channel_id,
-                "ts": response.get("ts", ""),
-                "permalink": f"https://slack.com/archives/{channel_id}/p{response.get('ts', '').replace('.', '')}",
+                "channel": response_channel,
+                "ts": response_ts,
+                "permalink": self._canonical_message_permalink(response_channel, response_ts),
             }
         except SlackApiError as e:
             raise RuntimeError(f"Slack API error: {e.response['error']}") from e
+
+    def add_reaction(self, channel_id: str, timestamp: str, emoji: str) -> dict:
+        """Add a bot reaction to a message; requires Slack's reactions:write scope.
+
+        Accept an emoji name with or without surrounding colons. An existing
+        reaction by this bot is a successful no-op. Message timestamps stay
+        strings to preserve their precision.
+        """
+        channel_id = self._normalize_explicit_channel_id(channel_id)
+        timestamp = timestamp.strip()
+        if not re.fullmatch(r"\d+\.\d+", timestamp):
+            raise ValueError("timestamp must be a Slack message timestamp like 1234567890.123456")
+        name = emoji.strip()
+        if name.startswith(":") and name.endswith(":"):
+            name = name[1:-1]
+        if not name or any(char.isspace() for char in name):
+            raise ValueError("emoji must be a Slack emoji name like pencil2 or :pencil2:")
+
+        added = True
+        try:
+            self._retry_on_ratelimit(
+                self._client.reactions_add,
+                channel=channel_id,
+                timestamp=timestamp,
+                name=name,
+            )
+        except SlackApiError as error:
+            if self._slack_error_code(error) == "already_reacted":
+                added = False
+            else:
+                self._raise_slack_api_error(
+                    error,
+                    slack_method="reactions.add",
+                    access_path="slack_api",
+                    requested_channel=channel_id,
+                    resolved_channel=channel_id,
+                )
+        return {"ok": True, "channel": channel_id, "ts": timestamp, "name": name, "added": added}
+
+    def remove_reaction(self, channel_id: str, timestamp: str, emoji: str) -> dict:
+        """Remove this bot's reaction to a message; requires Slack's reactions:write scope.
+
+        Accept an emoji name with or without surrounding colons. A missing
+        reaction by this bot is a successful no-op. Message timestamps stay
+        strings to preserve their precision.
+        """
+        channel_id = self._normalize_explicit_channel_id(channel_id)
+        timestamp = timestamp.strip()
+        if not re.fullmatch(r"\d+\.\d+", timestamp):
+            raise ValueError("timestamp must be a Slack message timestamp like 1234567890.123456")
+        name = emoji.strip()
+        if name.startswith(":") and name.endswith(":"):
+            name = name[1:-1]
+        if not name or any(char.isspace() for char in name):
+            raise ValueError("emoji must be a Slack emoji name like pencil2 or :pencil2:")
+
+        removed = True
+        try:
+            self._retry_on_ratelimit(
+                self._client.reactions_remove,
+                channel=channel_id,
+                timestamp=timestamp,
+                name=name,
+            )
+        except SlackApiError as error:
+            if self._slack_error_code(error) == "no_reaction":
+                removed = False
+            else:
+                self._raise_slack_api_error(
+                    error,
+                    slack_method="reactions.remove",
+                    access_path="slack_api",
+                    requested_channel=channel_id,
+                    resolved_channel=channel_id,
+                )
+        return {"ok": True, "channel": channel_id, "ts": timestamp, "name": name, "removed": removed}
 
     def send_dm(
         self,
@@ -1991,8 +1956,6 @@ class SlackClient:
             )
             if comment:
                 kwargs["initial_comment"] = comment
-            elif effective_filename:
-                kwargs["initial_comment"] = f"Uploaded `{effective_filename}`."
             if effective_thread_ts:
                 kwargs["thread_ts"] = effective_thread_ts
             # We intentionally do NOT forward alt_text to Slack. Passing alt_txt
@@ -2214,7 +2177,11 @@ class SlackClient:
         except SlackApiError as e:
             raise RuntimeError(f"Slack API error: {e.response['error']}") from e
 
-    def get_message_files(self, channel_id: str, message_ts: str) -> list[dict]:
+    def get_message_files(
+        self,
+        channel_id: str,
+        message_ts: str,
+    ) -> list[dict]:
         """Get files attached to a specific message."""
         try:
             response = self._client.conversations_replies(
@@ -2253,6 +2220,26 @@ class SlackClient:
 
         return files
 
+    def get_file_info_direct(self, file_id: str) -> dict[str, Any]:
+        """Fetch file metadata directly with the Slack SDK."""
+        normalized_file_id = file_id.strip().upper()
+        if not self._FILE_ID_RE.fullmatch(normalized_file_id):
+            raise ValueError(f"Invalid Slack file ID: {file_id!r}")
+
+        try:
+            response = self._retry_on_ratelimit(
+                self._client.files_info,
+                file=normalized_file_id,
+                method_key="files.info",
+            )
+        except SlackApiError as e:
+            self._raise_slack_api_error(
+                e,
+                slack_method="files.info",
+                access_path="bot_token",
+            )
+        return dict(response.get("file") or {})
+
     # Slack file downloads buffer the file in memory before writing it, so cap the
     # size regardless of Slack's own (much larger) per-file limit.
     _MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
@@ -2260,12 +2247,11 @@ class SlackClient:
     def _fetch_slack_file(self, url: str) -> tuple[str, str, bytes]:
         """Download a Slack file's bytes: returns ``(filename, mime_type, body)``.
 
-        ``url`` must be an ``https://files.slack.com/`` URL. The bot token is
-        sent only to that host, so it can never be aimed at a Slack API
-        endpoint (e.g. api.test) that would echo the credential back.
+        ``url`` must be an ``https://files.slack.com/`` URL. The token is sent
+        only to that host, so it can never be aimed at a Slack API endpoint
+        (e.g. api.test) that would echo the credential back.
         """
-        if not self.token:
-            raise RuntimeError("SLACK_BOT_TOKEN not set")
+        token = self.token
 
         parsed = urlparse(url)
         if parsed.scheme != "https" or (parsed.hostname or "").lower() != "files.slack.com":
@@ -2273,7 +2259,7 @@ class SlackClient:
                 f"Slack file downloads only accept https://files.slack.com/ URLs; refusing {url!r}"
             )
 
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.token}"})
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
         with urllib.request.urlopen(req) as response:
             # Read one byte past the cap so an oversized file is rejected
             # without buffering an unbounded response.
@@ -2527,7 +2513,6 @@ def _client() -> SlackClient:
 
     return SlackClient(
         bot_token=secret("SLACK_BOT_TOKEN"),
-        search_token=secret("SLACK_SEARCH_TOKEN", ""),
     )
 
 
@@ -2545,6 +2530,11 @@ def get_user_cache(client: SlackClient | None = None) -> dict[str, str]:
     return slack_client._get_user_cache()
 
 
+def resolve_channel(channel: str) -> str:
+    """Resolve a destination using the same channel cache as send_message."""
+    return _client()._resolve_channel(channel)
+
+
 def list_bot_channels(*args, **kwargs):
     return _client().list_bot_channels(*args, **kwargs)
 
@@ -2557,8 +2547,8 @@ def resolve_mentions(
     return slack_client._resolve_mentions(text, resolved_user_cache)
 
 
-def search_messages(*args, **kwargs):
-    return _client().search_messages(*args, **kwargs)
+def search_messages_direct(*args, **kwargs):
+    return _client().search_messages_direct(*args, **kwargs)
 
 
 def get_channel_history_page(*args, **kwargs):
@@ -2629,6 +2619,10 @@ def send_dm(*args, **kwargs):
     return _client().send_dm(*args, **kwargs)
 
 
+def add_reaction(*args, **kwargs):
+    return _client().add_reaction(*args, **kwargs)
+
+
 def upload_file(*args, **kwargs):
     return _client().upload_file(*args, **kwargs)
 
@@ -2661,6 +2655,10 @@ def get_message_files(*args, **kwargs):
     return _client().get_message_files(*args, **kwargs)
 
 
+def get_file_info_direct(*args, **kwargs):
+    return _client().get_file_info_direct(*args, **kwargs)
+
+
 def _fetch_slack_file(*args, **kwargs):
     return _client()._fetch_slack_file(*args, **kwargs)
 
@@ -2683,3 +2681,7 @@ def search_users(*args, **kwargs):
 
 def get_user_profile(*args, **kwargs):
     return _client().get_user_profile(*args, **kwargs)
+
+
+def remove_reaction(*args, **kwargs):
+    return _client().remove_reaction(*args, **kwargs)

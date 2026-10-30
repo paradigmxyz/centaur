@@ -1,7 +1,9 @@
 import type { GitHubAdapter } from "@chat-adapter/github";
 import type { StateAdapter } from "chat";
 import { backgroundWaitUntil } from "./context";
-import { runTurnStream } from "./turn";
+import { resolveAllowedAuthorAssociations } from "./authorization";
+import { reactWorkingOnReview, settleReviewReaction } from "./reactions";
+import { runTurnStream, turnOutputChars } from "./turn";
 import {
   fetchCiEvaluation,
   maybeEmitReviewSubmitted,
@@ -355,6 +357,19 @@ export async function handleReviewEvent(
   // Never act on the bot's own review (it shouldn't review its own PRs anyway).
   if (reviewer && reviewer.toLowerCase() === ctx.userName.toLowerCase()) return;
 
+  // Same trust gate as the comment path: an untrusted reviewer must not steer
+  // a write-capable turn or drive the merge signal on a bot-owned PR.
+  const allowed = resolveAllowedAuthorAssociations(
+    ctx.options.allowedAuthorAssociations,
+  );
+  const association = stringValue(reviewNode.author_association)?.toUpperCase();
+  if (
+    !allowed.includes("*") &&
+    (!association || !allowed.includes(association))
+  ) {
+    return;
+  }
+
   if (
     !(await claim(
       ctx,
@@ -369,7 +384,11 @@ export async function handleReviewEvent(
     return;
   }
   if (reviewState === "changes_requested" || reviewState === "commented") {
-    fireAddressReviewTurn(ctx, repo.owner, repo.repo, pr, reviewer ?? "the reviewer", reviewId);
+    fireAddressReviewTurn(ctx, repo.owner, repo.repo, pr, {
+      reviewer: reviewer ?? "the reviewer",
+      reviewId,
+      reviewNodeId: stringValue(reviewNode.node_id),
+    });
   }
 }
 
@@ -422,26 +441,28 @@ async function processCi(
     knownEvaluation ?? (await fetchCiEvaluation(ctx, owner, repo, headSha));
   if (!evaluation?.settled) return; // wait until *all* checks are done (and readable).
   // Act once per fully-settled SHA (the last-arriving check event wins).
-  if (
-    !(await claim(
-      ctx,
-      `${ctx.options.stateKeyPrefix ?? "centaur-githubbot"}:ci-settled:${owner}/${repo}#${number}:${headSha}`,
-    ))
-  ) {
-    return;
-  }
+  const firstSettle = await claim(
+    ctx,
+    `${ctx.options.stateKeyPrefix ?? "centaur-githubbot"}:ci-settled:${owner}/${repo}#${number}:${headSha}`,
+  );
 
   const trace = makeTrace(managementThreadKey(owner, repo, number), `ci-${headSha}`);
   if (!evaluation.failed) {
-    // Green: reset the fix counter and consider merging.
-    const state = await loadState(ctx, owner, repo, number);
-    if (state.consecutiveCiFixes) {
-      await saveState(ctx, owner, repo, number, { ...state, consecutiveCiFixes: 0 });
+    // Green: reset the fix counter and consider merging. The merge gate is
+    // deterministic and has its own claim, so it runs on every green settle:
+    // a check that finishes later on the same SHA (a rerun, or one triggered
+    // by an approval) or a re-assignment can be what makes the PR mergeable.
+    if (firstSettle) {
+      const state = await loadState(ctx, owner, repo, number);
+      if (state.consecutiveCiFixes) {
+        await saveState(ctx, owner, repo, number, { ...state, consecutiveCiFixes: 0 });
+      }
+      traceLog(ctx.options, "githubbot_ci_green", trace, { pr: `${owner}/${repo}#${number}` });
     }
-    traceLog(ctx.options, "githubbot_ci_green", trace, { pr: `${owner}/${repo}#${number}` });
     await tryMerge(ctx, owner, repo, number);
     return;
   }
+  if (!firstSettle) return;
 
   // Red: back off if a human pushed the failing commit (don't step on them) —
   // unless this is a forced takeover (the PR was just assigned to us, so the
@@ -633,9 +654,9 @@ function fireAddressReviewTurn(
   owner: string,
   repo: string,
   pr: PullRequestSummary,
-  reviewer: string,
-  reviewId: number,
+  review: { reviewer: string; reviewId: number; reviewNodeId?: string },
 ): void {
+  const { reviewer, reviewId, reviewNodeId } = review;
   const preamble =
     `A review was submitted on pull request ${owner}/${repo}#${pr.number} ` +
     `(head ${pr.headSha}). Address it as the PR author, working in your sandbox:\n` +
@@ -647,11 +668,19 @@ function fireAddressReviewTurn(
     `explain why, briefly and respectfully. Resolve the threads you've addressed.\n` +
     `- Re-request review from @${reviewer} once you've pushed.\n` +
     `- If a request is unclear or you can't address it, say so in the thread and ask.`;
-  fireManagementTurn(ctx, owner, repo, pr, preamble, {
-    id: `review-resp-${owner}/${repo}#${pr.number}-${reviewId}`,
-    label: "address-review",
-    text: `Address the review on ${owner}/${repo}#${pr.number} from @${reviewer}.`,
-  });
+  fireManagementTurn(
+    ctx,
+    owner,
+    repo,
+    pr,
+    preamble,
+    {
+      id: `review-resp-${owner}/${repo}#${pr.number}-${reviewId}`,
+      label: "address-review",
+      text: `Address the review on ${owner}/${repo}#${pr.number} from @${reviewer}.`,
+    },
+    reviewNodeId,
+  );
 }
 
 function fireConflictTurn(
@@ -680,6 +709,7 @@ function fireManagementTurn(
   pr: PullRequestSummary,
   preamble: string,
   message: { id: string; label: string; text: string },
+  reviewNodeId?: string,
 ): void {
   const threadKey = managementThreadKey(owner, repo, pr.number);
   const trace = makeTrace(threadKey, message.id);
@@ -707,19 +737,39 @@ function fireManagementTurn(
     pr: `${owner}/${repo}#${pr.number}`,
     work: message.label,
   });
+  // Review-triggered turns ack on the reviewer's own review — instant 👀,
+  // settled to 🚀/😕 when the turn finishes (same lifecycle as @-mention acks).
+  // Not awaited: the ack must not delay the turn, and a failed reaction is only
+  // a missing ack. Turns with no triggering review (CI-fix, conflicts) stay
+  // silent — a reaction on the PR's top post isn't clearly tied to anything.
+  if (reviewNodeId) {
+    void reactWorkingOnReview(ctx.octokit, reviewNodeId, logger(ctx));
+  }
   backgroundWaitUntil(
     runTurnStream(ctx.options, forwardInput)
-      .then((result) => {
+      .then(async (result) => {
         traceLog(ctx.options, "githubbot_management_turn_complete", trace, {
+          chars: turnOutputChars(result),
           failed: result.failed,
           work: message.label,
         });
+        if (reviewNodeId) {
+          await settleReviewReaction(
+            ctx.octokit,
+            reviewNodeId,
+            result.failed,
+            logger(ctx),
+          );
+        }
       })
-      .catch((error) => {
+      .catch(async (error) => {
         logger(ctx).warn("githubbot_management_turn_failed", {
           error: errorMessage(error),
           work: message.label,
         });
+        if (reviewNodeId) {
+          await settleReviewReaction(ctx.octokit, reviewNodeId, true, logger(ctx));
+        }
       }),
   );
 }

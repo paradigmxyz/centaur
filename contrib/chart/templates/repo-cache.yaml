@@ -83,12 +83,18 @@ metadata:
 spec:
 {{- if $repoCacheUsePvc }}
   replicas: 1
+  strategy:
+    type: Recreate
 {{- end }}
   selector:
     matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "repo-cache") | nindent 6 }}
   template:
     metadata:
+{{- if $repoCacheHasGithubToken }}
+      annotations:
+        checksum/github-token: {{ include "centaur.secretResourceVersion" (dict "root" . "name" (include "centaur.repoCacheGithubTokenSecretName" .)) | sha256sum }}
+{{- end }}
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "repo-cache") | nindent 8 }}
     spec:
@@ -97,18 +103,7 @@ spec:
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
       {{- end }}
-{{- with .Values.repoCache.nodeSelector }}
-      nodeSelector:
-{{ toYaml . | nindent 8 }}
-{{- end }}
-{{- with .Values.repoCache.affinity }}
-      affinity:
-{{ toYaml . | nindent 8 }}
-{{- end }}
-{{- with .Values.repoCache.tolerations }}
-      tolerations:
-{{ toYaml . | nindent 8 }}
-{{- end }}
+{{- include "centaur.podScheduling" (dict "values" .Values.repoCache "indent" 6) }}
       containers:
         - name: repo-cache
           image: {{ printf "%s:%s" $repoCacheImageRepository $repoCacheImageTag | quote }}

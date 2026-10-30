@@ -3,6 +3,8 @@ import {
   githubContextPreamble,
   parseGithubThreadKey,
   reviewCommentContextFromRaw,
+  turnOutputChars,
+  type TurnResult,
 } from "../src/turn";
 
 describe("parseGithubThreadKey", () => {
@@ -99,5 +101,36 @@ describe("githubContextPreamble", () => {
 
   test("returns undefined for an unparseable key", () => {
     expect(githubContextPreamble("not-a-github-key")).toBeUndefined();
+  });
+});
+
+describe("turnOutputChars", () => {
+  function result(overrides: Partial<TurnResult> = {}): TurnResult {
+    return {
+      answer: "",
+      cotLines: [],
+      errorText: "",
+      failed: false,
+      fallbackText: "",
+      ...overrides,
+    };
+  }
+
+  test("measures the answer a turn produced", () => {
+    expect(turnOutputChars(result({ answer: "done" }))).toBe(4);
+  });
+
+  test("falls back to the fallback text when there is no answer", () => {
+    expect(turnOutputChars(result({ fallbackText: "twelve chars" }))).toBe(12);
+  });
+
+  test("reports the error text for a failed turn", () => {
+    expect(
+      turnOutputChars(result({ errorText: "boom", failed: true })),
+    ).toBe(4);
+  });
+
+  test("is zero only when a successful turn really produced nothing", () => {
+    expect(turnOutputChars(result())).toBe(0);
   });
 });

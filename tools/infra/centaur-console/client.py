@@ -4,11 +4,28 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
 SANDBOX_PERMISSIONS_PATH = "/api/v1/sandbox/permissions"
 SANDBOX_OAUTH_APPS_PATH = "/api/v1/sandbox/oauth_apps"
+SANDBOX_SCHEDULED_TASKS_PATH = "/api/v1/sandbox/scheduled_tasks"
+SANDBOX_ADMIN_PRINCIPALS_PATH = "/api/v1/sandbox/admin/principals"
+SANDBOX_ADMIN_ROLES_PATH = "/api/v1/sandbox/admin/roles"
+SANDBOX_ADMIN_GRANTS_PATH = "/api/v1/sandbox/admin/grants"
+SANDBOX_ADMIN_SECRETS_PATH = "/api/v1/sandbox/admin/secrets"
+SANDBOX_ADMIN_STATIC_SECRETS_PATH = "/api/v1/sandbox/admin/static_secrets"
+SANDBOX_ADMIN_PG_DSN_SECRETS_PATH = "/api/v1/sandbox/admin/pg_dsn_secrets"
+SANDBOX_ADMIN_GCP_ID_TOKEN_SECRETS_PATH = "/api/v1/sandbox/admin/gcp_id_token_secrets"
+# Secret kinds an admin can create and edit from a sandbox, by kind and grant key.
+ADMIN_WRITABLE_SECRET_PATHS = {
+    "static": SANDBOX_ADMIN_STATIC_SECRETS_PATH,
+    "pg_dsn": SANDBOX_ADMIN_PG_DSN_SECRETS_PATH,
+    "gcp_id_token": SANDBOX_ADMIN_GCP_ID_TOKEN_SECRETS_PATH,
+}
+SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH = "/api/v1/sandbox/admin/slack_external_teams"
+ADMIN_PAGE_LIMIT = 200
 
 
 class ConsoleClient:
@@ -93,6 +110,376 @@ class ConsoleClient:
         """Alias for tool bridge calls."""
         return self.sandbox_oauth_apps()
 
+    def scheduled_tasks(self) -> list[dict[str, Any]]:
+        """List scheduled tasks owned by the current Console user."""
+        result = self._scheduled_task_request(SANDBOX_SCHEDULED_TASKS_PATH)
+        if not isinstance(result, list):
+            raise RuntimeError(
+                "centaur-console scheduled tasks response did not include a data array"
+            )
+        return result
+
+    def scheduled_task(self, task_id: str) -> dict[str, Any]:
+        """Read one scheduled task owned by the current Console user."""
+        result = self._scheduled_task_request(
+            f"{SANDBOX_SCHEDULED_TASKS_PATH}/{quote(task_id, safe='')}"
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                "centaur-console scheduled task response did not include a data object"
+            )
+        return result
+
+    def create_scheduled_task(
+        self,
+        name: str,
+        prompt: str,
+        cron_expression: str | None = None,
+        delivery_channel: str = "dm",
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        """Create an ad-hoc or Pacific Time cron task."""
+        result = self._scheduled_task_request(
+            SANDBOX_SCHEDULED_TASKS_PATH,
+            method="POST",
+            json={
+                "data": {
+                    "name": name,
+                    "prompt": prompt,
+                    "cron_expression": cron_expression,
+                    "delivery_channel": delivery_channel,
+                    "enabled": enabled,
+                }
+            },
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                "centaur-console scheduled task response did not include a data object"
+            )
+        return result
+
+    def update_scheduled_task(
+        self,
+        task_id: str,
+        name: str | None = None,
+        prompt: str | None = None,
+        cron_expression: str | None = None,
+        delivery_channel: str | None = None,
+        enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        """Update selected fields on a scheduled task owned by the current Console user."""
+        attributes: dict[str, str | bool | None] = {}
+        for key, value in {
+            "name": name,
+            "prompt": prompt,
+            "cron_expression": cron_expression,
+            "delivery_channel": delivery_channel,
+            "enabled": enabled,
+        }.items():
+            if value is not None:
+                attributes[key] = value
+        if not attributes:
+            raise ValueError("at least one scheduled task field must be provided")
+
+        result = self._scheduled_task_request(
+            f"{SANDBOX_SCHEDULED_TASKS_PATH}/{quote(task_id, safe='')}",
+            method="PATCH",
+            json={"data": attributes},
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                "centaur-console scheduled task response did not include a data object"
+            )
+        return result
+
+    def delete_scheduled_task(self, task_id: str) -> None:
+        """Delete a scheduled task owned by the current Console user."""
+        self._scheduled_task_request(
+            f"{SANDBOX_SCHEDULED_TASKS_PATH}/{quote(task_id, safe='')}",
+            method="DELETE",
+        )
+
+    def run_scheduled_task(self, task_id: str) -> dict[str, Any]:
+        """Queue an immediate run of a scheduled task owned by the current Console user."""
+        result = self._scheduled_task_request(
+            f"{SANDBOX_SCHEDULED_TASKS_PATH}/{quote(task_id, safe='')}/run",
+            method="POST",
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                "centaur-console scheduled task response did not include a data object"
+            )
+        return result
+
+    def admin_principals(self, slack_channel_id: str | None = None) -> list[dict[str, Any]]:
+        """List principals, or only those bound to a Slack channel. Console admins only."""
+        if slack_channel_id:
+            return self._admin_list(
+                SANDBOX_ADMIN_PRINCIPALS_PATH, {"slack_channel_id": slack_channel_id}
+            )
+        return self._admin_list_all(SANDBOX_ADMIN_PRINCIPALS_PATH)
+
+    def admin_create_principal(
+        self,
+        slack_channel_id: str | None = None,
+        slack_user_id: str | None = None,
+        workflow_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a Slack channel, Slack user, or workflow principal; the Console derives its foreign ID."""
+        identities = {
+            "slack_channel": ("slack_channel_id", slack_channel_id),
+            "slack_dm": ("slack_user_id", slack_user_id),
+            "workflow": ("workflow_name", workflow_name),
+        }
+        given = [
+            (kind, key, value) for kind, (key, value) in identities.items() if value is not None
+        ]
+        if len(given) != 1:
+            raise ValueError(
+                "pass exactly one of slack_channel_id, slack_user_id, or workflow_name"
+            )
+        kind, key, value = given[0]
+        data = {"kind": kind, key: value}
+        return self._admin_object(SANDBOX_ADMIN_PRINCIPALS_PATH, method="POST", json={"data": data})
+
+    def admin_principal(self, principal: str) -> dict[str, Any]:
+        """Read a principal by OID or foreign ID, with its roles and direct grants."""
+        result = self._admin_object(
+            self._admin_ref_path(SANDBOX_ADMIN_PRINCIPALS_PATH, principal, "prn_")
+        )
+        path = f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/{result['id']}"
+        result["roles"] = self._admin_list(f"{path}/roles")
+        result["grants"] = self._admin_list_all(f"{path}/grants")
+        return result
+
+    def admin_effective_grants(self, principal: str) -> list[dict[str, Any]]:
+        """List secrets a principal holds directly or through roles, with their sources."""
+        principal_id = self._admin_principal_id(principal)
+        return self._admin_list_all(
+            f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/{principal_id}/effective_grants"
+        )
+
+    def admin_roles(self) -> list[dict[str, Any]]:
+        """List every role. Console admins only."""
+        return self._admin_list_all(SANDBOX_ADMIN_ROLES_PATH)
+
+    def admin_assign_role(self, principal: str, role: str) -> dict[str, Any]:
+        """Assign a role (OID or foreign ID) to a principal (OID or foreign ID)."""
+        principal_id, role_id = self._admin_principal_and_role_ids(principal, role)
+        return self._admin_object(
+            f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/{principal_id}/roles",
+            method="POST",
+            json={"data": {"role_id": role_id}},
+        )
+
+    def admin_unassign_role(self, principal: str, role: str) -> None:
+        """Remove a role (OID or foreign ID) from a principal (OID or foreign ID)."""
+        principal_id, role_id = self._admin_principal_and_role_ids(principal, role)
+        self._admin_request(
+            f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/{principal_id}/roles/{role_id}", method="DELETE"
+        )
+
+    def admin_secrets(self, query: str | None = None) -> list[dict[str, Any]]:
+        """List grantable secrets, optionally filtered by name or foreign ID."""
+        return self._admin_list(SANDBOX_ADMIN_SECRETS_PATH, {"q": query} if query else None)
+
+    def admin_secret_document(self, secret: str) -> dict[str, Any]:
+        """Read a static, pg_dsn, or gcp_id_token secret's document (never its value) by OID, foreign ID, or name."""
+        return self._admin_object(self._admin_writable_secret_path(secret))
+
+    def admin_create_secret(self, kind: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Create a static, pg_dsn, or gcp_id_token secret from a Console API document."""
+        if kind not in ADMIN_WRITABLE_SECRET_PATHS:
+            raise ValueError("kind must be static, pg_dsn, or gcp_id_token")
+        return self._admin_object(
+            ADMIN_WRITABLE_SECRET_PATHS[kind], method="POST", json={"data": data}
+        )
+
+    def admin_update_secret(self, secret: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Update the given fields of a static, pg_dsn, or gcp_id_token secret; omitted fields are kept."""
+        return self._admin_object(
+            self._admin_writable_secret_path(secret), method="PATCH", json={"data": data}
+        )
+
+    def admin_grant_secret(self, principal: str, secret: str) -> dict[str, Any]:
+        """Grant a secret (OID, foreign ID, or name) directly to a principal."""
+        return self._admin_grant("principal_id", self._admin_principal_id(principal), secret)
+
+    def admin_revoke_secret(self, principal: str, secret: str) -> None:
+        """Revoke a secret granted directly to a principal."""
+        principal_id = self._admin_principal_id(principal)
+        self._admin_revoke(
+            f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/{principal_id}/grants", secret, principal
+        )
+
+    def admin_grant_role_secret(self, role: str, secret: str) -> dict[str, Any]:
+        """Grant a secret to a role, and so to every principal that holds the role."""
+        return self._admin_grant("role_id", self._admin_role_id(role), secret)
+
+    def admin_revoke_role_secret(self, role: str, secret: str) -> None:
+        """Revoke a secret granted to a role."""
+        role_id = self._admin_role_id(role)
+        self._admin_revoke(f"{SANDBOX_ADMIN_ROLES_PATH}/{role_id}/grants", secret, role)
+
+    def admin_set_slack_permission(
+        self,
+        principal: str,
+        channel_id: str,
+        upload: bool | None = None,
+        download: bool | None = None,
+        history: bool | None = None,
+    ) -> dict[str, Any]:
+        """Create or update a principal's Slack channel permission.
+
+        New permissions default every unspecified flag to enabled.
+        """
+        data: dict[str, Any] = {"channel_id": channel_id}
+        for key, value in {
+            "upload_enabled": upload,
+            "download_enabled": download,
+            "history_enabled": history,
+        }.items():
+            if value is not None:
+                data[key] = value
+        principal_id = self._admin_principal_id(principal)
+        return self._admin_object(
+            f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/{principal_id}/slack_channel_permissions",
+            method="POST",
+            json={"data": data},
+        )
+
+    def admin_remove_slack_permission(self, principal: str, channel_id: str) -> None:
+        """Remove a principal's own permission for a Slack channel."""
+        principal_id = self._admin_principal_id(principal)
+        self._admin_request(
+            f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/{principal_id}/slack_channel_permissions/"
+            f"{quote(channel_id, safe='')}",
+            method="DELETE",
+        )
+
+    def admin_set_sandbox_access(self, principal: str, **capabilities: Any) -> dict[str, Any]:
+        """Update selected sandbox capabilities, such as sandbox_sessions_read_enabled."""
+        data = {key: value for key, value in capabilities.items() if value is not None}
+        if not data:
+            raise ValueError("at least one sandbox capability must be provided")
+        principal_id = self._admin_principal_id(principal)
+        return self._admin_object(
+            f"{SANDBOX_ADMIN_PRINCIPALS_PATH}/{principal_id}/sandbox_access",
+            method="PATCH",
+            json={"data": data},
+        )
+
+    def admin_slack_external_teams(self) -> list[str]:
+        """List Slack Connect workspace and org ids Centaur accepts messages from."""
+        return self._admin_list(SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH)
+
+    def admin_add_slack_external_team(self, team_id: str) -> list[str]:
+        """Allow a Slack Connect workspace (T…) or Enterprise Grid org (E…)."""
+        return self._admin_list(
+            SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH,
+            method="POST",
+            json={"data": {"team_id": team_id}},
+        )
+
+    def admin_remove_slack_external_team(self, team_id: str) -> list[str]:
+        """Stop accepting messages from a Slack Connect workspace or org."""
+        return self._admin_list(
+            f"{SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH}/{quote(team_id, safe='')}",
+            method="DELETE",
+        )
+
+    def _admin_principal_id(self, principal: str) -> str:
+        path = self._admin_ref_path(SANDBOX_ADMIN_PRINCIPALS_PATH, principal, "prn_")
+        return self._admin_object(path)["id"]
+
+    def _admin_secret(self, secret: str) -> dict[str, Any]:
+        matches = [
+            row
+            for row in self.admin_secrets()
+            if secret in (row.get("id"), row.get("foreign_id"), row.get("name"))
+        ]
+        if len(matches) != 1:
+            found = "no secret" if not matches else "several secrets"
+            raise RuntimeError(f"{found} matched {secret}; pass the secret OID")
+        return matches[0]
+
+    def _admin_writable_secret_path(self, secret: str) -> str:
+        match = self._admin_secret(secret)
+        kind = match["grant_key"].removesuffix("_secret_id")
+        if kind not in ADMIN_WRITABLE_SECRET_PATHS:
+            raise RuntimeError(f"{secret} is a {kind} secret; edit it in the Console UI")
+        return f"{ADMIN_WRITABLE_SECRET_PATHS[kind]}/{match['id']}"
+
+    def _admin_role_id(self, role: str) -> str:
+        path = self._admin_ref_path(SANDBOX_ADMIN_ROLES_PATH, role, "role_")
+        return self._admin_object(path)["id"]
+
+    def _admin_principal_and_role_ids(self, principal: str, role: str) -> tuple[str, str]:
+        return self._admin_principal_id(principal), self._admin_role_id(role)
+
+    def _admin_grant(self, grantee_key: str, grantee_id: str, secret: str) -> dict[str, Any]:
+        match = self._admin_secret(secret)
+        return self._admin_object(
+            SANDBOX_ADMIN_GRANTS_PATH,
+            method="POST",
+            json={"data": {grantee_key: grantee_id, match["grant_key"]: match["id"]}},
+        )
+
+    def _admin_revoke(self, grants_path: str, secret: str, grantee: str) -> None:
+        match = self._admin_secret(secret)
+        grants = self._admin_list_all(grants_path)
+        grant = next((g for g in grants if g.get(match["grant_key"]) == match["id"]), None)
+        if grant is None:
+            raise RuntimeError(f"{secret} is not granted directly to {grantee}")
+        self._admin_request(f"{SANDBOX_ADMIN_GRANTS_PATH}/{grant['id']}", method="DELETE")
+
+    @staticmethod
+    def _admin_ref_path(collection: str, ref: str, oid_prefix: str) -> str:
+        if ref.startswith(oid_prefix):
+            return f"{collection}/{quote(ref, safe='')}"
+        return f"{collection}/lookup/{quote(ref, safe='')}"
+
+    def _admin_list_all(self, path: str) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            payload = self._admin_request(path, params={"page": page, "limit": ADMIN_PAGE_LIMIT})
+            records.extend(_admin_data(payload, list))
+            if page >= (payload.get("meta") or {}).get("total_pages", 0):
+                return records
+            page += 1
+
+    def _admin_list(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        method: str = "GET",
+        json: dict[str, Any] | None = None,
+    ) -> list[Any]:
+        return _admin_data(self._admin_request(path, method=method, params=params, json=json), list)
+
+    def _admin_object(
+        self, path: str, method: str = "GET", json: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return _admin_data(self._admin_request(path, method=method, json=json), dict)
+
+    def _admin_request(
+        self,
+        path: str,
+        method: str = "GET",
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            response = self.client.request(method, path, params=params, json=json)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = _response_error_detail(exc.response)
+            raise RuntimeError(f"centaur-console admin request failed: {detail}") from exc
+        except httpx.RequestError as exc:
+            raise RuntimeError(f"centaur-console admin request failed: {exc}") from exc
+        return response.json() if response.content else {}
+
     def health(self) -> dict[str, Any]:
         """Assert the sandbox permissions endpoint is reachable and authorized."""
         try:
@@ -115,6 +502,30 @@ class ConsoleClient:
                 "details": {},
             }
 
+    def _scheduled_task_request(
+        self,
+        path: str,
+        method: str = "GET",
+        json: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | list[dict[str, Any]] | None:
+        try:
+            response = self.client.request(method, path, json=json)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = _response_error_detail(exc.response)
+            raise RuntimeError(f"centaur-console scheduled task request failed: {detail}") from exc
+        except httpx.RequestError as exc:
+            raise RuntimeError(f"centaur-console scheduled task request failed: {exc}") from exc
+
+        if not response.content:
+            return None
+
+        payload = response.json()
+        data = payload.get("data")
+        if not isinstance(data, (dict, list)):
+            raise RuntimeError("centaur-console scheduled task response did not include data")
+        return data
+
     def close(self) -> None:
         if self._client:
             self._client.close()
@@ -133,6 +544,13 @@ def _response_error_detail(response: httpx.Response) -> str:
     except ValueError:
         body = response.text
     return f"HTTP {response.status_code}: {body}"
+
+
+def _admin_data(payload: dict[str, Any], kind: type) -> Any:
+    data = payload.get("data")
+    if not isinstance(data, kind):
+        raise RuntimeError("centaur-console admin response did not include the expected data")
+    return data
 
 
 def _client() -> ConsoleClient:

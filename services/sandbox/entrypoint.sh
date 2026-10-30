@@ -50,10 +50,12 @@ if [ -n "${TOOL_DIRS:-}" ]; then
 fi
 
 if [ -d "$STATE_DIR" ] && [ -w "$STATE_DIR" ]; then
-    mkdir -p "$STATE_DIR/workspace" "$STATE_DIR/uploads" "$STATE_DIR/branches" "$STATE_DIR/codex" "$STATE_DIR/claude"
-    rm -rf "$HOME_DIR/.codex" "$HOME_DIR/.claude" "$HOME_DIR/uploads" "$HOME_DIR/branches"
+    mkdir -p "$STATE_DIR/workspace" "$STATE_DIR/uploads" "$STATE_DIR/branches" "$STATE_DIR/codex" "$STATE_DIR/claude" "$STATE_DIR/pi" "$STATE_DIR/omp"
+    rm -rf "$HOME_DIR/.codex" "$HOME_DIR/.claude" "$HOME_DIR/.pi" "$HOME_DIR/.omp" "$HOME_DIR/uploads" "$HOME_DIR/branches"
     ln -s "$STATE_DIR/codex" "$HOME_DIR/.codex"
     ln -s "$STATE_DIR/claude" "$HOME_DIR/.claude"
+    ln -s "$STATE_DIR/pi" "$HOME_DIR/.pi"
+    ln -s "$STATE_DIR/omp" "$HOME_DIR/.omp"
     ln -s "$STATE_DIR/uploads" "$HOME_DIR/uploads"
     ln -s "$STATE_DIR/branches" "$HOME_DIR/branches"
     export CENTAUR_PERSISTENT_STATE=1
@@ -128,14 +130,11 @@ mkdir -p "$HOME_DIR/.codex"
 if [ "$CODEX_AUTH_MODE" = "access_token" ] && [ -f /etc/centaur/codex-auth.default.json ]; then
     cp /etc/centaur/codex-auth.default.json "$HOME_DIR/.codex/auth.json"
     chmod 600 "$HOME_DIR/.codex/auth.json"
+    seed-hermes-codex-auth "$HOME_DIR/.codex/auth.json" "$HOME_DIR/.hermes/auth.json"
 elif [ ! -f "$HOME_DIR/.codex/auth.json" ] && [ -f /etc/centaur/codex-auth.default.json ]; then
     cp /etc/centaur/codex-auth.default.json "$HOME_DIR/.codex/auth.json"
     chmod 600 "$HOME_DIR/.codex/auth.json"
 fi
-if [ -n "${CENTAUR_TRACE_ID:-}" ]; then
-    printf '%s' "$CENTAUR_TRACE_ID" > "$HOME_DIR/.trace_id"
-fi
-
 HARNESS_CONFIG_DIR="${CENTAUR_HARNESS_CONFIG_DIR:-$HOME_DIR/harness}"
 if [ -f "$HARNESS_CONFIG_DIR/codex/config.toml" ]; then
     cp "$HARNESS_CONFIG_DIR/codex/config.toml" "$HOME_DIR/.codex/config.toml"
@@ -245,6 +244,37 @@ if bedrock_region:
         ).setdefault("aws", {})["region"] = bedrock_region
         text = tomli_w.dumps(config)
 
+# CODEX_CUSTOM_PROVIDERS is the chart-rendered map of private OpenAI-compatible
+# Responses providers. Codex reads placeholder API keys from the environment;
+# iron-proxy replaces each one only for its configured base URL's host. Applied
+# before CODEX_CONFIG_OVERLAY so operators can still override provider details.
+custom_providers_raw = (os.environ.get("CODEX_CUSTOM_PROVIDERS") or "").strip()
+if custom_providers_raw:
+    import json
+    import tomllib
+    import tomli_w
+
+    try:
+        custom_providers = json.loads(custom_providers_raw)
+        if not isinstance(custom_providers, dict):
+            raise ValueError("expected an object keyed by provider id")
+        config = tomllib.loads(text)
+        model_providers = config.setdefault("model_providers", {})
+        for provider_id, provider in custom_providers.items():
+            if not isinstance(provider, dict):
+                raise ValueError(f"provider {provider_id!r} must be an object")
+            model_providers[provider_id] = {
+                "name": provider["name"],
+                "base_url": provider["baseUrl"],
+                "env_key": provider["apiKeyEnv"],
+                "wire_api": "responses",
+                "requires_openai_auth": False,
+            }
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, tomllib.TOMLDecodeError) as exc:
+        print(f"ignoring invalid CODEX_CUSTOM_PROVIDERS: {exc}", file=sys.stderr)
+    else:
+        text = tomli_w.dumps(config)
+
 # CODEX_CONFIG_OVERLAY: deep-merge an operator-supplied TOML fragment over the
 # baked config so a deployment can configure codex -- e.g. point it at a custom
 # model provider via a [model_providers.*] block -- through sandbox.extraEnv,
@@ -324,8 +354,8 @@ fi
 #   - access_token: Claude Code runs as a Claude.ai Pro or Max subscription
 #     user. We install a dummy ~/.claude/.credentials.json so the CLI emits
 #     OAuth-shaped requests, unset the API-key stub so it does not fall back
-#     to X-Api-Key, and let iron-token-broker mint a real Bearer at request
-#     time via the anthropic-claude brokered_token secret.
+#     to X-Api-Key, and let iron-proxy inject the current Console-managed
+#     Bearer via the anthropic-claude brokered_token secret.
 CLAUDE_CODE_AUTH_MODE="${CLAUDE_CODE_AUTH_MODE:-api_key}"
 case "$CLAUDE_CODE_AUTH_MODE" in
     api_key)
@@ -343,17 +373,6 @@ case "$CLAUDE_CODE_AUTH_MODE" in
         exit 1
         ;;
 esac
-
-# ── Pi-mono settings ─────────────────────────────────────────────────────────
-mkdir -p "$HOME_DIR/.pi/agent/extensions"
-cat > "$HOME_DIR/.pi/agent/settings.json" <<EOF
-{
-  "provider": "anthropic",
-  "model": "claude-sonnet-4-20250514",
-  "thinkingLevel": "medium",
-  "autoCompaction": true
-}
-EOF
 
 # ── Per-session workspace clone (no shared worktree metadata) ────────────────
 if [ "${CENTAUR_PERSISTENT_STATE:-0}" = "1" ]; then
@@ -408,20 +427,11 @@ unset _centaur_tools_auto_reload
 # ── Assemble system prompt from bind mounts ──────────────────────────────────
 # Base prompt: mounted as AGENTS_BASE.md when present, fallback to baked-in AGENTS.md.
 # Prompt overlays from mounted repos are appended when present.
+# The selected persona is appended when AGENTS_PERSONA.md exists in the sandbox home.
 TARGET_PROMPT="$WORKSPACE_DIR/AGENTS.md"
-compose-system-prompt --home-dir "$HOME_DIR" --target-prompt "$TARGET_PROMPT"
-
-if [ "${CENTAUR_SANDBOX_OBSERVABILITY_ENABLED:-true}" = "false" ] && [ -f "$TARGET_PROMPT" ]; then
-    cat >> "$TARGET_PROMPT" <<'EOF'
-
----
-
-[Observability access]
-This sandbox does not have Centaur observability access. Do not use vlogs, vmetrics, Grafana, or related internal logs/metrics tools.
-EOF
-fi
-
-# Persona prompt injection is done by the API when it writes AGENTS_BASE.md.
+compose-system-prompt \
+    --home-dir "$HOME_DIR" \
+    --target-prompt "$TARGET_PROMPT"
 
 # Switch to workspace so the harness reads workspace/AGENTS.md (with persona overlay)
 cd "$WORKSPACE_DIR"

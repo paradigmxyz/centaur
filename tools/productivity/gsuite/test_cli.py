@@ -1,11 +1,108 @@
 import json
+from unittest.mock import Mock
 
+import pytest
 from typer.testing import CliRunner
 
 from gsuite import client
 from gsuite.cli import app, extract_drive_file_id
 
 runner = CliRunner()
+
+
+def test_sheets_batch_read_passes_repeated_ranges_and_outputs_json(monkeypatch):
+    calls = []
+    expected = [{"spreadsheet_id": "sheet-123", "raw_values": [["[bold]data"]]}]
+
+    def fake_batch_read(spreadsheet_id, range_notations):
+        calls.append((spreadsheet_id, range_notations))
+        return expected
+
+    monkeypatch.setattr(client, "sheets_batch_read", fake_batch_read)
+    for json_flag in ["--json", "-o"]:
+        calls.clear()
+        result = runner.invoke(
+            app,
+            [
+                "sheets",
+                "batch-read",
+                "sheet-123",
+                "-r",
+                "Data!A1:B3",
+                "--range",
+                "Other!A1",
+                json_flag,
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert calls == [("sheet-123", ["Data!A1:B3", "Other!A1"])]
+        assert json.loads(result.stdout) == expected
+
+
+def test_sheets_batch_read_displays_each_range_by_default(monkeypatch):
+    monkeypatch.setattr(
+        client,
+        "sheets_batch_read",
+        lambda spreadsheet_id, range_notations: [
+            {"range": "Empty!A1", "headers": [], "rows": []},
+            {"range": "Data!A1:A2", "headers": ["Name"], "rows": [{"Name": "Alice"}]},
+            {"range": "Other!A1:A2", "headers": ["Name"], "rows": [{"Name": "Bob"}]},
+        ],
+    )
+    result = runner.invoke(
+        app,
+        [
+            "sheets",
+            "batch-read",
+            "sheet-123",
+            "-r",
+            "Empty!A1",
+            "-r",
+            "Data!A1:A2",
+            "-r",
+            "Other!A1:A2",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Empty!A1: No data found." in result.stdout
+    assert "Data!A1:A2" in "".join(result.stdout.split())
+    assert "Alice" in result.stdout
+    assert "Other!A1:A2" in "".join(result.stdout.split())
+    assert "Bob" in result.stdout
+
+
+def test_sheets_batch_read_requires_ranges():
+    result = runner.invoke(app, ["sheets", "batch-read", "sheet-123"])
+    assert result.exit_code == 2
+
+
+def test_sheets_batch_read_requires_range_flag():
+    result = runner.invoke(app, ["sheets", "batch-read", "sheet-123", "Data!A1"])
+    assert result.exit_code == 2
+
+
+def test_sheets_batch_read_accepts_one_range(monkeypatch):
+    calls = []
+
+    def fake_batch_read(spreadsheet_id, range_notations):
+        calls.append((spreadsheet_id, range_notations))
+        return []
+
+    monkeypatch.setattr(client, "sheets_batch_read", fake_batch_read)
+    result = runner.invoke(app, ["sheets", "batch-read", "sheet-123", "--range", "Data!A1"])
+    assert result.exit_code == 0
+    assert calls == [("sheet-123", ["Data!A1"])]
+
+
+def test_sheets_batch_read_reports_errors(monkeypatch):
+    def fake_batch_read(spreadsheet_id, range_notations):
+        raise ValueError("Invalid range")
+
+    monkeypatch.setattr(client, "sheets_batch_read", fake_batch_read)
+    result = runner.invoke(app, ["sheets", "batch-read", "sheet-123", "-r", "invalid"])
+    assert result.exit_code == 1
+    assert "Invalid range" in result.stdout
 
 
 def test_extract_drive_file_id_accepts_editor_and_drive_urls():
@@ -23,6 +120,197 @@ def test_extract_drive_file_id_accepts_editor_and_drive_urls():
     )
     assert extract_drive_file_id("https://drive.google.com/open?id=file-123") == "file-123"
     assert extract_drive_file_id("raw-file-id") == "raw-file-id"
+
+
+def test_docs_create_allows_omitting_channel(monkeypatch):
+    permission_calls: list[dict] = []
+    monkeypatch.setattr(
+        client,
+        "docs_create",
+        lambda title, content, folder_id=None: {
+            "document_id": "doc-123",
+            "title": title,
+            "url": "https://docs.google.com/document/d/doc-123/edit",
+        },
+    )
+    monkeypatch.setattr(
+        client,
+        "drive_setup_channel_permissions",
+        lambda **kwargs: (
+            permission_calls.append(kwargs)
+            or {"shared_with": [], "new_owner": kwargs["requester_email"]}
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        ["docs", "create", "Personal Notes", "--owner", "alice@example.com"],
+    )
+
+    assert result.exit_code == 0
+    assert permission_calls == [
+        {
+            "file_id": "doc-123",
+            "channel_member_emails": [],
+            "requester_email": "alice@example.com",
+        }
+    ]
+    assert "Created document: Personal Notes" in result.output
+    assert "Shared with" not in result.output
+    assert "Ownership transferred to alice@example.com" in result.output
+
+
+def test_drive_drives_lists_shared_drive_ids(monkeypatch):
+    calls: list[dict] = []
+
+    def fake_drive_list_drives(**kwargs):
+        calls.append(kwargs)
+        return [{"id": "0ALWnusNQi9yLUk9PVA", "name": "Engineering"}]
+
+    monkeypatch.setattr(client, "drive_list_drives", fake_drive_list_drives)
+
+    result = runner.invoke(app, ["drive", "drives", "--limit", "5"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [{"max_results": 5}]
+    assert "Engineering" in result.output
+    assert "0ALWnusNQi9yLUk9PVA" in result.output
+
+
+_CREATE_COMMANDS = [
+    ("docs", "docs_create", "document_id", "document"),
+    ("sheets", "sheets_create", "spreadsheet_id", "spreadsheet"),
+    ("slides", "slides_create", "presentation_id", "presentation"),
+]
+
+
+@pytest.mark.parametrize(("command", "client_fn", "id_key", "kind"), _CREATE_COMMANDS)
+def test_create_in_folder_skips_ownership_transfer(
+    monkeypatch, command, client_fn, id_key, kind
+):
+    create_calls: list[dict] = []
+    monkeypatch.setattr(
+        client,
+        client_fn,
+        lambda title, *args, **kwargs: (
+            create_calls.append({"title": title, "folder_id": kwargs.get("folder_id")})
+            or {id_key: "file-123", "title": title, "url": "https://example.test/file-123"}
+        ),
+    )
+    monkeypatch.setattr(
+        client,
+        "drive_setup_channel_permissions",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected permission setup")),
+    )
+
+    result = runner.invoke(app, [command, "create", "Team Notes", "--folder", "drive-123"])
+
+    assert result.exit_code == 0, result.output
+    assert create_calls == [{"title": "Team Notes", "folder_id": "drive-123"}]
+    assert f"Created {kind}: Team Notes" in result.output
+    assert "Ownership transferred" not in result.output
+
+
+@pytest.mark.parametrize(("command", "client_fn", "id_key", "kind"), _CREATE_COMMANDS)
+def test_create_in_folder_ignores_owner(
+    monkeypatch, command, client_fn, id_key, kind
+):
+    monkeypatch.setattr(
+        client,
+        client_fn,
+        lambda title, *args, **kwargs: {
+            id_key: "file-123",
+            "title": title,
+            "url": "https://example.test/file-123",
+        },
+    )
+    monkeypatch.setattr(
+        client,
+        "drive_setup_channel_permissions",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected permission setup")),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            command,
+            "create",
+            "Team Notes",
+            "--folder",
+            "drive-123",
+            "--owner",
+            "alice@example.com",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Ownership transferred" not in result.output
+
+
+@pytest.mark.parametrize(("command", "client_fn", "id_key", "kind"), _CREATE_COMMANDS)
+def test_create_in_folder_still_shares_with_channel(
+    monkeypatch, command, client_fn, id_key, kind
+):
+    permission_calls: list[dict] = []
+    monkeypatch.setattr(
+        client,
+        client_fn,
+        lambda title, *args, **kwargs: {
+            id_key: "file-123",
+            "title": title,
+            "url": "https://example.test/file-123",
+        },
+    )
+    monkeypatch.setattr(
+        "gsuite.cli._get_channel_member_emails_via_cli", lambda channel: ["bob@example.com"]
+    )
+    monkeypatch.setattr(
+        client,
+        "drive_setup_channel_permissions",
+        lambda **kwargs: (
+            permission_calls.append(kwargs) or {"shared_with": ["bob@example.com"]}
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            command,
+            "create",
+            "Team Notes",
+            "--folder",
+            "drive-123",
+            "--channel",
+            "eng",
+            "--owner",
+            "alice@example.com",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert permission_calls == [
+        {
+            "file_id": "file-123",
+            "channel_member_emails": ["bob@example.com"],
+            "requester_email": None,
+        }
+    ]
+    assert "Shared with 1 channel members" in result.output
+    assert "Ownership transferred" not in result.output
+
+
+@pytest.mark.parametrize(("command", "client_fn", "id_key", "kind"), _CREATE_COMMANDS)
+def test_create_requires_owner_without_folder(monkeypatch, command, client_fn, id_key, kind):
+    monkeypatch.setattr(
+        client,
+        client_fn,
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected create")),
+    )
+
+    result = runner.invoke(app, [command, "create", "Team Notes"])
+
+    assert result.exit_code == 1
+    assert "--owner is required unless --folder is set" in result.output
 
 
 def test_drive_list_full_text_flag_is_passed_to_client(monkeypatch):
@@ -58,6 +346,25 @@ def test_drive_list_full_text_flag_is_passed_to_client(monkeypatch):
             "file_type": None,
             "full_text": True,
         }
+    ]
+    assert "file-123" in result.output
+
+
+def test_analytics_sites_outputs_json(monkeypatch):
+    from gsuite import analytics_properties
+
+    monkeypatch.setattr(
+        analytics_properties,
+        "PROPERTY_MAPPINGS",
+        {"example.com": "123", "example": "123", "other.com": "456"},
+    )
+
+    result = runner.invoke(app, ["analytics", "sites", "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == [
+        {"property_id": "123", "sites": ["example", "example.com"]},
+        {"property_id": "456", "sites": ["other.com"]},
     ]
 
 
@@ -98,6 +405,91 @@ def test_docs_bullets_command_prints_verification_summary(monkeypatch):
     assert "Verification: matched 2, updated 2, verified 2, already bulleted 1" in result.output
     assert "paragraph 2:" in result.output
     assert "tab tab-2 paragraph 4:" in result.output
+
+
+def test_docs_comments_command_accepts_url_and_outputs_json(monkeypatch):
+    calls: list[dict] = []
+    comments = [
+        {
+            "id": "comment-1",
+            "content": "Please clarify this section.",
+            "author": {"display_name": "Ada Lovelace"},
+            "quoted_file_content": {"value": "Draft language"},
+            "resolved": False,
+            "deleted": False,
+            "replies": [],
+        }
+    ]
+    monkeypatch.setattr(
+        client,
+        "docs_list_comments",
+        lambda document_id, max_results, include_deleted: (
+            calls.append(
+                {
+                    "document_id": document_id,
+                    "max_results": max_results,
+                    "include_deleted": include_deleted,
+                }
+            )
+            or comments
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "docs",
+            "comments",
+            "https://docs.google.com/document/d/doc-123/edit",
+            "--limit",
+            "25",
+            "--include-deleted",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == comments
+    assert calls == [
+        {
+            "document_id": "doc-123",
+            "max_results": 25,
+            "include_deleted": True,
+        }
+    ]
+
+
+def test_docs_comments_command_prints_threads_without_rich_markup(monkeypatch):
+    monkeypatch.setattr(
+        client,
+        "docs_list_comments",
+        lambda document_id, max_results, include_deleted: [
+            {
+                "id": "comment-1",
+                "content": "Use [draft] here.",
+                "author": {"display_name": "Ada Lovelace"},
+                "quoted_file_content": {"value": "Original [text]"},
+                "resolved": True,
+                "deleted": False,
+                "replies": [
+                    {
+                        "id": "reply-1",
+                        "content": "Done [now].",
+                        "action": "resolve",
+                        "author": {"display_name": "Grace Hopper"},
+                    }
+                ],
+            }
+        ],
+    )
+
+    result = runner.invoke(app, ["docs", "comments", "doc-123"])
+
+    assert result.exit_code == 0
+    assert "Comment comment-1 by Ada Lovelace [resolved]" in result.output
+    assert "Quoted: Original [text]" in result.output
+    assert "Use [draft] here." in result.output
+    assert "Reply reply-1 by Grace Hopper [resolve]: Done [now]." in result.output
 
 
 def test_drive_revisions_command_accepts_sheets_url_and_outputs_json(monkeypatch):
@@ -264,3 +656,151 @@ def test_drive_download_revision_command_writes_original_binary(tmp_path, monkey
     assert result.exit_code == 0
     assert output_path.read_bytes() == b"historical image"
     assert "Downloaded revision rev-42" in result.output
+
+
+@pytest.mark.parametrize("json_flag", ["--json", "-o"])
+def test_directory_search_json_and_limit(monkeypatch, json_flag):
+    expected = [
+        {
+            "resource_name": "people/123",
+            "name": "[bold]Alex",
+            "email_addresses": ["alex@example.com"],
+        }
+    ]
+    search = Mock(return_value=expected)
+    monkeypatch.setattr(client, "directory_search", search)
+    result = runner.invoke(app, ["directory", "search", "Alex", "-n", "7", json_flag])
+
+    assert result.exit_code == 0
+    search.assert_called_once_with("Alex", max_results=7)
+    assert json.loads(result.stdout) == expected
+
+
+def test_directory_table_preserves_names_and_all_emails(monkeypatch):
+    monkeypatch.setattr(
+        client,
+        "directory_list",
+        lambda *args, **kwargs: [
+            {
+                "resource_name": "people/123",
+                "name": "Alex",
+                "email_addresses": ["alex@example.com", "alias@example.com"],
+            },
+            {"resource_name": "people/456", "name": "No email", "email_addresses": []},
+        ],
+    )
+
+    result = runner.invoke(app, ["directory", "list"])
+
+    assert result.exit_code == 0
+    for text in ["Alex", "alex@example.com", "alias@example.com", "No email"]:
+        assert text in result.stdout
+
+
+def test_directory_markdown_escapes_cells(monkeypatch):
+    monkeypatch.setattr(
+        client,
+        "directory_list",
+        lambda *args, **kwargs: [
+            {
+                "resource_name": "people/123",
+                "name": "Alex|Example\nTeam",
+                "email_addresses": ["alex@example.com", "alias@example.com"],
+            },
+        ],
+    )
+
+    result = runner.invoke(app, ["directory", "list", "--markdown"])
+
+    assert result.exit_code == 0
+    assert result.stdout == (
+        "| Name | Email addresses |\n| --- | --- |\n"
+        "| Alex\\|Example Team | alex@example.com, alias@example.com |\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "flags,expected",
+    [
+        ([], "No people found."),
+        (["--json"], "[]"),
+        (["--markdown"], "| Name | Email addresses |\n| --- | --- |"),
+    ],
+)
+def test_directory_empty_output(monkeypatch, flags, expected):
+    monkeypatch.setattr(client, "directory_list", lambda *args, **kwargs: [])
+
+    result = runner.invoke(app, ["directory", "list", *flags])
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == expected
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        [],
+        ["Alex", "--limit", "0"],
+        ["Alex", "--limit", "-1"],
+    ],
+)
+def test_directory_search_cli_rejects_invalid_arguments(monkeypatch, args):
+    search = Mock()
+    monkeypatch.setattr(client, "directory_search", search)
+
+    assert runner.invoke(app, ["directory", "search", *args]).exit_code == 2
+    search.assert_not_called()
+
+
+@pytest.mark.parametrize("command", [["list"], ["search", "Alex"]])
+def test_directory_cli_reports_api_error(monkeypatch, command):
+    search = Mock(side_effect=RuntimeError("Insufficient authentication scopes"))
+    monkeypatch.setattr(client, f"directory_{command[0]}", search)
+    result = runner.invoke(app, ["directory", *command, "--json"])
+
+    assert result.exit_code == 1
+    assert "Insufficient authentication scopes" in result.stdout
+
+
+def test_directory_is_discoverable_in_help():
+    for args, expected in [
+        (["--help"], ["directory"]),
+        (["directory", "--help"], ["search", "list"]),
+    ]:
+        result = runner.invoke(app, args)
+        assert result.exit_code == 0
+        for command in expected:
+            assert command in result.stdout
+
+
+@pytest.mark.parametrize("json_flag", ["--json", "-o"])
+def test_directory_list_outputs_json(monkeypatch, json_flag):
+    expected = [
+        {
+            "resource_name": "people/1",
+            "name": "Alex",
+            "email_addresses": ["alex@example.com"],
+        }
+    ]
+
+    list_people = Mock(return_value=expected)
+    monkeypatch.setattr(client, "directory_list", list_people)
+    result = runner.invoke(app, ["directory", "list", json_flag])
+
+    assert result.exit_code == 0
+    list_people.assert_called_once_with()
+    assert json.loads(result.stdout) == expected
+
+
+@pytest.mark.parametrize("args", [["--limit", "100"], ["-n", "100"], ["Alex"]])
+def test_directory_list_rejects_invalid_arguments(args):
+    assert runner.invoke(app, ["directory", "list", *args]).exit_code == 2
+
+
+def test_directory_json_takes_precedence_over_markdown(monkeypatch):
+    monkeypatch.setattr(client, "directory_list", lambda *args, **kwargs: [])
+
+    result = runner.invoke(app, ["directory", "list", "--json", "--markdown"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == []

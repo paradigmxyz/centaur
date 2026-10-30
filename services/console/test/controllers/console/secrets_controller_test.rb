@@ -85,7 +85,7 @@ module Console
 
     test "POST create resolves the GitHub token profile" do
       assert_difference -> { StaticSecret.count } => 1,
-                        -> { RequestRule.count } => 2 do
+                        -> { RequestRule.count } => 3 do
         post console_static_secrets_url, params: {
           secret: { name: "GitHub token", foreign_id: "github-token" },
           static: { kind: "github_token", mode: "inject" },
@@ -97,7 +97,7 @@ module Console
       assert_equal "github_token", secret.kind
       assert_nil secret.inject_config
       assert_equal CredentialProfiles::GithubToken::REPLACE_CONFIG, secret.replace_config
-      assert_equal %w[api.github.com github.com], secret.rules.map(&:host)
+      assert_equal %w[api.github.com github.com api.githubcopilot.com], secret.rules.map(&:host)
     end
 
     test "PATCH preserves a GitHub token profile through the form representation" do

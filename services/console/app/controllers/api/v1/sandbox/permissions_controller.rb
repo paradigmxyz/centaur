@@ -8,11 +8,7 @@ module Api
             return render_error(status: :unauthorized, message: "sandbox token is no longer assigned")
           end
 
-          # Redacting the cached snapshot stores the unredacted config but skips
-          # the expensive per-request grant rebuild, under the same freshness
-          # model the proxy sync path accepts.
-          snapshot = PrincipalSyncConfigSnapshot.fetch_for(principal)
-          permissions = Principal.redact_live_secrets(snapshot.config)
+          permissions = PrincipalSyncConfig.redacted_config_for(principal)
           body = {
             data: {
               sandbox_id: sandbox_claims.fetch("sandbox_id"),
@@ -22,6 +18,7 @@ module Api
               capabilities: capabilities_payload(principal),
               slack_channel_permissions: principal.effective_slack_channel_permissions_payload,
               oauth_credentials: oauth_credentials_payload(principal),
+              connected_tools: principal.connected_tool_names,
               permissions: permissions
             }
           }.to_json

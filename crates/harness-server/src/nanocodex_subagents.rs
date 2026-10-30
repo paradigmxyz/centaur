@@ -301,14 +301,3 @@ pub(crate) fn with_subagents(
         .tool(PromptAgent { agents })
         .build()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::ChildKind;
-
-    #[test]
-    fn child_tool_names_are_stable() {
-        assert_eq!(ChildKind::Spawn.name(), "spawn_agent");
-        assert_eq!(ChildKind::Fork.name(), "fork_agent");
-    }
-}

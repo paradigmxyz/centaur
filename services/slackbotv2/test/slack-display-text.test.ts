@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { slackRichTextMentionsUser } from '../src/slack-display-text'
+import { renderSlackDisplayText, slackRichTextMentionsUser } from '../src/slack-display-text'
 
 const BOT_USER_ID = 'U0ANX3AM5RR'
 const MENTION = `<@${BOT_USER_ID}> investigate`
@@ -44,5 +44,22 @@ describe('Slack rich-text mentions', () => {
   it('requires the exact configured bot user', () => {
     expect(slackRichTextMentionsUser({ attachments: [{ pretext: MENTION }] }, 'UOTHER')).toBe(false)
     expect(slackRichTextMentionsUser({ attachments: [{ pretext: MENTION }] }, undefined)).toBe(false)
+  })
+})
+
+describe('Slack display text', () => {
+  it('decodes block text escapes once, keeping escaped entities literal', () => {
+    const raw = {
+      blocks: [
+        {
+          type: 'section',
+          text: { type: 'mrkdwn', text: 'a &lt; b &amp;&amp; Write &amp;lt;br&amp;gt;' }
+        }
+      ]
+    }
+    expect(renderSlackDisplayText({ raw, text: '' })).toMatchObject({
+      source: 'raw_blocks',
+      text: 'a < b && Write &lt;br&gt;'
+    })
   })
 })

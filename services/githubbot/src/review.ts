@@ -3,7 +3,7 @@ import type { StateAdapter } from "chat";
 import { backgroundWaitUntil } from "./context";
 import { reactWorkingOnSubject, settleSubjectReaction } from "./reactions";
 import { DEFAULT_REVIEW_PROMPT } from "./review-prompt";
-import { runTurnStream } from "./turn";
+import { runTurnStream, turnOutputChars } from "./turn";
 import type {
   ForwardSessionInput,
   GithubbotApiMessage,
@@ -41,6 +41,18 @@ const REVIEW_DEDUP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 // Team membership is cached briefly so a flurry of team review-requests doesn't
 // hit the API for every one.
 const TEAM_MEMBERSHIP_CACHE_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Session thread key for a PR's review run. api-rs authorizes githubbot per
+ * thread-key prefix, so this family is listed in its ingress spec.
+ */
+export function reviewThreadKey(
+  owner: string,
+  repo: string,
+  number: number,
+): string {
+  return `github-review:${owner}/${repo}:${number}`;
+}
 
 /**
  * Review-on-request trigger. The GitHub chat adapter only surfaces comment
@@ -83,7 +95,7 @@ export function handleReviewRequest(
   const teamSlug = stringValue(payload.requested_team?.slug);
   if (!directMatch && !teamSlug) return null;
 
-  const reviewThreadKey = `github-review:${owner}/${repo}:${number}`;
+  const threadKey = reviewThreadKey(owner, repo, number);
   const title = stringValue(payload.pull_request?.title) ?? `#${number}`;
   const url =
     stringValue(payload.pull_request?.html_url) ??
@@ -94,11 +106,11 @@ export function handleReviewRequest(
 
   const trace: GithubbotTrace = {
     includeContext: false,
-    messageId: `review-${reviewThreadKey}-${input.deliveryId}`,
+    messageId: `review-${threadKey}-${input.deliveryId}`,
     mode: "execute",
     openStream: true,
     startedAtMs: nowMs(),
-    threadId: reviewThreadKey,
+    threadId: threadKey,
   };
 
   return (async () => {
@@ -114,7 +126,7 @@ export function handleReviewRequest(
     // Claim the delivery before the background run so a redelivery never
     // double-reviews. State-keyed (not Chat-thread-keyed) because the review
     // thread is synthetic and never touches the adapter.
-    const dedupKey = `${options.stateKeyPrefix ?? "centaur-githubbot"}:review-delivery:${reviewThreadKey}:${input.deliveryId}`;
+    const dedupKey = `${options.stateKeyPrefix ?? "centaur-githubbot"}:review-delivery:${threadKey}:${input.deliveryId}`;
     let claimed = true;
     try {
       claimed = await state.setIfNotExists(dedupKey, "1", REVIEW_DEDUP_TTL_MS);
@@ -151,7 +163,7 @@ export function handleReviewRequest(
         owner,
         repo,
         requester,
-        threadKey: reviewThreadKey,
+        threadKey,
         title,
         url,
       }),
@@ -162,7 +174,7 @@ export function handleReviewRequest(
         forwardInput.afterEventId = lastEventId;
       },
       openStream: false,
-      threadId: reviewThreadKey,
+      threadId: threadKey,
       trace,
     };
 
@@ -170,6 +182,7 @@ export function handleReviewRequest(
       runTurnStream(options, forwardInput)
         .then(async (result) => {
           traceLog(options, "githubbot_review_turn_complete", trace, {
+            chars: turnOutputChars(result),
             failed: result.failed,
           });
           await settleSubjectReaction(

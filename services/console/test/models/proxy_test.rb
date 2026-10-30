@@ -1,13 +1,7 @@
 require "test_helper"
 
 class ProxyTest < ActiveSupport::TestCase
-  include ActiveJob::TestHelper
   include ActiveSupport::Testing::TimeHelpers
-
-  teardown do
-    clear_enqueued_jobs
-    clear_performed_jobs
-  end
 
   def valid_attrs(overrides = {})
     {
@@ -90,28 +84,6 @@ class ProxyTest < ActiveSupport::TestCase
     assert_nil proxy.requester_principal_assigned_at
   end
 
-  test "an unassigned proxy delivers an empty config" do
-    proxy = Proxy.create!(name: "idle", principal: nil)
-    config = proxy.sync_config_snapshot.fetch(:config)
-    assert_empty config["secrets"]
-    assert_empty config["transforms"]
-    assert_empty config["postgres"]
-  end
-
-  test "config_hash changes when the principal is swapped" do
-    proxy = Proxy.create!(name: "swap", principal: principals(:globex_user))
-    before = proxy.config_hash
-    proxy.update!(principal: principals(:acme_channel))
-    refute_equal before, proxy.config_hash
-  end
-
-  test "config_hash changes when labels change" do
-    proxy = Proxy.create!(name: "label-hash", principal: principals(:globex_user))
-    before = proxy.config_hash
-    proxy.update!(labels: { "centaur.slack_user_id" => "U123" })
-    refute_equal before, proxy.config_hash
-  end
-
   test "declares prx as its oid prefix" do
     assert_equal "prx", Proxy.oid_prefix
   end
@@ -154,119 +126,11 @@ class ProxyTest < ActiveSupport::TestCase
     assert_includes dup.errors[:bearer_token_hash], "has already been taken"
   end
 
-  # --- config_hash --------------------------------------------------------
-  # Grant resolution and sync-payload assembly are tested on
-  # PrincipalSyncConfigSnapshot; here we cover only how the proxy's hash reacts
-  # to changes.
-
-  test "config_hash changes when a pg_dsn grant is added" do
-    proxy = Proxy.create!(name: "pg-hashing", principal: principals(:globex_user))
-    before = proxy.config_hash
-    Grant.create!(principal: proxy.principal, pg_dsn_secret: pg_dsn_secrets(:acme_analytics_pg),
-                  created_by: users(:globex_admin))
-
-    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ proxy.principal.id ]) do
-      assert_equal before, proxy.reload.config_hash
-    end
-
-    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
-    refute_equal before, proxy.reload.config_hash
-  end
-
-  test "config_hash changes when a transform grant is added" do
-    proxy = Proxy.create!(name: "hashing", principal: principals(:globex_user))
-    before = proxy.config_hash
-    Grant.create!(principal: proxy.principal, gcp_auth_secret: gcp_auth_secrets(:acme_bigquery),
-                  created_by: users(:globex_admin))
-
-    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ proxy.principal.id ]) do
-      assert_equal before, proxy.reload.config_hash
-    end
-
-    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
-    refute_equal before, proxy.reload.config_hash
-  end
-
-  test "config_hash changes when a role grant becomes reachable" do
-    role = Role.create!(foreign_id: "extra", created_by: users(:acme_admin))
-    proxy = proxies(:acme_proxy)
-    before = proxy.config_hash
-    Grant.create!(role: role, gcp_auth_secret: gcp_auth_secrets(:acme_bigquery),
-                  created_by: users(:acme_admin))
-    principals(:acme_channel).principal_roles.create!(role: role)
-
-    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ proxy.principal.id ]) do
-      assert_equal before, proxy.reload.config_hash
-    end
-
-    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
-    refute_equal before, proxy.reload.config_hash
-  end
-
   # --- requester principal ------------------------------------------------
 
   def build_requester
     Principal.create!(foreign_id: "requester-#{SecureRandom.hex(4)}",
                       kind: "user", created_by: users(:acme_admin))
-  end
-
-  def build_hoistable_wrapper_secret
-    admin = users(:acme_admin)
-    app = OauthApp.create!(
-      slug: "hoist-#{SecureRandom.hex(4)}", provider: "github", client_id: "cid",
-      client_secret: "shh",
-      allowed_scopes: [ "repo" ], always_available: true, created_by: admin
-    )
-    credential = BrokerCredential.create!(
-      foreign_id: "hoist-cred-#{SecureRandom.hex(4)}",
-      token_endpoint: "https://oauth.example.com/token", client_id: "cid",
-      refresh_token: "refresh", access_token: "hoisted-token",
-      expires_at: 1.hour.from_now, last_refresh: Time.current,
-      oauth_app: app, created_by: admin
-    )
-    secret = StaticSecret.new(
-      name: "hoist wrapper",
-      inject_config: { "header" => "X-Requester-Token", "formatter" => "Bearer {{ .Value }}" },
-      broker_credential: credential, created_by: admin
-    )
-    secret.build_source(source_type: "token_broker", config: { "credential_id" => credential.oid })
-    secret.rules.build(host: "api.github.com", position: 0)
-    secret.save!
-    secret
-  end
-
-  test "config_hash changes on requester assign and swap, and clearing restores it" do
-    proxy = Proxy.create!(name: "requester-hash", principal: principals(:globex_user))
-    base = proxy.config_hash
-
-    proxy.update!(requester_principal: principals(:acme_user_alice))
-    assigned = proxy.config_hash
-    refute_equal base, assigned
-
-    proxy.update!(requester_principal: principals(:acme_user_bob))
-    swapped = proxy.config_hash
-    refute_equal assigned, swapped
-
-    proxy.update!(requester_principal: nil)
-    assert_equal base, proxy.config_hash
-  end
-
-  test "config_hash reacts to requester hoistable grant changes without a warm job" do
-    requester = build_requester
-    proxy = Proxy.create!(name: "requester-grants", principal: principals(:acme_channel),
-                          requester_principal: requester)
-    secret = build_hoistable_wrapper_secret
-    before = proxy.config_hash
-
-    grant = Grant.create!(principal: requester, static_secret: secret, created_by: users(:acme_admin))
-    granted = nil
-    assert_no_enqueued_jobs only: PrincipalSyncConfigSnapshotWarmJob do
-      granted = proxy.reload.config_hash
-    end
-    refute_equal before, granted
-
-    grant.destroy!
-    assert_equal before, proxy.reload.config_hash
   end
 
   test "destroying the requester principal unbinds it and keeps the proxy" do

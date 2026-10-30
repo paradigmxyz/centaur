@@ -14,9 +14,13 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, urlunparse
 
 log = logging.getLogger(__name__)
+
+COMPANY_CONTEXT_DSN_ENV = "CENTAUR_POSTGRES_DSN"
+COMPANY_CONTEXT_DATABASE_ENV = "COMPANY_CONTEXT_POSTGRES_DATABASE"
+DEFAULT_COMPANY_CONTEXT_DATABASE = "ai_v2"
 
 
 @dataclass
@@ -77,6 +81,28 @@ def secret(key: str, default: str | None = None) -> str:
     with contextlib.suppress(LookupError):
         ctx_name = f" for tool '{_tool_ctx.get().name}'"
     raise KeyError(f"Missing secret '{key}'{ctx_name}")
+
+
+def company_context_database_url(dsn: str | None = None) -> str:
+    """Return the Postgres URL company context data is read through.
+
+    The sandbox receives one database-less iron-proxy DSN and the proxy routes
+    by database name, so every tool reading indexed company context must pick
+    the same database. Returns an empty string when no DSN is configured.
+    """
+    value = dsn
+    if value is None:
+        value = os.environ.get(COMPANY_CONTEXT_DSN_ENV)
+    if value is None:
+        value = secret(COMPANY_CONTEXT_DSN_ENV, default="")
+    value = value.strip()
+    if value == COMPANY_CONTEXT_DSN_ENV:
+        return ""
+    parsed = urlparse(value)
+    if parsed.scheme and parsed.netloc and parsed.path in ("", "/"):
+        database = os.environ.get(COMPANY_CONTEXT_DATABASE_ENV, "").strip()
+        return urlunparse(parsed._replace(path=f"/{database or DEFAULT_COMPANY_CONTEXT_DATABASE}"))
+    return value
 
 
 def current_thread_key() -> str:

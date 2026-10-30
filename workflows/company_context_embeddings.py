@@ -1,4 +1,4 @@
-"""Experimental workflow: embed company context documents with OpenAI."""
+"""Workflow: embed company context documents with OpenAI."""
 
 from __future__ import annotations
 
@@ -6,22 +6,22 @@ import json
 import os
 from dataclasses import dataclass, field
 from typing import Any, Protocol
-from urllib.parse import urlparse, urlunparse
 
-import asyncpg
 from api.workflow_engine import WorkflowContext
 from openai import AsyncOpenAI, BadRequestError
 
 WORKFLOW_NAME = "company_context_embeddings"
-WORKFLOW_PRINCIPAL = True
 
-CENTAUR_POSTGRES_DSN_ENV = "CENTAUR_POSTGRES_DSN"
-DEFAULT_POSTGRES_DATABASE = "ai_v2"
 DEFAULT_BATCH_SIZE = 250
 DEFAULT_INTERVAL_SECONDS = 5 * 60
 DEFAULT_MAX_INPUT_CHARS = 8_192
 DEFAULT_MODEL = "text-embedding-3-small"
-EMBEDDING_DIMENSIONS = 1_536
+DEFAULT_EMBEDDING_DIMENSIONS = 1_536
+EMBEDDING_DIMENSIONS_ENV = "COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS"
+# pgvector will not build an HNSW or IVFFlat index above 2000 dimensions, so a
+# larger vector is storable but not searchable. Refuse it here rather than let
+# the index build fail later against a table that is already populated.
+MAX_EMBEDDING_DIMENSIONS = 2_000
 OPENAI_BATCH_SIZE = 25
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 EMBEDDING_UPSERTS = {
@@ -120,27 +120,6 @@ def _env_flag_enabled(name: str, default: bool = False) -> bool:
     return value.strip().lower() not in FALSE_ENV_VALUES
 
 
-def _database_url_with_name(value: str, database: str) -> str:
-    parsed = urlparse(value)
-    if parsed.scheme and parsed.netloc and parsed.path in ("", "/"):
-        return urlunparse(parsed._replace(path=f"/{database}"))
-    return value
-
-
-def _centaur_database_url() -> str:
-    value = os.getenv(CENTAUR_POSTGRES_DSN_ENV, "").strip()
-    if not value or value == CENTAUR_POSTGRES_DSN_ENV:
-        raise RuntimeError(f"{CENTAUR_POSTGRES_DSN_ENV} is required")
-    return _database_url_with_name(value, DEFAULT_POSTGRES_DATABASE)
-
-
-async def _connect_database():
-    return await asyncpg.connect(
-        _centaur_database_url(),
-        command_timeout=30,
-    )
-
-
 SCHEDULE = {
     "schedule_id": WORKFLOW_NAME,
     "interval_seconds": _positive_int(
@@ -173,6 +152,31 @@ def _client() -> EmbeddingsClient:
 def _model(value: str | None) -> str:
     configured = value or os.getenv("COMPANY_CONTEXT_EMBEDDINGS_MODEL") or DEFAULT_MODEL
     return configured.strip() or DEFAULT_MODEL
+
+
+def _embedding_dimensions(value: int | str | None = None) -> int:
+    """Vector width to request, which must match the embedding column.
+
+    The write side (this workflow) and the query side (the company_context
+    tool) read the same variable for that reason: a mismatch is not a
+    degraded search, it is an insert that fails or a query that compares
+    vectors of different widths.
+    """
+    configured = value if value is not None else os.getenv(EMBEDDING_DIMENSIONS_ENV)
+    if configured is None or (isinstance(configured, str) and not configured.strip()):
+        return DEFAULT_EMBEDDING_DIMENSIONS
+    try:
+        dimensions = int(configured)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"{EMBEDDING_DIMENSIONS_ENV} must be an integer, got {configured!r}"
+        ) from error
+    if not 1 <= dimensions <= MAX_EMBEDDING_DIMENSIONS:
+        raise ValueError(
+            f"{EMBEDDING_DIMENSIONS_ENV} must be between 1 and "
+            f"{MAX_EMBEDDING_DIMENSIONS}, got {dimensions}"
+        )
+    return dimensions
 
 
 def _embedding_text(row: Any, max_chars: int) -> str:
@@ -281,7 +285,7 @@ async def _generate_embeddings(
     response = await client.embeddings.create(
         model=model,
         input=inputs,
-        dimensions=EMBEDDING_DIMENSIONS,
+        dimensions=_embedding_dimensions(),
         encoding_format="float",
     )
     embeddings_by_index = {item.index: item.embedding for item in response.data}
@@ -302,90 +306,87 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         inp.max_input_chars or os.getenv("COMPANY_CONTEXT_EMBEDDINGS_MAX_INPUT_CHARS"),
         DEFAULT_MAX_INPUT_CHARS,
     )
-    connection = await _connect_database()
+    connection = ctx._pool
     embedded_count = 0
     failed_count = 0
-    try:
-        rows = await _load_documents(connection, model=model, batch_size=batch_size)
-        if rows:
-            client = _client()
-            prepared_rows: list[tuple[Any, str]] = []
-            for row in rows:
-                text = _embedding_text(row, max_input_chars)
-                if text:
-                    prepared_rows.append((row, text))
-                    continue
-                await _store_embedding_failure(
-                    connection,
-                    row=row,
+    rows = await _load_documents(connection, model=model, batch_size=batch_size)
+    if rows:
+        client = _client()
+        prepared_rows: list[tuple[Any, str]] = []
+        for row in rows:
+            text = _embedding_text(row, max_input_chars)
+            if text:
+                prepared_rows.append((row, text))
+                continue
+            await _store_embedding_failure(
+                connection,
+                row=row,
+                model=model,
+                error_type="empty_input",
+                error_message="document contains no non-whitespace text",
+            )
+            failed_count += 1
+            ctx.log(
+                "company_context_embedding_document_failed",
+                source_kind=str(row["source_kind"]),
+                document_id=str(row["document_id"]),
+                error_type="empty_input",
+            )
+
+        for batch in _batches(prepared_rows, OPENAI_BATCH_SIZE):
+            batch_rows = [row for row, _text in batch]
+            batch_inputs = [text for _row, text in batch]
+            try:
+                embeddings = await _generate_embeddings(
+                    client,
                     model=model,
-                    error_type="empty_input",
-                    error_message="document contains no non-whitespace text",
+                    inputs=batch_inputs,
                 )
-                failed_count += 1
+            except BadRequestError as batch_error:
                 ctx.log(
-                    "company_context_embedding_document_failed",
-                    source_kind=str(row["source_kind"]),
-                    document_id=str(row["document_id"]),
-                    error_type="empty_input",
+                    "company_context_embedding_batch_rejected",
+                    documents=len(batch),
+                    error_type=type(batch_error).__name__,
                 )
-
-            for batch in _batches(prepared_rows, OPENAI_BATCH_SIZE):
-                batch_rows = [row for row, _text in batch]
-                batch_inputs = [text for _row, text in batch]
-                try:
-                    embeddings = await _generate_embeddings(
-                        client,
-                        model=model,
-                        inputs=batch_inputs,
-                    )
-                except BadRequestError as batch_error:
-                    ctx.log(
-                        "company_context_embedding_batch_rejected",
-                        documents=len(batch),
-                        error_type=type(batch_error).__name__,
-                    )
-                    for row, text in batch:
-                        try:
-                            document_embeddings = await _generate_embeddings(
-                                client,
-                                model=model,
-                                inputs=[text],
-                            )
-                        except BadRequestError as document_error:
-                            await _store_embedding_failure(
-                                connection,
-                                row=row,
-                                model=model,
-                                error_type=type(document_error).__name__,
-                                error_message=str(document_error),
-                            )
-                            failed_count += 1
-                            ctx.log(
-                                "company_context_embedding_document_failed",
-                                source_kind=str(row["source_kind"]),
-                                document_id=str(row["document_id"]),
-                                error_type=type(document_error).__name__,
-                            )
-                            continue
-                        await _store_embeddings(
-                            connection,
-                            rows=[row],
+                for row, text in batch:
+                    try:
+                        document_embeddings = await _generate_embeddings(
+                            client,
                             model=model,
-                            embeddings=document_embeddings,
+                            inputs=[text],
                         )
-                        embedded_count += 1
-                    continue
+                    except BadRequestError as document_error:
+                        await _store_embedding_failure(
+                            connection,
+                            row=row,
+                            model=model,
+                            error_type=type(document_error).__name__,
+                            error_message=str(document_error),
+                        )
+                        failed_count += 1
+                        ctx.log(
+                            "company_context_embedding_document_failed",
+                            source_kind=str(row["source_kind"]),
+                            document_id=str(row["document_id"]),
+                            error_type=type(document_error).__name__,
+                        )
+                        continue
+                    await _store_embeddings(
+                        connection,
+                        rows=[row],
+                        model=model,
+                        embeddings=document_embeddings,
+                    )
+                    embedded_count += 1
+                continue
 
-                await _store_embeddings(
-                    connection,
-                    rows=batch_rows,
-                    model=model,
-                    embeddings=embeddings,
-                )
-                embedded_count += len(batch_rows)
-    finally:
-        await connection.close()
+            await _store_embeddings(
+                connection,
+                rows=batch_rows,
+                model=model,
+                embeddings=embeddings,
+            )
+            embedded_count += len(batch_rows)
 
     if not rows:
         result = {

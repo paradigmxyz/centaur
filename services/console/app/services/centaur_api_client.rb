@@ -2,7 +2,14 @@ require "cgi"
 require "uri"
 
 class CentaurApiClient
-  Error = Class.new(StandardError)
+  class Error < StandardError
+    attr_reader :status
+
+    def initialize(message = nil, status: nil)
+      @status = status
+      super(message)
+    end
+  end
 
   DEFAULT_TIMEOUT_SECONDS = 20
 
@@ -13,34 +20,6 @@ class CentaurApiClient
     @base_url = (base_url.presence || ConsoleEnv["CENTAUR_API_URL"].presence || "http://localhost:8080").delete_suffix("/")
     @token_provider = token_provider
     @api = HttpClient.new(http: http, open_timeout: timeout, read_timeout: read_timeout)
-  end
-
-  def list_slack_archive_imports(limit: 100)
-    get("/api/admin/slack/archive-imports", limit: limit)
-  end
-
-  def create_slack_archive_import(filename:, content_type:, created_by:, metadata: {})
-    post(
-      "/api/admin/slack/archive-imports",
-      {
-        filename: filename,
-        content_type: content_type,
-        created_by: created_by,
-        metadata: metadata
-      }
-    )
-  end
-
-  def start_slack_archive_import(import_id)
-    post("/api/admin/slack/archive-imports/#{escape_path(import_id)}/start", {})
-  end
-
-  def retry_slack_archive_import(import_id)
-    post("/api/admin/slack/archive-imports/#{escape_path(import_id)}/retry", {})
-  end
-
-  def delete_slack_archive_import(import_id)
-    request(:delete, "/api/admin/slack/archive-imports/#{escape_path(import_id)}")
   end
 
   def list_slack_dm_sync_checkpoints(broker_credential_id:, home_team_id: nil)
@@ -66,12 +45,25 @@ class CentaurApiClient
     post("/api/admin/google/docs-sync/batch", payload)
   end
 
+  def get_google_docs_content_status(files:)
+    post("/api/admin/google/docs-sync/content-status", { files: files })
+  end
+
   def get_granola_sync_checkpoint(scope_id:)
     get("/api/admin/granola/sync/checkpoint", scope_id: scope_id)
   end
 
   def ingest_granola_sync_batch(payload)
     post("/api/admin/granola/sync/batch", payload)
+  end
+
+  def slack_external_team_ids
+    Array(get("/api/slack/external-team-ids")["slack_external_team_ids"])
+  end
+
+  def replace_slack_external_team_ids(team_ids)
+    response = request(:put, "/api/slack/external-team-ids", { slack_external_team_ids: team_ids })
+    Array(response["slack_external_team_ids"])
   end
 
   def create_session(thread_key:, harness_type:, metadata: {}, persona_id: nil,
@@ -108,9 +100,11 @@ class CentaurApiClient
     get("/api/workflows/runs/#{escape_path(run_id)}")
   end
 
-  def create_workflow_run(workflow_name:, input: nil)
+  def create_workflow_run(workflow_name:, input: nil, idempotency_key: nil, max_attempts: nil)
     payload = { workflow_name: workflow_name }
     payload[:input] = input unless input.nil?
+    payload[:idempotency_key] = idempotency_key if idempotency_key.present?
+    payload[:max_attempts] = max_attempts unless max_attempts.nil?
 
     post("/api/workflows/runs", payload)
   end
@@ -137,7 +131,10 @@ class CentaurApiClient
     return parsed if response.status.between?(200, 299)
 
     message = parsed.is_a?(Hash) ? parsed["error"] || parsed["message"] || parsed["detail"] : nil
-    raise Error, message.presence || "Centaur API returned HTTP #{response.status}"
+    raise Error.new(
+      message.presence || "Centaur API returned HTTP #{response.status}",
+      status: response.status
+    )
   end
 
   def request_headers

@@ -8,7 +8,7 @@
         <label class="form-label" for="principal_foreign_id">Foreign ID</label>
         <%= text_field_tag "principal[foreign_id]", principal.foreign_id, id: "principal_foreign_id", class: "form-input #{field_error_class(principal, :foreign_id)}", placeholder: "slack-channel-T123-C456" %>
         <%= field_error(principal, :foreign_id) %>
-        <p class="form-hint">Optional. A stable, URL-safe handle for the chat or service identity.</p>
+        <p class="form-hint">Optional. A stable, URL-safe handle for the service identity.</p>
       </div>
       <div>
         <label class="form-label" for="principal_name">Display name</label>

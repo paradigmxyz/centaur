@@ -5,7 +5,11 @@ module Login
   # the code exchange, and user provisioning live in SessionOauthController.
   module Providers
     def self.registry
-      @registry ||= { Google::KEY => Google.new, Slack::KEY => Slack.new }.freeze
+      @registry ||= {
+        Google::KEY => Google.new,
+        Slack::KEY => Slack.new,
+        Okta::KEY => Okta.new
+      }.freeze
     end
 
     # The strategy for +key+, or nil for an unknown provider.

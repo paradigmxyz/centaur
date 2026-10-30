@@ -1,11 +1,42 @@
 {{- if .Values.slackbotv2.enabled }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
+{{- $proactivity := .Values.slackbotv2.proactivity -}}
+{{- $proactivityRules := and $proactivity.enabled (or $proactivity.defaultRules $proactivity.channelRules) -}}
 {{- $console := include "centaur.consoleValues" . | fromYaml -}}
 {{- $slackbotV2MetricsAnnotations := dict -}}
 {{- if .Values.slackbotv2.metrics.scrapeAnnotations -}}
 {{- $slackbotV2MetricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" .Values.slackbotv2.metrics.path "prometheus.io/port" "3001" -}}
 {{- $slackbotV2MetricsAnnotations = mergeOverwrite $slackbotV2MetricsAnnotations (.Values.slackbotv2.metrics.annotations | default dict) -}}
 {{- end -}}
+{{- if $proactivityRules }}
+{{- /* The bot runs with no rules at all if any list repeats a name, so fail here. */ -}}
+{{- $ruleLists := dict "default" ($proactivity.defaultRules | default list) -}}
+{{- range $channel, $rules := $proactivity.channelRules }}{{- $_ := set $ruleLists $channel ($rules | default list) -}}{{- end }}
+{{- range $key, $rules := $ruleLists }}
+{{- $names := dict -}}
+{{- range $rules }}
+{{- if hasKey $names (trim .name) }}{{- fail (printf "slackbotv2.proactivity: %s rules repeat the name %q" $key (trim .name)) }}{{- end }}
+{{- $_ := set $names (trim .name) true -}}
+{{- end }}
+{{- end }}
+# Proactivity rules as JSON files the bot reads at boot from
+# SLACKBOTV2_PROACTIVITY_RULES_DIR: default.json for every channel and
+# <CHANNEL_ID>.json per channel (an empty list turns rule matching off there).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2") }}-proactivity-rules
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "slackbotv2") | nindent 4 }}
+data:
+{{- if $proactivity.defaultRules }}
+  default.json: {{ $proactivity.defaultRules | toJson | quote }}
+{{- end }}
+{{- range $channel, $rules := $proactivity.channelRules }}
+  {{ printf "%s.json" $channel }}: {{ $rules | default list | toJson | quote }}
+{{- end }}
+---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,6 +52,9 @@ spec:
     metadata:
       annotations:
         checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+{{- if $proactivityRules }}
+        checksum/proactivity-rules: {{ dict "default" $proactivity.defaultRules "channels" $proactivity.channelRules | toJson | sha256sum }}
+{{- end }}
 {{- with $slackbotV2MetricsAnnotations }}
 {{ toYaml . | nindent 8 }}
 {{- end }}
@@ -43,8 +77,7 @@ spec:
             - name: CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
             # New threads without an explicit --claude/--amp/--codex/
-            # --nanocodex flag run the deployment's default harness. api-rs
-            # applies any configured Codex/Nanocodex rollout.
+            # --nanocodex flag run the deployment's default harness.
             - name: SLACKBOTV2_DEFAULT_HARNESS
               value: {{ .Values.sandbox.harnessEngine | quote }}
             - name: SLACK_BOT_TOKEN
@@ -79,6 +112,16 @@ spec:
               value: {{ .Values.apiRs.activitySummary.enabled | quote }}
             - name: SLACKBOTV2_AUTO_JOIN_CREATED_CHANNELS
               value: {{ .Values.slackbotv2.autoJoinCreatedChannels | quote }}
+            - name: SLACKBOTV2_AGENT_VIEW_ENABLED
+              value: {{ .Values.slackbotv2.agentViewEnabled | quote }}
+            - name: SLACKBOTV2_ACK_REACTION_ENABLED
+              value: {{ .Values.slackbotv2.ackReactionEnabled | quote }}
+            - name: SLACKBOTV2_ACK_REACTION
+              value: {{ .Values.slackbotv2.ackReaction | quote }}
+            - name: SLACKBOTV2_STEERING_REACTION_ENABLED
+              value: {{ .Values.slackbotv2.steeringReactionEnabled | quote }}
+            - name: SLACKBOTV2_STEERING_REACTION
+              value: {{ .Values.slackbotv2.steeringReaction | quote }}
             - name: SLACKBOTV2_RESPONSE_METADATA_MODE
               value: {{ .Values.slackbotv2.responseMetadataMode | quote }}
             - name: SLACKBOTV2_RESPONSE_SERVICE_TIER_ENABLED
@@ -91,22 +134,29 @@ spec:
               value: {{ .Values.slackbotv2.messageOverridesStrategy.openaiBaseUrl | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_TIMEOUT_MS
               value: {{ .Values.slackbotv2.messageOverridesStrategy.timeoutMs | quote }}
-            - name: SLACKBOTV2_MESSAGE_OVERRIDES_MAX_OUTPUT_TOKENS
-              value: {{ .Values.slackbotv2.messageOverridesStrategy.maxOutputTokens | quote }}
-{{- if $console.publicUrl }}
-            # Public origin of the Console UI (matches the Console's own
-            # CENTAUR_CONSOLE_PUBLIC_URL). When set, the first assistant message
-            # in a Slack thread gets an "Open session in Console" link.
-            - name: CENTAUR_CONSOLE_PUBLIC_URL
-              value: {{ $console.publicUrl | quote }}
+            - name: SLACKBOTV2_PROACTIVITY_ENABLED
+              value: {{ .Values.slackbotv2.proactivity.enabled | quote }}
+{{- if .Values.slackbotv2.proactivity.enabled }}
+            - name: SLACKBOTV2_PROACTIVITY_CLASSIFIER
+              value: {{ .Values.slackbotv2.proactivity.classifier | quote }}
+{{- if gt (int .Values.slackbotv2.proactivity.debounceMs) 0 }}
+            - name: SLACKBOTV2_PROACTIVITY_DEBOUNCE_MS
+              value: {{ .Values.slackbotv2.proactivity.debounceMs | quote }}
+{{- end }}
+            - name: SLACKBOTV2_PROACTIVITY_MODEL
+              value: {{ .Values.slackbotv2.proactivity.model | quote }}
+            - name: SLACKBOTV2_PROACTIVITY_OPENAI_BASE_URL
+              value: {{ .Values.slackbotv2.proactivity.openaiBaseUrl | quote }}
+{{- if $proactivityRules }}
+            - name: SLACKBOTV2_PROACTIVITY_RULES_DIR
+              value: /etc/slackbotv2/proactivity-rules
+{{- end }}
+            - name: SLACKBOTV2_PROACTIVITY_TIMEOUT_MS
+              value: {{ .Values.slackbotv2.proactivity.timeoutMs | quote }}
 {{- end }}
 {{- if .Values.slackbotv2.assistantStatus }}
             - name: SLACKBOTV2_ASSISTANT_STATUS
               value: {{ .Values.slackbotv2.assistantStatus | quote }}
-{{- end }}
-{{- if .Values.slackbotv2.externalOrgAllowlist }}
-            - name: SLACKBOT_EXTERNAL_ORG_ALLOWLIST
-              value: {{ .Values.slackbotv2.externalOrgAllowlist | quote }}
 {{- end }}
 {{- if .Values.slackbotv2.triggerBotAllowlist }}
             - name: SLACKBOT_TRIGGER_BOT_ALLOWLIST
@@ -122,7 +172,11 @@ spec:
             - name: SLACKBOTV2_CHANNEL_DEFAULTS
               value: {{ .Values.slackbotv2.channelDefaults | toJson | quote }}
 {{- end }}
-{{- range $name := tuple "CLAUDE_MODEL" "CODEX_MODEL" "CODEX_MODEL_REASONING_EFFORT" }}
+{{- if .Values.codex.customProviders }}
+            - name: CODEX_CUSTOM_PROVIDERS
+              value: {{ .Values.codex.customProviders | toJson | quote }}
+{{- end }}
+{{- range $name := tuple "CLAUDE_MODEL" "CODEX_MODEL" "CODEX_MODEL_REASONING_EFFORT" "CENTAUR_PI_MODEL" "CENTAUR_OMP_MODEL" }}
 {{- if and (hasKey $.Values.sandbox.extraEnv $name) (not (hasKey $.Values.slackbotv2.extraEnv $name)) }}
             # Mirror the deployer's harness default override (sandbox.extraEnv)
             # so the Slack Console-link line names the model/reasoning policy
@@ -142,6 +196,15 @@ spec:
           ports:
             - containerPort: 3001
               name: http
+          # /health fails until the state database connects; keep liveness
+          # from restarting the pod while Postgres is still starting.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            periodSeconds: 5
+            failureThreshold: 24
+            timeoutSeconds: 5
           readinessProbe:
             httpGet:
               path: /health
@@ -156,6 +219,16 @@ spec:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:
 {{ toYaml .Values.slackbotv2.resources | nindent 12 }}
+{{- if $proactivityRules }}
+          volumeMounts:
+            - name: proactivity-rules
+              mountPath: /etc/slackbotv2/proactivity-rules
+              readOnly: true
+      volumes:
+        - name: proactivity-rules
+          configMap:
+            name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2") }}-proactivity-rules
+{{- end }}
 ---
 apiVersion: v1
 kind: Service

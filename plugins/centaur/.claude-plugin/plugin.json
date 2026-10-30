@@ -1,0 +1,27 @@
+{
+  "name": "centaur",
+  "description": "Use an authenticated Centaur deployment from Claude Code.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Paradigm",
+    "url": "https://github.com/paradigmxyz"
+  },
+  "homepage": "https://centaur.run",
+  "repository": "https://github.com/paradigmxyz/centaur",
+  "license": "Apache-2.0 OR MIT",
+  "keywords": ["centaur", "mcp", "tools", "agents"],
+  "userConfig": {
+    "mcp_url": {
+      "type": "string",
+      "title": "Centaur MCP URL",
+      "description": "The HTTPS URL of your Centaur deployment's /mcp endpoint.",
+      "required": true
+    }
+  },
+  "mcpServers": {
+    "centaur": {
+      "type": "http",
+      "url": "${user_config.mcp_url}"
+    }
+  }
+}

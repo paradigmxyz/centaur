@@ -7,6 +7,18 @@ module Api
         @proxy = proxies(:acme_proxy)
       end
 
+      test "shared apps are excluded without excluding their personal provider peers" do
+        app = oauth_apps(:acme_google).dup
+        app.update!(slug: "shared-google", client_secret: "synthetic", shared: true)
+        with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+          get "/api/v1/sandbox/oauth_apps", headers: auth_headers(token_for(@proxy))
+        end
+        assert_response :ok
+        slugs = json_body.fetch("data").map { |row| row.fetch("slug") }
+        assert_includes slugs, "google"
+        refute_includes slugs, "shared-google"
+      end
+
       test "returns enabled OAuth app start URLs for a valid sandbox token" do
         with_env(
           "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",

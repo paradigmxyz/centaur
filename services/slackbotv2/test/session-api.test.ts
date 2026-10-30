@@ -6,8 +6,10 @@ import {
   forwardToSessionApi,
   harnessRestartPreamble,
   interruptSessionExecution,
+  isSessionPrincipalAdmissionDenied,
   openSessionEventStream,
   resolveSlackHomeTeamId,
+  SessionApiError,
   serializeAttachment,
   serializeMessage
 } from '../src/session-api'
@@ -24,6 +26,21 @@ type RecordedRequest = {
   body: unknown
   url: string
 }
+
+describe('session admission errors', () => {
+  test('recognizes only the typed preapproval denial', () => {
+    const error = new SessionApiError({
+      action: 'create session',
+      body: JSON.stringify({ code: 'session_principal_not_preapproved' }),
+      retryable: false,
+      status: 403,
+      statusText: 'Forbidden'
+    })
+
+    expect(isSessionPrincipalAdmissionDenied(error)).toBe(true)
+    expect(isSessionPrincipalAdmissionDenied(new Error('forbidden'))).toBe(false)
+  })
+})
 
 function apiMessage(
   text: string,
@@ -232,7 +249,7 @@ describe('Slack home team API metadata', () => {
 })
 
 describe('session event streaming', () => {
-  test('passes activity summary events through to the renderer source stream', async () => {
+  test('passes activity summary and steering events through to the renderer source stream', async () => {
     const encoded = new TextEncoder().encode(
       [
         'id: 1',
@@ -240,6 +257,10 @@ describe('session event streaming', () => {
         'data: {"summary":"The agent is reading App Server events."}',
         '',
         'id: 2',
+        'event: session.steering_delivered',
+        'data: {"execution_id":"exec-1","input_line_count":1}',
+        '',
+        'id: 3',
         'event: session.execution_completed',
         'data: {"result_text":"done"}',
         '',
@@ -272,12 +293,18 @@ describe('session event streaming', () => {
       eventId: 1,
       eventKind: 'session.activity_summary'
     })
-    expect(events[1]).toMatchObject({
-      event: 'session.execution_completed',
+    expect(events[1]).toEqual({
+      data: { execution_id: 'exec-1', input_line_count: 1 },
+      event: 'session.steering_delivered',
       eventId: 2,
+      eventKind: 'session.steering_delivered'
+    })
+    expect(events[2]).toMatchObject({
+      event: 'session.execution_completed',
+      eventId: 3,
       eventKind: 'session.execution_completed'
     })
-    expect(seenEventIds).toEqual([1, 2])
+    expect(seenEventIds).toEqual([1, 2, 3])
   })
 
   test('uses interrupted wording for cancelled executions without error text', async () => {
@@ -312,7 +339,7 @@ describe('session event streaming', () => {
 
     expect(events).toEqual([
       {
-        data: { error: 'Execution interrupted' },
+        data: { error: 'Execution interrupted.' },
         event: 'session.execution_cancelled',
         eventId: 1,
         eventKind: 'session.execution_cancelled'
@@ -600,49 +627,6 @@ describe('Slack attachment serialization', () => {
 })
 
 describe('forwardToSessionApi overrides', () => {
-  test('creates session with default codex harness', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
-    const create = requests.find(request => request.url.endsWith('.000100'))
-    expect((create?.body as { harness_type?: string }).harness_type).toBe('codex')
-  })
-
-  test('creates session with parsed harness override', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('review this'), { harnessType: 'claudecode' })
-    )
-    const create = requests.find(request => request.url.endsWith('.000100'))
-    expect((create?.body as { harness_type?: string }).harness_type).toBe('claudecode')
-  })
-
-  test('includes model override on the execute input line', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('review this'), {
-        harnessType: 'claudecode',
-        model: 'claude-sonnet-4-6'
-      })
-    )
-    const execute = requests.find(request => request.url.endsWith('/execute'))
-    const inputLines = (execute?.body as { input_lines: string[] }).input_lines
-    expect(inputLines).toHaveLength(1)
-    const line = JSON.parse(inputLines[0]!)
-    expect(line.model).toBe('claude-sonnet-4-6')
-    expect(lineContent(line).some(part => textPartIncludes(part, '# Requester Context'))).toBe(true)
-    expect(line.message.content.at(-1)).toEqual({ type: 'text', text: 'review this' })
-  })
-
-  test('omits model field when no override is set', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
-    const execute = requests.find(request => request.url.endsWith('/execute'))
-    const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
-    expect('model' in line).toBe(false)
-  })
-
   test('includes provider override on the execute input line', async () => {
     const { fetchFn, requests } = fakeApi()
     await forwardToSessionApi(
@@ -664,25 +648,6 @@ describe('forwardToSessionApi overrides', () => {
     const execute = requests.find(request => request.url.endsWith('/execute'))
     const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
     expect('provider' in line).toBe(false)
-  })
-
-  test('includes reasoning override on the execute input line', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('audit this'), { reasoning: 'high' })
-    )
-    const execute = requests.find(request => request.url.endsWith('/execute'))
-    const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
-    expect(line.reasoning).toBe('high')
-  })
-
-  test('omits reasoning field when no override is set', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
-    const execute = requests.find(request => request.url.endsWith('/execute'))
-    const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
-    expect('reasoning' in line).toBe(false)
   })
 
   test('includes default idle timeout on execute requests', async () => {
@@ -759,6 +724,51 @@ describe('forwardToSessionApi overrides', () => {
     )
   })
 
+  test('restarts an existing disabled harness instead of routing back to it on conflict', async () => {
+    const { fetchFn, requests } = fakeApi({
+      createSession: [
+        {
+          body: {
+            error: 'session slack:C1:1700000000.000100 already exists with harness_type amp, requested codex',
+            ok: false
+          },
+          status: 409
+        },
+        { status: 200 }
+      ]
+    })
+    await forwardToSessionApi(
+      { ...options(fetchFn), enabledHarnesses: ['codex', 'claudecode'] },
+      forwardInput(apiMessage('hi'))
+    )
+    const creates = requests.filter(request => request.url.endsWith('.000100'))
+    expect(creates.map(request => request.body)).toEqual([
+      expect.objectContaining({ harness_type: 'codex' }),
+      expect.objectContaining({ harness_type: 'codex', on_harness_conflict: 'restart' })
+    ])
+    expect(requests.some(request => request.url.endsWith('/execute'))).toBe(true)
+  })
+
+  test('rejects disabled harnesses before making any session API requests', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await expect(forwardToSessionApi(
+      { ...options(fetchFn), enabledHarnesses: ['codex'] },
+      forwardInput(apiMessage('hi'), { harnessType: 'amp' })
+    )).rejects.toThrow('Harness amp is not enabled for this deployment')
+    expect(requests).toEqual([])
+  })
+
+  test('does not execute when the API resolves a disabled harness', async () => {
+    const { fetchFn, requests } = fakeApi({
+      createSession: [{ status: 200, body: { harness_type: 'amp' } }]
+    })
+    await expect(forwardToSessionApi(
+      { ...options(fetchFn), enabledHarnesses: ['codex'] },
+      forwardInput(apiMessage('hi'))
+    )).rejects.toThrow('Harness amp is not enabled for this deployment')
+    expect(requests.some(request => request.url.endsWith('/execute'))).toBe(false)
+  })
+
   test('surfaces non-conflict create failures', async () => {
     const { fetchFn } = fakeApi({
       createSession: [{ body: { error: 'boom', ok: false }, status: 500 }]
@@ -780,64 +790,6 @@ describe('forwardToSessionApi overrides', () => {
 })
 
 describe('forwardToSessionApi harness restart', () => {
-  test('explicit harness override requests restart on conflict', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('switch me'), { harnessType: 'codex' })
-    )
-    const create = requests.find(request => request.url.endsWith('.000100'))
-    expect((create?.body as { on_harness_conflict?: string }).on_harness_conflict).toBe('restart')
-  })
-
-  test('default create does not request restart', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
-    const create = requests.find(request => request.url.endsWith('.000100'))
-    expect('on_harness_conflict' in (create?.body as object)).toBe(false)
-  })
-
-  test('reports the harness resolved by api-rs', async () => {
-    const { fetchFn, requests } = fakeApi({
-      createSession: [
-        {
-          body: {
-            harness_switched: false,
-            harness_type: 'nanocodex',
-            harness_assignment: {
-              experiment: 'codex_nanocodex_ab',
-              requested_harness: 'codex',
-              cohort: 'nanocodex',
-              rollout_percent: 50
-            }
-          },
-          status: 200
-        }
-      ]
-    })
-    let resolvedHarness: string | undefined
-    let resolvedExperiment: string | undefined
-
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')), {
-      onSessionCreated: async outcome => {
-        resolvedHarness = outcome.harnessType
-        resolvedExperiment = outcome.harnessAssignment?.experiment
-      }
-    })
-
-    expect(resolvedHarness).toBe('nanocodex')
-    expect(resolvedExperiment).toBe('codex_nanocodex_ab')
-    expect(executeBody(requests).metadata).toMatchObject({
-      harness_type: 'nanocodex',
-      harness_assignment: {
-        experiment: 'codex_nanocodex_ab',
-        requested_harness: 'codex',
-        cohort: 'nanocodex',
-        rollout_percent: 50
-      }
-    })
-  })
-
   test('harness_switched response fires onSessionRestarted and prepends the preamble', async () => {
     const { fetchFn, requests } = fakeApi({
       createSession: [{ body: { ok: true, harness_switched: true }, status: 200 }]
@@ -976,96 +928,6 @@ describe('session principal display name', () => {
     }
   }
 
-  test('uses the GitHub handle from the requester Slack profile for PR attribution', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await withSlackStub(
-      url => {
-        if (url.includes('conversations.info')) {
-          return Response.json({ channel: { id: 'C1', name_normalized: 'eng-oncall' }, ok: true })
-        }
-        if (url.includes('users.profile.get')) {
-          return Response.json({
-            ok: true,
-            profile: {
-              display_name: 'Ada Lovelace',
-              fields: {
-                XfGithub: { label: 'GitHub', value: 'https://github.com/ada-lovelace' }
-              },
-              name: 'ada'
-            }
-          })
-        }
-        if (url.includes('users.info')) {
-          return Response.json({ ok: true, user: { profile: { display_name: 'Ada Lovelace' } } })
-        }
-        return Response.json({ ok: true })
-      },
-      async () => {
-        await forwardToSessionApi(slackOptions(fetchFn), forwardInput(apiMessage('please PR')))
-      }
-    )
-
-    const requesterContext = lineContent(executeLine(requests)).find(part =>
-      textPartIncludes(part, '# Requester Context')
-    )
-    expect(requesterContext?.text).toContain('GitHub handle from Slack profile: @ada-lovelace')
-    expect(requesterContext?.text).toContain('Prompted by: @ada-lovelace')
-    expect(requesterContext?.text).toContain('Assign the PR to the requester when possible: `ada-lovelace`')
-  })
-
-  test('uses the requester Slack display name for PR attribution when no GitHub handle exists', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await withSlackStub(
-      url => {
-        if (url.includes('conversations.info')) {
-          return Response.json({ channel: { id: 'C1', name_normalized: 'eng-oncall' }, ok: true })
-        }
-        if (url.includes('users.profile.get')) {
-          return Response.json({
-            ok: true,
-            profile: {
-              display_name: 'Ada Lovelace',
-              fields: {},
-              name: 'ada'
-            }
-          })
-        }
-        if (url.includes('users.info')) {
-          return Response.json({ ok: true, user: { profile: { display_name: 'Ada Lovelace' } } })
-        }
-        return Response.json({ ok: true })
-      },
-      async () => {
-        await forwardToSessionApi(slackOptions(fetchFn), forwardInput(apiMessage('please PR')))
-      }
-    )
-
-    const requesterContext = lineContent(executeLine(requests)).find(part =>
-      textPartIncludes(part, '# Requester Context')
-    )
-    expect(requesterContext?.text).toContain('GitHub handle from Slack profile: unavailable')
-    expect(requesterContext?.text).toContain('Prompted by: Ada Lovelace')
-    expect(requesterContext?.text).toContain(
-      'Use the requester\'s Slack display name or username because no verified GitHub handle is available.'
-    )
-    expect(requesterContext?.text).not.toContain('Omit the `Prompted by` line')
-  })
-
-  test('channel sessions name the principal after the channel', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await withSlackStub(
-      url =>
-        url.includes('conversations.info')
-          ? Response.json({ channel: { id: 'C1', name_normalized: 'eng-oncall' }, ok: true })
-          : Response.json({ ok: true }),
-      async () => {
-        await forwardToSessionApi(slackOptions(fetchFn), forwardInput(apiMessage('hi')))
-      }
-	    )
-	    expect(createBody(requests).metadata?.slack_conversation_name).toBe('eng-oncall')
-	    expect(createBody(requests).metadata?.slack_channel_id).toBe('C1')
-	  })
-
   test('continues creating the session when the channel lookup never settles', async () => {
     const { fetchFn, requests } = fakeApi()
     let slackCalls = 0
@@ -1087,78 +949,6 @@ describe('session principal display name', () => {
     expect(slackCalls).toBe(1)
     expect('slack_conversation_name' in (createBody(requests).metadata ?? {})).toBe(false)
     expect(requests.some(request => request.url.endsWith('/execute'))).toBe(true)
-  })
-
-  test('DM sessions include the email of a home-team partner', async () => {
-    const { fetchFn, requests } = fakeApi()
-    const dm = apiMessage('hi')
-    dm.threadId = 'slack:D9:1700000000.000100'
-    dm.raw = { channel: 'D9' }
-    await withSlackStub(
-      url => {
-        if (url.includes('users.info')) {
-          return Response.json({
-            ok: true,
-            user: {
-              is_stranger: false,
-              profile: { display_name: 'Ada Lovelace', email: 'ada@example.com' },
-              team_id: 'T1'
-            }
-          })
-        }
-        return Response.json({
-          ok: true,
-          profile: { display_name: 'Ada Lovelace' }
-        })
-      },
-      async () => {
-        await forwardToSessionApi(
-          { ...slackOptions(fetchFn), slackHomeTeamId: 'T1' },
-          forwardInput(dm)
-        )
-      }
-    )
-    expect(createBody(requests).metadata?.slack_conversation_name).toBe('Ada Lovelace')
-    expect(createBody(requests).metadata?.slack_channel_id).toBe('D9')
-    expect(createBody(requests).metadata?.slack_team_id).toBe('T1')
-    expect(createBody(requests).metadata?.slack_user_email).toBe('ada@example.com')
-    expect(createBody(requests).metadata?.slack_user_id).toBe('U1')
-  })
-
-  test('DM sessions omit the email of an external-team partner', async () => {
-    const { fetchFn, requests } = fakeApi()
-    const dm = apiMessage('hi')
-    dm.threadId = 'slack:D9:1700000000.000100'
-    dm.raw = { channel: 'D9' }
-    await withSlackStub(
-      url => {
-        if (url.includes('users.info')) {
-          return Response.json({
-            ok: true,
-            user: {
-              is_stranger: true,
-              profile: { display_name: 'Grace Hopper', email: 'grace@example.com' },
-              team_id: 'T2'
-            }
-          })
-        }
-        return Response.json({
-          ok: true,
-          profile: { display_name: 'Grace Hopper' }
-        })
-      },
-      async () => {
-        await forwardToSessionApi(
-          { ...slackOptions(fetchFn), slackHomeTeamId: 'T1' },
-          forwardInput(dm)
-        )
-      }
-    )
-
-    expect(createBody(requests).metadata?.slack_conversation_name).toBe('Grace Hopper')
-    expect(createBody(requests).metadata?.slack_user_email).toBeUndefined()
-    expect(createBody(requests).metadata?.slack_user_id).toBe('U1')
-    expect(createBody(requests).metadata?.slack_team_id).toBe('T2')
   })
 
   test('DM metadata falls back to the event team when the profile lookup fails', async () => {

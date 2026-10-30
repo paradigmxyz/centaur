@@ -43,6 +43,17 @@ module Broker
       assert_equal "AT", result.response["access_token"]
     end
 
+    test "client_secret_basic sends credentials in the authorization header" do
+      client, http = client_with(status: 200, body: success_body) do |request|
+        assert_equal "Basic Y2lkOnNlYw==", request.dig(:headers, "Authorization")
+        assert_nil request[:form]["client_id"]
+        assert_nil request[:form]["client_secret"]
+      end
+
+      client.exchange(**base_args, client_auth_method: "client_secret_basic")
+      http.verify
+    end
+
     test "missing expires_in yields nil" do
       client, http = client_with(status: 200, body: success_body(expires_in: nil))
       assert_nil client.exchange(**base_args).expires_in

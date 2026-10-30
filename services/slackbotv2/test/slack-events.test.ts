@@ -115,3 +115,38 @@ describe('Slack trigger bot allowlist', () => {
     expect(requests).toBe(0)
   })
 })
+
+function externalMessage(userTeam: string): Message {
+  return {
+    author: { isBot: false },
+    id: '1700000000.000002',
+    raw: { team_id: 'THOME', user: 'UPARTNER', user_team: userTeam },
+    threadId: 'C1:1700000000.000002'
+  } as Message
+}
+
+describe('Slack external org allowlist', () => {
+  it('admits only the external orgs the console allows and caches the list', async () => {
+    const requests: Request[] = []
+    const config: SlackbotV2Options = {
+      ...options(async (input, init) => {
+        requests.push(new Request(input, init))
+        return Response.json({ slack_external_team_ids: ['TPARTNER'] })
+      }),
+      apiKey: 'slackbot-key'
+    }
+
+    expect(await isAllowedSlackMessage(externalMessage('TPARTNER'), config, logger)).toBe(true)
+    expect(await isAllowedSlackMessage(externalMessage('TSTRANGER'), config, logger)).toBe(false)
+    expect(requests.map(request => request.url)).toEqual([
+      'http://session.test/api/slack/external-team-ids'
+    ])
+    expect(requests[0]?.headers.get('authorization')).toBe('Bearer slackbot-key')
+  })
+
+  it('keeps external orgs blocked when the console list is unavailable', async () => {
+    const config = options(async () => new Response('unavailable', { status: 503 }))
+
+    expect(await isAllowedSlackMessage(externalMessage('TPARTNER'), config, logger)).toBe(false)
+  })
+})

@@ -70,7 +70,7 @@ module Oauth
         assert_equal "https://linear.app/oauth/authorize", strategy.authorization_endpoint
         assert_equal "https://api.linear.app/oauth/token", strategy.token_endpoint
         assert_equal [], strategy.identity_scopes
-        assert_equal [ "api.linear.app" ], strategy.api_hosts
+        assert_equal [ "api.linear.app", "uploads.linear.app", "mcp.linear.app" ], strategy.api_hosts
         assert_equal "scope", strategy.authorization_scope_param
         assert_equal ",", strategy.scope_separator
         assert_equal({}, strategy.extra_authorization_params)

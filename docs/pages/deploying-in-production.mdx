@@ -59,10 +59,9 @@ Minimum keys:
 
 | Secret | Required for | Notes |
 |--------|--------------|-------|
-| `DATABASE_URL` | API | Postgres connection string. Make sure the password is URL-encoded. |
+| `DATABASE_URL` | API | Postgres connection string. Make sure the password is URL-encoded. For a managed server, see [Use an External PostgreSQL](#use-an-external-postgresql). |
 | `POSTGRES_PASSWORD` | Bundled Postgres | Password used when the chart manages Postgres. |
 | `IRON_MANAGEMENT_API_KEY` | [iron-proxy](https://docs.iron.sh) management API | Generate with `openssl rand -hex 32`. |
-| `SANDBOX_SIGNING_KEY` | Sandbox API tokens | Generate with `openssl rand -hex 32`; keeps sandbox tokens valid across API restarts. |
 | `SLACK_BOT_TOKEN` | Slackbot/API | Bot User OAuth Token from the Slack app. |
 | `SLACK_SIGNING_SECRET` | Slackbot/API | Used to verify Slack webhook signatures. |
 | `SLACKBOT_API_KEY` | Slackbot to API | Dedicated static service token restricted to Slack session routes and workflow event emission. |
@@ -76,7 +75,7 @@ component. Add these keys to the same infra Secret:
 
 | Secret | Required for | Notes |
 |--------|--------------|-------|
-| `IRON_CONTROL_DATABASE_URL` | Console database | May use the bundled Postgres server. Keep the Console in its own logical database. |
+| `IRON_CONTROL_DATABASE_URL` | Console database, also read by api-rs and proxy-sync | May use the bundled Postgres server. Keep the Console in its own logical database. |
 | `IRON_CONTROL_INITIAL_USER_EMAIL` | Initial Console admin | Used only to create the first user when no user exists. |
 | `IRON_CONTROL_INITIAL_USER_PASSWORD` | Initial Console admin | Minimum 12 characters. Use a generated break-glass password. |
 | `IRON_CONTROL_INITIAL_API_KEY` | api-rs and `centaur-perms` | Must be `iak_` followed by 64 lowercase hexadecimal characters. |
@@ -103,9 +102,9 @@ Store one secret per enabled harness credential:
 | Codex default | `codex` | none or `--codex` | `OPENAI_API_KEY` | `api.openai.com` |
 | Codex with OpenRouter provider | `codex` | none or `--codex` | `OPENROUTER_API_KEY` | `openrouter.ai` |
 | Codex with Meta AI direct | `codex` | `--meta` | `META_AI_API_KEY` | `api.ai.meta.com` |
+| Codex with a custom provider | `codex` | `--provider <id>` | Provider `apiKeyEnv` | Provider `baseUrl` host |
 | Amp | `amp` | `--amp` | `AMP_API_KEY` | `ampcode.com` |
 | Claude Code | `claude-code` | `--claude` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
-| pi-mono | `pi-mono` | `--pi` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
 
 `sandbox.harnessEngine` and the selectors above apply when a session is created.
 A session records its harness and keeps it for the life of the thread, so
@@ -123,12 +122,33 @@ Codex credential in a 1Password item named `OPENAI_API_KEY`. To run Codex
 through OpenRouter, store `OPENROUTER_API_KEY` and set `OPENROUTER_MODEL` to a
 model slug such as `openrouter/auto`, or set `CODEX_MODEL_PROVIDER=openrouter`
 alongside `CODEX_MODEL`. Per-turn Codex model overrides with provider-style
-slugs such as `--model anthropic/claude-fable-5` also select the OpenRouter
+slugs such as `--model anthropic/claude-fable-5-1` also select the OpenRouter
 provider even when `OPENROUTER_MODEL` is unset.
 
 To run Codex through Meta AI direct, store `META_AI_API_KEY` and select the
 provider with `--meta`. Pair it with `--model <model-id>` when choosing a
 provider-specific model for a turn.
+
+To register a private OpenAI-compatible Responses provider, add it once under
+`codex.customProviders`:
+
+```yaml
+codex:
+  customProviders:
+    private_responses:
+      name: Private Responses
+      baseUrl: https://inference.example.com/v1
+      apiKeyEnv: PRIVATE_RESPONSES_API_KEY
+      defaultModel: example-model
+```
+
+Store the named key in the configured iron-proxy secret source. The chart sends
+the non-secret provider catalog to api-rs, sandboxes, chat ingresses, and the
+Console. api-rs registers a bearer-token replacement restricted to the
+`baseUrl` DNS host; sandboxes receive only the `apiKeyEnv` placeholder. Select
+the provider with `--provider private_responses`; `--model` overrides its
+configured default for that turn. If `defaultModel` is omitted, callers must
+pass `--model`; the Console lists only custom providers that define a default.
 
 The backing vault can be shared across the deployment, but access is not. The
 Centaur Console grants each user, channel, issue, or workflow principal only
@@ -149,38 +169,67 @@ token family is revoked, logging both sides out at random. Use a separate
 ChatGPT account for any non-Centaur Codex work.
 :::
 
-Codex supports two authentication modes, selected per deployment with the
-`CODEX_AUTH_MODE` env var on the sandbox (set it via `sandbox.extraEnv`):
+Codex supports two authentication modes, selected per deployment with
+`sandbox.codexAuthMode` in the chart values. api-rs reads the resulting
+`CODEX_AUTH_MODE` env var to register the matching proxy credential with the
+console and propagates it into each sandbox, so the agent's `auth.json` and
+the injected credential always agree. Do not set `CODEX_AUTH_MODE` through
+`sandbox.extraEnv`: that reaches sandbox pods but not api-rs, which is the
+component that acts on the mode.
 
-| Mode | Upstream | Secrets required |
-|------|----------|------------------|
-| `api_key` (default) | `api.openai.com` | `OPENAI_API_KEY` |
-| `access_token` | `chatgpt.com` | `OPENAI_CODEX_CLIENT_ID`, `OPENAI_CODEX_BLOB`, `OPENAI_CODEX_ACCOUNT_ID` |
+| Mode | Upstream | Credentials required |
+|------|----------|----------------------|
+| `api_key` (default) | `api.openai.com` | `OPENAI_API_KEY` in the secrets backend |
+| `access_token` | `chatgpt.com` | `OPENAI_CODEX_ACCOUNT_ID` in the secrets backend, plus the `openai-codex` broker credential in the console |
 
 `access_token` mode routes Codex through a ChatGPT account rather than a raw
-API key. [iron-token-broker](https://docs.iron.sh) holds the refresh token
-and mints short-lived access tokens, which iron-proxy injects on outbound
-requests so the sandbox never sees them.
+API key. The console owns the refresh token as the `openai-codex` broker
+credential: its background worker refreshes it and mints short-lived access
+tokens, which the per-sandbox proxy injects on outbound requests so the
+sandbox never sees them. The refresh token is stored encrypted in the
+console's own database. It is not read from or synced to your secrets
+backend.
 
-Store these three items in your secrets backend (1Password vault, Kubernetes
-Secret, etc.) when running in `access_token` mode:
+The commands below assume you are at the root of a Centaur checkout and have
+configured `IRON_CONTROL_URL` and `IRON_CONTROL_API_KEY` as described in
+[Configure the Operator CLI](/secrets/advanced-permissioning#configure-the-operator-cli).
 
-- `OPENAI_CODEX_CLIENT_ID`: the Codex CLI's OAuth client id. This is a
-  fixed, publicly known constant: `app_EMoamEEZ73f0CkXaXp7hrann`. It is
-  the same for every Codex install and never rotates, but the broker
-  still resolves it through your secrets backend, so store the literal
-  value as-is.
-- `OPENAI_CODEX_BLOB`: a JSON document `{"refresh_token": "..."}`. The
-  broker rotates this in place on every refresh, so the backing item must
-  be writable.
-- `OPENAI_CODEX_ACCOUNT_ID`: the ChatGPT account UUID the credential is
-  bound to. It is static, but iron-proxy injects it as the
-  `chatgpt-account-id` header so the backend can route to the right
-  workspace. Store it alongside the other two, not in code.
+To bootstrap `access_token` mode:
 
-To bootstrap, run `codex login` locally, then copy the refresh token and
-account id from `~/.codex/auth.json` into the matching secret items. Use
-the constant above for `OPENAI_CODEX_CLIENT_ID`.
+1. Log in locally with the dedicated ChatGPT account and force this login to
+   use a file-backed credential store:
+
+   ```bash
+   codex login -c 'cli_auth_credentials_store="file"'
+   CODEX_AUTH_FILE="${CODEX_HOME:-$HOME/.codex}/auth.json"
+   export OPENAI_CODEX_ACCOUNT_ID="$(jq -er '.tokens.account_id' "$CODEX_AUTH_FILE")"
+   export OPENAI_CODEX_REFRESH_TOKEN="$(jq -er '.tokens.refresh_token' "$CODEX_AUTH_FILE")"
+   ```
+
+   The credential-store override is intentional. Codex can otherwise use the
+   operating system keyring, which leaves no `auth.json` file to read.
+2. Store `OPENAI_CODEX_ACCOUNT_ID` in your secrets backend (1Password vault,
+   Kubernetes Secret, etc.). iron-proxy injects this ChatGPT account UUID as
+   the `chatgpt-account-id` header so the backend routes to the right
+   workspace.
+3. Create the broker credential with the refresh token from the same login:
+
+   ```bash
+   cargo run -p centaur-perms -- \
+     broker create --foreign-id openai-codex \
+     --token-endpoint https://auth.openai.com/oauth/token \
+     --client-id app_EMoamEEZ73f0CkXaXp7hrann \
+     --refresh-token "$OPENAI_CODEX_REFRESH_TOKEN"
+   unset OPENAI_CODEX_REFRESH_TOKEN
+   ```
+
+   The client id is the Codex CLI's fixed, publicly known OAuth client id:
+   the same for every Codex install; it is passed here, not stored in the
+   secrets backend.
+4. Start (or restart) api-rs. At startup it registers the access-token
+   fragment with the console; if the `openai-codex` broker credential does
+   not exist yet, the console rejects the registration with a 422 and api-rs
+   fails fast, so create the credential first.
 
 ### Claude Auth Modes
 
@@ -194,38 +243,62 @@ entire token family is revoked, logging both sides out at random. Use a
 separate Claude.ai account for any non-Centaur Claude Code work.
 :::
 
-Claude Code supports two authentication modes, selected per deployment
-with the `CLAUDE_CODE_AUTH_MODE` env var on the sandbox (set it via
-`sandbox.extraEnv`):
+Claude Code supports two authentication modes, selected per deployment with
+`sandbox.claudeCodeAuthMode` in the chart values. It has the same contract as
+`sandbox.codexAuthMode` above: api-rs registers the matching proxy credential
+and propagates `CLAUDE_CODE_AUTH_MODE` into each sandbox, so do not set the
+env var through `sandbox.extraEnv`.
 
-| Mode | Upstream | Secrets required |
-|------|----------|------------------|
-| `api_key` (default) | `api.anthropic.com` | `ANTHROPIC_API_KEY` |
-| `access_token` | `api.anthropic.com` | `CLAUDE_CODE_CLIENT_ID`, `CLAUDE_CODE_BLOB` |
+| Mode | Upstream | Credentials required |
+|------|----------|----------------------|
+| `api_key` (default) | `api.anthropic.com` | `ANTHROPIC_API_KEY` in the secrets backend |
+| `access_token` | `api.anthropic.com` | the `anthropic-claude` broker credential in the console |
 
 `access_token` mode routes Claude Code through a Claude.ai Pro or Max
-subscription rather than a raw API key. [iron-token-broker](https://docs.iron.sh)
-holds the refresh token and mints short-lived access tokens, which iron-proxy
-injects on outbound requests so the sandbox never sees them. The entrypoint
-plants a dummy `~/.claude/.credentials.json` so the CLI emits OAuth-shaped
-requests; the broker overwrites the Bearer at request time.
+subscription rather than a raw API key. The console owns the refresh token as
+the `anthropic-claude` broker credential and mints short-lived access tokens,
+which the per-sandbox proxy injects as the Bearer on outbound requests so the
+sandbox never sees them. The sandbox entrypoint plants a dummy
+`~/.claude/.credentials.json` so the CLI emits OAuth-shaped requests; the
+proxy overwrites the Bearer at request time. This mode needs no
+secrets-backend items.
 
-Store these two items in your secrets backend (1Password vault, Kubernetes
-Secret, etc.) when running in `access_token` mode:
+The commands below assume you are at the root of a Centaur checkout and have
+configured `IRON_CONTROL_URL` and `IRON_CONTROL_API_KEY` as described in
+[Configure the Operator CLI](/secrets/advanced-permissioning#configure-the-operator-cli).
 
-- `CLAUDE_CODE_CLIENT_ID`: the Claude Code CLI's OAuth client id. This
-  is a fixed, publicly known constant:
-  `9d1c250a-e61b-44d9-88ed-5944d1962f5e`. It is the same for every Claude
-  Code install and never rotates, but the broker still resolves it through
-  your secrets backend, so store the literal value as-is.
-- `CLAUDE_CODE_BLOB`: a JSON document `{"refresh_token": "..."}`. The
-  broker rotates this in place on every refresh, so the backing item must be
-  writable.
+To bootstrap, run `claude login` locally with the dedicated Claude.ai
+account, then export the refresh token. On systems where Claude Code writes a
+credentials file, run:
 
-To bootstrap, run `claude login` locally, then copy the refresh token from
-`~/.claude/.credentials.json` (or from the `Claude Code-credentials` keychain
-item on macOS) into `CLAUDE_CODE_BLOB`. Use the constant above for
-`CLAUDE_CODE_CLIENT_ID`.
+```bash
+export CLAUDE_CODE_REFRESH_TOKEN="$(
+  jq -er '.claudeAiOauth.refreshToken' "$HOME/.claude/.credentials.json"
+)"
+```
+
+If Claude Code used the macOS keychain instead, run:
+
+```bash
+export CLAUDE_CODE_REFRESH_TOKEN="$(
+  security find-generic-password -s 'Claude Code-credentials' -w |
+    jq -er '.claudeAiOauth.refreshToken'
+)"
+```
+
+Create the broker credential from the root of the checkout:
+
+```bash
+cargo run -p centaur-perms -- \
+  broker create --foreign-id anthropic-claude \
+  --token-endpoint https://platform.claude.com/v1/oauth/token \
+  --client-id 9d1c250a-e61b-44d9-88ed-5944d1962f5e \
+  --refresh-token "$CLAUDE_CODE_REFRESH_TOKEN"
+unset CLAUDE_CODE_REFRESH_TOKEN
+```
+
+The client id is Claude Code's fixed, publicly known OAuth client id. As with
+Codex, api-rs fails fast at startup if the broker credential is missing.
 
 ## 4. Configure Advanced Permissioning
 
@@ -263,7 +336,10 @@ Use the app page to install the bot, copy the Bot User OAuth Token for
 7. Subscribe to `app_mention` and to the message events you want Centaur to see:
    `message.channels`, `message.groups`, and `message.im`. To automatically join
    newly-created public channels, set `slackbotv2.autoJoinCreatedChannels` to
-   `true` and subscribe to `channel_created`.
+   `true` and subscribe to `channel_created`. For Slack agent view, complete the
+   [Slack app migration](/quickstart) and set `slackbotv2.agentViewEnabled` to
+   `true`. The toggle defaults to `false`. Subscribe to `agent_session_stopped`
+   to show Slack's Stop button, which interrupts the running execution.
 8. Enable Interactivity and set its Request URL to the same
    `https://<your-host>/api/webhooks/slack` URL. Block Kit actions are emitted
    to the workflow engine as `slack.block_action.<action_id>` events.
@@ -323,8 +399,7 @@ sandbox:
   runtimeClassName: gvisor
 ```
 
-The Kubernetes sandbox backend is the active runtime backend; there is no chart
-switch named `api.sandboxBackend`.
+The Kubernetes sandbox backend is the only runtime backend.
 
 Sandbox lifecycle has two separate timers:
 
@@ -369,6 +444,144 @@ sandbox:
 
 Malformed selector/toleration JSON fails api-rs startup. Empty values keep
 default scheduling.
+
+### Configure Sandbox User Namespaces and Container Security
+
+`sandbox.hostUsers` and `sandbox.containerSecurityContext` are passed through
+api-rs as `SESSION_SANDBOX_HOST_USERS` and
+`SESSION_SANDBOX_CONTAINER_SECURITY_CONTEXT`. The former sets the sandbox
+Pod's `hostUsers`; the latter accepts a Kubernetes `SecurityContext` for the
+agent container. Neither changes the paired iron-proxy pod, and the container
+setting does not change bootstrap init containers. Defaults omit both fields.
+
+For example, request an isolated Pod user namespace and a non-root agent:
+
+```yaml
+sandbox:
+  hostUsers: false
+  containerSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+```
+
+The cluster's Kubernetes version, container runtime, and volume filesystems
+must support Pod user namespaces. Setting `procMount: Unmasked` requires
+`hostUsers: false`; malformed security-context JSON or that incompatible
+combination fails api-rs startup. Cluster admission policies still apply.
+Enabling nested containers also requires a compatible image, UID/GID maps,
+device access, and node configuration; these settings alone do not provide a
+Docker daemon.
+
+These Pod settings are immutable. Before enabling reuse, api-rs stops retained
+sandboxes whose user namespace or agent security context differs from the
+configured profile, using the same reconciliation as ServiceAccount changes.
+This includes warm pods and active sessions, and applies when reverting a
+profile as well. Schedule these changes after active turns finish. Leaving
+both options unset preserves existing default sandboxes.
+
+### Use an External PostgreSQL
+
+By default the chart runs a bundled PostgreSQL built on ParadeDB. To use a
+managed server such as Amazon RDS, Aurora PostgreSQL, or Cloud SQL instead,
+prepare the server, point the database secrets at it, and disable the bundled
+Postgres.
+
+The server needs:
+
+- PostgreSQL 16, the version the bundled server and CI use.
+- The `vector` extension, pgvector 0.5.0 or newer, for embedding search.
+  `uuid-ossp` is also required. `pg_cron` is optional.
+- A migrating user that can create extensions and roles. Migrations create
+  cluster-wide roles such as `centaur_company_context_reader`. That is the `DATABASE_URL` user when api-rs
+  migrates at startup, or the user passed to `centaur-api-server migrate` below.
+  The Console also creates its databases with the `DATABASE_URL` user. The RDS
+  master user and the Cloud SQL `postgres` user can do all of this. With a less
+  privileged user, have an administrator create the `vector` and `uuid-ossp`
+  extensions and the Console databases listed below first.
+- Enough connections. api-rs opens up to 500 connections under load, and the
+  bundled server allows 500.
+
+The deployment uses these databases on the server:
+
+| Database | Used by | Connection |
+| --- | --- | --- |
+| Any name, for example `centaur` | api-rs, Slackbot, and ETL workflows | `DATABASE_URL`, including the database name. |
+| `iron_control_production`, plus `_cache`, `_queue`, and `_cable` variants | Console; api-rs and proxy-sync read `iron_control_production` | `IRON_CONTROL_DATABASE_URL` without a database name; the Console selects each database itself. The Console init container creates missing databases with the `DATABASE_URL` credentials. |
+
+Managed servers usually require TLS, so add `sslmode=require` to both URLs.
+`POSTGRES_PASSWORD` is not needed. Tools that declare `pg_dsn` secrets connect
+through iron-proxy with a DSN from your secret source; point those at the
+external server too. For `company_context`, that secret is
+`CENTAUR_POSTGRES_DSN`.
+
+Then set the chart values:
+
+```yaml
+postgres:
+  enabled: false
+
+externalDatabase:
+  # Address ranges the database endpoint resolves to, for NetworkPolicy egress.
+  cidrs:
+    - 10.0.32.0/20
+  port: 5432
+  textSearch: postgres
+```
+
+`externalDatabase.cidrs` is required when `networkPolicy.enabled` is true,
+because NetworkPolicy cannot match hostnames. Use the RDS DB subnet group's
+CIDRs, since the endpoint address moves on failover, or the Cloud SQL private IP
+as a `/32`. Control-plane pods and per-sandbox iron-proxies may reach only these
+ranges on `port`; see [Security](/security).
+
+`externalDatabase.textSearch` selects how company-context keyword search is
+indexed. Set it only with `postgres.enabled: false`; the bundled Postgres always
+uses `paradedb`.
+
+- `postgres` (the default when unset) uses PostgreSQL's built-in full-text search and works on
+  any server above.
+- `paradedb` uses ParadeDB BM25 indexes and requires the `pg_search` extension,
+  which RDS and Cloud SQL do not offer. Use it only for a self-managed ParadeDB
+  server.
+
+api-rs migrates its database at startup while `apiRs.runMigrations` is true. To
+migrate the external database on its own, for example with an administrator
+account before a rollout, run the `migrate` subcommand from the api-rs image.
+It takes only flags and applies the same migrations and checks as startup:
+
+```bash
+PGPASSWORD='<password>' centaur-api-server migrate \
+  --database-url 'postgresql://<user>@<host>:5432/<database>?sslmode=require' \
+  --text-search postgres
+```
+
+Leave the password out of the URL so it stays out of the process list; the
+subcommand also reads a passfile (`~/.pgpass`). Rerunning it is a no-op. When
+migrations run this way, set `apiRs.runMigrations: false` so api-rs starts with
+a user that does not need to create roles or extensions.
+
+A database keeps the backend it was first migrated with; there is no in-place
+switch. Migrations, at startup or through `centaur-api-server migrate`, fail if
+the configured backend later disagrees.
+
+To change backends, including moving from the bundled Postgres (`paradedb`) to
+RDS or Cloud SQL (`postgres`), migrate a fresh database and move the data into
+it:
+
+1. Create an empty api-rs database on the new server and migrate it with
+   `centaur-api-server migrate --text-search postgres`.
+2. Stop the components that write to the old database.
+3. Copy the data only, not the schema, into the new database. Leave out
+   `_sqlx_migrations`: the new database already records its own migrations,
+   including its text-search backend. `search_vector` is a generated column,
+   so each row's value is computed as it is inserted. The tables have foreign
+   keys and triggers that maintain derived company-context rows, so plan the
+   copy order or disable triggers while copying.
+4. Point `DATABASE_URL` and the other database secrets at the new server,
+   update the chart values above, and deploy.
+
+The Console databases have no text-search backend and move with an ordinary
+dump and restore.
 
 ## 7. Verify the Deployment
 

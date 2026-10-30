@@ -1,672 +1,339 @@
-"""Websearch client.
+"""Web search over one configurable vendor: Parallel (default), Exa, or Tako.
 
-Powered by Parallel Web Systems (https://docs.parallel.ai). Search runs
-through the free hosted Parallel Search MCP when no `PARALLEL_API_KEY` is
-configured, and through the Parallel Search REST API when one is. Deep
-research always goes through the Parallel Task API and requires a key.
-
-`search(synthesize=True)` runs the original tool's Claude pipeline
-(reviewer → writer → citation-repair) against the Parallel results
-when `ANTHROPIC_API_KEY` is set. The synthesis prompts and repair loop
-are byte-identical to centaur main, so output quality and failure
-modes mirror that pipeline. Without an Anthropic key, the call still
-returns raw Parallel results and records the skipped synthesis in
-`meta.partial_failures`.
+`WEBSEARCH_BACKEND` selects the vendor. Each call sends the vendor's API key
+placeholder for iron-proxy to replace. Parallel falls back to its free
+anonymous Search MCP when the key is rejected; Exa and Tako require a key.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import json
-import re
-import warnings
-from collections.abc import Callable
-from typing import Any
+import os
+from dataclasses import dataclass
 
-from anthropic import AsyncAnthropic, AuthenticationError
+import httpx
 
-from centaur_sdk import get_tool_context, secret
+from centaur_sdk import secret
 
-from ._parallel import API_BASE_URL, MCP_URL, ParallelBackend
-from .models import SourceDocument
-from .prompts import EVIDENCE_REVIEWER_SYSTEM, REPORT_REPAIR_SYSTEM, REPORT_WRITER_SYSTEM
+BACKENDS = ("parallel", "exa", "tako")
+DEFAULT_BACKEND = "parallel"
+MODES = ("basic", "advanced")
 
-REVIEW_SOURCE_CHAR_LIMIT = 3500
-REVIEW_TOTAL_CHAR_BUDGET = 120000
-WRITE_SOURCE_CHAR_LIMIT = 7000
-WRITE_TOTAL_CHAR_BUDGET = 220000
+PARALLEL_API_URL = "https://api.parallel.ai/v1/search"
+PARALLEL_MCP_URL = "https://search.parallel.ai/mcp"
+PARALLEL_ATTRIBUTION = (
+    "Search powered by the free Parallel Web Search MCP (https://parallel.ai). "
+    "See https://parallel.ai/customer-terms."
+)
+EXA_API_URL = "https://api.exa.ai/search"
+TAKO_API_URL = "https://tako.com/api/v3/search"
+
+PARALLEL_MAX_RESULTS = 40
+EXA_MAX_RESULTS = 100
+TAKO_MAX_WEB_RESULTS = 20
+TAKO_DATA_CARDS = 2
+EXA_TYPES = {"basic": "fast", "advanced": "auto"}
+TAKO_EFFORTS = {"basic": "instant", "advanced": "fast"}
 
 
-def _is_configured(key: str) -> bool:
-    """Authoritative check for whether a secret was explicitly configured.
+class KeyRejected(RuntimeError):
+    pass
 
-    `secret(key)` is unsafe for routing decisions: under centaur's default
-    StubBackend it returns the literal key name as a placeholder for
-    un-configured secrets (the stub goes in outbound HTTP headers where
-    the firewall swaps it in-flight). Both signals are needed to cover
-    server and CLI use:
 
-    - Server / tool-runtime: ToolManager populates ``ctx.secrets[key]``
-      only for secrets it actually resolved, so dict membership is the
-      authoritative signal.
-    - CLI / direct-invoke: no ToolContext is bound; fall through to
-      ``secret(key)`` and treat the value-equals-key stub case as
-      "not configured" (the firewall has nothing to swap into).
-    """
+@dataclass(frozen=True)
+class Query:
+    text: str
+    num_results: int
+    include_domains: list[str]
+    exclude_domains: list[str]
+    max_age_hours: int | None
+    mode: str | None
+    max_chars_total: int | None
+    session_id: str | None
+
+    def published_after(self) -> dt.datetime | None:
+        if not self.max_age_hours:
+            return None
+        return dt.datetime.now(dt.UTC) - dt.timedelta(hours=self.max_age_hours)
+
+    def ignored(self, backend: str, *names: str) -> list[str]:
+        used = [name for name in names if getattr(self, name)]
+        return [f"{backend} ignores {', '.join(used)}."] if used else []
+
+
+@dataclass
+class Page:
+    backend: str
+    request_id: str | None
+    results: list[dict]
+    warnings: list[str]
+    attribution: str | None = None
+
+
+def _result(title: str | None, url: str, snippet: str | None, published: str | None) -> dict:
+    return {
+        "title": title or url,
+        "url": url,
+        "snippet": snippet or "",
+        "published_date": published,
+    }
+
+
+def _post(http: httpx.Client, url: str, body: dict, *, key: str, header: str) -> httpx.Response:
+    response = http.post(url, json=body, headers={header: secret(key, key)})
+    if response.status_code in (401, 403):
+        raise KeyRejected(
+            f"{key} was rejected ({response.status_code}); configure and grant it for this backend."
+        )
+    if response.is_error:
+        raise RuntimeError(f"{url} returned {response.status_code}: {response.text[:500]}")
+    return response
+
+
+def _search_parallel(http: httpx.Client, q: Query) -> Page:
+    body: dict = {
+        "objective": q.text,
+        "search_queries": [q.text],
+        "advanced_settings": {"max_results": min(q.num_results, PARALLEL_MAX_RESULTS)},
+    }
+    policy: dict = {}
+    if q.include_domains:
+        policy["include_domains"] = q.include_domains
+    if q.exclude_domains:
+        policy["exclude_domains"] = q.exclude_domains
+    if after := q.published_after():
+        policy["after_date"] = after.date().isoformat()
+    if policy:
+        body["advanced_settings"]["source_policy"] = policy
+    for name in ("mode", "max_chars_total", "session_id"):
+        if value := getattr(q, name):
+            body[name] = value
     try:
-        ctx = get_tool_context()
-        return bool(ctx.secrets.get(key))
-    except LookupError:
-        try:
-            val = secret(key)
-        except KeyError:
-            return False
-        return bool(val) and val != key
+        response = _post(http, PARALLEL_API_URL, body, key="PARALLEL_API_KEY", header="x-api-key")
+    except KeyRejected:
+        return _search_parallel_free(http, q)
+    data = response.json()
+    return Page("parallel:api", data.get("search_id"), _parallel_results(data), [])
+
+
+def _search_parallel_free(http: httpx.Client, q: Query) -> Page:
+    arguments = {"objective": q.text, "search_queries": [q.text]}
+    if q.session_id:
+        arguments["session_id"] = q.session_id
+    response = http.post(
+        PARALLEL_MCP_URL,
+        headers={"Accept": "application/json, text/event-stream"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "web_search", "arguments": arguments},
+        },
+    )
+    if response.is_error:
+        raise RuntimeError(
+            f"Parallel Search MCP returned {response.status_code}: {response.text[:500]}"
+        )
+    message = _jsonrpc_message(response)
+    if "error" in message:
+        raise RuntimeError(f"Parallel Search MCP error: {str(message['error'])[:500]}")
+    result = message.get("result") or {}
+    if result.get("isError"):
+        raise RuntimeError(f"Parallel Search MCP tool error: {str(result.get('content'))[:500]}")
+    data = result.get("structuredContent") or json.loads(result["content"][0]["text"])
+    warnings = q.ignored(
+        "Free Parallel search (PARALLEL_API_KEY was rejected)",
+        "include_domains",
+        "exclude_domains",
+        "max_age_hours",
+        "mode",
+    )
+    return Page(
+        "parallel:free",
+        data.get("search_id"),
+        _parallel_results(data),
+        warnings,
+        PARALLEL_ATTRIBUTION,
+    )
+
+
+def _jsonrpc_message(response: httpx.Response) -> dict:
+    if "text/event-stream" not in response.headers.get("content-type", ""):
+        return response.json()
+    data_lines = [
+        line[5:].strip() for line in response.text.splitlines() if line.startswith("data:")
+    ]
+    if not data_lines:
+        raise RuntimeError("Parallel Search MCP returned an empty event stream.")
+    return json.loads(data_lines[-1])
+
+
+def _parallel_results(data: dict) -> list[dict]:
+    return [
+        _result(
+            item.get("title"),
+            item["url"],
+            "\n\n".join(item.get("excerpts") or []),
+            item.get("publish_date"),
+        )
+        for item in data.get("results") or []
+    ]
+
+
+def _search_exa(http: httpx.Client, q: Query) -> Page:
+    body: dict = {
+        "query": q.text,
+        "numResults": min(q.num_results, EXA_MAX_RESULTS),
+        "contents": {"highlights": True},
+    }
+    if q.mode:
+        body["type"] = EXA_TYPES[q.mode]
+    if q.include_domains:
+        body["includeDomains"] = q.include_domains
+    if q.exclude_domains:
+        body["excludeDomains"] = q.exclude_domains
+    if after := q.published_after():
+        body["startPublishedDate"] = after.isoformat(timespec="seconds")
+    data = _post(http, EXA_API_URL, body, key="EXA_API_KEY", header="x-api-key").json()
+    results = [
+        _result(
+            item.get("title"),
+            item["url"],
+            "\n\n".join(item.get("highlights") or []) or item.get("text"),
+            item.get("publishedDate"),
+        )
+        for item in data.get("results") or []
+    ]
+    return Page("exa", data.get("requestId"), results, q.ignored("Exa", "session_id"))
+
+
+def _search_tako(http: httpx.Client, q: Query) -> Page:
+    web: dict = {"count": min(q.num_results, TAKO_MAX_WEB_RESULTS), "highlights": True}
+    if q.include_domains:
+        web["include_domains"] = q.include_domains
+    if q.exclude_domains:
+        web["exclude_domains"] = q.exclude_domains
+    if after := q.published_after():
+        web["published_after"] = after.date().isoformat()
+    body: dict = {
+        "query": q.text,
+        "sources": {"data": {"count": min(q.num_results, TAKO_DATA_CARDS)}, "web": web},
+    }
+    if q.mode:
+        body["effort"] = TAKO_EFFORTS[q.mode]
+    data = _post(http, TAKO_API_URL, body, key="TAKO_API_KEY", header="X-API-Key").json()
+    results = [
+        _result(
+            card.get("title"),
+            card["webpage_url"],
+            card.get("description"),
+            (card.get("data_freshness") or {}).get("last_updated"),
+        )
+        for card in data.get("cards") or []
+        if card.get("webpage_url")
+    ]
+    results += [
+        _result(item.get("title"), item["url"], item.get("snippet"), item.get("publish_date"))
+        for item in data.get("web_results") or []
+    ]
+    return Page("tako", data.get("request_id"), results, q.ignored("Tako", "session_id"))
+
+
+SEARCHES = {"parallel": _search_parallel, "exa": _search_exa, "tako": _search_tako}
+
+
+def _dedupe_and_trim(
+    results: list[dict], num_results: int, max_chars_total: int | None
+) -> list[dict]:
+    unique: dict[str, dict] = {}
+    for result in results:
+        unique.setdefault(result["url"], result)
+    trimmed = list(unique.values())[:num_results]
+    if max_chars_total is None:
+        return trimmed
+    remaining = max_chars_total
+    for result in trimmed:
+        result["snippet"] = result["snippet"][: max(remaining, 0)]
+        remaining -= len(result["snippet"])
+    return trimmed
+
+
+def _unsupported_warning(arguments: dict[str, object]) -> list[str]:
+    used = sorted(name for name, value in arguments.items() if value is not None)
+    return [f"websearch ignores unsupported arguments: {', '.join(used)}."] if used else []
+
+
+def _backend_name(backend: str | None) -> str:
+    configured = os.environ.get("WEBSEARCH_BACKEND")  # noqa: TID251  # deployment config, not a secret
+    name = (backend or configured or DEFAULT_BACKEND).strip().lower()
+    if name not in BACKENDS:
+        raise ValueError(f"backend must be one of {', '.join(BACKENDS)} (got {name!r}).")
+    return name
 
 
 class WebSearchClient:
-    """Web search and deep research via Parallel."""
+    """Web search through Parallel, Exa, or Tako."""
 
-    def __init__(
-        self,
-        parallel_api_key: str | None = None,
-        parallel_api_base_url: str | None = None,
-        parallel_mcp_url: str | None = None,
-        parallel_deep_research_processor: str | None = None,
-        anthropic_api_key: str | None = None,
-        synthesis_model: str | None = None,
-        max_retries: int = 3,
-    ) -> None:
-        # Always pass the StubBackend placeholder so the SDK sends x-api-key.
-        # Search falls back to anonymous MCP if injected authentication fails.
-        self._parallel_api_key = parallel_api_key or secret("PARALLEL_API_KEY", "PARALLEL_API_KEY")
-        self._has_anthropic_key = anthropic_api_key is not None or _is_configured(
-            "ANTHROPIC_API_KEY"
-        )
-        self._anthropic_api_key = anthropic_api_key or (
-            secret("ANTHROPIC_API_KEY") if self._has_anthropic_key else None
-        )
-        # Non-secret config: hardcoded defaults, overridable via constructor
-        # args. We deliberately do NOT route these through secret() — under
-        # StubBackend that would return the literal key name as a value.
-        self._api_base_url = parallel_api_base_url or API_BASE_URL
-        self._mcp_url = parallel_mcp_url or MCP_URL
-        self._deep_research_processor = parallel_deep_research_processor or "ultra-fast"
-        self._synthesis_model = synthesis_model or "claude-opus-4-6"
-        self._max_retries = max_retries
-        self._progress_callback: Callable[[str], None] | None = None
-        self._backend = ParallelBackend(
-            api_key=self._parallel_api_key,
-            api_base_url=self._api_base_url,
-            mcp_url=self._mcp_url,
-            deep_research_processor=self._deep_research_processor,
-            max_retries=self._max_retries,
-        )
+    def __init__(self, *, transport: httpx.BaseTransport | None = None) -> None:
+        self._transport = transport
 
-    def _set_progress_callback(self, callback: Callable[[str], None] | None) -> None:
-        self._progress_callback = callback
-
-    def _emit_progress(self, stage: str) -> None:
-        if self._progress_callback is not None:
-            self._progress_callback(stage)
-
-    @property
-    def search_mode(self) -> str:
-        return self._backend.search_mode
-
-    @property
-    def has_api_key(self) -> bool:
-        return self._backend.has_api_key
-
-    @property
-    def has_synthesis(self) -> bool:
-        return self._has_anthropic_key
-
-    def _build_synthesis_pipeline(self) -> ClaudeSynthesisPipeline | None:
-        if not self._has_anthropic_key or not self._synthesis_model:
-            return None
-        return ClaudeSynthesisPipeline(
-            api_key=self._anthropic_api_key or "",
-            model=self._synthesis_model,
-        )
-
-    async def search(
+    def search(
         self,
         query: str,
         *,
         num_results: int = 10,
-        timeout_seconds: float = 60.0,
-        synthesize: bool = True,
-        mode: str | None = None,
-        client_model: str | None = None,
-        max_chars_total: int | None = None,
         include_domains: list[str] | None = None,
         exclude_domains: list[str] | None = None,
         max_age_hours: int | None = None,
+        mode: str | None = None,
+        max_chars_total: int | None = None,
         session_id: str | None = None,
-        thread_context: list[str] | None = None,
-        max_report_chars: int = 12000,
-        search_type: str | None = None,
+        timeout_seconds: float = 60.0,
+        backend: str | None = None,
+        **unsupported: object,
     ) -> dict:
-        """Search the web via Parallel.
+        """Search the web and return `{query, results, meta}`.
 
-        Args:
-          query: Required. The user's question or topic. Used as the search
-            objective (and as a single-query fallback per Parallel best
-            practices).
-          synthesize: When true, runs the Claude reviewer + writer pipeline
-            on top of Parallel results (matches the prior Exa+Claude
-            behavior). Requires `ANTHROPIC_API_KEY`; without one the call
-            still returns raw results and records the skipped synthesis in
-            `meta.partial_failures`.
-          mode: `basic` (lower latency, 2-3 queries) or `advanced` (default,
-            higher quality). REST path only.
-          client_model: Identifier of the LLM that will consume the
-            excerpts. Enables per-model optimization. Forwarded to MCP as
-            `model_name`.
-          max_chars_total: Hard cap on total excerpt characters. REST only.
-          include_domains / exclude_domains / max_age_hours: Source filters
-            for the REST path. Not honored by the free MCP — surfaced in
-            `meta.partial_failures` when used without a key. `max_age_hours`
-            is rounded down to a UTC calendar-date cutoff (Parallel's
-            source policy is date-granular, not hour-precise).
-          session_id: Stable identifier (UUID recommended) reused across
-            related Search/Extract calls. Required for free-tier rate
-            limiting when called over MCP.
-          thread_context: Optional prior-turn context strings passed to the
-            synthesis reviewer/writer for disambiguation. Synthesis only.
-          search_type: Accepted for backward compatibility with the original
-            Exa-backed tool; ignored under Parallel retrieval. Pass `None`.
+        `backend` is `parallel`, `exa`, or `tako`; it defaults to
+        `WEBSEARCH_BACKEND`, then `parallel`. Each result has `title`, `url`, `snippet`, and `published_date`.
+        `mode` is `basic` (faster) or `advanced`. `max_age_hours` is rounded
+        down to a UTC date on Parallel and Tako. `session_id` is Parallel-only.
+        Flags a backend cannot honor, and any other keyword arguments (such as
+        the retired `synthesize`), are ignored and listed in `meta.warnings`.
         """
-        if search_type is not None:
-            warnings.warn(
-                "search_type is ignored — the Parallel retrieval backend does "
-                "not expose Exa's neural/keyword/auto modes.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        synthesis_pipeline = self._build_synthesis_pipeline() if synthesize else None
-        return await self._backend.search(
-            objective=query,
-            search_queries=[query],
+        name = _backend_name(backend)
+        text = query.strip()
+        if not text:
+            raise ValueError("query cannot be empty.")
+        if num_results < 1:
+            raise ValueError("num_results must be at least 1.")
+        if mode is not None and mode not in MODES:
+            raise ValueError(f"mode must be one of {', '.join(MODES)} (got {mode!r}).")
+        q = Query(
+            text=text,
             num_results=num_results,
-            timeout_seconds=timeout_seconds,
-            synthesize=synthesize,
-            mode=mode,
-            client_model=client_model,
-            max_chars_total=max_chars_total,
-            include_domains=include_domains,
-            exclude_domains=exclude_domains,
+            include_domains=list(include_domains or []),
+            exclude_domains=list(exclude_domains or []),
             max_age_hours=max_age_hours,
+            mode=mode,
+            max_chars_total=max_chars_total,
             session_id=session_id,
-            max_report_chars=max_report_chars,
-            synthesis_pipeline=synthesis_pipeline,
-            thread_context=thread_context,
         )
-
-    async def deep_research(
-        self,
-        question: str,
-        *,
-        processor: str | None = None,
-        timeout_seconds: float | None = None,
-        max_report_chars: int = 50000,
-        max_iterations: int | None = None,
-        num_queries_per_iteration: int | None = None,
-        num_results_per_query: int | None = None,
-        thread_context: list[str] | None = None,
-    ) -> dict:
-        """Run deep research and return a cited markdown report.
-
-        Args:
-          processor: Task API processor (pro/ultra family). Defaults to
-            the value passed to `WebSearchClient(parallel_deep_research_processor=...)`,
-            or `"ultra-fast"` if neither is set.
-          timeout_seconds: Override the request timeout. When omitted, a
-            processor-appropriate default is used (e.g. `ultra4x` waits up
-            to ~2h).
-          max_iterations / num_queries_per_iteration / num_results_per_query /
-          thread_context: Accepted for backward compatibility with the
-            original Exa+Claude iterative pipeline; ignored under Parallel
-            Task API (a single multi-source run replaces the iterative
-            planner→search→reviewer→writer loop).
-
-        Requires `PARALLEL_API_KEY`.
-        """
-        deprecated = [
-            ("max_iterations", max_iterations),
-            ("num_queries_per_iteration", num_queries_per_iteration),
-            ("num_results_per_query", num_results_per_query),
-            ("thread_context", thread_context),
-        ]
-        used = [name for name, value in deprecated if value is not None]
-        if used:
-            warnings.warn(
-                f"deep_research kwargs ignored under Parallel Task API: {used}. "
-                "The new backend is single-call; iteration knobs no longer apply.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        return await self._backend.deep_research(
-            question=question,
-            progress=self._emit_progress,
-            processor=processor,
-            timeout_seconds=timeout_seconds,
-            max_report_chars=max_report_chars,
-        )
-
-
-class ClaudeSynthesisPipeline:
-    """Reviewer + writer + LLM-driven citation repair.
-
-    Byte-identical to the synthesis pipeline in centaur main: the
-    reviewer extracts claims and contradictions, the writer drafts a
-    cited report, and `_validate_and_repair_citations` invokes the
-    repair prompt up to two times to fix any citation IDs that aren't
-    grounded in the source list before raising. `synthesize()` returns
-    a dict so that callers can mirror the original tool's "partial
-    failure flagged but writer output retained" behavior when the
-    repair loop ultimately throws.
-    """
-
-    def __init__(self, *, api_key: str, model: str) -> None:
-        self._client = AsyncAnthropic(api_key=api_key)
-        self._model = model
-
-    async def synthesize(
-        self,
-        *,
-        question: str,
-        sources: list[SourceDocument],
-        thread_context: list[str] | None = None,
-        max_report_chars: int = 12000,
-    ) -> dict[str, Any]:
-        """Run reviewer → writer → validate-and-repair-citations.
-
-        Returns a dict with 'report' (the markdown — writer output retained
-        even when citation validation throws, matching the original tool's
-        behavior) and 'validation_error' (str | None when repair could not
-        produce a valid Sources section).
-        """
-        normalized_context = _normalize_thread_context(thread_context)
-        reviewer = await self._review_evidence(
-            question=question,
-            sources=sources,
-            thread_context=normalized_context,
-        )
-        report = await self._write_report(
-            question=question,
-            sources=sources,
-            claims=reviewer["claims"],
-            contradictions=reviewer["contradictions"],
-            thread_context=normalized_context,
-            max_report_chars=max_report_chars,
-        )
-        validation_error: str | None = None
-        try:
-            report = await self._validate_and_repair_citations(
-                report=report, sources=sources, max_report_chars=max_report_chars
-            )
-        except Exception as exc:
-            validation_error = str(exc)
-        return {"report": report, "validation_error": validation_error}
-
-    async def _review_evidence(
-        self,
-        *,
-        question: str,
-        sources: list[SourceDocument],
-        thread_context: list[str],
-    ) -> dict[str, Any]:
-        compact_sources = _trim_sources_for_budget(
-            sources,
-            per_source_chars=REVIEW_SOURCE_CHAR_LIMIT,
-            total_chars=REVIEW_TOTAL_CHAR_BUDGET,
-        )
-        user_prompt = json.dumps(
-            {
-                "question": question,
-                "iteration": 1,
-                "max_iterations": 1,
-                "thread_context": thread_context,
-                "sources": compact_sources,
-            },
-            indent=2,
-        )
-        payload = await self._call_claude_json(
-            system_prompt=EVIDENCE_REVIEWER_SYSTEM,
-            user_prompt=user_prompt,
-            max_tokens=3600,
-        )
-        if not isinstance(payload, dict):
-            raise RuntimeError("Evidence reviewer output must be a JSON object.")
-        valid_source_ids = {source.source_id for source in sources}
-        claims = _normalize_claims(
-            payload.get("claims", []) if isinstance(payload.get("claims"), list) else [],
-            valid_source_ids,
-        )
-        contradictions = _normalize_contradictions(
-            payload.get("contradictions", [])
-            if isinstance(payload.get("contradictions"), list)
-            else [],
-            valid_source_ids,
-        )
-        return {"claims": claims, "contradictions": contradictions}
-
-    async def _write_report(
-        self,
-        *,
-        question: str,
-        sources: list[SourceDocument],
-        claims: list[dict[str, Any]],
-        contradictions: list[dict[str, Any]],
-        thread_context: list[str],
-        max_report_chars: int,
-    ) -> str:
-        selected_sources = _trim_sources_for_budget(
-            sources,
-            per_source_chars=WRITE_SOURCE_CHAR_LIMIT,
-            total_chars=WRITE_TOTAL_CHAR_BUDGET,
-        )
-        source_map = {source["source_id"]: source for source in selected_sources}
-        user_prompt = json.dumps(
-            {
-                "question": question,
-                "claims": claims,
-                "contradictions": contradictions,
-                "thread_context": thread_context,
-                "source_map": source_map,
-            },
-            indent=2,
-        )
-        report = await self._call_claude_text(
-            system_prompt=REPORT_WRITER_SYSTEM,
-            user_prompt=user_prompt,
-            max_tokens=8000,
-        )
-        return report[:max_report_chars]
-
-    async def _repair_report_citations(
-        self,
-        *,
-        report: str,
-        invalid_ids: list[int],
-        missing_sources_ids: list[int],
-        sources: list[SourceDocument],
-        max_report_chars: int,
-    ) -> str:
-        source_map = {
-            source.source_id: {
-                "title": source.title,
-                "url": source.url,
-                "snippet": source.snippet[:REVIEW_SOURCE_CHAR_LIMIT],
-            }
-            for source in sources
+        with httpx.Client(timeout=timeout_seconds, transport=self._transport) as http:
+            page = SEARCHES[name](http, q)
+        meta: dict = {
+            "backend": page.backend,
+            "request_id": page.request_id,
+            "warnings": page.warnings + _unsupported_warning(unsupported),
         }
-        user_prompt = json.dumps(
-            {
-                "invalid_citation_ids": invalid_ids,
-                "missing_sources_section_ids": missing_sources_ids,
-                "source_map": source_map,
-                "report": report,
-            },
-            indent=2,
-        )
-        repaired = await self._call_claude_text(
-            system_prompt=REPORT_REPAIR_SYSTEM,
-            user_prompt=user_prompt,
-            max_tokens=7000,
-        )
-        return repaired[:max_report_chars]
-
-    async def _validate_and_repair_citations(
-        self,
-        *,
-        report: str,
-        sources: list[SourceDocument],
-        max_report_chars: int,
-    ) -> str:
-        max_repair_attempts = 2
-        invalid_ids = sorted(_invalid_citation_ids(report, sources))
-        cited_ids = _extract_citation_ids(report)
-        sources_section_ids = _extract_sources_section_ids(report)
-        missing_sources_ids = sorted(cited_ids - sources_section_ids)
-        attempt = 0
-        while (invalid_ids or missing_sources_ids) and attempt < max_repair_attempts:
-            attempt += 1
-            report = await self._repair_report_citations(
-                report=report,
-                invalid_ids=invalid_ids,
-                missing_sources_ids=missing_sources_ids,
-                sources=sources,
-                max_report_chars=max_report_chars,
-            )
-            invalid_ids = sorted(_invalid_citation_ids(report, sources))
-            cited_ids = _extract_citation_ids(report)
-            sources_section_ids = _extract_sources_section_ids(report)
-            missing_sources_ids = sorted(cited_ids - sources_section_ids)
-        if invalid_ids:
-            raise RuntimeError(
-                f"Citation validation failed. Invalid source IDs in report: {invalid_ids}"
-            )
-        if missing_sources_ids:
-            raise RuntimeError(
-                "Citation validation failed. Sources section missing cited IDs: "
-                f"{missing_sources_ids}"
-            )
-        if not _extract_citation_ids(report):
-            raise RuntimeError(
-                "Citation validation failed. Report did not include source citations."
-            )
-        return report
-
-    async def _call_claude_text(
-        self,
-        *,
-        system_prompt: str,
-        user_prompt: str,
-        max_tokens: int,
-    ) -> str:
-        try:
-            message = await self._client.messages.create(
-                model=self._model,
-                max_tokens=max_tokens,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_prompt}],
-            )
-        except AuthenticationError as exc:
-            raise RuntimeError(
-                "Anthropic authentication failed. Check ANTHROPIC_API_KEY."
-            ) from exc
-        body = _extract_text_content(message)
-        if not body:
-            raise RuntimeError("Claude returned empty content.")
-        return body
-
-    async def _call_claude_json(
-        self,
-        *,
-        system_prompt: str,
-        user_prompt: str,
-        max_tokens: int,
-    ) -> Any:
-        raw = await self._call_claude_text(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            max_tokens=max_tokens,
-        )
-        return _coerce_json(raw)
-
-
-def _normalize_thread_context(
-    thread_context: list[str] | None,
-    *,
-    max_items: int = 20,
-    max_chars_per_item: int = 1200,
-) -> list[str]:
-    if not thread_context:
-        return []
-    normalized: list[str] = []
-    for item in thread_context:
-        text = str(item).strip()
-        if not text:
-            continue
-        normalized.append(text[:max_chars_per_item])
-        if len(normalized) >= max_items:
-            break
-    return normalized
-
-
-def _trim_sources_for_budget(
-    sources: list[SourceDocument],
-    *,
-    per_source_chars: int,
-    total_chars: int,
-) -> list[dict[str, Any]]:
-    selected: list[dict[str, Any]] = []
-    consumed = 0
-    ranked = sorted(sources, key=_source_quality_score, reverse=True)
-    for source in ranked:
-        snippet = source.snippet[:per_source_chars] or source.title
-        projected = consumed + len(snippet)
-        if selected and projected > total_chars:
-            break
-        selected.append(
-            {
-                "source_id": source.source_id,
-                "title": source.title,
-                "url": source.url,
-                "snippet": snippet,
-                "published_date": source.published_date,
-                "domain": source.domain,
-            }
-        )
-        consumed = projected
-    return selected
-
-
-def _source_quality_score(source: SourceDocument) -> int:
-    score = 0
-    snippet_lower = source.snippet.lower()
-    domain = (source.domain or "").lower()
-    if source.published_date:
-        score += 1
-    if len(source.snippet) > 600:
-        score += 1
-    if domain.endswith(".gov") or domain.endswith(".edu"):
-        score += 3
-    low_signal_tokens = [
-        "book now",
-        "free 30-min",
-        "cookie policy",
-        "skip to content",
-    ]
-    if any(token in snippet_lower for token in low_signal_tokens):
-        score -= 2
-    if "linkedin.com" in domain:
-        score -= 2
-    return score
-
-
-def _normalize_claims(claims: list[Any], valid_ids: set[int]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for claim in claims:
-        if not isinstance(claim, dict):
-            continue
-        text = str(claim.get("claim", "")).strip()
-        if not text:
-            continue
-        key = text.casefold()
-        if key in seen:
-            continue
-        raw_ids = claim.get("source_ids", [])
-        ids: list[int] = []
-        if isinstance(raw_ids, list):
-            for raw_id in raw_ids:
-                if isinstance(raw_id, int) and raw_id in valid_ids:
-                    ids.append(raw_id)
-        support = str(claim.get("support_level", "none")).strip().lower()
-        if support not in {"strong", "partial", "weak", "none"}:
-            support = "none"
-        out.append({"claim": text, "source_ids": sorted(set(ids)), "support_level": support})
-        seen.add(key)
-    return out
-
-
-def _normalize_contradictions(
-    contradictions: list[Any], valid_ids: set[int]
-) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for entry in contradictions:
-        if not isinstance(entry, dict):
-            continue
-        summary = str(entry.get("summary", "")).strip()
-        if not summary:
-            continue
-        key = summary.casefold()
-        if key in seen:
-            continue
-        raw_ids = entry.get("source_ids", [])
-        ids: list[int] = []
-        if isinstance(raw_ids, list):
-            for raw_id in raw_ids:
-                if isinstance(raw_id, int) and raw_id in valid_ids:
-                    ids.append(raw_id)
-        out.append({"summary": summary, "source_ids": sorted(set(ids))})
-        seen.add(key)
-    return out
-
-
-def _extract_citation_ids(text: str) -> set[int]:
-    return {int(m) for m in re.findall(r"\[\s*(\d+)\s*\]", text)}
-
-
-def _extract_sources_section_ids(text: str) -> set[int]:
-    match = re.search(r"##\s*Sources\s*(.*)$", text, flags=re.IGNORECASE | re.DOTALL)
-    if not match:
-        return set()
-    return {
-        int(source_id)
-        for source_id in re.findall(
-            r"^\s*(?:[-*]\s+)?\[\s*(\d+)\s*\]\s+", match.group(1), flags=re.MULTILINE
-        )
-    }
-
-
-def _invalid_citation_ids(text: str, sources: list[SourceDocument]) -> set[int]:
-    valid = {source.source_id for source in sources}
-    return {cid for cid in _extract_citation_ids(text) if cid not in valid}
-
-
-def _extract_text_content(message: Any) -> str:
-    blocks = getattr(message, "content", None)
-    if not isinstance(blocks, list):
-        return ""
-    parts: list[str] = []
-    for block in blocks:
-        text = getattr(block, "text", None)
-        if isinstance(text, str):
-            parts.append(text)
-    return "".join(parts).strip()
-
-
-def _coerce_json(raw_text: str) -> Any:
-    stripped = raw_text.strip()
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
-        stripped = re.sub(r"\s*```$", "", stripped)
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        pass
-    object_match = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
-    if object_match:
-        return json.loads(object_match.group(0))
-    array_match = re.search(r"\[.*\]", stripped, flags=re.DOTALL)
-    if array_match:
-        return json.loads(array_match.group(0))
-    raise ValueError("Model response did not contain valid JSON.")
+        if page.attribution:
+            meta["attribution"] = page.attribution
+        return {
+            "query": text,
+            "results": _dedupe_and_trim(page.results, num_results, max_chars_total),
+            "meta": meta,
+        }
 
 
 def _client() -> WebSearchClient:

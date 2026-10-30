@@ -1,0 +1,4 @@
+# Keeps evals out of the root workspace so its dependencies cannot change
+# service lockfile resolution.
+packages:
+  - .

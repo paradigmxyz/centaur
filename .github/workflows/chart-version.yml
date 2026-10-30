@@ -1,0 +1,91 @@
+name: Chart Version
+
+# Keeps one rolling PR that bumps the chart version after chart changes land on
+# main. Merging that PR lets release-chart.yml publish the new version.
+#
+# CHART_BUMP_TOKEN must be a token for the bot account with Contents and Pull
+# requests write access to this repository. GITHUB_TOKEN cannot be used: its
+# pushes and PRs do not trigger the required CI checks.
+
+"on":
+  push:
+    branches:
+      - main
+    paths:
+      - "contrib/chart/**"
+  workflow_dispatch:
+
+# Newer main commits supersede older runs; the PR always reflects latest main.
+concurrency:
+  group: chart-version
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  BRANCH: chore/chart-version
+  CHART_YAML: contrib/chart/Chart.yaml
+
+jobs:
+  bump:
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require bump token
+        env:
+          CHART_BUMP_TOKEN: ${{ secrets.CHART_BUMP_TOKEN }}
+        run: |
+          if [[ -z "${CHART_BUMP_TOKEN}" ]]; then
+            echo "::error::CHART_BUMP_TOKEN is not set; cannot open the chart version PR."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.CHART_BUMP_TOKEN }}
+
+      - name: Check for unversioned chart changes
+        id: changes
+        run: |
+          set -euo pipefail
+          last_bump="$(git log -1 --format=%H -G '^version:' -- "${CHART_YAML}")"
+          if git diff --quiet "${last_bump}" HEAD -- contrib/chart; then
+            echo "No chart changes since the last version bump"
+            echo "pending=false" >>"${GITHUB_OUTPUT}"
+          else
+            echo "pending=true" >>"${GITHUB_OUTPUT}"
+          fi
+
+      - name: Update version PR
+        if: steps.changes.outputs.pending == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CHART_BUMP_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          current="$(awk '$1 == "version:" { print $2; exit }' "${CHART_YAML}")"
+          next="$(awk -F. -v OFS=. '{ $NF += 1; print }' <<<"${current}")"
+          sed -i -E "s/^version: .*/version: ${next}/" "${CHART_YAML}"
+          grep -qx "version: ${next}" "${CHART_YAML}"
+
+          read -r login id < <(gh api user --jq '"\(.login) \(.id)"')
+          git config user.name "${login}"
+          git config user.email "${id}+${login}@users.noreply.github.com"
+
+          title="chore(chart): release chart ${next}"
+          git switch -C "${BRANCH}"
+          git commit -m "${title}" -- "${CHART_YAML}"
+          git push --force origin "HEAD:refs/heads/${BRANCH}"
+
+          pr="$(gh pr list --head "${BRANCH}" --base main --state open --json number --jq '.[0].number // empty')"
+          if [[ -z "${pr}" ]]; then
+            gh pr create --base main --head "${BRANCH}" --title "${title}" \
+              --body "Publishes chart changes merged to main as ${next}. Updated automatically by chart-version.yml."
+          else
+            gh pr edit "${pr}" --title "${title}" \
+              --body "Publishes chart changes merged to main as ${next}. Updated automatically by chart-version.yml."
+          fi
+          gh pr merge "${BRANCH}" --auto --squash

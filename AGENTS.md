@@ -28,6 +28,8 @@ product-specific defaults solely to make them neutral unless the user asks.
   a parallel one.
 - Keep clients thin and changes focused. If a contract changes, update every
   producer, consumer, test fixture, and chart value affected by it.
+- Do not bump `version` in `contrib/chart/Chart.yaml`; a bot PR bumps it after
+  chart changes merge to `main`.
 - Never expose credentials in output, logs, fixtures, commits, or command-line
   arguments. Use placeholders and configured secret paths.
 - Do not mutate a remote environment unless the user explicitly asks. Local
@@ -62,6 +64,10 @@ Ownership by tree:
 
 - `services/api-rs/`: Rust control plane, durable sessions, sandbox backends,
   workflows, auth integration, and telemetry.
+- `crates/`: every Rust package, in one repository-root Cargo workspace
+  (`Cargo.toml`, `Cargo.lock`). A Rust service's code lives here, while its
+  `services/<name>/` directory holds the Dockerfile and docs. Run `cargo` from
+  the repository root.
 - `services/slackbotv2/`, `discordbot/`, `githubbot/`, `linearbot/`,
   `teamsbot/`: platform transport, policy gates, session forwarding, and
   platform rendering.

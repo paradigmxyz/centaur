@@ -19,7 +19,7 @@ default:
 
 # Prepare the database, then run the web server + Tailwind CSS watcher under
 # overmind (see Procfile.dev), so console styles rebuild on change.
-dev: deps paradedb
+dev: deps postgres
     @echo "== Preparing database =="
     bin/rails db:prepare
     @echo "== Starting overmind (web + css watch) on http://localhost:3000 =="
@@ -29,9 +29,9 @@ dev: deps paradedb
     @echo "   api key:  $CENTAUR_CONSOLE_INITIAL_API_KEY"
     bin/dev
 
-# Start the persistent ParadeDB container used by local Console development.
-paradedb:
-    script/start-paradedb
+# Start the persistent PostgreSQL container used by local Console development.
+postgres:
+    script/start-postgres
 
 # Build the Tailwind CSS bundle once (app/assets/builds/tailwind.css).
 css:
@@ -50,5 +50,5 @@ api-key:
     @echo "$CENTAUR_CONSOLE_INITIAL_API_KEY"
 
 # Drop, recreate, and migrate the dev database. Re-bootstraps on next `just dev`.
-db-reset: paradedb
+db-reset: postgres
     bin/rails db:drop db:create db:migrate

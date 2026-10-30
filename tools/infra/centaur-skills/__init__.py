@@ -1,1 +1,1 @@
-"""Console-authored skill catalog tool."""
+"""Repository and Console-authored skill catalog tool."""

@@ -6,6 +6,25 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     oauth_apps(:acme_google).update!(client_secret: "google-secret")
   end
 
+  test "shared credentials never auto grant while personal credentials of the same provider still do" do
+    user = users(:acme_admin)
+    principal = create_console_user_principal(user, foreign_id: "shared-test-admin")
+    app = oauth_apps(:acme_google).dup
+    app.update!(slug: "shared-google", shared: true)
+    shared = create_credential(app, "shared-account", user.email, created_by: user)
+    shared_secret = wrap(shared)
+    personal = create_credential(oauth_apps(:acme_google), "personal-account", user.email, created_by: user)
+    personal_secret = wrap(personal)
+    service = PrincipalCredentialReconciliation.new
+    service.apply_for_credential(shared)
+    service.apply_for_principal(principal)
+    service.apply_all
+    shared.update!(access_token: "rotated-synthetic")
+    refute principal.grants.exists?(static_secret: shared_secret)
+    assert principal.grants.exists?(static_secret: personal_secret)
+    assert_empty service.entries.flat_map(&:credentials).select { |credential| credential.id == shared.id }
+  end
+
   test "automatically grants matched Slack and Google wrapper secrets when wrappers appear" do
     principal = principals(:acme_user_alice)
     principal.update!(labels: principal.labels.merge("email" => "alice@example.com"))
@@ -82,6 +101,29 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     assert_equal "wrong-google@example.com", principal.labels["google_email"]
     refute principal.grants.exists?(static_secret: email_only_slack.static_secret)
     refute principal.grants.exists?(static_secret: email_only_google.static_secret)
+  end
+
+  test "matches GitHub credentials to requester principals by github_subject label" do
+    # GitHub's consent flow collects no email scope, so the credential carries
+    # only the numeric user id — the subject match is the only path.
+    github = create_credential(oauth_apps(:acme_github), "90210001", nil)
+    other = create_credential(oauth_apps(:acme_github), "9999999", nil)
+    github_secret = wrap(github)
+    other_secret = wrap(other)
+
+    principal = nil
+    assert_difference -> { Grant.count }, 1 do
+      principal = Principal.create!(
+        foreign_id: "github-user-90210001",
+        name: "GitHub User @ada",
+        kind: "github_user",
+        labels: { "managed-by" => "centaur", "github_subject" => "90210001" },
+        created_by: users(:acme_admin)
+      )
+    end
+
+    assert principal.grants.exists?(static_secret: github_secret)
+    refute principal.grants.exists?(static_secret: other_secret)
   end
 
   test "changing first-class Slack identity fields grants an existing matching wrapper" do

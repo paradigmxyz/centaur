@@ -1,0 +1,108 @@
+name: Evals
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/scripts/eval-summary.mjs
+      - .github/workflows/evals.yml
+      - evals/**
+      # Production code the eval providers import at runtime.
+      - services/slackbotv2/src/message-overrides-strategy.ts
+      - services/slackbotv2/src/overrides.ts
+      - services/slackbotv2/src/proactive-classifier.ts
+      - services/slackbotv2/src/utils.ts
+
+concurrency:
+  group: evals-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  evals:
+    name: Run evals
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 30
+    # Fork PRs get no secrets; never run untrusted code with them.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    defaults:
+      run:
+        working-directory: evals
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.1"
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10.34.7
+          run_install: false
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run evals
+        env:
+          OPENAI_API_KEY: ${{ secrets.EVALS_OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.EVALS_OPENAI_BASE_URL }}
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "::error::The EVALS_OPENAI_API_KEY secret is not set."
+            exit 1
+          fi
+          # Providers treat an empty base URL as set.
+          [ -n "$OPENAI_BASE_URL" ] || unset OPENAI_BASE_URL
+          mkdir -p "$RUNNER_TEMP/evals"
+          for config in */promptfooconfig.yaml; do
+            name="$(dirname "$config")"
+            status=0
+            pnpm run eval -c "$config" --no-write --no-progress-bar -o "$RUNNER_TEMP/evals/$name.json" || status=$?
+            # Exit 100 means some cases failed, which the comment reports.
+            if [ "$status" -ne 0 ] && [ "$status" -ne 100 ]; then
+              echo "::error::$name eval exited with $status."
+              exit "$status"
+            fi
+          done
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: eval-results
+          path: ${{ runner.temp }}/evals/
+          if-no-files-found: ignore
+
+      - name: Comment results
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          marker="<!-- centaur-eval-results -->"
+          body_file="$RUNNER_TEMP/eval-comment.md"
+          {
+            echo "$marker"
+            echo "### Eval results"
+            echo
+            echo "For ${HEAD_SHA::7} · [workflow run and JSON results]($RUN_URL)"
+            echo
+            node ../.github/scripts/eval-summary.mjs "$RUNNER_TEMP"/evals/*.json
+          } > "$body_file"
+          cat "$body_file" >> "$GITHUB_STEP_SUMMARY"
+          comment_id="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" --paginate \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$marker\"))) | .id" \
+            2>/dev/null | tail -n 1 || true)"
+          if [ -n "$comment_id" ]; then
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" -F body=@"$body_file"
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" -F body=@"$body_file"
+          fi

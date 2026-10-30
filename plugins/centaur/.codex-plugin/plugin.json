@@ -1,0 +1,27 @@
+{
+  "name": "centaur",
+  "version": "0.1.0",
+  "description": "Use an authenticated Centaur deployment from Codex.",
+  "author": {
+    "name": "Paradigm",
+    "url": "https://github.com/paradigmxyz"
+  },
+  "homepage": "https://centaur.run",
+  "repository": "https://github.com/paradigmxyz/centaur",
+  "license": "Apache-2.0 OR MIT",
+  "keywords": ["centaur", "mcp", "tools", "agents"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Centaur",
+    "shortDescription": "Use your team's approved Centaur tools.",
+    "longDescription": "Connect Codex to an authenticated Centaur MCP deployment and use the tools permitted for your Centaur principal.",
+    "developerName": "Paradigm",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "websiteURL": "https://centaur.run",
+    "defaultPrompt": [
+      "Show my Centaur identity and available tools.",
+      "Use Centaur to complete this task."
+    ]
+  }
+}

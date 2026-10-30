@@ -9,53 +9,17 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     expect_http_call(http, status: status, body: body) { |request| yield request if block_given? }
   end
 
-  test "lists Slack archive imports with query params" do
-    http = Minitest::Mock.new
-    expect_request(http, status: 200, body: { imports: [] }.to_json) do |request|
-      assert_equal :get, request[:method]
-      assert_equal "http://api.internal:8080/api/admin/slack/archive-imports?limit=25", request[:url]
-      assert_equal "application/json", request[:headers]["Accept"]
-    end
-    client = api_client(base_url: "http://api.internal:8080", http: http)
-
-    assert_equal({ "imports" => [] }, client.list_slack_archive_imports(limit: 25))
-    http.verify
-  end
-
-  test "creates Slack archive imports with a Console service JWT" do
-    http = Minitest::Mock.new
-    expect_request(http, status: 201, body: { ok: true }.to_json) do |request|
-      assert_equal :post, request[:method]
-      assert_equal "Bearer console-service-jwt", request[:headers]["Authorization"]
-      body = JSON.parse(request[:body])
-      assert_equal "export.zip", body["filename"]
-      assert_equal({ "source" => "test" }, body["metadata"])
-    end
-    client = api_client(
-      base_url: "http://api.internal:8080/",
-      http: http
-    )
-
-    client.create_slack_archive_import(
-      filename: "export.zip",
-      content_type: "application/zip",
-      created_by: "admin@example.com",
-      metadata: { source: "test" }
-    )
-
-    http.verify
-  end
-
   test "raises useful errors for non-2xx responses" do
     http = Minitest::Mock.new
-    expect_request(http, status: 400, body: { error: "bad archive" }.to_json)
+    expect_request(http, status: 400, body: { error: "bad run" }.to_json)
     client = api_client(base_url: "http://api.internal:8080", http: http)
 
     error = assert_raises(CentaurApiClient::Error) do
-      client.start_slack_archive_import("sai_bad")
+      client.get_workflow_run("run_bad")
     end
     http.verify
-    assert_equal "bad archive", error.message
+    assert_equal "bad run", error.message
+    assert_equal 400, error.status
   end
 
   test "fails before the request when the service JWT cannot be minted" do
@@ -71,6 +35,7 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     end
 
     assert_equal "Console API service JWT could not be minted", error.message
+    assert_nil error.status
   end
 
   test "lists Slack DM sync checkpoints for a broker credential" do
@@ -103,6 +68,19 @@ class CentaurApiClientTest < ActiveSupport::TestCase
 
     client.ingest_slack_dm_sync_batch(run: { run_id: "sdms_1" }, messages: [])
 
+    http.verify
+  end
+
+  test "replaces Slack external team ids" do
+    http = Minitest::Mock.new
+    expect_request(http, status: 200, body: { slack_external_team_ids: [ "T0PARTNER" ] }.to_json) do |request|
+      assert_equal :put, request[:method]
+      assert_equal "http://api.internal:8080/api/slack/external-team-ids", request[:url]
+      assert_equal({ "slack_external_team_ids" => [ "t0partner" ] }, JSON.parse(request[:body]))
+    end
+    client = api_client(base_url: "http://api.internal:8080", http: http)
+
+    assert_equal [ "T0PARTNER" ], client.replace_slack_external_team_ids([ "t0partner" ])
     http.verify
   end
 
@@ -148,6 +126,25 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     client = api_client(base_url: "http://api.internal:8080", http: http)
 
     client.ingest_google_docs_sync_batch(run: { run_id: "gdocs_1" }, files: [])
+
+    http.verify
+  end
+
+  test "gets Google Docs content status" do
+    http = Minitest::Mock.new
+    expect_request(http, status: 200, body: { missing: [] }.to_json) do |request|
+      assert_equal :post, request[:method]
+      assert_equal "http://api.internal:8080/api/admin/google/docs-sync/content-status", request[:url]
+      assert_equal(
+        { "files" => [ { "file_id" => "doc-123", "source_version" => "7" } ] },
+        JSON.parse(request[:body])
+      )
+    end
+    client = api_client(base_url: "http://api.internal:8080", http: http)
+
+    client.get_google_docs_content_status(
+      files: [ { file_id: "doc-123", source_version: "7" } ]
+    )
 
     http.verify
   end
@@ -222,7 +219,7 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     http.verify
   end
 
-  test "creates workflow runs with optional input" do
+  test "creates workflow runs with optional input and idempotency key" do
     http = Minitest::Mock.new
     expect_request(http, status: 200, body: { ok: true, run_id: "r1" }.to_json) do |request|
       assert_equal :post, request[:method]
@@ -235,10 +232,25 @@ class CentaurApiClientTest < ActiveSupport::TestCase
         JSON.parse(request[:body])
       )
     end
+    expect_request(http, status: 200, body: { ok: true, run_id: "r1" }.to_json) do |request|
+      assert_equal(
+        {
+          "workflow_name" => "console_workflow",
+          "idempotency_key" => "scheduled:1",
+          "max_attempts" => 3
+        },
+        JSON.parse(request[:body])
+      )
+    end
     client = api_client(base_url: "http://api.internal:8080", http: http)
 
     client.create_workflow_run(workflow_name: "slack_sync")
     client.create_workflow_run(workflow_name: "slack_sync", input: { "mode" => "full" })
+    client.create_workflow_run(
+      workflow_name: "console_workflow",
+      idempotency_key: "scheduled:1",
+      max_attempts: 3
+    )
 
     http.verify
   end

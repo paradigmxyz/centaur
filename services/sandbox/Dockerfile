@@ -4,11 +4,14 @@ FROM ubuntu:24.04 AS toolchain
 
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# ── System packages (cached unless base image changes) ───────────────────────
+# Bump this pin to refresh the trust store even when the base image is cached.
+ARG CA_CERTIFICATES_VERSION=20260816ubuntu0.24.04.1
+
+# ── System packages (cached unless base image or package pins change) ─────────
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-    git curl wget ca-certificates gnupg lsb-release sudo \
+    git curl wget ca-certificates=${CA_CERTIFICATES_VERSION} gnupg lsb-release sudo \
     build-essential pkg-config cmake ninja-build \
     ffmpeg ghostscript dvisvgm file \
     libssl-dev libclang-dev protobuf-compiler \
@@ -41,11 +44,11 @@ ENV LIBCLANG_PATH=/usr/lib/llvm-22/lib
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip3 install --break-system-packages --no-compile --ignore-installed "packaging>=24.2.0" \
     && pip3 install --break-system-packages --no-compile \
-    python-docx==1.2.0 lxml==6.0.2 docx-revisions==0.1.4 \
-    matplotlib==3.10.8 numpy==2.4.4 pandas==3.0.2 \
-    python-pptx==1.0.2 openpyxl==3.1.5 PyMuPDF==1.27.2 mammoth==1.12.0 \
+    python-docx==1.2.0 lxml==6.1.3 docx-revisions==0.1.5 \
+    matplotlib==3.11.2 numpy==2.5.4 pandas==3.0.6 \
+    python-pptx==1.0.2 openpyxl==3.1.5 PyMuPDF==1.28.2 mammoth==1.13.0 \
     faster-whisper \
-    asyncpg==0.30.0 \
+    asyncpg==0.32.0 \
     boto3>=1.40.0 \
     google-api-python-client>=2.100.0 \
     google-auth-httplib2>=0.2.0 \
@@ -55,15 +58,16 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     httplib2>=0.20.0 \
     httpx>=0.28.0 \
     "openai>=2.53.0" \
-    opentelemetry-proto==1.42.1 \
     "psycopg[binary]>=3.2.0" \
+    "githubkit>=0.16.1" \
     pysocks>=1.7.1 \
     rich>=13.0.0 \
-    slack-sdk==3.39.0 \
+    slack-sdk==3.45.0 \
     tomli-w==1.2.0 \
     && find /usr/local/lib/python3.12 /usr/lib/python3 -type d -name __pycache__ -prune -exec rm -rf '{}' +
 
 # ── GitHub CLI + Node.js 24 (LTS) + Docker CLI + Google Cloud CLI (cached) ──
+ARG NODE_VERSION=24.22.1
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -79,7 +83,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
       | tee /etc/apt/sources.list.d/google-cloud-sdk.list > /dev/null \
-    && apt-get update && apt-get install -y --no-install-recommends gh nodejs docker-ce-cli google-cloud-cli \
+    && apt-get update && apt-get install -y --no-install-recommends gh "nodejs=${NODE_VERSION}-1nodesource1" docker-ce-cli google-cloud-cli \
+    && node --version | grep -Fx "v${NODE_VERSION}" \
     && gcloud --version >/dev/null \
     && bq version >/dev/null \
     && rm -rf /usr/share/doc /usr/share/man /usr/share/info
@@ -88,20 +93,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 RUN useradd -m -s /bin/bash -u 1001 agent \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/agent
 
-ARG CLAUDE_CODE_VERSION=2.1.154
-ARG CODEX_VERSION=0.144.0
+ARG CLAUDE_CODE_VERSION=2.1.310
+ARG CODEX_VERSION=0.165.0
+ARG PI_CODING_AGENT_VERSION=1.4.0
 # Hermes Agent (NousResearch) — pinned by commit SHA per the dependency policy.
 ARG HERMES_AGENT_REF=e5e2fb8b2dbe1cae85aa5ad6ce45aef376016e43
-ARG PI_CODING_AGENT_VERSION=0.67.2
-ARG NUSHELL_VERSION=0.112.2
-ARG KUBECTL_VERSION=v1.34.2
-ARG KACHE_VERSION=v0.7.0
+ARG NUSHELL_VERSION=0.116.1
+ARG KUBECTL_VERSION=v1.37.1
+ARG KACHE_VERSION=v0.28.1
 # Bootstrap pnpm for agents working in JS monorepos. The exact baked version
 # doesn't constrain repos: when a repo's `packageManager` field declares a
 # different version, pnpm downloads and runs that one (v11 `pmOnFail=download`
 # default; `manage-package-manager-versions` in v10) over the same registry
 # egress a dependency install already needs.
-ARG PNPM_VERSION=11.5.3
+ARG PNPM_VERSION=11.28.7
 
 # ── kubectl ──────────────────────────────────────────────────────────────────
 RUN set -eux; \
@@ -150,13 +155,17 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm install -g --prefer-online --force \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
       "@openai/codex@${CODEX_VERSION}" \
-      "@mariozechner/pi-coding-agent@${PI_CODING_AGENT_VERSION}" \
+      "@earendil-works/pi-coding-agent@${PI_CODING_AGENT_VERSION}" \
       "pnpm@${PNPM_VERSION}" \
-      agent-browser@0.26.0 \
+      agent-browser@0.39.1 \
     && find /usr/lib/node_modules -type f \( -name '*.map' -o -name '*.tsbuildinfo' \) -delete \
     && claude --version | grep -F "${CLAUDE_CODE_VERSION}" \
     && codex --version | grep -F "${CODEX_VERSION}" \
+    && pi --version | grep -Fx "${PI_CODING_AGENT_VERSION}" \
     && pnpm --version | grep -F "${PNPM_VERSION}"
+# Keep every pi run, the harness's and the agent's own, from phoning home.
+ENV PI_TELEMETRY=0 \
+    PI_SKIP_VERSION_CHECK=1
 
 # ── Hermes Agent (own venv; exposes `hermes` + the tui_gateway module) ───────
 # The hermes harness drives `python -m tui_gateway.entry` (see
@@ -198,10 +207,11 @@ WORKDIR /home/agent
 
 ENV PATH="/home/agent/.cargo/bin:/home/agent/.local/bin:/home/agent/.foundry/bin:/home/agent/.bun/bin:${PATH}"
 
-ARG FOUNDRY_VERSION=v1.7.0
-ARG AMP_CLI_VERSION=0.0.1774529752-g94f44d
-ARG MANIM_VERSION=0.20.1
-ARG BUN_VERSION=bun-v1.3.13
+ARG FOUNDRY_VERSION=v1.8.5
+ARG AMP_CLI_VERSION=0.0.1792995770-gba80ba
+ARG MANIM_VERSION=0.22.0
+ARG BUN_VERSION=bun-v1.4.4
+ARG OMP_VERSION=18.13.2
 
 # ── Agent-scoped toolchains ─────────────────────────────────────────────────
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -221,15 +231,32 @@ RUN --mount=type=cache,target=/home/agent/.cargo/registry,uid=1001,gid=1001,shar
     && kache --version
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 RUN curl -fsSL https://bun.sh/install | bash -s "${BUN_VERSION}"
+# Optional and peer dependencies are OMP's local-model features (onnxruntime,
+# transformers, speech), off by default and about 600 MB. Omitting them also
+# omits pi-natives' platform addon, so that is installed explicitly. Bun still
+# downloads them into its cache, which is dropped; the install keeps its files.
+RUN set -eux; \
+    omp_platform="$(case "$(dpkg --print-architecture)" in \
+      amd64) echo linux-x64 ;; \
+      arm64) echo linux-arm64 ;; \
+      *) echo unsupported-architecture >&2; exit 1 ;; \
+    esac)"; \
+    bun install -g --omit=optional --omit=peer \
+      "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" \
+      "@oh-my-pi/pi-natives-${omp_platform}@${OMP_VERSION}"; \
+    rm -rf "$HOME/.bun/install/cache"; \
+    omp --version | grep -Fx "omp/${OMP_VERSION}"
 RUN --mount=type=cache,target=/home/agent/.cache/uv,uid=1001,gid=1001,sharing=locked \
     uv tool install "manim==${MANIM_VERSION}" \
     && manim --version
 RUN curl -L https://foundry.paradigm.xyz | bash \
     && /home/agent/.foundry/bin/foundryup --install ${FOUNDRY_VERSION} \
     && for bin in forge cast anvil chisel; do \
-      rm -f "$HOME/.foundry/bin/$bin"; \
-      ln -s "$HOME/.foundry/versions/${FOUNDRY_VERSION}/$bin" "$HOME/.foundry/bin/$bin"; \
-    done
+      src="$(find "$HOME/.foundry/versions" -type f -name "$bin" | head -n1)"; \
+      [ -n "$src" ] || { echo "foundry: $bin not found under ~/.foundry/versions" >&2; exit 1; }; \
+      ln -sf "$src" "$HOME/.foundry/bin/$bin"; \
+    done \
+    && cast --version && forge --version && anvil --version
 RUN set -eux; \
     amp_platform="$(case "$(dpkg --print-architecture)" in \
       amd64) echo linux-x64 ;; \
@@ -253,21 +280,37 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
 # Keep Playwright in uv's image-backed cache so isolated tool environments do
 # not download its large Python driver package on first use. Browser binaries
 # are intentionally omitted because DocSend connects to Browserbase over CDP.
-ARG PLAYWRIGHT_VERSION=1.62.0
+ARG PLAYWRIGHT_VERSION=1.64.1
 RUN uv tool install "playwright==${PLAYWRIGHT_VERSION}" \
     && playwright --version | grep -F "${PLAYWRIGHT_VERSION}"
 
 # ── Agent skills + workspace setup (rarely changes) ─────────────────────────
+# Codex installs into .agents/skills, which startup shares with every harness.
 RUN --mount=type=cache,target=/home/agent/.npm,uid=1001,gid=1001,sharing=locked \
-    npx -y skills add vercel-labs/agent-browser
+    npx -y skills add vercel-labs/agent-browser --agent codex --skill agent-browser --yes \
+    && test -s .agents/skills/agent-browser/SKILL.md
 # git-branch configures each writable clone with the publishing GitHub account.
 # A baked agent identity would reappear as a co-author when GitHub squash-merges its commits.
-RUN mkdir -p ~/.amp/bin ~/.config/amp ~/.codex ~/.pi/agent ~/github ~/workspace \
+RUN mkdir -p ~/.amp/bin ~/.config/amp ~/.codex ~/github ~/workspace \
     && git config --global init.defaultBranch main \
     && git config --global push.autoSetupRemote true \
     && git config --global core.hooksPath /opt/centaur/git-hooks \
     && git config --global --add safe.directory '*' \
     && git config --global user.useConfigOnly true
+
+# harness-server is a member of the repo-wide Cargo workspace, so the build
+# needs the workspace manifest, lockfile, and every crate's sources. Build it
+# in its own stage so only the binary reaches the sandbox image.
+FROM toolchain AS harness-server-build
+
+WORKDIR /home/agent/centaur-src
+COPY --chown=1001:1001 Cargo.toml Cargo.lock ./
+COPY --chown=1001:1001 crates/ crates/
+RUN --mount=type=cache,target=/home/agent/.cargo/registry,uid=1001,gid=1001,sharing=locked \
+    --mount=type=cache,target=/home/agent/.cargo/git,uid=1001,gid=1001,sharing=locked \
+    --mount=type=cache,target=/home/agent/.cache/harness-server-target,uid=1001,gid=1001,sharing=locked \
+    CARGO_TARGET_DIR=/home/agent/.cache/harness-server-target \
+    cargo +stable install --locked --path crates/harness-server --root /home/agent/harness-server
 
 # ==============================================================================
 # Final thin stage: only frequently-changing local files below.
@@ -282,7 +325,8 @@ RUN rm -f /etc/sudoers.d/agent
 # BuildKit's COPY --link creates parent directories without an explicit mode,
 # which can leave /etc/centaur without the execute bit for non-root users.
 # Pre-create it as 0755 so the agent user can traverse into it at runtime.
-RUN install -d -m 0755 /etc/centaur /opt/centaur
+RUN install -d -m 0755 /etc/centaur /opt/centaur \
+    && install -d -o 1001 -g 1001 -m 0700 /tmp/downloads
 COPY --link centaur_sdk/ /opt/centaur/centaur_sdk/
 COPY --link --chmod=0755 services/sandbox/git-hooks/ /opt/centaur/git-hooks/
 COPY --link --chown=1001:1001 tools/ /opt/centaur/tools/
@@ -293,23 +337,17 @@ COPY --link --chmod=755 services/workflow-python/workflow_host.py /usr/local/bin
 COPY --link services/workflow-python/api/ /usr/local/bin/api/
 COPY --link --chmod=755 services/sandbox/git-branch.sh /usr/local/bin/git-branch
 COPY --link --chmod=755 services/sandbox/install_tool_shims.py /usr/local/bin/install-tool-shims
+COPY --link --chmod=755 services/sandbox/seed_hermes_codex_auth.py /usr/local/bin/seed-hermes-codex-auth
+COPY --link --chmod=755 services/sandbox/centaur_artifact_get.py /usr/local/bin/centaur-artifact-get
 COPY --link --chmod=755 services/sandbox/centaur_tool_host.py /usr/local/bin/centaur-tool-host
 COPY --link --chmod=755 services/sandbox/compose_system_prompt.py /usr/local/bin/compose-system-prompt
 COPY --link --chmod=755 services/sandbox/repo_cache_sync.py /usr/local/bin/repo-cache-sync
 COPY --link --chmod=755 services/sandbox/repo_cache_watch.py /usr/local/bin/repo-cache-watch
 COPY --link --chmod=755 services/sandbox/entrypoint.sh /entrypoint.sh
-COPY --link --chown=1001:1001 crates/harness-server/ /opt/centaur/harness-server-src/
+COPY --link --chown=1001:1001 --from=harness-server-build /home/agent/harness-server/bin/harness-server /home/agent/.local/bin/harness-server
 
 USER agent
 WORKDIR /home/agent
-
-# Keep harness-server source as a real image input so crate changes invalidate
-# the install layer. Do not COPY into /tmp; that can clobber /tmp's sticky bit.
-RUN --mount=type=cache,target=/home/agent/.cargo/registry,uid=1001,gid=1001,sharing=locked \
-    --mount=type=cache,target=/home/agent/.cargo/git,uid=1001,gid=1001,sharing=locked \
-    --mount=type=cache,target=/home/agent/.cache/harness-server-target,uid=1001,gid=1001,sharing=locked \
-    CARGO_TARGET_DIR=/home/agent/.cache/harness-server-target \
-    cargo +stable install --locked --path /opt/centaur/harness-server-src --root /home/agent/.local
 
 # No RUN instructions after these — all repo-local content at the very end.
 COPY --link --chown=1001:1001 .agents/skills/ /home/agent/.agents/skills/

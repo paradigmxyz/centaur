@@ -10,10 +10,9 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
+ActiveRecord::Schema[8.1].define(version: 2026_10_10_025431) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
-  enable_extension "pg_search"
 
   create_table "api_keys", force: :cascade do |t|
     t.datetime "created_at", null: false
@@ -234,6 +233,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
     t.boolean "enabled", default: true, null: false
     t.jsonb "labels", default: {}, null: false
     t.string "provider", null: false
+    t.boolean "shared", default: false, null: false
     t.string "slug", null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_oauth_apps_on_created_by_id"
@@ -380,8 +380,29 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
     t.index ["labels"], name: "index_roles_on_labels", using: :gin
   end
 
+  create_table "scheduled_tasks", force: :cascade do |t|
+    t.bigint "author_id", null: false
+    t.datetime "created_at", null: false
+    t.string "cron_expression"
+    t.string "delivery_channel", null: false
+    t.boolean "enabled", default: true, null: false
+    t.datetime "last_enqueued_at"
+    t.text "last_error"
+    t.datetime "last_run_at"
+    t.string "last_run_id"
+    t.string "name", null: false
+    t.datetime "next_run_at"
+    t.text "prompt", null: false
+    t.string "timezone", default: "America/Los_Angeles", null: false
+    t.datetime "updated_at", null: false
+    t.index ["author_id", "name"], name: "index_scheduled_tasks_on_author_id_and_name", unique: true
+    t.index ["author_id"], name: "index_scheduled_tasks_on_author_id"
+    t.index ["enabled", "next_run_at"], name: "index_scheduled_tasks_on_enabled_and_next_run_at"
+  end
+
   create_table "secret_sources", force: :cascade do |t|
     t.bigint "aws_auth_secret_id"
+    t.bigint "broker_credential_id"
     t.jsonb "config", default: {}, null: false
     t.datetime "created_at", null: false
     t.bigint "gcp_auth_secret_id"
@@ -397,6 +418,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
     t.datetime "updated_at", null: false
     t.index ["aws_auth_secret_id", "role", "role_kind"], name: "index_secret_sources_on_aws_owner_and_role", unique: true
     t.index ["aws_auth_secret_id"], name: "index_secret_sources_on_aws_auth_secret_id"
+    t.index ["broker_credential_id"], name: "index_secret_sources_on_broker_credential_id"
     t.index ["gcp_auth_secret_id"], name: "index_secret_sources_on_gcp_auth_secret_id", unique: true
     t.index ["gcp_id_token_secret_id"], name: "index_secret_sources_on_gcp_id_token_secret_id", unique: true
     t.index ["hmac_secret_id", "role", "role_kind"], name: "index_secret_sources_on_hmac_owner_and_role", unique: true
@@ -406,6 +428,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
     t.index ["pg_dsn_secret_id"], name: "index_secret_sources_on_pg_dsn_secret_id", unique: true
     t.index ["source_type"], name: "index_secret_sources_on_source_type"
     t.index ["static_secret_id"], name: "index_secret_sources_on_static_secret_id", unique: true
+    t.check_constraint "broker_credential_id IS NULL OR source_type::text = 'token_broker'::text", name: "secret_sources_broker_credential_requires_token_broker"
   end
 
   create_table "skill_editors", force: :cascade do |t|
@@ -425,13 +448,35 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
     t.text "description", null: false
     t.integer "lock_version", default: 0, null: false
     t.string "name", null: false
+    t.virtual "search_vector", type: :tsvector, as: "((setweight(to_tsvector('english'::regconfig, (name)::text), 'A'::\"char\") || setweight(to_tsvector('english'::regconfig, description), 'B'::\"char\")) || setweight(to_tsvector('english'::regconfig, content), 'C'::\"char\"))", stored: true
     t.datetime "shared_at"
     t.datetime "updated_at", null: false
     t.bigint "user_id", null: false
     t.string "visibility", default: "shared", null: false
     t.index ["name"], name: "index_active_skills_on_name", unique: true, where: "(archived_at IS NULL)"
+    t.index ["search_vector"], name: "index_skills_on_search_vector", using: :gin
     t.index ["user_id"], name: "index_skills_on_user_id"
     t.index ["visibility", "updated_at"], name: "index_active_skills_for_catalog", where: "(archived_at IS NULL)"
+  end
+
+  create_table "slack_bot_channels", force: :cascade do |t|
+    t.boolean "active", default: true, null: false
+    t.boolean "archived", default: false, null: false
+    t.string "bot_user_id", null: false
+    t.string "channel_id", null: false
+    t.datetime "created_at", null: false
+    t.datetime "last_seen_at"
+    t.text "member_user_ids", default: [], null: false, array: true
+    t.text "membership_error"
+    t.datetime "membership_last_attempted_at"
+    t.datetime "membership_refreshed_at"
+    t.string "name", null: false
+    t.boolean "private", default: false, null: false
+    t.string "team_id", null: false
+    t.datetime "updated_at", null: false
+    t.index ["member_user_ids"], name: "index_slack_bot_channels_on_member_user_ids", using: :gin
+    t.index ["team_id", "active", "name"], name: "index_slack_bot_channels_for_catalog_search"
+    t.index ["team_id", "channel_id"], name: "index_slack_bot_channels_on_team_id_and_channel_id", unique: true
   end
 
   create_table "slack_channel_permissions", force: :cascade do |t|
@@ -447,6 +492,16 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
     t.index ["principal_id"], name: "index_slack_channel_permissions_on_principal_id"
     t.index ["role_id", "channel_id"], name: "idx_slack_permissions_unique_role_channel", unique: true, where: "(role_id IS NOT NULL)"
     t.check_constraint "(principal_id IS NOT NULL) <> (role_id IS NOT NULL)", name: "slack_channel_permissions_exactly_one_grantee"
+  end
+
+  create_table "slack_dm_sync_cursors", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.string "next_conversation_id"
+    t.bigint "next_credential_id"
+    t.datetime "not_before"
+    t.string "oauth_app_slug", null: false
+    t.datetime "updated_at", null: false
+    t.index ["oauth_app_slug"], name: "index_slack_dm_sync_cursors_on_oauth_app_slug", unique: true
   end
 
   create_table "static_secrets", force: :cascade do |t|
@@ -544,7 +599,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
   add_foreign_key "pg_dsn_secrets", "users", column: "created_by_id"
   add_foreign_key "principal_roles", "principals"
   add_foreign_key "principal_roles", "roles"
-  add_foreign_key "principal_sync_config_snapshots", "principals"
+  add_foreign_key "principal_sync_config_snapshots", "principals", on_delete: :cascade
   add_foreign_key "principals", "users", column: "console_user_id"
   add_foreign_key "principals", "users", column: "created_by_id"
   add_foreign_key "proxies", "principals", column: "requester_principal_id", on_delete: :nullify
@@ -556,7 +611,9 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
   add_foreign_key "request_rules", "oauth_token_secrets"
   add_foreign_key "request_rules", "static_secrets"
   add_foreign_key "roles", "users", column: "created_by_id"
+  add_foreign_key "scheduled_tasks", "users", column: "author_id"
   add_foreign_key "secret_sources", "aws_auth_secrets"
+  add_foreign_key "secret_sources", "broker_credentials"
   add_foreign_key "secret_sources", "gcp_auth_secrets"
   add_foreign_key "secret_sources", "gcp_id_token_secrets"
   add_foreign_key "secret_sources", "hmac_secrets"
@@ -573,6 +630,4 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
   add_foreign_key "thread_shares", "users", column: "created_by_id"
   add_foreign_key "user_identities", "users"
   add_foreign_key "users", "users", column: "approved_by_id"
-
-  add_bm25_index :skills, fields: { id: {}, name: {}, description: {}, content: {} }, key_field: :id, name: "index_skills_on_search_document"
 end

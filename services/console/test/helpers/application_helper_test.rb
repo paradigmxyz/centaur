@@ -130,24 +130,6 @@ class ApplicationHelperTest < ActionView::TestCase
     assert_includes html, "not a table"
   end
 
-  test "console_sidebar_thread_title prefers the stored generated title" do
-    session = Struct.new(:title, :metadata_hash, keyword_init: true).new(
-      title: "Fix worker memory leak",
-      metadata_hash: { "title" => "metadata title" }
-    )
-
-    assert_equal "Fix worker memory leak", console_sidebar_thread_title(session)
-  end
-
-  test "console_sidebar_thread_title falls back to metadata when no stored title" do
-    session = Struct.new(:title, :metadata_hash, keyword_init: true).new(
-      title: nil,
-      metadata_hash: { "title" => "metadata title" }
-    )
-
-    assert_equal "metadata title", console_sidebar_thread_title(session)
-  end
-
   test "console_markdown escapes unsafe html" do
     html = console_markdown("<script>alert(1)</script> **safe**")
 

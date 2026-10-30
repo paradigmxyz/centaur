@@ -77,6 +77,29 @@ def schema(base_id: str) -> None:
 
 
 @app.command()
+def create_table(
+    base_id: str,
+    name: str,
+    fields: str | None = typer.Option(
+        None,
+        "--fields",
+        help=('Fields as a JSON array. Defaults to a single-line text primary field named "Name".'),
+    ),
+    description: str | None = typer.Option(None, "--description"),
+) -> None:
+    """Create a table in an existing base."""
+    parsed_fields = _json_object_list(fields) if fields is not None else None
+    _print(
+        AirtableClient().create_table(
+            base_id,
+            name,
+            fields=parsed_fields,
+            description=description,
+        )
+    )
+
+
+@app.command()
 def records(
     base_id: str,
     table: str,

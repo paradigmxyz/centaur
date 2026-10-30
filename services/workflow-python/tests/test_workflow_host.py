@@ -65,6 +65,20 @@ class RequestRpc(FakeRpc):
             }
         if message_type == "ctx.agent_turn":
             return payload["args"]
+        if message_type == "ctx.run_agents":
+            return {
+                "results": [
+                    {
+                        "index": index,
+                        "name": agent["name"],
+                        "ok": True,
+                        "result": agent,
+                    }
+                    for index, agent in enumerate(payload["agents"])
+                ],
+                "succeeded": len(payload["agents"]),
+                "failed": 0,
+            }
         if message_type == "ctx.workflow.start":
             return {
                 "workflow_name": payload["workflow_name"],
@@ -72,6 +86,8 @@ class RequestRpc(FakeRpc):
                 "run_id": "run-child",
                 "created": True,
             }
+        if message_type == "ctx.post_to_slack":
+            return {"channel": payload["channel"], "ts": "1710000000.000100"}
         if message_type == "ctx.sleep":
             return {"slept": True}
         if message_type == "ctx.event.wait":
@@ -298,6 +314,96 @@ class WorkflowHostTests(unittest.TestCase):
             {"model": "claude-opus-4-8", "reasoning": "low", "text": "cheap step"},
         )
 
+    def test_agent_turn_forwards_principal_foreign_id(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+        )
+
+        result = asyncio.run(
+            ctx.agent_turn("do the thing", principal="finance-automation")
+        )
+
+        self.assertEqual(
+            result,
+            {"principal": "finance-automation", "text": "do the thing"},
+        )
+
+    def test_run_agents_applies_defaults_and_preserves_input_order(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+            agent_defaults={"harness": "codex", "reasoning": "high"},
+        )
+
+        result = asyncio.run(
+            ctx.run_agents(
+                [
+                    {"name": "correctness", "text": "Review correctness"},
+                    {
+                        "name": "security",
+                        "text": "Review security",
+                        "reasoning": "medium",
+                    },
+                ],
+                max_concurrency=2,
+            )
+        )
+
+        self.assertEqual(rpc.requests[-1]["type"], "ctx.run_agents")
+        self.assertEqual(rpc.requests[-1]["max_concurrency"], 2)
+        self.assertEqual(
+            rpc.requests[-1]["agents"],
+            [
+                {
+                    "harness": "codex",
+                    "reasoning": "high",
+                    "name": "correctness",
+                    "text": "Review correctness",
+                },
+                {
+                    "harness": "codex",
+                    "reasoning": "medium",
+                    "name": "security",
+                    "text": "Review security",
+                },
+            ],
+        )
+        self.assertEqual(
+            [item["name"] for item in result["results"]],
+            ["correctness", "security"],
+        )
+
+    def test_run_agents_rejects_non_mapping_items_before_rpc(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+        )
+
+        with self.assertRaisesRegex(TypeError, "agent at index 1 must be a dict"):
+            asyncio.run(
+                ctx.run_agents(
+                    [
+                        {"name": "correctness", "text": "Review correctness"},
+                        "not-an-agent",  # type: ignore[list-item]
+                    ]
+                )
+            )
+
+        self.assertEqual(rpc.requests, [])
+
     def test_start_workflow_enqueues_durable_child_with_idempotency_key(self) -> None:
         host = load_workflow_host()
         rpc = RequestRpc()
@@ -325,6 +431,41 @@ class WorkflowHostTests(unittest.TestCase):
                     "workflow_name": "company_context_documents",
                     "input": {"scope": "slack_thread"},
                     "idempotency_key": "company-context:slack-thread:42",
+                }
+            ],
+        )
+
+    def test_post_to_slack_sends_optional_custom_identity(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+        )
+
+        result = asyncio.run(
+            ctx.post_to_slack(
+                "U12345678",
+                "Your date is approaching.",
+                username="The Date Goblin",
+                icon_emoji=":female_mage:",
+            )
+        )
+
+        self.assertEqual(result["channel"], "U12345678")
+        self.assertEqual(
+            rpc.requests,
+            [
+                {
+                    "type": "ctx.post_to_slack",
+                    "channel": "U12345678",
+                    "text": "Your date is approaching.",
+                    "args": {
+                        "username": "The Date Goblin",
+                        "icon_emoji": ":female_mage:",
+                    },
                 }
             ],
         )
@@ -493,6 +634,49 @@ class WorkflowHostTests(unittest.TestCase):
         assert registered is not None
         self.assertEqual(host.normalize_principal(registered), True)
 
+    def test_load_workflow_file_reads_workflow_principal_reference(self) -> None:
+        host = load_workflow_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "principal_workflow.py"
+            path.write_text(
+                "WORKFLOW_NAME = 'principal_workflow'\n"
+                "WORKFLOW_PRINCIPAL = ' finance-automation '\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            registered = host.load_workflow_file(path)
+
+        assert registered is not None
+        self.assertEqual(host.normalize_principal(registered), "finance-automation")
+
+        registered.principal = " prn_01k2m3n4p5 "
+        self.assertEqual(host.normalize_principal(registered), "prn_01k2m3n4p5")
+
+    def test_load_workflow_file_reads_workflow_starters(self) -> None:
+        host = load_workflow_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "starters_workflow.py"
+            path.write_text(
+                "WORKFLOW_NAME = 'starters_workflow'\n"
+                "WORKFLOW_STARTERS = {' console ', 'admin'}\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            registered = host.load_workflow_file(path)
+
+        assert registered is not None
+        self.assertEqual(host.normalize_starters(registered), ["admin", "console"])
+
+        registered.starters = None
+        self.assertIsNone(host.normalize_starters(registered))
+
+        registered.starters = "console"
+        self.assertEqual(host.normalize_starters(registered), ["console"])
+
+        # A declared but malformed value fails closed.
+        registered.starters = True
+        self.assertEqual(host.normalize_starters(registered), [])
+
     def test_workflow_name_from_source_reads_string_constant(self) -> None:
         host = load_workflow_host()
         with tempfile.TemporaryDirectory() as tmp:
@@ -586,6 +770,89 @@ class WorkflowHostTests(unittest.TestCase):
         self.assertEqual(discovered, {})
         self.assertFalse(marker.exists())
 
+    def test_slack_buttons_post_workflow_target_and_replay_message(self) -> None:
+        source = '''
+from api.workflow_engine import Button
+WORKFLOW_NAME = "buttons"
+async def handler(inp, ctx):
+    return await ctx.slack_buttons(
+        "review", channel=inp["channel"], text="Proceed?", workflow="review_release",
+        input={"release_id": "release-1"},
+        buttons={"approve": Button("Approve", style="primary"),
+                 "reject": Button("Reject", style="danger"),
+                 "later": "Decide later", "details": Button("Details")},
+    )
+'''
+        message = {"ok": True, "channel": "C1", "ts": "1.0"}
+        group_ids = []
+        for channel, replay in [("C1", False), ("C1", True), ("C1", False)]:
+            with self.subTest(channel=channel, replay=replay), self.workflow_host(source) as proc:
+                self.send_host_message(proc, {
+                    "type": "workflow.start", "workflow_name": "buttons",
+                    "task_id": "task-1", "run_id": "run-1", "input": {"channel": channel},
+                })
+                posts = 0
+                while True:
+                    request = self.read_host_message(proc)
+                    kind = request["type"]
+                    if kind == "workflow.result":
+                        self.assertEqual(request["result"], message)
+                        break
+                    if kind == "ctx.step.get":
+                        self.assertEqual(request["step"], "review.post")
+                        value = {"done": replay, "value": message if replay else None, "checkpoint_name": "review.post"}
+                    elif kind == "ctx.post_to_slack":
+                        posts += 1
+                        self.assertEqual(request["channel"], "C1")
+                        elements = request["args"]["blocks"][1]["elements"]
+                        group_id = request["args"]["client_msg_id"]
+                        group_ids.append(group_id)
+                        self.assertEqual([b["action_id"] for b in elements], [
+                            f"centaur.workflow.action:{group_id}:approve",
+                            f"centaur.workflow.action:{group_id}:reject",
+                            f"centaur.workflow.action:{group_id}:later",
+                            f"centaur.workflow.action:{group_id}:details",
+                        ])
+                        self.assertEqual([b["text"]["text"] for b in elements], ["Approve", "Reject", "Decide later", "Details"])
+                        self.assertEqual([b.get("style") for b in elements], ["primary", "danger", None, None])
+                        for button in elements:
+                            self.assertEqual(json.loads(button["value"]), {
+                                "workflow_name": "review_release", "input": {"release_id": "release-1"},
+                            })
+                        value = message
+                    elif kind == "ctx.step.put":
+                        self.assertEqual(request["value"], message)
+                        value = None
+                    else:
+                        self.fail(f"unexpected host output: {request}")
+                    self.send_host_message(proc, {"type": "ctx.response", "request_id": request["request_id"], "ok": True, "value": value})
+                self.assertEqual(posts, int(not replay))
+                proc.wait(timeout=2)
+                self.assertEqual(proc.returncode, 0)
+        self.assertEqual(group_ids[0], group_ids[1])
+
+    def test_button_configuration_is_validated_before_posting(self) -> None:
+        source = """
+from api.workflow_engine import Button
+WORKFLOW_NAME = "buttons"
+async def handler(inp, ctx):
+    return await ctx.slack_buttons(
+        "review", channel=inp.get("channel", "C1"), workflow="review_release",
+        text=inp.get("text", "Proceed?"), input=inp.get("data", {}),
+        buttons={"approve": Button("Approve", style=inp["style"])} if "style" in inp else inp.get("buttons", {"approve": "Approve"}),
+    )
+"""
+        for inp in [{"buttons": {}}, {"channel": "general"}, {"channel": "#general"}, {"text": "x" * 3001}, {"data": {"large": "x" * 2000}},
+                    {"buttons": {"bad:action": "Bad"}}, {"buttons": {"approve": "x" * 76}},
+                    {"style": "blue"}, {"style": "default"}, {"style": ""}]:
+            with self.subTest(input=inp), self.workflow_host(source) as proc:
+                self.send_host_message(proc, {
+                    "type": "workflow.start", "workflow_name": "buttons",
+                    "task_id": "task-1", "run_id": "run-1", "input": inp,
+                })
+                self.assertEqual(self.read_host_message(proc)["type"], "workflow.error")
+                proc.wait(timeout=2)
+
     def test_failed_workflow_host_exits_with_stdin_open(self) -> None:
         source = (
             "WORKFLOW_NAME = 'failing_workflow'\n"
@@ -649,6 +916,70 @@ class WorkflowHostTests(unittest.TestCase):
                 response["result"],
                 {"agent_result": {"text": "daily digest"}},
             )
+            proc.wait(timeout=2)
+            self.assertEqual(proc.returncode, 0)
+            assert proc.stderr is not None
+            self.assertEqual(proc.stderr.read(), "")
+
+    def test_workflow_host_round_trips_agent_batch_result(self) -> None:
+        source = (
+            "WORKFLOW_NAME = 'review_workflow'\n"
+            "async def handler(inp, ctx):\n"
+            "    return await ctx.run_agents([\n"
+            "        {'name': 'correctness', 'text': 'Review correctness'},\n"
+            "        {'name': 'security', 'text': 'Review security'},\n"
+            "    ], max_concurrency=2)\n"
+        )
+        with self.workflow_host(source) as proc:
+            self.send_host_message(
+                proc,
+                {
+                    "type": "workflow.start",
+                    "run_id": "run-123",
+                    "task_id": "task-456",
+                    "workflow_name": "review_workflow",
+                    "input": {},
+                },
+            )
+
+            request = self.read_host_message(proc)
+            self.assertEqual(request["type"], "ctx.run_agents")
+            self.assertEqual(request["max_concurrency"], 2)
+            self.assertEqual(
+                [agent["name"] for agent in request["agents"]],
+                ["correctness", "security"],
+            )
+            result = {
+                "results": [
+                    {
+                        "index": 0,
+                        "name": "correctness",
+                        "ok": True,
+                        "result": {"result_text": "looks good"},
+                    },
+                    {
+                        "index": 1,
+                        "name": "security",
+                        "ok": False,
+                        "error": "agent unavailable",
+                    },
+                ],
+                "succeeded": 1,
+                "failed": 1,
+            }
+            self.send_host_message(
+                proc,
+                {
+                    "type": "ctx.response",
+                    "request_id": request["request_id"],
+                    "ok": True,
+                    "value": result,
+                },
+            )
+
+            response = self.read_host_message(proc)
+            self.assertEqual(response["type"], "workflow.result")
+            self.assertEqual(response["result"], result)
             proc.wait(timeout=2)
             self.assertEqual(proc.returncode, 0)
             assert proc.stderr is not None

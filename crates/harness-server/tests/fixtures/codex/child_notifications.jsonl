@@ -1,0 +1,7 @@
+{"method":"turn/started","params":{"threadId":"child","turn":{"id":"child-turn","items":[],"itemsView":"full","status":"inProgress","error":null,"startedAt":1,"completedAt":null,"durationMs":null}}}
+{"method":"thread/status/changed","params":{"threadId":"child","status":{"type":"idle"}}}
+{"method":"item/agentMessage/delta","params":{"threadId":"child","turnId":"child-turn","itemId":"child-answer","delta":"review findings"}}
+{"method":"item/completed","params":{"threadId":"child","turnId":"child-turn","item":{"type":"agentMessage","id":"child-answer","text":"review findings","phase":"final_answer","memoryCitation":null},"completedAtMs":2}}
+{"method":"turn/completed","params":{"threadId":"child","turn":{"id":"child-turn","items":[],"itemsView":"full","status":"completed","error":null,"startedAt":1,"completedAt":2,"durationMs":1}}}
+{"method":"error","params":{"threadId":"failing-child","turnId":"failing-child-turn","error":{"message":"child failed","codexErrorInfo":"other"},"willRetry":false}}
+{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"previous-turn","items":[],"itemsView":"full","status":"completed","error":null,"startedAt":1,"completedAt":2,"durationMs":1}}}

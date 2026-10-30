@@ -1,6 +1,24 @@
 require "test_helper"
 
 class Console::IntegrationsControllerTest < ActionDispatch::IntegrationTest
+  test "shared apps coexist with personal apps and only admins see their shared connection" do
+    app = oauth_apps(:acme_google).dup
+    app.update!(slug: "shared-google", client_secret: "synthetic", shared: true)
+    BrokerCredential.create!(oauth_app: app, provider_subject: "shared-user", token_endpoint: app.provider_strategy.token_endpoint,
+      created_by: users(:globex_admin))
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+    get console_integrations_url
+    assert_select "a[href*='/oauth/shared-google/start']", count: 0
+    assert_select "a[href*='/oauth/google/start']", count: 1
+    assert_select "form[action*='/presets/mercator']", count: 0
+    delete logout_url
+    post login_url, params: { email: users(:acme_admin).email, password: "password123456" }
+    get console_integrations_url
+    assert_select "a[href=?]", console_oauth_app_path(app.oid), text: "Manage"
+    assert_select "a[href*='/oauth/shared-google/start']", text: "Reconnect"
+    assert_select "form[action=?]", console_oauth_app_preset_path(provider: "mercator")
+  end
+
   test "redirects to login when not signed in" do
     get console_integrations_url
     assert_redirected_to login_path

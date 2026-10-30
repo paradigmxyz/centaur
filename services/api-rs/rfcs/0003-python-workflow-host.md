@@ -96,6 +96,7 @@ Absurd queue: centaur_workflows
                  |
                  +--> ctx.step       -> api-rs / Absurd checkpoint RPC
                  +--> ctx.agent_turn -> api-rs SessionRuntime
+                 +--> ctx.run_agents -> bounded parallel SessionRuntime turns
                  +--> ctx.call_tool  -> api-rs tool route
                  +--> ctx.post_to_slack
                  +--> ctx._pool      -> direct Postgres
@@ -200,9 +201,10 @@ While a workflow is running, the host may send requests:
 {"type":"ctx.step.get","request_id":"1","step":"load_state"}
 {"type":"ctx.step.put","request_id":"2","step":"load_state","value":{}}
 {"type":"ctx.agent_turn","request_id":"3","args":{}}
-{"type":"ctx.call_tool","request_id":"4","tool":"slack","method":"send_message","args":{}}
-{"type":"ctx.post_to_slack","request_id":"5","channel":"C123","text":"hello","args":{}}
-{"type":"ctx.log","request_id":"6","message":"workflow_event","fields":{}}
+{"type":"ctx.run_agents","request_id":"4","agents":[{"name":"security","text":"Review security"}],"max_concurrency":4}
+{"type":"ctx.call_tool","request_id":"5","tool":"slack","method":"send_message","args":{}}
+{"type":"ctx.post_to_slack","request_id":"6","channel":"C123","text":"hello","args":{}}
+{"type":"ctx.log","request_id":"7","message":"workflow_event","fields":{}}
 ```
 
 api-rs responds:
@@ -229,6 +231,7 @@ class WorkflowContext:
 
     async def step(self, name, fn, *, retry=None, timeout=None): ...
     async def agent_turn(self, text=None, **kwargs): ...
+    async def run_agents(self, agents, *, max_concurrency=None): ...
     async def call_tool(self, tool, method, args=None): ...
     async def post_to_slack(self, channel, text, **kwargs): ...
     def log(self, message, **fields): ...
@@ -275,6 +278,15 @@ Rules:
 - wait for terminal session result and return the same result shape existing
   workflows expect
 
+### `ctx.run_agents`
+
+api-rs handles a named batch as bounded concurrent `ctx.agent_turn` operations.
+Each item receives its own workflow-owned thread key, message id, execution
+idempotency key, and batch metadata. Results preserve input order and report
+individual failures without failing the entire batch. The runtime rejects
+duplicate names and caller-supplied session or idempotency fields so two batch
+items cannot accidentally serialize through the same session.
+
 ### `ctx.call_tool`
 
 api-rs should call the tool runtime and return JSON output. If api-rs tool
@@ -300,7 +312,7 @@ The route should:
 
 - look up the registered slug
 - enforce allowed methods and content types
-- verify HMAC, GitHub HMAC, or bearer auth
+- verify raw-body HMAC, GitHub HMAC, Standard Webhooks, or bearer auth
 - redact sensitive headers
 - parse JSON or form payloads
 - preserve the Python-compatible input envelope

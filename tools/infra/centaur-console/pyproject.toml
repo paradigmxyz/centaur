@@ -1,6 +1,6 @@
 [project]
 name = "centaur-console"
-description = "Centaur console sandbox permission introspection"
+description = "Inspect Centaur Console permissions and manage scheduled tasks"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [

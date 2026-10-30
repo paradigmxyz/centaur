@@ -58,7 +58,6 @@ __pycache__/
 __pycache__/**
 **/__pycache__/
 **/__pycache__/**
-services/api-rs/target
 
 # Logs
 logs/

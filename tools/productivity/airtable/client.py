@@ -554,6 +554,32 @@ class AirtableClient:
         """Get tables, fields, and views for a base."""
         return self._request("GET", f"{META_URL}/bases/{_path_part(base_id)}/tables")
 
+    def create_table(
+        self,
+        base_id: str,
+        name: str,
+        fields: list[dict[str, Any]] | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a table in an existing Airtable base.
+
+        When `fields` is omitted, Airtable's required primary field is created as a
+        single-line text field named ``Name``. The API key needs Airtable's
+        `schema.bases:write` scope for the target base.
+        """
+        if not name.strip():
+            raise ValueError("Table name must not be empty.")
+
+        table_fields = fields or [{"name": "Name", "type": "singleLineText"}]
+        payload: dict[str, Any] = {"name": name, "fields": table_fields}
+        if description is not None:
+            payload["description"] = description
+        return self._request(
+            "POST",
+            f"{META_URL}/bases/{_path_part(base_id)}/tables",
+            json=payload,
+        )
+
     def list_tables(self, base_id: str) -> list[dict[str, Any]]:
         """List tables, fields, and views in a base."""
         tables = self.schema(base_id).get("tables", [])

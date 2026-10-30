@@ -13,14 +13,14 @@ production:
   clear_solid_queue_finished_jobs:
     command: "SolidQueue::Job.clear_finished_in_batches(sleep_between_batches: 0.3)"
     schedule: every hour at minute 12
-  # Drives the BrokerCredential refresh loop: enqueues a refresh for every
-  # credential whose access token is due to be renewed. iron-token-broker imposes
-  # a 60s floor before expiry, so minute cadence keeps tokens warm.
-  broker_poll_refresh:
-    class: "Broker::PollRefreshJob"
-    schedule: every minute
   slack_dm_poll_sync:
-    class: "SlackDm::PollSyncJob"
+    class: "SlackDm::SyncCredentialJob"
+    schedule: every 10 minutes
+  slack_channel_catalog_refresh:
+    class: "SlackChannelCatalogRefreshJob"
+    schedule: every hour
+  slack_channel_catalog_membership_refresh:
+    class: "SlackChannelCatalogMembershipRefreshJob"
     schedule: every 10 minutes
   google_docs_poll_sync:
     class: "GoogleDocs::PollSyncJob"
@@ -28,6 +28,6 @@ production:
   granola_poll_sync:
     class: "Granola::PollSyncJob"
     schedule: every 30 minutes
-  prune_principal_sync_config_snapshots:
-    class: "PrunePrincipalSyncConfigSnapshotsJob"
-    schedule: every 10 minutes
+  scheduled_task_scheduler:
+    class: "ScheduledTaskSchedulerJob"
+    schedule: every minute

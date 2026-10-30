@@ -1,3 +1,5 @@
+import type { ReasoningEffortPolicy } from "./reasoning-effort";
+
 import type { RustSessionStreamEvent } from "@centaur/harness-events";
 import type { CodexAppServerToChatStreamOptions } from "@centaur/rendering";
 import type { Attachment, Chat, Logger, StateAdapter } from "chat";
@@ -90,6 +92,13 @@ export type LinearbotOptions = {
   apiKey?: string;
   apiUrl: string;
   /**
+   * Reasoning effort per turn type. This bot's turns are mostly autonomous, so
+   * there is no message for a `-rsn` flag to ride on and every turn otherwise
+   * runs at the harness global default -- which suits neither an assignment
+   * turn implementing a whole ticket nor a one-line comment reply.
+   */
+  reasoningEffort?: ReasoningEffortPolicy;
+  /**
    * Connect the Postgres state (and initialize the adapter) at startup.
    * Defaults to true; tests pass false to skip the live connect against mock
    * backends.
@@ -130,6 +139,8 @@ export type Linearbot = {
 export type LinearbotThreadState = {
   /** Set once the thread's first turn has run (gates follow-up ingestion). */
   historyForwarded?: boolean;
+  /** Codex provider pinned for this thread. Null clears a previous selection. */
+  provider?: string | null;
   /**
    * Set once the full issue context (with description) has ridden a turn's
    * execute; later turns prepend only the compact id/title header instead.
@@ -188,6 +199,8 @@ export type ForwardSessionInput = {
   messages: LinearbotApiMessage[];
   /** Per-turn model override parsed from message flags (--model/--opus/...). */
   model?: string;
+  /** Per-turn reasoning effort, forwarded to the harness as turn/start.effort. */
+  reasoning?: string;
   /** Per-turn model provider override parsed from message flags (--meta). */
   provider?: string;
   onEventId(eventId: number): void;

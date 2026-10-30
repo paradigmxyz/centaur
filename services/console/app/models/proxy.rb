@@ -3,7 +3,6 @@ class Proxy < ApplicationRecord
 
   TOKEN_PREFIX = "iprx_".freeze
   TOKEN_FORMAT = /\Aiprx_[0-9a-f]{64}\z/
-  SANDBOX_ENTITLEMENTS_PATH_PATTERN = "/api/v1/sandbox/*".freeze
 
   attr_readonly :bearer_token_hash
   attr_accessor :token
@@ -12,8 +11,8 @@ class Proxy < ApplicationRecord
   # swapped later. principal_id is mutable so the assignment can change.
   belongs_to :principal, optional: true
   # Optional second principal: the human whose turn is currently running.
-  # When set, the rendered config unions in their always-available direct
-  # credential grants (see PrincipalSyncConfigSnapshot).
+  # When set, proxy-sync unions in their always-available direct credential
+  # grants.
   belongs_to :requester_principal, class_name: "Principal", optional: true
 
   validates :name, presence: true
@@ -43,20 +42,6 @@ class Proxy < ApplicationRecord
 
   def self.hash_token(plaintext)
     Digest::SHA256.hexdigest(plaintext)
-  end
-
-  def sync_config_snapshot(sandbox_entitlements_hosts: self.class.sandbox_entitlements_hosts)
-    PrincipalSyncConfigSnapshot.sync_config_for_proxy(self, sandbox_entitlements_hosts: sandbox_entitlements_hosts)
-  end
-
-  # Opaque, deterministic fingerprint of the exact config delivered by the
-  # proxy sync endpoint.
-  def config_hash
-    sync_config_snapshot.fetch(:config_hash)
-  end
-
-  def self.sandbox_entitlements_hosts
-    [ Principal.host_from_url(ENV["CENTAUR_CONSOLE_URL"]) ]
   end
 
   private

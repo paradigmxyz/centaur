@@ -1,0 +1,27 @@
+general:
+  team_id: T0123456789
+  bot_user_id: U0999999999
+  channel_id: C0123456789
+  name: general
+  private: false
+  archived: false
+  active: true
+  member_user_ids:
+    - U0123456789
+    - U0999999999
+  membership_refreshed_at: 2026-08-20 11:46:01
+  last_seen_at: 2026-08-20 11:46:01
+
+private_channel:
+  team_id: T0123456789
+  bot_user_id: U0999999999
+  channel_id: G9876543210
+  name: private
+  private: true
+  archived: false
+  active: true
+  member_user_ids:
+    - U0999999999
+    - U1111111111
+  membership_refreshed_at: 2026-08-20 11:46:01
+  last_seen_at: 2026-08-20 11:46:01

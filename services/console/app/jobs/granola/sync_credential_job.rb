@@ -2,7 +2,14 @@ module Granola
   class SyncCredentialJob < ApplicationJob
     queue_as :default
 
+    retry_on Granola::SyncCredential::TransientGranolaApiError,
+      Errno::ECONNREFUSED,
+      wait: :polynomially_longer,
+      attempts: 5
+
     def perform(credential_id)
+      return unless CompanyContextV1.enabled?
+
       credential = BrokerCredential.includes(:oauth_app).find_by(id: credential_id)
       return unless Granola::SyncCredential.syncable?(credential)
 

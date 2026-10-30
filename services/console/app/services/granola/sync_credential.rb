@@ -15,6 +15,7 @@ module Granola
     PARTICIPANT_RE = /(?<name>[^,<]+?)\s*<(?<email>[^>]+)>/
 
     GranolaApiError = Class.new(StandardError)
+    TransientGranolaApiError = Class.new(GranolaApiError)
 
     class << self
       attr_accessor :mcp_http
@@ -102,6 +103,8 @@ module Granola
 
     def meeting_transcript(meeting_id)
       mcp_tool("get_meeting_transcript", "meeting_id" => meeting_id)
+    rescue TransientGranolaApiError
+      raise
     rescue GranolaApiError => error
       # Transcripts are only available on paid Granola plans. Keep syncing the
       # note metadata when that optional tool is unavailable or access is
@@ -337,7 +340,8 @@ module Granola
         headers: headers
       )
       unless response.success?
-        raise GranolaApiError, "Granola MCP returned HTTP #{response.status}"
+        error_class = response.status.between?(500, 599) ? TransientGranolaApiError : GranolaApiError
+        raise error_class, "Granola MCP returned HTTP #{response.status}"
       end
 
       response

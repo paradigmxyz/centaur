@@ -5,13 +5,15 @@ module Console
     private
 
     def load_slack_channel_permission_form(owner)
-      @slack_channel_catalog = SlackChannelCatalogProvider.fetch
-      @slack_channel_names = @slack_channel_catalog.channels.to_h { |channel| [ channel.id, channel.name ] }
-      @slack_channel_permissions = owner.slack_channel_permissions.ordered
-      @slack_channel_options = @slack_channel_catalog.channels.map do |channel|
-        label = "##{channel.name} (#{channel.id}) #{channel.private ? "Private" : "Public"}"
-        [ label, channel.id ]
+      SlackChannelCatalogSync.enqueue_if_empty
+      @slack_channel_catalog_error = if !SlackChannelCatalogSync.configured?
+        "SLACK_BOT_TOKEN is not configured."
+      elsif SlackBotChannel.none?
+        "Slack channel catalog is loading. Enter a channel ID or reload shortly."
       end
+      @slack_channel_names = SlackBotChannel.pluck(:channel_id, :name).to_h
+      @slack_channel_permissions = owner.slack_channel_permissions.ordered
+      @slack_channel_options_url = slack_channel_options_url(owner)
     end
 
     def update_slack_channel_permissions_from_form(owner, path, preserve_api_managed_direct_messages: false)
@@ -84,6 +86,14 @@ module Console
       owner.slack_channel_permissions
            .select { |permission| permission.channel_id.to_s.start_with?("D") }
            .map(&:as_permission_json)
+    end
+
+    def slack_channel_options_url(owner)
+      case owner
+      when Principal then console_principal_slack_channel_options_path(owner.oid)
+      when Role then slack_channel_options_console_role_path(owner.oid)
+      else raise ArgumentError, "unsupported Slack channel permission owner"
+      end
     end
   end
 end

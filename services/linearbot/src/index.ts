@@ -15,6 +15,8 @@ import {
   type Thread,
 } from "chat";
 import { Hono, type Context } from "hono";
+
+import { reasoningEffortFor } from "./reasoning-effort";
 import pg from "pg";
 import {
   parseIssueAssignmentWebhook,
@@ -53,7 +55,7 @@ import {
   updateIssueState,
   type LinearStatusMarker,
 } from "./linear-status";
-import { extractMessageOverrides } from "./overrides";
+import { extractMessageOverrides, resolveStickyProvider } from "./overrides";
 import {
   executeSessionTurn,
   forwardToSessionApi,
@@ -521,6 +523,7 @@ function handleCommentMention(
           harnessType: overrides.harnessType,
           model: overrides.model,
           provider: overrides.provider,
+          reasoning: reasoningEffortFor(options.reasoningEffort, "comment"),
         },
         parentCommentId: rootCommentId,
         reactCommentId: event.commentId,
@@ -697,7 +700,9 @@ function handleIssueAssignment(
         executeMessage: assignmentInstructionMessage(event, threadKey),
         issueId: event.issueId,
         options,
-        overrides: {},
+        overrides: {
+          reasoning: reasoningEffortFor(options.reasoningEffort, "assignment"),
+        },
         thread,
         threadKey,
         trace,
@@ -729,7 +734,12 @@ async function runThreadTurn(input: {
   executeMessage: LinearbotApiMessage;
   issueId: string;
   options: LinearbotOptions;
-  overrides: { harnessType?: string; model?: string; provider?: string };
+  overrides: {
+    harnessType?: string;
+    model?: string;
+    provider?: string;
+    reasoning?: string;
+  };
   parentCommentId?: string;
   /** Comment to react to (👀 → ✅/❌); the triggering mention, if any. */
   reactCommentId?: string;
@@ -769,6 +779,12 @@ async function runThreadTurn(input: {
     }
   }
   const threadState = (await thread.state) ?? {};
+  const provider = resolveStickyProvider(threadState.provider, overrides);
+  if (provider.update !== undefined) {
+    // Commit the selection before execution so a bot/sandbox crash cannot lose
+    // the provider needed to resume this Codex thread on the next turn.
+    await thread.setState({ provider: provider.update });
+  }
   // Resolve the issue context up front — including whether it's delegated to us.
   // The context rides inline in the execute (contextPreamble lands directly in
   // the prompt's input lines) rather than as a one-time appended session
@@ -832,7 +848,8 @@ async function runThreadTurn(input: {
     harnessType: overrides.harnessType,
     messages: [],
     model: overrides.model,
-    provider: overrides.provider,
+    provider: provider.provider,
+    reasoning: overrides.reasoning,
     onEventId: (eventId) => {
       lastEventId = Math.max(lastEventId, eventId);
       // Keep afterEventId in sync so a mid-stream retry resumes after the last

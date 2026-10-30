@@ -1,0 +1,106 @@
+// Runs the production Slack proactive-response classifier on a case's thread. Each
+// `thread` entry is a one-key map from author to text, oldest first; the last
+// entry is the newest message and the author `centaur` is the bot. Entries
+// become Chat SDK messages labelled by slackbotv2's own proactiveThreadMessage,
+// so texts are written as Chat SDK renders them: mentions resolve to display
+// names (`@centaur`, `@Bob Martinez`). History is built as slackbotv2 builds it:
+// the latest earlier messages, bot replies included, oldest first. An optional `rules` var (a list of {name, when}) runs a
+// rule-match decision with those proactivity rules instead of the
+// mentioned-thread rules; the output's `rule` names the first rule matched.
+// An optional `burst` var (default 1) counts the trailing entries sent in quick
+// succession that slackbotv2's debounce judges together as the newest message.
+import type { ApiProvider, CallApiContextParams, ProviderOptions, ProviderResponse } from 'promptfoo'
+import {
+  createOpenAiProactiveClassifier,
+  proactiveThreadMessage
+} from '../../services/slackbotv2/src/proactive-classifier'
+import type { ProactivityRule } from '../../services/slackbotv2/src/proactivity-rules'
+import type { ProactiveThreadMessage as ThreadMessage } from '../../services/slackbotv2/src/types'
+
+const BOT_NAME = 'centaur'
+// slackbotv2's PROACTIVE_HISTORY_MESSAGES.
+const MAX_HISTORY_MESSAGES = 20
+
+type Config = {
+  model?: string
+  timeoutMs?: number
+}
+
+export default class ProactiveResponseProvider implements ApiProvider {
+  readonly config: Config
+  private readonly providerId: string
+
+  constructor(options: ProviderOptions) {
+    this.config = (options.config ?? {}) as Config
+    this.providerId = options.id ?? `proactive-response:${this.config.model}`
+  }
+
+  id(): string {
+    return this.providerId
+  }
+
+  async callApi(_prompt: string, context?: CallApiContextParams): Promise<ProviderResponse> {
+    const apiKey = process.env.OPENAI_API_KEY
+    if (!apiKey) return { error: 'OPENAI_API_KEY is not set' }
+
+    let messages: ThreadMessage[]
+    try {
+      messages = threadMessages(context?.vars.thread)
+    } catch (error) {
+      return { error: (error as Error).message }
+    }
+
+    const tokenUsage = { completion: 0, prompt: 0, total: 0 }
+    try {
+      const classify = createOpenAiProactiveClassifier({
+        apiKey,
+        baseUrl: process.env.OPENAI_BASE_URL,
+        fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+          const response = await fetch(input, init)
+          const usage = response.ok ? (await response.clone().json()).usage : undefined
+          tokenUsage.prompt += usage?.input_tokens ?? 0
+          tokenUsage.completion += usage?.output_tokens ?? 0
+          tokenUsage.total += usage?.total_tokens ?? 0
+          return response
+        }) as typeof fetch,
+        model: this.config.model ?? 'gpt-6-luna'
+      })
+      const burstSize = Number(context?.vars.burst ?? 1)
+      const earlier = messages.slice(0, -1).slice(-MAX_HISTORY_MESSAGES)
+      const burst = earlier.slice(earlier.length - (burstSize - 1))
+      const decision = await classify(
+        {
+          botName: BOT_NAME,
+          ...(burstSize > 1 ? { burst } : {}),
+          history: earlier.slice(0, earlier.length - (burstSize - 1)),
+          message: messages.at(-1)!,
+          ...(Array.isArray(context?.vars.rules)
+            ? { rules: context.vars.rules as ProactivityRule[] }
+            : {})
+        },
+        AbortSignal.timeout(this.config.timeoutMs ?? 10_000)
+      )
+      return { output: decision, tokenUsage }
+    } catch (error) {
+      return { error: (error as Error).message }
+    }
+  }
+}
+
+function threadMessages(thread: unknown): ThreadMessage[] {
+  if (!Array.isArray(thread) || thread.length === 0) {
+    throw new Error('thread must be a non-empty list of {author: text} entries')
+  }
+  return thread.map(entry => {
+    const pairs = entry && typeof entry === 'object' ? Object.entries(entry) : []
+    const [author, text] = pairs[0] ?? []
+    if (pairs.length !== 1 || typeof text !== 'string') {
+      throw new Error(`thread entry must be a single {author: text} pair: ${JSON.stringify(entry)}`)
+    }
+    const isMe = author === BOT_NAME
+    return proactiveThreadMessage({
+      author: { fullName: author, isBot: isMe, isMe, userId: author, userName: author },
+      text
+    })
+  })
+}

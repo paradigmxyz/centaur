@@ -13,7 +13,9 @@ module Oauth
       GRAPHQL_ENDPOINT = "https://api.linear.app/graphql"
       VIEWER_QUERY = "{ viewer { id name email } }".freeze
       IDENTITY_SCOPES = [].freeze
-      API_HOSTS = %w[api.linear.app].freeze
+      # Linear accepts the same OAuth access token as a Bearer credential on its
+      # GraphQL API, private file storage, and hosted MCP server.
+      API_HOSTS = %w[api.linear.app uploads.linear.app mcp.linear.app].freeze
 
       def key = KEY
       def display_name = "Linear"

@@ -12,13 +12,32 @@ from rich.json import JSON
 from rich.table import Table
 
 from .client import CompanyContextClient
+from .v2 import CompanyContextV2Client
 
 load_dotenv()
 
 app = typer.Typer(
     name="company_context",
-    help="Search or run scoped SQL over company history, Slack DMs, Google Docs, and Granola notes.",
+    help=(
+        "Search or run scoped SQL over company history, Slack DMs, Google Docs, and "
+        "Granola notes. Search for and read the `company-context` skill with "
+        "`centaur-skills` before use.\n\n"
+        "Preview: `company_context v2 search|read` query Slack messages and files, "
+        "Google Docs and PDFs, Google Calendar events, Granola notes, and custom "
+        "documents through the company-context service's API, where it is deployed; "
+        "`company_context v2 create|update|delete|list` manage the custom "
+        "documents, such as memories, that you create."
+    ),
 )
+v2_app = typer.Typer(
+    help=(
+        "Preview: query Slack messages and files, Google Docs and PDFs, Google Calendar "
+        "events, Granola notes, and custom documents visible to the current user, "
+        "and manage the custom documents the current user creates, through the "
+        "company-context service's API."
+    ),
+)
+app.add_typer(v2_app, name="v2")
 
 
 @app.command("health")
@@ -77,7 +96,11 @@ def query(
         "--timeout-seconds",
         help="Query timeout in seconds, capped at 30.",
     ),
-    json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or human-readable text.",
+    ),
 ) -> None:
     """Run raw read-only SQL against the scoped company-context database."""
     result = CompanyContextClient().query(
@@ -134,7 +157,11 @@ def search(
         "--hybrid/--no-hybrid",
         help="Fuse keyword and vector results when embeddings are enabled.",
     ),
-    json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or human-readable text.",
+    ),
 ) -> None:
     """Search indexed company context, including Google Docs and Granola notes."""
     result = CompanyContextClient().search(
@@ -171,7 +198,11 @@ def search(
 def search_dm_conversations(
     query: str = typer.Argument(..., help="Person, user id, or conversation search query."),
     limit: int = typer.Option(10, "--limit", "-n", help="Max conversations."),
-    json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or human-readable text.",
+    ),
 ) -> None:
     """Find Slack DM/group DM conversations visible to the current user."""
     result = CompanyContextClient().search_dm_conversations(query=query, limit=limit)
@@ -217,7 +248,11 @@ def search_dms(
     occurred_before: str | None = typer.Option(
         None, "--before", help="Only results before this time."
     ),
-    json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or human-readable text.",
+    ),
 ) -> None:
     """Search Slack DMs and group DMs visible to the current user."""
     result = CompanyContextClient().search_dms(
@@ -271,7 +306,11 @@ def list_documents(
     occurred_before: str | None = typer.Option(
         None, "--before", help="Only documents before this time."
     ),
-    json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or human-readable text.",
+    ),
 ) -> None:
     """List indexed company context documents, including Google Docs and Granola notes."""
     result = CompanyContextClient().list_documents(
@@ -312,7 +351,11 @@ def read_document(
     max_related_children: int = typer.Option(
         10, "--max-related-children", help="Max related children."
     ),
-    json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or human-readable text.",
+    ),
 ) -> None:
     """Read a company context document returned by search, including Granola notes."""
     result = CompanyContextClient().read_document(
@@ -348,6 +391,202 @@ def latest_date(
 ) -> None:
     """Show the latest indexed timestamp as JSON."""
     result = CompanyContextClient().latest_date(source=source, source_type=source_type)
+    _require_ok(result)
+    _print_json(result)
+
+
+_V2_TYPES_HELP = (
+    "Data type to search; repeat for several: slack_message, slack_file, drive_doc, "
+    "calendar_event, granola_note, or custom_doc. Defaults to every type."
+)
+
+
+def _json_object(value: str | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    try:
+        parsed = json.loads(value)
+    except ValueError as exc:
+        raise typer.BadParameter(f"must be a JSON object: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise typer.BadParameter("must be a JSON object")
+    return parsed
+
+
+@v2_app.command("search")
+def v2_search(
+    query: str = typer.Argument(..., help="Search query."),
+    limit: int | None = typer.Option(
+        None, "--limit", "-n", help="Max results (API default 10, at most 50)."
+    ),
+    types: list[str] | None = typer.Option(None, "--type", help=_V2_TYPES_HELP),  # noqa: B008
+    occurred_after: str | None = typer.Option(
+        None, "--after", help="Only documents on/after this RFC 3339 time."
+    ),
+    occurred_before: str | None = typer.Option(
+        None, "--before", help="Only documents before this RFC 3339 time."
+    ),
+    channel_ids: list[str] | None = typer.Option(  # noqa: B008
+        None, "--channel-id", help="Only Slack messages and files in this conversation; repeatable."
+    ),
+    file_ids: list[str] | None = typer.Option(  # noqa: B008
+        None, "--file-id", help="Only this Slack or Drive file's documents; repeatable."
+    ),
+    sources: list[str] | None = typer.Option(  # noqa: B008
+        None, "--source", help="Only custom documents in this source; repeatable."
+    ),
+    metadata: str | None = typer.Option(
+        None,
+        "--metadata",
+        callback=_json_object,
+        help=(
+            "Only custom documents whose metadata contains this JSON object, "
+            """e.g. '{"author": "Ada"}'. Matches exactly and case-sensitively."""
+        ),
+    ),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or human-readable text.",
+    ),
+) -> None:
+    """Search Slack, Drive, Calendar, Granola, and custom documents visible to the current user."""
+    result = CompanyContextV2Client().search(
+        query=query,
+        limit=limit,
+        types=types,
+        occurred_after=occurred_after,
+        occurred_before=occurred_before,
+        channel_ids=channel_ids,
+        file_ids=file_ids,
+        sources=sources,
+        metadata=metadata,
+    )
+    _require_ok(result)
+    if json_output:
+        _print_json(result)
+        return
+    results = result.get("results") or []
+    if not results:
+        console.print(f"[yellow]No company context found for: {query}[/yellow]")
+        return
+    table = Table(title=f"Company Context Search ({len(results)})")
+    table.add_column("Document ID", style="dim", max_width=36)
+    table.add_column("Type", style="cyan", max_width=14)
+    table.add_column("Occurred", style="green", max_width=20)
+    table.add_column("Title", style="bold", max_width=36)
+    table.add_column("Text", max_width=72)
+    for item in results:
+        table.add_row(
+            str(item.get("document_id") or ""),
+            str(item.get("type") or ""),
+            str(item.get("occurred_at") or ""),
+            str(item.get("title") or ""),
+            " ".join(str(item.get("text") or "").split())[:200],
+        )
+    console.print(table)
+
+
+@v2_app.command("read")
+def v2_read(
+    document_id: str = typer.Argument(..., help="Document ID returned by v2 search."),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or human-readable text.",
+    ),
+) -> None:
+    """Read a document returned by v2 search."""
+    result = CompanyContextV2Client().read_document(document_id=document_id)
+    _require_ok(result)
+    if json_output:
+        _print_json(result)
+        return
+    console.print(f"[bold]{result.get('title') or result.get('document_id')}[/bold]")
+    if result.get("url"):
+        console.print(f"[dim]{result['url']}[/dim]")
+    console.print(result.get("text") or "")
+
+
+_SOURCE_HELP = "Custom document source, e.g. memory."
+_READERS_HELP = (
+    "Who can read the document; repeat for several: principal:<your ID> or role:<one of "
+    "your roles>. Defaults to you alone."
+)
+
+
+@v2_app.command("create")
+def v2_create(
+    source: str = typer.Argument(..., help=_SOURCE_HELP),
+    body: str = typer.Argument(..., help="Document text."),
+    title: str | None = typer.Option(None, "--title", help="Document title."),
+    occurred_at: str | None = typer.Option(
+        None, "--occurred-at", help="RFC 3339 time the content occurred, for time filters."
+    ),
+    readers: list[str] | None = typer.Option(None, "--reader", help=_READERS_HELP),  # noqa: B008
+    metadata: str | None = typer.Option(
+        None, "--metadata", callback=_json_object, help="JSON object returned with the document."
+    ),
+) -> None:
+    """Create a custom document in a source; prints it with its new external_id."""
+    result = CompanyContextV2Client().create_document(
+        source, body, title=title, occurred_at=occurred_at, readers=readers, metadata=metadata
+    )
+    _require_ok(result)
+    _print_json(result)
+
+
+@v2_app.command("update")
+def v2_update(
+    source: str = typer.Argument(..., help=_SOURCE_HELP),
+    external_id: str = typer.Argument(..., help="Document ID returned by v2 create."),
+    body: str = typer.Argument(..., help="New document text."),
+    title: str | None = typer.Option(None, "--title", help="Document title."),
+    occurred_at: str | None = typer.Option(
+        None, "--occurred-at", help="RFC 3339 time the content occurred, for time filters."
+    ),
+    readers: list[str] | None = typer.Option(None, "--reader", help=_READERS_HELP),  # noqa: B008
+    metadata: str | None = typer.Option(
+        None, "--metadata", callback=_json_object, help="JSON object returned with the document."
+    ),
+) -> None:
+    """Replace a custom document you created; omitted options are cleared or reset."""
+    result = CompanyContextV2Client().update_document(
+        source,
+        external_id,
+        body,
+        title=title,
+        occurred_at=occurred_at,
+        readers=readers,
+        metadata=metadata,
+    )
+    _require_ok(result)
+    _print_json(result)
+
+
+@v2_app.command("delete")
+def v2_delete(
+    source: str = typer.Argument(..., help=_SOURCE_HELP),
+    external_id: str = typer.Argument(..., help="Document ID returned by v2 create."),
+) -> None:
+    """Delete a custom document you created."""
+    result = CompanyContextV2Client().delete_document(source, external_id)
+    _require_ok(result)
+    _print_json(result)
+
+
+@v2_app.command("list")
+def v2_list(
+    source: str = typer.Argument(..., help=_SOURCE_HELP),
+    limit: int | None = typer.Option(
+        None, "--limit", "-n", help="Max documents (API default 20, at most 100)."
+    ),
+    before: str | None = typer.Option(
+        None, "--before", help="Only documents created before this external_id, to page."
+    ),
+) -> None:
+    """List the custom documents you created in a source, newest first."""
+    result = CompanyContextV2Client().list_documents(source, limit=limit, before=before)
     _require_ok(result)
     _print_json(result)
 

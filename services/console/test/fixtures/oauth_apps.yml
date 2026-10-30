@@ -67,3 +67,26 @@ acme_linear:
     - write
   enabled: true
   created_by: acme_admin
+
+acme_zoom:
+  slug: zoom
+  description: Acme Zoom integration
+  provider: zoom
+  client_id: acme-zoom-client-id
+  allowed_scopes:
+    - user:read:user
+    - meeting:write
+    - recording:read
+  enabled: true
+  created_by: acme_admin
+
+acme_microsoft:
+  slug: microsoft
+  description: Acme Microsoft 365 integration
+  provider: microsoft
+  client_id: acme-microsoft-client-id
+  allowed_scopes:
+    - Mail.Read
+    - Calendars.Read
+  enabled: true
+  created_by: acme_admin

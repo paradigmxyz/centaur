@@ -19,7 +19,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     [ root_url, console_principals_url, console_roles_url, console_secrets_url,
       console_credentials_url, console_oauth_apps_url ].each do |url|
       get url
-      assert_redirected_to console_threads_path
+      assert_redirected_to console_integrations_path
       assert_nil flash[:alert]
     end
   end
@@ -31,22 +31,64 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_no_difference -> { Role.count } do
       post console_roles_url, params: { role: { foreign_id: "sneaky" } }
     end
-    assert_redirected_to console_threads_path
+    assert_redirected_to console_integrations_path
   end
 
-  test "secrets table shows backend labels (not refs) and links to detail" do
+  test "secrets table combines kinds and links names to detail" do
     secret = static_secrets(:acme_prod_api_key)
     get console_secrets_url
     assert_response :ok
+
+    assert_select "table", count: 1
+    assert_select "th", text: "Name"
+    assert_select "th", text: "Type"
+    assert_select "th", text: "Source"
+    assert_select "th", text: "Created"
     # Source column shows only the backend label, not the underlying reference.
     assert_select "td span", text: "Env"
     assert_select "body", text: /GITHUB_TOKEN/, count: 0
-    # The foreign_id links to the detail page (full value as a hover tooltip),
-    # with the opaque oid shown beneath it.
-    assert_select "a[href=?][title=?]", console_secret_path("static", secret.oid), secret.foreign_id
-    assert_select "div", text: secret.oid
-    # The name is plain text (not a link) with the full value as a tooltip.
-    assert_select "span[title=?]", secret.name
+    assert_select "a[href=?][title=?]", console_secret_path("static", secret.oid), secret.name
+    assert_select "time[datetime=?]", secret.created_at.iso8601
+  end
+
+  test "secrets table filters by type and searches by name" do
+    matching = static_secrets(:acme_prod_api_key)
+    excluded_by_name = static_secrets(:acme_staging_api_key)
+    excluded_by_type = pg_dsn_secrets(:acme_reporting_pg)
+
+    get console_secrets_url, params: { q: "PROD-API", type: "static" }
+    assert_response :ok
+
+    assert_select "select[name=type] option[value=static][selected]"
+    assert_select "a[href=?]", console_secret_path("static", matching.oid)
+    assert_select "a[href=?]", console_secret_path("static", excluded_by_name.oid), count: 0
+    assert_select "a[href=?]", console_secret_path("pg_dsn", excluded_by_type.oid), count: 0
+  end
+
+  test "secrets table paginates fifty filtered records per page" do
+    now = Time.current
+    StaticSecret.insert_all!((1..51).map do |number|
+      {
+        created_at: now,
+        updated_at: now,
+        name: "Pagination secret #{number}",
+        inject_config: { header: "Authorization" }
+      }
+    end)
+
+    filters = { q: "Pagination secret", type: "static" }
+    get console_secrets_url, params: filters
+
+    assert_response :ok
+    assert_select "tbody tr", count: 50
+    assert_select "a[href*='page=2'][href*='type=static']", text: "Next"
+    assert_select "div", text: /51 secrets.*page 1 of 2/
+
+    get console_secrets_url, params: filters.merge(page: 2)
+
+    assert_response :ok
+    assert_select "tbody tr", count: 1
+    assert_select "a[href*='page=1']", text: "Previous"
   end
 
   test "secret detail page offers delete for an editable kind but not for others" do
@@ -264,22 +306,20 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
       channel_id: "G9876543210",
       history_enabled: true
     )
-    catalog = SlackChannelCatalog::Result.new(
-      channels: [
-        SlackChannelCatalog::Channel.new(id: "C0123456789", name: "general", private: false),
-        SlackChannelCatalog::Channel.new(id: "G9876543210", name: "private", private: true)
-      ],
-      error: nil,
-      configured: true
-    )
-
-    with_slack_channel_catalog(catalog) { get console_principal_url(principal.oid) }
+    get console_principal_url(principal.oid)
     assert_response :ok
 
     assert_select "td", text: /#general/
     assert_select "h3", text: "Inherited From Roles"
     assert_select "td", text: /#private/
     assert_select "input[type=checkbox][disabled]", minimum: 3
+    assert_select "input[role=combobox][aria-controls]"
+    assert_select "[data-slack-channel-autocomplete-url-value=?]",
+                  console_principal_slack_channel_options_path(principal.oid)
+    assert_select "input[type=submit][data-slack-channel-autocomplete-target=submit]:not([disabled])",
+                  value: "Save Slack channel permissions"
+    assert_select "select[name$='[channel_id]']", count: 0
+    assert_select "body", text: /#unused/, count: 0
   end
 
   test "credentials table combines id, shows status, and links to detail" do
@@ -496,16 +536,5 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
       assert_select "input[name=_method][value=delete]", count: 1
       assert_select "button", text: "Sign out"
     end
-  end
-
-  private
-
-  def with_slack_channel_catalog(catalog)
-    singleton = SlackChannelCatalogProvider.singleton_class
-    original = singleton.instance_method(:fetch)
-    singleton.define_method(:fetch) { catalog }
-    yield
-  ensure
-    singleton.define_method(:fetch, original)
   end
 end

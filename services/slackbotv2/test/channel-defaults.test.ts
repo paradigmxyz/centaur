@@ -22,7 +22,7 @@ describe('parseChannelDefaults', () => {
     )
     expect(parsed).toEqual({
       // `claude` -> wire harness, `opus` -> full model id.
-      C0ENG: { harnessType: 'claudecode', model: 'claude-opus-4-8', reasoning: 'high' },
+      C0ENG: { harnessType: 'claudecode', model: 'claude-opus-5-5', reasoning: 'high' },
       C0TRIAGE: { harnessType: 'codex', reasoning: 'low' },
       // A provider shortcut implies its harness, mirroring `--bedrock`.
       C0BEDROCK: { harnessType: 'codex', model: 'gpt-5.2', provider: 'amazon-bedrock' }
@@ -35,6 +35,22 @@ describe('parseChannelDefaults', () => {
     })
   })
 
+  test('accepts a persona alone and reports an invalid persona id', () => {
+    const reasons: string[] = []
+    const parsed = parseChannelDefaults(
+      JSON.stringify({
+        C0INVEST: { persona: ' invest ' },
+        C0BAD: { persona: 'not a persona', harness: 'codex' }
+      }),
+      reason => reasons.push(reason)
+    )
+    expect(parsed).toEqual({
+      C0INVEST: { personaId: 'invest' },
+      C0BAD: { harnessType: 'codex' }
+    })
+    expect(reasons.some(r => r.includes('C0BAD') && r.includes('invalid persona'))).toBe(true)
+  })
+
   test('expands a model alias but leaves the harness to the explicit field', () => {
     // Like `--model opus` (not `--opus`): fields are independent, so a model
     // with no `harness` inherits the thread/deployment harness rather than one
@@ -43,11 +59,17 @@ describe('parseChannelDefaults', () => {
       parseChannelDefaults(
         JSON.stringify({
           C0A: { model: 'opus' },
+          C0F: { model: 'fable' },
+          C0S: { model: 'sonnet' },
+          C0H: { model: 'haiku' },
           C0B: { model: 'gpt-5.2' }
         })
       )
     ).toEqual({
-      C0A: { model: 'claude-opus-4-8' },
+      C0A: { model: 'claude-opus-5-5' },
+      C0F: { model: 'claude-fable-5-1' },
+      C0S: { model: 'claude-sonnet-5-5' },
+      C0H: { model: 'claude-haiku-5-5' },
       C0B: { model: 'gpt-5.2' }
     })
   })

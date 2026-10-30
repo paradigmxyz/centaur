@@ -1,12 +1,12 @@
 # syntax=docker/dockerfile:1.7
 
-FROM oven/bun:1.3.13-slim
+FROM oven/bun:1.4.4-slim
 
 WORKDIR /repo
 ENV NODE_ENV=production
 
 RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \
-    bun install -g pnpm@10.28.1
+    bun install -g pnpm@10.34.7
 
 # Workspace manifests first so dependency install is a cached layer. slackbotv2
 # depends on the @centaur/* workspace packages, so they must be present for
@@ -19,10 +19,8 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
     pnpm install --filter slackbotv2 --prod --frozen-lockfile
 
 COPY services/slackbotv2/ services/slackbotv2/
-# Harness config files: console-session-link.ts imports the baked default
-# models (harness/claude/settings.json, harness/codex/config.toml) so the
-# Slack Console-link line can name the model a harness runs without a
-# hardcoded copy of those values.
+# Harness config files: response-context.ts imports the baked default models
+# so Slack response metadata can name the model without a hardcoded copy.
 COPY harness/ harness/
 WORKDIR /repo/services/slackbotv2
 

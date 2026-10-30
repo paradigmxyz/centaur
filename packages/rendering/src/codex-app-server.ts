@@ -234,6 +234,15 @@ export class CodexAppServerRendererEventMapper
       this.emitActivitySummary(out)
     }
 
+    const backgroundAgent = backgroundAgentEvent(event)
+    if (backgroundAgent) {
+      const existing = this.state.taskByUseId.get(String(backgroundAgent.id))
+      const task = backgroundAgentTask(backgroundAgent, String(event?.type ?? ''))
+      const merged = mergeTask(existing, task)
+      this.state.taskByUseId.set(merged.id, merged)
+      this.emitActivitySummary(out)
+    }
+
     const outputDelta = commandOutputDelta(event)
     if (outputDelta && this.includeTaskOutput) {
       const current = this.state.commandOutputById.get(outputDelta.id) ?? ''
@@ -308,8 +317,9 @@ export class CodexAppServerRendererEventMapper
         resultText,
         willClose
       })
-      if (resultText && !this.state.answerText.trim()) {
-        this.state.harnessAnswerText += resultText
+      const finalText = resultText || (isInterruptedTurn(event) ? INTERRUPTED_TEXT : '')
+      if (finalText && !this.state.answerText.trim()) {
+        this.state.harnessAnswerText += finalText
         recomposeBuffers(this.state)
         this.emitPendingAssistantText(out, { force: true })
       }
@@ -629,6 +639,8 @@ async function* renderChatSdkChunks(
   }
 }
 
+const INTERRUPTED_TEXT = 'Execution interrupted.'
+
 export type RustSessionMappingResult =
   | { kind: 'notification'; notification: ServerNotification }
   | { kind: 'failed'; error: string }
@@ -679,7 +691,7 @@ export function rustSessionEventToServerNotification(source: unknown): RustSessi
   if (eventKind === 'session.execution_cancelled') {
     const data = isRecord(source.data) ? source.data : source
     const resultText =
-      terminalResultText(data).trim() || String(data.error ?? 'Execution interrupted').trim()
+      terminalResultText(data).trim() || String(data.error ?? INTERRUPTED_TEXT).trim()
     return {
       kind: 'completed',
       ...(resultText ? { resultText } : {})
@@ -782,6 +794,10 @@ export function isRetryableCodexErrorNotification(source: unknown): boolean {
   return event.willRetry === true
 }
 
+function isInterruptedTurn(event: any): boolean {
+  return String(event?.turn?.status ?? event?.status ?? '').toLowerCase() === 'interrupted'
+}
+
 function isFailedTurn(event: any): boolean {
   const status = String(event?.turn?.status ?? event?.status ?? '').toLowerCase()
   return status === 'failed' || status === 'error' || status === 'cancelled' || status === 'canceled'
@@ -867,8 +883,18 @@ function recomposeBuffers(state: CodexMapperState): void {
 
 function compose(byItemId: Map<string, string>, trailing: string): string {
   let out = ''
-  for (const value of byItemId.values()) out += value
-  return trailing ? out + trailing : out
+  for (const value of [...byItemId.values(), trailing]) {
+    if (!value) continue
+    if (out) {
+      // Items are separate assistant messages; only deltas within an item
+      // concatenate without a boundary. Preserve any existing newlines.
+      const newlines = (out.match(/\n*$/)?.[0].length ?? 0)
+        + (value.match(/^\n*/)?.[0].length ?? 0)
+      out += '\n'.repeat(Math.max(0, 2 - newlines))
+    }
+    out += value
+  }
+  return out
 }
 
 function extractDeltaText(event: any): string {
@@ -950,6 +976,32 @@ function fileChangeEvent(event: any): Record<string, any> | null {
   const item = event.item
   if (!item || (item.type !== 'fileChange' && item.type !== 'file_change')) return null
   return item
+}
+
+// Claude Code background subagents, projected by harness-server as
+// `BackgroundAgent` dynamic tool items that stay in progress until the agent
+// reports back.
+function backgroundAgentEvent(event: any): Record<string, any> | null {
+  if (event?.type !== 'item.started' && event?.type !== 'item.completed') return null
+  const item = event.item
+  if (item?.type !== 'dynamicToolCall' || item.tool !== 'BackgroundAgent') return null
+  return item
+}
+
+function backgroundAgentTask(item: any, eventType: string): HarnessTask {
+  const description = String(item.arguments?.description ?? '').trim()
+  const summary = (Array.isArray(item.contentItems) ? item.contentItems : [])
+    .map((part: any) => String(part?.text ?? ''))
+    .join('\n')
+    .trim()
+  const failed = item.status === 'failed' || item.success === false
+  return {
+    id: String(item.id),
+    title: description ? `Agent: ${oneLine(description)}` : 'Agent',
+    status: failed ? 'error' : itemStatus(item, eventType),
+    details: [],
+    output: summary ? [section([text(oneLine(summary, 220))])] : []
+  }
 }
 
 function structuredPlanUpdate(event: any): Array<{ step: string; status?: string }> | null {

@@ -18,6 +18,19 @@ module Api
         }.merge(overrides) }
       end
 
+      test "shared flag round trips and rejects always available" do
+        post api_v1_oauth_apps_url, params: valid_body(shared: true).to_json, headers: auth_headers
+        assert_response :created
+        assert_equal true, json_body.dig("data", "shared")
+        app = OauthApp.find_by!(slug: "api-google")
+        patch api_v1_oauth_app_url(app.oid), params: { data: { always_available: true } }.to_json, headers: auth_headers
+        assert_response :unprocessable_entity
+        patch api_v1_oauth_app_url(app.oid), params: { data: { shared: false } }.to_json, headers: auth_headers
+        assert_response :unprocessable_entity
+        assert app.reload.shared?
+        refute app.always_available?
+      end
+
       test "rejects requests without an API key" do
         get api_v1_oauth_apps_url
         assert_response :unauthorized

@@ -2,4 +2,4 @@
 
 ## Report a Vulnerability
 
-Contact [security@tempo.xyz](mailto:security@tempo.xyz).
+Contact [centaur-security@paradigm.xyz](mailto:centaur-security@paradigm.xyz).

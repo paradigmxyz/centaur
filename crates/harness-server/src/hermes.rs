@@ -30,9 +30,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use codex_app_server_protocol::UserInput;
 use serde_json::{Value, json};
 
+use crate::protocol::UserInput;
 use crate::server::{BlocksCommand, BlocksState, parse_blocks_line_with_state, write_blocks_error};
 use crate::traits::{
     NormalizedContent, NormalizedEvent, NormalizedTokenUsage, NormalizedToolResult,

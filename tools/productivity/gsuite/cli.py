@@ -1,13 +1,16 @@
-"""CLI for GSuite operations - Gmail, Calendar, Drive."""
+"""CLI for GSuite operations - Gmail, Calendar, Directory, Drive."""
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-app = typer.Typer(name="gsuite", help="GSuite CLI for AI agents - Gmail, Calendar, Drive")
+app = typer.Typer(
+    name="gsuite", help="GSuite CLI for AI agents - Gmail, Calendar, Directory, Drive"
+)
 
 
 @app.command("health")
@@ -40,6 +43,7 @@ docs_app = typer.Typer(help="Google Docs operations")
 sheets_app = typer.Typer(help="Google Sheets operations")
 slides_app = typer.Typer(help="Google Slides operations")
 analytics_app = typer.Typer(help="Google Analytics operations")
+directory_app = typer.Typer(help="Directory operations")
 
 app.add_typer(gmail_app, name="gmail")
 app.add_typer(calendar_app, name="calendar")
@@ -48,11 +52,12 @@ app.add_typer(docs_app, name="docs")
 app.add_typer(sheets_app, name="sheets")
 app.add_typer(slides_app, name="slides")
 app.add_typer(analytics_app, name="analytics")
+app.add_typer(directory_app, name="directory")
 
 
 @app.callback()
 def main():
-    """GSuite CLI for AI agents - Gmail, Calendar, Drive.
+    """GSuite CLI for AI agents - Gmail, Calendar, Directory, Drive.
 
     Authentication is handled transparently by iron-proxy's ``gcp_auth``
     transform, which mints a service-account token for outbound Google API
@@ -68,6 +73,7 @@ def gmail_search(
     query: str = typer.Argument(..., help="Gmail search query"),
     limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
     full: bool = typer.Option(False, "--full", "-f", help="Show full snippets"),
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
     """Search Gmail messages.
 
@@ -79,6 +85,10 @@ def gmail_search(
     from .client import gmail_search as search
 
     results = search(query, max_results=limit)
+
+    if output_json:
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return
 
     if not results:
         console.print("[yellow]No messages found.[/]")
@@ -154,11 +164,17 @@ def gmail_send(
 
 
 @gmail_app.command("labels")
-def gmail_labels():
+def gmail_labels(
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
     """List Gmail labels."""
     from .client import gmail_labels as labels
 
     results = labels()
+
+    if output_json:
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return
 
     table = Table(title=f"Gmail Labels ({len(results)})")
     table.add_column("Name", style="cyan")
@@ -239,11 +255,17 @@ def gmail_reply_cmd(
 
 
 @calendar_app.command("list")
-def calendar_list():
+def calendar_list(
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
     """List all calendars."""
     from .client import calendar_list as list_cals
 
     results = list_cals()
+
+    if output_json:
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return
 
     table = Table(title=f"Calendars ({len(results)})")
     table.add_column("Name", style="cyan")
@@ -265,6 +287,7 @@ def calendar_events(
     days: int = typer.Option(None, "--days", "-d", help="Look ahead N days"),
     start: str = typer.Option(None, "--start", "-s", help="Start date (YYYY-MM-DD or ISO8601)"),
     end: str = typer.Option(None, "--end", "-e", help="End date (YYYY-MM-DD or ISO8601)"),
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
     """List calendar events.
 
@@ -341,6 +364,10 @@ def calendar_events(
         time_max=time_max,
     )
 
+    if output_json:
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return
+
     if not results:
         console.print("[yellow]No events found.[/]")
         raise typer.Exit()
@@ -376,6 +403,7 @@ def calendar_create(
     description: str = typer.Option(None, "--description", "-d", help="Event description"),
     location: str = typer.Option(None, "--location", "-l", help="Event location"),
     attendees: str = typer.Option(None, "--attendees", "-a", help="Comma-separated emails"),
+    meet: bool = typer.Option(False, "--meet", "-m", help="Add a Google Meet link"),
 ):
     """Create a calendar event.
 
@@ -383,6 +411,7 @@ def calendar_create(
         gsuite calendar create "Team Meeting" "2024-01-15T10:00:00Z" "2024-01-15T11:00:00Z"
         gsuite calendar create "All-day event" "2024-01-15" "2024-01-16"
         gsuite calendar create "Meeting" "..." "..." -a "a@b.com,c@d.com" -l "Room 1"
+        gsuite calendar create "Standup" "..." "..." --meet
     """
     from .client import calendar_create_event
 
@@ -397,9 +426,12 @@ def calendar_create(
             description=description,
             location=location,
             attendees=attendee_list,
+            conference=meet,
         )
         console.print("[green]✓ Event created[/]")
         console.print(f"[dim]{result['html_link']}[/]")
+        if result.get("meet_link"):
+            console.print(f"[dim]{result['meet_link']}[/]")
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
@@ -415,6 +447,12 @@ def calendar_update(
     description: str = typer.Option(None, "--description", "-d", help="New description"),
     location: str = typer.Option(None, "--location", "-l", help="New location"),
     add_attendees: str = typer.Option(None, "--add", "-a", help="Comma-separated emails to add"),
+    meet: bool = typer.Option(False, "--meet", "-m", help="Add a Google Meet link"),
+    notify: bool = typer.Option(
+        None,
+        "--notify/--no-notify",
+        help="Email attendees (default: on a material change to an event with attendees)",
+    ),
 ):
     """Update a calendar event.
 
@@ -422,6 +460,8 @@ def calendar_update(
         gsuite calendar update "event_id" --summary "New Title"
         gsuite calendar update "event_id" --start "2024-01-15T14:00:00Z" --end "2024-01-15T15:00:00Z"
         gsuite calendar update "event_id" --add "a@b.com,c@d.com"
+        gsuite calendar update "event_id" --meet
+        gsuite calendar update "event_id" --start "..." --end "..." --no-notify
     """
     from .client import calendar_update_event
 
@@ -437,12 +477,40 @@ def calendar_update(
             description=description,
             location=location,
             add_attendees=attendee_list,
+            conference=meet,
+            notify=notify,
         )
         console.print("[green]✓ Event updated[/]")
         console.print(f"[dim]{result['html_link']}[/]")
+        if result.get("meet_link"):
+            console.print(f"[dim]{result['meet_link']}[/]")
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
+
+
+@calendar_app.command("delete")
+def calendar_delete(
+    event_id: str = typer.Argument(..., help="Event ID"),
+    calendar: str = typer.Option("primary", "--calendar", "-c", help="Calendar ID"),
+    notify: bool = typer.Option(
+        True, "--notify/--no-notify", help="Email attendees that the event was cancelled"
+    ),
+):
+    """Delete a calendar event.
+
+    Examples:
+        gsuite calendar delete "event_id"
+        gsuite calendar delete "event_id" --no-notify
+    """
+    from .client import calendar_delete_event
+
+    try:
+        calendar_delete_event(event_id=event_id, calendar_id=calendar, notify=notify)
+        console.print("[green]✓ Event deleted[/]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
 
 
 @calendar_app.command("rsvp")
@@ -510,6 +578,7 @@ def drive_list(
         help="Search file contents and metadata with Drive fullText contains",
     ),
     file_type: str = typer.Option(None, "--type", "-t", help="Filter by MIME type"),
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
     """List files in Google Drive.
 
@@ -530,11 +599,16 @@ def drive_list(
         full_text=full_text,
     )
 
+    if output_json:
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return
+
     if not results:
         console.print("[yellow]No files found.[/]")
         raise typer.Exit()
 
     table = Table(title=f"Drive Files ({len(results)})")
+    table.add_column("ID", style="dim", max_width=30)
     table.add_column("Name", style="cyan", max_width=40)
     table.add_column("Type", style="dim", max_width=20)
     table.add_column("Size", style="green", justify="right", max_width=10)
@@ -545,7 +619,36 @@ def drive_list(
         mime = f["mime_type"].split("/")[-1][:20]
         size = f"{f['size'] / 1024:.1f} KB" if f["size"] else "-"
         modified = f["modified_time"][:10] if f["modified_time"] else ""
-        table.add_row(name, mime, size, modified)
+        table.add_row(f["id"], name, mime, size, modified)
+
+    console.print(table)
+
+
+@drive_app.command("drives")
+def drive_drives(
+    limit: int = typer.Option(100, "--limit", "-n", help="Max results"),
+):
+    """List the shared drives the account is a member of.
+
+    Use a drive ID with `gsuite drive list --folder <id>` to browse its top level.
+
+    Examples:
+        gsuite drive drives
+    """
+    from .client import drive_list_drives
+
+    results = drive_list_drives(max_results=limit)
+
+    if not results:
+        console.print("[yellow]No shared drives found.[/]")
+        raise typer.Exit()
+
+    table = Table(title=f"Shared Drives ({len(results)})")
+    table.add_column("Name", style="cyan", max_width=40)
+    table.add_column("ID", style="dim")
+
+    for d in results:
+        table.add_row(d["name"][:40], d["id"])
 
     console.print(table)
 
@@ -959,6 +1062,7 @@ def drive_download_revision_cmd(
 @drive_app.command("permissions")
 def drive_permissions_cmd(
     file_id: str = typer.Argument(..., help="File ID"),
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
     """List permissions on a Google Drive file.
 
@@ -969,6 +1073,10 @@ def drive_permissions_cmd(
 
     try:
         permissions = drive_list_permissions(file_id)
+
+        if output_json:
+            print(json.dumps(permissions, indent=2, ensure_ascii=False))
+            return
 
         if not permissions:
             console.print("[yellow]No permissions found.[/]")
@@ -1278,6 +1386,63 @@ def docs_read(
         raise typer.Exit(1)
 
 
+@docs_app.command("comments")
+def docs_comments(
+    doc_id: str = typer.Argument(..., help="Document ID or Google Docs URL"),
+    limit: int = typer.Option(100, "--limit", "-n", help="Max comments"),
+    include_deleted: bool = typer.Option(
+        False,
+        "--include-deleted",
+        help="Include deleted comments and replies",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """Read comments and replies on a Google Doc.
+
+    Examples:
+        gsuite docs comments "1abc123"
+        gsuite docs comments "https://docs.google.com/document/d/1abc123/edit" --json
+    """
+    from .client import docs_list_comments
+
+    try:
+        document_id = extract_doc_id(doc_id)
+        comments = docs_list_comments(
+            document_id,
+            max_results=limit,
+            include_deleted=include_deleted,
+        )
+        if json_output:
+            print(json.dumps(comments, indent=2, ensure_ascii=False))
+            return
+        if not comments:
+            console.print("[yellow]No comments found.[/]")
+            return
+
+        for comment in comments:
+            author = comment["author"]["display_name"] or "Unknown author"
+            status = (
+                "deleted" if comment["deleted"] else "resolved" if comment["resolved"] else "open"
+            )
+            console.print(f"Comment {comment['id']} by {author} [{status}]", markup=False)
+            quoted_text = comment["quoted_file_content"]["value"]
+            if quoted_text:
+                console.print(f"  Quoted: {quoted_text}", markup=False)
+            if comment["content"]:
+                console.print(f"  {comment['content']}", markup=False)
+            for reply in comment["replies"]:
+                reply_author = reply["author"]["display_name"] or "Unknown author"
+                reply_action = f" [{reply['action']}]" if reply["action"] else ""
+                console.print(
+                    f"  Reply {reply['id']} by {reply_author}{reply_action}: {reply['content']}",
+                    markup=False,
+                )
+            console.print()
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+
 @docs_app.command("replace")
 def docs_replace_cmd(
     doc_id: str = typer.Argument(..., help="Document ID or Google Docs URL"),
@@ -1450,51 +1615,103 @@ def _get_channel_member_emails_via_cli(channel: str) -> list[str]:
     return data.get("emails", [])
 
 
+def _create_and_share(
+    kind: str,
+    create: Callable[[], dict],
+    id_key: str,
+    channel: str | None,
+    owner: str | None,
+    folder: str | None,
+) -> None:
+    """Create a native Google file, then share it and transfer ownership.
+
+    Files created inside a shared drive are owned by the drive, so --owner is
+    optional with --folder and ownership is not transferred.
+    """
+    from .client import drive_setup_channel_permissions
+
+    if not owner and not folder:
+        console.print("[red]Error: --owner is required unless --folder is set[/]")
+        raise typer.Exit(1)
+
+    try:
+        result = create()
+        console.print(f"[green]✓ Created {kind}: {result['title']}[/]")
+        console.print(f"[cyan]URL: {result['url']}[/]", soft_wrap=True)
+        console.print(f"[dim]ID: {result[id_key]}[/]")
+
+        owner_to_transfer = owner if not folder else None
+        if not channel and not owner_to_transfer:
+            return
+
+        member_emails = _get_channel_member_emails_via_cli(channel) if channel else []
+        if channel:
+            console.print(
+                f"[dim]Setting up permissions for {len(member_emails)} channel members...[/]"
+            )
+
+        perm_result = drive_setup_channel_permissions(
+            file_id=result[id_key],
+            channel_member_emails=member_emails,
+            requester_email=owner_to_transfer,
+        )
+
+        if channel:
+            console.print(
+                f"[green]✓ Shared with {len(perm_result['shared_with'])} channel members[/]"
+            )
+        if owner_to_transfer:
+            console.print(f"[green]✓ Ownership transferred to {owner_to_transfer}[/]")
+
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1)
+
+
 @docs_app.command("create")
 def docs_create_cmd(
     title: str = typer.Argument(..., help="Document title"),
-    channel: str = typer.Option(..., "--channel", help="Slack channel to share with (required)"),
-    owner: str = typer.Option(..., "--owner", help="Email of new owner (required)"),
+    channel: str | None = typer.Option(
+        None, "--channel", help="Optional Slack channel to share with"
+    ),
+    owner: str | None = typer.Option(
+        None, "--owner", help="Email of new owner (required unless --folder is set)"
+    ),
+    folder: str | None = typer.Option(
+        None, "--folder", "-f", help="Parent folder or shared drive ID"
+    ),
     content: str = typer.Option(None, "--content", "-c", help="Initial content"),
 ):
     """Create a new Google Doc with automatic permission setup.
 
     This command:
-    1. Creates the document
-    2. Shares with all channel members (writer role)
-    3. Transfers ownership to the specified owner
+    1. Creates the document, inside --folder when given
+    2. Shares with all channel members when --channel is provided (writer role)
+    3. Transfers ownership to --owner
 
     The original owner (service account) is automatically downgraded to editor
     by Google Drive when ownership is transferred. An Okta Workflows configuration
     removes the service account's editor role permissions after 7 days.
 
+    Files created inside a shared drive are owned by the drive, so --owner is
+    optional with --folder and ownership is not transferred.
+
     Examples:
+        gsuite docs create "Personal Notes" --owner alice@paradigm.xyz
         gsuite docs create "Meeting Notes" --channel eng-ai --owner alice@paradigm.xyz
         gsuite docs create "Doc Title" --channel ai-agent --owner bob@paradigm.xyz --content "Hello"
+        gsuite docs create "Design Notes" --folder 0ALWnusNQi9yLUk9PVA
     """
-    from .client import docs_create, drive_setup_channel_permissions
+    from .client import docs_create
 
-    try:
-        result = docs_create(title, content)
-        console.print(f"[green]✓ Created document: {result['title']}[/]")
-        console.print(f"[cyan]URL: {result['url']}[/]", soft_wrap=True)
-        console.print(f"[dim]ID: {result['document_id']}[/]")
-
-        member_emails = _get_channel_member_emails_via_cli(channel)
-        console.print(f"[dim]Setting up permissions for {len(member_emails)} channel members...[/]")
-
-        perm_result = drive_setup_channel_permissions(
-            file_id=result["document_id"],
-            channel_member_emails=member_emails,
-            requester_email=owner,
-        )
-
-        console.print(f"[green]✓ Shared with {len(perm_result['shared_with'])} channel members[/]")
-        console.print(f"[green]✓ Ownership transferred to {owner}[/]")
-
-    except Exception as e:
-        console.print(f"[red]Error: {e}[/]")
-        raise typer.Exit(1)
+    _create_and_share(
+        "document",
+        lambda: docs_create(title, content, folder_id=folder),
+        "document_id",
+        channel,
+        owner,
+        folder,
+    )
 
 
 # Sheets commands
@@ -1520,7 +1737,7 @@ def sheets_read_cmd(
         result = sheets_read(spreadsheet_id, range_notation)
 
         if output_json:
-            console.print(json.dumps(result["rows"], indent=2))
+            print(json.dumps(result["rows"], indent=2, ensure_ascii=False))
             return
 
         if not result["rows"]:
@@ -1542,6 +1759,48 @@ def sheets_read_cmd(
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
+
+
+@sheets_app.command("batch-read")
+def sheets_batch_read_cmd(
+    spreadsheet_id: str = typer.Argument(..., help="Spreadsheet ID (from URL)"),
+    range_notations: list[str] = typer.Option(..., "--range", "-r", help="A1 notation range"),  # noqa: B008
+    output_json: bool = typer.Option(False, "--json", "-o", help="Output as JSON"),
+):
+    """Read data from a Google Sheet, across several ranges.
+
+    Example:
+        gsuite sheets batch-read "1Abc..." --range "Sheet1!A1:D10" --range "Sheet2!A1:B5"
+        gsuite sheets batch-read "1Abc..." --range "Sheet1!A1:D10" --json
+    """
+    from .client import sheets_batch_read
+
+    try:
+        result = sheets_batch_read(spreadsheet_id, range_notations)
+
+        if output_json:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return
+
+        for value_range in result:
+            if not value_range["rows"]:
+                console.print(f"[yellow]{value_range['range']}: No data found.[/]")
+                continue
+
+            table = Table(title=f"{value_range['range']} ({len(value_range['rows'])} rows)")
+            for header in value_range["headers"]:
+                table.add_column(header, style="cyan", max_width=30)
+
+            for row in value_range["rows"][:50]:
+                values = [str(row.get(h, ""))[:30] for h in value_range["headers"]]
+                table.add_row(*values)
+
+            console.print(table)
+            if len(value_range["rows"]) > 50:
+                console.print(f"[dim]... and {len(value_range['rows']) - 50} more rows[/]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
 
 
 @sheets_app.command("update")
@@ -1575,46 +1834,44 @@ def sheets_update_cmd(
 @sheets_app.command("create")
 def sheets_create_cmd(
     title: str = typer.Argument(..., help="Spreadsheet title"),
-    channel: str = typer.Option(..., "--channel", help="Slack channel to share with (required)"),
-    owner: str = typer.Option(..., "--owner", help="Email of new owner (required)"),
+    channel: str | None = typer.Option(
+        None, "--channel", help="Optional Slack channel to share with"
+    ),
+    owner: str | None = typer.Option(
+        None, "--owner", help="Email of new owner (required unless --folder is set)"
+    ),
+    folder: str | None = typer.Option(
+        None, "--folder", "-f", help="Parent folder or shared drive ID"
+    ),
 ):
     """Create a new Google Sheet with automatic permission setup.
 
     This command:
-    1. Creates the spreadsheet
-    2. Shares with all channel members (writer role)
-    3. Transfers ownership to the specified owner
+    1. Creates the spreadsheet, inside --folder when given
+    2. Shares with all channel members when --channel is provided (writer role)
+    3. Transfers ownership to --owner
 
     The original owner (service account) is automatically downgraded to editor
     by Google Drive when ownership is transferred. An Okta Workflows configuration
     removes the service account's editor role permissions after 7 days.
 
+    Files created inside a shared drive are owned by the drive, so --owner is
+    optional with --folder and ownership is not transferred.
+
     Examples:
         gsuite sheets create "My Spreadsheet" --channel eng-ai --owner alice@paradigm.xyz
+        gsuite sheets create "Budget" --folder 0ALWnusNQi9yLUk9PVA
     """
-    from .client import sheets_create, drive_setup_channel_permissions
+    from .client import sheets_create
 
-    try:
-        result = sheets_create(title)
-        console.print(f"[green]✓ Created spreadsheet: {result['title']}[/]")
-        console.print(f"[cyan]URL: {result['url']}[/]", soft_wrap=True)
-        console.print(f"[dim]ID: {result['spreadsheet_id']}[/]")
-
-        member_emails = _get_channel_member_emails_via_cli(channel)
-        console.print(f"[dim]Setting up permissions for {len(member_emails)} channel members...[/]")
-
-        perm_result = drive_setup_channel_permissions(
-            file_id=result["spreadsheet_id"],
-            channel_member_emails=member_emails,
-            requester_email=owner,
-        )
-
-        console.print(f"[green]✓ Shared with {len(perm_result['shared_with'])} channel members[/]")
-        console.print(f"[green]✓ Ownership transferred to {owner}[/]")
-
-    except Exception as e:
-        console.print(f"[red]Error: {e}[/]")
-        raise typer.Exit(1)
+    _create_and_share(
+        "spreadsheet",
+        lambda: sheets_create(title, folder_id=folder),
+        "spreadsheet_id",
+        channel,
+        owner,
+        folder,
+    )
 
 
 # Slides commands
@@ -1623,46 +1880,44 @@ def sheets_create_cmd(
 @slides_app.command("create")
 def slides_create_cmd(
     title: str = typer.Argument(..., help="Presentation title"),
-    channel: str = typer.Option(..., "--channel", help="Slack channel to share with (required)"),
-    owner: str = typer.Option(..., "--owner", help="Email of new owner (required)"),
+    channel: str | None = typer.Option(
+        None, "--channel", help="Optional Slack channel to share with"
+    ),
+    owner: str | None = typer.Option(
+        None, "--owner", help="Email of new owner (required unless --folder is set)"
+    ),
+    folder: str | None = typer.Option(
+        None, "--folder", "-f", help="Parent folder or shared drive ID"
+    ),
 ):
     """Create a new Google Slides presentation with automatic permission setup.
 
     This command:
-    1. Creates the presentation
-    2. Shares with all channel members (writer role)
-    3. Transfers ownership to the specified owner
+    1. Creates the presentation, inside --folder when given
+    2. Shares with all channel members when --channel is provided (writer role)
+    3. Transfers ownership to --owner
 
     The original owner (service account) is automatically downgraded to editor
     by Google Drive when ownership is transferred. An Okta Workflows configuration
     removes the service account's editor role permissions after 7 days.
 
+    Files created inside a shared drive are owned by the drive, so --owner is
+    optional with --folder and ownership is not transferred.
+
     Examples:
         gsuite slides create "My Presentation" --channel eng-ai --owner alice@paradigm.xyz
+        gsuite slides create "Roadmap" --folder 0ALWnusNQi9yLUk9PVA
     """
-    from .client import slides_create, drive_setup_channel_permissions
+    from .client import slides_create
 
-    try:
-        result = slides_create(title)
-        console.print(f"[green]✓ Created presentation: {result['title']}[/]")
-        console.print(f"[cyan]URL: {result['url']}[/]", soft_wrap=True)
-        console.print(f"[dim]ID: {result['presentation_id']}[/]")
-
-        member_emails = _get_channel_member_emails_via_cli(channel)
-        console.print(f"[dim]Setting up permissions for {len(member_emails)} channel members...[/]")
-
-        perm_result = drive_setup_channel_permissions(
-            file_id=result["presentation_id"],
-            channel_member_emails=member_emails,
-            requester_email=owner,
-        )
-
-        console.print(f"[green]✓ Shared with {len(perm_result['shared_with'])} channel members[/]")
-        console.print(f"[green]✓ Ownership transferred to {owner}[/]")
-
-    except Exception as e:
-        console.print(f"[red]Error: {e}[/]")
-        raise typer.Exit(1)
+    _create_and_share(
+        "presentation",
+        lambda: slides_create(title, folder_id=folder),
+        "presentation_id",
+        channel,
+        owner,
+        folder,
+    )
 
 
 # Analytics commands
@@ -1694,7 +1949,6 @@ def _setup_analytics_property():
             console.print("[dim]Tip: Use 'gsuite analytics sites' to list known sites[/]")
             raise typer.Exit(1)
 
-        console.print(f"[dim]Using property {resolved_id} for {_analytics_site}[/]")
         set_analytics_property(resolved_id)
     elif _analytics_property:
         set_analytics_property(_analytics_property)
@@ -1719,18 +1973,28 @@ def analytics_main(
 
 
 @analytics_app.command("sites")
-def analytics_sites():
+def analytics_sites(
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
     """List available site mappings."""
     from .analytics_properties import PROPERTY_MAPPINGS
-
-    table = Table(title="Available Sites")
-    table.add_column("Site / Alias", style="cyan")
-    table.add_column("Property ID", style="green")
 
     # Group by property ID to show aliases together
     by_property: dict[str, list[str]] = {}
     for name, prop_id in PROPERTY_MAPPINGS.items():
         by_property.setdefault(prop_id, []).append(name)
+
+    if output_json:
+        sites = [
+            {"property_id": prop_id, "sites": sorted(names)}
+            for prop_id, names in sorted(by_property.items())
+        ]
+        print(json.dumps(sites, indent=2, ensure_ascii=False))
+        return
+
+    table = Table(title="Available Sites")
+    table.add_column("Site / Alias", style="cyan")
+    table.add_column("Property ID", style="green")
 
     for prop_id, names in sorted(by_property.items()):
         canonical = max(names, key=len)
@@ -1767,7 +2031,7 @@ def analytics_summary(
         result = analytics_get_summary(start_date=start, end_date=end)
 
         if output_json:
-            console.print(json.dumps(result, indent=2))
+            print(json.dumps(result, indent=2, ensure_ascii=False))
             return
 
         table = Table(title=f"GA4 Summary ({start} to {end})")
@@ -2180,6 +2444,97 @@ def analytics_query(
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
+
+
+# Directory commands
+
+
+@directory_app.command("list")
+def directory_list(
+    output_json: bool = typer.Option(False, "--json", "-o", help="Output as JSON"),
+    markdown: bool = typer.Option(False, "--markdown", help="Output as a Markdown table"),
+):
+    """List all visible Workspace directory profiles with names and email addresses.
+
+    Examples:
+        gsuite directory list
+        gsuite directory list --json
+    """
+    from .client import directory_list as list_people
+
+    try:
+        results = list_people()
+    except Exception as exc:
+        console.print(f"Error: {exc}", style="red", markup=False)
+        raise typer.Exit(1) from exc
+
+    _print_directory_people(results, output_json, markdown)
+
+
+@directory_app.command("search")
+def directory_search(
+    query: str = typer.Argument(..., help="Name or email prefix to search"),
+    limit: int = typer.Option(
+        20,
+        "--limit",
+        "-n",
+        min=1,
+        help="Maximum number of people",
+    ),
+    output_json: bool = typer.Option(False, "--json", "-o", help="Output as JSON"),
+    markdown: bool = typer.Option(False, "--markdown", help="Output as a Markdown table"),
+):
+    """Search Workspace directory profiles for names and email addresses.
+
+    Examples:
+        gsuite directory search "Alex" --json
+        gsuite directory search "alex@example.com" --limit 5
+    """
+    from .client import directory_search as search
+
+    try:
+        results = search(query, max_results=limit)
+    except Exception as exc:
+        console.print(f"Error: {exc}", style="red", markup=False)
+        raise typer.Exit(1) from exc
+
+    _print_directory_people(results, output_json, markdown)
+
+
+def _print_directory_people(results: list[dict], output_json: bool, markdown: bool) -> None:
+    """Render directory list and search results in the requested format."""
+    if output_json:
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return
+
+    if markdown:
+
+        def escape_cell(value: str) -> str:
+            return (
+                value.replace("\\", "\\\\")
+                .replace("|", "\\|")
+                .replace("\r", " ")
+                .replace("\n", " ")
+            )
+
+        print("| Name | Email addresses |")
+        print("| --- | --- |")
+        for person in results:
+            name = escape_cell(person["name"])
+            emails = escape_cell(", ".join(person["email_addresses"]))
+            print(f"| {name} | {emails} |")
+        return
+
+    if not results:
+        console.print("No people found.", style="yellow")
+        return
+
+    table = Table(title=f"Directory ({len(results)} people)")
+    table.add_column("Name", style="cyan")
+    table.add_column("Email addresses", style="green", overflow="fold")
+    for person in results:
+        table.add_row(person["name"], "\n".join(person["email_addresses"]))
+    console.print(table)
 
 
 if __name__ == "__main__":

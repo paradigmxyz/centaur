@@ -1,0 +1,364 @@
+# Expected values are the overrides the bot applies after validation: a model
+# implies its harness, a provider implies codex, and reasoning is dropped for
+# harnesses that cannot use it.
+
+# Model aliases
+- description: sol alias
+  vars:
+    text: 'use sol for this: summarize the incident timeline'
+    harness: codex
+    model: gpt-6.1-sol
+- description: versioned pro alias
+  vars:
+    text: switch to 5.5 pro and review the migration
+    harness: codex
+    model: gpt-5.5-pro
+- description: luna alias
+  vars:
+    text: can you answer this one with luna?
+    harness: codex
+    model: gpt-6-luna
+- description: versioned terra alias
+  vars:
+    text: try 6.1 terra on this bug
+    harness: codex
+    model: gpt-6.1-terra
+- description: gpt mini alias
+  vars:
+    text: use gpt 5.4 mini to classify these tickets
+    harness: codex
+    model: gpt-5.4-mini
+- description: bare astra request
+  vars:
+    text: use astra
+    harness: codex
+    model: gpt-6-astra
+- description: claude without a model means opus
+  vars:
+    text: 'using claude: what model are you?'
+    harness: claudecode
+    model: claude-opus-5-5
+- description: claude in a leading clause
+  vars:
+    text: with claude, review PR 123
+    harness: claudecode
+    model: claude-opus-5-5
+- description: claude fable
+  vars:
+    text: 'using claude fable: draft the release notes'
+    harness: claudecode
+    model: claude-fable-5-1
+- description: versioned sonnet alias
+  vars:
+    text: please run this on sonnet 4.6
+    harness: claudecode
+    model: claude-sonnet-4-6
+- description: versioned opus alias
+  vars:
+    text: use opus 4.7 to look at the flaky test
+    harness: claudecode
+    model: claude-opus-4-7
+- description: haiku as a model
+  vars:
+    text: 'use haiku for this one: which pods are crashlooping?'
+    harness: claudecode
+    model: claude-haiku-5-5
+- description: model request followed by a pasted diff
+  vars:
+    text: |
+      use sonnet
+
+      review this diff:
+      ```
+      - const timeout = 1000
+      + const timeout = 5000
+      ```
+    harness: claudecode
+    model: claude-sonnet-5-5
+- description: bare opus before a short task
+  vars:
+    text: "@bot opus redo it"
+    harness: claudecode
+    model: claude-opus-5-5
+- description: astra prefix without punctuation
+  vars:
+    text: "@bot using astra code review the pr"
+    harness: codex
+    model: gpt-6-astra
+- description: versioned opus at the end of a request
+  vars:
+    text: "@bot can you perform that market sizing analysis for the developer tools space again but using Opus 5.5?"
+    harness: claudecode
+    model: claude-opus-5-5
+- description: claude suffix on a follow-up
+  vars:
+    text: "@bot ^ do the above missing stuff on claude"
+    harness: claudecode
+    model: claude-opus-5-5
+- description: fable after long notes
+  vars:
+    text: "@bot ok so my high level thoughts after reading this are: the rollout plan is too aggressive and the rollback story is thin. can we just show a series of tradeoffs within a set of tables? one table per rollout stage, with risk and mitigation columns. continue using fable"
+    harness: claudecode
+    model: claude-fable-5-1
+- description: versioned fable at the end
+  vars:
+    text: "@bot can you rerun the load test scenarios at 2x and 5x traffic, showing both p50 / p99 latency? keep the same regions but make your best judgment use fable 5.1"
+    harness: claudecode
+    model: claude-fable-5-1
+- description: fable after a quote
+  vars:
+    text: "\"the smaller model was distilled from the larger one\" - what does that mean? @bot use fable also curious if there is any way to test for forms of distillation that isn't comparing probability distributions to a specific model, but any tells (e.g., breaking on novel / strange / longer-horizon tasks outside of the training set)"
+    harness: claudecode
+    model: claude-fable-5-1
+- description: fable at the end of a run-on sentence
+  vars:
+    text: "@bot what are the best public sources of data for us to understand enterprise adoption of postgres vs mysql? e.g., survey data is helpful one use fable"
+    harness: claudecode
+    model: claude-fable-5-1
+- description: bare fable prefix
+  vars:
+    text: "@bot using fable: what model are you?"
+    harness: claudecode
+    model: claude-fable-5-1
+- description: claude prefix after a mention
+  vars:
+    text: "@bot using claude: what model are you?"
+    harness: claudecode
+    model: claude-opus-5-5
+- description: claude fable prefix with a short task
+  vars:
+    text: "@bot using claude fable: takeaways?"
+    harness: claudecode
+    model: claude-fable-5-1
+- description: claude fable alongside a persona
+  vars:
+    text: "@bot Using the reviewer persona and claude fable... generate a design review for the billing service based on: the design docs you can find in this slack channel"
+    harness: claudecode
+    model: claude-fable-5-1
+- description: codex with a version
+  vars:
+    text: "@bot retry with codex 5.5"
+    harness: codex
+    model: gpt-5.5
+
+# Harness only
+- description: codex harness
+  vars:
+    text: have codex fix the lint errors
+    harness: codex
+- description: amp harness
+  vars:
+    text: run this through amp
+    harness: amp
+- description: pi harness
+  vars:
+    text: use the pi harness for this task
+    harness: pi
+- description: nanocodex harness
+  vars:
+    text: switch to nanocodex and rerun the tests
+    harness: nanocodex
+- description: codex feature request
+  vars:
+    text: "@bot can you use Codex's /goal?"
+    harness: codex
+- description: codex feature with a retry
+  vars:
+    text: "@bot use /goal on codex and retry the task in this thread"
+    harness: codex
+- description: codex feature at the end
+  vars:
+    text: "@bot provide periodic updates, use /goal in Codex"
+    harness: codex
+- description: codex feature in a question
+  vars:
+    text: "@bot can you use /goal with codex in this chat?"
+    harness: codex
+
+# Amp modes
+- description: amp deep model
+  vars:
+    text: use the deep model to investigate the outage
+    harness: amp
+    model: deep
+- description: amp fast mode
+  vars:
+    text: switch to fast mode and list open PRs
+    harness: amp
+    model: fast
+
+# Reasoning effort
+- description: explicit high effort
+  vars:
+    text: 'use high reasoning effort: why is the build slow?'
+    reasoning: high
+- description: explicit max effort
+  vars:
+    text: set effort to max and audit the auth flow
+    reasoning: max
+- description: fuzzy low effort
+  vars:
+    text: use cheap reasoning, just rename the variable
+    reasoning: low|minimal
+- description: fuzzy maximum effort
+  vars:
+    text: turn the reasoning way up for this one, superduper effort
+    reasoning: max
+- description: model and effort together
+  vars:
+    text: use max effort and the sol model
+    harness: codex
+    model: gpt-6.1-sol
+    reasoning: max
+- description: codex with low reasoning
+  vars:
+    text: use codex with low reasoning to bump the chart version
+    harness: codex
+    reasoning: low
+- description: model plus xhigh thinking
+  vars:
+    text: crank the thinking up to xhigh and use 5.5
+    harness: codex
+    model: gpt-5.5
+    reasoning: xhigh
+- description: reasoning dropped for claude
+  vars:
+    text: use opus with high effort
+    harness: claudecode
+    model: claude-opus-5-5
+- description: effort and versioned model shorthand
+  vars:
+    text: "@bot how does this compare to the infrastructure costs of similar platform teams? Use xhigh/5.6 sol"
+    harness: codex
+    model: gpt-5.6-sol
+    reasoning: xhigh
+- description: claude model with xhigh suffix
+  vars:
+    text: "@bot can you help us understand how much of our CI time is going to builds vs. tests vs. deploys and how that has been changing over the last 8 weeks? fable xhigh"
+    harness: claudecode
+    model: claude-fable-5-1
+- description: claude model with high suffix
+  vars:
+    text: "@bot can u figure out what the key debates are on the auth service redesign RFC? use fable high"
+    harness: claudecode
+    model: claude-fable-5-1
+
+# Providers
+- description: bedrock provider
+  vars:
+    text: run this on bedrock
+    harness: codex
+    provider: amazon-bedrock
+- description: openrouter provider with a model
+  vars:
+    text: route this through openrouter with sol
+    harness: codex
+    model: gpt-6.1-sol
+    provider: openrouter
+
+# No selection request
+- description: think deeply is not amp deep
+  vars:
+    text: think deeply about the race condition in the scheduler
+- description: deep analysis is not amp deep
+  vars:
+    text: do a deep analysis of the query planner
+- description: fast answer is not amp fast
+  vars:
+    text: 'give me a fast answer: what port does postgres use?'
+- description: strongest thinking is not a selector
+  vars:
+    text: use your strongest thinking on this proof
+- description: comparing models
+  vars:
+    text: what's the difference between opus and sonnet for code review?
+- description: business model
+  vars:
+    text: our pricing model needs an update, draft a proposal
+- description: harness discussed as a subject
+  vars:
+    text: the codex harness crashed last night, can you find the logs?
+- description: reasoning effort in task requirements
+  vars:
+    text: "the ticket says 'reasoning effort: high' should be the default. implement that"
+- description: model name in quoted output
+  vars:
+    text: "here's what it said: 'I am claude-opus-5-5'. is that right?"
+- description: reasoning effort in code
+  vars:
+    text: set `model_reasoning_effort = "max"` in config.toml
+- description: default model edit in config
+  vars:
+    text: change the default model in values.yaml to gpt-5.5
+- description: haiku poem
+  vars:
+    text: write a haiku about kubernetes
+- description: sol as a branch name
+  vars:
+    text: the sol branch is failing CI, can you check why?
+- description: comparing model latency
+  vars:
+    text: compare gpt-5.5 and gpt-5.4 latency in our dashboards
+- description: past amp behavior
+  vars:
+    text: why did amp pick the fast model yesterday?
+- description: words containing aliases
+  vars:
+    text: solve the terraform drift in staging
+- description: thoroughness without a selector
+  vars:
+    text: be more thorough this time
+- description: question about the current model
+  vars:
+    text: "@bot what model are you?"
+- description: question about which harness ran
+  vars:
+    text: "@bot did you run this on codex or claude?"
+- description: asking for an opinion on models
+  vars:
+    text: "@bot is fable or opus better at long refactors? curious what you think"
+- description: summarizing a model launch
+  vars:
+    text: "@bot summarize the opus 5.5 launch post for the team"
+- description: ml model in a task
+  vars:
+    text: "@bot our churn model is overfitting on last quarter's data, can you take a look?"
+- description: harness name as a ci job
+  vars:
+    text: "@bot the codex-e2e CI job flaked again, can you find out why?"
+- description: reasoning as rationale
+  vars:
+    text: "@bot what's the reasoning behind the 30s timeout in the scheduler?"
+- description: effort as an estimate
+  vars:
+    text: "@bot give me an effort estimate for migrating the billing service to postgres 17"
+- description: mode as a product setting
+  vars:
+    text: "@bot set dark mode as the default in the dashboard settings"
+- description: provider as an incident subject
+  vars:
+    text: "@bot openrouter had an outage yesterday, draft a short postmortem from the incident channel"
+- description: think as an ordinary verb
+  vars:
+    text: "@bot think about whether we should split the monorepo and write up the tradeoffs"
+- description: model default in a feature request
+  vars:
+    text: "@bot add a model option to our CLI that defaults to sonnet"
+- description: provider as a billing subject
+  vars:
+    text: "@bot the bedrock bill doubled last month, break it down by service"
+- description: models as product features
+  vars:
+    text: "@bot can you write release notes for the new haiku and sonnet support in our SDK?"
+- description: model and effort in code to translate
+  vars:
+    text: "@bot translate this to python: `client.responses.create(model=\"gpt-5.5\", reasoning={\"effort\": \"high\"})`"
+- description: past harness used as feedback
+  vars:
+    text: "@bot last time you used claude it missed the edge cases, can you double check the parser tests?"
+- description: aliases as cluster names
+  vars:
+    text: "@bot luna and sol are the two staging clusters, which one is healthier right now?"
+- description: effort as a ticket label
+  vars:
+    text: "@bot high effort tickets should go to the platform team; can you triage the backlog?"

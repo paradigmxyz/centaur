@@ -6,12 +6,14 @@ on:
     tags: [v*]
     paths:
       - .github/workflows/publish-images.yml
+      - .github/workflows/e2e.yml
       - services/**
-      - crates/harness-server/**
+      - crates/**
       - harness/**
       - centaur_sdk/**
       - packages/**
       - tools/**
+      - workflows/**
       - scripts/bootstrap-k8s-secrets.sh
       - package.json
       - pnpm-lock.yaml
@@ -50,13 +52,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [api-rs, slackbotv2, linearbot, discordbot, githubbot, teamsbot, agent, iron-proxy, console]
+        service: [api-rs, company-context, proxy-sync, token-broker, slackbotv2, linearbot, discordbot, githubbot, teamsbot, agent, iron-proxy, console]
         platform: ${{ github.event_name == 'push' && fromJSON('["linux/amd64", "linux/arm64"]') || fromJSON('["linux/amd64"]') }}
         include:
           - service: api-rs
             image: centaur-api-rs
             context: .
             dockerfile: services/api-rs/Dockerfile
+            target: ""
+          - service: company-context
+            image: centaur-company-context
+            context: .
+            dockerfile: services/company-context/Dockerfile
+            target: ""
+          - service: proxy-sync
+            image: centaur-proxy-sync
+            context: .
+            dockerfile: services/proxy-sync/Dockerfile
+            target: ""
+          - service: token-broker
+            image: centaur-token-broker
+            context: .
+            dockerfile: services/token-broker/Dockerfile
             target: ""
           - service: slackbotv2
             image: centaur-slackbotv2
@@ -111,7 +128,7 @@ jobs:
           echo "PLATFORM_SLUG=${platform//\//-}" >> "$GITHUB_ENV"
 
       - name: Set up Depot
-        uses: depot/setup-action@15c09a5f77a0840ad4bce955686522a257853461 # v1.7.1
+        uses: depot/setup-action@91bc8495a33ebfc504ffc89e5674379ccf23c29c # v1.7.2
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -157,7 +174,7 @@ jobs:
 
       - name: Upload digest
         if: ${{ !github.event.pull_request.head.repo.fork }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: digests-${{ matrix.image }}-${{ env.PLATFORM_SLUG }}
           path: ${{ runner.temp }}/digests/*
@@ -165,7 +182,7 @@ jobs:
           retention-days: 1
 
   merge:
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: depot-ubuntu-24.04
     needs: build
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
     strategy:
@@ -173,6 +190,9 @@ jobs:
       matrix:
         include:
           - image: centaur-api-rs
+          - image: centaur-company-context
+          - image: centaur-proxy-sync
+          - image: centaur-token-broker
           - image: centaur-slackbotv2
           - image: centaur-linearbot
           - image: centaur-agent
@@ -184,14 +204,14 @@ jobs:
 
     steps:
       - name: Download digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: digests-${{ matrix.image }}-*
           path: ${{ runner.temp }}/digests
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -231,3 +251,40 @@ jobs:
       - name: Inspect manifest
         run: |
           docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ steps.meta.outputs.version }}
+
+  # Runs the e2e scenarios against the images just published.
+  e2e:
+    needs: merge
+    if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/e2e.yml
+
+  notify-centaur-paradigm:
+    name: Notify Paradigm Overlay
+    needs: merge
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: depot-ubuntu-24.04
+    environment: centaur-paradigm-dispatch
+    permissions: {}
+    steps:
+      - name: Dispatch sandbox update
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.CENTAUR_PARADIGM_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "CENTAUR_PARADIGM_DISPATCH_TOKEN is required." >&2
+            exit 1
+          fi
+
+          jq -n \
+            --arg sha "$GITHUB_SHA" \
+            '{
+              event_type: "centaur-sandbox-published",
+              client_payload: {sha: $sha}
+            }' |
+            gh api \
+              --method POST \
+              repos/paradigmxyz/centaur-paradigm/dispatches \
+              --input -

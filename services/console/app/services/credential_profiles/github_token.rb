@@ -1,7 +1,8 @@
 module CredentialProfiles
   # GitHub API clients authenticate with Bearer/token while Git-over-HTTPS uses
   # HTTP Basic. Replacing a placeholder preserves the scheme selected by each
-  # client and confines the credential to GitHub's API and Git hosts.
+  # client and confines the credential to GitHub's API, Git, and hosted MCP
+  # server hosts.
   module GithubToken
     KIND = "github_token"
     REPLACE_CONFIG = {
@@ -11,8 +12,10 @@ module CredentialProfiles
     }.freeze
     RULE_ATTRIBUTES = [
       { host: "api.github.com", http_methods: [], paths: [], position: 0 },
-      { host: "github.com", http_methods: [], paths: [], position: 1 }
+      { host: "github.com", http_methods: [], paths: [], position: 1 },
+      { host: "api.githubcopilot.com", http_methods: [], paths: [], position: 2 }
     ].freeze
+    ALLOWED_HOSTS = RULE_ATTRIBUTES.map { |attributes| attributes[:host] }.freeze
 
     module_function
 
@@ -32,21 +35,19 @@ module CredentialProfiles
       )
     end
 
+    # Host-based rather than an exact match against RULE_ATTRIBUTES so secrets
+    # seeded before a host was added stay valid on later saves.
     def validate_rules(secret, rules:)
-      actual = Array(rules).map do |rule|
-        {
-          host: rule.host,
-          cidr: rule.cidr,
-          http_methods: rule.http_methods,
-          paths: rule.paths,
-          position: rule.position
-        }.compact
+      actual = Array(rules)
+      confined = actual.present? && actual.all? do |rule|
+        ALLOWED_HOSTS.include?(rule.host) &&
+          rule.cidr.blank? && rule.http_methods.blank? && rule.paths.blank?
       end
-      return if actual == RULE_ATTRIBUTES
+      return if confined
 
       secret.errors.add(
         :rules,
-        "github_token credentials must target only api.github.com and github.com"
+        "github_token credentials must target only #{ALLOWED_HOSTS.join(', ')}"
       )
     end
 

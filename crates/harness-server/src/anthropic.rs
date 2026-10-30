@@ -14,6 +14,8 @@ pub enum AnthropicStreamEvent {
     System {
         subtype: Option<String>,
         session_id: Option<String>,
+        #[serde(flatten)]
+        task: AnthropicSystemTask,
     },
     Assistant {
         #[serde(default)]
@@ -103,6 +105,56 @@ impl AnthropicStreamEvent {
             Self::Result { usage, .. } => token_usage_from_value(usage.as_ref(), None),
             _ => None,
         }
+    }
+}
+
+/// Background-task fields Claude Code puts on `system` lifecycle events
+/// (`task_started`, `task_notification`, `background_tasks_changed`, ...).
+/// Every `system` line is flattened into this, so each field is lenient: an
+/// unexpected type reads as absent instead of failing the line (and turn).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AnthropicSystemTask {
+    #[serde(default, deserialize_with = "lenient")]
+    pub task_id: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub task_type: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub description: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub subagent_type: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub status: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub summary: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub is_backgrounded: bool,
+    #[serde(default, deserialize_with = "lenient")]
+    pub owned_by_subagent: bool,
+    /// `background_tasks_changed`: every live background task.
+    #[serde(default, deserialize_with = "lenient")]
+    pub tasks: Option<Vec<AnthropicBackgroundTask>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AnthropicBackgroundTask {
+    #[serde(default, deserialize_with = "lenient")]
+    pub task_id: Option<String>,
+}
+
+fn lenient<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    Ok(T::deserialize(Value::deserialize(deserializer)?).unwrap_or_default())
+}
+
+impl AnthropicSystemTask {
+    /// Background subagents (Agent tool with `run_in_background`) launched by
+    /// the main chain. Their completion makes Claude Code run a follow-up
+    /// turn on its own after the turn that launched them has already ended.
+    pub fn is_main_chain_agent(&self) -> bool {
+        self.task_type.as_deref() == Some("local_agent") && !self.owned_by_subagent
     }
 }
 
@@ -237,6 +289,7 @@ impl AnthropicEventNormalizer {
             AnthropicStreamEvent::System {
                 subtype,
                 session_id,
+                ..
             } => {
                 if subtype.as_deref() == Some("init") {
                     NormalizedEvent::SessionStarted { session_id }

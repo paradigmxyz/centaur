@@ -14,7 +14,6 @@ class Principal < ApplicationRecord
   has_many :principal_roles, dependent: :destroy
   has_many :roles, through: :principal_roles
   has_many :slack_channel_permissions, dependent: :destroy
-  has_many :sync_config_snapshots, class_name: "PrincipalSyncConfigSnapshot", dependent: :destroy
   has_many :mcp_oauth_authorization_codes, dependent: :destroy
   has_many :mcp_oauth_refresh_tokens, dependent: :destroy
   belongs_to :created_by, class_name: "User"
@@ -23,6 +22,7 @@ class Principal < ApplicationRecord
   include SlackChannelPermissionOwner
 
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
+  after_create_commit :enqueue_slack_channel_catalog_refresh, if: :slack_channel_catalog_refreshable?
   after_create :assign_default_roles, if: :roles_blank_for_defaulting?
   before_validation :apply_sandbox_repo_cache_label
   before_commit :bump_own_sync_config_cache_version, on: :update, if: :sync_config_fields_changed?
@@ -30,11 +30,12 @@ class Principal < ApplicationRecord
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
   URL_SAFE_MESSAGE = "must contain only URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)"
   SANDBOX_REPO_CACHE_LABEL = "centaur.sandbox_repo_cache".freeze
+  TOOL_LABEL = "centaur-tool".freeze
   SANDBOX_REPO_CACHE_VALUES = %w[none public all].freeze
   UNKNOWN_KIND = "unknown".freeze
   KINDS = %w[
     unknown user console_user workflow slack_channel slack_dm discord_channel linear_issue
-    teams_user teams_conversation
+    github_user teams_user teams_conversation
   ].freeze
   SLACK_USER_ID_FORMAT = /\A(?:[UW][A-Z0-9]{8,}|USLACK)\z/
   SLACK_CHANNEL_ID_FORMAT = /\A[CDG][A-Z0-9]{8,}\z/
@@ -68,6 +69,34 @@ class Principal < ApplicationRecord
   # path collapse naturally because callers select distinct secret rows.
   def effective_grants
     Grant.where(principal_id: id).or(Grant.where(role_id: role_ids))
+  end
+
+  # Tools associated with credentials granted directly or through roles. Each
+  # credential's centaur-tool label names one tool.
+  def connected_tool_names
+    effective_grants
+      .includes(*Grant::GRANTABLE_ASSOCIATIONS)
+      .filter_map(&:grantable)
+      .filter_map do |credential|
+        label = credential.labels.to_h[TOOL_LABEL]
+        label.strip if label.is_a?(String)
+      end
+      .reject(&:blank?)
+      .uniq
+      .sort
+  end
+
+  # Every kind of secret this principal resolves to, keyed by secret kind.
+  def granted_secrets_by_kind
+    {
+      "static" => granted_static_secrets,
+      "gcp_auth" => granted_gcp_auth_secrets,
+      "gcp_id_token" => granted_gcp_id_token_secrets,
+      "aws_auth" => granted_aws_auth_secrets,
+      "oauth_token" => granted_oauth_token_secrets,
+      "pg_dsn" => granted_pg_dsn_secrets,
+      "hmac" => granted_hmac_secrets
+    }
   end
 
   # Static secrets this principal resolves to, via its effective grants.
@@ -217,12 +246,6 @@ class Principal < ApplicationRecord
     scope.update_all("sync_config_cache_version = sync_config_cache_version + 1")
   end
 
-  def self.enqueue_sync_config_snapshot_warm(ids)
-    Array(ids).compact.uniq.each do |id|
-      PrincipalSyncConfigSnapshotWarmJob.perform_later(id)
-    end
-  end
-
   def self.effective_grantees_for_grantable(grantable)
     association = grantable.model_name.singular.to_sym
     grants = Grant.where(association => grantable)
@@ -255,6 +278,14 @@ class Principal < ApplicationRecord
   end
 
   private
+
+  def slack_channel_catalog_refreshable?
+    kind == "slack_channel" && slack_channel_id.present? && SlackChannelCatalogSync.configured?
+  end
+
+  def enqueue_slack_channel_catalog_refresh
+    SlackChannelCatalogMembershipRefreshJob.perform_later(slack_channel_id)
+  end
 
   def roles_blank_for_defaulting?
     association(:roles).target.empty? && !roles.exists?
@@ -346,9 +377,9 @@ class Principal < ApplicationRecord
   # in ASCENDING priority: the highest-priority grant lands last and becomes
   # authoritative. A secret reachable by several grants (e.g. both directly and
   # via a role) collapses to one row taking the strongest priority among them
-  # (MAX), and the id tiebreak keeps the order deterministic for config_hash.
+  # (MAX), and the id tiebreak keeps the order deterministic.
   # The selected effective_priority also drives cross-type conflict resolution
-  # when PrincipalSyncConfigSnapshot assembles a payload.
+  # when PrincipalSyncConfig assembles a payload.
   #
   # Do NOT add an `.order(:id)`-style sort to the per-type callers above or emit
   # grants in any other order downstream: that would silently let the wrong

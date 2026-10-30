@@ -1,12 +1,12 @@
 # syntax=docker/dockerfile:1.7
 
-FROM oven/bun:1.3.13-slim
+FROM oven/bun:1.4.4-slim
 
 WORKDIR /repo
 ENV NODE_ENV=production
 
 RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \
-    bun install -g pnpm@10.28.1
+    bun install -g pnpm@10.34.7
 
 # Workspace manifests first so dependency install is a cached layer. githubbot depends on the
 # @centaur/* workspace packages, so they must be present for pnpm to link the `workspace:*` ranges.

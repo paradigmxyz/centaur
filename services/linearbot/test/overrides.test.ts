@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { extractMessageOverrides } from "../src/overrides";
+import {
+  extractMessageOverrides,
+  resolveStickyProvider,
+} from "../src/overrides";
 
 describe("extractMessageOverrides", () => {
   test("returns text untouched without flags", () => {
@@ -66,16 +69,16 @@ describe("extractMessageOverrides", () => {
     expect(extractMessageOverrides("--opus fix it")).toEqual({
       cleanedText: "fix it",
       harnessType: "claudecode",
-      model: "claude-opus-4-8",
+      model: "claude-opus-5-5",
     });
     expect(extractMessageOverrides("--sonnet fix it").model).toBe(
-      "claude-sonnet-4-6",
+      "claude-sonnet-5-5",
     );
     expect(extractMessageOverrides("--haiku fix it").model).toBe(
-      "claude-haiku-4-5",
+      "claude-haiku-5-5",
     );
     expect(extractMessageOverrides("--fable fix it").model).toBe(
-      "claude-fable-5",
+      "claude-fable-5-1",
     );
   });
 
@@ -88,17 +91,48 @@ describe("extractMessageOverrides", () => {
     });
   });
 
+  test("--provider selects an arbitrary codex provider", () => {
+    expect(
+      extractMessageOverrides(
+        "--provider private_responses --model example-model audit this",
+      ),
+    ).toEqual({
+      cleanedText: "audit this",
+      harnessType: "codex",
+      model: "example-model",
+      provider: "private_responses",
+    });
+  });
+
+  test("--provider uses the configured provider default model", () => {
+    const previous = process.env.CODEX_CUSTOM_PROVIDERS;
+    process.env.CODEX_CUSTOM_PROVIDERS = JSON.stringify({
+      private_responses: { defaultModel: "configured-model" },
+    });
+    try {
+      expect(extractMessageOverrides("--provider=private_responses audit this")).toEqual({
+        cleanedText: "audit this",
+        harnessType: "codex",
+        model: "configured-model",
+        provider: "private_responses",
+      });
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_CUSTOM_PROVIDERS;
+      else process.env.CODEX_CUSTOM_PROVIDERS = previous;
+    }
+  });
+
   test("--model expands claude aliases to full model ids", () => {
     expect(extractMessageOverrides("--claude --model opus go")).toEqual({
       cleanedText: "go",
       harnessType: "claudecode",
-      model: "claude-opus-4-8",
+      model: "claude-opus-5-5",
     });
     expect(extractMessageOverrides("--model Sonnet go").model).toBe(
-      "claude-sonnet-4-6",
+      "claude-sonnet-5-5",
     );
     expect(extractMessageOverrides("--model fable go").model).toBe(
-      "claude-fable-5",
+      "claude-fable-5-1",
     );
   });
 
@@ -108,14 +142,14 @@ describe("extractMessageOverrides", () => {
     ).toEqual({
       cleanedText: "what model are you",
       harnessType: "claudecode",
-      model: "claude-fable-5",
+      model: "claude-fable-5-1",
     });
     expect(
       extractMessageOverrides("@Centaur AI --claude --model=fable\r\nwhat model are you"),
     ).toEqual({
       cleanedText: "@Centaur AI what model are you",
       harnessType: "claudecode",
-      model: "claude-fable-5",
+      model: "claude-fable-5-1",
     });
   });
 
@@ -125,7 +159,7 @@ describe("extractMessageOverrides", () => {
     ).toEqual({
       cleanedText: "what model are you",
       harnessType: "claudecode",
-      model: "claude-fable-5",
+      model: "claude-fable-5-1",
     });
   });
 
@@ -140,7 +174,7 @@ describe("extractMessageOverrides", () => {
     expect(extractMessageOverrides("--codex --opus fix it")).toEqual({
       cleanedText: "fix it",
       harnessType: "codex",
-      model: "claude-opus-4-8",
+      model: "claude-opus-5-5",
     });
     expect(
       extractMessageOverrides("--sonnet --model claude-opus-4-8 fix it").model,
@@ -176,5 +210,30 @@ describe("extractMessageOverrides", () => {
       harnessType: undefined,
       model: undefined,
     });
+  });
+});
+
+describe("resolveStickyProvider", () => {
+  test("persists a selected provider and reuses it on later turns", () => {
+    expect(
+      resolveStickyProvider(undefined, {
+        harnessType: "codex",
+        provider: "private_responses",
+      }),
+    ).toEqual({
+      provider: "private_responses",
+      update: "private_responses",
+    });
+    expect(resolveStickyProvider("private_responses", {})).toEqual({
+      provider: "private_responses",
+    });
+  });
+
+  test("an explicit harness switch clears a previous provider", () => {
+    expect(
+      resolveStickyProvider("private_responses", {
+        harnessType: "claudecode",
+      }),
+    ).toEqual({ update: null });
   });
 });

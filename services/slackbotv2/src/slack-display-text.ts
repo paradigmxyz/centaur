@@ -1,3 +1,5 @@
+import { escapeRegExp } from './utils'
+
 export type SlackDisplayTextSource = 'text' | 'raw_blocks' | 'raw_attachments' | 'empty'
 
 export type SlackDisplayText = {
@@ -191,10 +193,6 @@ function richValueMentionsUser(value: unknown, userId: string, mention: RegExp):
   return Object.values(value).some(item => richValueMentionsUser(item, userId, mention))
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
 function collectSlackAttachmentText(value: unknown, lines: string[]): void {
   if (!isRecord(value)) return
   collectStringFields(value, lines, ['fallback', 'pretext', 'title', 'text'])
@@ -373,9 +371,10 @@ function normalizeSlackFallbackText(input: string): string {
     .replace(/<@([A-Z0-9]+)>/g, '@$1')
     .replace(/<!subteam\^([A-Z0-9]+)\|([^>]+)>/g, '@$2')
     .replace(/<!(channel|here|everyone)>/g, '@$1')
-    .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
+    // Last, so an escaped entity such as &amp;lt; decodes to &lt;, not <.
+    .replace(/&amp;/g, '&')
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
     .split('\n')
