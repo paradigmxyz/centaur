@@ -532,6 +532,22 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_06_212027) do
     t.index ["oauth_app_slug"], name: "index_slack_dm_sync_cursors_on_oauth_app_slug", unique: true
   end
 
+  create_table "ssh_connections", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.string "destination"
+    t.datetime "expires_at"
+    t.string "generation", null: false
+    t.text "host_key"
+    t.string "name", null: false
+    t.text "private_key"
+    t.text "public_key", null: false
+    t.datetime "revoked_at"
+    t.datetime "updated_at", null: false
+    t.bigint "user_id", null: false
+    t.string "username"
+    t.index ["user_id"], name: "index_ssh_connections_on_user_id", unique: true
+  end
+
   create_table "static_secrets", force: :cascade do |t|
     t.bigint "broker_credential_id"
     t.datetime "created_at", null: false
@@ -657,6 +673,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_06_212027) do
   add_foreign_key "skills", "users", on_delete: :cascade
   add_foreign_key "slack_channel_permissions", "principals"
   add_foreign_key "slack_channel_permissions", "roles"
+  add_foreign_key "ssh_connections", "users"
   add_foreign_key "static_secrets", "broker_credentials"
   add_foreign_key "static_secrets", "users", column: "created_by_id"
   add_foreign_key "thread_shares", "users", column: "created_by_id"

@@ -36,6 +36,7 @@ pub use tools::{GitHubTokenRef, ToolSource, ToolsConfig};
 mod crd_migration;
 pub mod generated;
 mod iron_proxy;
+mod ssh;
 mod tools;
 
 const BACKEND_NAME: &str = "agent-sandbox-k8s";

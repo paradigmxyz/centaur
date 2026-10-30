@@ -4,6 +4,7 @@ mod database;
 #[cfg(test)]
 mod integration_tests;
 mod models;
+mod ssh;
 mod telemetry;
 mod tokens;
 
@@ -125,6 +126,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|url| host_from_url(&url));
     let state = AppState {
+        ssh_targets: ssh::target_policies(
+            env::var("CENTAUR_SSH_TARGETS")
+                .or_else(|_| env::var("CENTAUR_EE_SSH_TARGETS"))
+                .ok()
+                .as_deref(),
+        )?,
         pool,
         encryption: Arc::new(ActiveRecordEncryption::new(&primary_key, &salt)),
         jwt_secret: env::var("CENTAUR_JWT_SIGNING_SECRET")
@@ -152,6 +159,7 @@ fn router(state: AppState) -> Router {
         .route("/healthz", get(|| async { StatusCode::OK }))
         .route("/metrics", get(metrics))
         .route("/api/v1/proxy/sync", post(sync))
+        .route("/api/v1/proxy/ssh/authorize", post(ssh::authorize))
         .layer(middleware::from_fn(log_request))
         .with_state(state)
 }

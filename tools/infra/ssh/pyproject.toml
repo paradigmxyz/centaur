@@ -1,0 +1,19 @@
+[project]
+name = "centaur-remote-ssh"
+version = "0.1.0"
+description = "Headless remote development through a paired Iron SSH proxy"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+remote-ssh = "centaur_tool_ssh.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_ssh"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

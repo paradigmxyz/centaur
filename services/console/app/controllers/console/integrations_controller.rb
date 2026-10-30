@@ -10,6 +10,7 @@ class Console::IntegrationsController < ApplicationController
   layout "console"
 
   def index
+    @ssh_connection = current_user.ssh_connection
     @oauth_apps = OauthApp.where(enabled: true).order(:slug)
     @oauth_apps = @oauth_apps.where(shared: false) unless acting_admin?
     @presets = if acting_admin?

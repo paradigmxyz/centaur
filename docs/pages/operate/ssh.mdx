@@ -1,0 +1,49 @@
+---
+title: SSH access
+description: Connect personal SSH keys to remote development environments.
+---
+
+Save a dedicated, unencrypted private key in **Integrations → SSH key** and
+register the displayed public key with your remote environment. The key stays
+connected until you disconnect it. Leaving the key blank when editing preserves it.
+
+Use `remote-ssh exec --url wss://dev.example.com/events/events -- pwd` to connect.
+The URL must include the gateway's full SSH tunnel path. One saved key works
+across destinations permitted by the deployment. If `TOOL_ALLOWLIST` is set,
+include `ssh` to expose this tool.
+
+## Deployment
+
+Deploy Console's database migrations before proxy-sync. Use an Iron image that
+supports `--ssh`; custom builds can set the `IRON_PROXY_IMAGE` build argument.
+SSH is disabled by default. Configure api-rs with:
+
+- `KUBERNETES_IRON_PROXY_SSH_ENABLED=true`
+- `KUBERNETES_IRON_PROXY_SSH_WORKSPACE=/workspace`
+- A persistent secret `CENTAUR_SSH_SEED` of at least 32 bytes. Changing it requires
+  replacing retained sandboxes and proxies because it derives their identities.
+
+Set the allowed destinations in Helm:
+
+```yaml
+proxySync:
+  sshTargets:
+    - host: "*.dev.example.com"
+      path: /events/events
+      username: dev
+```
+
+Hosts support exact names or `*.` subdomains; paths are exact. Each URL must match
+one policy. An empty policy denies access. Only WSS on port 443 is accepted,
+without credentials, queries, or fragments. Iron verifies the gateway's TLS
+identity and trusts it to route to the container; there is no per-container host pin.
+
+Console users can use only their own saved key. Slack requires a verified subject
+and workspace linked to that Console account; channel access follows the current
+requester. The proxy renews authorization every five seconds with leases of at most
+30 seconds. Disconnect, key rotation, policy changes, and reassignment revoke access.
+
+The sandbox gets a disposable key; the real key stays encrypted in Console and
+is released only to its proxy. Remote commands inherit the remote environment's
+permissions. Disconnect does not remove its registered public key or guarantee
+that detached remote processes have stopped. Inspect results before retrying.
