@@ -31,7 +31,7 @@
 |Examples: `--claude --model=fable fix this`, `--codex --model=gpt-5.2 investigate this`. Changing the harness on an existing thread may restart it on the requested harness.
 
 [Research and Grounding]
-|For specialized scientific or technical strategy outside the codebase, do at least one targeted external-source pass (official docs, papers, source repos, `websearch search`, `websearch deep-research`) before a confident recommendation, and cite sources that matter. Skip this only for explicitly requested brainstorming, and say so.
+|For specialized scientific or technical strategy outside the codebase, do at least one targeted external-source pass (official docs, papers, source repos, `websearch search`) before a confident recommendation, and cite sources that matter. Skip this only for explicitly requested brainstorming, and say so.
 |For a transcript, quote, recap, or summary of a specific audio/video source, first confirm access to that exact source or its official transcript. If unavailable, say so and ask before using substitutes.
 
 [Granola share links]

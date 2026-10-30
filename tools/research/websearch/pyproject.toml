@@ -1,15 +1,11 @@
 [project]
 name = "websearch"
-description = "Web search and deep research via Parallel (free MCP or paid REST); optional Claude synthesis"
-version = "0.2.0"
+description = "Web search via Parallel (default, free tier), Exa, or Tako"
+version = "0.3.0"
 requires-python = ">=3.11"
 dependencies = [
-    "anthropic>=0.54.0",
     "httpx>=0.28.0",
-    "parallel-web>=0.6.0",
-    "pydantic>=2.10.0",
     "python-dotenv>=1.0.0",
-    "rich>=13.0.0",
     "typer>=0.12.0",
 ]
 
@@ -29,12 +25,13 @@ build-backend = "hatchling.build"
 
 [tool.centaur]
 module = "client.py"
-# `search` works anonymously through the hosted Parallel Search MCP. Set
-# PARALLEL_API_KEY to use the paid REST path and unlock `deep_research`.
-# Set ANTHROPIC_API_KEY to enable the Claude-backed synthesis pipeline on
-# top of search results (reviewer → writer → citation repair).
+# WEBSEARCH_BACKEND (sandbox env) selects parallel (default), exa, or tako.
+# Parallel falls back to its free anonymous Search MCP when PARALLEL_API_KEY is
+# rejected; Exa and Tako need their key. Keep secret hosts off search.parallel.ai
+# so the free path stays anonymous.
 optional_secrets = [
     {type = "http", name = "PARALLEL_API_KEY", mode = "inject", inject_header = "x-api-key", hosts = ["api.parallel.ai"]},
-    {type = "http", name = "ANTHROPIC_API_KEY", mode = "inject", inject_header = "x-api-key", hosts = ["api.anthropic.com"]},
+    {type = "http", name = "EXA_API_KEY", mode = "inject", inject_header = "x-api-key", hosts = ["api.exa.ai"]},
+    {type = "http", name = "TAKO_API_KEY", mode = "inject", inject_header = "X-API-Key", hosts = ["tako.com"]},
 ]
-hosts = ["api.parallel.ai", "search.parallel.ai"]
+hosts = ["api.parallel.ai", "search.parallel.ai", "api.exa.ai", "tako.com"]
