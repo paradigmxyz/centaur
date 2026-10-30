@@ -122,6 +122,29 @@ def test_handler_runs_one_scoped_agent_turn_and_delivers_its_text():
     assert result["delivery"]["ts"] == "123.1"
 
 
+def test_handler_skips_slack_delivery_for_a_silent_response():
+    context = FakeContext(
+        result_text=f"  {console_workflow.SCHEDULED_TASK_SILENT_RESPONSE}\n"
+    )
+
+    result = asyncio.run(
+        console_workflow.handler(
+            {
+                "prompt": "Alert me only when something is new",
+                "principal": "console-user-author",
+                "channel": "C0123456789",
+                "slack_user_id": "U0123456789",
+                "scheduled_task_id": "tsk_123",
+            },
+            context,
+        )
+    )
+
+    assert context.step_calls == ["agent_result"]
+    assert context.slack_calls == []
+    assert result["delivery"] is None
+
+
 def test_handler_treats_recurring_language_as_an_instruction_to_execute_now():
     context = FakeContext()
     task = (

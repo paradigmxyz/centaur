@@ -15,12 +15,15 @@ SLACK_MESSAGE_CHUNK_MAX_LENGTH = 3_800
 # Slack section block text is limited to 3,000 characters.
 SLACK_SECTION_MAX_LENGTH = 3_000
 SLACK_USER_ID_PATTERN = re.compile(r"[UW][A-Z0-9]{8,}")
+# A run that replies with exactly this token completes without posting to Slack.
+SCHEDULED_TASK_SILENT_RESPONSE = "NO_REPLY"
 SCHEDULED_TASK_FOOTER = "Sent by <@{slack_user_id}>'s scheduled task"
 SCHEDULED_TASK_FOOTER_FALLBACK = "Sent by a scheduled task"
 SCHEDULED_TASK_EXECUTION_INSTRUCTIONS = """\
 This is a run of an existing scheduled task. Execute the task now.
 NEVER create or update a scheduled task, even if the task prompt contains recurring or future schedule language.
-Treat schedule language such as "Each Monday" as context for this run, not as a request to schedule another task."""
+Treat schedule language such as "Each Monday" as context for this run, not as a request to schedule another task.
+If the task says to send nothing in this case, reply with exactly NO_REPLY and nothing else."""
 SLACK_MRKDWN_INSTRUCTIONS = """\
 Format the final response for Slack using Slack mrkdwn, not standard Markdown.
 Use *bold*, _italics_, ~strikethrough~, `inline code`, and <https://example.com|link text>.
@@ -173,6 +176,12 @@ async def handler(params: Any, ctx: Any) -> dict[str, Any]:
 
     result = await ctx.step("agent_result", run_agent)
     response_text = str(result.get("result_text") or "").strip()
+    if response_text == SCHEDULED_TASK_SILENT_RESPONSE:
+        return {
+            "agent_result": result,
+            "delivery": None,
+            "scheduled_task_id": scheduled_task_id,
+        }
     if not response_text:
         response_text = "The task completed without a text response."
 
