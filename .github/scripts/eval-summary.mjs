@@ -59,10 +59,11 @@ for (const file of process.argv.slice(2)) {
   const failing = results.results.filter(result => !result.success)
   if (failing.length === 0) continue
   const rows = failing.slice(0, MAX_CASES).map(result => {
-    const failed = (result.gradingResult?.componentResults ?? [])
-      .filter(component => !component.pass)
-      .map(component => component.assertion?.metric)
-      .filter(Boolean)
+    // namedScores holds rendered metric names; an assertion's `metric` may be
+    // an unrendered template such as `{{ "a" if x else "b" }}`.
+    const failed = Object.entries(result.namedScores ?? {})
+      .filter(([, score]) => score < 1)
+      .map(([metric]) => metric)
     const reason = result.failureReason === 2
       ? `error: ${result.error}`
       : `${failed.join(', ') || 'failed'}: got ${JSON.stringify(result.response?.output)}`
