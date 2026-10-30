@@ -713,7 +713,7 @@ mod tests {
                 .method(Method::POST)
                 .uri("/api/workflows/runs")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"workflow_name":"agent_turn","input":{}}"#))
+                .body(Body::from(r#"{"workflow_name":"echo","input":{}}"#))
                 .unwrap(),
             Request::builder()
                 .method(Method::GET)
