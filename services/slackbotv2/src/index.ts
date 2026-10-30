@@ -364,6 +364,10 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     onLockConflict: 'force',
     logger
   })
+  // The Slack adapter already flags real mentions (app_mention events and
+  // <@bot> tokens). Chat SDK's fallback also matches plain-text "@centaur",
+  // so prose that merely names the bot (changelogs, docs) started executions.
+  Object.assign(chat, { detectMention: () => false })
   const background = createBackgroundWork()
   const steeringReactions = createSteeringReactionController(options)
   const lateSlackFiles = createLateSlackFileRepair(options, state, steeringReactions)
