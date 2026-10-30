@@ -111,6 +111,7 @@ fn pi_blocks_turns_render_tools_and_codemode_and_respawn_on_model_change_and_int
         .env("CENTAUR_PI_BIN", fake_pi(&dir))
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("CENTAUR_PI_MODEL")
+        .env_remove("CENTAUR_PI_EXTRA_MODELS")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
