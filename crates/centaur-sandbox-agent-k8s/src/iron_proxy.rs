@@ -2549,6 +2549,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ssh_ports_and_credentials_are_scoped_to_the_paired_proxy() {
+        let mut target = resolved();
+        target.ssh = Some(crate::ssh::Identity::fixture("test-sandbox"));
+        let service = build_iron_proxy_service(&SandboxId::new("test"), &target);
+        assert!(
+            service
+                .spec
+                .unwrap()
+                .ports
+                .unwrap()
+                .iter()
+                .any(|p| p.port == 2222)
+        );
+        assert!(
+            sandbox_to_proxy_ports(&target)
+                .iter()
+                .any(|p| p.port == Some(IntOrString::Int(2222)))
+        );
+        let identity = target.ssh.as_ref().unwrap();
+        let sandbox = identity.sandbox(&target.proxy_host);
+        let proxy = identity.proxy("http://sync", &["10.0.0.0/8".into()]);
+        assert_ne!(sandbox["private_key"], proxy["host_key"]["value"]);
+        assert_eq!(proxy["upstream_deny_cidrs"][0], "10.0.0.0/8");
+        assert!(sandbox.get("host_key").is_some());
+        assert!(!sandbox.to_string().contains("control_plane"));
+    }
+
     fn resolved_with_observability(observability_enabled: bool) -> ResolvedIronProxy {
         ResolvedIronProxy {
             observability_enabled,

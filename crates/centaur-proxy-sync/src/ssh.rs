@@ -205,3 +205,44 @@ fn target_policy<'a>(
     }
     Ok((url.to_string(), policy))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn dynamic_targets_are_restricted_by_deployment_policy() {
+        let policies = target_policies(Some(
+            r#"[{"host":"*.dev.example.com","path":"/events/events","username":"dev"}]"#,
+        ))
+        .unwrap();
+        for target in [
+            "wss://one.dev.example.com/events/events",
+            "wss://two.dev.example.com/events/events",
+        ] {
+            assert!(target_policy(&policies, target).is_ok());
+        }
+        for target in [
+            "wss://dev.example.com/events/events",
+            "wss://one.dev.example.com.evil.test/events/events",
+            "wss://evildev.example.com/events/events",
+            "wss://one.dev.example.com/other",
+            "wss://one.dev.example.com:8443/events/events",
+            "wss://user:secret@one.dev.example.com/events/events",
+            "wss://one.dev.example.com/events/events?token=secret",
+            "tcp://one.dev.example.com:22",
+            "wss://169.254.169.254/events/events",
+        ] {
+            assert!(target_policy(&policies, target).is_err(), "{target}");
+        }
+        assert!(target_policy(&[], "wss://one.dev.example.com/events/events").is_err());
+        let ambiguous = vec![policies[0].clone(), policies[0].clone()];
+        assert!(target_policy(&ambiguous, "wss://one.dev.example.com/events/events").is_err());
+        assert!(
+            target_policies(Some(
+                r#"[{"host":"*","path":"/events/events","username":"dev"}]"#
+            ))
+            .is_err()
+        );
+        assert!(target_policies(Some("not-json")).is_err());
+    }
+}

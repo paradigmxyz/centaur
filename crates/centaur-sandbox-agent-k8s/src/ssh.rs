@@ -67,6 +67,10 @@ impl Identity {
             workspace: workspace.into(),
         })
     }
+    #[cfg(test)]
+    pub(crate) fn fixture(scope: &str) -> Self {
+        Self::from_seed("test-only-seed-with-at-least-32-bytes", scope, "/workspace").unwrap()
+    }
     pub(crate) fn sandbox(&self, host: &str) -> Value {
         json!({"host":host,"port":2222,"private_key":self.client_private,"host_key":self.host_public,"workspace":self.workspace})
     }
@@ -76,5 +80,25 @@ impl Identity {
             config["upstream_deny_cidrs"] = json!(deny_cidrs);
         }
         config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn identities_are_stable_and_isolated() {
+        let seed = "test-only-seed-with-at-least-32-bytes";
+        let a = Identity::from_seed(seed, "sandbox-a", "/workspace").unwrap();
+        let again = Identity::from_seed(seed, "sandbox-a", "/workspace").unwrap();
+        let b = Identity::from_seed(seed, "sandbox-b", "/workspace").unwrap();
+        assert_eq!(a, again);
+        assert_ne!(a.client_public, b.client_public);
+        assert_ne!(a.client_public, a.host_public);
+        let client = a.sandbox("proxy").to_string();
+        assert!(!client.contains(&a.host_private));
+        assert!(!client.contains(seed));
+        assert!(!format!("{a:?}").contains(&a.client_private));
+        assert!(Identity::from_seed("short", "a", "/").is_err());
     }
 }
