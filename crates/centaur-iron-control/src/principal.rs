@@ -355,16 +355,24 @@ fn slack_user_principal(user: &str, team: &str, display_name: Option<&str>) -> P
     }
 }
 
-/// Identify the team and conversation segments by their Slack prefix, ignoring
-/// the leading source namespace and any numeric ``thread_ts``. Returns the
-/// first team (``T…``) and first conversation (``C``/``D``/``G``) found.
+/// Identify the team and conversation segments of a Slack thread key by their
+/// Slack prefix, ignoring any numeric ``thread_ts``. Returns the first team
+/// (``T…``) and first conversation (``C``/``D``/``G``) found, or nothing when
+/// the key is not in a Slack namespace: ``slack:``, or the legacy ``chat:``
+/// that existing durable sessions may still carry.
 fn parse_slack_segments(thread_key: &str) -> (Option<&str>, Option<&str>) {
+    let Some(rest) = thread_key
+        .strip_prefix("slack:")
+        .or_else(|| thread_key.strip_prefix("chat:"))
+    else {
+        return (None, None);
+    };
     let mut team = None;
     let mut conversation = None;
     // Slack object ids are always uppercase, so match case-sensitively: a
     // numeric thread_ts never matches, and a lowercase placeholder like "ts"
     // is correctly ignored rather than mistaken for a team.
-    for segment in thread_key.split(':').skip(1).map(str::trim) {
+    for segment in rest.split(':').map(str::trim) {
         match segment.chars().next() {
             Some('T') if team.is_none() => team = Some(segment),
             Some('C' | 'D' | 'G') if conversation.is_none() => conversation = Some(segment),
@@ -570,6 +578,26 @@ mod tests {
         let principal = derive_principal("api", None, None);
         assert_eq!(principal.foreign_id, "thread-api");
         assert_eq!(principal.name, "api");
+    }
+
+    #[test]
+    fn non_slack_namespaces_never_derive_slack_principals() {
+        for thread_key in [
+            "github:Globex/widgets:12",
+            "github-issue:Contoso/app:12",
+            "github-manage:Dunder/paper:12",
+            "github-review:Tyrell/replicant:12",
+            "cron:T1:D1:ts",
+        ] {
+            let principal = derive_principal(thread_key, Some("U1"), None);
+            assert_eq!(
+                principal.foreign_id,
+                format!("thread-{}", slugify(thread_key))
+            );
+            assert_eq!(principal.kind, None);
+            assert_eq!(principal.slack_channel_id, None);
+            assert_eq!(principal.slack_team_id, None);
+        }
     }
 
     #[test]
