@@ -935,22 +935,22 @@ fn every_repo_tool_manifest_parses() {
 }
 
 #[test]
-fn real_slack_tool_parses_and_translates() {
+fn real_dune_tool_parses_and_translates() {
     let Some(tools_dir) = repo_tools_dir() else {
         return;
     };
-    let manifest = tools::find_tool(&[tools_dir], "slack").unwrap();
-    assert_eq!(manifest.name, "slack");
+    let manifest = tools::find_tool(&[tools_dir], "dune").unwrap();
+    assert_eq!(manifest.name, "dune");
     let out = translate::translate(
-        "tool-slack",
+        "tool-dune",
         &manifest.all_secrets().cloned().collect::<Vec<_>>(),
         &SourcePolicy::env(),
     );
     assert!(
         out.inputs.iter().any(
-            |i| matches!(i, SecretInput::Static(s) if s.foreign_id == "tool-slack-slack-search-token")
+            |i| matches!(i, SecretInput::Static(s) if s.foreign_id == "tool-dune-dune-api-key")
         ),
-        "expected the SLACK_SEARCH_TOKEN static secret"
+        "expected the DUNE_API_KEY static secret"
     );
 }
 

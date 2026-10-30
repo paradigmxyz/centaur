@@ -215,9 +215,7 @@ class IndexedSlackClient:
 class SlackClient:
     """Slack API client.
 
-    Most operations use the bot token. Native Slack search and Slack ETL can
-    optionally use dedicated user tokens so workspace-wide reads stay separate
-    from the interactive bot's access model.
+    All operations use ``SLACK_BOT_TOKEN``.
     """
 
     # Cache settings
@@ -254,7 +252,6 @@ class SlackClient:
     def __init__(
         self,
         bot_token: str | None = None,
-        search_token: str | None = None,
     ):
         token = (bot_token or secret("SLACK_BOT_TOKEN", default="")).strip()
         if not token:
@@ -263,14 +260,7 @@ class SlackClient:
                 "Get one at https://api.slack.com/apps → OAuth & Permissions → Bot User OAuth Token"
             )
         self.token = token
-        self.search_token = (search_token or secret("SLACK_SEARCH_TOKEN", default="")).strip()
-        timeout = self._api_timeout_seconds()
-        self._client = WebClient(token=token, timeout=timeout)
-        self._search_client = (
-            WebClient(token=self.search_token, timeout=timeout)
-            if self.search_token
-            else self._client
-        )
+        self._client = WebClient(token=token, timeout=self._api_timeout_seconds())
         self._user_cache: dict[str, str] = {}
         self._ratelimit_deadlines: dict[str, float] = {}
 
@@ -811,16 +801,15 @@ class SlackClient:
         except Exception:
             pass
 
-    def _get_user_cache(self, *, direct: bool = False) -> dict[str, str]:
+    def _get_user_cache(self) -> dict[str, str]:
         """Get user ID -> name mapping, using cache when possible."""
         cached = self._load_user_cache()
         if cached:
             return cached
 
         user_cache: dict[str, str] = {}
-        client = self._search_client if direct else self._client
         try:
-            users_response = self._retry_on_ratelimit(client.users_list, limit=1000)
+            users_response = self._retry_on_ratelimit(self._client.users_list, limit=1000)
             for user in users_response.get("members", []):
                 user_cache[user.get("id", "")] = user.get("name", "")
             self._save_user_cache(user_cache)
@@ -939,11 +928,10 @@ class SlackClient:
         try:
             return self._search_messages_native(search_query, max_results)
         except SlackApiError as error:
-            access_path = "search_token" if self._search_client is not self._client else "bot_token"
             self._raise_slack_api_error(
                 error,
                 slack_method="search.messages",
-                access_path=access_path,
+                access_path="bot_token",
             )
 
     def _search_messages_native(
@@ -953,7 +941,7 @@ class SlackClient:
     ) -> list[dict]:
         """Search using Slack's native search.messages API."""
         response = self._retry_on_ratelimit(
-            self._search_client.api_call,
+            self._client.api_call,
             "search.messages",
             method_key="search.messages",
             params={"query": query, "count": max_results, "sort": "timestamp"},
@@ -1631,12 +1619,12 @@ class SlackClient:
         """
         try:
             user_response = self._retry_on_ratelimit(
-                self._search_client.users_info,
+                self._client.users_info,
                 user=user_id,
                 method_key="users.info",
             )
             profile_response = self._retry_on_ratelimit(
-                self._search_client.users_profile_get,
+                self._client.users_profile_get,
                 user=user_id,
                 include_labels=True,
                 method_key="users.profile.get",
@@ -1645,9 +1633,7 @@ class SlackClient:
             self._raise_slack_api_error(
                 e,
                 slack_method="users.profile.get",
-                access_path="search_token"
-                if self._search_client is not self._client
-                else "bot_token",
+                access_path="bot_token",
             )
 
         user = user_response.get("user", {})
@@ -2195,13 +2181,10 @@ class SlackClient:
         self,
         channel_id: str,
         message_ts: str,
-        *,
-        direct: bool = False,
     ) -> list[dict]:
         """Get files attached to a specific message."""
-        client = self._search_client if direct else self._client
         try:
-            response = client.conversations_replies(
+            response = self._client.conversations_replies(
                 channel=channel_id,
                 ts=message_ts,
                 limit=1,
@@ -2211,9 +2194,7 @@ class SlackClient:
             self._raise_slack_api_error(
                 e,
                 slack_method="conversations.replies",
-                access_path="search_token"
-                if direct and self._search_client is not self._client
-                else "bot_token",
+                access_path="bot_token",
                 requested_channel=channel_id,
                 resolved_channel=channel_id,
             )
@@ -2240,14 +2221,14 @@ class SlackClient:
         return files
 
     def get_file_info_direct(self, file_id: str) -> dict[str, Any]:
-        """Fetch file metadata with the direct user-token client."""
+        """Fetch file metadata directly with the Slack SDK."""
         normalized_file_id = file_id.strip().upper()
         if not self._FILE_ID_RE.fullmatch(normalized_file_id):
             raise ValueError(f"Invalid Slack file ID: {file_id!r}")
 
         try:
             response = self._retry_on_ratelimit(
-                self._search_client.files_info,
+                self._client.files_info,
                 file=normalized_file_id,
                 method_key="files.info",
             )
@@ -2255,9 +2236,7 @@ class SlackClient:
             self._raise_slack_api_error(
                 e,
                 slack_method="files.info",
-                access_path="search_token"
-                if self._search_client is not self._client
-                else "bot_token",
+                access_path="bot_token",
             )
         return dict(response.get("file") or {})
 
@@ -2268,13 +2247,11 @@ class SlackClient:
     def _fetch_slack_file(self, url: str) -> tuple[str, str, bytes]:
         """Download a Slack file's bytes: returns ``(filename, mime_type, body)``.
 
-        ``url`` must be an ``https://files.slack.com/`` URL. The direct user
-        token is preferred and sent only to that host, so it can never be aimed
-        at a Slack API endpoint (e.g. api.test) that would echo the credential back.
+        ``url`` must be an ``https://files.slack.com/`` URL. The token is sent
+        only to that host, so it can never be aimed at a Slack API endpoint
+        (e.g. api.test) that would echo the credential back.
         """
-        token = getattr(self, "search_token", "") or self.token
-        if not token:
-            raise RuntimeError("No Slack direct-access token is configured")
+        token = self.token
 
         parsed = urlparse(url)
         if parsed.scheme != "https" or (parsed.hostname or "").lower() != "files.slack.com":
@@ -2338,13 +2315,13 @@ class SlackClient:
     ) -> list[dict]:
         """Search files directly through Slack's `files.list` API."""
         requested_limit = max(1, int(max_results))
-        user_cache = self._get_user_cache(direct=True)
+        user_cache = self._get_user_cache()
         results: list[dict] = []
         page = 1
         while len(results) < requested_limit:
             try:
                 response = self._retry_on_ratelimit(
-                    self._search_client.files_list,
+                    self._client.files_list,
                     count=self._MAX_SLACK_FILES_LIST_PAGE_SIZE,
                     page=page,
                 )
@@ -2352,9 +2329,7 @@ class SlackClient:
                 self._raise_slack_api_error(
                     e,
                     slack_method="files.list",
-                    access_path="search_token"
-                    if self._search_client is not self._client
-                    else "bot_token",
+                    access_path="bot_token",
                 )
             results.extend(self._filter_file_search_results(response, query, user_cache))
             if not self._files_list_response_has_more(response):
@@ -2538,7 +2513,6 @@ def _client() -> SlackClient:
 
     return SlackClient(
         bot_token=secret("SLACK_BOT_TOKEN"),
-        search_token=secret("SLACK_SEARCH_TOKEN", ""),
     )
 
 
