@@ -2271,15 +2271,17 @@ impl SessionRuntime {
                 );
                 return Ok(execution);
             }
+            // Until its input reaches a sandbox, this execution belongs to this
+            // dispatch, not to a stdout pump left over from an earlier turn.
+            // Registered before the lease claim so a shutdown handoff never
+            // sees a claimed lease without its dispatch.
+            let dispatching =
+                DispatchingExecution::new(&self.dispatching_executions, &execution.execution_id);
             if let Err(error) = self.claim_stdout_owner(&execution.execution_id).await {
                 self.handle_stdout_claim_failure(thread_key, &execution.execution_id, &error)
                     .await;
                 return Err(error);
             }
-            // Until its input reaches a sandbox, this execution belongs to this
-            // dispatch, not to a stdout pump left over from an earlier turn.
-            let dispatching =
-                DispatchingExecution::new(&self.dispatching_executions, &execution.execution_id);
             drop(admission);
             let execution_trace_span = info_span!(
                 parent: None,
@@ -2624,7 +2626,7 @@ impl SessionRuntime {
         if matches!(error, SessionRuntimeError::ShuttingDown) {
             match self
                 .store
-                .requeue_execution_if_running_without_stdout_owner(execution_id)
+                .requeue_execution_if_running_without_live_stdout_owner(execution_id)
                 .await
             {
                 Ok(Some(_)) => {
@@ -3588,7 +3590,9 @@ impl SessionRuntime {
     ///    recover the terminal outcome from the backend's recorded output.
     /// 2. The sandbox is still running the turn: re-attach the stdout pump
     ///    and re-arm the remaining max-duration deadline.
-    /// 3. The sandbox is gone: record the failure honestly.
+    /// 3. The turn never got a sandbox: requeue and replay its persisted
+    ///    request.
+    /// 4. The sandbox is gone: record the failure honestly.
     pub async fn adopt_orphaned_executions(&self) {
         self.run_orphan_adoption_scan(&mut OrphanAdoptionState::default(), None)
             .await;
@@ -3828,14 +3832,62 @@ impl SessionRuntime {
                 );
                 return Ok(OrphanAdoption::Skipped);
             }
-            self.fail_orphaned_execution(
-                thread_key,
+            let request = self.store.execution_request(execution_id).await?;
+            if request.as_object().is_some_and(serde_json::Map::is_empty) {
+                self.fail_orphaned_execution(
+                    thread_key,
+                    execution_id,
+                    "",
+                    "orphaned with no sandbox assigned",
+                )
+                .await;
+                return Ok(OrphanAdoption::Failed);
+            }
+            let input = match deserialize_persisted_execute_request(execution_id, request) {
+                Ok(input) => input,
+                Err(error) => {
+                    self.fail_orphaned_execution(
+                        thread_key,
+                        execution_id,
+                        "",
+                        &format!(
+                            "orphaned with no sandbox assigned; request could not be recovered: {error}"
+                        ),
+                    )
+                    .await;
+                    return Ok(OrphanAdoption::Failed);
+                }
+            };
+            // Input reaches a sandbox only after its assignment is recorded, so
+            // a turn without one was never delivered and replaying it cannot
+            // deliver it twice.
+            if self
+                .store
+                .requeue_execution_if_running_without_live_stdout_owner(execution_id)
+                .await?
+                .is_none()
+            {
+                return Ok(OrphanAdoption::Skipped);
+            }
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "execution_adopted",
+                thread_key = %thread_key,
                 execution_id,
-                "",
-                "orphaned with no sandbox assigned",
-            )
-            .await;
-            return Ok(OrphanAdoption::Failed);
+                mode = "requeued_undelivered",
+                "replaying undelivered execution from its persisted request"
+            );
+            let _ = self
+                .store
+                .append_event(
+                    thread_key,
+                    Some(execution_id),
+                    "session.execution_adopted",
+                    json!({ "mode": "requeued_undelivered" }),
+                )
+                .await;
+            self.spawn_session_execution(thread_key.clone(), execution.execution_id.clone(), input);
+            return Ok(OrphanAdoption::Adopted);
         };
         let id = SandboxId::new(sandbox_id);
         // Observe rather than just status: a sandbox the kubelet killed carries
@@ -4051,7 +4103,9 @@ impl SessionRuntime {
     /// plane's adoption scan can claim the executions right away instead of
     /// waiting out the lease TTL. Turn output produced after the release is
     /// not lost: adoption replays it from the sandbox backend's recorded
-    /// output.
+    /// output. Executions still being dispatched keep their lease, because
+    /// this process may yet write their input; a peer requeues them once the
+    /// lease expires after exit.
     pub async fn handoff_owned_executions(&self, timeout: Duration) {
         // Fence new stdout-owner claims first: an execution accepted after
         // this point would otherwise claim a lease that outlives the
@@ -4107,10 +4161,23 @@ impl SessionRuntime {
             }
             sleep(EXECUTION_HANDOFF_POLL_INTERVAL).await;
         }
+        let dispatching: Vec<String> = self
+            .dispatching_executions
+            .iter()
+            .map(|execution_id| execution_id.key().clone())
+            .collect();
+        for execution_id in &dispatching {
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "execution_handoff_retained",
+                execution_id,
+                "keeping stdout-owner lease of an execution still being dispatched"
+            );
+        }
         let released = tokio::time::timeout(
             EXECUTION_HANDOFF_DB_TIMEOUT,
             self.store
-                .release_stdout_owned_executions(&self.stdout_owner_id),
+                .release_stdout_owned_executions(&self.stdout_owner_id, &dispatching),
         )
         .await;
         let Ok(released) = released else {
@@ -4144,7 +4211,7 @@ impl SessionRuntime {
                         )
                         .await;
                 }
-                if released.is_empty() {
+                if released.is_empty() && dispatching.is_empty() {
                     info!(
                         component = COMPONENT_SESSION_RUNTIME,
                         event = "execution_handoff_idle",
@@ -4167,13 +4234,15 @@ impl SessionRuntime {
 /// Outcome of one orphan-adoption attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OrphanAdoption {
-    /// Terminal output was recovered or a live pump was re-attached.
+    /// Terminal output was recovered, a live pump was re-attached, or the
+    /// persisted request was scheduled again.
     Adopted,
     /// Another control plane still holds the stdout-owner lease.
     Deferred,
     /// The execution was failed as unrecoverable.
     Failed,
-    /// Too young to judge (freshly queued); revisit on a later scan.
+    /// Too young to judge (freshly queued), or claimed by a peer since the
+    /// scan's snapshot; revisit on a later scan.
     Skipped,
 }
 
@@ -12209,6 +12278,75 @@ mod adoption_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replays_running_orphans_that_never_got_a_sandbox() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:adopt-undelivered-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, None, false).await;
+        // A control plane claimed the turn, then died while the turn's
+        // sandbox was still being created.
+        store
+            .mark_execution_running(&execution_id)
+            .await
+            .expect("mark running");
+        assert!(
+            store
+                .claim_stdout_owner(&execution_id, "dead-control-plane", Duration::from_secs(60))
+                .await
+                .expect("claim as the dead control plane")
+        );
+        expire_stdout_lease(&store, &execution_id).await;
+        backdate_execution(&store, &execution_id, 300.0).await;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let create_gate = backend.hold_create();
+        let (io, mut stdout, _stdin) = mock_io();
+        backend.push_io(io).await;
+        let runtime = runtime_with(&store, backend.clone());
+        runtime
+            .run_orphan_adoption_scan(
+                &mut OrphanAdoptionState::default(),
+                Some(PRE_SANDBOX_ORPHAN_GRACE),
+            )
+            .await;
+
+        assert!(
+            events(&store, &thread_key).await.iter().any(|event| {
+                event.event_type == "session.execution_adopted"
+                    && event.payload["mode"] == json!("requeued_undelivered")
+            }),
+            "expected undelivered execution to be requeued"
+        );
+        timeout(Duration::from_secs(1), backend.create_started.notified())
+            .await
+            .expect("replay should start sandbox creation");
+        create_gate.notify_one();
+        stdout
+            .write_all(&completed_output_bytes("Recovered undelivered request."))
+            .await
+            .unwrap();
+        wait_for_event(&store, &thread_key, "session.execution_completed").await;
+        let latest = store
+            .latest_execution_for_thread(&thread_key)
+            .await
+            .expect("load latest execution")
+            .expect("execution exists");
+        assert_eq!(latest.execution_id, execution_id);
+        assert_eq!(latest.status, ExecutionStatus::Completed);
+        assert!(
+            events(&store, &thread_key)
+                .await
+                .iter()
+                .all(|event| event.event_type != "session.execution_failed"),
+            "a replayed execution must not also be failed"
+        );
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn adopts_deferred_execution_after_lease_expires() {
         let Some(store) = test_store().await else {
             return;
@@ -12420,6 +12558,53 @@ mod adoption_tests {
                 .await
                 .expect("peer claims released lease")
         );
+        store
+            .fail_execution_if_active(&execution_id, "test cleanup")
+            .await
+            .expect("terminalize execution");
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_handoff_keeps_leases_of_dispatching_executions() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:handoff-dispatching-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, None, true).await;
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with(&store, backend);
+        assert!(
+            store
+                .claim_stdout_owner(
+                    &execution_id,
+                    &runtime.stdout_owner_id,
+                    Duration::from_secs(60)
+                )
+                .await
+                .expect("claim as this control plane")
+        );
+        let dispatching = DispatchingExecution::new(&runtime.dispatching_executions, &execution_id);
+
+        runtime.handoff_owned_executions(Duration::ZERO).await;
+
+        assert!(
+            !store
+                .claim_stdout_owner(&execution_id, "peer-control-plane", Duration::from_secs(5))
+                .await
+                .expect("peer claim attempt"),
+            "a peer must not claim a turn this process may still deliver"
+        );
+        assert!(
+            events(&store, &thread_key)
+                .await
+                .iter()
+                .all(|event| event.event_type != "session.stdout_owner_released"),
+            "a dispatching execution must not be handed off"
+        );
+        drop(dispatching);
         store
             .fail_execution_if_active(&execution_id, "test cleanup")
             .await
