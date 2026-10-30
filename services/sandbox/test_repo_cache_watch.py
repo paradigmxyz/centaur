@@ -3,8 +3,11 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -142,6 +145,52 @@ class RepoCacheWatchTest(unittest.TestCase):
 
             self.assertFalse(refreshed)
             self.assertIsNone(applied)
+
+    def test_watcher_recomposes_prompt_when_overlay_changes(self) -> None:
+        sandbox_dir = Path(__file__).resolve().parent
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            workspace = root / "workspace"
+            bin_dir = root / "bin"
+            for path in (home, workspace, bin_dir):
+                path.mkdir()
+            (home / "AGENTS.md").write_text("base\n")
+            overlay = home / "github" / "acme" / "overlay" / "services" / "sandbox" / "SYSTEM_PROMPT.md"
+            overlay.parent.mkdir(parents=True)
+            overlay.write_text("old overlay\n")
+            compose = bin_dir / "compose-system-prompt"
+            compose.write_text(
+                f'#!/bin/sh\nexec "{sys.executable}" "{sandbox_dir / "compose_system_prompt.py"}" "$@"\n'
+            )
+            compose.chmod(0o755)
+            target = workspace / "AGENTS.md"
+            env = {
+                **os.environ,
+                "HOME": str(home),
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                "WORKSPACE_DIR": str(workspace),
+                "TOOL_DIRS": "",
+                "CENTAUR_TOOLS_RELOAD_INTERVAL_SECONDS": "0.05",
+            }
+            subprocess.run([str(compose), "--target-prompt", str(target)], env=env, check=True)
+            self.assertEqual(target.read_text(), "base\n\n\n---\n\nold overlay\n")
+
+            watcher = subprocess.Popen(
+                [sys.executable, str(sandbox_dir / "repo_cache_watch.py")],
+                env=env,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                overlay.write_text("new overlay\n")
+                expected = "base\n\n\n---\n\nnew overlay\n"
+                deadline = time.monotonic() + 10
+                while target.read_text() != expected and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertEqual(target.read_text(), expected)
+            finally:
+                watcher.terminate()
+                watcher.wait()
 
 
 if __name__ == "__main__":
