@@ -126,6 +126,8 @@ pub trait HarnessServer {
     fn turn_hold(&self, _normalizer: &Self::EventNormalizer) -> TurnHold {
         TurnHold::Released
     }
+    /// Called after a steer is written to the running process's stdin.
+    fn steer_sent(&self, _normalizer: &mut Self::EventNormalizer) {}
 
     fn thread_state(&self, params: &ThreadStartParams, cwd: PathBuf) -> ThreadState {
         let model = params.model.clone().unwrap_or_else(|| self.default_model());

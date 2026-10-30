@@ -436,6 +436,29 @@ pub struct ExecuteSessionInput {
     pub max_duration_ms: Option<u64>,
 }
 
+/// What an append did with its user messages relative to the thread's active
+/// execution.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SteeringOutcome {
+    /// Written to the input of the thread's queued or running execution.
+    Delivered,
+    /// The thread had no queued or running execution, so no execution will
+    /// run these messages unless the caller starts one.
+    NoActiveExecution,
+    /// An execution was active but the messages could not be written to it.
+    /// Recorded as `session.steering_failed`.
+    Failed,
+    /// The append carried no user message to steer.
+    NoUserMessages,
+}
+
+#[derive(Clone, Debug)]
+pub struct AppendMessagesOutcome {
+    pub message_ids: Vec<String>,
+    pub steering: SteeringOutcome,
+}
+
 #[derive(Clone, Debug)]
 pub struct InterruptExecutionOutcome {
     pub interrupted: bool,
@@ -1818,7 +1841,7 @@ impl SessionRuntime {
         &self,
         thread_key: &ThreadKey,
         messages: &[SessionMessageInput],
-    ) -> Result<Vec<String>, SessionRuntimeError> {
+    ) -> Result<AppendMessagesOutcome, SessionRuntimeError> {
         let span = info_span!(
             "centaur.api_rs.session.messages.append",
             component = COMPONENT_SESSION_RUNTIME,
@@ -1877,10 +1900,14 @@ impl SessionRuntime {
                 return Err(error);
             }
         };
-        self.forward_messages_to_active_execution(thread_key, messages, &message_ids)
+        let steering = self
+            .forward_messages_to_active_execution(thread_key, messages, &message_ids)
             .await;
         self.spawn_session_title_generation(thread_key);
-        Ok(message_ids)
+        Ok(AppendMessagesOutcome {
+            message_ids,
+            steering,
+        })
     }
 
     fn spawn_session_title_generation(&self, thread_key: &ThreadKey) {
@@ -2655,29 +2682,34 @@ impl SessionRuntime {
             .await;
     }
 
+    /// Steers the appended user messages into the thread's active execution.
+    /// The outcome reflects this check only: the harness can still refuse a
+    /// steer that reaches it after the execution's last turn ended. It reports
+    /// that on stdout, and the stdout pump records it as
+    /// `session.steering_failed`.
     async fn forward_messages_to_active_execution(
         &self,
         thread_key: &ThreadKey,
         messages: &[SessionMessageInput],
         message_ids: &[String],
-    ) {
+    ) -> SteeringOutcome {
         let input_lines = steering_input_lines(thread_key, messages, message_ids);
         if input_lines.is_empty() {
-            return;
+            return SteeringOutcome::NoUserMessages;
         }
 
         let Some(execution) = (match self.store.active_execution_for_thread(thread_key).await {
             Ok(execution) => execution,
             Err(error) => {
                 warn!(%thread_key, %error, "active execution lookup failed during message append");
-                return;
+                return SteeringOutcome::Failed;
             }
         }) else {
-            return;
+            return SteeringOutcome::NoActiveExecution;
         };
 
-        // A steer that lands after the turn ends starts a new turn, which must
-        // run the pinned model too.
+        // A harness that predates steer refusal runs a steer that lands after
+        // the turn ends as a new turn, which must run the pinned model too.
         let input_lines = match self.store.get_session(thread_key).await {
             Ok(session) => match self.persona_model(&session) {
                 Some(model) => input_lines_with_persona_model(input_lines, model),
@@ -2710,9 +2742,15 @@ impl SessionRuntime {
         {
             Ok(pipe) => pipe,
             Err(error) => {
-                self.record_steering_failure(thread_key, &execution.execution_id, error)
-                    .await;
-                return;
+                record_steering_failure(
+                    &self.store,
+                    thread_key,
+                    &execution.execution_id,
+                    message_ids,
+                    error,
+                )
+                .await;
+                return SteeringOutcome::Failed;
             }
         };
 
@@ -2725,9 +2763,15 @@ impl SessionRuntime {
         )
         .await
         {
-            self.record_steering_failure(thread_key, &execution.execution_id, error.to_string())
-                .await;
-            return;
+            record_steering_failure(
+                &self.store,
+                thread_key,
+                &execution.execution_id,
+                message_ids,
+                error.to_string(),
+            )
+            .await;
+            return SteeringOutcome::Failed;
         }
 
         if let Err(error) = self
@@ -2747,6 +2791,7 @@ impl SessionRuntime {
         {
             warn!(%thread_key, %error, "failed to record steering delivery");
         }
+        SteeringOutcome::Delivered
     }
 
     pub async fn interrupt_active_execution(
@@ -2840,28 +2885,6 @@ impl SessionRuntime {
             }
             sleep(STEERING_STARTUP_RETRY_INTERVAL).await;
         }
-    }
-
-    async fn record_steering_failure(
-        &self,
-        thread_key: &ThreadKey,
-        execution_id: &str,
-        error: String,
-    ) {
-        warn!(%thread_key, %execution_id, %error, "active steering delivery failed");
-        let _ = self
-            .store
-            .append_event(
-                thread_key,
-                Some(execution_id),
-                "session.steering_failed",
-                json!({
-                    "execution_id": execution_id,
-                    "thread_key": thread_key.as_str(),
-                    "error": error,
-                }),
-            )
-            .await;
     }
 
     pub async fn stream_events(
@@ -5065,6 +5088,22 @@ async fn run_stdout_pump(
             {
                 warn!(%thread_key, %harness_thread_id, %error, "failed to persist harness thread id");
             }
+            // A refused steer is not execution output: by the time the harness
+            // refuses it, the execution it named has ended.
+            if let Some((execution_id, message_id, reason)) =
+                output_value.as_ref().and_then(rejected_steer)
+            {
+                let message_ids: Vec<String> = message_id.map(ToOwned::to_owned).into_iter().collect();
+                record_steering_failure(
+                    &ctx.store,
+                    &thread_key,
+                    execution_id,
+                    &message_ids,
+                    format!("harness refused the steer: {reason}"),
+                )
+                .await;
+                continue;
+            }
             let active_execution = ctx.store.active_execution_for_thread(&thread_key).await?;
             let execution_id = active_execution
                 .as_ref()
@@ -6728,6 +6767,46 @@ async fn write_input_lines(
     }
     .instrument(span)
     .await
+}
+
+async fn record_steering_failure(
+    store: &PgSessionStore,
+    thread_key: &ThreadKey,
+    execution_id: &str,
+    message_ids: &[String],
+    error: String,
+) {
+    warn!(%thread_key, %execution_id, %error, "active steering delivery failed");
+    let _ = store
+        .append_event(
+            thread_key,
+            Some(execution_id),
+            "session.steering_failed",
+            json!({
+                "execution_id": execution_id,
+                "thread_key": thread_key.as_str(),
+                "message_ids": message_ids,
+                "error": error,
+            }),
+        )
+        .await;
+}
+
+/// The harness refused a steer because it arrived after the execution's last
+/// turn ended (`turn/steerRejected`, written by harness-server). Returns the
+/// execution and message the steer named.
+fn rejected_steer(value: &Value) -> Option<(&str, Option<&str>, &str)> {
+    if value.get("method").and_then(Value::as_str) != Some("turn/steerRejected") {
+        return None;
+    }
+    let params = value.get("params")?;
+    let execution_id = params.get("executionId").and_then(Value::as_str)?;
+    let message_id = params.get("messageId").and_then(Value::as_str);
+    let reason = params
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("steer rejected");
+    Some((execution_id, message_id, reason))
 }
 
 const EXECUTION_TRACEPARENT_METADATA_KEY: &str = "centaur.traceparent";
@@ -10191,6 +10270,132 @@ mod adoption_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn append_reports_steering_and_records_harness_refusal() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:steering-outcome-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let (io, mut stdout, stdin) = mock_io();
+        backend.push_io(io).await;
+        let runtime = runtime_with(&store, backend);
+        let user_message = |text: &str| SessionMessageInput {
+            client_message_id: Some(text.to_owned()),
+            role: MessageRole::User,
+            parts: vec![json!({"type": "text", "text": text})],
+            metadata: json!({}),
+        };
+
+        let idle = runtime
+            .append_messages(&thread_key, &[user_message("idle")])
+            .await
+            .expect("append with no execution");
+        assert_eq!(idle.steering, SteeringOutcome::NoActiveExecution);
+
+        let execution = runtime
+            .enqueue_session_execution(
+                &thread_key,
+                ExecuteSessionInput {
+                    idempotency_key: None,
+                    metadata: None,
+                    input_lines: vec![
+                        json!({
+                            "type": "user",
+                            "message": {"content": [{"type": "text", "text": "run"}]}
+                        })
+                        .to_string(),
+                    ],
+                    idle_timeout_ms: None,
+                    max_duration_ms: None,
+                },
+            )
+            .await
+            .expect("enqueue execution");
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = tokio::io::BufReader::new(stdin).lines();
+        timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("execution input written")
+            .expect("read execution input")
+            .expect("execution input present");
+
+        let steered = runtime
+            .append_messages(&thread_key, &[user_message("steer")])
+            .await
+            .expect("append during execution");
+        assert_eq!(steered.steering, SteeringOutcome::Delivered);
+        let steer = timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("steering line written")
+            .expect("read steering line")
+            .expect("steering line present");
+        let steer: Value = serde_json::from_str(&steer).unwrap();
+        assert_eq!(
+            steer["trace_metadata"]["execution_id"],
+            execution.execution_id
+        );
+        let steered_message_id = steered.message_ids[0].clone();
+        assert_eq!(steer["trace_metadata"]["message_id"], steered_message_id);
+
+        stdout
+            .write_all(&completed_output_bytes("Done."))
+            .await
+            .expect("write terminal output");
+        wait_for_event(&store, &thread_key, "session.execution_completed").await;
+
+        // The steer reached the harness after the turn ended; it refused it.
+        let refusal = json!({
+            "method": "turn/steerRejected",
+            "params": {
+                "threadId": "thread-1",
+                "executionId": execution.execution_id,
+                "messageId": steered_message_id,
+                "reason": "no active turn"
+            }
+        });
+        stdout
+            .write_all(format!("{refusal}\n").as_bytes())
+            .await
+            .expect("write steer refusal");
+        wait_for_event(&store, &thread_key, "session.steering_failed").await;
+        let events = events(&store, &thread_key).await;
+        let failed = events
+            .iter()
+            .find(|event| event.event_type == "session.steering_failed")
+            .expect("steering failure recorded");
+        assert_eq!(
+            failed.execution_id.as_deref(),
+            Some(execution.execution_id.as_str())
+        );
+        assert_eq!(failed.payload["message_ids"], json!([steered_message_id]));
+        assert!(!events.iter().any(|event| {
+            event.event_type == "session.output.line"
+                && event.payload["line"]
+                    .as_str()
+                    .is_some_and(|line| line.contains("turn/steerRejected"))
+        }));
+
+        let after = runtime
+            .append_messages(&thread_key, &[user_message("after")])
+            .await
+            .expect("append after execution");
+        assert_eq!(after.steering, SteeringOutcome::NoActiveExecution);
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn queued_execution_runs_persona_pinned_model_for_session_harness() {
         let Some(store) = test_store().await else {
             return;
@@ -10244,7 +10449,8 @@ mod adoption_tests {
         assert!(line.get("provider").is_none());
         assert_eq!(execution.metadata["model"], "eng-model");
 
-        // A steer can start a new turn, so it carries the pin too.
+        // A harness that predates steer refusal can run a steer as a new
+        // turn, so it carries the pin too.
         runtime
             .append_messages(
                 &thread_key,

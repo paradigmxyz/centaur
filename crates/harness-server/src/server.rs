@@ -5,8 +5,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, MutexGuard, PoisonError,
     mpsc::{self, Receiver, RecvTimeoutError},
 };
 use std::time::{Duration, Instant};
@@ -71,10 +70,10 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
     let mut state = initial_blocks_thread_state(harness)?;
     let (command_tx, command_rx) = mpsc::channel();
     let (request_tx, request_rx) = mpsc::channel();
-    let turn_active = Arc::new(AtomicBool::new(false));
+    let turns = Arc::new(BlocksTurns::default());
 
     {
-        let turn_active = Arc::clone(&turn_active);
+        let turns = Arc::clone(&turns);
         std::thread::spawn(move || {
             let stdin = io::stdin();
             let mut blocks_state = BlocksState::default();
@@ -87,14 +86,40 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                     continue;
                 }
 
-                match parse_blocks_line_with_state(trimmed, &mut blocks_state) {
-                    Ok(BlocksCommand::Interrupt) if turn_active.load(Ordering::SeqCst) => {
+                let parsed = parse_blocks_line_with_state(trimmed, &mut blocks_state);
+                let mut turns = turns.lock();
+                match parsed {
+                    Ok(BlocksCommand::Interrupt) if *turns > 0 => {
                         if request_tx.send(ActiveTurnRequest::BlocksInterrupt).is_err() {
                             break;
                         }
                     }
+                    // As in the codex blocks server: a message steered into
+                    // the active execution joins the running turn. Queued as a
+                    // turn of its own, it would run after the execution ends.
+                    Ok(BlocksCommand::User {
+                        input,
+                        client_user_message_id,
+                        trace_context,
+                        ..
+                    }) if *turns > 0 && is_steer(&trace_context) => {
+                        if request_tx
+                            .send(ActiveTurnRequest::BlocksSteer {
+                                input,
+                                client_user_message_id,
+                                trace_context,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                     Ok(command @ BlocksCommand::User { .. }) => {
-                        turn_active.store(true, Ordering::SeqCst);
+                        // A steer with no turn to join goes to the turn loop
+                        // only to be refused there, in stdout order.
+                        if !command.is_steer() {
+                            *turns += 1;
+                        }
                         if command_tx
                             .send(BlocksReaderInput::Command(command))
                             .is_err()
@@ -125,6 +150,11 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
 
     while let Ok(input) = command_rx.recv() {
         match input {
+            BlocksReaderInput::Command(BlocksCommand::User { trace_context, .. })
+                if is_steer(&trace_context) =>
+            {
+                write_blocks_steer_rejected(&mut stdout, &state.id, &trace_context)?;
+            }
             BlocksReaderInput::Command(BlocksCommand::User {
                 input,
                 client_user_message_id,
@@ -154,12 +184,14 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                     &trace_context,
                     &mut stdout,
                     &request_rx,
-                    &turn_active,
                 );
-                drain_active_turn_requests(&request_rx);
+                let missed_steers = turns.finish_turn(|| drain_active_turn_requests(&request_rx));
                 if let Err(error) = result {
                     eprintln!("blocks turn failed: {error:#}");
                     write_blocks_error(&mut stdout, &state.id, "turn", error.to_string())?;
+                }
+                for steer in missed_steers {
+                    write_blocks_steer_rejected(&mut stdout, &state.id, &steer)?;
                 }
             }
             BlocksReaderInput::Command(BlocksCommand::Interrupt) => {
@@ -219,8 +251,8 @@ pub(crate) fn run_app_server<H: HarnessServer>(harness: &H) -> Result<()> {
                     eprintln!("request failed: {error:#}");
                 }
             }
-            ActiveTurnRequest::BlocksInterrupt => {
-                eprintln!("blocks interrupt ignored: no active turn runs");
+            ActiveTurnRequest::BlocksInterrupt | ActiveTurnRequest::BlocksSteer { .. } => {
+                eprintln!("blocks input ignored: no active turn runs");
             }
         }
     }
@@ -243,12 +275,10 @@ fn run_blocks_turn<H: HarnessServer, W: Write>(
     trace_context: &TraceContext,
     stdout: &mut W,
     request_rx: &Receiver<ActiveTurnRequest>,
-    turn_active: &AtomicBool,
 ) -> Result<()> {
     let turn_id = format!("turn-{}", Uuid::new_v4().simple());
     let mut normalizer = normalizer_for(harness, state, &turn_id);
-    turn_active.store(true, Ordering::SeqCst);
-    let result = run_normalized_turn(
+    run_normalized_turn(
         harness,
         state,
         &input,
@@ -257,9 +287,7 @@ fn run_blocks_turn<H: HarnessServer, W: Write>(
         &mut normalizer,
         stdout,
         request_rx,
-    );
-    turn_active.store(false, Ordering::SeqCst);
-    result
+    )
 }
 
 enum BlocksReaderInput {
@@ -270,11 +298,59 @@ enum BlocksReaderInput {
 enum ActiveTurnRequest {
     JsonRpc(JSONRPCRequest),
     BlocksInterrupt,
+    BlocksSteer {
+        input: Vec<UserInput>,
+        client_user_message_id: Option<String>,
+        trace_context: TraceContext,
+    },
 }
 
-fn drain_active_turn_requests(rx: &Receiver<ActiveTurnRequest>) {
-    while rx.try_recv().is_ok() {}
+/// Discards requests left for a turn that has ended and returns the trace
+/// context of each steer among them, so the caller can refuse it.
+fn drain_active_turn_requests(rx: &Receiver<ActiveTurnRequest>) -> Vec<TraceContext> {
+    rx.try_iter()
+        .filter_map(|request| match request {
+            ActiveTurnRequest::BlocksSteer { trace_context, .. } => Some(trace_context),
+            ActiveTurnRequest::JsonRpc(_) | ActiveTurnRequest::BlocksInterrupt => None,
+        })
+        .collect()
 }
+
+/// Counts the blocks turns that are queued or running. The stdin reader and
+/// the turn loop share the lock, so each steer either reaches a turn that
+/// runs or is refused; none is left between turns.
+#[derive(Debug, Default)]
+pub(crate) struct BlocksTurns(Mutex<usize>);
+
+impl BlocksTurns {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, usize> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Records the end of a turn. If no turn is queued behind it, `drain`
+    /// runs under the lock and its result is returned; otherwise pending
+    /// requests are left for the next turn and the result is empty.
+    pub(crate) fn finish_turn<T: Default>(&self, drain: impl FnOnce() -> T) -> T {
+        let mut turns = self.lock();
+        *turns = turns.saturating_sub(1);
+        if *turns == 0 { drain() } else { T::default() }
+    }
+}
+
+/// Whether a blocks user line is a message api-rs steered into the thread's
+/// active execution rather than the input of a new execution.
+pub(crate) fn is_steer(trace_context: &TraceContext) -> bool {
+    trace_context.metadata.get("action").and_then(Value::as_str)
+        == Some(STEER_ACTIVE_EXECUTION_ACTION)
+}
+
+const STEER_ACTIVE_EXECUTION_ACTION: &str = "steer_active_execution";
+
+/// Notification written when a steered message reaches the harness after its
+/// turn ended. The message is not run as a new turn, because no execution
+/// would read that turn's output; api-rs records the refusal as a steering
+/// failure for the execution named in the steer's trace metadata.
+pub(crate) const STEER_REJECTED_METHOD: &str = "turn/steerRejected";
 
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -289,6 +365,12 @@ pub(crate) enum BlocksCommand {
     },
     Interrupt,
     AttachmentChunk,
+}
+
+impl BlocksCommand {
+    pub(crate) fn is_steer(&self) -> bool {
+        matches!(self, Self::User { trace_context, .. } if is_steer(trace_context))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1054,12 +1136,32 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
     harness: &H,
     process: &mut HarnessChild,
     normalizer: &mut CodexTurnNormalizer,
+    event_normalizer: &mut H::EventNormalizer,
     request: ActiveTurnRequest,
     stdout: &mut W,
 ) -> Result<bool> {
-    let ActiveTurnRequest::JsonRpc(request) = request else {
-        process.kill_and_wait()?;
-        return Ok(true);
+    let request = match request {
+        ActiveTurnRequest::JsonRpc(request) => request,
+        ActiveTurnRequest::BlocksInterrupt => {
+            process.kill_and_wait()?;
+            return Ok(true);
+        }
+        ActiveTurnRequest::BlocksSteer {
+            input,
+            client_user_message_id,
+            ..
+        } => {
+            write_steer(
+                harness,
+                process,
+                normalizer,
+                event_normalizer,
+                input,
+                client_user_message_id,
+                stdout,
+            )?;
+            return Ok(false);
+        }
     };
 
     match request.method.as_str() {
@@ -1091,6 +1193,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                 .stdin
                 .write_all(&harness.stdin_for_steer(&params.input)?)?;
             process.stdin.flush()?;
+            harness.steer_sent(event_normalizer);
             write_response(
                 stdout,
                 request.id,
@@ -1143,6 +1246,24 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
             Ok(false)
         }
     }
+}
+
+fn write_steer<H: HarnessServer, W: Write>(
+    harness: &H,
+    process: &mut HarnessChild,
+    normalizer: &mut CodexTurnNormalizer,
+    event_normalizer: &mut H::EventNormalizer,
+    input: Vec<UserInput>,
+    client_user_message_id: Option<String>,
+    stdout: &mut W,
+) -> Result<()> {
+    process.stdin.write_all(&harness.stdin_for_steer(&input)?)?;
+    process.stdin.flush()?;
+    harness.steer_sent(event_normalizer);
+    for notification in normalizer.emit_user_message(client_user_message_id, input)? {
+        write_value(stdout, &notification_to_wire_value(&notification)?)?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1290,7 +1411,14 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
                 .process
                 .as_mut()
                 .ok_or(HarnessServerError::HarnessStdinUnavailable)?;
-            if handle_active_turn_request(harness, process, normalizer, request, stdout)? {
+            if handle_active_turn_request(
+                harness,
+                process,
+                normalizer,
+                &mut event_normalizer,
+                request,
+                stdout,
+            )? {
                 state.process = None;
                 return Err(HarnessServerError::TurnInterrupted {
                     kind: harness.kind(),
@@ -1344,10 +1472,17 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
                         _ => {}
                     }
                 }
-                hold_deadline = match harness.turn_hold(&event_normalizer) {
+                let hold = harness.turn_hold(&event_normalizer);
+                hold_deadline = match hold {
                     TurnHold::Idle(window) => Some(Instant::now() + window),
                     TurnHold::Released | TurnHold::Waiting => None,
                 };
+                // A held turn still owes output (e.g. the answer to a steer
+                // that arrived during the final message), so a terminal stop
+                // seen while held must not complete it via the fallback.
+                if hold != TurnHold::Released {
+                    settle_deadline = None;
+                }
             }
             Err(RecvTimeoutError::Timeout)
                 if hold_deadline.is_some_and(|deadline| Instant::now() >= deadline) =>
@@ -1565,9 +1700,85 @@ pub(crate) fn write_blocks_error<W: Write>(
     )
 }
 
+pub(crate) fn write_blocks_steer_rejected<W: Write>(
+    stdout: &mut W,
+    thread_id: &str,
+    trace_context: &TraceContext,
+) -> Result<()> {
+    write_value(
+        stdout,
+        &json!({
+            "method": STEER_REJECTED_METHOD,
+            "params": {
+                "threadId": thread_id,
+                "executionId": trace_context.metadata.get("execution_id"),
+                "messageId": trace_context.metadata.get("message_id"),
+                "reason": "no active turn",
+            }
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ended_turn_refuses_missed_steers_only_when_no_turn_is_queued() {
+        let turns = BlocksTurns::default();
+        let (tx, rx) = mpsc::channel();
+        let steer = || ActiveTurnRequest::BlocksSteer {
+            input: Vec::new(),
+            client_user_message_id: None,
+            trace_context: TraceContext::default(),
+        };
+        *turns.lock() = 2;
+        tx.send(steer()).unwrap();
+        // Another turn is queued: the steer is left for it to join.
+        assert!(
+            turns
+                .finish_turn(|| drain_active_turn_requests(&rx))
+                .is_empty()
+        );
+        tx.send(ActiveTurnRequest::BlocksInterrupt).unwrap();
+        // The last turn ended: the steer is refused, the interrupt dropped.
+        assert_eq!(
+            turns.finish_turn(|| drain_active_turn_requests(&rx)).len(),
+            1
+        );
+        assert!(rx.try_recv().is_err());
+        assert_eq!(*turns.lock(), 0);
+    }
+
+    #[test]
+    fn steer_rejection_names_the_execution_and_message() {
+        let mut trace_context = TraceContext::default();
+        trace_context
+            .metadata
+            .insert("action".to_owned(), json!("steer_active_execution"));
+        trace_context
+            .metadata
+            .insert("execution_id".to_owned(), json!("exe-1"));
+        trace_context
+            .metadata
+            .insert("message_id".to_owned(), json!("msg-1"));
+        assert!(is_steer(&trace_context));
+        let mut stdout = Vec::new();
+        write_blocks_steer_rejected(&mut stdout, "thread-1", &trace_context).unwrap();
+        let value: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "method": "turn/steerRejected",
+                "params": {
+                    "threadId": "thread-1",
+                    "executionId": "exe-1",
+                    "messageId": "msg-1",
+                    "reason": "no active turn",
+                }
+            })
+        );
+    }
 
     fn temp_upload_dir() -> PathBuf {
         let path = env::temp_dir().join(format!("harness-server-test-{}", Uuid::new_v4().simple()));

@@ -214,9 +214,18 @@ Example response:
 ```json
 {
   "ok": true,
-  "message_ids": ["msg_123"]
+  "message_ids": ["msg_123"],
+  "steering": "no_active_execution"
 }
 ```
+
+User messages appended while the thread has a queued or running execution are
+steered into that execution. `steering` reports the outcome: `delivered`,
+`no_active_execution` (nothing will run the messages unless the caller starts an
+execution), `failed` (recorded as `session.steering_failed`), or
+`no_user_messages`. A harness can still refuse a delivered steer that reaches it
+after the execution's last turn ended; api-rs records that refusal as
+`session.steering_failed` with the steered `message_ids`.
 
 Message `parts` are durable transcript data for clients and operators. The API
 stores them but does not translate them into harness-specific stdin during

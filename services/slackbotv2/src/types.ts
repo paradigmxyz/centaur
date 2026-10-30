@@ -72,6 +72,24 @@ export type SlackbotV2AppendMessagesRequest = {
   messages: SlackbotV2SessionMessage[]
 }
 
+/**
+ * What api-rs did with appended user messages relative to the thread's active
+ * execution. `no_active_execution` means nothing will run them unless the
+ * caller starts an execution.
+ */
+export type SlackbotV2SteeringOutcome =
+  | 'delivered'
+  | 'failed'
+  | 'no_active_execution'
+  | 'no_user_messages'
+
+export type SlackbotV2AppendMessagesResponse = {
+  message_ids: string[]
+  ok: boolean
+  /** Absent from session APIs that predate it. */
+  steering?: SlackbotV2SteeringOutcome
+}
+
 export type SlackbotV2CreateSessionRequest = {
   harness_type: string
   metadata: JsonObject

@@ -106,6 +106,7 @@ import type {
   SlackbotV2ProactivityOptions,
   SlackbotV2RenderObligation,
   SlackbotV2RendererSource,
+  SlackbotV2SteeringOutcome,
   SlackbotV2ThreadState,
   SlackbotV2Trace
 } from './types'
@@ -133,6 +134,7 @@ export type {
   SlackbotV2BlockActionPayload,
   SlackbotV2ApiMessage,
   SlackbotV2AppendMessagesRequest,
+  SlackbotV2AppendMessagesResponse,
   SlackbotV2CreateSessionRequest,
   SlackbotV2ExecuteSessionRequest,
   SlackbotV2ExecuteSessionResponse,
@@ -140,7 +142,8 @@ export type {
   SlackbotV2Options,
   SlackbotV2ProactivityOptions,
   SlackbotV2SessionMessage,
-  SlackbotV2SessionMessageRole
+  SlackbotV2SessionMessageRole,
+  SlackbotV2SteeringOutcome
 } from './types'
 
 type WaitUntilContext = {
@@ -1508,6 +1511,12 @@ async function ensureStateConnected(
 }
 
 type SyncThreadMessageInput = {
+  /**
+   * Set when api-rs reported, on appending this message, that the thread had
+   * no active execution. The message was not steered, so it starts an
+   * execution even though thread state still shows the ending one as active.
+   */
+  executionEnded?: boolean
   initialAssistantStatus?: Promise<boolean>
   initialAssistantStatusRequested?: boolean
   initialAssistantStatusVisible?: boolean
@@ -1603,7 +1612,9 @@ async function syncThreadMessageToSession(
   const messageIds = new Set(state.forwardedMessageIds ?? [])
   const executedMessageIds = new Set(state.executedMessageIds ?? [])
   const shouldStartExecution =
-    input.mode === 'execute' && state.activeExecution !== true && !executedMessageIds.has(message.id)
+    input.mode === 'execute'
+    && (state.activeExecution !== true || input.executionEnded === true)
+    && !executedMessageIds.has(message.id)
   const shouldRefreshThreadContext = shouldStartExecution && isSlackThreadReply(message)
   const shouldIncludeContext =
     shouldStartExecution && (state.historyForwarded !== true || shouldRefreshThreadContext)
@@ -1924,7 +1935,11 @@ async function syncThreadMessageToSession(
     })
   }
 
-  const commitMessagesAppended = async (): Promise<void> => {
+  let appendSteering: SlackbotV2SteeringOutcome | undefined
+  const commitMessagesAppended = async (
+    steering: SlackbotV2SteeringOutcome | undefined
+  ): Promise<void> => {
+    appendSteering = steering
     const latest = (await thread.state) ?? {}
     const latestMessageIds = new Set(latest.forwardedMessageIds ?? [])
     for (const item of messagesToAppend) latestMessageIds.add(item.id)
@@ -2040,6 +2055,20 @@ async function syncThreadMessageToSession(
       finishSteeringReaction(input, trace)
       recordForward(input.mode, 'error', traceStartedAtMs)
       throw error
+    }
+    // The thread state still showed an execution, but api-rs had none left
+    // to steer this mention into: it ended as the mention arrived. Start an
+    // execution for it, as for a mention that arrives while idle, so it gets
+    // its own reply. Steered or failed deliveries keep the existing path.
+    if (
+      input.mode === 'execute'
+      && appendSteering === 'no_active_execution'
+      && messagesToAppend.some(item => item.id === message.id)
+    ) {
+      traceLog(input.options, 'slackbotv2_forward_execution_ended_before_steer', trace)
+      recordForward(input.mode, 'execution_ended_before_steer', traceStartedAtMs)
+      await syncThreadMessageToSession(thread, message, { ...input, executionEnded: true })
+      return
     }
     finishSteeringReaction(input, trace)
     traceLog(input.options, 'slackbotv2_forward_complete', trace)
@@ -2274,6 +2303,14 @@ function scheduleExecutionRender(
   backgroundWaitUntil(promise)
 }
 
+function renderObligationSuperseded(
+  state: SlackbotV2ThreadState,
+  executionId: string | undefined
+): boolean {
+  const current = state.renderObligation?.executionId
+  return current !== undefined && executionId !== undefined && current !== executionId
+}
+
 function setMessageText(message: SlackbotV2ApiMessage, text: string): void {
   const displayText = renderSlackDisplayText({ raw: message.raw, text })
   message.text = text
@@ -2437,10 +2474,13 @@ async function renderExecutionAttempt(
     throw error
   } finally {
     const latest = (await thread.state) ?? {}
+    // A message that arrived as this execution ended may already have started
+    // the next one; its active flag and render obligation are not ours.
+    const superseded = renderObligationSuperseded(latest, input.executionId)
     await thread.setState({
-      activeExecution: retry,
+      ...(superseded ? {} : { activeExecution: retry }),
       lastEventId: Math.max(latest.lastEventId ?? 0, getLastEventId(), fallbackLastEventId),
-      ...(rendered ? { renderObligation: null } : {})
+      ...(rendered && !superseded ? { renderObligation: null } : {})
     })
     if (rendered) await steeringReactions.completeThread(thread.id, trace)
     traceLog(options, 'slackbotv2_render_finalized', trace, {

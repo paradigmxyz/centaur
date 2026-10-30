@@ -20,7 +20,8 @@ import type {
   SlackbotV2InterruptSessionResponse,
   SlackbotV2Options,
   SlackbotV2RendererSource,
-  SlackbotV2SessionMessage
+  SlackbotV2SessionMessage,
+  SlackbotV2SteeringOutcome
 } from './types'
 import { observeSeconds, slackbotMetrics } from './metrics'
 import { rawSlackUserId } from './slack-user'
@@ -181,7 +182,8 @@ type ForwardSessionApiCallbacks = {
   /** Runs after append; returning false skips execute. */
   shouldExecute?(): Promise<boolean>
   onExecutionStarted?(execution: SlackbotV2ExecuteSessionResponse): Promise<void>
-  onMessagesAppended?(): Promise<void>
+  /** `steering` is undefined when the session API does not report it. */
+  onMessagesAppended?(steering: SlackbotV2SteeringOutcome | undefined): Promise<void>
   onSessionCreated?(outcome: CreateSessionOutcome): Promise<void>
   /**
    * Fires when session creation restarted the thread onto a new harness
@@ -517,7 +519,7 @@ export async function forwardToSessionApi(
   }
   if (input.messages.length > 0) {
     const appendStartedAtMs = nowMs()
-    await recordSessionApiOperation(
+    const steering = await recordSessionApiOperation(
       'append_messages',
       () => appendSessionMessages(options, input.threadId, input.messages, !input.executeMessage),
       sessionApiTimeoutMs(options),
@@ -525,9 +527,10 @@ export async function forwardToSessionApi(
     )
     traceLog(options, 'slackbotv2_session_append_complete', input.trace, {
       message_count: input.messages.length,
-      phase_ms: elapsedMs(appendStartedAtMs)
+      phase_ms: elapsedMs(appendStartedAtMs),
+      steering
     })
-    await callbacks.onMessagesAppended?.()
+    await callbacks.onMessagesAppended?.(steering)
   } else {
     traceLog(options, 'slackbotv2_session_append_skipped', input.trace, {
       message_count: 0
@@ -1362,7 +1365,7 @@ async function appendSessionMessages(
   threadId: string,
   messages: SlackbotV2ApiMessage[],
   includeRequesterContext = false
-): Promise<void> {
+): Promise<SlackbotV2SteeringOutcome | undefined> {
   const fetchFn = options.fetch ?? fetch
   const body: SlackbotV2AppendMessagesRequest = {
     messages: await Promise.all(
@@ -1381,6 +1384,21 @@ async function appendSessionMessages(
     'append session messages'
   )
   await ensureApiOk(response, 'append session messages')
+  return appendSteeringOutcome(await response.json().catch(() => undefined))
+}
+
+const STEERING_OUTCOMES: ReadonlySet<string> = new Set<SlackbotV2SteeringOutcome>([
+  'delivered',
+  'failed',
+  'no_active_execution',
+  'no_user_messages'
+])
+
+export function appendSteeringOutcome(body: unknown): SlackbotV2SteeringOutcome | undefined {
+  if (!isJsonObject(body) || typeof body.steering !== 'string') return undefined
+  return STEERING_OUTCOMES.has(body.steering)
+    ? (body.steering as SlackbotV2SteeringOutcome)
+    : undefined
 }
 
 async function executeSession(

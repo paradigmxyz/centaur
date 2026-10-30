@@ -19,12 +19,15 @@ import {
   type ProactiveDecision,
   type SlackbotV2,
   type SlackbotV2AppendMessagesRequest,
+  type SlackbotV2AppendMessagesResponse,
   type SlackbotV2ApiMessage,
   type SlackbotV2BlockActionPayload,
   type SlackbotV2CreateSessionRequest,
   type SlackbotV2ExecuteSessionRequest,
-  type SlackbotV2SessionMessage
+  type SlackbotV2SessionMessage,
+  type SlackbotV2SteeringOutcome
 } from '../src/index'
+import type { SlackbotV2ThreadState } from '../src/types'
 import { clearRequesterIdentityCacheForTests } from '../src/session-api'
 import { slackbotMetrics } from '../src/metrics'
 import type { ProactivityRules } from '../src/proactivity-rules'
@@ -4243,6 +4246,81 @@ describe('slackbotv2', () => {
     expect(await threadText(parent.ts)).toContain('Upgraded retry complete.')
   })
 
+  it('starts an execution for a mention that arrives as the active execution ends', async () => {
+    const logs: CapturedLog[] = []
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ logger: captureLogger(logs), state: sharedState })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before a mention at the end of a run.')
+    const key = threadKey(parent.ts)
+    const stateKey = `thread-state:${key}`
+    const first = await sendMessage(`<@${BOT_USER_ID}> start running`, { threadTs: parent.ts })
+    expect(first.response.status).toBe(200)
+    await waitFor(() => codexApi.streamCount === 1)
+    const firstExecutionId = (await sharedState.get<SlackbotV2ThreadState>(stateKey))
+      ?.renderObligation?.executionId
+    expect(firstExecutionId).toBeDefined()
+
+    // api-rs has completed the execution; its Slack render has not finalized.
+    codexApi.appendSteering = 'no_active_execution'
+    const late = await sendMessage(`<@${BOT_USER_ID}> one more thing`, { threadTs: parent.ts })
+    expect(late.response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 2, 3000)
+    expect(codexApi.appends.filter(append =>
+      append.body.messages.some(item => item.client_message_id === late.ts)
+    )).toHaveLength(1)
+    expect(codexApi.executes[1]?.body.idempotency_key).toBe(late.ts)
+    expect(hasLog(logs, 'slackbotv2_forward_execution_ended_before_steer')).toBe(true)
+    const lateExecutionId = (await sharedState.get<SlackbotV2ThreadState>(stateKey))
+      ?.renderObligation?.executionId
+    expect(lateExecutionId).toBeDefined()
+    expect(lateExecutionId).not.toBe(firstExecutionId)
+
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('First answer.'), firstExecutionId)
+    await first.finished()
+    // The first render's cleanup leaves the newer execution's state alone.
+    expect(await sharedState.get<SlackbotV2ThreadState>(stateKey)).toMatchObject({
+      activeExecution: true,
+      renderObligation: { executionId: lateExecutionId }
+    })
+
+    await waitFor(() => codexApi.eventRequests.length === 2, 3000)
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('Late answer.'), lateExecutionId)
+    await late.finished()
+    const text = await threadText(parent.ts)
+    expect(text).toContain('First answer.')
+    expect(text).toContain('Late answer.')
+    expect(await sharedState.get<SlackbotV2ThreadState>(stateKey)).toMatchObject({
+      activeExecution: false,
+      renderObligation: null
+    })
+  })
+
+  it('does not start an execution for a mention steered into the active execution', async () => {
+    const logs: CapturedLog[] = []
+    bot = createTestBot({ logger: captureLogger(logs) })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before a steered mention.')
+    const first = await sendMessage(`<@${BOT_USER_ID}> start running`, { threadTs: parent.ts })
+    expect(first.response.status).toBe(200)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    codexApi.appendSteering = 'delivered'
+    const steered = await sendMessage(`<@${BOT_USER_ID}> also this`, { threadTs: parent.ts })
+    expect(steered.response.status).toBe(200)
+    await steered.finished()
+    expect(codexApi.appends).toHaveLength(2)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(hasLog(logs, 'slackbotv2_forward_execution_ended_before_steer')).toBe(false)
+
+    codexApi.emitOutputLines(threadKey(parent.ts), sampleCodexOutputLines('Both handled.'))
+    await first.finished()
+    expect(codexApi.executes).toHaveLength(1)
+  })
+
   it('reuses an accepted execution when the local retry follows a lost execute response', async () => {
     let overrideStrategyCalls = 0
     bot = createTestBot({
@@ -5571,6 +5649,11 @@ type MockWorkflowEventRequest = {
 
 type MockSessionApi = {
   appends: MockSessionRequest<SlackbotV2AppendMessagesRequest>[]
+  /**
+   * The steering outcome appends report. The mock tracks no executions, so
+   * tests set it to the outcome api-rs would report for their scenario.
+   */
+  appendSteering: SlackbotV2SteeringOutcome
   autoRespond: boolean
   close(): Promise<void>
   closeStreams(): void
@@ -5603,6 +5686,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
   const idempotentExecutions = new Map<string, string>()
   const streams = new Set<ServerResponse>()
   const workflowEvents: MockWorkflowEventRequest[] = []
+  let appendSteering: SlackbotV2SteeringOutcome = 'delivered'
   let autoRespond = true
   let executeHold: Promise<void> | null = null
   let executeHoldRelease: (() => void) | null = null
@@ -5619,6 +5703,9 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
   const server = createServer((req, res) => {
     void handleMockCodexRequest(req, res, {
       appends,
+      get appendSteering() {
+        return appendSteering
+      },
       createResponses,
       creates,
       events,
@@ -5679,6 +5766,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
       events.length = 0
       executes.length = 0
       idempotentExecutions.clear()
+      appendSteering = 'delivered'
       executeHoldRelease?.()
       executeHold = null
       executeHoldRelease = null
@@ -5697,6 +5785,12 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
     url: `http://127.0.0.1:${port}`,
     workflowEvents,
     closeStreams,
+    get appendSteering() {
+      return appendSteering
+    },
+    set appendSteering(value: SlackbotV2SteeringOutcome) {
+      appendSteering = value
+    },
     get autoRespond() {
       return autoRespond
     },
@@ -5780,6 +5874,7 @@ async function handleMockCodexRequest(
   res: ServerResponse,
   input: {
     appends: MockSessionRequest<SlackbotV2AppendMessagesRequest>[]
+    appendSteering: SlackbotV2SteeringOutcome
     autoRespond: boolean
     createResponses: Array<{ body: Record<string, unknown>; status: number }>
     creates: MockSessionRequest<SlackbotV2CreateSessionRequest>[]
@@ -5886,7 +5981,12 @@ async function handleMockCodexRequest(
   if (endpoint === 'messages') {
     const body = (await request.json()) as SlackbotV2AppendMessagesRequest
     input.appends.push({ threadKey, body })
-    await sendWebResponse(res, Response.json({ ok: true, message_ids: body.messages.map((_, index) => `msg-${index + 1}`) }))
+    const response: SlackbotV2AppendMessagesResponse = {
+      ok: true,
+      message_ids: body.messages.map((_, index) => `msg-${index + 1}`),
+      steering: input.appendSteering
+    }
+    await sendWebResponse(res, Response.json(response))
     return
   }
 

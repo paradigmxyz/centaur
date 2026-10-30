@@ -1,6 +1,6 @@
 use axum::response::sse::Event;
 use centaur_session_core::{HarnessType, Session, SessionEvent, SessionMessageInput, ThreadKey};
-use centaur_session_runtime::SESSION_OUTPUT_LINE_EVENT;
+use centaur_session_runtime::{SESSION_OUTPUT_LINE_EVENT, SteeringOutcome};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -105,6 +105,11 @@ pub struct AppendMessagesRequest {
 pub struct AppendMessagesResponse {
     pub ok: bool,
     pub message_ids: Vec<String>,
+    /// Whether the appended user messages reached the thread's active
+    /// execution. `no_active_execution` means no execution will run them
+    /// unless the caller starts one. Absent from servers that predate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steering: Option<SteeringOutcome>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -255,4 +260,30 @@ pub enum SessionEventConversionError {
     OutputLinePayload { event_id: i64 },
     #[error("failed to serialize session event {event_id} payload as SSE JSON: {source}")]
     JsonData { event_id: i64, source: axum::Error },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn append_response_reports_steering_and_reads_older_servers() {
+        let response = AppendMessagesResponse {
+            ok: true,
+            message_ids: vec!["msg-1".to_owned()],
+            steering: Some(SteeringOutcome::NoActiveExecution),
+        };
+        assert_eq!(
+            serde_json::to_value(&response).unwrap(),
+            serde_json::json!({
+                "ok": true,
+                "message_ids": ["msg-1"],
+                "steering": "no_active_execution",
+            })
+        );
+
+        let older: AppendMessagesResponse =
+            serde_json::from_str(r#"{"ok":true,"message_ids":["msg-1"]}"#).unwrap();
+        assert_eq!(older.steering, None);
+    }
 }

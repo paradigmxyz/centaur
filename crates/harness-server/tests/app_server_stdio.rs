@@ -698,6 +698,134 @@ fn fake_claude_blocks_mode_applies_reasoning_effort_per_turn() {
 }
 
 #[test]
+fn fake_claude_blocks_mode_steers_active_turn_and_keeps_queued_answer() {
+    // The steer reaches Claude Code's stdin during the turn. The fake reads it
+    // before answering, then behaves like Claude Code when a steer arrives
+    // during the final answer: echoes each message as it consumes it, answers
+    // the first message with a `result`, then runs a turn of its own for the
+    // steer. Both answers belong to the one turn; the next turn is clean.
+    let stdin_log = temp_path("fake-claude-steer-stdin.jsonl");
+    let reply = |n: u32, text: &str| {
+        format!(
+            concat!(
+                "'{{\"type\":\"user\",\"isReplay\":true,\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"echo\"}}]}}}}' ",
+                "'{{\"type\":\"assistant\",\"is_partial\":false,\"message\":{{\"id\":\"msg_{n}\",\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}]}}}}' ",
+                "'{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"{text}\"}}' "
+            ),
+            n = n,
+            text = text
+        )
+    };
+    let fake_claude = format!(
+        concat!(
+            "printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}}'; ",
+            "IFS= read -r line; printf '%s\\n' \"$line\" >> '{log}'; ",
+            "IFS= read -r line; printf '%s\\n' \"$line\" >> '{log}'; ",
+            "printf '%s\\n' {first}{second}; ",
+            "while IFS= read -r line; do printf '%s\\n' \"$line\" >> '{log}'; printf '%s\\n' {next}; done"
+        ),
+        log = stdin_log.display(),
+        first = reply(1, "first answer"),
+        second = reply(2, "steered answer"),
+        next = reply(3, "next answer"),
+    );
+
+    let mut bridge =
+        BridgeProcess::spawn_harness_blocks(Harness::ClaudeCode, Some(fake_claude), None);
+    let turn = bridge.run_blocks_steered_turn(
+        "start a long turn",
+        "use this steering update",
+        Duration::from_secs(10),
+    );
+    assert_completed_turn(&turn);
+    assert_eq!(turn.text_from_deltas, "first answersteered answer");
+    assert_eq!(
+        turn.methods
+            .iter()
+            .filter(|method| *method == "turn/started")
+            .count(),
+        1,
+        "steering must not start a second turn"
+    );
+
+    let next = bridge.run_blocks_user_line(
+        json!({
+            "type": "user",
+            "thread_key": "slack:C123:123.456",
+            "message": {"role": "user", "content": [{"type": "text", "text": "next"}]},
+        }),
+        Duration::from_secs(10),
+    );
+    assert_completed_turn(&next);
+    assert_eq!(next.text_from_deltas, "next answer");
+    bridge.finish_successfully();
+
+    let stdin = std::fs::read_to_string(&stdin_log).expect("read fake claude stdin log");
+    let texts: Vec<Value> = stdin
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("fake claude stdin JSON"))
+        .map(|line| {
+            assert_eq!(line["type"], "user", "stdin={stdin}");
+            line["message"]["content"][0]["text"].clone()
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            json!("start a long turn"),
+            json!("use this steering update"),
+            json!("next"),
+        ]
+    );
+
+    let _ = std::fs::remove_file(stdin_log);
+}
+
+#[test]
+fn fake_claude_blocks_mode_refuses_steer_after_turn_ends() {
+    // api-rs steers a message into an execution whose turn has just ended.
+    // Run as a turn of its own, its output would reach no execution, so the
+    // server refuses it and reports the refusal instead.
+    let stdin_log = temp_path("fake-claude-late-steer-stdin.jsonl");
+    let fake_claude = format!(
+        concat!(
+            "printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}}'; ",
+            "n=0; while IFS= read -r line; do n=$((n+1)); printf '%s\\n' \"$line\" >> '{log}'; printf '%s\\n' ",
+            "'{{\"type\":\"assistant\",\"is_partial\":false,\"message\":{{\"id\":\"msg_'\"$n\"'\",\"content\":[{{\"type\":\"text\",\"text\":\"answer\"}}]}}}}' ",
+            "'{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"answer\"}}'; done"
+        ),
+        log = stdin_log.display(),
+    );
+
+    let mut bridge =
+        BridgeProcess::spawn_harness_blocks(Harness::ClaudeCode, Some(fake_claude), None);
+    let first = bridge.run_blocks_user_turn("first", Duration::from_secs(10));
+    assert_completed_turn(&first);
+
+    let rejected = bridge.send_late_steer(Duration::from_secs(10));
+    assert_steer_rejected(&rejected);
+
+    let next = bridge.run_blocks_user_turn("next", Duration::from_secs(10));
+    assert_completed_turn(&next);
+    assert_eq!(next.text_from_deltas, "answer");
+    bridge.finish_successfully();
+
+    let stdin = std::fs::read_to_string(&stdin_log).expect("read fake claude stdin log");
+    let texts: Vec<Value> = stdin
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("fake claude stdin JSON"))
+        .map(|line| line["message"]["content"][0]["text"].clone())
+        .collect();
+    assert_eq!(
+        texts,
+        vec![json!("first"), json!("next")],
+        "a refused steer must not reach the CLI"
+    );
+
+    let _ = std::fs::remove_file(stdin_log);
+}
+
+#[test]
 fn fake_amp_blocks_mode_accepts_user_blocks_by_default() {
     let fake_amp = concat!(
         "printf '%s\\n' ",
@@ -1012,6 +1140,60 @@ fn fake_codex_blocks_mode_steers_active_turn() {
             .pointer("/params/clientUserMessageId")
             .and_then(Value::as_str),
         Some("steer-message-1")
+    );
+
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(fake_codex_log);
+}
+
+#[test]
+fn fake_codex_blocks_mode_refuses_steer_after_turn_ends() {
+    let fake_codex = temp_path("fake-late-steer-codex.sh");
+    let fake_codex_log = temp_path("fake-late-steer-codex-requests.jsonl");
+    let script = fake_codex_app_server_script(&fake_codex_log);
+    std::fs::write(&fake_codex, script).expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex)
+        .expect("fake codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks(
+        Harness::Codex,
+        None,
+        Some((
+            "CODEX_BIN",
+            fake_codex.to_str().expect("utf-8 fake codex path"),
+        )),
+    );
+    let turn = bridge.run_blocks_user_turn("say codex blocks", Duration::from_secs(10));
+    assert_completed_turn(&turn);
+    let rejected = bridge.send_late_steer(Duration::from_secs(10));
+    bridge.finish_successfully();
+    assert_steer_rejected(&rejected);
+
+    let requests = std::fs::read_to_string(&fake_codex_log).expect("read fake codex request log");
+    let methods: Vec<String> = requests
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("fake codex request JSON"))
+        .filter_map(|value| {
+            value
+                .get("method")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    assert_eq!(
+        methods
+            .iter()
+            .filter(|method| *method == "turn/start")
+            .count(),
+        1,
+        "a refused steer must not start a turn: {methods:?}"
+    );
+    assert!(
+        !methods.iter().any(|method| method == "turn/steer"),
+        "a refused steer must not reach codex: {methods:?}"
     );
 
     let _ = std::fs::remove_file(fake_codex);
@@ -2179,6 +2361,27 @@ impl BridgeProcess {
         capture
     }
 
+    /// Sends a steer, as api-rs writes it, while no turn runs and returns the
+    /// next stdout line.
+    fn send_late_steer(&mut self, timeout: Duration) -> Value {
+        self.send(json!({
+            "type": "user",
+            "thread_key": "slack:C123:123.456",
+            "trace_metadata": {
+                "source": "session.append_messages",
+                "action": "steer_active_execution",
+                "execution_id": "exe-ended",
+                "message_id": "msg-late"
+            },
+            "client_user_message_id": "steer-message-late",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "too late"}],
+            },
+        }));
+        self.read_json(Instant::now() + timeout)
+    }
+
     fn send(&mut self, value: Value) {
         eprintln!("stdin JSON: {value}");
         let stdin = self.stdin.as_mut().expect("stdin still open");
@@ -2536,6 +2739,19 @@ fn validate_jsonrpc_value(value: &Value, allow_error: bool) {
             "not a JSON-RPC message: {value}"
         );
     }
+}
+
+fn assert_steer_rejected(value: &Value) {
+    assert_eq!(
+        value.get("method").and_then(Value::as_str),
+        Some("turn/steerRejected"),
+        "expected a steer refusal: {value}"
+    );
+    assert_eq!(
+        value.pointer("/params/executionId"),
+        Some(&json!("exe-ended"))
+    );
+    assert_eq!(value.pointer("/params/messageId"), Some(&json!("msg-late")));
 }
 
 fn response_id(value: &Value) -> Option<i64> {
