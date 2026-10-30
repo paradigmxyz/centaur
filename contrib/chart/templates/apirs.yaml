@@ -624,7 +624,11 @@ spec:
 {{- range $name, $value := .Values.apiRs.extraEnv }}
 {{- if ne $name "SESSION_SANDBOX_PASSTHROUGH_ENV" }}
             - name: {{ $name }}
+{{- if kindIs "map" $value }}
+{{ toYaml $value | nindent 14 }}
+{{- else }}
               value: {{ $value | quote }}
+{{- end }}
 {{- end }}
 {{- end }}
           envFrom:

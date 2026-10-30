@@ -1,0 +1,45 @@
+<% content_for :title, "Configure SSH key · Centaur Console" %>
+<% saved_key = @connection.persisted? && @connection.private_key_in_database.present? %>
+<%= render "console/page_header", title: "Connect an SSH key", subtitle: "Save your key once. Choose a permitted environment URL when you ask Centaur to connect." %>
+
+<div class="max-w-3xl">
+  <% if @connection.errors.any? %>
+    <div class="mb-6 rounded-lg border border-red-900 bg-red-950/30 p-4 text-sm text-red-200" role="alert">
+      <ul class="list-disc pl-5"><% @connection.errors.full_messages.each do |message| %><li><%= message %></li><% end %></ul>
+    </div>
+  <% end %>
+  <%= form_with scope: :ssh_connection, url: console_ssh_connection_path, method: :patch, data: { turbo: false, controller: "ssh-key", ssh_key_url_value: validate_key_console_ssh_connection_path, ssh_key_saved_value: saved_key, action: "submit->ssh-key#saving" } do |form| %>
+    <div class="space-y-6">
+      <section class="form-section">
+        <h2 class="form-section-heading">Your key</h2>
+        <div class="space-y-5">
+          <div>
+            <%= form.label :name, "Name", class: "form-label" %>
+            <%= form.text_field :name, value: @connection.name, required: true, maxlength: 100, class: "form-input", placeholder: "My SSH key" %>
+          </div>
+        </div>
+      </section>
+      <section class="form-section">
+        <h2 class="form-section-heading">Keys</h2>
+        <div class="space-y-5">
+          <div>
+            <%= form.label :private_key, "Your private SSH key", class: "form-label" %>
+            <%= form.text_area :private_key, value: nil, rows: 6, required: !saved_key, class: "form-input font-mono", autocomplete: "off", spellcheck: false, aria: { describedby: "ssh-key-feedback" }, data: { ssh_key_target: "input", action: "input->ssh-key#validate" }, placeholder: saved_key ? "Leave blank to keep your saved key" : "Paste your dedicated private SSH key" %>
+            <p id="ssh-key-feedback" class="form-hint" role="status" aria-live="polite" data-ssh-key-target="feedback">Paste the complete private key, including the BEGIN and END lines. Validation does not save it.</p>
+            <p class="form-hint">Use a dedicated key without a passphrase. Stored encrypted and never shown again. Centaur's sandbox receives a disposable key; the proxy holds your real key.</p>
+          </div>
+        </div>
+      </section>
+      <section class="form-section">
+        <h2 class="form-section-heading">Access</h2>
+        <p class="form-hint mb-4">Your administrator controls which SSH destinations are allowed. Give Centaur the environment URL in your request; this key can be reused across allowed destinations.</p>
+        <p class="form-hint">Connected until you disconnect. Only your Console sessions, DMs, and channel turns can use this key. Disconnect at any time.</p>
+        <p class="form-hint">Slack access requires a verified Slack identity linked to your Console account.</p>
+      </section>
+      <div class="flex flex-wrap gap-3">
+        <%= form.submit "Save SSH key", class: "btn-primary", data: { ssh_key_target: "submit" } %>
+        <%= link_to "Cancel", console_integrations_path, class: "btn-secondary" %>
+      </div>
+    </div>
+  <% end %>
+</div>
