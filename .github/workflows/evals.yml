@@ -7,6 +7,11 @@ on:
       - .github/scripts/eval-summary.mjs
       - .github/workflows/evals.yml
       - evals/**
+      # Production code the eval providers import at runtime.
+      - services/slackbotv2/src/message-overrides-strategy.ts
+      - services/slackbotv2/src/overrides.ts
+      - services/slackbotv2/src/proactive-classifier.ts
+      - services/slackbotv2/src/utils.ts
 
 concurrency:
   group: evals-${{ github.event.pull_request.number }}

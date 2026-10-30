@@ -2,7 +2,7 @@
 
 Evals measure the quality of LLM-backed behavior that unit tests cannot pin
 down. They make real model calls, so they run on demand and, for same-repo
-pull requests that change `evals/`, in the `Evals` workflow, which comments the
+pull requests that change `evals/` or the code it evaluates, in the `Evals` workflow, which comments the
 results on the PR. The workflow needs the `EVALS_OPENAI_API_KEY` repository
 secret and optionally `EVALS_OPENAI_BASE_URL`.
 
