@@ -110,6 +110,10 @@ impl Args {
         self.sandbox.sandbox_capacity_config()
     }
 
+    pub(crate) fn sandbox_state_volume_enabled(&self) -> bool {
+        self.sandbox.state_volume_enabled
+    }
+
     pub(crate) fn sandbox_reaper_config(&self) -> SandboxReaperConfig {
         self.sandbox.sandbox_reaper_config()
     }
@@ -2754,6 +2758,7 @@ mod tests {
 
             let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
             assert_eq!(config.state_volume, None);
+            assert!(!args.sandbox_state_volume_enabled());
         }
     }
 
@@ -2782,6 +2787,7 @@ mod tests {
             .unwrap();
 
             let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
+            assert!(args.sandbox_state_volume_enabled());
             assert_eq!(
                 config.state_volume,
                 Some(StateVolumeConfig {

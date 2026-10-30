@@ -177,6 +177,7 @@ pub struct SessionRuntime {
     session_title_in_flight: SessionTitleThreadSet,
     session_title_rerun_requested: SessionTitleThreadSet,
     capacity: Option<Arc<SandboxCapacityController>>,
+    keep_sandbox_on_transient_resume_failure: bool,
     stdout_owner_id: String,
     /// Set once a shutdown handoff begins; fences new stdout-owner claims
     /// so an execution cannot start on a control plane that is about to
@@ -793,6 +794,7 @@ impl SessionRuntime {
             session_title_in_flight: Arc::new(DashSet::new()),
             session_title_rerun_requested: Arc::new(DashSet::new()),
             capacity: None,
+            keep_sandbox_on_transient_resume_failure: false,
             stdout_owner_id: format!("api-rs-{}", uuid::Uuid::new_v4().simple()),
             shutting_down: Arc::new(AtomicBool::new(false)),
             execution_admission: Arc::new(RwLock::new(())),
@@ -1441,6 +1443,33 @@ impl SessionRuntime {
         pool.clone().spawn_replenisher();
         self.warm_pool = Some(pool);
         self
+    }
+
+    /// Keep a suspended sandbox, and the durable state it holds, when resuming
+    /// it fails for a reason that can clear up (ready timeout, pod pending on
+    /// scheduling or volume placement). The turn then fails with the resume
+    /// error and the next turn resumes the same sandbox again. Without this,
+    /// any resume failure replaces the sandbox. A sandbox that is gone or
+    /// permanently unusable is replaced either way.
+    pub fn with_keep_sandbox_on_transient_resume_failure(mut self, keep: bool) -> Self {
+        self.keep_sandbox_on_transient_resume_failure = keep;
+        self
+    }
+
+    async fn resume_failure_is_transient(&self, id: &SandboxId, error: &SandboxError) -> bool {
+        if matches!(
+            error,
+            SandboxError::NotFound(_)
+                | SandboxError::InvalidSpec(_)
+                | SandboxError::Unsupported { .. }
+        ) {
+            return false;
+        }
+        match self.sandbox_runtime.manager.status(id).await {
+            Ok(status) => existing_sandbox_action(&status) != ExistingSandboxAction::Replace,
+            Err(SandboxError::NotFound(_)) => false,
+            Err(_) => true,
+        }
     }
 
     pub fn with_sandbox_capacity(mut self, config: SandboxCapacityConfig) -> Self {
@@ -3107,6 +3136,9 @@ impl SessionRuntime {
                                     return Ok(sandbox_id.to_owned());
                                 }
                                 Err(SessionRuntimeError::Sandbox(error)) => {
+                                    let keep_sandbox = self
+                                        .keep_sandbox_on_transient_resume_failure
+                                        && self.resume_failure_is_transient(&id, &error).await;
                                     warn!(
                                         component = COMPONENT_SESSION_RUNTIME,
                                         event = "sandbox_ensure_resume_failed",
@@ -3114,7 +3146,8 @@ impl SessionRuntime {
                                         %execution_id,
                                         %sandbox_id,
                                         %error,
-                                        "replacing sandbox after resume failed"
+                                        keep_sandbox,
+                                        "sandbox resume failed"
                                     );
                                     self.store
                                         .append_event(
@@ -3126,9 +3159,13 @@ impl SessionRuntime {
                                                 "thread_key": thread_key.as_str(),
                                                 "sandbox_id": sandbox_id,
                                                 "error": error.to_string(),
+                                                "sandbox_kept": keep_sandbox,
                                             }),
                                         )
                                         .await?;
+                                    if keep_sandbox {
+                                        return Err(SessionRuntimeError::Sandbox(error));
+                                    }
                                 }
                                 Err(error) => return Err(error),
                             }
@@ -7228,6 +7265,14 @@ fn is_transient_steering_startup_error(error: &SessionRuntimeError) -> bool {
 
 fn harness_thread_id_from_output_line(line: &str) -> Option<String> {
     let value: Value = serde_json::from_str(line).ok()?;
+    if value.get("method").and_then(Value::as_str) == Some("thread/started") {
+        return value
+            .pointer("/params/thread/id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|thread_id| !thread_id.is_empty())
+            .map(ToOwned::to_owned);
+    }
     let event_type = value.get("type").and_then(Value::as_str);
     if event_type == Some("run.started") {
         return value
@@ -8791,6 +8836,35 @@ mod tests {
     }
 
     #[test]
+    fn harness_thread_id_is_extracted_from_codex_thread_started_notification() {
+        assert_eq!(
+            harness_thread_id_from_output_line(
+                r#"{"method":"thread/started","params":{"thread":{"id":"codex-thread-3","turns":[]}}}"#
+            ),
+            Some("codex-thread-3".to_owned())
+        );
+        assert_eq!(
+            harness_thread_id_from_output_line(
+                r#"{"method":"thread/started","params":{"thread":{"id":"  "}}}"#
+            ),
+            None
+        );
+        assert_eq!(
+            harness_thread_id_from_output_line(
+                r#"{"method":"thread/started","params":{"thread":{}}}"#
+            ),
+            None
+        );
+        for line in [
+            r#"{"method":"turn/started","params":{"threadId":"codex-thread-3","turn":{"id":"turn-1"}}}"#,
+            r#"{"method":"thread/status/changed","params":{"threadId":"codex-thread-3","status":{"type":"idle"}}}"#,
+            r#"{"method":"item/completed","params":{"thread":{"id":"codex-thread-3"}}}"#,
+        ] {
+            assert_eq!(harness_thread_id_from_output_line(line), None, "{line}");
+        }
+    }
+
+    #[test]
     fn codex_workload_applies_mounts_to_sandbox_spec() {
         let workload = SandboxWorkloadMode::codex_app_server(
             "centaur-agent:latest",
@@ -9553,6 +9627,7 @@ mod adoption_tests {
         create_id: String,
         created_specs: std::sync::Mutex<Vec<SandboxSpec>>,
         resume_fails: AtomicBool,
+        resume_times_out: AtomicBool,
         stopped: std::sync::Mutex<Vec<String>>,
         proxy_ensures: std::sync::Mutex<Vec<ProxyEnsure>>,
         missing_on_stop: std::sync::Mutex<BTreeSet<String>>,
@@ -9574,6 +9649,7 @@ mod adoption_tests {
                 create_id: "mock-sbx".to_owned(),
                 created_specs: std::sync::Mutex::new(Vec::new()),
                 resume_fails: AtomicBool::new(false),
+                resume_times_out: AtomicBool::new(false),
                 stopped: std::sync::Mutex::new(Vec::new()),
                 proxy_ensures: std::sync::Mutex::new(Vec::new()),
                 missing_on_stop: std::sync::Mutex::new(BTreeSet::new()),
@@ -9627,6 +9703,10 @@ mod adoption_tests {
 
         fn fail_resume(&self) {
             self.resume_fails.store(true, Ordering::SeqCst);
+        }
+
+        fn time_out_resume(&self) {
+            self.resume_times_out.store(true, Ordering::SeqCst);
         }
 
         fn mark_stop_missing(&self, sandbox_id: &str) {
@@ -9746,6 +9826,12 @@ mod adoption_tests {
         async fn resume(&self, _id: &SandboxId) -> SandboxResult<()> {
             if self.resume_fails.load(Ordering::SeqCst) {
                 return Err(SandboxError::NotFound(_id.as_str().to_owned()));
+            }
+            if self.resume_times_out.load(Ordering::SeqCst) {
+                return Err(SandboxError::NotReady(format!(
+                    "sandbox {} did not become running before timeout",
+                    _id.as_str()
+                )));
             }
             self.set_observed_status(_id.as_str(), SandboxStatus::Running);
             Ok(())
@@ -11435,6 +11521,136 @@ mod adoption_tests {
         reset_test_store(&store).await;
     }
 
+    async fn ensure_suspended_sandbox_after_failed_resume(
+        store: &PgSessionStore,
+        runtime: &SessionRuntime,
+    ) -> (ThreadKey, Result<String, SessionRuntimeError>) {
+        let thread_key =
+            ThreadKey::parse(format!("test:resume-kept-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        store
+            .update_sandbox_id(&thread_key, Some("sbx-old"))
+            .await
+            .expect("set sandbox id");
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution
+            .execution_id;
+        let result = runtime
+            .ensure_session_sandbox(EnsureSessionSandboxRequest {
+                thread_key: &thread_key,
+                harness_type: &HarnessType::Codex,
+                persona_id: None,
+                existing_sandbox_id: Some("sbx-old"),
+                existing_sandbox_capabilities: None,
+                iron_control_principal: None,
+                requester_principal: None,
+                proxy_labels: &BTreeMap::new(),
+                desired_capabilities: &SessionSandboxCapabilities::default_enabled(),
+                execution_id: &execution_id,
+            })
+            .await;
+        (thread_key, result)
+    }
+
+    async fn resume_failed_event_kept_flag(
+        store: &PgSessionStore,
+        thread_key: &ThreadKey,
+    ) -> Option<bool> {
+        events(store, thread_key)
+            .await
+            .iter()
+            .find(|event| event.event_type == "session.sandbox_resume_failed")
+            .and_then(|event| event.payload.get("sandbox_kept").and_then(Value::as_bool))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transient_resume_failure_keeps_the_suspended_sandbox_when_configured() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Suspended, Vec::new()));
+        backend.time_out_resume();
+        let runtime = runtime_with(&store, backend.clone())
+            .with_keep_sandbox_on_transient_resume_failure(true);
+
+        let (thread_key, result) =
+            ensure_suspended_sandbox_after_failed_resume(&store, &runtime).await;
+
+        assert!(matches!(
+            result,
+            Err(SessionRuntimeError::Sandbox(SandboxError::NotReady(_)))
+        ));
+        let session = store.get_session(&thread_key).await.unwrap();
+        assert_eq!(session.sandbox_id, Some("sbx-old".to_owned()));
+        assert!(backend.created_specs().is_empty());
+        assert!(backend.stopped().is_empty());
+        assert_eq!(
+            resume_failed_event_kept_flag(&store, &thread_key).await,
+            Some(true)
+        );
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transient_resume_failure_replaces_the_sandbox_by_default() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Suspended, Vec::new()));
+        backend.time_out_resume();
+        let runtime = runtime_with(&store, backend.clone());
+
+        let (thread_key, result) =
+            ensure_suspended_sandbox_after_failed_resume(&store, &runtime).await;
+
+        assert_eq!(result.expect("replacement sandbox"), "mock-sbx");
+        let session = store.get_session(&thread_key).await.unwrap();
+        assert_eq!(session.sandbox_id, Some("mock-sbx".to_owned()));
+        assert_eq!(
+            resume_failed_event_kept_flag(&store, &thread_key).await,
+            Some(false)
+        );
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn missing_sandbox_is_replaced_even_when_transient_failures_are_kept() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Suspended, Vec::new()));
+        backend.fail_resume();
+        let runtime = runtime_with(&store, backend.clone())
+            .with_keep_sandbox_on_transient_resume_failure(true);
+
+        let (thread_key, result) =
+            ensure_suspended_sandbox_after_failed_resume(&store, &runtime).await;
+
+        assert_eq!(result.expect("replacement sandbox"), "mock-sbx");
+        let session = store.get_session(&thread_key).await.unwrap();
+        assert_eq!(session.sandbox_id, Some("mock-sbx".to_owned()));
+        assert_eq!(
+            resume_failed_event_kept_flag(&store, &thread_key).await,
+            Some(false)
+        );
+        reset_test_store(&store).await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_pipe_ensure_opens_one_io_per_sandbox() {
         let Some(store) = test_store().await else {
@@ -11565,6 +11781,44 @@ mod adoption_tests {
             Some("Completed after reattach.")
         );
         assert_eq!(backend.opens(), 2);
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stdout_pump_persists_the_codex_thread_id_from_thread_started() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:codex-thread-id-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id =
+            orphaned_execution(&store, &thread_key, Some("sbx-thread-id"), true).await;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let (io, mut stdout, _stdin) = mock_io();
+        backend.push_io(io).await;
+
+        let runtime = runtime_with(&store, backend.clone());
+        claim_test_stdout_owner(&runtime, &execution_id).await;
+        runtime
+            .ensure_session_pipe(&thread_key, "sbx-thread-id")
+            .await
+            .expect("open pipe");
+        stdout
+            .write_all(
+                b"{\"method\":\"thread/started\",\"params\":{\"thread\":{\"id\":\"codex-thread-9\"}}}\n",
+            )
+            .await
+            .unwrap();
+        stdout
+            .write_all(&completed_output_bytes("Done."))
+            .await
+            .unwrap();
+
+        wait_for_event(&store, &thread_key, "session.execution_completed").await;
+        let session = store.get_session(&thread_key).await.unwrap();
+        assert_eq!(session.harness_thread_id.as_deref(), Some("codex-thread-9"));
         reset_test_store(&store).await;
     }
 
