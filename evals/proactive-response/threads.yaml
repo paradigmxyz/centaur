@@ -1277,3 +1277,181 @@
     - pat: nice, that looks right. @ops_bot verify the rates
     - ops_bot: Checking the policy doc now.
     - pat: good test of whether it actually reads the policy doc
+- description: airline-outage-debate-01
+  vars:
+    respond: false
+    thread:
+    - dana: 'Probably a dumb question, but is the Skyline Air meltdown good or bad for us? Stranded passengers switching carriers vs. people souring on flying overall. How should I think about it for the business? @raj @elena'
+    - raj: 'I''d expect Skyline to lose some corporate accounts short term. Northstar had a two-week IT outage in 2023 and is still a top-5 carrier, though. Near term we probably pick up share on overlapping routes.'
+    - raj: '@centaur what happened to Northstar''s market share and to total domestic passenger volume in the months after its 2023 outage?'
+    - centaur: 'Northstar''s domestic share fell from 11.8% to 10.1% the next quarter and recovered to 11.2% within a year. Total domestic volume was flat; most of the lost share went to the two largest carriers.'
+    - owen: 'It''s complicated. Airline reputations move together, so a meltdown can hurt everyone. Travelers may assume our IT is no better, a lot of our volume is passengers connecting from partner airlines and Skyline shrinking would shrink that, and enough incidents invite regulation that hits us too.'
+    - elena: 'Agreed. Short term it''s modestly positive, but share rarely moves much after these. The bigger long-term risk is regulators tightening rules on every carrier.'
+    - dana: 'Thanks all, really helpful'
+    - dana: '@owen how does the connecting traffic piece work?'
+    - dana: 'I think we''ll see more of these outages, not fewer'
+    - dana: 'and it feels like the weak point is always legacy systems. we migrated off ours last year, so our exposure is a lot smaller'
+    - dana: 'I wonder if a world where outages keep hitting the big carriers and we''re one of the few that stays up could be a real scenario'
+- description: airline-outage-debate-02
+  vars:
+    respond: false
+    thread:
+    - dana: 'Probably a dumb question, but is the Skyline Air meltdown good or bad for us? Stranded passengers switching carriers vs. people souring on flying overall. How should I think about it for the business? @raj @elena'
+    - raj: 'I''d expect Skyline to lose some corporate accounts short term. Northstar had a two-week IT outage in 2023 and is still a top-5 carrier, though. Near term we probably pick up share on overlapping routes.'
+    - raj: '@centaur what happened to Northstar''s market share and to total domestic passenger volume in the months after its 2023 outage?'
+    - centaur: 'Northstar''s domestic share fell from 11.8% to 10.1% the next quarter and recovered to 11.2% within a year. Total domestic volume was flat; most of the lost share went to the two largest carriers.'
+    - owen: 'It''s complicated. Airline reputations move together, so a meltdown can hurt everyone. Travelers may assume our IT is no better, a lot of our volume is passengers connecting from partner airlines and Skyline shrinking would shrink that, and enough incidents invite regulation that hits us too.'
+    - elena: 'Agreed. Short term it''s modestly positive, but share rarely moves much after these. The bigger long-term risk is regulators tightening rules on every carrier.'
+    - dana: 'Thanks all, really helpful'
+    - dana: '@owen how does the connecting traffic piece work?'
+    - dana: 'I think we''ll see more of these outages, not fewer'
+    - dana: 'and it feels like the weak point is always legacy systems. we migrated off ours last year, so our exposure is a lot smaller'
+    - dana: 'I wonder if a world where outages keep hitting the big carriers and we''re one of the few that stays up could be a real scenario'
+    - owen: 'RE connecting traffic: when a partner cancels, those passengers get rebooked onto whoever has seats, us included. Not sure how big it is for us. @centaur can you estimate what share of our passengers connect from partner airlines?'
+    - centaur: 'About 18% of last quarter''s passengers connected from partner airlines, per the interline bookings report.'
+    - dana: 'But presumably Skyline shrinking just moves passengers to other airlines rather than taking them out of the air, unless you think people fly less overall because of the reputational hit'
+- description: airline-outage-debate-03
+  vars:
+    respond: true
+    thread:
+    - dana: 'Probably a dumb question, but is the Skyline Air meltdown good or bad for us? Stranded passengers switching carriers vs. people souring on flying overall. How should I think about it for the business? @raj @elena'
+    - raj: 'I''d expect Skyline to lose some corporate accounts short term. Northstar had a two-week IT outage in 2023 and is still a top-5 carrier, though. Near term we probably pick up share on overlapping routes.'
+    - raj: '@centaur what happened to Northstar''s market share and to total domestic passenger volume in the months after its 2023 outage?'
+    - centaur: 'Northstar''s domestic share fell from 11.8% to 10.1% the next quarter and recovered to 11.2% within a year. Total domestic volume was flat; most of the lost share went to the two largest carriers.'
+    - owen: 'It''s complicated. Airline reputations move together, so a meltdown can hurt everyone. Travelers may assume our IT is no better, a lot of our volume is passengers connecting from partner airlines and Skyline shrinking would shrink that, and enough incidents invite regulation that hits us too.'
+    - elena: 'Agreed. Short term it''s modestly positive, but share rarely moves much after these. The bigger long-term risk is regulators tightening rules on every carrier.'
+    - dana: 'Thanks all, really helpful'
+    - dana: '@owen how does the connecting traffic piece work?'
+    - dana: 'I think we''ll see more of these outages, not fewer'
+    - dana: 'and it feels like the weak point is always legacy systems. we migrated off ours last year, so our exposure is a lot smaller'
+    - dana: 'I wonder if a world where outages keep hitting the big carriers and we''re one of the few that stays up could be a real scenario'
+    - owen: 'RE connecting traffic: when a partner cancels, those passengers get rebooked onto whoever has seats, us included. Not sure how big it is for us. @centaur can you estimate what share of our passengers connect from partner airlines?'
+    - centaur: 'About 18% of last quarter''s passengers connected from partner airlines, per the interline bookings report.'
+    - dana: 'does that 18% include codeshare passengers or only interline?'
+- description: airline-outage-debate-04
+  vars:
+    respond: true
+    thread:
+    - dana: 'Probably a dumb question, but is the Skyline Air meltdown good or bad for us? Stranded passengers switching carriers vs. people souring on flying overall. How should I think about it for the business? @raj @elena'
+    - raj: 'I''d expect Skyline to lose some corporate accounts short term. Northstar had a two-week IT outage in 2023 and is still a top-5 carrier, though. Near term we probably pick up share on overlapping routes.'
+    - raj: '@centaur what happened to Northstar''s market share and to total domestic passenger volume in the months after its 2023 outage?'
+    - centaur: 'Northstar''s domestic share fell from 11.8% to 10.1% the next quarter and recovered to 11.2% within a year. Total domestic volume was flat; most of the lost share went to the two largest carriers.'
+    - owen: 'It''s complicated. Airline reputations move together, so a meltdown can hurt everyone. Travelers may assume our IT is no better, a lot of our volume is passengers connecting from partner airlines and Skyline shrinking would shrink that, and enough incidents invite regulation that hits us too.'
+    - elena: 'Agreed. Short term it''s modestly positive, but share rarely moves much after these. The bigger long-term risk is regulators tightening rules on every carrier.'
+    - dana: 'Thanks all, really helpful'
+    - dana: '@owen how does the connecting traffic piece work?'
+    - dana: 'I think we''ll see more of these outages, not fewer'
+    - dana: 'and it feels like the weak point is always legacy systems. we migrated off ours last year, so our exposure is a lot smaller'
+    - dana: 'I wonder if a world where outages keep hitting the big carriers and we''re one of the few that stays up could be a real scenario'
+    - owen: 'RE connecting traffic: when a partner cancels, those passengers get rebooked onto whoever has seats, us included. Not sure how big it is for us. @centaur can you estimate what share of our passengers connect from partner airlines?'
+    - centaur: 'About 18% of last quarter''s passengers connected from partner airlines, per the interline bookings report.'
+    - dana: 'can you split that by route?'
+- description: airline-outage-debate-05
+  vars:
+    respond: true
+    thread:
+    - dana: 'Probably a dumb question, but is the Skyline Air meltdown good or bad for us? Stranded passengers switching carriers vs. people souring on flying overall. How should I think about it for the business? @raj @elena'
+    - raj: 'I''d expect Skyline to lose some corporate accounts short term. Northstar had a two-week IT outage in 2023 and is still a top-5 carrier, though. Near term we probably pick up share on overlapping routes.'
+    - raj: '@centaur what happened to Northstar''s market share and to total domestic passenger volume in the months after its 2023 outage?'
+    - centaur: 'Northstar''s domestic share fell from 11.8% to 10.1% the next quarter and recovered to 11.2% within a year. Total domestic volume was flat; most of the lost share went to the two largest carriers.'
+    - owen: 'It''s complicated. Airline reputations move together, so a meltdown can hurt everyone. Travelers may assume our IT is no better, a lot of our volume is passengers connecting from partner airlines and Skyline shrinking would shrink that, and enough incidents invite regulation that hits us too.'
+    - elena: 'Agreed. Short term it''s modestly positive, but share rarely moves much after these. The bigger long-term risk is regulators tightening rules on every carrier.'
+    - dana: 'Thanks all, really helpful'
+    - dana: '@owen how does the connecting traffic piece work?'
+    - dana: 'I think we''ll see more of these outages, not fewer'
+    - dana: 'and it feels like the weak point is always legacy systems. we migrated off ours last year, so our exposure is a lot smaller'
+    - dana: 'I wonder if a world where outages keep hitting the big carriers and we''re one of the few that stays up could be a real scenario'
+    - owen: 'RE connecting traffic: when a partner cancels, those passengers get rebooked onto whoever has seats, us included. Not sure how big it is for us. @centaur can you estimate what share of our passengers connect from partner airlines?'
+    - centaur: 'About 18% of last quarter''s passengers connected from partner airlines, per the interline bookings report.'
+    - dana: '18% seems high, I thought it was closer to 10. are you double counting round trips?'
+- description: holdout/ebike-recall-debate-01
+  vars:
+    respond: false
+    thread:
+    - mira: 'Is the Voltra battery recall a win for us or not? Riders who want a new bike vs. people deciding e-bikes are sketchy in general. Trying to figure out what it means for Q3. @theo @sasha'
+    - theo: 'Short term I think it helps. Voltra loses shelf space at the big dealers for a while. When Pedalix recalled its frames in 2022 they still ended up a top-3 brand, though, so I would not count on it lasting.'
+    - theo: '@centaur how did Pedalix''s share of US e-bike unit sales change in the year after the 2022 recall, and did total category sales dip?'
+    - centaur: 'Pedalix went from 14% to 9% of US units in the two quarters after the recall and was back to 12% a year later. Category units kept growing, about 6% year over year, with most of Pedalix''s lost share going to the two cheapest brands.'
+    - ade: 'I''d be careful. Safety scares stick to the whole category. Buyers might wonder about our cells too, a big slice of our units go through multi-brand dealers who rebalance between brands, so Voltra losing floor space there changes the mix we get, and a few more fires and the regulators show up for everyone.'
+    - sasha: '+1. Small bump for us near term, but recall news fades fast. What worries me more is a battery certification rule that raises costs for every brand.'
+    - mira: 'super useful, thank you'
+    - mira: '@ade what do you mean by dealers rebalancing?'
+    - mira: 'my gut says recalls are going to get more common as everyone races on range'
+    - mira: 'and the cells are where it always goes wrong. we dual-source and test every batch, which most of the cheap brands skip'
+    - mira: 'so could the long game be that the cheap brands keep blowing up and we''re the safe choice left standing?'
+- description: holdout/ebike-recall-debate-02
+  vars:
+    respond: false
+    thread:
+    - mira: 'Is the Voltra battery recall a win for us or not? Riders who want a new bike vs. people deciding e-bikes are sketchy in general. Trying to figure out what it means for Q3. @theo @sasha'
+    - theo: 'Short term I think it helps. Voltra loses shelf space at the big dealers for a while. When Pedalix recalled its frames in 2022 they still ended up a top-3 brand, though, so I would not count on it lasting.'
+    - theo: '@centaur how did Pedalix''s share of US e-bike unit sales change in the year after the 2022 recall, and did total category sales dip?'
+    - centaur: 'Pedalix went from 14% to 9% of US units in the two quarters after the recall and was back to 12% a year later. Category units kept growing, about 6% year over year, with most of Pedalix''s lost share going to the two cheapest brands.'
+    - ade: 'I''d be careful. Safety scares stick to the whole category. Buyers might wonder about our cells too, a big slice of our units go through multi-brand dealers who rebalance between brands, so Voltra losing floor space there changes the mix we get, and a few more fires and the regulators show up for everyone.'
+    - sasha: '+1. Small bump for us near term, but recall news fades fast. What worries me more is a battery certification rule that raises costs for every brand.'
+    - mira: 'super useful, thank you'
+    - mira: '@ade what do you mean by dealers rebalancing?'
+    - mira: 'my gut says recalls are going to get more common as everyone races on range'
+    - mira: 'and the cells are where it always goes wrong. we dual-source and test every batch, which most of the cheap brands skip'
+    - mira: 'so could the long game be that the cheap brands keep blowing up and we''re the safe choice left standing?'
+    - ade: 'On dealers: a shop has maybe 30 bikes of floor space, and when one brand gets pulled it fills the gap with whatever it can get quickly. Hard to say how much of our volume that is. @centaur roughly what fraction of our units sell through multi-brand dealers vs. direct?'
+    - centaur: 'About 41% of units last quarter went through multi-brand dealers; the rest sold direct online or in our two stores.'
+    - sasha: 'that''s higher than I would have guessed'
+    - mira: 'ok but if Voltra''s out, wouldn''t that floor space just go to other brands rather than disappear? unless you''d expect shops to cut e-bikes altogether because customers get spooked'
+- description: holdout/ebike-recall-debate-03
+  vars:
+    respond: true
+    thread:
+    - mira: 'Is the Voltra battery recall a win for us or not? Riders who want a new bike vs. people deciding e-bikes are sketchy in general. Trying to figure out what it means for Q3. @theo @sasha'
+    - theo: 'Short term I think it helps. Voltra loses shelf space at the big dealers for a while. When Pedalix recalled its frames in 2022 they still ended up a top-3 brand, though, so I would not count on it lasting.'
+    - theo: '@centaur how did Pedalix''s share of US e-bike unit sales change in the year after the 2022 recall, and did total category sales dip?'
+    - centaur: 'Pedalix went from 14% to 9% of US units in the two quarters after the recall and was back to 12% a year later. Category units kept growing, about 6% year over year, with most of Pedalix''s lost share going to the two cheapest brands.'
+    - ade: 'I''d be careful. Safety scares stick to the whole category. Buyers might wonder about our cells too, a big slice of our units go through multi-brand dealers who rebalance between brands, so Voltra losing floor space there changes the mix we get, and a few more fires and the regulators show up for everyone.'
+    - sasha: '+1. Small bump for us near term, but recall news fades fast. What worries me more is a battery certification rule that raises costs for every brand.'
+    - mira: 'super useful, thank you'
+    - mira: '@ade what do you mean by dealers rebalancing?'
+    - mira: 'my gut says recalls are going to get more common as everyone races on range'
+    - mira: 'and the cells are where it always goes wrong. we dual-source and test every batch, which most of the cheap brands skip'
+    - mira: 'so could the long game be that the cheap brands keep blowing up and we''re the safe choice left standing?'
+    - ade: 'On dealers: a shop has maybe 30 bikes of floor space, and when one brand gets pulled it fills the gap with whatever it can get quickly. Hard to say how much of our volume that is. @centaur roughly what fraction of our units sell through multi-brand dealers vs. direct?'
+    - centaur: 'About 41% of units last quarter went through multi-brand dealers; the rest sold direct online or in our two stores.'
+    - sasha: 'that''s higher than I would have guessed'
+    - mira: 'is that 41% units or revenue?'
+- description: holdout/ebike-recall-debate-04
+  vars:
+    respond: true
+    thread:
+    - mira: 'Is the Voltra battery recall a win for us or not? Riders who want a new bike vs. people deciding e-bikes are sketchy in general. Trying to figure out what it means for Q3. @theo @sasha'
+    - theo: 'Short term I think it helps. Voltra loses shelf space at the big dealers for a while. When Pedalix recalled its frames in 2022 they still ended up a top-3 brand, though, so I would not count on it lasting.'
+    - theo: '@centaur how did Pedalix''s share of US e-bike unit sales change in the year after the 2022 recall, and did total category sales dip?'
+    - centaur: 'Pedalix went from 14% to 9% of US units in the two quarters after the recall and was back to 12% a year later. Category units kept growing, about 6% year over year, with most of Pedalix''s lost share going to the two cheapest brands.'
+    - ade: 'I''d be careful. Safety scares stick to the whole category. Buyers might wonder about our cells too, a big slice of our units go through multi-brand dealers who rebalance between brands, so Voltra losing floor space there changes the mix we get, and a few more fires and the regulators show up for everyone.'
+    - sasha: '+1. Small bump for us near term, but recall news fades fast. What worries me more is a battery certification rule that raises costs for every brand.'
+    - mira: 'super useful, thank you'
+    - mira: '@ade what do you mean by dealers rebalancing?'
+    - mira: 'my gut says recalls are going to get more common as everyone races on range'
+    - mira: 'and the cells are where it always goes wrong. we dual-source and test every batch, which most of the cheap brands skip'
+    - mira: 'so could the long game be that the cheap brands keep blowing up and we''re the safe choice left standing?'
+    - ade: 'On dealers: a shop has maybe 30 bikes of floor space, and when one brand gets pulled it fills the gap with whatever it can get quickly. Hard to say how much of our volume that is. @centaur roughly what fraction of our units sell through multi-brand dealers vs. direct?'
+    - centaur: 'About 41% of units last quarter went through multi-brand dealers; the rest sold direct online or in our two stores.'
+    - sasha: 'that''s higher than I would have guessed'
+    - mira: 'what was it a year ago?'
+- description: holdout/ebike-recall-debate-05
+  vars:
+    respond: true
+    thread:
+    - mira: 'Is the Voltra battery recall a win for us or not? Riders who want a new bike vs. people deciding e-bikes are sketchy in general. Trying to figure out what it means for Q3. @theo @sasha'
+    - theo: 'Short term I think it helps. Voltra loses shelf space at the big dealers for a while. When Pedalix recalled its frames in 2022 they still ended up a top-3 brand, though, so I would not count on it lasting.'
+    - theo: '@centaur how did Pedalix''s share of US e-bike unit sales change in the year after the 2022 recall, and did total category sales dip?'
+    - centaur: 'Pedalix went from 14% to 9% of US units in the two quarters after the recall and was back to 12% a year later. Category units kept growing, about 6% year over year, with most of Pedalix''s lost share going to the two cheapest brands.'
+    - ade: 'I''d be careful. Safety scares stick to the whole category. Buyers might wonder about our cells too, a big slice of our units go through multi-brand dealers who rebalance between brands, so Voltra losing floor space there changes the mix we get, and a few more fires and the regulators show up for everyone.'
+    - sasha: '+1. Small bump for us near term, but recall news fades fast. What worries me more is a battery certification rule that raises costs for every brand.'
+    - mira: 'super useful, thank you'
+    - mira: '@ade what do you mean by dealers rebalancing?'
+    - mira: 'my gut says recalls are going to get more common as everyone races on range'
+    - mira: 'and the cells are where it always goes wrong. we dual-source and test every batch, which most of the cheap brands skip'
+    - mira: 'so could the long game be that the cheap brands keep blowing up and we''re the safe choice left standing?'
+    - ade: 'On dealers: a shop has maybe 30 bikes of floor space, and when one brand gets pulled it fills the gap with whatever it can get quickly. Hard to say how much of our volume that is. @centaur roughly what fraction of our units sell through multi-brand dealers vs. direct?'
+    - centaur: 'About 41% of units last quarter went through multi-brand dealers; the rest sold direct online or in our two stores.'
+    - sasha: 'that''s higher than I would have guessed'
+    - mira: '41% can''t be right, our direct site alone did more than half of units last quarter. are you counting dealer returns?'

@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { createOpenAiProactiveClassifier, proactiveDecisionTranscript } from '../src/proactive-classifier'
+import {
+  createOpenAiProactiveClassifier,
+  proactiveDecisionTranscript,
+  proactiveThreadMessage
+} from '../src/proactive-classifier'
 import type { ProactiveClassifierInput } from '../src/types'
 
 const input: ProactiveClassifierInput = {
@@ -67,6 +71,18 @@ describe('OpenAI proactive classifier', () => {
       '[Investor]: Acme Robotics',
       '[Investor]: Series B, founder ex-Stripe'
     ].join('\n'))
+  })
+
+  test('labels Chat SDK messages by display name and whether the bot wrote them', () => {
+    const author = { fullName: 'Dana Reyes', isBot: false, isMe: false, userId: 'U07LV5J6PA', userName: 'dana' }
+    expect(proactiveThreadMessage({ author, text: '@U03CTR8YKE hi' })).toEqual({
+      author: 'Dana Reyes',
+      fromBot: false,
+      text: '@U03CTR8YKE hi'
+    })
+    expect(proactiveThreadMessage({ author: { ...author, fullName: '', userName: '' }, text: 'x' }).author)
+      .toBe('U07LV5J6PA')
+    expect(proactiveThreadMessage({ author: { ...author, isMe: true }, text: 'x' }).fromBot).toBe(true)
   })
 
   test('picks the first rule, in order, that the message meets', async () => {

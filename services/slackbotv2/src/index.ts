@@ -69,6 +69,7 @@ import {
   type SlackContextBlock
 } from './response-context'
 import { resolveChannelDefault } from './channel-defaults'
+import { proactiveThreadMessage } from './proactive-classifier'
 import { resolveProactivityRules, type ProactivityRule } from './proactivity-rules'
 import {
   extractMessageOverrides,
@@ -95,7 +96,6 @@ import type {
   ForwardSessionInput,
   JsonObject,
   ProactiveDecision,
-  ProactiveThreadMessage,
   SlackbotV2,
   SlackbotV2ApiAttachment,
   SlackbotV2BlockActionPayload,
@@ -1156,14 +1156,6 @@ async function proactiveThreadHistory(
     if (history.length >= PROACTIVE_HISTORY_MESSAGES) break
   }
   return history.reverse()
-}
-
-function proactiveThreadMessage(message: ChatMessage): ProactiveThreadMessage {
-  return {
-    author: message.author.fullName || message.author.userName || message.author.userId,
-    fromBot: message.author.isMe === true,
-    text: message.text
-  }
 }
 
 async function subscribeSlackThreadForHandoff(

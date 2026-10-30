@@ -1,3 +1,4 @@
+import type { Message as ChatMessage } from 'chat'
 import type { ProactivityRule } from './proactivity-rules'
 import type {
   ProactiveClassifier,
@@ -136,6 +137,17 @@ function firstMatchingRule(rules: ProactivityRule[], probabilities: number[]): P
   const index = probabilities.findIndex(probability => probability >= RESPOND_PROBABILITY_THRESHOLD)
   if (index === -1) return { probability: Math.max(...probabilities), respond: false }
   return { probability: probabilities[index], respond: true, rule: rules[index]!.name }
+}
+
+/** A Chat SDK message as the classifier sees it. */
+export function proactiveThreadMessage(
+  message: Pick<ChatMessage, 'author' | 'text'>
+): ProactiveThreadMessage {
+  return {
+    author: message.author.fullName || message.author.userName || message.author.userId,
+    fromBot: message.author.isMe === true,
+    text: message.text
+  }
 }
 
 function transcriptLine(botName: string, message: ProactiveThreadMessage): string {

@@ -4814,6 +4814,9 @@ describe('proactive replies', () => {
     expect(calls).toHaveLength(1)
     expect(calls[0]!.message).toMatchObject({ fromBot: false, text: 'what about staging?' })
     expect(calls[0]!.history.map(item => item.text)).toContain('Proactive accept context.')
+    // Chat SDK resolves mentions to display names, as the proactive-response
+    // eval's thread texts assume.
+    expect(calls[0]!.history.map(item => item.text)).toContain('@centaur check the deploy')
     expect(calls[0]!.history.some(item => item.fromBot)).toBe(true)
     expect(codexApi.executes).toHaveLength(2)
     expect(sessionMessageTexts(codexApi.appends.flatMap(append => append.body.messages)))

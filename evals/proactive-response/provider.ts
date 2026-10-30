@@ -1,14 +1,19 @@
 // Runs the production Slack proactive-response classifier on a case's thread. Each
 // `thread` entry is a one-key map from author to text, oldest first; the last
-// entry is the newest message and the author `centaur` is the bot. History is
-// built as slackbotv2 builds it: the latest earlier messages, bot replies
-// included, oldest first. An optional `rules` var (a list of {name, when}) runs a
+// entry is the newest message and the author `centaur` is the bot. Entries
+// become Chat SDK messages labelled by slackbotv2's own proactiveThreadMessage,
+// so texts are written as Chat SDK renders them: mentions resolve to display
+// names (`@centaur`, `@Bob Martinez`). History is built as slackbotv2 builds it:
+// the latest earlier messages, bot replies included, oldest first. An optional `rules` var (a list of {name, when}) runs a
 // rule-match decision with those proactivity rules instead of the
 // mentioned-thread rules; the output's `rule` names the first rule matched.
 // An optional `burst` var (default 1) counts the trailing entries sent in quick
 // succession that slackbotv2's debounce judges together as the newest message.
 import type { ApiProvider, CallApiContextParams, ProviderOptions, ProviderResponse } from 'promptfoo'
-import { createOpenAiProactiveClassifier } from '../../services/slackbotv2/src/proactive-classifier'
+import {
+  createOpenAiProactiveClassifier,
+  proactiveThreadMessage
+} from '../../services/slackbotv2/src/proactive-classifier'
 import type { ProactivityRule } from '../../services/slackbotv2/src/proactivity-rules'
 import type { ProactiveThreadMessage as ThreadMessage } from '../../services/slackbotv2/src/types'
 
@@ -92,6 +97,10 @@ function threadMessages(thread: unknown): ThreadMessage[] {
     if (pairs.length !== 1 || typeof text !== 'string') {
       throw new Error(`thread entry must be a single {author: text} pair: ${JSON.stringify(entry)}`)
     }
-    return { author, fromBot: author === BOT_NAME, text }
+    const isMe = author === BOT_NAME
+    return proactiveThreadMessage({
+      author: { fullName: author, isBot: isMe, isMe, userId: author, userName: author },
+      text
+    })
   })
 }
