@@ -1164,11 +1164,22 @@ fn build_agent_sandbox(
         .map(|env| (env.name.clone(), env.value.clone()))
         .collect();
     let repo_cache_enabled = spec.capabilities.repo_cache.enabled();
+    // With a repo-cache server, checkouts are fetched into the pod through the
+    // proxy instead of mounted, so no host or shared volume reaches the pod.
+    let repo_cache_url = config
+        .iron_proxy
+        .as_ref()
+        .and_then(|iron_proxy| iron_proxy.repo_cache_url.as_deref())
+        .filter(|_| repo_cache_enabled);
     let scoped_tools = config
         .tools
         .as_ref()
         .filter(|_| repo_cache_enabled)
-        .map(|tools| tools.scoped_for_repo_cache_access(&spec.capabilities.repo_cache));
+        .map(|tools| tools.scoped_for_repo_cache_access(&spec.capabilities.repo_cache))
+        .map(|tools| match repo_cache_url {
+            Some(_) => tools.fetched_from_repo_cache(),
+            None => tools,
+        });
     let repo_cache_tools = scoped_tools.as_ref().filter(|tools| tools.has_sources());
     let baked_base_tools = config.tools.is_some() && repo_cache_tools.is_none();
 
@@ -1180,6 +1191,9 @@ fn build_agent_sandbox(
         for (name, value) in tools::baked_base_agent_env() {
             upsert_env(&mut agent_env, &name, value);
         }
+    }
+    if let Some(url) = repo_cache_url {
+        upsert_env(&mut agent_env, "CENTAUR_REPO_CACHE_URL", url.to_owned());
     }
     insert_optional(
         &mut container,
@@ -1236,11 +1250,39 @@ fn build_agent_sandbox(
         volume_mounts.extend(tools::agent_volume_mounts_json(repo_cache_tools));
         volumes.extend(tools::volumes_json(repo_cache_tools));
     }
+    // Fetched checkouts stay writable so the agent's watcher can refresh them.
+    if repo_cache_url.is_some() {
+        volumes.push(json!({"name": tools::REPO_CACHE_VOLUME, "emptyDir": {}}));
+        volume_mounts.push(json!({
+            "name": tools::REPO_CACHE_VOLUME,
+            "mountPath": tools::SANDBOX_REPOS_PATH,
+        }));
+    }
     insert_optional(
         &mut container,
         "volumeMounts",
         (!volume_mounts.is_empty()).then_some(volume_mounts),
     );
+
+    if let Some(url) = repo_cache_url {
+        let proxy_env: Vec<(String, String)> = spec
+            .env
+            .iter()
+            .filter(|env| {
+                matches!(
+                    env.name.as_str(),
+                    "HTTP_PROXY" | "http_proxy" | "NO_PROXY" | "no_proxy"
+                )
+            })
+            .map(|env| (env.name.clone(), env.value.clone()))
+            .collect();
+        init_containers.push(tools::repo_cache_fetch_init_container_json(
+            &spec.image,
+            config.image_pull_policy.as_deref(),
+            url,
+            &proxy_env,
+        ));
+    }
 
     // tools-bootstrap publishes the tools repo into /app/tools.
     if let Some(tools) = repo_cache_tools {
@@ -1272,7 +1314,7 @@ fn build_agent_sandbox(
     });
     insert_optional(&mut pod_spec, "hostUsers", config.host_users);
     // fsGroup makes bootstrap emptyDirs and the state PVC writable by the agent UID.
-    if repo_cache_tools.is_some() || config.state_volume.is_some() {
+    if repo_cache_tools.is_some() || repo_cache_url.is_some() || config.state_volume.is_some() {
         pod_spec["securityContext"] = tools::pod_security_context_json();
     }
     insert_optional(
@@ -2355,6 +2397,73 @@ mod tests {
                 .iter()
                 .any(|mount| mount.name == "firewall-ca")
         );
+    }
+
+    #[test]
+    fn repo_cache_server_fetches_checkouts_through_the_proxy() {
+        let spec = SandboxSpec::new("centaur-agent:latest")
+            .env("HTTP_PROXY", "http://asbx-test-iron-proxy:8080")
+            .env("NO_PROXY", "localhost");
+        let mut tools = ToolsConfig::new("acme/tools", "api:test");
+        tools.repo_cache_path = Some("/var/lib/centaur/repos".to_owned());
+        let mut iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
+        iron_proxy.repo_cache_url = Some("http://centaur-repo-cache:8080".to_owned());
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings())
+            .tools(tools)
+            .iron_proxy(iron_proxy);
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        let pod_spec = serde_json::to_value(&sandbox.spec.pod_template.spec).unwrap();
+        let init = pod_spec["initContainers"].as_array().unwrap();
+        assert_eq!(
+            init.iter().map(|c| c["name"].clone()).collect::<Vec<_>>(),
+            [json!("repo-cache-fetch"), json!("tools-bootstrap")]
+        );
+        let env = |container: &Value, name: &str| {
+            container["env"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|env| env["name"] == name)
+                .map(|env| env["value"].clone())
+        };
+        assert_eq!(
+            env(&init[0], "CENTAUR_REPO_CACHE_URL"),
+            Some(json!("http://centaur-repo-cache:8080"))
+        );
+        assert_eq!(
+            env(&init[0], "HTTP_PROXY"),
+            Some(json!("http://asbx-test-iron-proxy:8080"))
+        );
+        let script = init[1]["command"][2].as_str().unwrap();
+        assert!(script.contains("cache_repo=\"/home/agent/github/acme/tools\""));
+        assert!(!script.contains("until [ -d \"$cache_repo/.git\" ]"));
+
+        let volumes = pod_spec["volumes"].as_array().unwrap();
+        let repo_cache = volumes
+            .iter()
+            .find(|volume| volume["name"] == tools::REPO_CACHE_VOLUME)
+            .unwrap();
+        assert!(repo_cache["emptyDir"].is_object());
+        assert!(
+            volumes
+                .iter()
+                .all(|volume| volume.get("hostPath").is_none())
+        );
+        let agent = &pod_spec["containers"][0];
+        assert_eq!(
+            env(agent, "CENTAUR_REPO_CACHE_URL"),
+            Some(json!("http://centaur-repo-cache:8080"))
+        );
+        let repos = agent["volumeMounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|mount| mount["name"] == tools::REPO_CACHE_VOLUME)
+            .collect::<Vec<_>>();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0]["mountPath"], "/home/agent/github");
+        assert_ne!(repos[0]["readOnly"], true);
     }
 
     #[test]
