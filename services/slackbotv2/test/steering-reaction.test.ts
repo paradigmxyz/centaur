@@ -15,7 +15,8 @@ describe('steering reaction acknowledgements', () => {
     })
     const ack = controller.begin(
       { id: 'slack:C123:1700000000.000100' } as Thread,
-      { id: '1700000001.000200' } as ChatMessage
+      { id: '1700000001.000200' } as ChatMessage,
+      'steering'
     )
 
     expect(ack).toBeDefined()

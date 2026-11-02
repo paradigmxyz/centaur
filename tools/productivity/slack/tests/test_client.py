@@ -146,7 +146,6 @@ def _make_client() -> tuple[SlackClient, _FakeWebClient]:
     client = SlackClient.__new__(SlackClient)
     fake_web_client = _FakeWebClient()
     client._client = fake_web_client
-    client._search_client = fake_web_client
     client._user_cache = {}
     client._ratelimit_deadlines = {}
     client._resolve_channel = lambda channel: "C123"  # type: ignore[method-assign]
@@ -501,10 +500,8 @@ def test_get_channel_history_page_surfaces_structured_auth_failure() -> None:
     }
 
 
-def test_get_user_profile_reads_labeled_custom_fields_with_direct_client() -> None:
-    client, fake_bot_client = _make_client()
-    fake_web_client = _FakeWebClient()
-    client._search_client = fake_web_client
+def test_get_user_profile_reads_labeled_custom_fields() -> None:
+    client, fake_web_client = _make_client()
     fake_web_client.user_info_response = {
         "user": {
             "id": "U123",
@@ -534,8 +531,6 @@ def test_get_user_profile_reads_labeled_custom_fields_with_direct_client() -> No
 
     assert fake_web_client.users_calls == [{"user": "U123"}]
     assert fake_web_client.user_profile_calls == [{"user": "U123", "include_labels": True}]
-    assert fake_bot_client.users_calls == []
-    assert fake_bot_client.user_profile_calls == []
     assert profile["custom_fields"] == {"Affiliations": "GitHub: test-user"}
     assert profile["raw_custom_fields"] == {
         "Xf123": {"label": "Affiliations", "value": "GitHub: test-user", "alt": ""}
@@ -1138,10 +1133,8 @@ def test_search_files_paginates_proxy_until_enough_matches() -> None:
     assert [result["id"] for result in results] == ["F123456789"]
 
 
-def test_search_files_direct_uses_user_token_client() -> None:
-    client, fake_bot_client = _make_client()
-    fake_web_client = _FakeWebClient()
-    client._search_client = fake_web_client
+def test_search_files_direct_lists_files_with_sdk_client() -> None:
+    client, fake_web_client = _make_client()
     client._get_user_cache = lambda **_: {"U123456789": "alice"}  # type: ignore[method-assign]
     client.list_files_proxy = pytest.fail  # type: ignore[method-assign]
     fake_web_client.files_list_pages = [
@@ -1167,25 +1160,22 @@ def test_search_files_direct_uses_user_token_client() -> None:
     results = client.search_files_direct("report", max_results=10)
 
     assert fake_web_client.files_list_calls == [{"count": 200, "page": 1}]
-    assert fake_bot_client.files_list_calls == []
     assert results[0]["user"] == "alice"
 
 
-def test_search_files_direct_reports_user_token_auth_failure() -> None:
-    client, _ = _make_client()
-    fake_search_client = _FakeWebClient()
-    client._search_client = fake_search_client
+def test_search_files_direct_reports_auth_failure() -> None:
+    client, fake_web_client = _make_client()
     client._get_user_cache = lambda **_: {}  # type: ignore[method-assign]
 
     def fail_files_list(**kwargs):
         raise _make_slack_error(error="missing_scope", status_code=200)
 
-    fake_search_client.files_list = fail_files_list  # type: ignore[method-assign]
+    fake_web_client.files_list = fail_files_list  # type: ignore[method-assign]
 
     with pytest.raises(SlackAuthError) as excinfo:
         client.search_files_direct("report")
 
-    assert excinfo.value.payload["access_path"] == "search_token"
+    assert excinfo.value.payload["access_path"] == "bot_token"
     assert excinfo.value.payload["slack_method"] == "files.list"
 
 
@@ -1289,24 +1279,22 @@ def test_search_messages_direct_uses_native_filters_without_scanning_history() -
 
 
 def test_unscoped_search_surfaces_missing_user_scope_without_scanning_history() -> None:
-    client, _ = _make_client()
-    search_client = _FakeWebClient()
+    client, search_client = _make_client()
 
     def fail_native_search(method: str, *, params: dict) -> None:
         assert method == "search.messages"
         raise _make_slack_error(error="missing_scope", status_code=200)
 
     search_client.api_call = fail_native_search  # type: ignore[method-assign]
-    client._search_client = search_client
 
     with pytest.raises(SlackAuthError) as exc_info:
         client.search_messages_direct("fire-drill after:2026-08-10")
 
     assert exc_info.value.payload == {
         "error": "slack_auth_failed",
-        "message": "Slack authentication failed for search.messages via search_token",
+        "message": "Slack authentication failed for search.messages via bot_token",
         "slack_method": "search.messages",
-        "access_path": "search_token",
+        "access_path": "bot_token",
         "error_code": "missing_scope",
         "status_code": 200,
         "requested_channel": None,
@@ -1718,11 +1706,10 @@ def test_fetch_slack_file_returns_file_metadata_and_bytes(
 
     client, _ = _make_client()
     client.token = "SLACK_BOT_TOKEN"
-    client.search_token = "SLACK_SEARCH_TOKEN"
 
     def fake_urlopen(req, *args, **kwargs):
         if "files.slack.com" in req.full_url:
-            assert req.get_header("Authorization") == "Bearer SLACK_SEARCH_TOKEN"
+            assert req.get_header("Authorization") == "Bearer SLACK_BOT_TOKEN"
             return _FakeHTTPResponse(b"%PDF-1.4 report", "application/pdf")
         raise AssertionError(f"unexpected url {req.full_url}")
 
@@ -1737,23 +1724,19 @@ def test_fetch_slack_file_returns_file_metadata_and_bytes(
     assert body == b"%PDF-1.4 report"
 
 
-def test_get_file_info_direct_uses_user_token_client() -> None:
-    client, fake_bot_client = _make_client()
-    fake_search_client = _FakeWebClient()
-    fake_search_client._shares_by_file["F123"] = {}
-    client._search_client = fake_search_client
+def test_get_file_info_direct_fetches_file_metadata() -> None:
+    client, fake_web_client = _make_client()
+    fake_web_client._shares_by_file["F123"] = {}
 
     result = client.get_file_info_direct("f123")
 
     assert result["id"] == "F123"
-    assert fake_search_client.files_info_calls == [{"file": "F123"}]
-    assert fake_bot_client.files_info_calls == []
+    assert fake_web_client.files_info_calls == [{"file": "F123"}]
 
 
-def test_native_search_uses_dedicated_search_client() -> None:
-    client, fake_bot_client = _make_client()
-    fake_search_client = _FakeWebClient()
-    fake_search_client.api_call = lambda method, *, params: {  # type: ignore[method-assign]
+def test_native_search_formats_matches() -> None:
+    client, fake_web_client = _make_client()
+    fake_web_client.api_call = lambda method, *, params: {  # type: ignore[method-assign]
         "ok": True,
         "messages": {
             "matches": [
@@ -1769,7 +1752,6 @@ def test_native_search_uses_dedicated_search_client() -> None:
             ]
         },
     }
-    client._search_client = fake_search_client
     client._get_user_cache = lambda: {"U1": "alice", "U2": "bob"}  # type: ignore[method-assign]
 
     result = client._search_messages_native("deploy", max_results=5)
@@ -1787,7 +1769,6 @@ def test_native_search_uses_dedicated_search_client() -> None:
             "reply_count": 2,
         }
     ]
-    assert fake_bot_client.api_calls == []
 
 
 def test_sync_channel_history_uses_watermark_lookback() -> None:

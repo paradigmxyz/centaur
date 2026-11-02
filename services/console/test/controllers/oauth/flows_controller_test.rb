@@ -220,7 +220,7 @@ module Oauth
       assert_equal "google-sub-1", credential.reload.provider_subject
     end
 
-    test "Mercator shared consent creates a narrowly scoped secret and refresh preserves role access" do
+    test "Mercator shared consent creates a narrowly scoped secret" do
       provider = Oauth::Providers.fetch("mercator")
       app = OauthApp.create!(provider.preset.merge(provider: provider.key, client_id: "mercator-client", client_secret: "synthetic", created_by: users(:acme_admin)))
       sign_in users(:acme_admin)
@@ -239,16 +239,6 @@ module Oauth
       assert_equal [ { "host" => "mercator.sh", "methods" => [ "POST" ], "paths" => [ "/mcp/auth" ] } ], secret.rules.map(&:to_proxy_rule)
       assert_empty secret.labels
       assert_empty secret.grants
-      grant = Grant.create!(role: roles(:acme_infra), static_secret: secret, created_by: users(:acme_admin))
-      credential.update!(next_attempt_at: 1.minute.ago)
-      credential.refresh_client = Broker::RefreshClient.new(http: ->(**request) {
-        assert_equal "mercator-client", request[:form]["client_id"]
-        HttpClient::Response.new(status: 200, body: { access_token: "rotated-synthetic", refresh_token: "rotated-refresh", expires_in: 3600 }.to_json)
-      })
-      credential.refresh!
-      assert_not credential.dead?
-      assert_equal "rotated-synthetic", credential.static_secret.source.to_proxy_source["value"]
-      assert Grant.exists?(grant.id)
     end
 
     # --- start ----------------------------------------------------------------
@@ -487,7 +477,6 @@ module Oauth
       assert_nil cred.refresh_token
       assert_nil cred.expires_at
       assert_nil cred.next_attempt_at
-      refute_includes BrokerCredential.refreshable, cred
     end
 
     test "callback happy path supports non-rotating Slack bot tokens" do
@@ -512,7 +501,6 @@ module Oauth
       assert_nil cred.next_attempt_at
       assert_equal "TACME", cred.labels["slack_team_id"]
       assert_equal [ "slack.com" ], cred.static_secret.rules.map(&:host)
-      refute_includes BrokerCredential.refreshable, cred
     end
 
     test "callback happy path supports Attio workspace tokens" do
@@ -549,7 +537,6 @@ module Oauth
       assert_nil cred.next_attempt_at
       assert_equal [ "api.attio.com" ], cred.static_secret.rules.map(&:host)
       assert_equal "Attio – Acme Sales token", cred.static_secret.name
-      refute_includes BrokerCredential.refreshable, cred
     end
 
     test "callback happy path supports GitHub OAuth app tokens" do
@@ -598,7 +585,6 @@ module Oauth
         },
         cred.static_secret.replace_config
       )
-      refute_includes BrokerCredential.refreshable, cred
     end
 
     test "callback happy path supports Linear OAuth app tokens" do

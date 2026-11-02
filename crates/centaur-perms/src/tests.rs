@@ -918,22 +918,39 @@ fn repo_tools_dir() -> Option<PathBuf> {
 }
 
 #[test]
-fn real_slack_tool_parses_and_translates() {
+fn every_repo_tool_manifest_parses() {
     let Some(tools_dir) = repo_tools_dir() else {
         return;
     };
-    let manifest = tools::find_tool(&[tools_dir], "slack").unwrap();
-    assert_eq!(manifest.name, "slack");
+    let failures: Vec<String> = tools::collect_candidate_dirs(&tools_dir)
+        .into_iter()
+        .filter(|dir| dir.join("pyproject.toml").is_file())
+        .filter_map(|dir| tools::parse_manifest(&dir).err().map(|e| format!("{e:#}")))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "invalid tool manifests:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn real_dune_tool_parses_and_translates() {
+    let Some(tools_dir) = repo_tools_dir() else {
+        return;
+    };
+    let manifest = tools::find_tool(&[tools_dir], "dune").unwrap();
+    assert_eq!(manifest.name, "dune");
     let out = translate::translate(
-        "tool-slack",
+        "tool-dune",
         &manifest.all_secrets().cloned().collect::<Vec<_>>(),
         &SourcePolicy::env(),
     );
     assert!(
         out.inputs.iter().any(
-            |i| matches!(i, SecretInput::Static(s) if s.foreign_id == "tool-slack-slack-search-token")
+            |i| matches!(i, SecretInput::Static(s) if s.foreign_id == "tool-dune-dune-api-key")
         ),
-        "expected the SLACK_SEARCH_TOKEN static secret"
+        "expected the DUNE_API_KEY static secret"
     );
 }
 

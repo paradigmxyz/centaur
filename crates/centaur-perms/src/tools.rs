@@ -328,7 +328,7 @@ fn overlay_name_for_root(root: &Path) -> String {
 
 /// Candidate tool directories under `base`: direct children carrying a
 /// `pyproject.toml`, plus the children of category folders (one level deep).
-fn collect_candidate_dirs(base: &Path) -> Vec<PathBuf> {
+pub(crate) fn collect_candidate_dirs(base: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     let Ok(entries) = std::fs::read_dir(base) else {
         return candidates;

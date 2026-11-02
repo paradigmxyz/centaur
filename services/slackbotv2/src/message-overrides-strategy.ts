@@ -3,30 +3,25 @@ import {
   extractMessageOverrides,
   validateStrategyOverrides
 } from './overrides'
-import type { JsonObject, MessageOverridesStrategy } from './types'
+import type { MessageOverridesStrategy } from './types'
 import { errorMessage, isJsonObject } from './utils'
 
 const DEFAULT_TIMEOUT_MS = 2_000
-const DEFAULT_MAX_OUTPUT_TOKENS = 300
+// Minimum probability that the message asks for a selection at all. Below it,
+// every per-field answer is ignored.
+const SELECTION_PROBABILITY_THRESHOLD = 0.5
+const UNSPECIFIED = 'unspecified'
 
-const SYSTEM_PROMPT = [
-  'Decide whether the Slack message asks to use a specific AI harness, model, provider, or reasoning effort.',
-  'Return only canonical override values from the schema.',
-  'Use null for every field when the message does not ask to change model selection.',
-  'Allowed harness values: codex, claudecode, amp, nanocodex, pi, omp.',
-  'Allowed provider values: responses, amazon-bedrock, openrouter.',
-  'Allowed reasoning values: none, minimal, low, medium, high, xhigh, max, ultra.',
-  'Treat inline flags such as "--claude", "--claude --model=fable", and "--fable" as model selection requests.',
-  'In this Slackbot, a request to use Claude without another named Claude model means harness claudecode and model claude-opus-5-5. Examples: "--claude what model are you?" and "using claude:" select harness claudecode and model claude-opus-5-5. Explicit Fable requests such as "--claude --model=fable" and "using claude fable:" select harness claudecode and model claude-fable-5.',
-  'Only return reasoning when the user explicitly asks to change model reasoning or effort. A reasoning word appearing incidentally, in quoted text, pasted model output, code, or task requirements is not a selection request.',
-  'When the user explicitly requests a reasoning or effort change, map fuzzy magnitude words to the nearest reasoning value. Examples: tiny/cheap/fast -> low or minimal; normal/default -> medium; deep/strong/intense -> high or xhigh; maximum/superduper/biggest -> max.',
-  'Return reasoning even when the requested model is not Codex; validation will ignore reasoning that cannot apply.',
-  'Map OpenAI model aliases to canonical IDs: astra -> gpt-6-astra, sol -> gpt-6.1-sol, 6.1 sol -> gpt-6.1-sol, 6 sol -> gpt-6-sol, luna -> gpt-6-luna, terra -> gpt-5.6-terra, 5.6 sol -> gpt-5.6-sol, 5.6 luna -> gpt-5.6-luna, 5.5 -> gpt-5.5, 5.5 pro -> gpt-5.5-pro, 5.4 -> gpt-5.4, 5.4 pro -> gpt-5.4-pro, 5.4 mini -> gpt-5.4-mini, 5.4 nano -> gpt-5.4-nano. Preserve explicitly requested model generations; there is no GPT-6 Terra in the supported catalog.',
-  'Map Claude model aliases to canonical IDs: fable -> claude-fable-5, opus -> claude-opus-5-5, opus 4.8 -> claude-opus-4-8, opus 4.7 -> claude-opus-4-7, opus 5 -> claude-opus-5, opus 5 fast -> claude-opus-5-fast, opus 5.5 -> claude-opus-5-5, sonnet -> claude-sonnet-5, sonnet 4.6 -> claude-sonnet-4-6, sonnet 5 -> claude-sonnet-5, haiku -> claude-haiku-4-5.',
-  'Map Amp model aliases to canonical IDs: deep -> deep, fast -> fast. Select an Amp model only when the user explicitly names Amp or clearly asks for the deep or fast model/mode. Requests such as "use the deep model" and "switch to fast mode" select the corresponding Amp model. Do not infer Amp from superlatives, coined terms, or casual requests to be more intelligent, thorough, or fast.',
-  'Words containing or merely evoking model aliases are not model requests. For example, "think deeply", "do a deep analysis", "use your strongest thinking", and "give me a fast answer" do not select Amp. Unless another explicit selector is present, return null for every field.',
-  'For example, "use max effort and the sol model" should return model "gpt-6.1-sol" and reasoning "max".',
-  'Do not treat ordinary discussion of model names as a selection request.'
+const INSTRUCTIONS = [
+  'You evaluate a Slack message sent to an AI coding bot and decide whether it asks to choose the AI harness, model, provider, or reasoning effort used to answer it.',
+  'A selection is an explicit instruction to the bot about how to run, such as "use X", "switch to X", "run this on X", "retry with X", "with high effort", or a leading "using X:" prefix.',
+  'A selection counts wherever it appears: at the start, mid-sentence, or at the end of a long request, after quoted text, or alongside other setup such as "Using the reviewer persona and claude fable...". Only the quoted or pasted material itself is excluded.',
+  'Asking to use a feature of a specific harness, such as Codex\'s /goal, selects that harness.',
+  '"using claude:" or "use claude" with no other Claude model named selects the default Claude model, Opus 5.5.',
+  'Only explicit requests count. Words in quoted text, pasted output, code, config values like reasoning=high, task requirements, questions about the bot, or ordinary discussion of model names are not selection requests.',
+  'Words merely evoking speed or depth, such as "think deeply", "deep analysis", "quick question", or "a fast answer", select neither a model nor a reasoning effort. "Fast mode", "deep mode", "the fast model", and "the deep model" are explicit Amp model selections.',
+  'Reasoning effort is selected only when the user explicitly sets reasoning, effort, or a thinking level, such as "high effort" or "xhigh thinking"; then map magnitude words to the nearest level. Asking the bot to think hard or use its best or strongest thinking does not select a reasoning effort.',
+  'A version number always selects that exact model and overrides the default for a family name: "5.6 sol" is gpt-5.6-sol, not the default sol model, and "codex 5.5" or "gpt 5.5" is gpt-5.5. An effort word after a family name, such as "fable xhigh", is not a version.'
 ].join('\n')
 
 // Only messages that mention a model name or selection term can ask for an
@@ -36,73 +31,114 @@ const SYSTEM_PROMPT = [
 const SELECTOR_TERM_PATTERN =
   /(?<![a-z])(?:claude|claudecode|codex|amp|nanocodex|omp|opus|sonnet|haiku|fable|gpt|astra|sol|luna|terra|model|harness|provider|reasoning|effort|mode|bedrock|openrouter|think|thinking)(?:s|es)?(?![a-z])/i
 
-const MODEL_VALUES = [
-  'claude-fable-5',
-  'claude-haiku-4-5',
-  'claude-opus-4-7',
-  'claude-opus-4-8',
-  'claude-opus-5',
-  'claude-opus-5-fast',
-  'claude-opus-5-5',
-  'claude-sonnet-4-6',
-  'claude-sonnet-5',
-  'deep',
-  'fast',
-  'gpt-5.4',
-  'gpt-5.4-mini',
-  'gpt-5.4-nano',
-  'gpt-5.4-pro',
-  'gpt-5.5',
-  'gpt-5.5-pro',
-  'gpt-5.6-luna',
-  'gpt-5.6-sol',
-  'gpt-5.6-terra',
-  'gpt-6-astra',
-  'gpt-6-sol',
-  'gpt-6.1-sol',
-  'gpt-6-luna',
-  null
-] as const
+type Choice = { description?: string; value: string }
 
-const MESSAGE_OVERRIDES_SCHEMA = {
-  additionalProperties: false,
-  properties: {
-    harness: {
-      enum: ['codex', 'claudecode', 'amp', 'nanocodex', 'pi', 'omp', null],
-      type: ['string', 'null']
-    },
-    model: {
-      enum: MODEL_VALUES,
-      type: ['string', 'null']
-    },
-    provider: {
-      enum: ['responses', 'amazon-bedrock', 'openrouter', null],
-      type: ['string', 'null']
-    },
-    reasoning: {
-      enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra', null],
-      type: ['string', 'null']
-    }
+const HARNESS_CHOICES: Choice[] = ['codex', 'claudecode', 'amp', 'nanocodex', 'pi', 'omp'].map(
+  value => ({ value })
+)
+
+const PROVIDER_CHOICES: Choice[] = ['responses', 'amazon-bedrock', 'openrouter'].map(value => ({
+  value
+}))
+
+const REASONING_CHOICES: Choice[] = [
+  { value: 'none', description: 'No reasoning.' },
+  { value: 'minimal', description: 'Minimal; tiny.' },
+  { value: 'low', description: 'Low; cheap, fast, quick.' },
+  { value: 'medium', description: 'Medium; normal, default.' },
+  { value: 'high', description: 'High; deep, strong, hard.' },
+  { value: 'xhigh', description: 'Extra high; intense, very hard.' },
+  { value: 'max', description: 'Max; maximum, superduper, biggest, hardest.' },
+  { value: 'ultra', description: 'Ultra.' }
+]
+
+// Descriptions carry the user-facing aliases. Each states exactly when it
+// applies so a bare family name ("sol") resolves to its default generation.
+const MODEL_CHOICES: Choice[] = [
+  { value: 'claude-fable-5', description: 'Only when the user says "fable 5" (not 5.1).' },
+  { value: 'claude-fable-5-1', description: 'Fable: plain "fable", "claude fable", or "fable 5.1".' },
+  { value: 'claude-haiku-4-5', description: 'Only when the user says "haiku 4.5".' },
+  { value: 'claude-haiku-5-5', description: 'Haiku: plain "haiku" or "haiku 5.5".' },
+  { value: 'claude-opus-4-7', description: 'Only when the user says "opus 4.7".' },
+  { value: 'claude-opus-4-8', description: 'Only when the user says "opus 4.8".' },
+  { value: 'claude-opus-5', description: 'Only when the user says "opus 5" (not 5.5, not fast).' },
+  { value: 'claude-opus-5-fast', description: 'Only when the user says "opus 5 fast".' },
+  {
+    value: 'claude-opus-5-5',
+    description:
+      'Default Claude model: plain "opus", "opus 5.5", or "claude" / "using claude:" with no other Claude model named.'
   },
-  required: ['harness', 'model', 'provider', 'reasoning'],
-  type: 'object'
+  { value: 'claude-sonnet-4-6', description: 'Only when the user says "sonnet 4.6".' },
+  { value: 'claude-sonnet-5', description: 'Only when the user says "sonnet 5" (not 5.5).' },
+  { value: 'claude-sonnet-5-5', description: 'Sonnet: plain "sonnet" or "sonnet 5.5".' },
+  {
+    value: 'deep',
+    description: 'Amp deep model. Only when the user asks for "the deep model" or "deep mode"; naming Amp alone does not select it.'
+  },
+  {
+    value: 'fast',
+    description: 'Amp fast model. Only when the user asks for "the fast model" or "fast mode"; naming Amp alone does not select it.'
+  },
+  { value: 'gpt-5.4', description: 'Only when the user says "5.4", "gpt 5.4", or "codex 5.4" with no suffix.' },
+  { value: 'gpt-5.4-mini', description: 'Only when the user says "5.4 mini".' },
+  { value: 'gpt-5.4-nano', description: 'Only when the user says "5.4 nano".' },
+  { value: 'gpt-5.4-pro', description: 'Only when the user says "5.4 pro".' },
+  { value: 'gpt-5.5', description: 'Only when the user says "5.5", "gpt 5.5", or "codex 5.5" with no suffix.' },
+  { value: 'gpt-5.5-pro', description: 'Only when the user says "5.5 pro".' },
+  { value: 'gpt-5.6-luna', description: 'Only when the user says "5.6 luna".' },
+  { value: 'gpt-5.6-sol', description: 'Only when the user says "5.6 sol".' },
+  { value: 'gpt-5.6-terra', description: 'Only when the user says "5.6 terra".' },
+  { value: 'gpt-6-astra', description: 'Astra: plain "astra".' },
+  { value: 'gpt-6-sol', description: 'Only when the user says "6 sol" (not 6.1).' },
+  { value: 'gpt-6.1-sol', description: 'Sol: plain "sol", "the sol model", or "6.1 sol".' },
+  { value: 'gpt-6.1-terra', description: 'Terra: plain "terra" or "6.1 terra".' },
+  { value: 'gpt-6-luna', description: 'Luna: plain "luna" or "6 luna".' }
+]
+
+function choiceQuestion(name: string, instructions: string, choices: Choice[]) {
+  return {
+    choices: [
+      { value: UNSPECIFIED, description: 'The message does not explicitly request this.' },
+      ...choices
+    ],
+    instructions,
+    name,
+    type: 'choice'
+  }
 }
+
+const QUESTIONS = [
+  {
+    instructions:
+      'Does the message explicitly ask to change the AI harness, model, provider, or reasoning effort used to answer it?',
+    name: 'selection_request',
+    type: 'predicate'
+  },
+  choiceQuestion('harness', 'Which AI harness does the message explicitly request?', HARNESS_CHOICES),
+  choiceQuestion(
+    'model',
+    'Which AI model does the message explicitly request? Preserve the requested generation.',
+    MODEL_CHOICES
+  ),
+  choiceQuestion(
+    'provider',
+    'Which inference provider does the message explicitly request?',
+    PROVIDER_CHOICES
+  ),
+  choiceQuestion(
+    'reasoning',
+    'Which reasoning effort does the message explicitly request? Map magnitude words to the nearest level.',
+    REASONING_CHOICES
+  )
+]
 
 export type OpenAiMessageOverridesStrategyOptions = {
   apiKey: string
   baseUrl?: string
   fetch?: typeof fetch
   logger?: Logger
-  maxOutputTokens?: number
   model: string
   timeoutMs?: number
-}
-
-type OpenAiMessageOverridesStrategyOutput = {
-  harness?: unknown
-  model?: unknown
-  provider?: unknown
-  reasoning?: unknown
 }
 
 export function createFlagMessageOverridesStrategy(): MessageOverridesStrategy {
@@ -113,12 +149,12 @@ export function createFlagMessageOverridesStrategy(): MessageOverridesStrategy {
   }
 }
 
+/** Classifies natural-language model selection with the OpenAI Decisions API. */
 export function createOpenAiMessageOverridesStrategy(
   options: OpenAiMessageOverridesStrategyOptions
 ): MessageOverridesStrategy {
-  const responsesUrl = `${(options.baseUrl ?? 'https://api.openai.com/v1').replace(/\/+$/, '')}/responses`
+  const decisionsUrl = `${(options.baseUrl ?? 'https://api.openai.com/v1').replace(/\/+$/, '')}/decisions`
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
-  const maxOutputTokens = options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
   const fetchFn = options.fetch ?? fetch
 
   return async ({ text }) => {
@@ -141,22 +177,14 @@ export function createOpenAiMessageOverridesStrategy(
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
     try {
-      const response = await fetchFn(responsesUrl, {
+      const response = await fetchFn(decisionsUrl, {
         body: JSON.stringify({
-          input: strategyText,
-          instructions: SYSTEM_PROMPT,
-          max_output_tokens: maxOutputTokens,
+          input: [
+            { content: INSTRUCTIONS, role: 'developer' },
+            { content: strategyText, role: 'user' }
+          ],
           model: options.model,
-          reasoning: { effort: 'none' },
-          store: false,
-          text: {
-            format: {
-              name: 'slack_message_overrides',
-              schema: MESSAGE_OVERRIDES_SCHEMA,
-              strict: true,
-              type: 'json_schema'
-            }
-          }
+          questions: QUESTIONS
         }),
         headers: {
           authorization: `Bearer ${options.apiKey}`,
@@ -170,21 +198,30 @@ export function createOpenAiMessageOverridesStrategy(
           `message overrides strategy request failed with HTTP ${response.status} ${response.statusText}`
         )
       }
-      const value = await response.json()
-      const outputText = responseOutputText(value)
+      const answers = decisionAnswers(await response.json())
+      const selectionProbability = answers.selection_request?.probability
+      const selection = {
+        harness: chosenValue(answers.harness),
+        model: chosenValue(answers.model),
+        provider: chosenValue(answers.provider),
+        reasoning: chosenValue(answers.reasoning)
+      }
       options.logger?.info('slackbotv2_message_overrides_strategy_response_received', {
         elapsed_ms: Date.now() - startedAtMs,
         model: options.model,
-        output_text: outputText
+        selected_harness: selection.harness,
+        selected_model: selection.model,
+        selected_provider: selection.provider,
+        selected_reasoning: selection.reasoning,
+        selection_probability: selectionProbability
       })
-      if (!outputText) {
-        throw new Error('message overrides strategy response did not include output text')
+      if (
+        typeof selectionProbability !== 'number' ||
+        selectionProbability < SELECTION_PROBABILITY_THRESHOLD
+      ) {
+        return { overrides: {} }
       }
-      const parsed = JSON.parse(outputText)
-      const strategyOverrides = validateStrategyOverrides(
-        isJsonObject(parsed) ? (parsed as OpenAiMessageOverridesStrategyOutput) : null
-      )
-      return { overrides: strategyOverrides }
+      return { overrides: validateStrategyOverrides(selection) }
     } catch (error) {
       options.logger?.warn('slackbotv2_message_overrides_strategy_request_failed', {
         elapsed_ms: Date.now() - startedAtMs,
@@ -199,15 +236,22 @@ export function createOpenAiMessageOverridesStrategy(
   }
 }
 
-function responseOutputText(value: unknown): string | undefined {
-  const parts = arrayValue(isJsonObject(value) ? value.output : undefined).flatMap(item =>
-    arrayValue(isJsonObject(item) ? item.content : undefined).flatMap(content =>
-      isJsonObject(content) && typeof content.text === 'string' ? [content.text] : []
+type DecisionAnswer = { choice?: unknown; probability?: unknown; type?: unknown }
+
+function decisionAnswers(value: unknown): Record<string, DecisionAnswer> {
+  const answers = isJsonObject(value) && Array.isArray(value.answers) ? value.answers : []
+  return Object.fromEntries(
+    answers.flatMap(answer =>
+      isJsonObject(answer) && typeof answer.name === 'string' ? [[answer.name, answer]] : []
     )
   )
-  return parts.length > 0 ? parts.join('\n') : undefined
 }
 
-function arrayValue(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : []
+// Refusals and the unspecified sentinel both mean "no selection" for a field.
+function chosenValue(answer: DecisionAnswer | undefined): string | null {
+  return answer?.type === 'choice' &&
+    typeof answer.choice === 'string' &&
+    answer.choice !== UNSPECIFIED
+    ? answer.choice
+    : null
 }

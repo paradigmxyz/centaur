@@ -122,7 +122,7 @@ Codex credential in a 1Password item named `OPENAI_API_KEY`. To run Codex
 through OpenRouter, store `OPENROUTER_API_KEY` and set `OPENROUTER_MODEL` to a
 model slug such as `openrouter/auto`, or set `CODEX_MODEL_PROVIDER=openrouter`
 alongside `CODEX_MODEL`. Per-turn Codex model overrides with provider-style
-slugs such as `--model anthropic/claude-fable-5` also select the OpenRouter
+slugs such as `--model anthropic/claude-fable-5-1` also select the OpenRouter
 provider even when `OPENROUTER_MODEL` is unset.
 
 To run Codex through Meta AI direct, store `META_AI_API_KEY` and select the
@@ -445,6 +445,40 @@ sandbox:
 Malformed selector/toleration JSON fails api-rs startup. Empty values keep
 default scheduling.
 
+### Configure Sandbox User Namespaces and Container Security
+
+`sandbox.hostUsers` and `sandbox.containerSecurityContext` are passed through
+api-rs as `SESSION_SANDBOX_HOST_USERS` and
+`SESSION_SANDBOX_CONTAINER_SECURITY_CONTEXT`. The former sets the sandbox
+Pod's `hostUsers`; the latter accepts a Kubernetes `SecurityContext` for the
+agent container. Neither changes the paired iron-proxy pod, and the container
+setting does not change bootstrap init containers. Defaults omit both fields.
+
+For example, request an isolated Pod user namespace and a non-root agent:
+
+```yaml
+sandbox:
+  hostUsers: false
+  containerSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+```
+
+The cluster's Kubernetes version, container runtime, and volume filesystems
+must support Pod user namespaces. Setting `procMount: Unmasked` requires
+`hostUsers: false`; malformed security-context JSON or that incompatible
+combination fails api-rs startup. Cluster admission policies still apply.
+Enabling nested containers also requires a compatible image, UID/GID maps,
+device access, and node configuration; these settings alone do not provide a
+Docker daemon.
+
+These Pod settings are immutable. Before enabling reuse, api-rs stops retained
+sandboxes whose user namespace or agent security context differs from the
+configured profile, using the same reconciliation as ServiceAccount changes.
+This includes warm pods and active sessions, and applies when reverting a
+profile as well. Schedule these changes after active turns finish. Leaving
+both options unset preserves existing default sandboxes.
+
 ### Use an External PostgreSQL
 
 By default the chart runs a bundled PostgreSQL built on ParadeDB. To use a
@@ -499,6 +533,26 @@ because NetworkPolicy cannot match hostnames. Use the RDS DB subnet group's
 CIDRs, since the endpoint address moves on failover, or the Cloud SQL private IP
 as a `/32`. Control-plane pods and per-sandbox iron-proxies may reach only these
 ranges on `port`; see [Security](/security).
+
+For a database that runs in the cluster, such as a CloudNativePG cluster, set
+`externalDatabase.podSelector` to its pods' labels instead of `cidrs`, and
+`externalDatabase.namespace` if it runs outside the release namespace. Some
+CNIs do not apply `ipBlock` rules to pod traffic, so ranges cannot reliably
+admit an in-cluster database. If the database shares the release namespace,
+the chart's default-deny policy also covers its pods: allow their ingress, and
+the egress their operator needs, with your own NetworkPolicy.
+
+```yaml
+externalDatabase:
+  podSelector:
+    cnpg.io/cluster: core-db
+```
+
+Per-sandbox iron-proxies reach only the core database on Postgres ports inside
+the cluster. Earlier releases let them reach any in-cluster pod on port 5432,
+so an in-cluster database configured with `cidrs` alone may have worked without
+matching those ranges. Set `podSelector` before upgrading such a deployment.
+`pg_dsn` secrets for other in-cluster Postgres servers are no longer reachable.
 
 `externalDatabase.textSearch` selects how company-context keyword search is
 indexed. Set it only with `postgres.enabled: false`; the bundled Postgres always

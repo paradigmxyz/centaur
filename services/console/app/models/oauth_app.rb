@@ -8,8 +8,8 @@
 # unauthenticated /oauth/:slug/start + /callback endpoints resolve an OauthApp by
 # slug, run the provider's consent flow, and on success upsert a BrokerCredential
 # linked back to this app (see BrokerCredential#oauth_app). The app is the
-# durable config; its minted credentials are refreshed by the normal
-# Broker::PollRefreshJob loop and delegate their client_id/client_secret back to
+# durable config; its minted credentials are refreshed by
+# centaur-token-broker and delegate their client_id/client_secret back to
 # the app, so rotating the app's secret fixes every credential it minted.
 #
 # Provider-generic by design: one model with a `provider` column and a small

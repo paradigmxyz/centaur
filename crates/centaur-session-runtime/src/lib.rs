@@ -832,6 +832,15 @@ impl SessionRuntime {
         self
     }
 
+    /// The deployment's default harness (`SESSION_SANDBOX_HARNESS`), for
+    /// callers that create sessions without naming a harness.
+    pub fn default_harness(&self) -> HarnessType {
+        self.sandbox_runtime
+            .warm_harness
+            .clone()
+            .unwrap_or(HarnessType::Codex)
+    }
+
     pub async fn session_title(
         &self,
         thread_key: &ThreadKey,
@@ -1075,11 +1084,7 @@ impl SessionRuntime {
             ));
         }
         let thread_key = tool_host_thread_key(principal_id)?;
-        let harness = self
-            .sandbox_runtime
-            .warm_harness
-            .clone()
-            .unwrap_or(HarnessType::Codex);
+        let harness = self.default_harness();
         let spec =
             (self.sandbox_runtime.spec_factory)(&thread_key, "mcp-tool-catalog", &harness, None);
         let capabilities = self
@@ -1205,11 +1210,7 @@ impl SessionRuntime {
         // stored harness; the default only fills the column for new sessions.
         let harness = match self.store.get_session(thread_key).await {
             Ok(session) => session.harness_type,
-            Err(SessionStoreError::NotFound { .. }) => self
-                .sandbox_runtime
-                .warm_harness
-                .clone()
-                .unwrap_or(HarnessType::Codex),
+            Err(SessionStoreError::NotFound { .. }) => self.default_harness(),
             Err(error) => return Err(error.into()),
         };
         let metadata =

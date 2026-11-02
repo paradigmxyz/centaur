@@ -1134,6 +1134,15 @@ fn normalize_model_name(model: &str) -> String {
 }
 
 fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
+    if model.contains("fable-5-1") || model.contains("mythos-5-1") {
+        return Some(TokenPricing {
+            input_per_mtok: 10.0,
+            cache_creation_per_mtok: 12.5,
+            cache_read_per_mtok: 0.25,
+            output_per_mtok: 50.0,
+            source: "centaur_estimate:anthropic:fable-mythos-5-1:5m-cache-write",
+        });
+    }
     if model.contains("fable-5") || model.contains("mythos-5") {
         return Some(TokenPricing {
             input_per_mtok: 10.0,
@@ -1184,6 +1193,15 @@ fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
             source: "centaur_estimate:anthropic:opus-4-deprecated:5m-cache-write",
         });
     }
+    if model.contains("sonnet-5-5") {
+        return Some(TokenPricing {
+            input_per_mtok: 2.0,
+            cache_creation_per_mtok: 2.5,
+            cache_read_per_mtok: 0.1,
+            output_per_mtok: 10.0,
+            source: "centaur_estimate:anthropic:sonnet-5-5:5m-cache-write",
+        });
+    }
     if model.contains("sonnet-5") {
         return Some(TokenPricing {
             input_per_mtok: 2.0,
@@ -1202,6 +1220,16 @@ fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
             source: "centaur_estimate:anthropic:sonnet-4:5m-cache-write",
         });
     }
+    // Short-context estimate (<=100K prompt tokens); longer prompts cost 5x.
+    if model.contains("haiku-5-5") {
+        return Some(TokenPricing {
+            input_per_mtok: 0.1,
+            cache_creation_per_mtok: 0.125,
+            cache_read_per_mtok: 0.01,
+            output_per_mtok: 0.5,
+            source: "centaur_estimate:anthropic:haiku-5-5:5m-cache-write",
+        });
+    }
     if model.contains("haiku-4-5") {
         return Some(TokenPricing {
             input_per_mtok: 1.0,
@@ -1216,9 +1244,20 @@ fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
 
 fn openai_pricing(model: &str) -> Option<TokenPricing> {
     // Standard rates for <=272K input tokens, verified against the model pages:
+    // https://developers.openai.com/api/docs/models/gpt-6-astra
     // https://developers.openai.com/api/docs/models/gpt-6.1-sol
     // https://developers.openai.com/api/docs/models/gpt-6-sol
     // https://developers.openai.com/api/docs/models/gpt-6-luna
+    // https://developers.openai.com/api/docs/models/gpt-6.1-terra
+    if model.contains("gpt-6-1-terra") {
+        return Some(TokenPricing {
+            input_per_mtok: 1.0,
+            cache_creation_per_mtok: 1.25,
+            cache_read_per_mtok: 0.05,
+            output_per_mtok: 5.0,
+            source: "centaur_estimate:openai:gpt-6.1-terra:standard-short-context",
+        });
+    }
     if model.contains("gpt-6-1-sol") {
         return Some(TokenPricing {
             input_per_mtok: 2.0,
@@ -1251,16 +1290,17 @@ fn openai_pricing(model: &str) -> Option<TokenPricing> {
             input_per_mtok: 10.0,
             cache_creation_per_mtok: 12.5,
             cache_read_per_mtok: 1.0,
-            output_per_mtok: 60.0,
+            output_per_mtok: 50.0,
             source: "centaur_estimate:openai:gpt-6-astra:standard-short-context",
         });
     }
+    // https://developers.openai.com/api/docs/models/gpt-5.6-sol
     if model.contains("gpt-5-6-sol") {
         return Some(TokenPricing {
-            input_per_mtok: 5.0,
-            cache_creation_per_mtok: 6.25,
-            cache_read_per_mtok: 0.5,
-            output_per_mtok: 30.0,
+            input_per_mtok: 4.0,
+            cache_creation_per_mtok: 5.0,
+            cache_read_per_mtok: 0.4,
+            output_per_mtok: 20.0,
             source: "centaur_estimate:openai:gpt-5.6-sol:standard-short-context",
         });
     }
@@ -1282,6 +1322,17 @@ fn openai_pricing(model: &str) -> Option<TokenPricing> {
             source: "centaur_estimate:openai:gpt-5.6-luna:standard-short-context",
         });
     }
+    // https://developers.openai.com/api/docs/models/gpt-5.5-pro
+    // Pro has no cached-input discount; use the input rate for cache tokens.
+    if model.contains("gpt-5-5-pro") {
+        return Some(TokenPricing {
+            input_per_mtok: 30.0,
+            cache_creation_per_mtok: 30.0,
+            cache_read_per_mtok: 30.0,
+            output_per_mtok: 180.0,
+            source: "centaur_estimate:openai:gpt-5.5-pro:standard-short-context",
+        });
+    }
     if model.contains("gpt-5-5") {
         return Some(TokenPricing {
             input_per_mtok: 5.0,
@@ -1289,6 +1340,37 @@ fn openai_pricing(model: &str) -> Option<TokenPricing> {
             cache_read_per_mtok: 0.5,
             output_per_mtok: 30.0,
             source: "centaur_estimate:openai:gpt-5.5",
+        });
+    }
+    // https://developers.openai.com/api/docs/models/gpt-5.4-pro
+    // Pro has no cached-input discount; use the input rate for cache tokens.
+    if model.contains("gpt-5-4-pro") {
+        return Some(TokenPricing {
+            input_per_mtok: 30.0,
+            cache_creation_per_mtok: 30.0,
+            cache_read_per_mtok: 30.0,
+            output_per_mtok: 180.0,
+            source: "centaur_estimate:openai:gpt-5.4-pro:standard-short-context",
+        });
+    }
+    // https://developers.openai.com/api/docs/models/gpt-5.4-mini
+    if model.contains("gpt-5-4-mini") {
+        return Some(TokenPricing {
+            input_per_mtok: 0.75,
+            cache_creation_per_mtok: 0.75,
+            cache_read_per_mtok: 0.075,
+            output_per_mtok: 4.5,
+            source: "centaur_estimate:openai:gpt-5.4-mini:standard-short-context",
+        });
+    }
+    // https://developers.openai.com/api/docs/models/gpt-5.4-nano
+    if model.contains("gpt-5-4-nano") {
+        return Some(TokenPricing {
+            input_per_mtok: 0.2,
+            cache_creation_per_mtok: 0.2,
+            cache_read_per_mtok: 0.02,
+            output_per_mtok: 1.25,
+            source: "centaur_estimate:openai:gpt-5.4-nano:standard-short-context",
         });
     }
     if model.contains("gpt-5-4") {
@@ -1891,14 +1973,19 @@ mod tests {
             ..Default::default()
         };
 
-        for model in [
-            "gpt-6-astra",
-            "gpt-6.1-sol",
-            "gpt-6-sol",
-            "gpt-6-luna",
-            "gpt-5.6-sol",
-            "gpt-5.6-terra",
-            "gpt-5.6-luna",
+        for (model, input, cache_write, cache_read, output) in [
+            ("gpt-6-astra", 10.0, 12.5, 1.0, 50.0),
+            ("gpt-6.1-sol", 2.0, 2.5, 0.1, 10.0),
+            ("gpt-6.1-terra", 1.0, 1.25, 0.05, 5.0),
+            ("gpt-6-sol", 2.0, 2.5, 0.2, 10.0),
+            ("gpt-6-luna", 0.1, 0.125, 0.01, 0.5),
+            ("gpt-5.6-sol", 4.0, 5.0, 0.4, 20.0),
+            ("gpt-5.6-terra", 2.0, 2.5, 0.2, 12.0),
+            ("gpt-5.6-luna", 0.2, 0.25, 0.02, 1.2),
+            ("gpt-5.5-pro", 30.0, 30.0, 30.0, 180.0),
+            ("gpt-5.4-pro", 30.0, 30.0, 30.0, 180.0),
+            ("gpt-5.4-mini", 0.75, 0.75, 0.075, 4.5),
+            ("gpt-5.4-nano", 0.2, 0.2, 0.02, 1.25),
         ] {
             let cost =
                 estimate_usage_cost(HarnessKind::Codex, "openai", model, &usage).expect("cost");
@@ -1906,11 +1993,24 @@ mod tests {
                 cost.source,
                 format!("centaur_estimate:openai:{model}:standard-short-context")
             );
+            assert!((cost.input_cost - input).abs() < 1e-9, "{model}");
+            assert!((cost.output_cost - output * 0.1).abs() < 1e-9, "{model}");
+            // Exercise normalized spellings and cached-token rates, too.
+            for name in [
+                model.to_owned(),
+                model.replace('.', "_"),
+                model.replace('.', "-"),
+            ] {
+                let pricing =
+                    pricing_for_usage(HarnessKind::Codex, "openai", &name).expect("pricing");
+                assert_eq!(pricing.cache_creation_per_mtok, cache_write, "{name}");
+                assert_eq!(pricing.cache_read_per_mtok, cache_read, "{name}");
+            }
         }
     }
 
     #[test]
-    fn opus_5_5_cost_is_not_billed_as_opus_5() {
+    fn current_claude_models_are_priced_on_their_own_tiers() {
         let usage = NormalizedTokenUsage {
             input_tokens: Some(1_000_000),
             cache_creation_input_tokens: Some(100_000),
@@ -1931,6 +2031,30 @@ mod tests {
                 4.225,
                 2.5,
                 "centaur_estimate:anthropic:opus-4.5-plus:5m-cache-write",
+            ),
+            (
+                "claude-fable-5-1",
+                8.3,
+                5.0,
+                "centaur_estimate:anthropic:fable-mythos-5-1:5m-cache-write",
+            ),
+            (
+                "claude-sonnet-5-5",
+                1.67,
+                1.0,
+                "centaur_estimate:anthropic:sonnet-5-5:5m-cache-write",
+            ),
+            (
+                "claude-haiku-5-5",
+                0.0845,
+                0.05,
+                "centaur_estimate:anthropic:haiku-5-5:5m-cache-write",
+            ),
+            (
+                "claude-haiku-4-5",
+                0.845,
+                0.5,
+                "centaur_estimate:anthropic:haiku-4.5:5m-cache-write",
             ),
         ] {
             let cost = estimate_usage_cost(HarnessKind::ClaudeCode, "anthropic", model, &usage)

@@ -78,9 +78,9 @@ class MercatorClient:
             {key: value for key, value in arguments.items() if value is not None},
         )
 
-    def quote(self, plan: dict[str, Any]) -> dict[str, Any]:
+    def quote(self, plan: dict[str, Any], *, search_id: str | None = None) -> dict[str, Any]:
         """Validate a plan and live-price every node without paying."""
-        return self._call("quote_plan", {"plan": plan})
+        return self._call("quote_plan", {"plan": plan, **({"id": search_id} if search_id else {})})
 
     def submit(
         self,
@@ -88,19 +88,26 @@ class MercatorClient:
         *,
         max_spend: float,
         idempotency_key: str,
+        search_id: str | None = None,
     ) -> dict[str, Any]:
         """Quote a plan and pay for it only if the total is within max_spend."""
-        total = self.quote(plan)["totalAmount"]
+        quote = self.quote(plan, search_id=search_id)
+        total = quote["totalAmount"]
         if Decimal(total) > Decimal(str(max_spend)):
             raise ValueError(
                 f"Quoted total {total} exceeds max spend {max_spend:g}; nothing was paid."
             )
+        token = quote.get("quoteToken")
+        if not isinstance(token, str) or not token:
+            raise ValueError("Mercator quote did not include a quoteToken; nothing was paid.")
         return self._call(
             "create_job",
             {
                 "plan": plan,
                 "approved_total": total,
                 "idempotency_key": idempotency_key,
+                "quote_token": token,
+                **({"id": search_id} if search_id else {}),
             },
         )
 

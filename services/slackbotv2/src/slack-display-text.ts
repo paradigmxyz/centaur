@@ -371,9 +371,10 @@ function normalizeSlackFallbackText(input: string): string {
     .replace(/<@([A-Z0-9]+)>/g, '@$1')
     .replace(/<!subteam\^([A-Z0-9]+)\|([^>]+)>/g, '@$2')
     .replace(/<!(channel|here|everyone)>/g, '@$1')
-    .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
+    // Last, so an escaped entity such as &amp;lt; decodes to &lt;, not <.
+    .replace(/&amp;/g, '&')
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
     .split('\n')

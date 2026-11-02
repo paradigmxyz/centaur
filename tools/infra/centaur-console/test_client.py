@@ -3,6 +3,7 @@ import json
 import httpx
 import pytest
 from client import (
+    SANDBOX_ADMIN_GCP_ID_TOKEN_SECRETS_PATH,
     SANDBOX_ADMIN_GRANTS_PATH,
     SANDBOX_ADMIN_PG_DSN_SECRETS_PATH,
     SANDBOX_ADMIN_PRINCIPALS_PATH,
@@ -333,6 +334,34 @@ def test_admin_revoke_secret_deletes_the_matching_direct_grant():
     assert deleted == [f"{SANDBOX_ADMIN_GRANTS_PATH}/grt_2"]
 
 
+def test_admin_role_secret_grants_post_and_revoke_under_the_role():
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if request.url.path == f"{SANDBOX_ADMIN_ROLES_PATH}/lookup/tool-db":
+            return json_response({"data": {"id": "role_7"}})
+        if request.url.path == SANDBOX_ADMIN_SECRETS_PATH:
+            return json_response({"data": SECRETS})
+        if request.url.path == f"{SANDBOX_ADMIN_ROLES_PATH}/role_7/grants":
+            return json_response(
+                {"data": [{"id": "grt_3", "pg_dsn_secret_id": "pgd_2"}], "meta": {"total_pages": 1}}
+            )
+        if request.method == "POST":
+            assert json.loads(request.content) == {
+                "data": {"role_id": "role_7", "pg_dsn_secret_id": "pgd_2"}
+            }
+            return json_response({"data": {"id": "grt_3"}}, 201)
+        return httpx.Response(204)
+
+    client = make_client(handler)
+    assert client.admin_grant_role_secret("tool-db", "analytics") == {"id": "grt_3"}
+    client.admin_revoke_role_secret("tool-db", "analytics")
+
+    assert ("POST", SANDBOX_ADMIN_GRANTS_PATH) in requests
+    assert requests[-1] == ("DELETE", f"{SANDBOX_ADMIN_GRANTS_PATH}/grt_3")
+
+
 def test_admin_grant_secret_refuses_ambiguous_names():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == SANDBOX_ADMIN_SECRETS_PATH:
@@ -424,3 +453,16 @@ def test_admin_update_secret_patches_only_the_given_fields_at_its_kind_path():
         f"{SANDBOX_ADMIN_PG_DSN_SECRETS_PATH}/pgs_1",
         {"data": {"role": "writer"}},
     )
+
+
+def test_admin_create_secret_posts_gcp_id_token_documents_to_their_kind_path():
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path, json.loads(request.content)))
+        return json_response({"data": {"id": "gid_1"}}, 201)
+
+    data = {"audience": "https://run.example", "keyfile": {"source_type": "env"}}
+    assert make_client(handler).admin_create_secret("gcp_id_token", data) == {"id": "gid_1"}
+
+    assert requests == [("POST", SANDBOX_ADMIN_GCP_ID_TOKEN_SECRETS_PATH, {"data": data})]

@@ -6,7 +6,7 @@ WORKDIR /repo
 ENV NODE_ENV=production
 
 RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \
-    bun install -g pnpm@10.28.1
+    bun install -g pnpm@10.34.7
 
 # Workspace manifests first so dependency install is a cached layer. slackbotv2
 # depends on the @centaur/* workspace packages, so they must be present for

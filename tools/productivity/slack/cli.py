@@ -1501,7 +1501,7 @@ def _download_direct(permalink: str, output: str) -> None:
         console.print("[red]Provide a Slack permalink, 'channel_id:timestamp', or url_private[/]")
         raise typer.Exit(1)
 
-    files_list = get_message_files(channel_id, message_ts, direct=True)
+    files_list = get_message_files(channel_id, message_ts)
     if not files_list:
         console.print("[yellow]No files attached to this message.[/]")
         raise typer.Exit()

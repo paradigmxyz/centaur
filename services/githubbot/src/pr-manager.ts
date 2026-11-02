@@ -1,6 +1,7 @@
 import type { GitHubAdapter } from "@chat-adapter/github";
 import type { StateAdapter } from "chat";
 import { backgroundWaitUntil } from "./context";
+import { resolveAllowedAuthorAssociations } from "./authorization";
 import { reactWorkingOnReview, settleReviewReaction } from "./reactions";
 import { runTurnStream, turnOutputChars } from "./turn";
 import {
@@ -356,6 +357,19 @@ export async function handleReviewEvent(
   // Never act on the bot's own review (it shouldn't review its own PRs anyway).
   if (reviewer && reviewer.toLowerCase() === ctx.userName.toLowerCase()) return;
 
+  // Same trust gate as the comment path: an untrusted reviewer must not steer
+  // a write-capable turn or drive the merge signal on a bot-owned PR.
+  const allowed = resolveAllowedAuthorAssociations(
+    ctx.options.allowedAuthorAssociations,
+  );
+  const association = stringValue(reviewNode.author_association)?.toUpperCase();
+  if (
+    !allowed.includes("*") &&
+    (!association || !allowed.includes(association))
+  ) {
+    return;
+  }
+
   if (
     !(await claim(
       ctx,
@@ -427,26 +441,28 @@ async function processCi(
     knownEvaluation ?? (await fetchCiEvaluation(ctx, owner, repo, headSha));
   if (!evaluation?.settled) return; // wait until *all* checks are done (and readable).
   // Act once per fully-settled SHA (the last-arriving check event wins).
-  if (
-    !(await claim(
-      ctx,
-      `${ctx.options.stateKeyPrefix ?? "centaur-githubbot"}:ci-settled:${owner}/${repo}#${number}:${headSha}`,
-    ))
-  ) {
-    return;
-  }
+  const firstSettle = await claim(
+    ctx,
+    `${ctx.options.stateKeyPrefix ?? "centaur-githubbot"}:ci-settled:${owner}/${repo}#${number}:${headSha}`,
+  );
 
   const trace = makeTrace(managementThreadKey(owner, repo, number), `ci-${headSha}`);
   if (!evaluation.failed) {
-    // Green: reset the fix counter and consider merging.
-    const state = await loadState(ctx, owner, repo, number);
-    if (state.consecutiveCiFixes) {
-      await saveState(ctx, owner, repo, number, { ...state, consecutiveCiFixes: 0 });
+    // Green: reset the fix counter and consider merging. The merge gate is
+    // deterministic and has its own claim, so it runs on every green settle:
+    // a check that finishes later on the same SHA (a rerun, or one triggered
+    // by an approval) or a re-assignment can be what makes the PR mergeable.
+    if (firstSettle) {
+      const state = await loadState(ctx, owner, repo, number);
+      if (state.consecutiveCiFixes) {
+        await saveState(ctx, owner, repo, number, { ...state, consecutiveCiFixes: 0 });
+      }
+      traceLog(ctx.options, "githubbot_ci_green", trace, { pr: `${owner}/${repo}#${number}` });
     }
-    traceLog(ctx.options, "githubbot_ci_green", trace, { pr: `${owner}/${repo}#${number}` });
     await tryMerge(ctx, owner, repo, number);
     return;
   }
+  if (!firstSettle) return;
 
   // Red: back off if a human pushed the failing commit (don't step on them) —
   // unless this is a forced takeover (the PR was just assigned to us, so the

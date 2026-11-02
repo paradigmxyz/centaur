@@ -123,6 +123,7 @@ struct WorkflowRuntimeInner {
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
     starter_registry: Arc<RwLock<WorkflowStarters>>,
+    default_harness: HarnessType,
 }
 
 /// API caller classes each workflow allows to start it, from
@@ -733,6 +734,8 @@ impl WorkflowRuntime {
                 }
             },
         )?;
+        let default_harness = session_runtime.default_harness();
+        let schedule_default_harness = default_harness.clone();
         let schedule_tick_client = schedule_client.clone();
         let workflow_clients_for_schedule = workflow_clients.clone();
         let schedule_registry_for_task = schedule_registry.clone();
@@ -742,9 +745,17 @@ impl WorkflowRuntime {
                 let schedule_client = schedule_tick_client.clone();
                 let workflow_clients = workflow_clients_for_schedule.clone();
                 let schedules = schedule_registry_for_task.clone();
+                let default_harness = schedule_default_harness.clone();
                 async move {
-                    run_schedule_tick(input, ctx, schedule_client, workflow_clients, schedules)
-                        .await
+                    run_schedule_tick(
+                        input,
+                        ctx,
+                        schedule_client,
+                        workflow_clients,
+                        schedules,
+                        default_harness,
+                    )
+                    .await
                 }
             },
         )?;
@@ -864,6 +875,7 @@ impl WorkflowRuntime {
                 webhook_registry,
                 schedule_registry,
                 starter_registry,
+                default_harness,
             }),
         })
     }
@@ -894,7 +906,9 @@ impl WorkflowRuntime {
                 WorkflowTaskInput {
                     workflow_name: workflow_name.to_owned(),
                     input: request.input,
-                    harness_type: request.harness_type.unwrap_or(HarnessType::Codex),
+                    harness_type: request
+                        .harness_type
+                        .unwrap_or_else(|| self.inner.default_harness.clone()),
                     slack_button_feedback: feedback,
                 },
                 SpawnOptions {
@@ -2464,6 +2478,7 @@ async fn run_schedule_tick(
     schedule_client: Client,
     workflow_clients: WorkflowQueueClients,
     schedules: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
+    default_harness: HarnessType,
 ) -> Result<Value, absurd::Error> {
     ctx.sleep_until("schedule_tick", input.scheduled_at).await?;
     let schedule = match schedules
@@ -2515,7 +2530,7 @@ async fn run_schedule_tick(
             WorkflowTaskInput {
                 workflow_name: schedule.workflow_name.clone(),
                 input: schedule.input.clone(),
-                harness_type: HarnessType::Codex,
+                harness_type: default_harness,
                 slack_button_feedback: None,
             },
             SpawnOptions {
@@ -2824,76 +2839,6 @@ async fn run_centaur_workflow_inner(
                 task_id: ctx.task_id().to_owned(),
                 steps: vec!["sleep".to_owned(), "echo_after_sleep".to_owned()],
                 output,
-            })
-        }
-        "agent_turn" => {
-            let prompt = input
-                .input
-                .get("prompt")
-                .and_then(Value::as_str)
-                .unwrap_or("Reply with exactly PONG and nothing else.")
-                .to_owned();
-            let idle_timeout_ms = input
-                .input
-                .get("idle_timeout_ms")
-                .and_then(Value::as_u64)
-                .unwrap_or(DEFAULT_AGENT_IDLE_TIMEOUT_MS);
-            let max_duration_ms = input
-                .input
-                .get("max_duration_ms")
-                .and_then(Value::as_u64)
-                .unwrap_or(DEFAULT_AGENT_MAX_DURATION_MS);
-            let principal_foreign_id = parse_agent_principal(&input.input).map_err(absurd_error)?;
-            let agent = ctx
-                .step("agent_turn", || {
-                    let session_runtime = session_runtime.clone();
-                    let harness_type = input.harness_type.clone();
-                    let thread_key =
-                        format!("wf:{}:agent:agent_turn", ctx.task_id().replace('-', ""));
-                    let task_id = ctx.task_id().to_owned();
-                    let run_id = ctx.run_id().to_owned();
-                    async move {
-                        let client_message_id = format!("absurd-workflow:{task_id}:native:user");
-                        let metadata = json!({
-                            "source": "absurd_workflow",
-                            "workflow_name": "agent_turn",
-                            "workflow_task_id": task_id,
-                            "workflow_run_id": run_id,
-                        });
-                        run_agent_session_turn(
-                            session_runtime,
-                            AgentTurnRequest {
-                                thread_key,
-                                harness_type,
-                                persona_id: None,
-                                principal_foreign_id,
-                                parts: vec![json!({"type": "text", "text": prompt})],
-                                client_message_id: client_message_id.clone(),
-                                session_metadata: metadata.clone(),
-                                message_metadata: metadata.clone(),
-                                execution_metadata: metadata,
-                                execution_idempotency_key: format!(
-                                    "absurd-workflow-agent-turn:{client_message_id}"
-                                ),
-                                workflow_owned_thread: true,
-                                idle_timeout_ms,
-                                max_duration_ms,
-                                model: None,
-                                provider: None,
-                                reasoning: None,
-                            },
-                        )
-                        .await
-                        .map_err(absurd_error)
-                    }
-                })
-                .await?;
-            Ok(WorkflowResult {
-                workflow_name: input.workflow_name,
-                run_id: ctx.run_id().to_owned(),
-                task_id: ctx.task_id().to_owned(),
-                steps: vec!["agent_turn".to_owned()],
-                output: serde_json::to_value(agent).map_err(absurd::Error::Json)?,
             })
         }
         "tool_and_slack" => {
@@ -5766,8 +5711,8 @@ mod tests {
 
     #[test]
     fn workflow_allowlist_parses_comma_and_whitespace_names() {
-        let enablement = WorkflowEnablement::allowlist("agent_turn, slack_sync\ncompany_context");
-        assert!(enablement.is_enabled("agent_turn"));
+        let enablement = WorkflowEnablement::allowlist("echo, slack_sync\ncompany_context");
+        assert!(enablement.is_enabled("echo"));
         assert!(enablement.is_enabled("slack_sync"));
         assert!(enablement.is_enabled("company_context"));
         assert!(!enablement.is_enabled("google_drive_sync"));
@@ -5843,7 +5788,7 @@ mod tests {
 
     #[test]
     fn disabled_workflow_returns_policy_error() {
-        let error = WorkflowEnablement::allowlist("agent_turn")
+        let error = WorkflowEnablement::allowlist("echo")
             .ensure_enabled("slack_sync")
             .unwrap_err();
         assert!(matches!(error, WorkflowRuntimeError::Disabled(_)));

@@ -81,17 +81,31 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
     assert rows.find { |row| row["id"] == static_secrets(:github_token_inject).oid }["direct"]
   end
 
-  test "sandbox admin grants cannot change role grants" do
+  test "an admin's Slack DM sandbox grants a secret to a role and revokes it" do
+    secret = static_secrets(:acme_staging_api_key)
+
     with_token(dm_proxy_for(users(:acme_admin))) do |headers|
       post "/api/v1/sandbox/admin/grants",
-           params: { data: { role_id: @role.oid, static_secret_id: static_secrets(:acme_staging_api_key).oid } },
-           headers: headers, as: :json
-      assert_response :forbidden
+           params: { data: { role_id: @role.oid, static_secret_id: secret.oid } }, headers: headers, as: :json
+      assert_response :created
+      grant_id = json_body.dig("data", "id")
+      assert_includes @role.reload.grants.map(&:static_secret), secret
 
-      delete "/api/v1/sandbox/admin/grants/#{grants(:acme_infra_prod_api_key).oid}", headers: headers
-      assert_response :not_found
+      get "/api/v1/sandbox/admin/roles/#{@role.oid}/grants", headers: headers
+      assert_response :ok
+      assert_includes json_body.fetch("data").map { |grant| grant["id"] }, grant_id
+
+      delete "/api/v1/sandbox/admin/grants/#{grant_id}", headers: headers
+      assert_response :no_content
+      assert_not_includes @role.reload.grants.map(&:static_secret), secret
     end
-    assert Grant.exists?(grants(:acme_infra_prod_api_key).id)
+
+    with_token(dm_proxy_for(users(:member_user))) do |headers|
+      post "/api/v1/sandbox/admin/grants",
+           params: { data: { role_id: @role.oid, static_secret_id: secret.oid } }, headers: headers, as: :json
+    end
+    assert_response :forbidden
+    assert_not_includes @role.reload.grants.map(&:static_secret), secret
   end
 
   test "an admin's Slack DM sandbox changes Slack permissions and sandbox capabilities" do
@@ -312,6 +326,38 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
       assert_response :ok
       copy.reload
       assert_equal [ "auditor", "analytics", "env" ], [ copy.role, copy.database, copy.dsn_source.source_type ]
+    end
+  end
+
+  test "an admin's Slack DM sandbox creates a GCP ID token secret from another's keyfile and edits its audience" do
+    original = gcp_id_token_secrets(:acme_cloud_run)
+
+    with_token(dm_proxy_for(users(:acme_admin))) do |headers|
+      get "/api/v1/sandbox/admin/gcp_id_token_secrets/#{original.oid}", headers: headers
+      assert_response :ok
+      keyfile = json_body.dig("data", "keyfile")
+
+      post "/api/v1/sandbox/admin/gcp_id_token_secrets",
+           params: { data: { foreign_id: "cloud-run-other", name: "other cloud run", audience: "https://other.example",
+                             keyfile: keyfile, rules: [ { host: "other.example" } ] } },
+           headers: headers, as: :json
+      assert_response :created
+      copy = GcpIdTokenSecret.find_by_oid!(json_body.dig("data", "id"))
+      assert_equal [ "env", { "var" => "CLOUD_RUN_SA_KEYFILE" }, users(:acme_admin) ],
+                   [ copy.keyfile_source.source_type, copy.keyfile_source.config, copy.created_by ]
+
+      patch "/api/v1/sandbox/admin/gcp_id_token_secrets/#{copy.oid}",
+            params: { data: { audience: "https://renamed.example" } }, headers: headers, as: :json
+      assert_response :ok
+      copy.reload
+      assert_equal [ "https://renamed.example", %w[other.example], "env" ],
+                   [ copy.audience, copy.rules.map(&:host), copy.keyfile_source.source_type ]
+
+      post "/api/v1/sandbox/admin/gcp_id_token_secrets",
+           params: { data: { audience: "https://x.example", rules: [ { host: "x.example" } ],
+                             keyfile: { source_type: "control_plane", secret: "pasted", config: {} } } },
+           headers: headers, as: :json
+      assert_response :forbidden
     end
   end
 

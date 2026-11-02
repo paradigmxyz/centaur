@@ -29,7 +29,7 @@ use tokio::time::{Instant, sleep};
 
 pub use generated::agents_x_k8s_io as crd;
 pub use iron_proxy::IronProxyConfig;
-pub use k8s_openapi::api::core::v1::Toleration;
+pub use k8s_openapi::api::core::v1::{SecurityContext, Toleration};
 pub use tools::{GitHubTokenRef, ToolSource, ToolsConfig};
 
 pub mod generated;
@@ -75,6 +75,12 @@ pub struct AgentSandboxConfig {
     pub annotations: BTreeMap<String, String>,
     /// Operator metadata applied only to sandbox and iron-proxy pods.
     pub pod_annotations: BTreeMap<String, String>,
+    /// Pod user namespace selection for sandbox pods only. `None` keeps the
+    /// Kubernetes default; `Some(false)` requests an isolated user namespace.
+    pub host_users: Option<bool>,
+    /// Security context applied only to the agent container, not bootstrap
+    /// init containers or the paired iron-proxy pod.
+    pub container_security_context: Option<SecurityContext>,
     pub image_pull_policy: Option<String>,
     pub image_pull_secrets: Vec<String>,
     /// Node steering for every sandbox pod **and** its paired iron-proxy pod.
@@ -153,6 +159,8 @@ impl AgentSandboxConfig {
             labels: BTreeMap::new(),
             annotations: BTreeMap::new(),
             pod_annotations: BTreeMap::new(),
+            host_users: None,
+            container_security_context: None,
             image_pull_policy: None,
             image_pull_secrets: Vec::new(),
             node_selector: BTreeMap::new(),
@@ -167,6 +175,22 @@ impl AgentSandboxConfig {
             otlp_egress: None,
             ready_timeout: Duration::from_secs(60),
         }
+    }
+
+    /// Reject combinations Kubernetes cannot admit before creating resources.
+    pub fn validate(&self) -> SandboxResult<()> {
+        if self
+            .container_security_context
+            .as_ref()
+            .and_then(|context| context.proc_mount.as_deref())
+            == Some("Unmasked")
+            && self.host_users != Some(false)
+        {
+            return Err(SandboxError::InvalidSpec(
+                "sandbox container procMount Unmasked requires hostUsers false".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn state_volume(mut self, state_volume: StateVolumeConfig) -> Self {
@@ -283,23 +307,21 @@ impl AgentSandboxBackend {
         }
     }
 
-    /// Stop every retained sandbox whose immutable pod service account does
-    /// not match the current backend configuration. This runs before api-rs
-    /// enables session reuse or warm-pool claims, so a rollout cannot keep an
-    /// old workload identity alive or assign it to a new session.
-    pub async fn drain_service_account_mismatches(&self) -> SandboxResult<Vec<SandboxId>> {
+    /// Stop every retained sandbox whose immutable pod identity or agent
+    /// security context does not match the backend configuration. This runs
+    /// before api-rs enables session reuse or warm-pool claims, so a rollout
+    /// cannot keep an old security profile alive or assign it to a new session.
+    pub async fn drain_pod_config_mismatches(&self) -> SandboxResult<Vec<SandboxId>> {
+        self.config.validate()?;
         let params =
             ListParams::default().labels(&format!("{MANAGED_BY_LABEL}={MANAGED_BY_VALUE}"));
         let sandboxes = self.sandboxes().list(&params).await.map_err(|err| {
-            map_kube_error("list sandboxes for service account reconciliation", err)
+            map_kube_error("list sandboxes for pod configuration reconciliation", err)
         })?;
         let mut stopped = Vec::new();
 
         for sandbox in sandboxes.items {
-            if sandbox_service_account_matches(
-                &sandbox,
-                self.config.service_account_name.as_deref(),
-            ) {
+            if sandbox_pod_config_matches(&sandbox, &self.config)? {
                 continue;
             }
             let Some(name) = sandbox.metadata.name.as_deref() else {
@@ -312,7 +334,7 @@ impl AgentSandboxBackend {
                 existing_service_account = ?normalized_name(
                     sandbox.spec.pod_template.spec.service_account_name.as_deref()
                 ),
-                "stopping sandbox whose service account does not match configuration"
+                "stopping sandbox whose pod identity or agent security context does not match configuration"
             );
             SandboxBackend::stop(self, &id).await?;
             stopped.push(id);
@@ -1101,6 +1123,7 @@ fn build_agent_sandbox(
     spec: &SandboxSpec,
     config: &AgentSandboxConfig,
 ) -> SandboxResult<crd::Sandbox> {
+    config.validate()?;
     let mut labels = config.labels.clone();
     labels.extend(spec.labels.clone());
     labels.insert(MANAGED_BY_LABEL.to_owned(), MANAGED_BY_VALUE.to_owned());
@@ -1170,6 +1193,11 @@ fn build_agent_sandbox(
     );
     insert_optional(&mut container, "workingDir", spec.working_dir.clone());
     insert_optional(&mut container, "resources", resources_json(spec));
+    insert_optional(
+        &mut container,
+        "securityContext",
+        config.container_security_context.as_ref(),
+    );
 
     let (mut volumes, mut volume_mounts) = mount_json(spec);
     if !spec.files.is_empty() {
@@ -1242,6 +1270,7 @@ fn build_agent_sandbox(
         "automountServiceAccountToken": false,
         "enableServiceLinks": false,
     });
+    insert_optional(&mut pod_spec, "hostUsers", config.host_users);
     // fsGroup makes bootstrap emptyDirs and the state PVC writable by the agent UID.
     if repo_cache_tools.is_some() || config.state_volume.is_some() {
         pod_spec["securityContext"] = tools::pod_security_context_json();
@@ -1550,6 +1579,46 @@ fn sandbox_service_account_matches(
             .service_account_name
             .as_deref(),
     ) == normalized_name(configured_service_account)
+}
+
+fn sandbox_pod_config_matches(
+    sandbox: &crd::Sandbox,
+    config: &AgentSandboxConfig,
+) -> SandboxResult<bool> {
+    let pod = &sandbox.spec.pod_template.spec;
+    if !sandbox_service_account_matches(sandbox, config.service_account_name.as_deref())
+        || pod.host_users.unwrap_or(true) != config.host_users.unwrap_or(true)
+    {
+        return Ok(false);
+    }
+    let Some(agent) = pod
+        .containers
+        .iter()
+        .find(|container| container.name == config.container_name)
+    else {
+        return Ok(false);
+    };
+    // The CRD and Kubernetes client use different generated Rust types for
+    // the same SecurityContext. Compare their wire representation, treating
+    // an omitted context and an empty context identically.
+    let existing = agent
+        .security_context
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose();
+    let expected = config
+        .container_security_context
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose();
+    match (existing, expected) {
+        (Ok(existing), Ok(expected)) => {
+            Ok(existing.unwrap_or_else(|| json!({})) == expected.unwrap_or_else(|| json!({})))
+        }
+        (Err(error), _) | (_, Err(error)) => Err(SandboxError::InvalidSpec(format!(
+            "cannot compare sandbox security contexts: {error}"
+        ))),
+    }
 }
 
 /// Override-or-append an env entry, so the agent container never emits a
@@ -1928,6 +1997,83 @@ mod tests {
         assert!(pod_spec.runtime_class_name.is_none());
         assert!(pod_spec.service_account_name.is_none());
         assert!(pod_spec.priority_class_name.is_none());
+        assert!(pod_spec.host_users.is_none());
+        assert!(pod_spec.containers[0].security_context.is_none());
+    }
+
+    #[test]
+    fn sandbox_security_options_reach_the_agent_pod_template() {
+        let spec = SandboxSpec::new("centaur-agent:latest");
+        let mut config = AgentSandboxConfig::new("centaur", test_iron_control_settings())
+            .tools(ToolsConfig::new("example/tools", "agent:test"));
+        config.host_users = Some(false);
+        config.container_security_context = Some(
+            serde_json::from_value(json!({
+                "runAsUser": 1001,
+                "procMount": "Unmasked",
+                "appArmorProfile": {"type": "Unconfined"},
+            }))
+            .unwrap(),
+        );
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        let pod = serde_json::to_value(&sandbox.spec.pod_template.spec).unwrap();
+        assert_eq!(pod["hostUsers"], false);
+        assert_eq!(pod["containers"][0]["securityContext"]["runAsUser"], 1001);
+        assert_eq!(
+            pod["containers"][0]["securityContext"]["procMount"],
+            "Unmasked"
+        );
+        assert_eq!(
+            pod["containers"][0]["securityContext"]["appArmorProfile"]["type"],
+            "Unconfined"
+        );
+        assert_eq!(pod["automountServiceAccountToken"], false);
+        // Bootstrap permissions belong to its own configuration, even when
+        // the operator changes the agent container's security profile.
+        assert!(pod["initContainers"][0]["securityContext"]["procMount"].is_null());
+        assert!(pod["initContainers"][0]["securityContext"]["appArmorProfile"].is_null());
+
+        config.host_users = Some(true);
+        assert!(build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).is_err());
+        config.host_users = None;
+        assert!(build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).is_err());
+
+        config.container_security_context = None;
+        config.host_users = Some(true);
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        assert_eq!(sandbox.spec.pod_template.spec.host_users, Some(true));
+    }
+
+    #[test]
+    fn pod_config_reconciliation_detects_security_changes_and_rollback() {
+        let spec = SandboxSpec::new("centaur-agent:latest");
+        let mut config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
+        let defaults = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        assert!(sandbox_pod_config_matches(&defaults, &config).unwrap());
+
+        config.host_users = Some(true);
+        config.container_security_context = Some(SecurityContext::default());
+        assert!(sandbox_pod_config_matches(&defaults, &config).unwrap());
+
+        config.host_users = Some(false);
+        assert!(!sandbox_pod_config_matches(&defaults, &config).unwrap());
+        let isolated = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        assert!(sandbox_pod_config_matches(&isolated, &config).unwrap());
+
+        config.container_security_context = Some(SecurityContext {
+            proc_mount: Some("Unmasked".to_owned()),
+            ..Default::default()
+        });
+        assert!(!sandbox_pod_config_matches(&isolated, &config).unwrap());
+        let unmasked = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        assert!(sandbox_pod_config_matches(&unmasked, &config).unwrap());
+
+        config.container_security_context = None;
+        assert!(!sandbox_pod_config_matches(&unmasked, &config).unwrap());
+        config.host_users = None;
+        assert!(!sandbox_pod_config_matches(&isolated, &config).unwrap());
+        assert!(sandbox_pod_config_matches(&defaults, &config).unwrap());
     }
 
     #[test]

@@ -2,213 +2,117 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
+import os
+import sys
+from typing import Annotated
 
 import typer
 from dotenv import load_dotenv
-from rich.console import Console
 
 from .client import _client
 
 load_dotenv()
 
-app = typer.Typer(name="websearch", help="Web search and deep research via Parallel")
+app = typer.Typer(name="websearch", help="Web search via Parallel, Exa, or Tako")
+
+
+def _write(text: str) -> None:
+    try:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # The reader (e.g. `head`) stopped early, which is success. Point stdout at
+        # devnull so the interpreter's exit-time flush cannot fail with status 120.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+
+
+def _write_json(payload: dict) -> None:
+    _write(json.dumps(payload, indent=2, ensure_ascii=False, default=str) + "\n")
 
 
 @app.command("health")
 def health(
-    timeout_seconds: float = typer.Option(30.0, "--timeout-seconds", help="Request timeout"),
+    timeout_seconds: Annotated[float, typer.Option(help="Request timeout")] = 30.0,
 ):
     """Assert websearch connectivity and auth with a safe read-only check."""
-    from .client import _client
-
-    client = _client()
     try:
-        details = asyncio.run(
-            client.search(
-                "health check", num_results=1, timeout_seconds=timeout_seconds, synthesize=False
-            )
-        )
-        payload = {"ok": True, "tool": "websearch", "error": None, "details": details}
+        details = _client().search("health check", num_results=1, timeout_seconds=timeout_seconds)
     except Exception as exc:
-        payload = {"ok": False, "tool": "websearch", "error": str(exc), "details": {}}
-        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        _write_json({"ok": False, "tool": "websearch", "error": str(exc), "details": {}})
         raise typer.Exit(1) from exc
-    finally:
-        close = getattr(client, "close", None)
-        if callable(close):
-            close()
-    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
-
-
-console = Console(stderr=True)
-
-
-def _print_json(payload: dict) -> None:
-    print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+    _write_json({"ok": True, "tool": "websearch", "error": None, "details": details})
 
 
 @app.command()
 def search(
-    query: str = typer.Argument(..., help="Search query or research question."),
-    num_results: int = typer.Option(10, "--num-results", "-n", help="Maximum results"),
-    timeout_seconds: float = typer.Option(60.0, "--timeout-seconds", help="Request timeout"),
-    synthesize: bool = typer.Option(
-        True, "--synthesize/--no-synthesize", help="Compose a cited answer from excerpts"
-    ),
-    mode: str = typer.Option(None, "--mode", help="Search mode: basic | advanced (REST only)"),
-    client_model: str = typer.Option(
-        None,
-        "--client-model",
-        help="Identifier of the consuming LLM (e.g. claude-opus-4-7)",
-    ),
-    max_chars_total: int = typer.Option(
-        None, "--max-chars-total", help="Upper bound on total excerpt characters (REST only)"
-    ),
-    include_domains: list[str] = typer.Option(
-        None, "--include-domain", help="Restrict to these domains (REST only). Repeatable."
-    ),
-    exclude_domains: list[str] = typer.Option(
-        None, "--exclude-domain", help="Exclude these domains (REST only). Repeatable."
-    ),
-    max_age_hours: int = typer.Option(
-        None,
-        "--max-age-hours",
-        help=(
-            "Recency filter (REST only). Rounded DOWN to a UTC calendar-date "
-            "cutoff — Parallel's source policy is date-granular, not hour-precise."
-        ),
-    ),
-    session_id: str = typer.Option(
-        None,
-        "--session-id",
-        help="Stable session ID (UUID); reuse across related Search/Extract calls",
-    ),
-    max_report_chars: int = typer.Option(
-        12000, "--max-report-chars", help="Maximum composed answer length in characters"
-    ),
-    pretty: bool = typer.Option(False, "--pretty", help="Print concise human-readable output"),
-    # Backward-compat shim for the original Exa-backed tool's --search-type flag.
-    # Hidden from --help; if passed, we warn and ignore (no Parallel equivalent).
-    search_type: str = typer.Option(None, "--search-type", help="[deprecated] no-op", hidden=True),
+    query: Annotated[str, typer.Argument(help="Search query or question.")],
+    num_results: Annotated[int, typer.Option("--num-results", "-n", help="Maximum results")] = 10,
+    include_domains: Annotated[
+        list[str] | None,
+        typer.Option("--include-domain", help="Restrict to this domain. Repeatable."),
+    ] = None,
+    exclude_domains: Annotated[
+        list[str] | None, typer.Option("--exclude-domain", help="Exclude this domain. Repeatable.")
+    ] = None,
+    max_age_hours: Annotated[
+        int | None, typer.Option(help="Only recent results (date-granular on Parallel and Tako)")
+    ] = None,
+    mode: Annotated[str | None, typer.Option(help="basic (faster) | advanced")] = None,
+    max_chars_total: Annotated[
+        int | None, typer.Option(help="Upper bound on total snippet characters")
+    ] = None,
+    session_id: Annotated[
+        str | None, typer.Option(help="Stable ID reused across related searches (Parallel only)")
+    ] = None,
+    timeout_seconds: Annotated[float, typer.Option(help="Request timeout")] = 60.0,
+    backend: Annotated[
+        str | None,
+        typer.Option(help="parallel | exa | tako (default: $WEBSEARCH_BACKEND, then parallel)"),
+    ] = None,
+    pretty: Annotated[bool, typer.Option(help="Print concise human-readable output")] = False,
+    # Retired flags, accepted so older invocations keep working; reported in meta.warnings.
+    synthesize: Annotated[
+        bool | None, typer.Option("--synthesize/--no-synthesize", hidden=True)
+    ] = None,
+    client_model: Annotated[str | None, typer.Option(hidden=True)] = None,
+    max_report_chars: Annotated[int | None, typer.Option(hidden=True)] = None,
+    search_type: Annotated[str | None, typer.Option(hidden=True)] = None,
 ):
-    """Search the web via Parallel (free MCP or paid REST)."""
-    client = _client()
-    if search_type:
-        console.print(
-            f"[yellow]--search-type={search_type!r} is deprecated and ignored (no "
-            "Parallel equivalent for Exa's neural/keyword/auto modes).[/]"
-        )
+    """Search the web. Prints JSON with results and meta."""
     try:
-        payload = asyncio.run(
-            client.search(
-                query=query,
-                num_results=num_results,
-                timeout_seconds=timeout_seconds,
-                synthesize=synthesize,
-                mode=mode,
-                client_model=client_model,
-                max_chars_total=max_chars_total,
-                include_domains=include_domains or None,
-                exclude_domains=exclude_domains or None,
-                max_age_hours=max_age_hours,
-                session_id=session_id,
-                max_report_chars=max_report_chars,
-            )
+        payload = _client().search(
+            query,
+            num_results=num_results,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+            max_age_hours=max_age_hours,
+            mode=mode,
+            max_chars_total=max_chars_total,
+            session_id=session_id,
+            timeout_seconds=timeout_seconds,
+            backend=backend,
+            synthesize=synthesize,
+            client_model=client_model,
+            max_report_chars=max_report_chars,
+            search_type=search_type,
         )
-    except Exception as exc:  # pragma: no cover - CLI surface
-        console.print(f"[red]search failed:[/] {exc}")
+    except Exception as exc:
+        print(f"search failed: {exc}", file=sys.stderr)
         raise typer.Exit(1) from exc
 
-    if pretty:
-        out_console = Console()
-        out_console.print(f"[bold]Query:[/] {payload['query']}")
-        out_console.print(f"[dim]backend: {payload['meta'].get('backend')}[/]")
-        attribution = payload["meta"].get("attribution")
-        if attribution:
-            out_console.print(f"[dim]{attribution}[/]")
-        if payload["meta"].get("partial_failures"):
-            for failure in payload["meta"]["partial_failures"]:
-                out_console.print(f"[yellow]note: {failure.get('error')}[/]")
-        if payload.get("answer_markdown"):
-            out_console.print(payload["answer_markdown"])
-        out_console.print(f"\n[bold]Results:[/] {len(payload['results'])}")
-        for row in payload["results"][:10]:
-            out_console.print(f"- {row['title']} ({row['url']})")
+    if not pretty:
+        _write_json(payload)
         return
-    _print_json(payload)
-
-
-@app.command("deep-research")
-def deep_research_command(
-    question: str = typer.Argument(..., help="Research question"),
-    processor: str = typer.Option(
-        None,
-        "--processor",
-        "-p",
-        help="Task processor (pro/pro-fast/ultra/ultra-fast/ultra2x/ultra4x/ultra8x)",
-    ),
-    timeout_seconds: float = typer.Option(
-        None,
-        "--timeout-seconds",
-        help="Request timeout. Defaults to a processor-appropriate value.",
-    ),
-    max_report_chars: int = typer.Option(
-        50000, "--max-report-chars", help="Maximum report length in characters"
-    ),
-    pretty: bool = typer.Option(False, "--pretty", help="Print markdown report only"),
-    # Backward-compat shims for the original Exa+Claude iterative pipeline.
-    # Hidden from --help; if passed, we warn and ignore (single-call Task API
-    # replaces planner→search→reviewer→writer loops).
-    max_iterations: int = typer.Option(
-        None, "--max-iterations", help="[deprecated] no-op", hidden=True
-    ),
-    num_queries_per_iteration: int = typer.Option(
-        None, "--num-queries-per-iteration", help="[deprecated] no-op", hidden=True
-    ),
-    num_results_per_query: int = typer.Option(
-        None, "--num-results-per-query", help="[deprecated] no-op", hidden=True
-    ),
-):
-    """Run Parallel deep research (requires PARALLEL_API_KEY)."""
-    client = _client()
-
-    def _progress(stage: str) -> None:
-        console.print(f"[dim]{stage}[/]")
-
-    client._set_progress_callback(_progress)
-    deprecated_passed = [
-        name
-        for name, value in (
-            ("--max-iterations", max_iterations),
-            ("--num-queries-per-iteration", num_queries_per_iteration),
-            ("--num-results-per-query", num_results_per_query),
-        )
-        if value is not None
-    ]
-    if deprecated_passed:
-        console.print(
-            f"[yellow]Ignored deprecated flags: {', '.join(deprecated_passed)} "
-            "(Parallel Task API is single-call; iteration knobs no longer apply).[/]"
-        )
-    try:
-        payload = asyncio.run(
-            client.deep_research(
-                question=question,
-                processor=processor,
-                timeout_seconds=timeout_seconds,
-                max_report_chars=max_report_chars,
-            )
-        )
-    except Exception as exc:  # pragma: no cover - CLI surface
-        console.print(f"[red]deep research failed:[/] {exc}")
-        raise typer.Exit(1) from exc
-
-    if pretty:
-        print(payload["answer_markdown"])
-        return
-    _print_json(payload)
+    for warning in payload["meta"]["warnings"]:
+        print(f"note: {warning}", file=sys.stderr)
+    lines = [f"[{payload['meta']['backend']}] {payload['query']}"]
+    for index, result in enumerate(payload["results"], 1):
+        date = f" ({result['published_date']})" if result["published_date"] else ""
+        lines.append(f"{index}. {result['title']}{date}\n   {result['url']}")
+    if attribution := payload["meta"].get("attribution"):
+        lines.append(attribution)
+    _write("\n".join(lines) + "\n")
 
 
 if __name__ == "__main__":

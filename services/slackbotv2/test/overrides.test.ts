@@ -85,9 +85,9 @@ describe('extractMessageOverrides', () => {
       model: 'claude-opus-5-5',
       reasoning: undefined
     })
-    expect(extractMessageOverrides('--sonnet fix it').model).toBe('claude-sonnet-5')
-    expect(extractMessageOverrides('--haiku fix it').model).toBe('claude-haiku-4-5')
-    expect(extractMessageOverrides('--fable fix it').model).toBe('claude-fable-5')
+    expect(extractMessageOverrides('--sonnet fix it').model).toBe('claude-sonnet-5-5')
+    expect(extractMessageOverrides('--haiku fix it').model).toBe('claude-haiku-5-5')
+    expect(extractMessageOverrides('--fable fix it').model).toBe('claude-fable-5-1')
   })
 
   test('--meta selects the Meta provider and codex harness', () => {
@@ -135,15 +135,15 @@ describe('extractMessageOverrides', () => {
       harnessType: 'claudecode',
       model: 'claude-opus-5-5'
     })
-    expect(extractMessageOverrides('--model Sonnet go').model).toBe('claude-sonnet-5')
-    expect(extractMessageOverrides('--model fable go').model).toBe('claude-fable-5')
+    expect(extractMessageOverrides('--model Sonnet go').model).toBe('claude-sonnet-5-5')
+    expect(extractMessageOverrides('--model fable go').model).toBe('claude-fable-5-1')
   })
 
   test('--model accepts a newline immediately after the value', () => {
     expect(extractMessageOverrides('--claude --model=fable\nwhat model are you')).toEqual({
       cleanedText: 'what model are you',
       harnessType: 'claudecode',
-      model: 'claude-fable-5',
+      model: 'claude-fable-5-1',
       reasoning: undefined
     })
     expect(
@@ -151,7 +151,7 @@ describe('extractMessageOverrides', () => {
     ).toEqual({
       cleanedText: '@Centaur AI what model are you',
       harnessType: 'claudecode',
-      model: 'claude-fable-5',
+      model: 'claude-fable-5-1',
       reasoning: undefined
     })
   })
@@ -160,7 +160,7 @@ describe('extractMessageOverrides', () => {
     expect(extractMessageOverrides('--claude --model=fable<br>what model are you')).toEqual({
       cleanedText: 'what model are you',
       harnessType: 'claudecode',
-      model: 'claude-fable-5',
+      model: 'claude-fable-5-1',
       reasoning: undefined
     })
   })
@@ -380,7 +380,7 @@ describe('normalizeHarnessOverrides', () => {
 })
 
 describe('validateStrategyOverrides', () => {
-  for (const model of ['gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna']) {
+  for (const model of ['gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-sol', 'gpt-6-luna']) {
     test(`accepts ${model} and routes it to Codex`, () => {
       expect(validateStrategyOverrides({ model, reasoning: 'max' })).toEqual({
         harnessType: 'codex',
@@ -479,6 +479,14 @@ describe('validateStrategyOverrides', () => {
       provider: undefined,
       reasoning: undefined
     })
+    for (const model of ['claude-fable-5-1', 'claude-sonnet-5-5', 'claude-haiku-5-5']) {
+      expect(validateStrategyOverrides({ model })).toEqual({
+        harnessType: 'claudecode',
+        model,
+        provider: undefined,
+        reasoning: undefined
+      })
+    }
   })
 
   test('rejects aliases and arbitrary model ids from the strategy path', () => {
@@ -570,7 +578,7 @@ describe('messageOverridesForText strategy invocation', () => {
       cleanedText: 'review this',
       overrides: {
         harnessType: 'claudecode',
-        model: 'claude-fable-5',
+        model: 'claude-fable-5-1',
         personaId: 'invest',
         provider: undefined,
         reasoning: undefined
@@ -684,7 +692,7 @@ describe('messageOverridesForText strategy invocation', () => {
                 status: 503,
                 statusText: 'Service Unavailable'
               })) as unknown as typeof fetch,
-            model: 'gpt-5.4-nano'
+            model: 'gpt-6-luna'
           })
         }),
         'use sol',
@@ -701,7 +709,7 @@ describe('messageOverridesForText strategy invocation', () => {
         requestCount += 1
         throw new Error('the explicit flag must not call the strategy model')
       }) as unknown as typeof fetch,
-      model: 'gpt-5.4-nano'
+      model: 'gpt-6-luna'
     })
 
     await expect(strategy({ text: '--nanocodex review this' })).resolves.toEqual({
@@ -717,22 +725,14 @@ describe('messageOverridesForText strategy invocation', () => {
   })
 
   test('only calls the OpenAI strategy for messages with a selector term', async () => {
-    const requestedInputs: unknown[] = []
+    const requestedTexts: unknown[] = []
     const strategy = createOpenAiMessageOverridesStrategy({
       apiKey: 'test-key',
       fetch: (async (_input: RequestInfo | URL, init?: RequestInit) => {
-        requestedInputs.push(JSON.parse(String(init?.body)).input)
-        return Response.json({
-          output: [
-            {
-              content: [
-                { text: JSON.stringify({ harness: null, model: null, provider: null, reasoning: null }) }
-              ]
-            }
-          ]
-        })
+        requestedTexts.push(userText(init))
+        return decisionsResponse({ selection: 0.01 })
       }) as unknown as typeof fetch,
-      model: 'gpt-5.4-nano'
+      model: 'gpt-6-luna'
     })
 
     for (const text of [
@@ -750,7 +750,7 @@ describe('messageOverridesForText strategy invocation', () => {
       await strategy({ text })
     }
 
-    expect(requestedInputs).toEqual([
+    expect(requestedTexts).toEqual([
       'use Opus-4.7 for this',
       'try gpt5',
       'think harder about it',
@@ -764,7 +764,7 @@ describe('messageOverridesForText strategy invocation', () => {
       fetch: (async () => {
         throw new Error('selector unavailable')
       }) as unknown as typeof fetch,
-      model: 'gpt-5.4-nano'
+      model: 'gpt-6-luna'
     })
 
     await expect(
@@ -780,29 +780,17 @@ describe('messageOverridesForText strategy invocation', () => {
   })
 
   test('composes a deterministic persona with natural-language model selection', async () => {
-    let requestBody: Record<string, unknown> | undefined
+    let requestUrl: string | undefined
+    let requestInit: RequestInit | undefined
     const strategy = createOpenAiMessageOverridesStrategy({
       apiKey: 'test-key',
-      fetch: (async (_input: RequestInfo | URL, init?: RequestInit) => {
-        requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>
-        return Response.json({
-          output: [
-            {
-              content: [
-                {
-                  text: JSON.stringify({
-                    harness: 'codex',
-                    model: 'gpt-6.1-sol',
-                    provider: null,
-                    reasoning: null
-                  })
-                }
-              ]
-            }
-          ]
-        })
+      baseUrl: 'https://us.api.openai.example/v1/',
+      fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        requestUrl = String(input)
+        requestInit = init
+        return decisionsResponse({ selection: 0.98, model: 'gpt-6.1-sol' })
       }) as unknown as typeof fetch,
-      model: 'gpt-5.4-nano'
+      model: 'gpt-6-luna'
     })
 
     await expect(
@@ -821,57 +809,76 @@ describe('messageOverridesForText strategy invocation', () => {
         reasoning: undefined
       }
     })
-    expect(requestBody?.input).toBe('use sol for this')
-    expect(requestBody?.instructions).toContain('sol -> gpt-6.1-sol')
-    expect(requestBody?.instructions).toContain('6 sol -> gpt-6-sol')
-    expect(requestBody?.instructions).toContain('luna -> gpt-6-luna')
-    const format = (requestBody?.text as {
-      format: { schema: { properties: { model: { enum: (string | null)[] } } } }
-    }).format
-    expect(format.schema.properties.model.enum).toContain('gpt-6.1-sol')
-    expect(format.schema.properties.model.enum).toContain('gpt-6-sol')
-    expect(format.schema.properties.model.enum).toContain('gpt-6-luna')
-    expect(format.schema.properties.model.enum).toContain('gpt-5.6-sol')
-    expect(format.schema.properties.model.enum).toContain('gpt-5.6-luna')
+    expect(requestUrl).toBe('https://us.api.openai.example/v1/decisions')
+    expect(userText(requestInit)).toBe('use sol for this')
   })
 
-  test('allows the OpenAI strategy to select nanocodex from natural language', async () => {
-    let requestBody: Record<string, unknown> | undefined
+  test('ignores field answers when the message is not a selection request', async () => {
     const strategy = createOpenAiMessageOverridesStrategy({
       apiKey: 'test-key',
-      fetch: (async (_input: RequestInfo | URL, init?: RequestInit) => {
-        requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>
-        return Response.json({
-          output: [
-            {
-              content: [
-                {
-                  text: JSON.stringify({
-                    harness: 'nanocodex',
-                    model: null,
-                    provider: null,
-                    reasoning: null
-                  })
-                }
-              ]
-            }
-          ]
-        })
-      }) as unknown as typeof fetch,
-      model: 'gpt-5.4-nano'
+      fetch: (async () =>
+        decisionsResponse({ selection: 0.2, model: 'claude-opus-4-7' })) as unknown as typeof fetch,
+      model: 'gpt-6-luna'
     })
 
-    await expect(strategy({ text: 'use nanocodex for this' })).resolves.toEqual({
+    await expect(
+      strategy({ text: 'our eval shows opus 4.7 hallucinating more, can you dig in' })
+    ).resolves.toEqual({ overrides: {} })
+  })
+
+  test('maps Decisions answers onto validated overrides', async () => {
+    const strategy = createOpenAiMessageOverridesStrategy({
+      apiKey: 'test-key',
+      fetch: (async () =>
+        decisionsResponse({
+          selection: 0.97,
+          harness: 'nanocodex',
+          provider: 'refusal',
+          reasoning: 'high'
+        })) as unknown as typeof fetch,
+      model: 'gpt-6-luna'
+    })
+
+    await expect(strategy({ text: 'use nanocodex with high effort' })).resolves.toEqual({
       overrides: {
         harnessType: 'nanocodex',
         model: undefined,
         provider: undefined,
-        reasoning: undefined
+        reasoning: 'high'
       }
     })
-    expect(JSON.stringify(requestBody)).toContain('nanocodex')
   })
 })
+
+type DecisionsFields = {
+  harness?: string
+  model?: string
+  provider?: string
+  reasoning?: string
+  selection: number
+}
+
+// Builds a /v1/decisions response. A field set to 'refusal' returns a refusal
+// answer; an omitted field returns the unspecified choice.
+function decisionsResponse({ selection, ...fields }: DecisionsFields): Response {
+  return Response.json({
+    answers: [
+      { name: 'selection_request', probability: selection, type: 'predicate' },
+      ...(['harness', 'model', 'provider', 'reasoning'] as const).map(name =>
+        fields[name] === 'refusal'
+          ? { name, type: 'refusal' }
+          : { choice: fields[name] ?? 'unspecified', confidence: 0.9, name, type: 'choice' }
+      )
+    ],
+    model: 'gpt-6-luna'
+  })
+}
+
+function userText(init: RequestInit | undefined): unknown {
+  const body = JSON.parse(String(init?.body)) as { input: { content: unknown; role: string }[] }
+  return body.input.find(item => item.role === 'user')?.content
+}
+
 
 function slackOptions(overrides: Partial<SlackbotV2Options>): SlackbotV2Options {
   return {
@@ -901,7 +908,7 @@ describe('SlackFormatConverter.extractPlainText + extractMessageOverrides', () =
     expect(extractMessageOverrides(text)).toEqual({
       cleanedText: 'examine github.com/paradigmxyz/centaur/pull/921. cross reference that PR.',
       harnessType: 'claudecode',
-      model: 'claude-fable-5',
+      model: 'claude-fable-5-1',
       reasoning: undefined
     })
   })

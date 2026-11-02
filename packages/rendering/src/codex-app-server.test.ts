@@ -112,6 +112,135 @@ describe('CodexAppServerRendererEventMapper', () => {
     })
   })
 
+  it('suppresses unphased progress messages and promotes only the terminal message', () => {
+    const mapper = new CodexAppServerRendererEventMapper()
+    const output: Array<ReturnType<typeof mapper.process>[number]> = []
+    const process = (event: unknown) => output.push(...mapper.process(event))
+
+    process({ type: 'item.started', item: { id: 'progress-1', type: 'agentMessage' } })
+    process({
+      type: 'item.agentMessage.delta',
+      itemId: 'progress-1',
+      delta: 'Let me inspect the linked thread.'
+    })
+    process({
+      type: 'item.completed',
+      item: { id: 'progress-1', type: 'agentMessage', text: 'Let me inspect the linked thread.' }
+    })
+    process({
+      type: 'item.started',
+      item: { id: 'cmd-1', type: 'commandExecution', command: 'slack thread C123:123.456' }
+    })
+    process({
+      type: 'item.completed',
+      item: {
+        id: 'cmd-1',
+        type: 'commandExecution',
+        command: 'slack thread C123:123.456',
+        status: 'completed'
+      }
+    })
+    process({ type: 'item.started', item: { id: 'final-1', type: 'agentMessage' } })
+    process({ type: 'item.agentMessage.delta', itemId: 'final-1', delta: 'Investigation complete.' })
+    process({
+      type: 'item.completed',
+      item: { id: 'final-1', type: 'agentMessage', text: 'Investigation complete.' }
+    })
+    process({ type: 'turn.completed', turn: { status: 'completed' } })
+
+    const messages = output.filter(event => event.type === 'renderer.message.delta')
+    expect(messages).toEqual([
+      {
+        type: 'renderer.message.delta',
+        delta: 'Investigation complete.',
+        force: false,
+        planPrefix: true
+      }
+    ])
+    expect(output.at(-1)).toMatchObject({
+      type: 'renderer.done',
+      answerMarkdown: 'Investigation complete.'
+    })
+  })
+
+  it('keeps every unphased message after the last tool call', () => {
+    const mapper = new CodexAppServerRendererEventMapper({ preStreamGraceMs: 0 })
+    const output: Array<ReturnType<typeof mapper.process>[number]> = []
+    const process = (event: unknown) => output.push(...mapper.process(event))
+    const message = (id: string, text: string) => {
+      process({ type: 'item.started', item: { id, type: 'agentMessage' } })
+      process({ type: 'item.agentMessage.delta', itemId: id, delta: text })
+      process({ type: 'item.completed', item: { id, type: 'agentMessage', text } })
+    }
+
+    message('progress-1', 'Let me run the tests.')
+    process({ type: 'item.started', item: { id: 'cmd-1', type: 'commandExecution', command: 'pnpm test' } })
+    process({
+      type: 'item.completed',
+      item: { id: 'cmd-1', type: 'commandExecution', command: 'pnpm test', status: 'completed' }
+    })
+    message('final-1', 'The tests pass.')
+    message('final-2', 'The fix is ready for review.')
+    process({ type: 'turn.completed', turn: { status: 'completed' } })
+
+    expect(output.at(-1)).toMatchObject({
+      type: 'renderer.done',
+      answerMarkdown: 'The tests pass.\n\nThe fix is ready for review.'
+    })
+  })
+
+  it('discards unphased messages before any non-message work item', () => {
+    for (const item of [
+      { type: 'webSearch', query: 'release notes' },
+      { type: 'mcpToolCall', server: 'docs', tool: 'search' },
+      { type: 'collabAgentToolCall', tool: 'spawn_agent' }
+    ]) {
+      const mapper = new CodexAppServerRendererEventMapper({ preStreamGraceMs: 0 })
+      const output: Array<ReturnType<typeof mapper.process>[number]> = []
+      const process = (event: unknown) => output.push(...mapper.process(event))
+      const message = (id: string, text: string) => {
+        process({ type: 'item.started', item: { id, type: 'agentMessage' } })
+        process({ type: 'item.completed', item: { id, type: 'agentMessage', text } })
+      }
+
+      message('progress-1', 'Let me look that up.')
+      process({ type: 'item.started', item: { id: 'work-1', ...item } })
+      process({ type: 'item.completed', item: { id: 'work-1', ...item } })
+      message('final-1', 'Here is the answer.')
+      process({ type: 'turn.completed', turn: { status: 'completed' } })
+
+      expect(output.at(-1)).toMatchObject({
+        type: 'renderer.done',
+        answerMarkdown: 'Here is the answer.'
+      })
+    }
+  })
+
+  it('uses the phased completed text when the phase arrives after deltas', () => {
+    const mapper = new CodexAppServerRendererEventMapper({ preStreamGraceMs: 0 })
+    const output: Array<ReturnType<typeof mapper.process>[number]> = []
+    const process = (event: unknown) => output.push(...mapper.process(event))
+
+    process({ type: 'item.started', item: { id: 'narration', type: 'agentMessage' } })
+    process({ type: 'item.agentMessage.delta', itemId: 'narration', delta: 'Narration draft.' })
+    process({
+      type: 'item.completed',
+      item: { id: 'narration', type: 'agentMessage', phase: 'commentary', text: 'Narration.' }
+    })
+    process({ type: 'item.started', item: { id: 'answer', type: 'agentMessage' } })
+    process({ type: 'item.agentMessage.delta', itemId: 'answer', delta: 'Draft answer.' })
+    process({
+      type: 'item.completed',
+      item: { id: 'answer', type: 'agentMessage', phase: 'final_answer', text: 'Canonical answer.' }
+    })
+    process({ type: 'turn.completed', turn: { status: 'completed' } })
+
+    expect(output.at(-1)).toMatchObject({
+      type: 'renderer.done',
+      answerMarkdown: 'Canonical answer.'
+    })
+  })
+
   it('suppresses reasoning thinking blocks', () => {
     const mapper = new CodexAppServerRendererEventMapper()
 
@@ -771,7 +900,7 @@ describe('CodexAppServerRendererEventMapper', () => {
           },
           {
             eventKind: 'session.execution_cancelled',
-            data: { error: 'Execution interrupted' }
+            data: { error: 'Execution interrupted.' }
           }
         ])
       )
@@ -780,7 +909,32 @@ describe('CodexAppServerRendererEventMapper', () => {
     expect(chunks.filter(chunk => chunk.type === 'markdown_text')).toEqual([
       {
         type: 'markdown_text',
-        text: 'Execution interrupted'
+        text: 'Execution interrupted.'
+      }
+    ])
+  })
+
+  it('emits interrupted final text when the interrupted turn precedes cancellation', async () => {
+    const chunks = await collect(
+      codexAppServerToChatSdkStream(
+        toAsyncIterable([
+          {
+            type: 'item.started',
+            item: { id: 'cmd-1', type: 'commandExecution', command: 'sleep 60' }
+          },
+          { type: 'turn.completed', turn: { id: 'turn-1', status: 'interrupted' } },
+          {
+            eventKind: 'session.execution_cancelled',
+            data: { error: 'Execution interrupted.' }
+          }
+        ])
+      )
+    )
+
+    expect(chunks.filter(chunk => chunk.type === 'markdown_text')).toEqual([
+      {
+        type: 'markdown_text',
+        text: 'Execution interrupted.'
       }
     ])
   })
