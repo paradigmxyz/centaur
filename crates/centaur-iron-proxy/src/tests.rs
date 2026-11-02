@@ -135,6 +135,67 @@ fn custom_provider_fragments_reject_unsafe_or_malformed_config() {
 }
 
 #[test]
+fn custom_provider_model_metadata_does_not_change_credential_scope() {
+    let provider = serde_json::json!({
+        "name": "Private Responses",
+        "baseUrl": "https://inference.example.com/v1",
+        "apiKeyEnv": "PRIVATE_RESPONSES_API_KEY"
+    });
+    let plain = serde_json::json!({"private": provider});
+    let mut catalog = plain.clone();
+    catalog["private"]["models"] = serde_json::json!({
+        "reasoning-model": {
+            "displayName": "Reasoning Model",
+            "aliases": ["reasoner"],
+            "description": "General-purpose model",
+            "contextWindow": 1000000,
+            "inputModalities": ["text", "image"],
+            "reasoningEfforts": ["low", "high"],
+            "defaultReasoning": "high",
+            "reasoningAliases": {"max": "high"}
+        },
+        "basic-model": {"displayName": "Basic Model"}
+    });
+    let plain = custom_provider_auth_fragments(&plain.to_string()).unwrap();
+    let catalog = custom_provider_auth_fragments(&catalog.to_string()).unwrap();
+    assert_eq!(
+        serde_yaml::to_string(&plain).unwrap(),
+        serde_yaml::to_string(&catalog).unwrap()
+    );
+}
+
+#[test]
+fn custom_provider_model_metadata_rejects_invalid_contracts() {
+    for model in [
+        serde_json::json!({"displayName": " "}),
+        serde_json::json!({"displayName": "Model", "reasoningEfforts": ["banana"]}),
+        serde_json::json!({"displayName": "Model", "reasoningEfforts": ["high"], "defaultReasoning": "banana"}),
+        serde_json::json!({"displayName": "Model", "reasoningEfforts": ["high"], "reasoningAliases": {"max": "banana"}}),
+        serde_json::json!({"displayName": "Model", "contextWindow": 0}),
+        serde_json::json!({"displayName": "Model", "contextWindow": -1}),
+        serde_json::json!({"displayName": "Model", "contextWindow": 1.5}),
+        serde_json::json!({"displayName": "Model", "inputModalities": []}),
+        serde_json::json!({"displayName": "Model", "inputModalities": ["image"]}),
+        serde_json::json!({"displayName": "Model", "inputModalities": ["text", "text"]}),
+        serde_json::json!({"displayName": "Model", "inputModalities": ["text", "audio"]}),
+        serde_json::json!({"displayName": "Model", "aliases": [""]}),
+        serde_json::json!({"displayName": "Model", "reasoningEfforts": "high"}),
+        serde_json::json!({"displayName": "Model", "defaultReasoning": "high"}),
+        serde_json::json!({"displayName": "Model", "reasoningEfforts": ["high"], "reasoningAliases": {"max": "low"}}),
+        serde_json::json!({"displayName": "Model", "apiKeyEnv": "OTHER_KEY"}),
+    ] {
+        let config = serde_json::json!({"private": {
+            "name": "Private", "baseUrl": "https://inference.example.com/v1",
+            "apiKeyEnv": "PRIVATE_API_KEY", "models": {"model": model}
+        }});
+        assert!(
+            custom_provider_auth_fragments(&config.to_string()).is_err(),
+            "accepted {config}"
+        );
+    }
+}
+
+#[test]
 fn pg_sandbox_dsns_reads_name_and_database_from_fragments() {
     // A listener with a sandbox_env (the api-rs-internal annotation api-rs
     // stamps from each tool's declared pg_dsn name/database) is surfaced; a

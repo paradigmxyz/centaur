@@ -992,6 +992,93 @@ describe('slackbotv2', () => {
     ).toEqual(expect.objectContaining({ model: 'gpt-5.4' }))
   })
 
+  it('switches a sticky thread to a named configured model and forwards its default effort', async () => {
+    const previous = process.env.CODEX_CUSTOM_PROVIDERS
+    process.env.CODEX_CUSTOM_PROVIDERS = JSON.stringify({
+      private: { name: 'Private Inference', defaultModel: 'atlas-full', models: {
+        'atlas-full': { displayName: 'Atlas Full', aliases: ['atlas'],
+          reasoningEfforts: ['low', 'max'], defaultReasoning: 'max' }
+      } }
+    })
+    try {
+      const sharedState = createMemoryState()
+      await sharedState.connect()
+      bot = createTestBot({
+        state: sharedState,
+        responseMetadataMode: 'first',
+        messageOverridesStrategy: createOpenAiMessageOverridesStrategy({
+          apiKey: 'test-key', model: 'classifier',
+          fetch: (async (_url: RequestInfo | URL, init?: RequestInit) => Response.json({ answers: [
+            { name: 'selection_request', probability: 0.99, type: 'predicate' },
+            { name: 'model', choice: String(init?.body).includes('use Sol') ? 'gpt-6.1-sol' : 'private/atlas-full', type: 'choice' }
+          ] })) as unknown as typeof fetch
+        })
+      })
+      const parent = await sendMessage(`<@${BOT_USER_ID}> --codex --model gpt-6.1-sol start here`)
+      await parent.finished()
+      const switched = await sendMessage(`<@${BOT_USER_ID}> switch to Atlas for this`, { threadTs: parent.ts })
+      await switched.finished()
+      const followup = await sendMessage(`<@${BOT_USER_ID}> continue the work`, { threadTs: parent.ts })
+      await followup.finished()
+      for (const execution of codexApi.executes.slice(1)) {
+        const line = JSON.parse(execution.body.input_lines.at(-1)!)
+        expect(line.model).toBe('atlas-full')
+        expect(line.provider).toBe('private')
+        expect(line.reasoning).toBe('max')
+      }
+      expect(codexApi.executes).toHaveLength(3)
+      expect(await sharedState.get(`thread-state:${threadKey(parent.ts)}`)).toMatchObject({
+        model: 'atlas-full', provider: 'private', harnessType: 'codex'
+      })
+      const reset = await sendMessage(`<@${BOT_USER_ID}> use Sol again`, { threadTs: parent.ts })
+      await reset.finished()
+      const resetLine = JSON.parse(codexApi.executes[3]!.body.input_lines.at(-1)!)
+      expect(resetLine.model).toBe('gpt-6.1-sol')
+      expect(resetLine.provider).toBe(process.env.CODEX_MODEL_PROVIDER?.trim() || 'openai')
+      const invalid = await sendMessage(`<@${BOT_USER_ID}> --provider openrouter --model atlas use this`, { threadTs: parent.ts })
+      await invalid.finished()
+      expect(codexApi.executes).toHaveLength(4)
+      expect(await threadText(parent.ts)).toContain('incompatible')
+      const stopBlocks = slackApi.calls.filter(call => call.method === 'chat.stopStream')
+      expect(JSON.stringify(stopBlocks)).toContain('Atlas Full · Private Inference · Codex · Max')
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_CUSTOM_PROVIDERS
+      else process.env.CODEX_CUSTOM_PROVIDERS = previous
+    }
+  })
+
+  for (const configuredProvider of [undefined, 'configured-default']) {
+    it(`routes a model-only OpenRouter selection after a custom provider (${configuredProvider ?? 'inferred'})`, async () => {
+      const previousProvider = process.env.CODEX_MODEL_PROVIDER
+      const previousOpenRouter = process.env.OPENROUTER_MODEL
+      delete process.env.OPENROUTER_MODEL
+      if (configuredProvider) process.env.CODEX_MODEL_PROVIDER = configuredProvider
+      else delete process.env.CODEX_MODEL_PROVIDER
+      try {
+        const sharedState = createMemoryState()
+        await sharedState.connect()
+        bot = createTestBot({ state: sharedState })
+        const parent = await sendMessage(`<@${BOT_USER_ID}> --provider private --model private-model start here`)
+        await parent.finished()
+        const switched = await sendMessage(
+          `<@${BOT_USER_ID}> --model anthropic/claude-sonnet-5-5 continue`, { threadTs: parent.ts }
+        )
+        await switched.finished()
+        const line = JSON.parse(codexApi.executes[1]!.body.input_lines.at(-1)!)
+        expect(line.model).toBe('anthropic/claude-sonnet-5-5')
+        expect(line.provider).toBe(configuredProvider ?? 'openrouter')
+        expect(await sharedState.get(`thread-state:${threadKey(parent.ts)}`)).toMatchObject({
+          model: 'anthropic/claude-sonnet-5-5', provider: configuredProvider ?? 'openrouter'
+        })
+      } finally {
+        if (previousProvider === undefined) delete process.env.CODEX_MODEL_PROVIDER
+        else process.env.CODEX_MODEL_PROVIDER = previousProvider
+        if (previousOpenRouter === undefined) delete process.env.OPENROUTER_MODEL
+        else process.env.OPENROUTER_MODEL = previousOpenRouter
+      }
+    })
+  }
+
   it('keeps a top-level harness flag pinned when the LLM strategy guesses another harness', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()

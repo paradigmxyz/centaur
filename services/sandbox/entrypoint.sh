@@ -302,6 +302,7 @@ if overlay_raw:
 
 path.write_text(text)
 PYEOF
+    configure-codex-models "$HOME_DIR/.codex/config.toml"
 else
     echo "missing Codex harness config: $HARNESS_CONFIG_DIR/codex/config.toml" >&2
     exit 1

@@ -140,6 +140,16 @@ codex:
       baseUrl: https://inference.example.com/v1
       apiKeyEnv: PRIVATE_RESPONSES_API_KEY
       defaultModel: example-model
+      models:
+        example-model:
+          displayName: Example Model
+          aliases: [example]
+          description: General-purpose reasoning model
+          contextWindow: 1000000
+          inputModalities: [text]
+          reasoningEfforts: [low, high]
+          defaultReasoning: high
+          reasoningAliases: {max: high}
 ```
 
 Store the named key in the configured iron-proxy secret source. The chart sends
@@ -148,7 +158,47 @@ Console. api-rs registers a bearer-token replacement restricted to the
 `baseUrl` DNS host; sandboxes receive only the `apiKeyEnv` placeholder. Select
 the provider with `--provider private_responses`; `--model` overrides its
 configured default for that turn. If `defaultModel` is omitted, callers must
-pass `--model`; the Console lists only custom providers that define a default.
+pass `--model`.
+
+The optional `models` catalog supplies readable names, natural-language aliases,
+and supported reasoning settings without adding a harness or model-query tool.
+For example, “use Example Model with max reasoning” can resolve to the registered
+provider and model, with `max` normalized to the supported `high` effort. Use
+unique, descriptive aliases across configured providers. `reasoningEfforts: []`
+represents a model with no selectable reasoning effort; omit `defaultReasoning`
+and `reasoningAliases` in that case. Defaults and alias targets must be members
+of `reasoningEfforts`. Supported effort names are `none`, `minimal`, `low`,
+`medium`, `high`, `xhigh`, `max`, and `ultra`, matching the native Codex protocol.
+Provider entries without `models` remain supported.
+Flags also accept aliases, such as `--model example`. Use
+`--model private_responses/example-model` to disambiguate a model hosted by
+multiple configured providers.
+
+Optional `contextWindow` and `inputModalities` describe the model's actual context
+budget and accepted inputs in the sandbox's Codex model catalog. Set a positive
+context size and a unique list containing `text`, with `image` only when supported
+by the provider. This avoids treating a registered model as an unknown model
+with generic context and input capabilities. The generated catalog preserves
+Codex's bundled model entries. Omit these fields when the provider's limits are
+unknown; they do not configure a maximum output-token limit.
+Custom IDs must not replace bundled Codex IDs. Multiple providers sharing a
+model ID must declare identical native metadata, because Codex's catalog is
+keyed by model ID. An explicit operator `model_catalog_json` takes precedence
+over generation; profile-specific catalogs remain intact.
+
+Keep this non-secret catalog in deployment values, alongside the rest of the
+Helm configuration. Adding files to a tool or prompt overlay does not apply Helm
+values. Locally, merge the catalog into the file selected by
+`CENTAUR_EXTRA_VALUES` before `just deploy`. Provision the named API key through
+the existing secret source; never put its value in this catalog. With the default
+`apiRs.syncInfraSecrets: true`, the provider credential is registered in the
+infrastructure role. Deployments disabling that sync must register it separately.
+Existing sandbox pods retain their startup environment and configuration; validate
+new provider registrations in newly created sandboxes after rollout.
+
+Validate each model through a fresh local sandbox, including streaming tool use,
+a follow-up turn, effective reasoning attribution, and cancellation. A direct
+Chat Completions request does not validate the Codex Responses integration.
 
 The backing vault can be shared across the deployment, but access is not. The
 Centaur Console grants each user, channel, issue, or workflow principal only

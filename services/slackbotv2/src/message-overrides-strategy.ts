@@ -1,4 +1,5 @@
 import type { Logger } from 'chat'
+import { configuredModels, mentionsSelectionName } from './model-catalog'
 import {
   extractMessageOverrides,
   validateStrategyOverrides
@@ -132,6 +133,29 @@ const QUESTIONS = [
   )
 ]
 
+function configuredQuestions() {
+  const models = configuredModels()
+  const modelChoices = new Map(MODEL_CHOICES.map(choice => [choice.value, choice]))
+  for (const model of models) {
+    // Qualify configured choices so equal model IDs at different providers
+    // resolve to distinct routes.
+    const value = `${model.provider}/${model.id}`
+    modelChoices.set(value, {
+      value,
+      description: [model.displayName, `Provider: ${model.providerName}`, ...model.aliases, model.description]
+        .filter(Boolean).join('; ')
+    })
+  }
+  const providers = new Set([...PROVIDER_CHOICES.map(choice => choice.value), ...models.map(model => model.provider)])
+  return QUESTIONS.map(question => {
+    if (question.name === 'model') return choiceQuestion('model',
+      'Which AI model does the message explicitly request? Preserve the requested generation.', [...modelChoices.values()])
+    if (question.name === 'provider') return choiceQuestion('provider',
+      'Which inference provider does the message explicitly request?', [...providers].map(value => ({ value })))
+    return question
+  })
+}
+
 export type OpenAiMessageOverridesStrategyOptions = {
   apiKey: string
   baseUrl?: string
@@ -169,7 +193,8 @@ export function createOpenAiMessageOverridesStrategy(
     if (!strategyText) {
       return { cleanedText, overrides: {} }
     }
-    if (!SELECTOR_TERM_PATTERN.test(strategyText)) {
+    if (!SELECTOR_TERM_PATTERN.test(strategyText) && !mentionsSelectionName(strategyText,
+      configuredModels().flatMap(model => [model.id, model.provider, model.displayName, ...model.aliases]))) {
       return { overrides: {} }
     }
 
@@ -184,7 +209,7 @@ export function createOpenAiMessageOverridesStrategy(
             { content: strategyText, role: 'user' }
           ],
           model: options.model,
-          questions: QUESTIONS
+          questions: configuredQuestions()
         }),
         headers: {
           authorization: `Bearer ${options.apiKey}`,

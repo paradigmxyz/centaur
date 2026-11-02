@@ -38,6 +38,7 @@ export type Execution = { execution_id: string; status: string; error: string | 
 export type ModelRequest = {
   provider: 'openai' | 'anthropic'
   model?: string
+  host?: string
   /** The credential header as the provider received it, after iron-proxy. */
   credential?: string
   /** The ChatGPT workspace the request was sent for, after iron-proxy. */
@@ -111,6 +112,14 @@ export const chatgptAccountId = process.env.E2E_CHATGPT_ACCOUNT_ID
 export const turnTimeoutMs = Number(process.env.E2E_TURN_TIMEOUT_MS ?? 300_000)
 /** How long a finished execution may take to show up in Slack. */
 const renderTimeoutMs = 60_000
+
+export async function executionOutput(executionId: string): Promise<any[]> {
+  const events = await db`
+    select payload from session_events
+    where execution_id = ${executionId} and event_type = 'session.output.line'
+    order by event_id`
+  return events.map(({ payload }: { payload: string }) => JSON.parse(payload))
+}
 
 export const model = {
   /**
@@ -468,6 +477,16 @@ export class Thread {
       sandbox,
       request: token ? (await modelRequests(token))[0] : undefined
     }
+  }
+
+  async nextCancelledExecution(): Promise<Execution> {
+    const index = this.turnsSeen++
+    return eventually(`cancelled execution ${index + 1} of ${this.key}`, turnTimeoutMs, async () => {
+      const execution = (await this.executions())[index]
+      if (!execution || !isTerminal(execution.status)) return undefined
+      if (execution.status !== 'cancelled') throw new Error(`expected cancellation, got ${JSON.stringify(execution)}`)
+      return execution
+    })
   }
 
   /** Sandboxes that served this thread, in the order they became ready. */

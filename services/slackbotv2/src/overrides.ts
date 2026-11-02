@@ -1,3 +1,4 @@
+import { configuredModels, findConfiguredModel, mentionsSelectionName } from './model-catalog'
 import { escapeRegExp } from './utils'
 
 /**
@@ -38,6 +39,7 @@ export type HarnessOverrides = {
   personaId?: string
   provider?: string
   reasoning?: string
+  selectionError?: string
 }
 
 export type MessageOverrides = HarnessOverrides & {
@@ -226,10 +228,7 @@ export function extractMessageOverrides(text: string): MessageOverrides {
 
   return {
     cleanedText: cleaned === text ? text : cleaned.trim(),
-    harnessType,
-    model,
-    provider,
-    reasoning
+    ...resolveConfiguredSelection({ harnessType, model, provider, reasoning }, true)
   }
 }
 
@@ -266,7 +265,7 @@ export function validateStrategyOverrides(
   const providerRaw = cleanString(raw.provider)
   if (providerRaw) {
     const normalized = providerRaw.toLowerCase()
-    if (!STRATEGY_PROVIDERS.has(normalized)) return {}
+    if (!STRATEGY_PROVIDERS.has(normalized) && !configuredModels().some(model => model.provider === normalized)) return {}
     provider = normalized
     if (harnessType && harnessType !== 'codex') return {}
     harnessType = 'codex'
@@ -274,7 +273,7 @@ export function validateStrategyOverrides(
 
   const modelRaw = cleanString(raw.model)
   if (modelRaw) {
-    const modelHarness = STRATEGY_MODEL_HARNESSES[modelRaw.toLowerCase()]
+    const modelHarness = findConfiguredModel(modelRaw, provider) ? 'codex' : STRATEGY_MODEL_HARNESSES[modelRaw.toLowerCase()]
     if (!modelHarness) return {}
     if (harnessType && harnessType !== modelHarness) return {}
     model = modelRaw.toLowerCase()
@@ -295,7 +294,7 @@ export function validateStrategyOverrides(
         : undefined
   }
 
-  return { harnessType, model, provider, reasoning }
+  return resolveConfiguredSelection({ harnessType, model, provider, reasoning })
 }
 
 /**
@@ -342,7 +341,7 @@ export function normalizeHarnessOverrides(
     if (!reasoning) onError?.(`unknown reasoning effort "${reasoningRaw}"`)
   }
 
-  return { harnessType, model, provider, reasoning }
+  return resolveConfiguredSelection({ harnessType, model, provider, reasoning })
 }
 
 function cleanString(value: unknown): string | undefined {
@@ -407,4 +406,38 @@ export function parseEnabledHarnesses(value: string | undefined): string[] | und
 
 export function isHarnessEnabled(harness: string, enabledHarnesses?: readonly string[]): boolean {
   return enabledHarnesses === undefined || enabledHarnesses.includes(harness)
+}
+
+function resolveConfiguredSelection(overrides: HarnessOverrides, explicit = false): HarnessOverrides {
+  if (!overrides.model && overrides.provider) {
+    const model = customProviderDefaultModel(overrides.provider)
+    if (model) overrides = { ...overrides, model }
+  }
+  if (!overrides.model) return overrides
+  const candidates = configuredModels().filter(model =>
+    [model.id, `${model.provider}/${model.id}`, ...model.aliases].some(name => name.toLowerCase() === overrides.model?.toLowerCase()))
+  if (candidates.length === 0) return overrides
+  const model = findConfiguredModel(overrides.model, overrides.provider)
+  if (!model || (overrides.harnessType && overrides.harnessType !== 'codex')) {
+    return explicit ? { selectionError: 'That model selection is ambiguous or incompatible with the requested provider or harness. Choose its configured provider and use the Codex harness.' } : {}
+  }
+  return { ...overrides, harnessType: 'codex', model: model.id, provider: model.provider }
+}
+
+/** A classifier cannot replace a pinned selection unless its target is actually named. */
+export function namesRequestedSelection(text: string, overrides: HarnessOverrides): boolean {
+  if (overrides.model) {
+    const model = findConfiguredModel(overrides.model, overrides.provider)
+    const providerNames = model && customProviderDefaultModel(model.provider) === model.id
+      ? [model.provider, model.providerName] : []
+    const names = model ? [model.id, model.displayName, ...model.aliases, ...providerNames]
+      : [overrides.model, overrides.model.replace(/-/g, ' '),
+        ...(/^(?:gpt-[0-9.]+)-(sol|terra|luna|astra)$/.exec(overrides.model)?.slice(1) ?? []),
+        ...Object.entries(CLAUDE_MODEL_ALIASES)
+        .filter(([, id]) => id === overrides.model).map(([alias]) => alias)]
+    return mentionsSelectionName(text, names)
+  }
+  if (overrides.provider) return mentionsSelectionName(text, [overrides.provider])
+  return Boolean(overrides.harnessType && mentionsSelectionName(text,
+    Object.entries(HARNESS_FLAGS).filter(([, value]) => value === overrides.harnessType).map(([key]) => key)))
 }
