@@ -167,8 +167,7 @@ Console mints for api-rs (`Authorization: Bearer <jwt>`); iron-proxy injects it
 into sandbox requests to this service. The token's subject names the principal,
 whose Slack workspace and user ID and granted broker credentials are looked up
 in the Rails Console database. Slack user IDs are workspace-scoped, so a
-principal's Slack identity matches only when both its workspace and user ID do;
-a principal without a Slack workspace ID sees no Slack documents. The principal's Google and Granola identities are the
+principal's Slack identity matches only when both its workspace and user ID do. The principal's Google and Granola identities are the
 subjects of the live Google and Granola broker credentials (from
 `COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG` and
 `COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG`) granted directly to it; role grants
@@ -177,9 +176,11 @@ broker observation for one of those identities still reaches its Drive file,
 Slack conversation (for Slack files, any conversation the file is shared in),
 or Granola note; a Calendar event only to the Google identity it was synced
 for. A Slack conversation is also visible to its members, as of its last sync,
-while any live credential observes it. A custom document is visible to the
+while any live credential observes it, and to every principal granted history
+access to it in the Console, directly or through a role, while the Slack OAuth
+app is enabled and any live credential observes it. A custom document is visible to the
 principals its readers match. A principal without one of those identities sees no documents
-of the corresponding types. Disabling an OAuth app in the Console removes the
+of the corresponding types, except Slack channels whose history it is granted. Disabling an OAuth app in the Console removes the
 corresponding identity, so its documents stop being returned without being
 removed from the index.
 
