@@ -449,11 +449,35 @@ spec:
               value: {{ .Values.ironProxy.image.pullPolicy | quote }}
             - name: KUBERNETES_IRON_PROXY_UPSTREAM_DENY_CIDRS
               value: {{ join "," .Values.ironProxy.upstreamDenyCidrs | quote }}
-{{- if and (not .Values.postgres.enabled) .Values.externalDatabase.cidrs }}
             # Per-sandbox iron-proxies forward the tool-server sidecar's pool to
-            # the core database; allow them to reach the external database.
+            # the core database; allow them to reach it and no other in-cluster
+            # Postgres.
+{{- if .Values.postgres.enabled }}
+{{- $databasePodLabels := list }}
+{{- range $key, $value := fromYaml (include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres")) }}
+{{- $databasePodLabels = append $databasePodLabels (printf "%s=%s" $key $value) }}
+{{- end }}
+            - name: KUBERNETES_IRON_PROXY_DATABASE_POD_LABEL_SELECTOR
+              value: {{ join "," $databasePodLabels | quote }}
+            - name: KUBERNETES_IRON_PROXY_DATABASE_PORT
+              value: "5432"
+{{- else if or .Values.externalDatabase.cidrs .Values.externalDatabase.podSelector }}
+{{- with .Values.externalDatabase.cidrs }}
             - name: KUBERNETES_IRON_PROXY_DATABASE_CIDRS
-              value: {{ join "," .Values.externalDatabase.cidrs | quote }}
+              value: {{ join "," . | quote }}
+{{- end }}
+{{- with .Values.externalDatabase.podSelector }}
+{{- $databasePodLabels := list }}
+{{- range $key, $value := . }}
+{{- $databasePodLabels = append $databasePodLabels (printf "%s=%s" $key $value) }}
+{{- end }}
+            - name: KUBERNETES_IRON_PROXY_DATABASE_POD_LABEL_SELECTOR
+              value: {{ join "," $databasePodLabels | quote }}
+{{- with $.Values.externalDatabase.namespace }}
+            - name: KUBERNETES_IRON_PROXY_DATABASE_NAMESPACE
+              value: {{ . | quote }}
+{{- end }}
+{{- end }}
             - name: KUBERNETES_IRON_PROXY_DATABASE_PORT
               value: {{ .Values.externalDatabase.port | quote }}
 {{- end }}

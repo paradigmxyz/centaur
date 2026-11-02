@@ -107,6 +107,12 @@ pub struct IronProxyConfig {
     /// SQL). Proxies may reach them on `database_port`; the public-upstream rule
     /// excludes private ranges, where managed databases usually live.
     pub database_cidrs: Vec<String>,
+    /// Pod labels of an in-cluster core database (the bundled Postgres or, for
+    /// example, a CloudNativePG cluster). Proxies may reach these pods on
+    /// `database_port`, in `database_namespace` or, when unset, the sandbox
+    /// namespace. Empty allows no in-cluster database egress.
+    pub database_pod_labels: BTreeMap<String, String>,
+    pub database_namespace: Option<String>,
     pub database_port: u16,
     pub op_connect_app_name: String,
     pub op_connect_port: u16,
@@ -139,6 +145,8 @@ impl IronProxyConfig {
             extra_env: BTreeMap::new(),
             upstream_deny_cidrs: Vec::new(),
             database_cidrs: Vec::new(),
+            database_pod_labels: BTreeMap::new(),
+            database_namespace: None,
             database_port: 5432,
             op_connect_app_name: "onepassword-connect".to_owned(),
             op_connect_port: 8080,
@@ -1848,10 +1856,6 @@ fn proxy_egress_rules(
             vec![network_port(target.port)],
         ));
     }
-    rules.push(egress_to(
-        vec![all_namespaces_peer()],
-        vec![network_port(PG_LISTENER_PORT)],
-    ));
     rules.push(egress_to(vec![public_ipv4_peer()], upstream_ports));
     if !iron_proxy.database_cidrs.is_empty() {
         rules.push(egress_to(
@@ -1860,6 +1864,17 @@ fn proxy_egress_rules(
                 .iter()
                 .map(|cidr| ip_block_peer(cidr))
                 .collect(),
+            vec![network_port(iron_proxy.database_port)],
+        ));
+    }
+    if !iron_proxy.database_pod_labels.is_empty() {
+        let labels = iron_proxy.database_pod_labels.clone();
+        let peer = match iron_proxy.database_namespace.as_deref() {
+            Some(namespace) => namespace_pod_peer(namespace, labels),
+            None => pod_peer(labels),
+        };
+        rules.push(egress_to(
+            vec![peer],
             vec![network_port(iron_proxy.database_port)],
         ));
     }
@@ -1914,13 +1929,6 @@ fn namespace_pod_peer(namespace: &str, labels: BTreeMap<String, String>) -> Netw
             namespace.to_owned(),
         )]))),
         pod_selector: Some(label_selector(labels)),
-        ..Default::default()
-    }
-}
-
-fn all_namespaces_peer() -> NetworkPolicyPeer {
-    NetworkPolicyPeer {
-        namespace_selector: Some(LabelSelector::default()),
         ..Default::default()
     }
 }
@@ -3159,7 +3167,7 @@ mod tests {
                 .any(|rule| rule_allows_namespace_port(rule, "centaur", 3000))
         );
         assert!(
-            proxy_egress
+            !proxy_egress
                 .iter()
                 .any(|rule| rule_allows_all_namespaces_port(rule, 5432))
         );
@@ -3206,6 +3214,45 @@ mod tests {
         assert!(!sandbox_egress.iter().any(allows_database));
         let proxy_egress = policies[1].spec.as_ref().unwrap().egress.as_ref().unwrap();
         assert!(proxy_egress.iter().any(allows_database));
+    }
+
+    #[test]
+    fn proxy_policy_allows_in_cluster_database_pods_on_database_port() {
+        let id = SandboxId::new("asbx-test");
+        let labels = BTreeMap::from([("cnpg.io/cluster".to_owned(), "core-db".to_owned())]);
+        let database_port = vec![NetworkPolicyPort {
+            port: Some(IntOrString::Int(5432)),
+            protocol: Some("TCP".to_owned()),
+            ..Default::default()
+        }];
+        let proxy_egress = |iron_proxy: &IronProxyConfig| {
+            build_iron_proxy_network_policies(
+                &id,
+                &resolved(),
+                iron_proxy,
+                &[control_target()],
+                None,
+                false,
+            )[1]
+            .spec
+            .clone()
+            .unwrap()
+            .egress
+            .unwrap()
+        };
+
+        let mut iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
+        iron_proxy.database_pod_labels = labels.clone();
+        assert!(proxy_egress(&iron_proxy).iter().any(|rule| {
+            rule.to.as_deref() == Some(&[pod_peer(labels.clone())][..])
+                && rule.ports.as_ref() == Some(&database_port)
+        }));
+
+        iron_proxy.database_namespace = Some("databases".to_owned());
+        assert!(proxy_egress(&iron_proxy).iter().any(|rule| {
+            rule.to.as_deref() == Some(&[namespace_pod_peer("databases", labels.clone())][..])
+                && rule.ports.as_ref() == Some(&database_port)
+        }));
     }
 
     #[test]

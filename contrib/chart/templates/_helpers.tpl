@@ -37,8 +37,9 @@ app.kubernetes.io/component: {{ .component }}
 
 {{/*
 NetworkPolicy egress rule for Postgres clients. With the bundled Postgres,
-allow only its pod. With an external database (postgres.enabled=false, e.g.
-RDS or Cloud SQL), allow externalDatabase.cidrs on externalDatabase.port.
+allow only its pod. With an external database (postgres.enabled=false), allow
+externalDatabase.cidrs (e.g. RDS or Cloud SQL) and the pods matching
+externalDatabase.podSelector (an in-cluster database) on externalDatabase.port.
 NetworkPolicy cannot match hostnames, so the ranges must cover every address
 the database endpoint can resolve to.
 */}}
@@ -54,13 +55,23 @@ the database endpoint can resolve to.
       port: 5432
 {{- else -}}
 {{- $external := $root.Values.externalDatabase -}}
-{{- if not $external.cidrs -}}
-{{- fail "externalDatabase.cidrs must list the external database's address ranges when postgres.enabled=false and networkPolicy.enabled=true" -}}
+{{- if and (not $external.cidrs) (not $external.podSelector) -}}
+{{- fail "externalDatabase.cidrs or externalDatabase.podSelector must select the external database when postgres.enabled=false and networkPolicy.enabled=true" -}}
 {{- end -}}
 - to:
 {{- range $external.cidrs }}
     - ipBlock:
         cidr: {{ . | quote }}
+{{- end }}
+{{- with $external.podSelector }}
+    - podSelector:
+        matchLabels:
+{{ toYaml . | indent 10 }}
+{{- with $external.namespace }}
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ . | quote }}
+{{- end }}
 {{- end }}
   ports:
     - protocol: TCP
