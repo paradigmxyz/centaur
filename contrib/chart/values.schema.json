@@ -579,6 +579,8 @@
       "type": "object",
       "properties": {
         "cidrs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "podSelector": { "type": "object", "additionalProperties": { "type": "string" } },
+        "namespace": { "type": "string" },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "textSearch": { "enum": ["", "paradedb", "postgres"] }
       }

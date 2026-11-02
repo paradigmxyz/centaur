@@ -1976,6 +1976,21 @@ struct IronProxyArgs {
         value_delimiter = ','
     )]
     database_cidrs: Vec<String>,
+    /// Pod labels of an in-cluster core database. Per-sandbox iron-proxy
+    /// NetworkPolicies allow egress to these pods on the database port.
+    #[arg(
+        long = "kubernetes-iron-proxy-database-pod-label-selector",
+        env = "KUBERNETES_IRON_PROXY_DATABASE_POD_LABEL_SELECTOR",
+        value_parser = parse_label_selector_arg
+    )]
+    database_pod_label_selector: Option<BTreeMap<String, String>>,
+    /// Namespace of the in-cluster core database's pods. Defaults to the
+    /// sandbox namespace.
+    #[arg(
+        long = "kubernetes-iron-proxy-database-namespace",
+        env = "KUBERNETES_IRON_PROXY_DATABASE_NAMESPACE"
+    )]
+    database_namespace: Option<String>,
     #[arg(
         long = "kubernetes-iron-proxy-database-port",
         env = "KUBERNETES_IRON_PROXY_DATABASE_PORT",
@@ -2058,6 +2073,9 @@ impl IronProxyArgs {
                 Ok(cidr.to_owned())
             })
             .collect::<Result<_, ServerError>>()?;
+        config.database_pod_labels = self.database_pod_label_selector.clone().unwrap_or_default();
+        config.database_namespace =
+            non_empty(self.database_namespace.as_deref()).map(ToOwned::to_owned);
         config.database_port = self.database_port;
         self.source.apply_to_config(&mut config);
         config.fragments = harness_fragments;
@@ -3690,6 +3708,37 @@ mod tests {
         for invalid in ["db.example.com", "10.0.32.0", "10.0.32.0/33"] {
             assert!(parse(invalid).is_err(), "{invalid} must be rejected");
         }
+    }
+
+    #[test]
+    fn iron_proxy_database_pod_selector_is_parsed() {
+        let config = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--kubernetes-firewall-ca-secret-name",
+            "centaur-firewall-ca",
+            "--kubernetes-firewall-ca-key-secret-name",
+            "centaur-firewall-ca-key",
+            "--kubernetes-iron-proxy-database-pod-label-selector",
+            "cnpg.io/cluster=core-db,cnpg.io/instanceRole=primary",
+            "--kubernetes-iron-proxy-database-namespace",
+            "databases",
+        ])
+        .unwrap()
+        .sandbox
+        .iron_proxy
+        .to_config()
+        .unwrap();
+
+        assert_eq!(
+            config.database_pod_labels,
+            BTreeMap::from([
+                ("cnpg.io/cluster".to_owned(), "core-db".to_owned()),
+                ("cnpg.io/instanceRole".to_owned(), "primary".to_owned()),
+            ])
+        );
+        assert_eq!(config.database_namespace.as_deref(), Some("databases"));
     }
 
     #[test]

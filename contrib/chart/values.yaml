@@ -1044,6 +1044,16 @@ externalDatabase:
   # networkPolicy.enabled=true; must be empty while postgres.enabled=true.
   cidrs: []
   #   - 10.0.32.0/20
+  # Labels of the database's pods, for a database running in the cluster such
+  # as a CloudNativePG cluster. Control-plane pods and per-sandbox iron-proxies
+  # may reach these pods on port. Use this instead of cidrs for an in-cluster
+  # database: NetworkPolicy ipBlock rules may not match pod traffic. One of
+  # cidrs or podSelector is required when networkPolicy.enabled=true; both
+  # must be empty while postgres.enabled=true.
+  podSelector: {}
+  #   cnpg.io/cluster: core-db
+  # Namespace of those pods. Empty means the release namespace.
+  namespace: ""
   port: 5432
   # Keyword search backend for company context. "postgres" (used when empty)
   # uses built-in full-text search and works on RDS and Cloud SQL; "paradedb"

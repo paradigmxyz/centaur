@@ -62,10 +62,11 @@ Services. On clusters with a different pod CIDR, add that range to
 Services are exposed through another permitted route.
 
 With an external core database (`postgres.enabled=false`), control-plane pods
-and the per-sandbox proxies may also reach `externalDatabase.cidrs` on
-`externalDatabase.port`. Sandboxes still reach only their proxy. Keep those
-ranges limited to the database's subnets, such as the RDS DB subnet group or the
-Cloud SQL private IP.
+and the per-sandbox proxies may also reach `externalDatabase.cidrs`, or the pods
+matching `externalDatabase.podSelector`, on `externalDatabase.port`. Sandboxes
+still reach only their proxy. Keep those ranges limited to the database's
+subnets, such as the RDS DB subnet group or the Cloud SQL private IP, and the
+selector to the database's own pods.
 
 ### Egress policy
 

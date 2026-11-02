@@ -534,6 +534,20 @@ CIDRs, since the endpoint address moves on failover, or the Cloud SQL private IP
 as a `/32`. Control-plane pods and per-sandbox iron-proxies may reach only these
 ranges on `port`; see [Security](/security).
 
+For a database that runs in the cluster, such as a CloudNativePG cluster, set
+`externalDatabase.podSelector` to its pods' labels instead of `cidrs`, and
+`externalDatabase.namespace` if it runs outside the release namespace. Some
+CNIs do not apply `ipBlock` rules to pod traffic, so ranges cannot reliably
+admit an in-cluster database. If the database shares the release namespace,
+the chart's default-deny policy also covers its pods: allow their ingress, and
+the egress their operator needs, with your own NetworkPolicy.
+
+```yaml
+externalDatabase:
+  podSelector:
+    cnpg.io/cluster: core-db
+```
+
 `externalDatabase.textSearch` selects how company-context keyword search is
 indexed. Set it only with `postgres.enabled: false`; the bundled Postgres always
 uses `paradedb`.
