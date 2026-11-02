@@ -4,10 +4,25 @@
            title: "Integrations",
            subtitle: "Connect your accounts so Centaur can act on your behalf." %>
 
-<% if @oauth_apps.empty? && @presets.empty? %>
-  <p class="empty-state">No integrations available yet.</p>
-<% else %>
   <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+    <div class="console-panel flex flex-col gap-3 p-5">
+      <div class="flex items-center gap-3">
+        <span class="flex size-10 shrink-0 items-center justify-center rounded-lg bg-ink-700 font-mono text-sm text-zinc-200" aria-hidden="true">&gt;_</span>
+        <div>
+          <h2 class="font-mono text-sm font-semibold text-zinc-100">SSH key</h2>
+          <div class="text-[11px] uppercase tracking-wide text-zinc-500">Remote development</div>
+        </div>
+      </div>
+      <p class="text-xs text-zinc-500">Save one personal key for multiple allowed SSH destinations. Provide the environment URL in your request. Available in Console, DMs, and channel turns you initiate.</p>
+      <div class="mt-auto flex items-center justify-between gap-3 pt-1">
+        <%= link_to @ssh_connection&.configured? ? "Manage" : "Connect", @ssh_connection&.configured? ? console_ssh_connection_path : edit_console_ssh_connection_path, class: @ssh_connection&.configured? ? "btn-secondary" : "btn-primary" %>
+        <% if @ssh_connection&.configured? %>
+          <span class="text-xs text-emerald-300">Configured</span>
+        <% elsif @ssh_connection && !@ssh_connection.revoked? %>
+          <span class="text-xs text-amber-300">Expired</span>
+        <% end %>
+      </div>
+    </div>
     <% @oauth_apps.each do |app| %>
       <% start_url = "#{public_base_url}/oauth/#{app.slug}/start" %>
       <div class="console-panel flex flex-col gap-3 p-5">
@@ -58,5 +73,4 @@
       </div>
     <% end %>
   </div>
-  <p class="mt-6 text-xs text-zinc-600">Connecting opens the provider's consent screen. Once you approve, Centaur stores and refreshes the credential automatically.</p>
-<% end %>
+  <p class="mt-6 text-xs text-zinc-600">Account integrations open the provider's consent screen. SSH uses a personal key that stays connected until you disconnect.</p>

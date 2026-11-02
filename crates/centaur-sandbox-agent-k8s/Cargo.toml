@@ -22,6 +22,9 @@ tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread", 
 tracing.workspace = true
 uuid.workspace = true
 
+sha2 = "0.11"
+ssh-key = { version = "0.6.7", features = ["ed25519"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
 
