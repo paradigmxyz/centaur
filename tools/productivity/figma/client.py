@@ -2,6 +2,7 @@
 
 import json
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from urllib.request import Request, urlopen
 
@@ -61,8 +62,10 @@ class FigmaClient:
         # https://www.figma.com/file/ABC123/Name?node-id=1:2
         # https://www.figma.com/design/ABC123/Name?node-id=1-2
         # https://www.figma.com/proto/ABC123/Name
+        # https://www.figma.com/slides/ABC123/Name?node-id=1-2
+        # https://www.figma.com/board/ABC123/Name
 
-        match = re.search(r"figma\.com/(?:file|design|proto)/([a-zA-Z0-9]+)", url)
+        match = re.search(r"figma\.com/(?:file|design|proto|slides|board)/([a-zA-Z0-9]+)", url)
         if not match:
             raise ValueError(f"Invalid Figma URL: {url}")
 
@@ -96,6 +99,39 @@ class FigmaClient:
     def get_node(self, file_key: str, node_id: str) -> dict:
         """Get specific node(s) from file."""
         return self._request(f"/files/{file_key}/nodes?ids={node_id}")
+
+    def get_text(self, url: str) -> list[dict]:
+        """Get the visible text on each slide of a Figma Slides deck, in deck order.
+
+        A file without slides is read by its top-level layers instead, top to
+        bottom and left to right, since decks are often built as frames in a
+        design file.
+        """
+        file_key, _ = self.parse_url(url)
+        document = self.get_file(file_key).get("document", {})
+
+        slides = [node for node in _visible_nodes(document) if node.get("type") == "SLIDE"]
+        blocks = slides or sorted(
+            (
+                layer
+                for page in document.get("children", [])
+                for layer in page.get("children", [])
+                if layer.get("visible", True)
+            ),
+            key=_position,
+        )
+        return [
+            {
+                "id": block.get("id", ""),
+                "name": block.get("name", ""),
+                "text": [
+                    node["characters"]
+                    for node in sorted(_visible_nodes(block), key=_position)
+                    if node.get("type") == "TEXT" and node.get("characters")
+                ],
+            }
+            for block in blocks
+        ]
 
     def crawl(self, url: str) -> FigmaDesignSystem:
         """Crawl a Figma file/frame URL and extract all design system info."""
@@ -239,6 +275,21 @@ class FigmaClient:
         if a < 1:
             return f"rgba({r}, {g}, {b}, {a:.2f})"
         return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _visible_nodes(node: dict) -> Iterator[dict]:
+    """Yield a node and its visible descendants, skipping hidden subtrees."""
+    if not node.get("visible", True):
+        return
+    yield node
+    for child in node.get("children", []):
+        yield from _visible_nodes(child)
+
+
+def _position(node: dict) -> tuple[float, float]:
+    """Sort key for reading order: Figma lists children by z-order, not position."""
+    box = node.get("absoluteBoundingBox") or {}
+    return (box.get("y", 0), box.get("x", 0))
 
 
 def _client() -> FigmaClient:

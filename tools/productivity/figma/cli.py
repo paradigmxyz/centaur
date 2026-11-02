@@ -37,6 +37,37 @@ console = Console()
 
 
 @app.command()
+def text(
+    url: str = typer.Argument(..., help="Figma Slides or design file URL"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """Print the text on each slide of a Figma Slides deck, in deck order.
+
+    A design file is read by its top-level frames instead.
+    Uses FIGMA_ACCESS_TOKEN for authentication.
+    """
+    from .client import FigmaClient
+
+    try:
+        slides = FigmaClient().get_text(url)
+    except ValueError as e:
+        console.print(f"[red]{e}[/]")
+        raise typer.Exit(1) from e
+    except Exception as e:
+        console.print(f"[red]Figma API error: {e}[/]")
+        raise typer.Exit(1) from e
+
+    if json_output:
+        print(json.dumps(slides, indent=2, ensure_ascii=False))
+        return
+
+    # Plain print, since rich would treat brackets in slide copy as markup.
+    for number, slide in enumerate(slides, start=1):
+        print(f"## {number}. {slide['name']}\n")
+        print("\n\n".join(slide["text"]) + "\n")
+
+
+@app.command()
 def crawl(
     url: str = typer.Argument(..., help="Figma file or frame URL"),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
@@ -53,10 +84,10 @@ def crawl(
         ds = client.crawl(url)
     except ValueError as e:
         console.print(f"[red]{e}[/]")
-        return
+        raise typer.Exit(1) from e
     except Exception as e:
         console.print(f"[red]Figma API error: {e}[/]")
-        return
+        raise typer.Exit(1) from e
 
     if json_output:
         import json
