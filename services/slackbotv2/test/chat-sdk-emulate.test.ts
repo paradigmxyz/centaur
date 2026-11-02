@@ -1664,6 +1664,14 @@ describe('slackbotv2', () => {
     })
   })
 
+  it('ignores plain-text @centaur that is not a Slack mention', async () => {
+    const message = await sendMessage('To mute it, send "@centaur stop".')
+    await message.finished()
+
+    expect(codexApi.creates).toHaveLength(0)
+    expect(codexApi.executes).toHaveLength(0)
+  })
+
   it('ignores non-JSON sandbox bootstrap output lines instead of ending the stream', async () => {
     codexApi.autoRespond = false
 
