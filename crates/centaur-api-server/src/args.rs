@@ -251,7 +251,7 @@ struct ActivitySummaryArgs {
     #[arg(
         long = "session-progress-update-interval-secs",
         env = "SESSION_PROGRESS_UPDATE_INTERVAL_SECS",
-        default_value_t = 300,
+        default_value_t = 120,
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     progress_update_interval_secs: u64,
@@ -2760,7 +2760,7 @@ mod tests {
         assert!(parse(&[]).is_none());
         let progress = parse(&["--session-progress-update-enabled", "true"]).unwrap();
         assert_eq!(progress.after, Duration::from_secs(60));
-        assert_eq!(progress.interval, Duration::from_secs(300));
+        assert_eq!(progress.interval, Duration::from_secs(120));
     }
 
     #[test]

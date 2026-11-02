@@ -126,7 +126,7 @@ created. Changing a default does not rewrite existing principals.
 | `SESSION_ACTIVITY_SUMMARY_MODEL` | `apiRs.activitySummary.model`, default `gpt-5.4-nano`. | Model used for the short live activity sentence. |
 | `apiRs.activitySummary.progressUpdates.enabled` / `SESSION_PROGRESS_UPDATE_ENABLED` | Helm value, default `false`. Requires `apiRs.activitySummary.enabled`. | Feature flag for progress messages. When on, api-rs writes a short progress message from recent activity as a durable `session.progress_update` event for long-running executions, which Slackbot v2 posts as a separate thread message. |
 | `apiRs.activitySummary.progressUpdates.afterSecs` / `SESSION_PROGRESS_UPDATE_AFTER_SECS` | Helm value, default `60`. | Execution age before the first progress message. |
-| `apiRs.activitySummary.progressUpdates.intervalSecs` / `SESSION_PROGRESS_UPDATE_INTERVAL_SECS` | Helm value, default `300`. | Minimum time between progress messages for one execution. A message is written only when new activity arrived since the previous one. |
+| `apiRs.activitySummary.progressUpdates.intervalSecs` / `SESSION_PROGRESS_UPDATE_INTERVAL_SECS` | Helm value, default `120`. | Minimum time between progress messages for one execution. A message is written only when new activity arrived since the previous one. |
 
 Sandbox lifecycle:
 
