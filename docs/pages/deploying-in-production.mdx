@@ -548,6 +548,12 @@ externalDatabase:
     cnpg.io/cluster: core-db
 ```
 
+Per-sandbox iron-proxies reach only the core database on Postgres ports inside
+the cluster. Earlier releases let them reach any in-cluster pod on port 5432,
+so an in-cluster database configured with `cidrs` alone may have worked without
+matching those ranges. Set `podSelector` before upgrading such a deployment.
+`pg_dsn` secrets for other in-cluster Postgres servers are no longer reachable.
+
 `externalDatabase.textSearch` selects how company-context keyword search is
 indexed. Set it only with `postgres.enabled: false`; the bundled Postgres always
 uses `paradedb`.

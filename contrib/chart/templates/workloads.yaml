@@ -8,6 +8,9 @@
 {{- if and .Values.postgres.enabled .Values.externalDatabase.podSelector }}
 {{- fail "externalDatabase.podSelector is set but postgres.enabled=true; set postgres.enabled=false to use the external database" }}
 {{- end }}
+{{- if and .Values.externalDatabase.namespace (not .Values.externalDatabase.podSelector) }}
+{{- fail "externalDatabase.namespace requires externalDatabase.podSelector" }}
+{{- end }}
 {{- if and .Values.postgres.enabled .Values.externalDatabase.textSearch }}
 {{- fail "externalDatabase.textSearch is set but postgres.enabled=true; the bundled Postgres always uses paradedb" }}
 {{- end }}

@@ -1052,7 +1052,8 @@ externalDatabase:
   # must be empty while postgres.enabled=true.
   podSelector: {}
   #   cnpg.io/cluster: core-db
-  # Namespace of those pods. Empty means the release namespace.
+  # Namespace of those pods; requires podSelector. Empty means the release
+  # namespace.
   namespace: ""
   port: 5432
   # Keyword search backend for company context. "postgres" (used when empty)

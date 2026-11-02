@@ -107,10 +107,10 @@ pub struct IronProxyConfig {
     /// SQL). Proxies may reach them on `database_port`; the public-upstream rule
     /// excludes private ranges, where managed databases usually live.
     pub database_cidrs: Vec<String>,
-    /// Pod labels of an in-cluster core database (for example a CloudNativePG
-    /// cluster). Proxies may reach these pods on `database_port`, in
-    /// `database_namespace` or, when unset, the sandbox namespace. Empty
-    /// allows no such egress.
+    /// Pod labels of an in-cluster core database (the bundled Postgres or, for
+    /// example, a CloudNativePG cluster). Proxies may reach these pods on
+    /// `database_port`, in `database_namespace` or, when unset, the sandbox
+    /// namespace. Empty allows no in-cluster database egress.
     pub database_pod_labels: BTreeMap<String, String>,
     pub database_namespace: Option<String>,
     pub database_port: u16,
@@ -1856,10 +1856,6 @@ fn proxy_egress_rules(
             vec![network_port(target.port)],
         ));
     }
-    rules.push(egress_to(
-        vec![all_namespaces_peer()],
-        vec![network_port(PG_LISTENER_PORT)],
-    ));
     rules.push(egress_to(vec![public_ipv4_peer()], upstream_ports));
     if !iron_proxy.database_cidrs.is_empty() {
         rules.push(egress_to(
@@ -1933,13 +1929,6 @@ fn namespace_pod_peer(namespace: &str, labels: BTreeMap<String, String>) -> Netw
             namespace.to_owned(),
         )]))),
         pod_selector: Some(label_selector(labels)),
-        ..Default::default()
-    }
-}
-
-fn all_namespaces_peer() -> NetworkPolicyPeer {
-    NetworkPolicyPeer {
-        namespace_selector: Some(LabelSelector::default()),
         ..Default::default()
     }
 }
@@ -3178,7 +3167,7 @@ mod tests {
                 .any(|rule| rule_allows_namespace_port(rule, "centaur", 3000))
         );
         assert!(
-            proxy_egress
+            !proxy_egress
                 .iter()
                 .any(|rule| rule_allows_all_namespaces_port(rule, 5432))
         );
