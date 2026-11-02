@@ -1,6 +1,10 @@
 //! SQLx-backed session repository.
 
-use std::{collections::BTreeMap, str::FromStr, time::Duration};
+use std::{
+    collections::BTreeMap,
+    str::FromStr,
+    time::{Duration, SystemTime},
+};
 
 use centaur_session_core::{
     ExecutionStatus, HarnessType, MessageRole, SandboxCapabilities, SandboxRepoCacheAccess,
@@ -68,6 +72,15 @@ pub struct IdleSandboxCandidate {
     pub sandbox_id: String,
     pub execution_id: String,
     pub idle_timeout: Duration,
+}
+
+/// Durable state the max-lifetime reaper consults before stopping a sandbox.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SandboxReapState {
+    /// When a warm-pool sandbox was claimed for a session, if it was.
+    pub claimed_at: Option<SystemTime>,
+    /// Whether a session using the sandbox has a queued or running execution.
+    pub has_active_execution: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -676,6 +689,41 @@ impl PgSessionStore {
         self.set_session_status(&row.thread_key, SessionStatus::Idle)
             .await?;
         row.try_into().map(Some)
+    }
+
+    pub async fn sandbox_reap_state(
+        &self,
+        sandbox_id: &str,
+    ) -> Result<SandboxReapState, SessionStoreError> {
+        let (claimed_at, has_active_execution) =
+            sqlx::query_as::<_, (Option<OffsetDateTime>, bool)>(
+                r#"
+            select
+                (
+                    select claimed_at
+                    from session_warm_sandboxes
+                    where sandbox_id = $1
+                ),
+                exists (
+                    select 1
+                    from sessions
+                    join session_executions
+                      on session_executions.thread_key = sessions.thread_key
+                    where sessions.sandbox_id = $1
+                      and session_executions.status in ($2, $3)
+                )
+            "#,
+            )
+            .bind(sandbox_id)
+            .bind(ExecutionStatus::Queued.as_ref())
+            .bind(ExecutionStatus::Running.as_ref())
+            .fetch_one(&self.pool)
+            .await?;
+
+        Ok(SandboxReapState {
+            claimed_at: claimed_at.map(SystemTime::from),
+            has_active_execution,
+        })
     }
 
     /// Returns whether a sandbox is durably known to be idle and safe for an
@@ -2537,6 +2585,66 @@ mod tests {
         assert_eq!(candidate.sandbox_id, sandbox_id);
         assert_eq!(candidate.execution_id, execution_id);
         assert_eq!(candidate.idle_timeout, Duration::from_secs(1));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sandbox_reap_state_reports_claim_time_and_active_execution() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key = ThreadKey::parse(format!("test:reap-state-{}", Uuid::new_v4())).unwrap();
+        let workload_key = format!("test-reap-state-{}", Uuid::new_v4());
+        let sandbox_id = format!("sbx-reap-state-{}", Uuid::new_v4());
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        store
+            .insert_ready_warm_sandbox(&sandbox_id, &workload_key)
+            .await
+            .expect("insert warm sandbox");
+        assert_eq!(
+            store.sandbox_reap_state(&sandbox_id).await.unwrap(),
+            super::SandboxReapState::default()
+        );
+
+        let before_claim = std::time::SystemTime::now() - Duration::from_secs(60);
+        store
+            .claim_ready_warm_sandbox(&workload_key, thread_key.as_str())
+            .await
+            .expect("claim warm sandbox");
+        store
+            .update_sandbox_id(&thread_key, Some(&sandbox_id))
+            .await
+            .expect("set sandbox id");
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution
+            .execution_id;
+
+        let state = store.sandbox_reap_state(&sandbox_id).await.unwrap();
+        assert!(state.claimed_at.is_some_and(|at| at >= before_claim));
+        assert!(state.has_active_execution);
+
+        store
+            .complete_execution(&execution_id)
+            .await
+            .expect("complete execution");
+        assert!(
+            !store
+                .sandbox_reap_state(&sandbox_id)
+                .await
+                .unwrap()
+                .has_active_execution
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

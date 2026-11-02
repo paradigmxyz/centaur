@@ -6,7 +6,10 @@
 //! that exceed the configured max lifetime, releasing the sandbox, its proxy
 //! resources, and its node pod slots. That includes sandboxes whose agent
 //! exited (`Stopped`): sessions replace rather than reuse them, so nothing
-//! else ever releases their backend resources. Each sweep also deletes iron-proxy
+//! else ever releases their backend resources. A warm-pool sandbox's lifetime
+//! starts when a session claims it, not when the pool created it, and a
+//! sandbox whose session has a queued or running execution is left for a later
+//! sweep. Each sweep also deletes iron-proxy
 //! resources whose sandbox no longer has a live Sandbox, the orphan class no
 //! observed-sandbox path can reach.
 
@@ -16,6 +19,7 @@ use std::{
 };
 
 use centaur_sandbox_core::{ObservedSandbox, SandboxResult, SandboxStatus};
+use centaur_session_sqlx::{PgSessionStore, SandboxReapState};
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{info, warn};
 
@@ -28,8 +32,8 @@ pub struct SandboxReaperConfig {
     /// Minimum age of an iron-proxy resource whose Sandbox no longer exists
     /// before the orphan sweep may delete it.
     pub orphan_sweep_grace: Duration,
-    /// Stop any sandbox older than this regardless of status. `None` disables
-    /// the max-lifetime sweep.
+    /// Stop any idle sandbox older than this, measured from its warm-pool
+    /// claim when it has one. `None` disables the max-lifetime sweep.
     pub max_lifetime: Option<Duration>,
 }
 
@@ -43,12 +47,21 @@ impl SandboxReaperConfig {
 
 pub struct SandboxReaper {
     manager: Arc<SandboxManager>,
+    store: PgSessionStore,
     config: SandboxReaperConfig,
 }
 
 impl SandboxReaper {
-    pub fn new(manager: Arc<SandboxManager>, config: SandboxReaperConfig) -> Self {
-        Self { manager, config }
+    pub fn new(
+        manager: Arc<SandboxManager>,
+        store: PgSessionStore,
+        config: SandboxReaperConfig,
+    ) -> Self {
+        Self {
+            manager,
+            store,
+            config,
+        }
     }
 
     pub fn spawn(self) {
@@ -75,7 +88,23 @@ impl SandboxReaper {
         let now = SystemTime::now();
         let mut reaped = 0;
         for observed in self.manager.list_observed().await? {
-            let Some(reason) = reap_reason(&observed, now, &self.config) else {
+            // Durable state can only defer a reap, so skip the lookup for
+            // sandboxes that are not expired by backend age alone.
+            if reap_reason(&observed, &SandboxReapState::default(), now, &self.config).is_none() {
+                continue;
+            }
+            let state = match self.store.sandbox_reap_state(observed.id.as_str()).await {
+                Ok(state) => state,
+                Err(error) => {
+                    warn!(
+                        sandbox_id = %observed.id.as_str(),
+                        %error,
+                        "failed to load sandbox reap state; skipping"
+                    );
+                    continue;
+                }
+            };
+            let Some(reason) = reap_reason(&observed, &state, now, &self.config) else {
                 continue;
             };
             match self.manager.stop(&observed.id).await {
@@ -110,15 +139,17 @@ impl SandboxReaper {
 
 fn reap_reason(
     observed: &ObservedSandbox,
+    state: &SandboxReapState,
     now: SystemTime,
     config: &SandboxReaperConfig,
 ) -> Option<&'static str> {
-    if observed.status == SandboxStatus::Gone {
+    if observed.status == SandboxStatus::Gone || state.has_active_execution {
         return None;
     }
-    if let (Some(max_lifetime), Some(created_at)) = (config.max_lifetime, observed.created_at)
+    let started_at = state.claimed_at.or(observed.created_at);
+    if let (Some(max_lifetime), Some(started_at)) = (config.max_lifetime, started_at)
         && now
-            .duration_since(created_at)
+            .duration_since(started_at)
             .is_ok_and(|age| age >= max_lifetime)
     {
         return Some("max_lifetime");
@@ -148,7 +179,12 @@ mod tests {
         let sandbox = observed(centaur_sandbox_core::SandboxStatus::Running)
             .with_created_at(Some(now - Duration::from_secs(100_000)));
 
-        let reason = reap_reason(&sandbox, now, &config(Some(Duration::from_secs(86_400))));
+        let reason = reap_reason(
+            &sandbox,
+            &SandboxReapState::default(),
+            now,
+            &config(Some(Duration::from_secs(86_400))),
+        );
 
         assert_eq!(reason, Some("max_lifetime"));
     }
@@ -160,7 +196,12 @@ mod tests {
             .with_created_at(Some(now - Duration::from_secs(100_000)))
             .with_suspended_since(Some(now - Duration::from_secs(60)));
 
-        let reason = reap_reason(&sandbox, now, &config(Some(Duration::from_secs(86_400))));
+        let reason = reap_reason(
+            &sandbox,
+            &SandboxReapState::default(),
+            now,
+            &config(Some(Duration::from_secs(86_400))),
+        );
 
         assert_eq!(reason, Some("max_lifetime"));
     }
@@ -171,7 +212,12 @@ mod tests {
         let sandbox = observed(centaur_sandbox_core::SandboxStatus::Running)
             .with_created_at(Some(now - Duration::from_secs(60)));
 
-        let reason = reap_reason(&sandbox, now, &config(Some(Duration::from_secs(86_400))));
+        let reason = reap_reason(
+            &sandbox,
+            &SandboxReapState::default(),
+            now,
+            &config(Some(Duration::from_secs(86_400))),
+        );
 
         assert_eq!(reason, None);
     }
@@ -182,7 +228,12 @@ mod tests {
         let sandbox = observed(centaur_sandbox_core::SandboxStatus::Stopped)
             .with_created_at(Some(now - Duration::from_secs(100_000)));
 
-        let reason = reap_reason(&sandbox, now, &config(Some(Duration::from_secs(86_400))));
+        let reason = reap_reason(
+            &sandbox,
+            &SandboxReapState::default(),
+            now,
+            &config(Some(Duration::from_secs(86_400))),
+        );
 
         assert_eq!(reason, Some("max_lifetime"));
     }
@@ -193,7 +244,12 @@ mod tests {
         let sandbox = observed(centaur_sandbox_core::SandboxStatus::Gone)
             .with_created_at(Some(now - Duration::from_secs(100_000)));
 
-        let reason = reap_reason(&sandbox, now, &config(Some(Duration::from_secs(86_400))));
+        let reason = reap_reason(
+            &sandbox,
+            &SandboxReapState::default(),
+            now,
+            &config(Some(Duration::from_secs(86_400))),
+        );
 
         assert_eq!(reason, None);
     }
@@ -206,7 +262,50 @@ mod tests {
             .with_suspended_since(Some(now - Duration::from_secs(100_000)));
         let config = config(None);
 
-        assert_eq!(reap_reason(&sandbox, now, &config), None);
+        assert_eq!(
+            reap_reason(&sandbox, &SandboxReapState::default(), now, &config),
+            None
+        );
+    }
+
+    #[test]
+    fn warm_sandbox_lifetime_starts_at_claim() {
+        let now = SystemTime::now();
+        let sandbox = observed(centaur_sandbox_core::SandboxStatus::Running)
+            .with_created_at(Some(now - Duration::from_secs(100_000)));
+        let state = SandboxReapState {
+            claimed_at: Some(now - Duration::from_secs(60)),
+            has_active_execution: false,
+        };
+
+        let reason = reap_reason(
+            &sandbox,
+            &state,
+            now,
+            &config(Some(Duration::from_secs(86_400))),
+        );
+
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn keeps_expired_sandbox_with_active_execution() {
+        let now = SystemTime::now();
+        let sandbox = observed(centaur_sandbox_core::SandboxStatus::Running)
+            .with_created_at(Some(now - Duration::from_secs(100_000)));
+        let state = SandboxReapState {
+            claimed_at: Some(now - Duration::from_secs(100_000)),
+            has_active_execution: true,
+        };
+
+        let reason = reap_reason(
+            &sandbox,
+            &state,
+            now,
+            &config(Some(Duration::from_secs(86_400))),
+        );
+
+        assert_eq!(reason, None);
     }
 
     #[test]
