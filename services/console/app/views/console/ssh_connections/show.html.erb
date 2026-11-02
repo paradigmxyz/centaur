@@ -1,0 +1,34 @@
+<% content_for :title, "SSH key · Centaur Console" %>
+<%= render "console/page_header", title: @connection.name, subtitle: "Your personal SSH key" %>
+<div class="max-w-3xl space-y-6">
+  <% if @connection.configured? %>
+    <div class="rounded border border-green-700 bg-green-950/20 p-4" role="status">
+      <p class="font-semibold">SSH key saved</p>
+      <p class="text-sm">Saved <%= @connection.updated_at.utc.strftime("%Y-%m-%d %H:%M UTC") %>. Your private key is stored encrypted. You can leave this page.</p>
+      <p class="form-hint">This confirms the key was saved; it does not test access to an environment. Register the public key below in your environments.</p>
+    </div>
+  <% end %>
+  <section class="form-section">
+    <h2 class="form-section-heading">Key details</h2>
+    <p class="form-hint mb-4">Provide the destination URL when asking Centaur to connect. Available to your Console sessions. Slack DMs and channel turns use your verified linked Slack identity.</p>
+    <dl class="space-y-4 text-sm">
+      <div><dt class="form-label">Status</dt><dd><%= @connection.configured? ? "Configured" : @connection.revoked? ? "Disconnected" : "Expired" %></dd></div>
+      <div><dt class="form-label">Access</dt><dd><%= @connection.expires_at ? @connection.expires_at.utc.strftime("%Y-%m-%d %H:%M UTC") : "Until you disconnect" %></dd></div>
+      <div><dt class="form-label">Your key fingerprint</dt><dd class="break-all font-mono text-zinc-300"><%= @connection.key_fingerprint %></dd></div>
+    </dl>
+  </section>
+  <section class="form-section">
+    <h2 class="form-section-heading">Register your public key in your environments</h2>
+    <p class="form-hint mb-4">Add this public key to each environment's SSH access settings. You can reuse this key for any URL allowed by your administrator. Saving does not register it automatically.</p>
+    <label class="form-label" for="ssh-public-key">Public key</label>
+    <textarea id="ssh-public-key" class="form-input font-mono" rows="4" readonly spellcheck="false"><%= @connection.public_key %></textarea>
+    <p class="form-hint">Your private key is stored encrypted and cannot be viewed or downloaded.</p>
+  </section>
+  <div class="flex flex-wrap gap-3">
+    <%= link_to "Edit", edit_console_ssh_connection_path, class: "btn-primary" %>
+    <% unless @connection.revoked? %>
+      <%= button_to "Disconnect", console_ssh_connection_path, method: :delete, class: "btn-secondary" %>
+    <% end %>
+    <%= link_to "Back to integrations", console_integrations_path, class: "btn-secondary" %>
+  </div>
+</div>

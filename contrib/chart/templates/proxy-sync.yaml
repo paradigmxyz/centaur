@@ -98,6 +98,8 @@ spec:
 {{- end }}
             - name: RUST_LOG
               value: info
+            - name: CENTAUR_SSH_TARGETS
+              value: {{ .Values.proxySync.sshTargets | toJson | quote }}
           ports:
             - name: http
               containerPort: {{ .Values.proxySync.port }}
