@@ -741,7 +741,7 @@ apiRs:
     # activity arrives. Requires activitySummary.enabled.
     progressUpdates:
       enabled: false
-      afterSecs: 120
+      afterSecs: 60
       intervalSecs: 300
   metrics:
     # The Rust API always serves Prometheus text metrics at /metrics. This flag
