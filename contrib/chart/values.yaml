@@ -467,6 +467,9 @@ proxySync:
 # HTTPS to token endpoints. Replicas coordinate through row locks, so a rolling
 # update never refreshes a credential twice.
 tokenBroker:
+  # Set false to run no broker, for example while another deployment refreshes
+  # the same credentials. The console's own refresh jobs are unaffected.
+  enabled: true
   replicaCount: 1
   nodeSelector: {}
   affinity: {}
