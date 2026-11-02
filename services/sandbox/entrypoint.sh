@@ -409,6 +409,17 @@ mkdir -p "$HOME_DIR/uploads"
 WORKSPACE_DIR="$WORKSPACE_DIR" install-tool-shims --refresh-skills \
     || echo "warning: failed to reload Centaur skills" >&2
 
+# ── Background: keep fetched repo-cache checkouts current ───────────────────
+# With a repo-cache server, checkouts are fetched into ~/github instead of
+# mounted. Keep them following the cache and the principal's repo-cache access.
+if [ -n "${CENTAUR_REPO_CACHE_URL:-}" ] \
+    && [ "${CENTAUR_SANDBOX_REPO_CACHE_ENABLED:-true}" != "false" ]; then
+    (
+        repo-cache-fetch --watch --dest "$HOME_DIR/github" \
+            || echo "warning: repo-cache fetch watcher stopped" >&2
+    ) &
+fi
+
 # ── Background: refresh repo-cache-backed tools/skills in running sandboxes ───
 case "${CENTAUR_TOOLS_AUTO_RELOAD:-true}" in
     0|false|False|FALSE|no|No|NO|off|Off|OFF) _centaur_tools_auto_reload=0 ;;

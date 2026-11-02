@@ -1,12 +1,164 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+from http.server import ThreadingHTTPServer
+import json
 import os
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import repo_cache_sync
+
+JWT_SECRET = b"test-signing-secret"
+
+
+def _b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def make_jwt(
+    claims: dict[str, object], *, alg: str = "HS256", secret: bytes = JWT_SECRET
+) -> str:
+    header = _b64(json.dumps({"alg": alg, "typ": "JWT"}).encode())
+    payload = _b64(json.dumps(claims).encode())
+    signature = hmac.new(
+        secret, f"{header}.{payload}".encode(), hashlib.sha256
+    ).digest()
+    return f"{header}.{payload}.{_b64(signature)}"
+
+
+def api_claims(**overrides: object) -> dict[str, object]:
+    now = int(time.time())
+    return {
+        "iss": "centaur-console",
+        "aud": "centaur-api",
+        "iat": now,
+        "exp": now + 3600,
+        "sub": "prn_test",
+        "repo_cache": "all",
+        **overrides,
+    }
+
+
+class RepoCacheServerTest(unittest.TestCase):
+    def verify(self, token: str) -> dict[str, object] | None:
+        return repo_cache_sync.verify_api_jwt(
+            token,
+            secret=JWT_SECRET,
+            audience="centaur-api",
+            issuer="centaur-console",
+            now=time.time(),
+        )
+
+    def test_verify_api_jwt_applies_api_rs_rules(self) -> None:
+        self.assertEqual(self.verify(make_jwt(api_claims()))["sub"], "prn_test")
+        now = int(time.time())
+        header, payload, signature = make_jwt(api_claims()).split(".")
+        forged = _b64(json.dumps(api_claims(sub="prn_other")).encode())
+        for token in [
+            make_jwt(api_claims(), secret=b"other-secret"),
+            make_jwt(api_claims(), alg="none"),
+            f"{header}.{forged}.{signature}",
+            make_jwt(api_claims(exp=now - 120)),
+            make_jwt(api_claims(iat=now + 120)),
+            make_jwt(api_claims(nbf=now + 120)),
+            make_jwt(api_claims(aud="centaur-console-sandbox-entitlements")),
+            make_jwt(api_claims(iss="someone-else")),
+            make_jwt(api_claims(sub=" ")),
+            make_jwt({k: v for k, v in api_claims().items() if k != "exp"}),
+            "not-a-jwt",
+        ]:
+            self.assertIsNone(self.verify(token), token)
+
+    def test_server_requires_token_and_scopes_clones_to_access(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            git_env = {
+                **os.environ,
+                "GIT_CONFIG_GLOBAL": str(root / "gitconfig"),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_AUTHOR_NAME": "test",
+                "GIT_AUTHOR_EMAIL": "test@example.com",
+                "GIT_COMMITTER_NAME": "test",
+                "GIT_COMMITTER_EMAIL": "test@example.com",
+                "http_proxy": "",
+            }
+
+            def git(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["git", *args], env=git_env, text=True, capture_output=True
+                )
+
+            sync = repo_cache_sync.RepoCacheSync(
+                cache_dir=root / "cache",
+                repositories=["acme/docs", "acme/secret"],
+                repository_refs={},
+                repository_visibilities={"acme/docs": "public"},
+                sync_interval_seconds=30,
+                github_token_file=root / "missing-token",
+            )
+            for repo in sync.repositories:
+                checkout = sync.repository_target(repo)
+                git("init", "-q", "-b", "main", str(checkout))
+                git("-C", str(checkout), "commit", "-q", "--allow-empty", "-m", "one")
+            server = repo_cache_sync.RepoCacheServer(
+                sync=sync,
+                secret=JWT_SECRET,
+                audience="centaur-api",
+                issuer="centaur-console",
+            )
+            httpd = ThreadingHTTPServer(
+                ("127.0.0.1", 0), repo_cache_sync._handler_class(server)
+            )
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            self.addCleanup(httpd.server_close)
+            self.addCleanup(httpd.shutdown)
+            base_url = f"http://127.0.0.1:{httpd.server_address[1]}"
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+            def status(path: str, token: str | None) -> int:
+                headers = {"Authorization": f"Bearer {token}"} if token else {}
+                try:
+                    with opener.open(
+                        urllib.request.Request(base_url + path, headers=headers)
+                    ) as response:
+                        return response.status
+                except urllib.error.HTTPError as error:
+                    return error.code
+
+            def clone(repo: str, token: str) -> int:
+                return git(
+                    "-c",
+                    f"http.extraHeader=Authorization: Bearer {token}",
+                    "clone",
+                    "-q",
+                    f"{base_url}/{repo}.git",
+                    str(root / "clones" / token[-8:] / repo),
+                ).returncode
+
+            public = make_jwt(api_claims(repo_cache="public"))
+            full = make_jwt(api_claims(repo_cache="all"))
+            unknown = make_jwt(api_claims(repo_cache="internal"))
+            self.assertEqual(status("/repos", None), 403)
+            self.assertEqual(
+                status("/acme/docs.git/info/refs?service=git-upload-pack", None), 403
+            )
+            self.assertEqual(clone("acme/docs", public), 0)
+            self.assertNotEqual(clone("acme/secret", public), 0)
+            self.assertNotEqual(clone("acme/docs", unknown), 0)
+            self.assertEqual(clone("acme/secret", full), 0)
+            self.assertEqual(
+                status("/acme/secret.git/info/refs?service=git-receive-pack", full), 404
+            )
+            self.assertEqual(status("/acme/secret.git/HEAD", full), 404)
 
 
 class RepoCacheSyncTest(unittest.TestCase):

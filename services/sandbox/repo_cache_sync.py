@@ -1,17 +1,31 @@
 #!/usr/bin/env python3
-"""Keep configured GitHub repositories synced into the Centaur repo cache."""
+"""Keep configured GitHub repositories synced into the Centaur repo cache.
+
+With ``--serve`` this also serves read-only git clones of the cache to
+sandboxes. Each request must carry the principal API JWT that iron-proxy
+injects; its ``repo_cache`` claim (``none``, ``public``, or ``all``) decides
+which repositories the caller may clone.
+"""
 
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone
 import glob
+import hashlib
+import hmac
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+from urllib.parse import parse_qs, urlsplit
 
 REPOSITORY_VISIBILITIES = {"private", "public"}
 PUBLIC_REPOSITORY_VISIBILITY = "public"
@@ -423,10 +437,322 @@ class RepoCacheSync:
             time.sleep(self.sync_interval_seconds)
 
 
+JWT_CLOCK_SKEW_SECONDS = 30
+REPO_CACHE_ACCESS_LEVELS = {"none", "public", "all"}
+# Upload-pack requests carry wants/haves only; packs flow the other way.
+MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024
+GIT_ROUTE = re.compile(
+    r"^/(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?"
+    r"/(?P<endpoint>info/refs|git-upload-pack)$"
+)
+# Serve only the smart upload-pack protocol: no pushes and no dumb file reads.
+HTTP_BACKEND_GIT_CONFIG = {
+    "safe.directory": "*",
+    "http.receivepack": "false",
+    "http.getanyfile": "false",
+    "http.uploadpack": "true",
+    "uploadpack.allowFilter": "true",
+}
+
+
+def _b64url_decode(value: str) -> bytes:
+    padded = value + "=" * (-len(value) % 4)
+    return base64.b64decode(padded, altchars=b"-_", validate=True)
+
+
+def verify_api_jwt(
+    token: str, *, secret: bytes, audience: str, issuer: str, now: float
+) -> dict[str, object] | None:
+    """Return the claims of a valid HS256 principal API JWT, else None.
+
+    Mirrors api-rs's validation: exact algorithm, signature, audience, issuer,
+    expiry, not-before, issued-at, and a non-empty subject.
+    """
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        header = json.loads(_b64url_decode(parts[0]))
+        signature = _b64url_decode(parts[2])
+        claims = json.loads(_b64url_decode(parts[1]))
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(header, dict) or header.get("alg") != "HS256":
+        return None
+    expected = hmac.new(
+        secret, f"{parts[0]}.{parts[1]}".encode("ascii"), hashlib.sha256
+    ).digest()
+    if not hmac.compare_digest(signature, expected) or not isinstance(claims, dict):
+        return None
+
+    def number(name: str) -> float | None:
+        value = claims.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value)
+
+    exp, iat = number("exp"), number("iat")
+    if exp is None or exp <= now - JWT_CLOCK_SKEW_SECONDS:
+        return None
+    if iat is None or iat > now + JWT_CLOCK_SKEW_SECONDS:
+        return None
+    if "nbf" in claims:
+        nbf = number("nbf")
+        if nbf is None or nbf > now + JWT_CLOCK_SKEW_SECONDS:
+            return None
+    aud = claims.get("aud")
+    if not (aud == audience or (isinstance(aud, list) and audience in aud)):
+        return None
+    if claims.get("iss") != issuer:
+        return None
+    sub = claims.get("sub")
+    if not isinstance(sub, str) or not sub.strip():
+        return None
+    return claims
+
+
+def repo_cache_access(claims: dict[str, object]) -> str:
+    access = claims.get("repo_cache")
+    return access if access in REPO_CACHE_ACCESS_LEVELS else "none"
+
+
+class RepoCacheServer:
+    def __init__(
+        self, *, sync: RepoCacheSync, secret: bytes, audience: str, issuer: str
+    ) -> None:
+        self.sync = sync
+        self.secret = secret
+        self.audience = audience
+        self.issuer = issuer
+
+    @classmethod
+    def from_env(cls, sync: RepoCacheSync) -> RepoCacheServer:
+        secret = os.environ.get("CENTAUR_JWT_SIGNING_SECRET", "")
+        if not secret.strip():
+            raise SystemExit(
+                "CENTAUR_JWT_SIGNING_SECRET is required to serve repo-cache"
+            )
+        return cls(
+            sync=sync,
+            secret=secret.encode(),
+            audience=os.environ.get("CENTAUR_API_JWT_AUDIENCE", "").strip()
+            or "centaur-api",
+            issuer=os.environ.get("CENTAUR_API_JWT_ISSUER", "").strip()
+            or "centaur-console",
+        )
+
+    def claims(self, authorization: str | None) -> dict[str, object] | None:
+        scheme, _, token = (authorization or "").partition(" ")
+        if scheme.lower() != "bearer" or not token.strip():
+            return None
+        return verify_api_jwt(
+            token.strip(),
+            secret=self.secret,
+            audience=self.audience,
+            issuer=self.issuer,
+            now=time.time(),
+        )
+
+    def accessible_repositories(self, access: str) -> list[str]:
+        if access not in {"public", "all"}:
+            return []
+        return [
+            repo
+            for repo in self.sync.repositories
+            if (access == "all" or self.sync.repository_visibility(repo) == "public")
+            and (self.sync.repository_target(repo) / ".git").is_dir()
+        ]
+
+    def repository_path(self, repo: str, access: str) -> Path | None:
+        if repo not in self.accessible_repositories(access):
+            return None
+        return self.sync.repository_target(repo)
+
+    def serve_forever(self, port: int) -> int:
+        server = ThreadingHTTPServer(("", port), _handler_class(self))
+        server.daemon_threads = True
+        print(f"repo-cache serving on :{port}", flush=True)
+        server.serve_forever()
+        return 0
+
+
+def _read_chunked(stream, limit: int) -> bytes:
+    body = bytearray()
+    while True:
+        size_line = stream.readline(1024).split(b";", 1)[0].strip()
+        size = int(size_line, 16)
+        if size == 0:
+            while stream.readline(1024).strip():
+                pass
+            return bytes(body)
+        if len(body) + size > limit:
+            raise ValueError("request body too large")
+        body += stream.read(size)
+        stream.readline(1024)
+
+
+def _handler_class(server: RepoCacheServer) -> type[BaseHTTPRequestHandler]:
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "centaur-repo-cache"
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            pass
+
+        def _log(self, status: int, subject: object = None, repo: str = "") -> None:
+            print(
+                json.dumps(
+                    {
+                        "event": "repo_cache_request",
+                        "method": self.command,
+                        "path": urlsplit(self.path).path,
+                        "status": status,
+                        "sub": subject,
+                        "repo": repo,
+                    }
+                ),
+                flush=True,
+            )
+
+        def _reply(
+            self, status: int, body: bytes, content_type: str = "text/plain"
+        ) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:  # noqa: N802
+            self._dispatch()
+
+        def do_POST(self) -> None:  # noqa: N802
+            self._dispatch()
+
+        def _dispatch(self) -> None:
+            url = urlsplit(self.path)
+            if url.path == "/healthz" and self.command == "GET":
+                self._reply(200, b"ok\n")
+                return
+            claims = server.claims(self.headers.get("Authorization"))
+            if claims is None:
+                # 403 rather than 401 so git never prompts for credentials.
+                self._log(403)
+                self._reply(
+                    403, b"repo-cache access requires a valid principal token\n"
+                )
+                return
+            subject = claims.get("sub")
+            access = repo_cache_access(claims)
+            if url.path == "/repos" and self.command == "GET":
+                body = json.dumps(
+                    {"repositories": server.accessible_repositories(access)}
+                ).encode()
+                self._log(200, subject)
+                self._reply(200, body, "application/json")
+                return
+            match = GIT_ROUTE.match(url.path)
+            endpoint = match["endpoint"] if match else ""
+            allowed = (
+                endpoint == "info/refs"
+                and self.command == "GET"
+                and parse_qs(url.query).get("service") == ["git-upload-pack"]
+            ) or (endpoint == "git-upload-pack" and self.command == "POST")
+            repo = match["repo"] if match else ""
+            repo_path = server.repository_path(repo, access) if allowed else None
+            if repo_path is None:
+                self._log(404, subject, repo)
+                self._reply(404, b"not found\n")
+                return
+            try:
+                body = self._request_body()
+            except ValueError:
+                self._log(400, subject, repo)
+                self._reply(400, b"invalid request body\n")
+                return
+            status = self._run_http_backend(repo_path, endpoint, url.query, body)
+            self._log(status, subject, repo)
+
+        def _request_body(self) -> bytes:
+            if self.command != "POST":
+                return b""
+            if "chunked" in self.headers.get("Transfer-Encoding", "").lower():
+                return _read_chunked(self.rfile, MAX_REQUEST_BODY_BYTES)
+            length = int(self.headers.get("Content-Length") or 0)
+            if length < 0 or length > MAX_REQUEST_BODY_BYTES:
+                raise ValueError("request body too large")
+            return self.rfile.read(length)
+
+        def _run_http_backend(
+            self, repo_path: Path, endpoint: str, query: str, body: bytes
+        ) -> int:
+            env = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": tempfile.gettempdir(),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_PROJECT_ROOT": str(repo_path.parent),
+                "GIT_HTTP_EXPORT_ALL": "1",
+                "PATH_INFO": f"/{repo_path.name}/{endpoint}",
+                "REQUEST_METHOD": self.command,
+                "QUERY_STRING": query,
+                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+                "CONTENT_LENGTH": str(len(body)),
+                "REMOTE_ADDR": self.client_address[0],
+                "GIT_CONFIG_COUNT": str(len(HTTP_BACKEND_GIT_CONFIG)),
+            }
+            for index, (key, value) in enumerate(HTTP_BACKEND_GIT_CONFIG.items()):
+                env[f"GIT_CONFIG_KEY_{index}"] = key
+                env[f"GIT_CONFIG_VALUE_{index}"] = value
+            if protocol := self.headers.get("Git-Protocol"):
+                env["GIT_PROTOCOL"] = protocol
+            if encoding := self.headers.get("Content-Encoding"):
+                env["HTTP_CONTENT_ENCODING"] = encoding
+            with tempfile.TemporaryFile() as stdin:
+                stdin.write(body)
+                stdin.seek(0)
+                process = subprocess.Popen(
+                    ["git", "http-backend"],
+                    env=env,
+                    stdin=stdin,
+                    stdout=subprocess.PIPE,
+                )
+            assert process.stdout is not None
+            try:
+                status, headers, complete = 200, [], False
+                while line := process.stdout.readline():
+                    line = line.rstrip(b"\r\n")
+                    if not line:
+                        complete = True
+                        break
+                    name, _, value = line.decode("latin-1").partition(":")
+                    if name.lower() == "status":
+                        status = int(value.strip().split()[0])
+                    else:
+                        headers.append((name, value.strip()))
+                if not complete:
+                    self._reply(502, b"git http-backend failed\n")
+                    return 502
+                self.send_response(status)
+                for name, value in headers:
+                    self.send_header(name, value)
+                self.end_headers()
+                shutil.copyfileobj(process.stdout, self.wfile)
+            finally:
+                process.stdout.close()
+                process.wait()
+            return status
+
+    return Handler
+
+
 def main() -> int:
     sync = RepoCacheSync.from_env()
     if "--check-ready" in sys.argv[1:]:
         return sync.check_ready()
+    if "--serve" in sys.argv[1:]:
+        port = int(os.environ.get("REPO_CACHE_SERVER_PORT", "8080"))
+        return RepoCacheServer.from_env(sync).serve_forever(port)
     return sync.run_forever()
 
 
