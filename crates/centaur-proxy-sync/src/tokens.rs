@@ -2,7 +2,7 @@ use std::env;
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use centaur_console_db::{models::Config, oid, slack_channels};
 
@@ -20,6 +20,9 @@ struct ApiJwtClaims {
     sub: String,
     capabilities: Capabilities,
     slack: SlackChannels,
+    /// Repo-cache access level (`none`, `public`, or `all`). repo-cache serves
+    /// sandbox clones only for repositories this level allows.
+    repo_cache: &'static str,
 }
 
 #[derive(Serialize)]
@@ -106,6 +109,7 @@ pub(crate) async fn append_api_jwt(
             download_channels: channels.download,
             history_channels: channels.history,
         },
+        repo_cache: repo_cache_access(proxy.principal_field("sandbox_repo_cache")),
     };
     let token = jwt(&claims, secret)?;
     config.secrets.push(json!({
@@ -150,6 +154,17 @@ pub(crate) fn append_sandbox_jwt(
     Ok(())
 }
 
+fn repo_cache_access(value: &Value) -> &'static str {
+    match value
+        .as_str()
+        .map(|value| value.trim().to_ascii_lowercase())
+    {
+        Some(value) if value == "all" => "all",
+        Some(value) if value == "public" => "public",
+        _ => "none",
+    }
+}
+
 fn jwt<T: Serialize>(claims: &T, secret: &str) -> Result<String, ApiError> {
     let mut header = Header::new(Algorithm::HS256);
     header.typ = Some("JWT".to_owned());
@@ -175,7 +190,18 @@ fn env_default(name: &str, default: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::window_start;
+    use serde_json::{Value, json};
+
+    use super::{repo_cache_access, window_start};
+
+    #[test]
+    fn repo_cache_access_fails_closed() {
+        assert_eq!(repo_cache_access(&json!("all")), "all");
+        assert_eq!(repo_cache_access(&json!(" Public ")), "public");
+        assert_eq!(repo_cache_access(&json!("none")), "none");
+        assert_eq!(repo_cache_access(&json!("internal")), "none");
+        assert_eq!(repo_cache_access(&Value::Null), "none");
+    }
 
     #[test]
     fn windowed_tokens_are_stable_within_a_window() {

@@ -834,12 +834,17 @@ async fn postgres_routes_pick_the_strongest_grant_and_render_settings() {
 }
 
 #[tokio::test]
-async fn api_jwt_carries_direct_and_role_slack_permissions() {
+async fn api_jwt_carries_slack_permissions_and_repo_cache_access() {
     let Some(f) = Fixture::with_jwt(true).await else {
         return;
     };
     let principal = f.principal("principal").await;
     let role = f.role("role", principal).await;
+    sqlx::query("UPDATE principals SET sandbox_repo_cache = 'public' WHERE id = $1")
+        .bind(principal)
+        .execute(&f.pool)
+        .await
+        .unwrap();
     f.slack_permission("principal_id", principal, "C0000000001", true, false)
         .await;
     f.slack_permission("role_id", role, "C0000000001", false, true)
@@ -869,6 +874,7 @@ async fn api_jwt_carries_direct_and_role_slack_permissions() {
             "history_channels": ["C0000000001"]
         })
     );
+    assert_eq!(claims["repo_cache"], "public");
 }
 
 #[tokio::test]
