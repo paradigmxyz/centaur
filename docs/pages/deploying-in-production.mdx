@@ -445,6 +445,19 @@ sandbox:
 Malformed selector/toleration JSON fails api-rs startup. Empty values keep
 default scheduling.
 
+By default, sandboxes mount the repo cache with a `hostPath` volume, which
+gVisor rejects. Set `repoCache.sandboxDelivery: fetch` to clone the cache
+over HTTP instead. repo-cache serves the clones, and each sandbox's
+iron-proxy injects the principal API JWT. The token's `repo_cache` claim
+(`none`, `public`, or `all`) follows the principal's repo-cache access and
+decides which repositories the sandbox receives. Running sandboxes pick up
+access changes on their next refresh.
+
+```yaml
+repoCache:
+  sandboxDelivery: fetch
+```
+
 ### Configure Sandbox User Namespaces and Container Security
 
 `sandbox.hostUsers` and `sandbox.containerSecurityContext` are passed through

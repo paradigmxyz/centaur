@@ -512,6 +512,14 @@ spec:
             - name: KUBERNETES_IRON_PROXY_COMPANY_CONTEXT_POD_LABEL_SELECTOR
               value: {{ printf "app.kubernetes.io/name=%s,app.kubernetes.io/instance=%s,app.kubernetes.io/component=company-context" (include "centaur.name" .) .Release.Name | quote }}
 {{- end }}
+{{- if include "centaur.repoCacheServerEnabled" . }}
+            # Sandboxes fetch repo-cache checkouts through their proxy instead
+            # of mounting the cache.
+            - name: KUBERNETES_IRON_PROXY_REPO_CACHE_URL
+              value: {{ include "centaur.repoCacheServerUrl" . | quote }}
+            - name: KUBERNETES_IRON_PROXY_REPO_CACHE_POD_LABEL_SELECTOR
+              value: {{ printf "app.kubernetes.io/name=%s,app.kubernetes.io/instance=%s,app.kubernetes.io/component=repo-cache" (include "centaur.name" .) .Release.Name | quote }}
+{{- end }}
             - name: FIREWALL_MANAGER_SECRET_SOURCE
               value: {{ .Values.ironProxy.secretSource | quote }}
             - name: FIREWALL_MANAGER_SECRET_TTL
