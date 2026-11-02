@@ -3,3 +3,17 @@ proxy:
   # default 30s response-header timeout. Keep model-provider calls from being
   # cut off while OpenAI is still computing the first response byte.
   upstream_response_header_timeout: "120s"
+transforms:
+  - name: secrets
+    config:
+      secrets:
+        # git/gh read GITHUB_TOKEN straight from the environment; the sandbox
+        # only ever holds the placeholder, so the proxy has to swap in the real
+        # value for the GitHub hosts.
+        #   api.github.com -> `gh` CLI (REST/GraphQL)
+        #   github.com     -> git clone/push over HTTPS
+        - id: GITHUB_TOKEN_AUTHORIZATION
+          replace:
+            proxy_value: GITHUB_TOKEN
+            match_headers: ["Authorization"]
+          rules: [{ host: api.github.com }, { host: github.com }]
