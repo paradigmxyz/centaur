@@ -380,6 +380,8 @@ impl ProgressJob {
                 &self.execution_id,
                 SESSION_PROGRESS_UPDATE_EVENT,
                 json!({
+                    // Lets renderers drop stale updates when they replay history.
+                    "created_at_ms": time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000,
                     "elapsed_secs": self.elapsed.as_secs(),
                     "execution_id": self.execution_id,
                     "model": self.model,

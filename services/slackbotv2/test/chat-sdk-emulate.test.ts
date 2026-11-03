@@ -3700,6 +3700,32 @@ describe('slackbotv2', () => {
     expect(texts).not.toContain(progress)
   })
 
+  it('drops progress updates that are already stale when rendered', async () => {
+    bot = createProductionDefaultTestBot({ activitySummaryStatusEnabled: true })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before a long-running task.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> audit every service`, {
+      threadTs: parent.ts
+    })
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    const key = threadKey(parent.ts)
+    const stale = 'I am starting with the billing service.'
+    const current = 'I audited billing; now checking the search service.'
+    codexApi.emitSessionEvent(key, 'session.progress_update', {
+      created_at_ms: Date.now() - 10 * 60 * 1000,
+      text: stale
+    })
+    codexApi.emitSessionEvent(key, 'session.progress_update', { created_at_ms: Date.now(), text: current })
+    await waitFor(async () => (await threadTexts(parent.ts)).includes(current))
+    codexApi.emitOutputLine(key, JSON.stringify({ type: 'turn.done', result: 'Audit complete.' }))
+    await mention.finished()
+
+    expect(await threadTexts(parent.ts)).not.toContain(stale)
+  })
+
   it('restores the default status after a steering message when no summary was published', async () => {
     bot = createProductionDefaultTestBot()
     codexApi.autoRespond = false

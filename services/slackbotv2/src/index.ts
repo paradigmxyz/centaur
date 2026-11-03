@@ -192,6 +192,9 @@ const RENDER_RETRY_MAX_DELAY_MS = 5_000
 const ASSISTANT_STATUS_MAX_CHARS = 50
 // Outlives render recovery, which only replays obligations up to a day old.
 const PROGRESS_UPDATE_DEDUPE_TTL_MS = 2 * 24 * 60 * 60 * 1000
+// Recovery replays every update of a long execution at once; only recent ones
+// still describe what the agent is doing.
+const PROGRESS_UPDATE_MAX_AGE_MS = 2 * 60 * 1000
 const SLACK_TASK_DETAILS_MAX_CHARS = 256
 const SLACK_FALLBACK_TEXT_MAX_CHARS = 35_000
 // Leave room below Slack's 12,000-character limit for adapter mention and emoji expansion.
@@ -4390,15 +4393,7 @@ async function* restoreAssistantStatusAfterSteering(
 ): AsyncIterable<SlackbotV2RendererSource> {
   for await (const event of stream) {
     if (sessionEventKind(event) === SESSION_PROGRESS_UPDATE_EVENT) {
-      // A message posted now would land below the answer, which is already
-      // streaming into an earlier message.
-      if (answerStream?.started) {
-        traceLog(options, 'slackbotv2_progress_update_skipped_answer_streaming', trace, {
-          event_id: 'eventId' in event ? event.eventId : undefined
-        })
-      } else {
-        await postProgressUpdate(thread, event, tracker, options, trace)
-      }
+      await postProgressUpdate(thread, event, tracker, options, trace, answerStream)
       continue
     }
     const steeringEvent = steeringEventKind(event)
@@ -4432,21 +4427,27 @@ function sessionEventKind(event: SlackbotV2RendererSource): unknown {
 
 /**
  * Posts an api-rs progress update as its own thread message. Render recovery
- * replays the whole execution, so each durable event posts at most once.
+ * replays the whole execution, so each durable event is handled at most once,
+ * and updates that are already stale when replayed are dropped.
  */
 async function postProgressUpdate(
   thread: Thread,
   event: SlackbotV2RendererSource,
   tracker: AssistantStatusTracker,
   options: SlackbotV2Options,
-  trace?: SlackbotV2Trace
+  trace?: SlackbotV2Trace,
+  /** Absent when the answer is posted only after the stream ends. */
+  answerStream?: AnswerStreamProgress
 ): Promise<void> {
   const data = 'data' in event ? event.data : undefined
   const eventId = 'eventId' in event ? event.eventId : undefined
-  const text = isJsonObject(data) ? stringValue(data.text) : undefined
-  if (!text || typeof eventId !== 'number' || !options.state) return
+  if (!isJsonObject(data) || typeof eventId !== 'number' || !options.state) return
+  const text = stringValue(data.text)
+  if (!text) return
   const fields = { event_id: eventId }
   try {
+    // Claim before deciding to skip so a replay cannot post an update the
+    // original render deliberately skipped.
     const claimed = await options.state.setIfNotExists(
       `slackbotv2:progress:${thread.id}:${eventId}`,
       true,
@@ -4454,6 +4455,17 @@ async function postProgressUpdate(
     )
     if (!claimed) {
       traceLog(options, 'slackbotv2_progress_update_duplicate_skipped', trace, fields)
+      return
+    }
+    // A message posted now would land below the answer, which is already
+    // streaming into an earlier message.
+    if (answerStream?.started) {
+      traceLog(options, 'slackbotv2_progress_update_skipped_answer_streaming', trace, fields)
+      return
+    }
+    const createdAtMs = typeof data.created_at_ms === 'number' ? data.created_at_ms : undefined
+    if (createdAtMs !== undefined && Date.now() - createdAtMs > PROGRESS_UPDATE_MAX_AGE_MS) {
+      traceLog(options, 'slackbotv2_progress_update_skipped_stale', trace, fields)
       return
     }
     await withSlackApiTimeout(options, 'post progress update', () => thread.post({ markdown: text }))
