@@ -10,6 +10,9 @@ use crate::SandboxManager;
 
 pub type WarmSandboxSpecFactory = Arc<dyn Fn() -> SandboxSpec + Send + Sync>;
 const STALE_EVICTING_WARM_SANDBOX_AGE: Duration = Duration::from_secs(300);
+/// How long a ready warm sandbox of a replaced workload stays claimable by
+/// replicas still running the old spec during a rolling deploy.
+const SUPERSEDED_WARM_SANDBOX_AGE: Duration = Duration::from_secs(600);
 
 pub struct WarmPoolConfig {
     pub target_size: usize,
@@ -61,12 +64,16 @@ impl WarmPoolManager {
         });
     }
 
+    /// Claim a ready warm sandbox for `thread_key` and hand its proxy to the
+    /// session principal. `enable_observability` grants observability access
+    /// the warm sandbox booted without.
     pub async fn claim(
         &self,
         thread_key: &str,
         iron_control_principal: Option<&str>,
         requester_principal_id: Option<&str>,
         proxy_labels: &BTreeMap<String, String>,
+        enable_observability: bool,
     ) -> Result<Option<String>, WarmPoolError> {
         loop {
             let Some(sandbox_id) = self
@@ -84,6 +91,18 @@ impl WarmPoolManager {
                 // (backends wait for readiness before returning from create),
                 // so claiming it would fail at I/O attach.
                 Ok(SandboxStatus::Running) => {
+                    // Before the principal barrier, so policy propagation
+                    // overlaps the wait for the proxy to sync.
+                    if enable_observability
+                        && let Err(error) = self.manager.enable_observability(&id).await
+                    {
+                        let error_message = error.to_string();
+                        let _ = self
+                            .store
+                            .mark_warm_sandbox_failed(&sandbox_id, &error_message)
+                            .await;
+                        return Err(WarmPoolError::Sandbox(error));
+                    }
                     if let Some(principal_id) = iron_control_principal
                         && let Err(error) = self
                             .manager
@@ -126,6 +145,7 @@ impl WarmPoolManager {
     async fn replenish_once(&self) -> Result<(), WarmPoolError> {
         self.prune_stale_ready_sandboxes().await?;
         self.prune_stale_evicting_sandboxes().await?;
+        self.evict_superseded_sandboxes().await?;
 
         let needed = self.config.target_size.saturating_sub(
             self.store
@@ -208,6 +228,32 @@ impl WarmPoolManager {
             self.store
                 .mark_warm_sandbox_failed(&sandbox_id, &failure)
                 .await?;
+        }
+        Ok(())
+    }
+
+    /// Stop ready warm sandboxes left by an earlier workload spec. A failed
+    /// stop stays `evicting` and is retried by the stale-evicting prune.
+    async fn evict_superseded_sandboxes(&self) -> Result<(), WarmPoolError> {
+        for sandbox_id in self
+            .store
+            .evict_superseded_warm_sandboxes(&self.workload_key, SUPERSEDED_WARM_SANDBOX_AGE)
+            .await?
+        {
+            match self
+                .manager
+                .stop(&SandboxId::new(sandbox_id.as_str()))
+                .await
+            {
+                Ok(()) | Err(SandboxError::NotFound(_)) => {
+                    self.store
+                        .mark_warm_sandbox_failed(&sandbox_id, "superseded warm workload stopped")
+                        .await?;
+                }
+                Err(error) => {
+                    warn!(%sandbox_id, %error, "failed to stop superseded warm sandbox");
+                }
+            }
         }
         Ok(())
     }
@@ -435,7 +481,7 @@ mod tests {
         );
 
         let claimed = pool
-            .claim(&thread_key, Some("prn_conv"), None, &BTreeMap::new())
+            .claim(&thread_key, Some("prn_conv"), None, &BTreeMap::new(), false)
             .await
             .expect("claim warm sandbox");
 
@@ -496,7 +542,13 @@ mod tests {
             .expect("insert first warm sandbox");
         backend.set_status(&first_sandbox, SandboxStatus::Running);
         let claimed = pool
-            .claim(&first_thread, Some("prn_conv"), Some("prn_req"), &labels)
+            .claim(
+                &first_thread,
+                Some("prn_conv"),
+                Some("prn_req"),
+                &labels,
+                false,
+            )
             .await
             .expect("claim first warm sandbox");
         assert_eq!(claimed, Some(first_sandbox.clone()));
@@ -507,7 +559,7 @@ mod tests {
             .expect("insert second warm sandbox");
         backend.set_status(&second_sandbox, SandboxStatus::Running);
         let claimed = pool
-            .claim(&second_thread, Some("prn_conv"), None, &labels)
+            .claim(&second_thread, Some("prn_conv"), None, &labels, false)
             .await
             .expect("claim second warm sandbox");
         assert_eq!(claimed, Some(second_sandbox.clone()));
@@ -525,6 +577,125 @@ mod tests {
                 ),
                 (second_sandbox, "prn_conv".to_owned(), None, labels),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_widens_observability_only_when_requested() {
+        let _serial = TEST_LOCK.lock().await;
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let suffix = unique_suffix();
+        let workload_key = format!("test-claim-observability-{suffix}");
+        let backend = Arc::new(TestBackend::new(format!("fresh-{suffix}")));
+        let pool = WarmPoolManager::new(
+            Arc::new(SandboxManager::new(backend.clone())),
+            store.clone(),
+            Arc::new(|| SandboxSpec::new("image")),
+            workload_key.clone(),
+            WarmPoolConfig {
+                target_size: 0,
+                replenish_interval: Duration::from_secs(60),
+                bootstrap_iron_control_principal: "prn_test_bootstrap".to_owned(),
+                max_running_sandboxes: None,
+            },
+        );
+
+        let mut claimed = Vec::new();
+        for enable_observability in [false, true] {
+            let sandbox_id = format!("claim-obs-{enable_observability}-{suffix}");
+            let thread_key = format!("test:claim-obs-{enable_observability}-{suffix}");
+            insert_session_row(&store, &thread_key).await;
+            store
+                .insert_ready_warm_sandbox(&sandbox_id, &workload_key)
+                .await
+                .expect("insert warm sandbox");
+            backend.set_status(&sandbox_id, SandboxStatus::Running);
+            let claim = pool
+                .claim(
+                    &thread_key,
+                    Some("prn_conv"),
+                    None,
+                    &BTreeMap::new(),
+                    enable_observability,
+                )
+                .await
+                .expect("claim warm sandbox");
+            assert_eq!(claim.as_deref(), Some(sandbox_id.as_str()));
+            claimed.push(sandbox_id);
+        }
+
+        assert_eq!(backend.observability_enabled(), vec![claimed[1].clone()]);
+    }
+
+    #[tokio::test]
+    async fn replenisher_stops_superseded_ready_sandboxes_after_the_rollout_grace() {
+        let _serial = TEST_LOCK.lock().await;
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let suffix = unique_suffix();
+        let workload_key = format!("test-superseded-new-{suffix}");
+        let old_workload_key = format!("test-superseded-old-{suffix}");
+        let old_sandbox = format!("superseded-old-{suffix}");
+        let recent_sandbox = format!("superseded-recent-{suffix}");
+        let backend = Arc::new(TestBackend::new(format!("fresh-{suffix}")));
+        for sandbox_id in [&old_sandbox, &recent_sandbox] {
+            store
+                .insert_ready_warm_sandbox(sandbox_id, &old_workload_key)
+                .await
+                .expect("insert superseded warm sandbox");
+            backend.set_status(sandbox_id, SandboxStatus::Running);
+        }
+        sqlx::query(
+            "update session_warm_sandboxes set created_at = now() - interval '1 hour' \
+             where sandbox_id = $1",
+        )
+        .bind(&old_sandbox)
+        .execute(store.pool())
+        .await
+        .expect("age superseded warm sandbox");
+        let pool = WarmPoolManager::new(
+            Arc::new(SandboxManager::new(backend.clone())),
+            store.clone(),
+            Arc::new(|| SandboxSpec::new("image")),
+            workload_key,
+            WarmPoolConfig {
+                target_size: 0,
+                replenish_interval: Duration::from_secs(60),
+                bootstrap_iron_control_principal: "prn_test_bootstrap".to_owned(),
+                max_running_sandboxes: None,
+            },
+        );
+
+        pool.replenish_once().await.expect("replenish warm pool");
+
+        assert_eq!(
+            backend.status(&SandboxId::new(&old_sandbox)).await.unwrap(),
+            SandboxStatus::Stopped
+        );
+        assert_eq!(
+            backend
+                .status(&SandboxId::new(&recent_sandbox))
+                .await
+                .unwrap(),
+            SandboxStatus::Running
+        );
+        // The recent one stays claimable by replicas still on the old spec.
+        assert_eq!(
+            store
+                .count_ready_warm_sandboxes(&old_workload_key)
+                .await
+                .expect("count ready warm sandboxes for old workload"),
+            1
+        );
+        assert!(
+            !store
+                .list_referenced_sandbox_ids()
+                .await
+                .expect("list referenced sandboxes")
+                .contains(&old_sandbox)
         );
     }
 
@@ -571,6 +742,7 @@ mod tests {
         statuses: Mutex<BTreeMap<String, SandboxStatus>>,
         created: Mutex<Vec<String>>,
         assigned: Mutex<Vec<RecordedAssignment>>,
+        observability_enabled: Mutex<Vec<String>>,
     }
 
     impl TestBackend {
@@ -580,6 +752,7 @@ mod tests {
                 statuses: Mutex::new(BTreeMap::new()),
                 created: Mutex::new(Vec::new()),
                 assigned: Mutex::new(Vec::new()),
+                observability_enabled: Mutex::new(Vec::new()),
             }
         }
 
@@ -589,6 +762,10 @@ mod tests {
 
         fn assigned(&self) -> Vec<RecordedAssignment> {
             self.assigned.lock().unwrap().clone()
+        }
+
+        fn observability_enabled(&self) -> Vec<String> {
+            self.observability_enabled.lock().unwrap().clone()
         }
 
         fn set_status(&self, sandbox_id: &str, status: SandboxStatus) {
@@ -672,6 +849,14 @@ mod tests {
                 requester_principal_id.map(ToOwned::to_owned),
                 labels.clone(),
             ));
+            Ok(())
+        }
+
+        async fn enable_observability(&self, id: &SandboxId) -> SandboxResult<()> {
+            self.observability_enabled
+                .lock()
+                .unwrap()
+                .push(id.as_str().to_owned());
             Ok(())
         }
 

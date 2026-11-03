@@ -1790,6 +1790,40 @@ impl PgSessionStore {
         Ok(rows)
     }
 
+    /// Move ready warm sandboxes booted for a different workload (an earlier
+    /// spec) and older than `min_age` to `evicting`, and return them. Nothing
+    /// claims them once their workload is replaced, and the age keeps a
+    /// rolling deploy's old and new replicas from evicting each other's pools.
+    pub async fn evict_superseded_warm_sandboxes(
+        &self,
+        workload_key: &str,
+        min_age: Duration,
+    ) -> Result<Vec<String>, SessionStoreError> {
+        let rows = sqlx::query_scalar::<_, String>(
+            r#"
+            with superseded as (
+                select sandbox_id
+                from session_warm_sandboxes
+                where status = 'ready'
+                  and workload_key <> $1
+                  and created_at <= now() - ($2::float8 * interval '1 second')
+                order by created_at, sandbox_id
+                for update skip locked
+            )
+            update session_warm_sandboxes warm
+            set status = 'evicting', updated_at = now()
+            from superseded
+            where warm.sandbox_id = superseded.sandbox_id
+            returning warm.sandbox_id
+            "#,
+        )
+        .bind(workload_key)
+        .bind(min_age.as_secs_f64())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     pub async fn mark_warm_sandbox_failed(
         &self,
         sandbox_id: &str,
