@@ -123,6 +123,12 @@ pub struct IronProxyConfig {
     /// sandboxes, and the labels of its pods. Unset allows no such egress.
     pub company_context_url: Option<String>,
     pub company_context_pod_labels: BTreeMap<String, String>,
+    /// In-cluster repo-cache server URL, and the labels of its pods. When set,
+    /// sandboxes fetch repo-cache checkouts through their proxy, which injects
+    /// the principal token repo-cache authorizes clones with, instead of
+    /// mounting the cache from the node.
+    pub repo_cache_url: Option<String>,
+    pub repo_cache_pod_labels: BTreeMap<String, String>,
     pub resources: Option<ResourceRequirements>,
 }
 
@@ -166,6 +172,11 @@ impl IronProxyConfig {
             company_context_pod_labels: BTreeMap::from([(
                 "app.kubernetes.io/component".to_owned(),
                 "company-context".to_owned(),
+            )]),
+            repo_cache_url: None,
+            repo_cache_pod_labels: BTreeMap::from([(
+                "app.kubernetes.io/component".to_owned(),
+                "repo-cache".to_owned(),
             )]),
             resources: None,
         }
@@ -421,6 +432,13 @@ impl AgentSandboxBackend {
                 url,
                 &self.config.namespace,
                 iron_proxy.company_context_pod_labels.clone(),
+            ));
+        }
+        if let Some(url) = &iron_proxy.repo_cache_url {
+            control_targets.push(control_plane_egress_target(
+                url,
+                &self.config.namespace,
+                iron_proxy.repo_cache_pod_labels.clone(),
             ));
         }
         for policy in build_iron_proxy_network_policies(

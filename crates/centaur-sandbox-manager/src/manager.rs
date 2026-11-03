@@ -216,6 +216,10 @@ impl SandboxManager {
             .await
     }
 
+    pub async fn bind_repo_cache(&self, id: &SandboxId, principal_id: &str) -> SandboxResult<()> {
+        self.backend.bind_repo_cache(id, principal_id).await
+    }
+
     pub async fn ensure_iron_control_proxy_resources(
         &self,
         id: &SandboxId,

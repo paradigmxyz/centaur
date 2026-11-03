@@ -16,6 +16,11 @@ pub struct WarmPoolConfig {
     pub replenish_interval: Duration,
     pub bootstrap_iron_control_principal: String,
     pub max_running_sandboxes: Option<usize>,
+    /// Whether claims bind the sandbox's repo-cache checkouts to the claiming
+    /// principal (see `SandboxBackend::bind_repo_cache`). Warm sandboxes boot
+    /// with the bootstrap principal's access, so without this they may only
+    /// serve sessions whose access matches it.
+    pub bind_repo_cache: bool,
 }
 
 pub struct WarmPoolManager {
@@ -45,6 +50,10 @@ impl WarmPoolManager {
 
     pub fn workload_key(&self) -> &str {
         &self.workload_key
+    }
+
+    pub fn binds_repo_cache(&self) -> bool {
+        self.config.bind_repo_cache
     }
 
     pub fn spawn_replenisher(self: Arc<Self>) {
@@ -101,6 +110,22 @@ impl WarmPoolManager {
                             .mark_warm_sandbox_failed(&sandbox_id, &error_message)
                             .await;
                         return Err(WarmPoolError::Sandbox(error));
+                    }
+                    if self.config.bind_repo_cache
+                        && let Some(principal_id) = iron_control_principal
+                        && let Err(error) = self.manager.bind_repo_cache(&id, principal_id).await
+                    {
+                        // The sandbox may still hold checkouts the claiming
+                        // principal cannot read; never hand it out.
+                        let failure = format!("repo-cache bind failed: {error}");
+                        warn!(%sandbox_id, error = %failure, thread_key);
+                        self.store
+                            .mark_warm_sandbox_failed(&sandbox_id, &failure)
+                            .await?;
+                        if let Err(error) = self.manager.stop(&id).await {
+                            warn!(%sandbox_id, %error, "failed to stop unbound warm sandbox");
+                        }
+                        continue;
                     }
                     return Ok(Some(sandbox_id));
                 }
@@ -307,6 +332,7 @@ mod tests {
                 replenish_interval: Duration::from_secs(60),
                 bootstrap_iron_control_principal: "prn_test_bootstrap".to_owned(),
                 max_running_sandboxes: None,
+                bind_repo_cache: false,
             },
         );
 
@@ -376,6 +402,7 @@ mod tests {
                 replenish_interval: Duration::from_secs(60),
                 bootstrap_iron_control_principal: "prn_test_bootstrap".to_owned(),
                 max_running_sandboxes: None,
+                bind_repo_cache: false,
             },
         );
 
@@ -431,6 +458,7 @@ mod tests {
                 replenish_interval: Duration::from_secs(60),
                 bootstrap_iron_control_principal: "prn_test_bootstrap".to_owned(),
                 max_running_sandboxes: None,
+                bind_repo_cache: false,
             },
         );
 
@@ -486,6 +514,7 @@ mod tests {
                 replenish_interval: Duration::from_secs(60),
                 bootstrap_iron_control_principal: "prn_test_bootstrap".to_owned(),
                 max_running_sandboxes: None,
+                bind_repo_cache: false,
             },
         );
         let labels = BTreeMap::from([("centaur.slack_channel_id".to_owned(), "C1".to_owned())]);
@@ -526,6 +555,77 @@ mod tests {
                 (second_sandbox, "prn_conv".to_owned(), None, labels),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn claim_binds_repo_cache_and_discards_sandboxes_that_fail_to_bind() {
+        let _serial = TEST_LOCK.lock().await;
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let suffix = unique_suffix();
+        let workload_key = format!("test-claim-bind-{suffix}");
+        let unbindable_sandbox = format!("a-unbindable-{suffix}");
+        let bindable_sandbox = format!("b-bindable-{suffix}");
+        let thread_key = format!("test:claim-bind-{suffix}");
+        insert_session_row(&store, &thread_key).await;
+
+        let backend = Arc::new(TestBackend::new(format!("fresh-{suffix}")));
+        for sandbox_id in [&unbindable_sandbox, &bindable_sandbox] {
+            store
+                .insert_ready_warm_sandbox(sandbox_id, &workload_key)
+                .await
+                .expect("insert warm sandbox");
+            backend.set_status(sandbox_id, SandboxStatus::Running);
+        }
+        backend
+            .unbindable
+            .lock()
+            .unwrap()
+            .push(unbindable_sandbox.clone());
+        let pool = WarmPoolManager::new(
+            Arc::new(SandboxManager::new(backend.clone())),
+            store.clone(),
+            Arc::new(|| SandboxSpec::new("image")),
+            workload_key.clone(),
+            WarmPoolConfig {
+                target_size: 0,
+                replenish_interval: Duration::from_secs(60),
+                bootstrap_iron_control_principal: "prn_test_bootstrap".to_owned(),
+                max_running_sandboxes: None,
+                bind_repo_cache: true,
+            },
+        );
+
+        let claimed = pool
+            .claim(&thread_key, Some("prn_conv"), None, &BTreeMap::new())
+            .await
+            .expect("claim warm sandbox");
+
+        assert_eq!(claimed, Some(bindable_sandbox.clone()));
+        assert_eq!(
+            backend.bound(),
+            vec![
+                (unbindable_sandbox.clone(), "prn_conv".to_owned()),
+                (bindable_sandbox, "prn_conv".to_owned()),
+            ]
+        );
+        // A sandbox that may still hold the bootstrap principal's checkouts
+        // is stopped, never handed to the session.
+        assert_eq!(
+            backend
+                .status(&SandboxId::new(&unbindable_sandbox))
+                .await
+                .unwrap(),
+            SandboxStatus::Stopped
+        );
+        let status: String =
+            sqlx::query_scalar("select status from session_warm_sandboxes where sandbox_id = $1")
+                .bind(&unbindable_sandbox)
+                .fetch_one(store.pool())
+                .await
+                .expect("load warm sandbox status");
+        assert_eq!(status, "failed");
     }
 
     async fn test_store() -> Option<PgSessionStore> {
@@ -571,6 +671,8 @@ mod tests {
         statuses: Mutex<BTreeMap<String, SandboxStatus>>,
         created: Mutex<Vec<String>>,
         assigned: Mutex<Vec<RecordedAssignment>>,
+        bound: Mutex<Vec<(String, String)>>,
+        unbindable: Mutex<Vec<String>>,
     }
 
     impl TestBackend {
@@ -580,7 +682,13 @@ mod tests {
                 statuses: Mutex::new(BTreeMap::new()),
                 created: Mutex::new(Vec::new()),
                 assigned: Mutex::new(Vec::new()),
+                bound: Mutex::new(Vec::new()),
+                unbindable: Mutex::new(Vec::new()),
             }
+        }
+
+        fn bound(&self) -> Vec<(String, String)> {
+            self.bound.lock().unwrap().clone()
         }
 
         fn created(&self) -> Vec<String> {
@@ -672,6 +780,23 @@ mod tests {
                 requester_principal_id.map(ToOwned::to_owned),
                 labels.clone(),
             ));
+            Ok(())
+        }
+
+        async fn bind_repo_cache(&self, id: &SandboxId, principal_id: &str) -> SandboxResult<()> {
+            self.bound
+                .lock()
+                .unwrap()
+                .push((id.as_str().to_owned(), principal_id.to_owned()));
+            if self
+                .unbindable
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|unbindable| unbindable == id.as_str())
+            {
+                return Err(SandboxError::backend("proxy presents another principal"));
+            }
             Ok(())
         }
 

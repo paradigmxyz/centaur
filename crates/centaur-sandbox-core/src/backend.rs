@@ -83,6 +83,18 @@ pub trait SandboxBackend: Send + Sync {
         Ok(())
     }
 
+    /// Narrow a running sandbox's repo-cache checkouts to what the principal
+    /// its proxy now presents may read, and rebuild the tools, skills, and
+    /// prompt derived from them. Fails unless the proxy presents
+    /// `principal_id`, so a sandbox claimed from the warm pool never starts a
+    /// turn with the warm-pool principal's access.
+    async fn bind_repo_cache(&self, _id: &SandboxId, _principal_id: &str) -> SandboxResult<()> {
+        Err(crate::SandboxError::Unsupported {
+            backend: self.name(),
+            operation: "bind_repo_cache",
+        })
+    }
+
     /// Suspend the sandbox while preserving any backend-supported runtime state.
     async fn pause(&self, id: &SandboxId) -> SandboxResult<()>;
 

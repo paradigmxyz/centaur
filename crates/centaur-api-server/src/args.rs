@@ -1154,10 +1154,8 @@ impl SandboxArgs {
         if let Ok(value) = env::var("PYTHON_WORKFLOW_HOST_PYTHON") {
             spec = spec.env("PYTHON_WORKFLOW_HOST_PYTHON", value);
         }
-        if let Some(repos_path) = clean_optional_value(self.repos_path.as_deref()) {
-            spec = spec.mount(
-                Mount::new(self.repos_mount_kind(repos_path), SANDBOX_REPOS_MOUNT_PATH).read_only(),
-            );
+        if let Some(mount) = self.repos_mount() {
+            spec = spec.mount(mount);
         }
         for (name, value) in self.workflow_host_env_template()? {
             upsert_spec_env(&mut spec, name, value);
@@ -1210,21 +1208,26 @@ impl SandboxArgs {
         )? {
             workload = workload.resources(resources);
         }
-        if let Some(repos_path) = clean_optional_value(self.repos_path.as_deref()) {
-            workload = workload.mount(
-                Mount::new(self.repos_mount_kind(repos_path), SANDBOX_REPOS_MOUNT_PATH).read_only(),
-            );
+        if let Some(mount) = self.repos_mount() {
+            workload = workload.mount(mount);
         }
         Ok(workload)
     }
 
-    fn repos_mount_kind(&self, repos_path: String) -> MountKind {
-        if let Some(claim_name) = clean_optional_value(self.repos_pvc.as_deref()) {
-            return MountKind::NamedVolume(claim_name);
+    /// The read-only repo-cache mount for sandboxes. None when sandboxes fetch
+    /// checkouts from the repo-cache server into the same path instead.
+    fn repos_mount(&self) -> Option<Mount> {
+        if self.iron_proxy.repo_cache_url().is_some() {
+            return None;
         }
-        MountKind::Bind {
-            source_path: repos_path,
-        }
+        let repos_path = clean_optional_value(self.repos_path.as_deref())?;
+        let kind = match clean_optional_value(self.repos_pvc.as_deref()) {
+            Some(claim_name) => MountKind::NamedVolume(claim_name),
+            None => MountKind::Bind {
+                source_path: repos_path,
+            },
+        };
+        Some(Mount::new(kind, SANDBOX_REPOS_MOUNT_PATH).read_only())
     }
 
     fn codex_app_server_env_template(&self) -> Result<Vec<(String, String)>, ServerError> {
@@ -1610,6 +1613,8 @@ impl SandboxArgs {
             bootstrap_iron_control_principal: bootstrap_iron_control_principal.to_owned(),
             max_running_sandboxes: (self.sandbox_running_limit > 0)
                 .then_some(self.sandbox_running_limit),
+            // Fetched checkouts are a per-sandbox copy that a claim can narrow.
+            bind_repo_cache: self.iron_proxy.repo_cache_url().is_some(),
         })
     }
 
@@ -2075,6 +2080,20 @@ struct IronProxyArgs {
         value_parser = parse_label_selector_arg
     )]
     company_context_pod_label_selector: Option<BTreeMap<String, String>>,
+    /// In-cluster repo-cache server URL. When set, sandboxes fetch repo-cache
+    /// checkouts through their proxy instead of mounting the cache.
+    #[arg(
+        long = "kubernetes-iron-proxy-repo-cache-url",
+        env = "KUBERNETES_IRON_PROXY_REPO_CACHE_URL"
+    )]
+    repo_cache_url: Option<String>,
+    /// Pod labels for the repo-cache server.
+    #[arg(
+        long = "kubernetes-iron-proxy-repo-cache-pod-label-selector",
+        env = "KUBERNETES_IRON_PROXY_REPO_CACHE_POD_LABEL_SELECTOR",
+        value_parser = parse_label_selector_arg
+    )]
+    repo_cache_pod_label_selector: Option<BTreeMap<String, String>>,
 }
 
 impl IronProxyArgs {
@@ -2136,7 +2155,19 @@ impl IronProxyArgs {
         {
             config.company_context_pod_labels = labels.clone();
         }
+        config.repo_cache_url = self.repo_cache_url();
+        if let Some(labels) = self
+            .repo_cache_pod_label_selector
+            .as_ref()
+            .filter(|labels| !labels.is_empty())
+        {
+            config.repo_cache_pod_labels = labels.clone();
+        }
         Ok(config)
+    }
+
+    fn repo_cache_url(&self) -> Option<String> {
+        non_empty(self.repo_cache_url.as_deref()).map(ToOwned::to_owned)
     }
 
     fn source_policy(&self) -> SourcePolicy {
@@ -3874,6 +3905,39 @@ mod tests {
                 && mount.read_only
                 && mount.kind == MountKind::NamedVolume("centaur-repo-cache".to_owned())
         }));
+    }
+
+    #[test]
+    fn repo_cache_server_replaces_the_repos_mount() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--repos-path",
+            "/var/lib/centaur/repos",
+            "--kubernetes-iron-proxy-repo-cache-url",
+            "http://centaur-repo-cache:8080",
+        ])
+        .unwrap();
+
+        let SandboxWorkloadMode { mounts, .. } = args.sandbox.container_workload_mode().unwrap();
+        assert!(
+            mounts
+                .iter()
+                .all(|mount| mount.target_path != SANDBOX_REPOS_MOUNT_PATH)
+        );
+        assert!(
+            args.sandbox
+                .workflow_host_spec("prn_bootstrap")
+                .unwrap()
+                .mounts
+                .iter()
+                .all(|mount| mount.target_path != SANDBOX_REPOS_MOUNT_PATH)
+        );
+        assert_eq!(
+            args.sandbox.iron_proxy.repo_cache_url().as_deref(),
+            Some("http://centaur-repo-cache:8080")
+        );
     }
 
     #[tokio::test]

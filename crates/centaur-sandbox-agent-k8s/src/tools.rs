@@ -43,7 +43,9 @@ const GITHUB_TOKEN_VOLUME: &str = "tools-github-token";
 const GITHUB_TOKEN_DIR: &str = "/tools-github-token";
 const GITHUB_TOKEN_FILE: &str = "token";
 const GITHUB_TOKEN_FILE_PATH: &str = "/tools-github-token/token";
-const REPO_CACHE_VOLUME: &str = "tools-repo-cache";
+pub(crate) const REPO_CACHE_VOLUME: &str = "tools-repo-cache";
+/// Where sandboxes see repo-cache checkouts, mounted or fetched.
+pub(crate) const SANDBOX_REPOS_PATH: &str = "/home/agent/github";
 const PUBLIC_VISIBILITY: &str = "public";
 const PRIVATE_VISIBILITY: &str = "private";
 
@@ -79,6 +81,10 @@ pub struct ToolsConfig {
     /// Optional subdirectory within the repo-cache volume to expose at
     /// `repo_cache_path`. Used for public-only repo-cache access.
     pub repo_cache_sub_path: Option<String>,
+    /// Set by the pod builder when the `repo-cache-fetch` init container
+    /// fetches checkouts into a pod volume at `repo_cache_path` instead of
+    /// mounting the cache. The pod builder owns that volume.
+    pub(crate) repo_cache_fetched: bool,
     /// Whether running sandboxes should watch repo-cache checkouts and refresh
     /// local tool shims when commits change.
     pub auto_reload: bool,
@@ -122,6 +128,7 @@ impl ToolsConfig {
             repo_cache_path: None,
             repo_cache_pvc: None,
             repo_cache_sub_path: None,
+            repo_cache_fetched: false,
             auto_reload: true,
             extra_sources: Vec::new(),
         }
@@ -163,6 +170,16 @@ impl ToolsConfig {
             }
         }
         scoped
+    }
+
+    /// Publish from checkouts the `repo-cache-fetch` init container fetched
+    /// into this pod rather than from a mounted cache.
+    pub(crate) fn fetched_from_repo_cache(mut self) -> Self {
+        self.repo_cache_path = Some(SANDBOX_REPOS_PATH.to_owned());
+        self.repo_cache_pvc = None;
+        self.repo_cache_sub_path = None;
+        self.repo_cache_fetched = true;
+        self
     }
 
     fn repo_cache_source_path(&self) -> Option<String> {
@@ -318,17 +335,23 @@ pub(crate) fn tools_init_container_json(
                 repo_cache_path.trim_end_matches('/'),
                 source.repo.trim_start_matches('/')
             );
-            // Wait only for the repo checkout itself; a source without the
-            // tools subdir is skipped instead of failing the sandbox init.
+            publish_steps.push_str(&format!("cache_repo=\"{repo_cache_repo_path}\"\n"));
+            // A mounted cache may still be syncing, so wait for the repo
+            // checkout itself. Fetched checkouts are complete once the fetch
+            // init container exits; a missing one is not readable by this
+            // principal and is skipped like a source without the subdir.
+            if !tools.repo_cache_fetched {
+                publish_steps.push_str(
+                    "attempt=0\n\
+                     until [ -d \"$cache_repo/.git\" ]; do\n\
+                     attempt=$((attempt + 1))\n\
+                     if [ \"$attempt\" -ge 30 ]; then echo \"tools repo-cache entry unavailable after $attempt attempts: $cache_repo\" >&2; exit 1; fi\n\
+                     sleep 2\n\
+                     done\n",
+                );
+            }
             publish_steps.push_str(&format!(
-                "attempt=0\n\
-                 cache_repo=\"{repo_cache_repo_path}\"\n\
-                 until [ -d \"$cache_repo/.git\" ]; do\n\
-                 attempt=$((attempt + 1))\n\
-                 if [ \"$attempt\" -ge 30 ]; then echo \"tools repo-cache entry unavailable after $attempt attempts: $cache_repo\" >&2; exit 1; fi\n\
-                 sleep 2\n\
-                 done\n\
-                 if [ -d \"$cache_repo/{subdir}\" ]; then\n\
+                "if [ -d \"$cache_repo/{subdir}\" ]; then\n\
                  install-tool-shims --copy-tools \"$cache_repo/{subdir}\" \"$target\"\n\
                  else\n\
                  echo \"skipping tools source {repo}: no {subdir}/ in repo-cache checkout\" >&2\n\
@@ -450,6 +473,43 @@ CENTAUR_TOOLS_METADATA"
     container
 }
 
+/// The `repo-cache-fetch` init container: unpacks the repo-cache checkouts the
+/// sandbox principal may read into the repo-cache volume through the
+/// per-sandbox proxy, which injects the token repo-cache authorizes with. It
+/// runs before `tools-bootstrap`, which publishes tools from those checkouts.
+/// A claim later narrows the copy to the claiming principal's access.
+pub(crate) fn repo_cache_fetch_init_container_json(
+    image: &str,
+    image_pull_policy: Option<&str>,
+    repo_cache_url: &str,
+    proxy_env: &[(String, String)],
+) -> Value {
+    let mut env = vec![json!({"name": "CENTAUR_REPO_CACHE_URL", "value": repo_cache_url})];
+    env.extend(
+        proxy_env
+            .iter()
+            .map(|(name, value)| json!({"name": name, "value": value})),
+    );
+    let mut container = json!({
+        "name": "repo-cache-fetch",
+        "image": image,
+        "command": ["repo-cache-fetch", "--dest", SANDBOX_REPOS_PATH],
+        "env": env,
+        "volumeMounts": [{"name": REPO_CACHE_VOLUME, "mountPath": SANDBOX_REPOS_PATH}],
+        "securityContext": security_context_json(),
+        // Small requests, as for tools-bootstrap. Unpacking is bound by file
+        // writes, which cost CPU under user-space kernels such as gVisor.
+        "resources": {
+            "requests": { "cpu": "50m", "memory": "64Mi" },
+            "limits": { "cpu": "2", "memory": "512Mi" },
+        },
+    });
+    if let Some(policy) = image_pull_policy {
+        container["imagePullPolicy"] = json!(policy);
+    }
+    container
+}
+
 /// Volumes added to the pod for tool sources.
 pub(crate) fn volumes_json(tools: Option<&ToolsConfig>) -> Vec<Value> {
     let mut volumes = Vec::new();
@@ -465,7 +525,11 @@ pub(crate) fn volumes_json(tools: Option<&ToolsConfig>) -> Vec<Value> {
                 },
             }));
         }
-        if let Some(repo_cache_path) = &tools.repo_cache_path {
+        if let Some(repo_cache_path) = tools
+            .repo_cache_path
+            .as_ref()
+            .filter(|_| !tools.repo_cache_fetched)
+        {
             if let Some(claim_name) = &tools.repo_cache_pvc {
                 volumes.push(json!({
                     "name": REPO_CACHE_VOLUME,
@@ -503,7 +567,10 @@ pub(crate) fn agent_volume_mounts_json(tools: Option<&ToolsConfig>) -> Vec<Value
             "readOnly": true,
         }));
     }
-    if let Some(mount) = tools.repo_cache_volume_mount() {
+    // The pod builder mounts fetched checkouts writable for in-place refresh.
+    if !tools.repo_cache_fetched
+        && let Some(mount) = tools.repo_cache_volume_mount()
+    {
         mounts.push(mount);
     }
     mounts

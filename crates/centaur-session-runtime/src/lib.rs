@@ -3180,7 +3180,13 @@ impl SessionRuntime {
             if !warm_persona_matches && self.warm_pool.is_some() {
                 record_sandbox_warm_pool_claim("persona_specific");
             }
-            if !desired_capabilities.is_default_enabled() && self.warm_pool.is_some() {
+            let warm_capabilities_match = self.warm_pool.as_ref().is_some_and(|warm_pool| {
+                warm_pool_serves_capabilities(
+                    desired_capabilities,
+                    warm_pool.binds_repo_cache() && iron_control_principal.is_some(),
+                )
+            });
+            if !warm_capabilities_match && self.warm_pool.is_some() {
                 record_sandbox_warm_pool_claim("capabilities_non_default");
             }
             if let Some(warm_pool) = self
@@ -3190,7 +3196,7 @@ impl SessionRuntime {
                     boot_mode.uses_warm_pool()
                         && warm_harness_matches
                         && warm_persona_matches
-                        && desired_capabilities.is_default_enabled()
+                        && warm_capabilities_match
                 })
             {
                 match warm_pool
@@ -6015,6 +6021,16 @@ fn sandbox_repo_cache_access_from_principal(
         Some(_) => SessionRepoCacheAccess::None,
         None => SessionRepoCacheAccess::None,
     }
+}
+
+/// Warm sandboxes boot with the default capabilities. A claim that binds
+/// repo-cache access to the claiming principal can also narrow that access,
+/// but nothing at claim time changes observability.
+fn warm_pool_serves_capabilities(
+    capabilities: &SessionSandboxCapabilities,
+    binds_repo_cache: bool,
+) -> bool {
+    capabilities.is_default_enabled() || (binds_repo_cache && capabilities.observability_enabled)
 }
 
 fn sandbox_capabilities_from_principal(
@@ -9562,6 +9578,7 @@ mod adoption_tests {
         stopped: std::sync::Mutex<Vec<String>>,
         proxy_ensures: std::sync::Mutex<Vec<ProxyEnsure>>,
         missing_on_stop: std::sync::Mutex<BTreeSet<String>>,
+        repo_cache_binds: std::sync::Mutex<Vec<(String, String)>>,
     }
 
     impl MockBackend {
@@ -9583,7 +9600,12 @@ mod adoption_tests {
                 stopped: std::sync::Mutex::new(Vec::new()),
                 proxy_ensures: std::sync::Mutex::new(Vec::new()),
                 missing_on_stop: std::sync::Mutex::new(BTreeSet::new()),
+                repo_cache_binds: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        fn repo_cache_binds(&self) -> Vec<(String, String)> {
+            self.repo_cache_binds.lock().unwrap().clone()
         }
 
         async fn push_io(&self, io: SandboxIo) {
@@ -9741,6 +9763,24 @@ mod adoption_tests {
                 requester_principal_id.map(ToOwned::to_owned),
                 labels.clone(),
             ));
+            Ok(())
+        }
+
+        async fn assign_iron_control_proxy_principal(
+            &self,
+            _id: &SandboxId,
+            _principal_id: &str,
+            _requester_principal_id: Option<&str>,
+            _labels: &BTreeMap<String, String>,
+        ) -> SandboxResult<()> {
+            Ok(())
+        }
+
+        async fn bind_repo_cache(&self, id: &SandboxId, principal_id: &str) -> SandboxResult<()> {
+            self.repo_cache_binds
+                .lock()
+                .unwrap()
+                .push((id.as_str().to_owned(), principal_id.to_owned()));
             Ok(())
         }
 
@@ -10704,6 +10744,15 @@ mod adoption_tests {
         backend: Arc<MockBackend>,
         workload_marker: impl Into<String>,
     ) -> SessionRuntime {
+        runtime_with_warm_pool_binding(store, backend, workload_marker, false)
+    }
+
+    fn runtime_with_warm_pool_binding(
+        store: &PgSessionStore,
+        backend: Arc<MockBackend>,
+        workload_marker: impl Into<String>,
+        bind_repo_cache: bool,
+    ) -> SessionRuntime {
         let workload_marker = Arc::new(workload_marker.into());
         let claimed_marker = workload_marker.clone();
         let warm_marker = workload_marker.clone();
@@ -10735,6 +10784,7 @@ mod adoption_tests {
                 replenish_interval: Duration::from_secs(60),
                 bootstrap_iron_control_principal: "prn_test_bootstrap".to_owned(),
                 max_running_sandboxes: None,
+                bind_repo_cache,
             },
         ));
         runtime.warm_pool = Some(warm_pool);
@@ -10893,6 +10943,77 @@ mod adoption_tests {
         let spec = backend.created_specs().pop().expect("created cold spec");
         assert!(!spec.capabilities.repo_cache.enabled());
         assert!(!spec.capabilities.observability_enabled);
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn binding_warm_pool_serves_narrower_repo_cache_access() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:cap-warm-bind-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution
+            .execution_id;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime =
+            runtime_with_warm_pool_binding(&store, backend.clone(), thread_key.as_str(), true);
+        let workload_key = runtime
+            .warm_pool
+            .as_ref()
+            .unwrap()
+            .workload_key()
+            .to_owned();
+        let warm_sandbox_id = format!("warm-sbx-{}", uuid::Uuid::new_v4());
+        store
+            .insert_ready_warm_sandbox(&warm_sandbox_id, &workload_key)
+            .await
+            .expect("insert warm sandbox");
+        let public_access = SessionSandboxCapabilities {
+            repo_cache: SessionRepoCacheAccess::Public,
+            observability_enabled: true,
+        };
+
+        let sandbox_id = runtime
+            .ensure_session_sandbox(EnsureSessionSandboxRequest {
+                thread_key: &thread_key,
+                harness_type: &HarnessType::Codex,
+                persona_id: None,
+                existing_sandbox_id: None,
+                existing_sandbox_capabilities: None,
+                iron_control_principal: Some("prn_public"),
+                requester_principal: None,
+                proxy_labels: &BTreeMap::new(),
+                desired_capabilities: &public_access,
+                execution_id: &execution_id,
+            })
+            .await
+            .expect("ensure sandbox");
+
+        assert_eq!(sandbox_id, warm_sandbox_id);
+        assert_eq!(
+            backend.repo_cache_binds(),
+            vec![(warm_sandbox_id, "prn_public".to_owned())]
+        );
+        assert!(backend.created_specs().is_empty());
+        let session = store.get_session(&thread_key).await.unwrap();
+        assert_eq!(session.sandbox_capabilities, Some(public_access));
         reset_test_store(&store).await;
     }
 
