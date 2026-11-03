@@ -23,6 +23,8 @@ pub enum HarnessServerError {
     },
     #[error("invalid blocks-mode input: {message}")]
     InvalidBlocksInput { message: String },
+    #[error("sandbox bind failed: {message}")]
+    InvalidBind { message: String },
     #[error("required environment variable {name} is not set")]
     MissingEnvironment { name: &'static str },
     #[error("Nanocodex error: {0}")]

@@ -2,8 +2,8 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use harness_server::{
-    HarnessKind, Result, run_blocks_server, run_harness_server, run_hermes_blocks_server,
-    run_nanocodex_blocks_server,
+    HarnessKind, HarnessServerError, Result, accept_sandbox_bind, run_blocks_server,
+    run_harness_server, run_hermes_blocks_server, run_nanocodex_blocks_server,
 };
 
 #[derive(Debug, Parser)]
@@ -32,6 +32,9 @@ enum CliCommand {
     Pi(HarnessCommand),
     /// Drive OMP's long-lived RPC mode with native session continuation.
     Omp(HarnessCommand),
+    /// Wait for a `sandbox.bind` stdin line, apply it, then serve the harness
+    /// it names in blocks mode.
+    Serve,
 }
 
 #[derive(Debug, Parser)]
@@ -55,11 +58,31 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    match Cli::parse()
-        .command
-        .unwrap_or(CliCommand::Codex(HarnessCommand {
-            mode: ServerMode::Blocks,
-        })) {
+    run_command(
+        Cli::parse()
+            .command
+            .unwrap_or(CliCommand::Codex(HarnessCommand {
+                mode: ServerMode::Blocks,
+            })),
+    )
+}
+
+fn run_command(command: CliCommand) -> Result<()> {
+    match command {
+        CliCommand::Serve => {
+            let harness = accept_sandbox_bind()?;
+            let invalid = |message: String| HarnessServerError::InvalidBind { message };
+            // Parse the bound harness exactly like a CLI subcommand.
+            match Cli::try_parse_from(["harness-server", harness.as_str()])
+                .map_err(|error| invalid(format!("unknown harness {harness:?}: {error}")))?
+                .command
+            {
+                Some(CliCommand::Serve) | None => {
+                    Err(invalid(format!("unknown harness {harness:?}")))
+                }
+                Some(command) => run_command(command),
+            }
+        }
         CliCommand::Codex(command) => run_mode(HarnessKind::Codex, command.mode),
         CliCommand::ClaudeCode(command) => run_mode(HarnessKind::ClaudeCode, command.mode),
         CliCommand::Amp(command) => run_mode(HarnessKind::Amp, command.mode),

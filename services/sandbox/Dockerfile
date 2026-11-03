@@ -344,6 +344,7 @@ COPY --link --chmod=755 services/sandbox/compose_system_prompt.py /usr/local/bin
 COPY --link --chmod=755 services/sandbox/repo_cache_sync.py /usr/local/bin/repo-cache-sync
 COPY --link --chmod=755 services/sandbox/repo_cache_watch.py /usr/local/bin/repo-cache-watch
 COPY --link --chmod=755 services/sandbox/entrypoint.sh /entrypoint.sh
+COPY --link --chmod=755 services/sandbox/bind_sandbox.sh /usr/local/bin/centaur-bind-sandbox
 COPY --link --chown=1001:1001 --from=harness-server-build /home/agent/harness-server/bin/harness-server /home/agent/.local/bin/harness-server
 
 USER agent

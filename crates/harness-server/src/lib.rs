@@ -1,5 +1,6 @@
 pub mod amp;
 pub mod anthropic;
+mod bind;
 pub mod claude;
 pub mod codex;
 mod error;
@@ -16,6 +17,7 @@ mod turn;
 mod util;
 pub mod wire;
 
+pub use bind::accept_sandbox_bind;
 pub use error::{HarnessServerError, Result};
 pub use hermes::run_hermes_blocks_server;
 pub use nanocodex::run_nanocodex_blocks_server;
