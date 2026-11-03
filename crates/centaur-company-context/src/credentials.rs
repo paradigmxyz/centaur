@@ -110,6 +110,8 @@ pub struct GoogleCredential {
 /// directly to the principal, the accounts it can already use through the
 /// proxy; principal labels are not trusted. The principal and its roles are
 /// also known by their Console IDs, which custom document grants name.
+/// Slack channels it may read the history of, directly or through a role,
+/// are readable without a Slack user identity.
 #[derive(Clone, Debug, Default, sqlx::FromRow)]
 pub struct PrincipalIdentity {
     pub principal_id: i64,
@@ -120,6 +122,9 @@ pub struct PrincipalIdentity {
     /// The workspace `slack_user_id` belongs to; Slack user IDs are scoped to
     /// a workspace.
     pub slack_team_id: Option<String>,
+    /// The Slack channels whose history the principal may read through the
+    /// proxy, by a permission granted to it or one of its roles.
+    pub slack_history_channel_ids: Vec<String>,
     pub google_subjects: Vec<String>,
     pub granola_subjects: Vec<String>,
 }
@@ -596,6 +601,20 @@ impl ConsoleCredentials {
                        WHERE app.provider = 'slack' AND app.slug = $4 AND app.enabled = TRUE
                    ) THEN NULLIF(BTRIM(p.slack_user_id), '') END AS slack_user_id,
                    NULLIF(BTRIM(p.slack_team_id), '') AS slack_team_id,
+                   CASE WHEN EXISTS (
+                       SELECT 1 FROM oauth_apps app
+                       WHERE app.provider = 'slack' AND app.slug = $4 AND app.enabled = TRUE
+                   ) THEN ARRAY(
+                       SELECT permissions.channel_id
+                       FROM slack_channel_permissions permissions
+                       WHERE permissions.principal_id = p.id
+                          OR permissions.role_id IN (
+                              SELECT role_id FROM principal_roles WHERE principal_id = p.id
+                          )
+                       GROUP BY permissions.channel_id
+                       HAVING bool_or(permissions.history_enabled)
+                       ORDER BY permissions.channel_id
+                   ) ELSE ARRAY[]::text[] END AS slack_history_channel_ids,
                    ARRAY(
                        SELECT DISTINCT provider_subject FROM granted
                        WHERE provider = 'google' AND slug = $2
@@ -736,6 +755,10 @@ mod tests {
             );
             CREATE TABLE static_secrets (id bigint PRIMARY KEY, broker_credential_id bigint);
             CREATE TABLE grants (principal_id bigint, role_id bigint, static_secret_id bigint);
+            CREATE TABLE slack_channel_permissions (
+                principal_id bigint, role_id bigint, channel_id text NOT NULL,
+                history_enabled boolean NOT NULL DEFAULT false
+            );
 
             INSERT INTO principals VALUES
                 (1, '{}', 'U-ADA', 'T1', 'ada'),
@@ -756,6 +779,10 @@ mod tests {
             INSERT INTO grants VALUES
                 (1, NULL, 1), (1, NULL, 2), (1, NULL, 3), (1, NULL, 4), (1, NULL, 5),
                 (NULL, 1, 6);
+            INSERT INTO slack_channel_permissions VALUES
+                (2, NULL, 'C-DIRECT', true), (2, NULL, 'C-UPLOAD-ONLY', false),
+                (NULL, 1, 'C-ROLE', true), (NULL, 2, 'C-DIRECT', true),
+                (1, NULL, 'C-UPLOAD-ONLY', false);
             "#,
         )
         .await
@@ -774,6 +801,8 @@ mod tests {
         assert!(bob.principal_foreign_id.is_none());
         assert_eq!(bob.role_ids, [1, 2]);
         assert_eq!(bob.role_foreign_ids, ["eng"]);
+        assert_eq!(bob.slack_history_channel_ids, ["C-DIRECT", "C-ROLE"]);
+        assert!(ada.slack_history_channel_ids.is_empty());
         assert!(bob.google_subjects.is_empty());
         assert!(bob.granola_subjects.is_empty());
         assert!(credentials.principal_identity(3).await.unwrap().is_none());
@@ -785,6 +814,8 @@ mod tests {
         let ada = credentials.principal_identity(1).await.unwrap().unwrap();
         assert!(ada.slack_user_id.is_none());
         assert!(ada.google_subjects.is_empty());
+        let bob = credentials.principal_identity(2).await.unwrap().unwrap();
+        assert!(bob.slack_history_channel_ids.is_empty());
         assert_eq!(ada.granola_subjects, ["GR-ADA", "GR-ADA-2"]);
 
         database.drop().await;

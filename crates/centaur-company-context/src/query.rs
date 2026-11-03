@@ -7,6 +7,9 @@
 //! to it, still reaches the document's file, conversation, or Granola note. A
 //! Slack conversation is also visible to its members while any live
 //! credential observes it. Slack identities match by workspace and user ID.
+//! A principal permitted to read a Slack channel's history through the proxy,
+//! such as a Slack channel's own principal, also sees that channel while any
+//! live credential observes it.
 //! Calendar events are stored per Google identity, as Google showed them to it,
 //! and are visible only to that identity. A custom document is visible to
 //! the principals, roles, or everyone its readers name.
@@ -65,6 +68,23 @@ const QUERY_ROLE: &str = "centaur_company_context_v2_query";
 macro_rules! custom_metadata {
     () => {
         "d.metadata || jsonb_build_object('source', d.source, 'external_id', d.external_id, 'written_by', d.written_by)"
+    };
+}
+
+/// The Slack conversations visible to the subjects `$2`: those the Slack user
+/// `[$2[1], $2[2]]` reads, and the channels `$2[3:]` the principal may read
+/// the history of while a live credential observes them.
+macro_rules! slack_readable {
+    () => {
+        r#"(
+                       SELECT r.conversation_id
+                       FROM company_context_data.slack_conversation_readers r
+                       WHERE r.team_id = $2[1] AND r.user_id = $2[2]
+                       UNION
+                       SELECT o.conversation_id
+                       FROM company_context_data.slack_broker_observations o
+                       WHERE o.active AND o.conversation_id = ANY($2[3:])
+                   )"#
     };
 }
 
@@ -204,14 +224,23 @@ impl DataType {
     /// `None` if the principal can see none of the type's documents.
     fn subjects(self, identity: &PrincipalIdentity) -> Option<Vec<String>> {
         let subjects: Vec<String> = match self {
-            // Slack user IDs are scoped to a workspace, so the subject is the
-            // pair `[team_id, user_id]`.
-            Self::SlackMessage | Self::SlackFile => identity
-                .slack_team_id
-                .iter()
-                .zip(&identity.slack_user_id)
-                .flat_map(|(team_id, user_id)| [team_id.clone(), user_id.clone()])
-                .collect(),
+            // Slack user IDs are scoped to a workspace, so the subjects start
+            // with the pair `[team_id, user_id]`, empty without a Slack user,
+            // followed by the channels whose history the principal may read.
+            Self::SlackMessage | Self::SlackFile => {
+                let user = identity
+                    .slack_team_id
+                    .clone()
+                    .zip(identity.slack_user_id.clone());
+                if user.is_none() && identity.slack_history_channel_ids.is_empty() {
+                    return None;
+                }
+                let (team_id, user_id) = user.unwrap_or_default();
+                [team_id, user_id]
+                    .into_iter()
+                    .chain(identity.slack_history_channel_ids.iter().cloned())
+                    .collect()
+            }
             Self::DriveDoc | Self::CalendarEvent => identity.google_subjects.clone(),
             Self::GranolaNote => identity.granola_subjects.clone(),
             Self::CustomDoc => custom_readers(identity),
@@ -235,11 +264,7 @@ impl DataType {
                        'first_message_at', d.first_message_at,
                        'last_message_at', d.last_message_at
                    ) AS metadata"#,
-                visible: r#"d.conversation_id IN (
-                       SELECT r.conversation_id
-                       FROM company_context_data.slack_conversation_readers r
-                       WHERE r.team_id = $2[1] AND r.user_id = $2[2]
-                   )"#,
+                visible: concat!("d.conversation_id IN ", slack_readable!()),
                 // A channel day chunk matches a window its messages overlap.
                 starts_at: "d.first_message_at",
                 ends_at: "d.last_message_at",
@@ -261,28 +286,28 @@ impl DataType {
                        'filetype', d.filetype,
                        'author_id', d.author_id
                    ) AS metadata"#,
-                visible: r#"d.file_id IN (
+                visible: concat!(
+                    r#"d.file_id IN (
                        SELECT s.file_id
                        FROM company_context_data.slack_file_shares s
-                       JOIN company_context_data.slack_conversation_readers r
-                         ON r.conversation_id = s.conversation_id
-                       WHERE r.team_id = $2[1] AND r.user_id = $2[2]
-                   )"#,
+                       WHERE s.conversation_id IN "#,
+                    slack_readable!(),
+                    ")"
+                ),
                 starts_at: "d.source_created_at",
                 ends_at: "d.source_created_at",
                 end_exclusive: false,
                 // Only shares the subject can see count, so a filter does not
                 // reveal where else a file was shared.
-                in_channels: Some(
+                in_channels: Some(concat!(
                     r#"d.file_id IN (
                        SELECT s.file_id
                        FROM company_context_data.slack_file_shares s
-                       JOIN company_context_data.slack_conversation_readers r
-                         ON r.conversation_id = s.conversation_id
-                       WHERE r.team_id = $2[1] AND r.user_id = $2[2]
-                         AND s.conversation_id = ANY($6)
-                   )"#,
-                ),
+                       WHERE s.conversation_id = ANY($6)
+                         AND s.conversation_id IN "#,
+                    slack_readable!(),
+                    ")"
+                )),
                 file_id: Some("d.file_id"),
                 source: None,
                 metadata: None,
@@ -1465,6 +1490,69 @@ mod tests {
         .await
         .unwrap();
         assert!(ids(pool, None, &carol, query).await.is_empty());
+
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    async fn slack_channels_are_visible_to_principals_permitted_their_history() {
+        let Ok(database_url) = env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
+            eprintln!("skipping: set COMPANY_CONTEXT_TEST_DATABASE_URL to a ParadeDB Postgres URL");
+            return;
+        };
+        let database = TestDatabase::create(&database_url, "query_channel_history").await;
+        let pool = &database.pool;
+        seed(pool).await;
+        // A channel's principal has no Slack user; it may read C2's history.
+        let channel = PrincipalIdentity {
+            slack_history_channel_ids: vec!["C2".to_owned()],
+            ..Default::default()
+        };
+        let query = json!({ "query": "falcon" });
+
+        assert!(
+            ids(pool, None, &PrincipalIdentity::default(), query.clone())
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            ids(pool, None, &channel, query.clone()).await,
+            ["slack-file:SF2", "slack:C2:2024-01-02:000000"]
+        );
+        assert!(
+            document(pool, &channel, "slack:C2:2024-01-02:000000")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // SF2 is also shared in C3, which the channel cannot read.
+        assert!(
+            ids(
+                pool,
+                None,
+                &channel,
+                json!({ "query": "falcon", "filters": { "channel_ids": ["C3"] } })
+            )
+            .await
+            .is_empty()
+        );
+
+        // A Slack user keeps their own conversations alongside the channels.
+        let bob_in_c1 = PrincipalIdentity {
+            slack_history_channel_ids: vec!["C1".to_owned()],
+            ..bob()
+        };
+        let both = ids(pool, None, &bob_in_c1, query.clone()).await;
+        assert!(both.contains(&"slack:C1:2024-01-02:000000".to_owned()));
+        assert!(both.contains(&"slack:C2:2024-01-02:000000".to_owned()));
+
+        // The permission grants access only while a live credential observes C2.
+        pool.execute(
+            "UPDATE company_context_data.slack_broker_observations SET active = FALSE WHERE conversation_id = 'C2'",
+        )
+        .await
+        .unwrap();
+        assert!(ids(pool, None, &channel, query).await.is_empty());
 
         database.drop().await;
     }
