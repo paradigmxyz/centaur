@@ -25,6 +25,7 @@ Use these as the main extension points:
 | `slackbot.extraEnv` | Slackbot HTTP, Slack, feedback, and cross-org behavior. |
 | `sandbox.extraEnv` | Extra variables copied into every sandbox pod through `KUBERNETES_SANDBOX_EXTRA_ENV`. |
 | `overlays.sources` | Ordered repo-cache-backed overlay repos for tools, workflows, and skills; subdirs default to `tools`, `workflows`, and `.agents/skills`. |
+| `repoCache.sandboxDelivery` | `mount` (default) mounts the repo cache into sandboxes; `fetch` copies it into each sandbox over HTTP from repo-cache through iron-proxy, authorized by the principal JWT's `repo_cache` claim, and lets warm sandboxes serve any repo-cache access level. Use `fetch` with runtimes such as gVisor that reject `hostPath`. |
 | `overlay.systemPrompt` | Small inline prompt overlay escape hatch. |
 
 Tool credentials are not listed here. Tool plugins declare their own secrets in
@@ -251,6 +252,7 @@ Kubernetes backend:
 | `KUBERNETES_API_POD_LABEL_SELECTOR` | Chart-rendered labels or `api.extraEnv`. | API pod selector for API-managed proxy policies. |
 | `KUBERNETES_IRON_PROXY_SYNC_POD_LABEL_SELECTOR` | Chart-rendered proxy-sync labels or `apiRs.extraEnv`. | Proxy-sync pod selector for API-created proxy egress policies. Defaults to `app.kubernetes.io/component=proxy-sync`; the destination port comes from `IRON_CONTROL_PROXY_SYNC_URL`. |
 | `KUBERNETES_IRON_PROXY_COMPANY_CONTEXT_URL`, `KUBERNETES_IRON_PROXY_COMPANY_CONTEXT_POD_LABEL_SELECTOR` | Chart-rendered when `experimentalCompanyContext.enabled`, or `apiRs.extraEnv`. | Company-context query API that API-created proxies may reach, and its pod selector (default `app.kubernetes.io/component=company-context`). The destination port comes from the URL. Unset allows no such egress. |
+| `KUBERNETES_IRON_PROXY_REPO_CACHE_URL`, `KUBERNETES_IRON_PROXY_REPO_CACHE_POD_LABEL_SELECTOR` | Chart-rendered when `repoCache.sandboxDelivery=fetch`, or `apiRs.extraEnv`. | repo-cache server that API-created proxies may reach, and its pod selector (default `app.kubernetes.io/component=repo-cache`). When set, sandboxes copy repo-cache checkouts into `/home/agent/github` through their proxy instead of mounting the cache, and warm-pool claims narrow the copy to the claiming principal's access. |
 | `KUBERNETES_EGRESS_DISCOVERY_ENABLED`, `KUBERNETES_EGRESS_SERVICE_NAMESPACE`, `KUBERNETES_CLUSTER_DOMAIN`, `KUBERNETES_EGRESS_TAILNET_FQDN_ANNOTATION` | `api.egressDiscovery.*`. | Egress service discovery for sandbox NetworkPolicies. |
 | `REPOS_PATH` | `sandbox.reposPath`. | Repo cache path mounted into sandboxes. |
 

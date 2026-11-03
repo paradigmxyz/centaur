@@ -119,6 +119,18 @@ the database endpoint can resolve to.
 {{- $storageType -}}
 {{- end -}}
 
+{{- define "centaur.repoCacheServerEnabled" -}}
+{{- $delivery := default "mount" .Values.repoCache.sandboxDelivery -}}
+{{- if and (ne $delivery "mount") (ne $delivery "fetch") -}}
+{{- fail "repoCache.sandboxDelivery must be either mount or fetch" -}}
+{{- end -}}
+{{- if and .Values.repoCache.enabled (eq $delivery "fetch") -}}true{{- end -}}
+{{- end -}}
+
+{{- define "centaur.repoCacheServerUrl" -}}
+{{- printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "repo-cache")) .Values.repoCache.server.port -}}
+{{- end -}}
+
 {{- define "centaur.repositoryVisibility" -}}
 {{- $visibility := lower (default "private" .) -}}
 {{- if eq $visibility "public" -}}public{{- else -}}private{{- end -}}

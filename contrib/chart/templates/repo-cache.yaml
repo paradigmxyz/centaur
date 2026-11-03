@@ -35,6 +35,10 @@
 {{- end }}
 {{- end }}
 {{- $repoCacheRepositories = uniq $repoCacheRepositories -}}
+{{- $repoCacheServe := include "centaur.repoCacheServerEnabled" . -}}
+{{- if and $repoCacheServe (not $repoCacheRepositories) }}
+{{- fail "repoCache.sandboxDelivery=fetch requires at least one repo-cache repository" }}
+{{- end }}
 {{- if $repoCacheRepositories }}
 {{- $repoCacheHasGithubToken := or .Values.repoCache.githubToken.existingSecretName .Values.repoCache.githubToken.token -}}
 {{- $repoCacheImageRepository := default .Values.sandbox.image.repository .Values.repoCache.image.repository -}}
@@ -149,6 +153,58 @@ spec:
               mountPath: /github-token
               readOnly: true
 {{- end }}
+{{- if $repoCacheServe }}
+        # Serves read-only clones to sandboxes through their iron-proxy. Only
+        # this container holds the JWT signing secret.
+        - name: repo-cache-server
+          image: {{ printf "%s:%s" $repoCacheImageRepository $repoCacheImageTag | quote }}
+          imagePullPolicy: {{ $repoCacheImagePullPolicy }}
+          command:
+            - /usr/local/bin/repo-cache-sync
+            - --serve
+          env:
+            - name: REPOSITORIES
+              value: {{ join " " $repoCacheRepositories | quote }}
+            - name: REPOSITORY_REFS
+              value: {{ join " " $repoCacheRepositoryRefs | quote }}
+            - name: REPOSITORY_VISIBILITIES
+              value: {{ join " " $repoCacheRepositoryVisibilityEntries | quote }}
+            - name: REPO_CACHE_SERVER_PORT
+              value: {{ .Values.repoCache.server.port | quote }}
+            - name: CENTAUR_JWT_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" .Values.secretManager.envPrefix }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.repoCache.server.port }}
+          readinessProbe:
+            exec:
+              command:
+                - /usr/local/bin/repo-cache-sync
+                - --check-ready
+            initialDelaySeconds: {{ .Values.repoCache.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.repoCache.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.repoCache.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.repoCache.readinessProbe.failureThreshold }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+{{ toYaml .Values.repoCache.server.resources | nindent 12 }}
+          volumeMounts:
+            - name: repo-cache
+              mountPath: /cache
+              readOnly: true
+{{- end }}
       volumes:
         - name: repo-cache
 {{- if $repoCacheUsePvc }}
@@ -167,6 +223,22 @@ spec:
             items:
               - key: {{ .Values.repoCache.githubToken.secretKey | quote }}
                 path: token
+{{- end }}
+{{- if $repoCacheServe }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "repo-cache") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "repo-cache") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "repo-cache") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.repoCache.server.port }}
+      targetPort: http
 {{- end }}
 {{- end }}
 {{- end }}

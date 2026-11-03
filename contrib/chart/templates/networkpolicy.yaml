@@ -600,7 +600,24 @@ spec:
     matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "repo-cache") | nindent 6 }}
   policyTypes:
+{{- if include "centaur.repoCacheServerEnabled" . }}
+    - Ingress
+{{- end }}
     - Egress
+{{- if include "centaur.repoCacheServerEnabled" . }}
+  # Sandboxes clone only through their iron-proxy, which injects the principal
+  # JWT repo-cache authorizes with; sandbox pods cannot reach it directly.
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              centaur.ai/iron-proxy: "true"
+      ports:
+        - protocol: TCP
+          port: {{ .Values.repoCache.server.port }}
+{{- end }}
+  # Keep repo-cache off api-rs's port: it holds the JWT signing secret when
+  # serving and must not be able to replay principal tokens to api-rs.
   egress:
 {{- range .Values.repoCache.egressPorts }}
     - ports:

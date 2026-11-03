@@ -380,6 +380,19 @@ repoCache:
   enabled: true
   autoReload: true
   hostPath: /var/lib/centaur/repos
+  # How sandboxes receive repo-cache checkouts. `mount` mounts the cache
+  # read-only from storage below. `fetch` gives each sandbox its own copy,
+  # unpacked at boot from a repo-cache server through the sandbox's
+  # iron-proxy, which injects the principal API JWT; the JWT's repo_cache claim
+  # (none/public/all) decides which repositories a sandbox may read. Warm
+  # sandboxes boot with the warm-pool principal's access and are narrowed to
+  # the claiming principal's when claimed, so one warm pool serves every
+  # repo-cache access level. `fetch` also suits runtimes, such as gVisor, that
+  # reject hostPath volumes. Requires at least one repository.
+  sandboxDelivery: mount
+  server:
+    port: 8080
+    resources: {}
   storage:
     # hostPath preserves the existing DaemonSet/node-local behavior. Set to
     # persistentVolumeClaim for GKE Autopilot or other clusters that disallow
