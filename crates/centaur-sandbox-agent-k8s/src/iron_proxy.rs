@@ -405,29 +405,11 @@ impl AgentSandboxBackend {
             )
             .await
             .map_err(|err| map_kube_error("create iron-proxy service", err))?;
-        let control_target = control_plane_egress_target(
-            &resolved.console_url,
-            &self.config.namespace,
-            iron_proxy.control_plane_pod_labels.clone(),
-        );
-        let proxy_sync_target = control_plane_egress_target(
-            &sync.control_url,
-            &self.config.namespace,
-            iron_proxy.proxy_sync_pod_labels.clone(),
-        );
-        let mut control_targets = vec![control_target, proxy_sync_target];
-        if let Some(url) = &iron_proxy.company_context_url {
-            control_targets.push(control_plane_egress_target(
-                url,
-                &self.config.namespace,
-                iron_proxy.company_context_pod_labels.clone(),
-            ));
-        }
         for policy in build_iron_proxy_network_policies(
             id,
             resolved,
             iron_proxy,
-            &control_targets,
+            &self.control_plane_egress_targets(iron_proxy),
             self.config.otlp_egress.as_ref(),
             resolved.observability_enabled,
         ) {
@@ -458,6 +440,91 @@ impl AgentSandboxBackend {
         self.wait_until_proxy_running(resolved).await?;
         self.wait_for_cold_proxy_principal_applied(id, &resolved.principal_id)
             .await;
+        Ok(())
+    }
+
+    /// Control-plane services every managed proxy may reach: the console and
+    /// proxy-sync (which can be different pods and ports) and company-context.
+    fn control_plane_egress_targets(
+        &self,
+        iron_proxy: &IronProxyConfig,
+    ) -> Vec<ControlPlaneEgressTarget> {
+        let iron_control = &self.config.iron_control;
+        let mut targets = vec![
+            control_plane_egress_target(
+                &iron_control.console_url,
+                &self.config.namespace,
+                iron_proxy.control_plane_pod_labels.clone(),
+            ),
+            control_plane_egress_target(
+                &iron_control.control_url,
+                &self.config.namespace,
+                iron_proxy.proxy_sync_pod_labels.clone(),
+            ),
+        ];
+        if let Some(url) = &iron_proxy.company_context_url {
+            targets.push(control_plane_egress_target(
+                url,
+                &self.config.namespace,
+                iron_proxy.company_context_pod_labels.clone(),
+            ));
+        }
+        targets
+    }
+
+    /// Widen a running sandbox's proxy to the observability profile: its
+    /// policy gains the api-rs and OTLP egress rules, and its pod gains the
+    /// label the chart's observability policies select. The Service and policy
+    /// selectors built without that label still match the labeled pod, so
+    /// routing is unaffected. Missing proxy resources are left to the proxy
+    /// repair that follows every claim, which rebuilds them from the sandbox's
+    /// now-enabled capability.
+    pub(crate) async fn enable_iron_proxy_observability(
+        &self,
+        id: &SandboxId,
+    ) -> SandboxResult<()> {
+        let Some(iron_proxy) = self.config.iron_proxy.as_ref() else {
+            return Ok(());
+        };
+        let egress = proxy_egress_rules(
+            iron_proxy,
+            &self.control_plane_egress_targets(iron_proxy),
+            self.config.otlp_egress.as_ref(),
+            true,
+        );
+        let params = PatchParams::default();
+        match self
+            .network_policies()
+            .patch(
+                &iron_proxy_policy_name(id),
+                &params,
+                &Patch::Merge(json!({ "spec": { "egress": egress } })),
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(err) if is_not_found(&err) => {}
+            Err(err) => return Err(map_kube_error("patch iron-proxy network policy", err)),
+        }
+        let pods = self
+            .pods()
+            .list(&ListParams::default().labels(&format!(
+                "{IRON_PROXY_LABEL}=true,{SANDBOX_ID_LABEL}={}",
+                id.as_str()
+            )))
+            .await
+            .map_err(|err| map_kube_error("list iron-proxy pods", err))?;
+        let label_patch = Patch::Merge(crate::observability_label_patch());
+        for pod in pods.items {
+            let Some(name) = pod.metadata.name else {
+                continue;
+            };
+            match self.pods().patch(&name, &params, &label_patch).await {
+                Ok(_) => {}
+                Err(err) if is_not_found(&err) => {}
+                Err(err) => return Err(map_kube_error("label iron-proxy pod", err)),
+            }
+        }
         Ok(())
     }
 
@@ -2085,12 +2152,8 @@ pub(crate) fn sandbox_observability_enabled(
     sandbox: &crate::crd::Sandbox,
     container_name: &str,
 ) -> Option<bool> {
-    sandbox_env_value(
-        sandbox,
-        "CENTAUR_SANDBOX_OBSERVABILITY_ENABLED",
-        container_name,
-    )
-    .and_then(|value| value.parse().ok())
+    sandbox_env_value(sandbox, crate::OBSERVABILITY_ENABLED_ENV, container_name)
+        .and_then(|value| value.parse().ok())
 }
 
 /// Prefer a present, parseable capability env. When env is missing/invalid,

@@ -23,6 +23,8 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# Applies the backend's JSON patches in tests; kube already depends on it.
+json-patch = "4.2.0"
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
 
 [lints]

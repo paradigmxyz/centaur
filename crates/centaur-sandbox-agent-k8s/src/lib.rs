@@ -41,6 +41,9 @@ const DEFAULT_CONTAINER_NAME: &str = "agent";
 const MANAGED_BY_LABEL: &str = "centaur.ai/managed-by";
 const SANDBOX_ID_LABEL: &str = "centaur.ai/sandbox-id";
 const OBSERVABILITY_ENABLED_LABEL: &str = "centaur.ai/observability-enabled";
+/// Agent container env recording the observability capability. It is the
+/// durable record resume and proxy repair read the capability back from.
+const OBSERVABILITY_ENABLED_ENV: &str = "CENTAUR_SANDBOX_OBSERVABILITY_ENABLED";
 const MANAGED_BY_VALUE: &str = "api-rs";
 const SANDBOX_FILES_VOLUME: &str = "sandbox-files";
 const ARTIFACT_GET_COMMAND: &str = "/usr/local/bin/centaur-artifact-get";
@@ -798,6 +801,41 @@ impl SandboxBackend for AgentSandboxBackend {
             .await
     }
 
+    async fn enable_observability(&self, id: &SandboxId) -> SandboxResult<()> {
+        let sandbox = self
+            .get_sandbox(id)
+            .await?
+            .ok_or_else(|| SandboxError::NotFound(id.as_str().to_owned()))?;
+        // Record the capability first: resume and proxy repair rebuild labels
+        // and policies from the template env, so a failure past this point
+        // heals on the next resume or repair instead of losing the grant.
+        let env_patch = serde_json::from_value(sandbox_observability_env_patch(
+            &sandbox,
+            &self.config.container_name,
+        )?)
+        .map_err(|error| {
+            SandboxError::backend(format!("build sandbox observability env patch: {error}"))
+        })?;
+        self.sandboxes()
+            .patch(
+                id.as_str(),
+                &PatchParams::default(),
+                &Patch::Json::<crd::Sandbox>(env_patch),
+            )
+            .await
+            .map_err(|err| map_kube_error("patch sandbox observability env", err))?;
+        let labels = observability_label_patch();
+        let mut sandbox_patch = labels.clone();
+        sandbox_patch["spec"] = json!({ "podTemplate": labels.clone() });
+        self.patch_sandbox_merge(id, sandbox_patch).await?;
+        // The template only labels pods created after this; label the live one.
+        self.pods()
+            .patch(id.as_str(), &PatchParams::default(), &Patch::Merge(labels))
+            .await
+            .map_err(|err| map_kube_error("label sandbox pod", err))?;
+        self.enable_iron_proxy_observability(id).await
+    }
+
     async fn pause(&self, id: &SandboxId) -> SandboxResult<()> {
         self.patch_sandbox_merge(id, sandbox_pause_patch(jiff::Timestamp::now()))
             .await?;
@@ -954,6 +992,59 @@ async fn read_stream_bounded(
     }
     tokio::io::copy(reader, &mut tokio::io::sink()).await?;
     Ok(exceeded)
+}
+
+fn observability_label_patch() -> Value {
+    json!({ "metadata": { "labels": { OBSERVABILITY_ENABLED_LABEL: "true" } } })
+}
+
+/// JSON patch setting the agent container's observability env to `true`,
+/// guarded by `test` ops so a reordered template cannot be patched blindly.
+fn sandbox_observability_env_patch(
+    sandbox: &crd::Sandbox,
+    container_name: &str,
+) -> SandboxResult<Value> {
+    let containers = &sandbox.spec.pod_template.spec.containers;
+    let index = containers
+        .iter()
+        .position(|container| container.name == container_name)
+        .ok_or_else(|| {
+            SandboxError::backend(format!("sandbox has no container named {container_name:?}"))
+        })?;
+    let container_path = format!("/spec/podTemplate/spec/containers/{index}");
+    let entry = json!({ "name": OBSERVABILITY_ENABLED_ENV, "value": "true" });
+    let mut ops = vec![json!({
+        "op": "test",
+        "path": format!("{container_path}/name"),
+        "value": container_name,
+    })];
+    match containers[index].env.as_deref() {
+        None => ops.push(json!({
+            "op": "add",
+            "path": format!("{container_path}/env"),
+            "value": [entry],
+        })),
+        Some(env) => match env
+            .iter()
+            .position(|var| var.name == OBSERVABILITY_ENABLED_ENV)
+        {
+            Some(position) => {
+                let path = format!("{container_path}/env/{position}");
+                ops.push(json!({
+                    "op": "test",
+                    "path": format!("{path}/name"),
+                    "value": OBSERVABILITY_ENABLED_ENV,
+                }));
+                ops.push(json!({ "op": "replace", "path": path, "value": entry }));
+            }
+            None => ops.push(json!({
+                "op": "add",
+                "path": format!("{container_path}/env/-"),
+                "value": entry,
+            })),
+        },
+    }
+    Ok(Value::Array(ops))
 }
 
 fn sandbox_pause_patch(paused_at: jiff::Timestamp) -> Value {
@@ -2280,6 +2371,66 @@ mod tests {
             patch["spec"]["podTemplate"]["metadata"]["labels"][OBSERVABILITY_ENABLED_LABEL],
             json!("true")
         );
+    }
+
+    /// Resume and proxy repair read the capability back from the template
+    /// env, so enabling observability on a running sandbox must leave that env
+    /// reporting it enabled, whether the env was recorded or absent.
+    #[test]
+    fn observability_env_patch_makes_resume_read_observability_enabled() {
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
+        let restricted = SandboxCapabilities {
+            repo_cache: RepoCacheAccess::All,
+            observability_enabled: false,
+        };
+        let recorded = SandboxSpec::new("centaur-agent:latest")
+            .capabilities(restricted.clone())
+            .env("OTHER", "value")
+            .env(OBSERVABILITY_ENABLED_ENV, "false");
+        let unrecorded = SandboxSpec::new("centaur-agent:latest")
+            .capabilities(restricted.clone())
+            .env("OTHER", "value");
+        let no_env = SandboxSpec::new("centaur-agent:latest").capabilities(restricted);
+
+        for spec in [recorded, unrecorded, no_env] {
+            let mut sandbox =
+                build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+            let mut sidecar = sandbox.spec.pod_template.spec.containers[0].clone();
+            sidecar.name = "sidecar".to_owned();
+            sidecar.env = None;
+            sandbox.spec.pod_template.spec.containers.insert(0, sidecar);
+            assert_eq!(
+                sandbox_capability_labels(&sandbox, DEFAULT_CONTAINER_NAME, "asbx-test")
+                    .get(OBSERVABILITY_ENABLED_LABEL),
+                Some(&false)
+            );
+
+            let patch: json_patch::Patch = serde_json::from_value(
+                sandbox_observability_env_patch(&sandbox, DEFAULT_CONTAINER_NAME).unwrap(),
+            )
+            .unwrap();
+            let mut document = serde_json::to_value(&sandbox).unwrap();
+            json_patch::patch(&mut document, &patch).unwrap();
+            let patched: crd::Sandbox = serde_json::from_value(document).unwrap();
+
+            assert_eq!(
+                sandbox_capability_labels(&patched, DEFAULT_CONTAINER_NAME, "asbx-test")
+                    .get(OBSERVABILITY_ENABLED_LABEL),
+                Some(&true)
+            );
+            let agent_env = patched.spec.pod_template.spec.containers[1]
+                .env
+                .clone()
+                .unwrap_or_default();
+            assert_eq!(
+                agent_env
+                    .iter()
+                    .filter(|var| var.name == OBSERVABILITY_ENABLED_ENV)
+                    .count(),
+                1
+            );
+            assert!(patched.spec.pod_template.spec.containers[0].env.is_none());
+        }
     }
 
     #[test]

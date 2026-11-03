@@ -83,6 +83,16 @@ pub trait SandboxBackend: Send + Sync {
         Ok(())
     }
 
+    /// Grant a running sandbox observability access it was created without,
+    /// durably, so a resumed or repaired sandbox keeps it. Capabilities only
+    /// ever widen after create; narrowing requires a new sandbox.
+    async fn enable_observability(&self, _id: &SandboxId) -> SandboxResult<()> {
+        Err(crate::SandboxError::Unsupported {
+            backend: self.name(),
+            operation: "enable_observability",
+        })
+    }
+
     /// Suspend the sandbox while preserving any backend-supported runtime state.
     async fn pause(&self, id: &SandboxId) -> SandboxResult<()>;
 
