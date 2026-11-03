@@ -700,8 +700,11 @@ apiRs:
       # migration, index rebuild, and re-embedding existing rows. pgvector will
       # not build an HNSW or IVFFlat index above 2000.
       dimensions: 1536
-  # Reaper: stop sandboxes older than the max lifetime, regardless of whether
-  # they are running or suspended. 0 disables the sweep. Interval must be >= 1.
+  # Reaper: stop sandboxes older than the max lifetime, whether running or
+  # suspended. Warm-pool sandboxes age from when a session claims them, and a
+  # sandbox with a queued or running turn waits for a later sweep unless that
+  # turn has itself run longer than the max lifetime. 0 disables the sweep.
+  # Interval must be >= 1.
   sandboxMaxLifetimeSecs: 259200 # 3 days
   sandboxReapIntervalSecs: 300
   # Delete session.output.line events older than this many days, once their

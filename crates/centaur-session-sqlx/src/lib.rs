@@ -1,6 +1,10 @@
 //! SQLx-backed session repository.
 
-use std::{collections::BTreeMap, str::FromStr, time::Duration};
+use std::{
+    collections::BTreeMap,
+    str::FromStr,
+    time::{Duration, SystemTime},
+};
 
 use centaur_session_core::{
     ExecutionStatus, HarnessType, MessageRole, SandboxCapabilities, SandboxRepoCacheAccess,
@@ -68,6 +72,17 @@ pub struct IdleSandboxCandidate {
     pub sandbox_id: String,
     pub execution_id: String,
     pub idle_timeout: Duration,
+}
+
+/// Durable state the max-lifetime reaper consults before stopping a sandbox.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SandboxReapState {
+    /// When a warm-pool sandbox was claimed for a session, if it is still
+    /// claimed. Failed claims do not extend the sandbox's lifetime.
+    pub claimed_at: Option<SystemTime>,
+    /// When the oldest queued or running execution of a session using the
+    /// sandbox started (or was queued), if any.
+    pub active_execution_since: Option<SystemTime>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -676,6 +691,69 @@ impl PgSessionStore {
         self.set_session_status(&row.thread_key, SessionStatus::Idle)
             .await?;
         row.try_into().map(Some)
+    }
+
+    pub async fn sandbox_reap_state(
+        &self,
+        sandbox_id: &str,
+    ) -> Result<SandboxReapState, SessionStoreError> {
+        let (claimed_at, active_execution_since) =
+            sqlx::query_as::<_, (Option<OffsetDateTime>, Option<OffsetDateTime>)>(
+                r#"
+            select
+                (
+                    select claimed_at
+                    from session_warm_sandboxes
+                    where sandbox_id = $1 and status = 'claimed'
+                ),
+                (
+                    select min(coalesce(session_executions.started_at, session_executions.created_at))
+                    from sessions
+                    join session_executions
+                      on session_executions.thread_key = sessions.thread_key
+                    where sessions.sandbox_id = $1
+                      and session_executions.status in ($2, $3)
+                )
+            "#,
+            )
+            .bind(sandbox_id)
+            .bind(ExecutionStatus::Queued.as_ref())
+            .bind(ExecutionStatus::Running.as_ref())
+            .fetch_one(&self.pool)
+            .await?;
+
+        Ok(SandboxReapState {
+            claimed_at: claimed_at.map(SystemTime::from),
+            active_execution_since: active_execution_since.map(SystemTime::from),
+        })
+    }
+
+    /// Takes a ready warm sandbox out of the pool so it can be reaped without
+    /// racing a claim. Returns `false` when the sandbox is claimed, including
+    /// by a claim that commits concurrently; the caller must not stop it then.
+    /// Sandboxes without a ready or claimed warm row are not pool-owned and
+    /// return `true`.
+    pub async fn evict_unclaimed_warm_sandbox(
+        &self,
+        sandbox_id: &str,
+    ) -> Result<bool, SessionStoreError> {
+        // Locking the row with an update, rather than reading it, makes a
+        // concurrent claim either finish first (status 'claimed') or skip the
+        // row once it is 'evicting'.
+        let status = sqlx::query_scalar::<_, String>(
+            r#"
+            update session_warm_sandboxes
+            set
+                status = case when status = 'ready' then 'evicting' else status end,
+                updated_at = case when status = 'ready' then now() else updated_at end
+            where sandbox_id = $1 and status in ('ready', 'claimed')
+            returning status
+            "#,
+        )
+        .bind(sandbox_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(status.as_deref() != Some("claimed"))
     }
 
     /// Returns whether a sandbox is durably known to be idle and safe for an
@@ -2537,6 +2615,134 @@ mod tests {
         assert_eq!(candidate.sandbox_id, sandbox_id);
         assert_eq!(candidate.execution_id, execution_id);
         assert_eq!(candidate.idle_timeout, Duration::from_secs(1));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sandbox_reap_state_reports_claim_time_and_active_execution() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key = ThreadKey::parse(format!("test:reap-state-{}", Uuid::new_v4())).unwrap();
+        let workload_key = format!("test-reap-state-{}", Uuid::new_v4());
+        let sandbox_id = format!("sbx-reap-state-{}", Uuid::new_v4());
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        store
+            .insert_ready_warm_sandbox(&sandbox_id, &workload_key)
+            .await
+            .expect("insert warm sandbox");
+        assert_eq!(
+            store.sandbox_reap_state(&sandbox_id).await.unwrap(),
+            super::SandboxReapState::default()
+        );
+
+        store
+            .claim_ready_warm_sandbox(&workload_key, thread_key.as_str())
+            .await
+            .expect("claim warm sandbox");
+        let claimed_at: OffsetDateTime = sqlx::query_scalar(
+            "select claimed_at from session_warm_sandboxes where sandbox_id = $1",
+        )
+        .bind(&sandbox_id)
+        .fetch_one(store.pool())
+        .await
+        .expect("load claimed_at");
+        store
+            .update_sandbox_id(&thread_key, Some(&sandbox_id))
+            .await
+            .expect("set sandbox id");
+        let execution = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution;
+
+        let state = store.sandbox_reap_state(&sandbox_id).await.unwrap();
+        assert_eq!(state.claimed_at, Some(claimed_at.into()));
+        assert_eq!(
+            state.active_execution_since,
+            Some(execution.created_at.into())
+        );
+
+        store
+            .complete_execution(&execution.execution_id)
+            .await
+            .expect("complete execution");
+        store
+            .mark_warm_sandbox_failed(&sandbox_id, "test failure")
+            .await
+            .expect("mark warm sandbox failed");
+        assert_eq!(
+            store.sandbox_reap_state(&sandbox_id).await.unwrap(),
+            super::SandboxReapState::default(),
+            "a failed claim must not extend the lifetime"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn evicting_unclaimed_warm_sandbox_blocks_claims_and_spares_claimed_ones() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key = ThreadKey::parse(format!("test:evict-{}", Uuid::new_v4())).unwrap();
+        let workload_key = format!("test-evict-{}", Uuid::new_v4());
+        let ready_id = format!("sbx-evict-ready-{}", Uuid::new_v4());
+        let claimed_id = format!("sbx-evict-claimed-{}", Uuid::new_v4());
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        store
+            .insert_ready_warm_sandbox(&claimed_id, &workload_key)
+            .await
+            .expect("insert warm sandbox to claim");
+        assert_eq!(
+            store
+                .claim_ready_warm_sandbox(&workload_key, thread_key.as_str())
+                .await
+                .unwrap(),
+            Some(claimed_id.clone())
+        );
+        store
+            .insert_ready_warm_sandbox(&ready_id, &workload_key)
+            .await
+            .expect("insert ready warm sandbox");
+
+        assert!(
+            !store
+                .evict_unclaimed_warm_sandbox(&claimed_id)
+                .await
+                .unwrap()
+        );
+        assert!(store.evict_unclaimed_warm_sandbox(&ready_id).await.unwrap());
+        assert!(
+            store
+                .evict_unclaimed_warm_sandbox(&format!("sbx-unpooled-{}", Uuid::new_v4()))
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .claim_ready_warm_sandbox(&workload_key, thread_key.as_str())
+                .await
+                .unwrap(),
+            None,
+            "an evicted sandbox must not be claimable"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

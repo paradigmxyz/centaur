@@ -796,9 +796,10 @@ struct SandboxArgs {
         default_value_t = 0
     )]
     sandbox_running_limit: usize,
-    /// Stop any sandbox older than this regardless of status; sessions replace
-    /// reaped sandboxes on their next message. 0 disables the max-lifetime
-    /// sweep.
+    /// Stop any sandbox older than this; sessions replace reaped sandboxes on
+    /// their next message. Warm-pool sandboxes age from their claim, and
+    /// sandboxes with an active execution are skipped unless that execution
+    /// outlived this too. 0 disables the max-lifetime sweep.
     #[arg(
         long = "session-sandbox-max-lifetime-secs",
         env = "SESSION_SANDBOX_MAX_LIFETIME_SECS",
