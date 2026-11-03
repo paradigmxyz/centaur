@@ -407,8 +407,9 @@ Sandbox lifecycle has two separate timers:
   3 hours, so api-rs can pause an idle sandbox after a turn finishes.
 - api-rs deletes old sandboxes through `apiRs.sandboxMaxLifetimeSecs`, default
   72 hours, whether the sandbox is still running or already suspended.
-  Warm-pool sandboxes age from when a session claims them, and a sandbox is
-  never deleted while its session has a queued or running turn.
+  Warm-pool sandboxes age from when a session claims them, and the reaper
+  skips a sandbox while its session has a queued or running turn, unless that
+  turn has itself run longer than the max lifetime.
 
 There is no suspended-only delete setting. If you want sandboxes gone after N
 hours, set `apiRs.sandboxMaxLifetimeSecs` to N hours in seconds.
