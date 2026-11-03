@@ -409,6 +409,24 @@ mkdir -p "$HOME_DIR/uploads"
 WORKSPACE_DIR="$WORKSPACE_DIR" install-tool-shims --refresh-skills \
     || echo "warning: failed to reload Centaur skills" >&2
 
+# ── Background: keep fetched repo-cache checkouts current ───────────────────
+# With a repo-cache server, ~/github is a copy rather than a mount. Keep it
+# following the cache and the principal's repo-cache access, which changes when
+# a warm sandbox is claimed. Rebuilding tools, skills, and the prompt after
+# such a change needs the environment computed above, so record it.
+if [ -n "${CENTAUR_REPO_CACHE_URL:-}" ]; then
+    WORKSPACE_DIR="$WORKSPACE_DIR" python3 -c '
+import json, os, sys
+names = ("TOOL_DIRS", "CENTAUR_TOOL_PYTHONPATH", "PYTHONPATH", "WORKSPACE_DIR")
+with open(sys.argv[1], "w") as f:
+    json.dump({name: os.environ.get(name, "") for name in names}, f)
+' "$HOME_DIR/.centaur-runtime-env.json"
+    (
+        repo-cache-fetch --watch --dest "$HOME_DIR/github" \
+            || echo "warning: repo-cache fetch watcher stopped" >&2
+    ) &
+fi
+
 # ── Background: refresh repo-cache-backed tools/skills in running sandboxes ───
 case "${CENTAUR_TOOLS_AUTO_RELOAD:-true}" in
     0|false|False|FALSE|no|No|NO|off|Off|OFF) _centaur_tools_auto_reload=0 ;;

@@ -491,5 +491,59 @@ class RefreshInstallTest(unittest.TestCase):
             index = json.loads((bin_dir / ".centaur-tools.json").read_text())
             self.assertEqual([tool["name"] for tool in index], ["websearch"])
 
+    def test_refresh_drops_removed_repo_cache_sources_and_falls_back_to_baked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repos = root / "github"
+            tool_dir = root / "tools"
+            baked = root / "baked"
+            for tree, name in (
+                (repos / "acme" / "public" / "tools", "docs"),
+                (repos / "acme" / "private" / "tools", "secret"),
+                (baked, "base"),
+            ):
+                (tree / "research" / name).mkdir(parents=True)
+                (tree / "research" / name / "pyproject.toml").write_text(name)
+            tool_dir.mkdir()
+            (tool_dir / install_tool_shims.TOOLS_METADATA_NAME).write_text(
+                json.dumps(
+                    {
+                        "sources": [
+                            {
+                                "repo": repo,
+                                "source": "repo_cache",
+                                "source_subdir": "tools",
+                                "repo_cache_repo_path": str(repos / repo),
+                            }
+                            for repo in ("acme/private", "acme/public")
+                        ]
+                    }
+                )
+            )
+
+            def published() -> list[str]:
+                return [
+                    package.name
+                    for package in install_tool_shims._tool_package_dirs(tool_dir)
+                ]
+
+            with (
+                mock.patch.object(install_tool_shims, "BAKED_TOOLS_DIR", baked),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                install_tool_shims._refresh_tool_dir(tool_dir)
+                self.assertEqual(sorted(published()), ["docs", "secret"])
+
+                # A principal that can read only public repos.
+                subprocess.run(["rm", "-r", str(repos / "acme" / "private")], check=True)
+                install_tool_shims._refresh_tool_dir(tool_dir)
+                self.assertEqual(published(), ["docs"])
+
+                # One that can read none: keep the baked first-party tools.
+                subprocess.run(["rm", "-r", str(repos)], check=True)
+                install_tool_shims._refresh_tool_dir(tool_dir)
+                self.assertEqual(published(), ["base"])
+
+
 if __name__ == "__main__":
     unittest.main()
