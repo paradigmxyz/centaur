@@ -2,6 +2,7 @@ import type { Logger } from 'chat'
 import { configuredModels, mentionsSelectionName } from './model-catalog'
 import {
   extractMessageOverrides,
+  modelSelectionNames,
   validateStrategyOverrides
 } from './overrides'
 import type { MessageOverridesStrategy } from './types'
@@ -135,7 +136,10 @@ const QUESTIONS = [
 
 function configuredQuestions() {
   const models = configuredModels()
-  const modelChoices = new Map(MODEL_CHOICES.map(choice => [choice.value, choice]))
+  const modelChoices = new Map(MODEL_CHOICES.map(choice => [choice.value, {
+    ...choice,
+    description: `${choice.description} Names: ${modelSelectionNames(choice.value).join('; ')}.`
+  }]))
   for (const model of models) {
     // Qualify configured choices so equal model IDs at different providers
     // resolve to distinct routes.

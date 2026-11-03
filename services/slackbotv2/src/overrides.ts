@@ -424,6 +424,30 @@ function resolveConfiguredSelection(overrides: HarnessOverrides, explicit = fals
   return { ...overrides, harnessType: 'codex', model: model.id, provider: model.provider }
 }
 
+/** Shared spoken names for the classifier and the pinned-selection guard. */
+export function modelSelectionNames(model: string): string[] {
+  const names = [model, model.replace(/-/g, ' ')]
+  const gpt = /^gpt-([0-9.]+)(?:-(.+))?$/.exec(model)
+  if (gpt) {
+    const versionedName = [gpt[1], gpt[2]?.replace(/-/g, ' ')].filter(Boolean).join(' ')
+    names.push(versionedName, `gpt ${versionedName}`, `gpt${versionedName}`,
+      `codex ${versionedName}`, `codex${versionedName}`)
+    const defaults: Record<string, string> = {
+      'gpt-6.1-sol': 'sol', 'gpt-6.1-terra': 'terra', 'gpt-6-luna': 'luna', 'gpt-6-astra': 'astra'
+    }
+    if (defaults[model]) names.push(defaults[model])
+  }
+  const claude = /^claude-([a-z]+)-([0-9]+(?:-[0-9]+)*)(.*)$/.exec(model)
+  if (claude) {
+    const versionedName = `${claude[1]} ${claude[2]!.replace(/-/g, '.')}${claude[3]!.replace(/-/g, ' ')}`
+    names.push(versionedName, `claude ${versionedName}`)
+    names.push(...Object.entries(CLAUDE_MODEL_ALIASES)
+      .filter(([, id]) => id === model).map(([alias]) => alias))
+    if (model === CLAUDE_MODEL_ALIASES.opus) names.push('claude')
+  }
+  return [...new Set(names)]
+}
+
 /** A classifier cannot replace a pinned selection unless its target is actually named. */
 export function namesRequestedSelection(text: string, overrides: HarnessOverrides): boolean {
   if (overrides.model) {
@@ -431,10 +455,7 @@ export function namesRequestedSelection(text: string, overrides: HarnessOverride
     const providerNames = model && customProviderDefaultModel(model.provider) === model.id
       ? [model.provider, model.providerName] : []
     const names = model ? [model.id, model.displayName, ...model.aliases, ...providerNames]
-      : [overrides.model, overrides.model.replace(/-/g, ' '),
-        ...(/^(?:gpt-[0-9.]+)-(sol|terra|luna|astra)$/.exec(overrides.model)?.slice(1) ?? []),
-        ...Object.entries(CLAUDE_MODEL_ALIASES)
-        .filter(([, id]) => id === overrides.model).map(([alias]) => alias)]
+      : modelSelectionNames(overrides.model)
     return mentionsSelectionName(text, names)
   }
   if (overrides.provider) return mentionsSelectionName(text, [overrides.provider])

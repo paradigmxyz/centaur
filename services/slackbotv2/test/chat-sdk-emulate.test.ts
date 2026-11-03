@@ -1079,6 +1079,43 @@ describe('slackbotv2', () => {
     })
   }
 
+  it('switches a pinned model using default Claude and versioned Codex names', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({
+      state: sharedState,
+      messageOverridesStrategy: createOpenAiMessageOverridesStrategy({
+        apiKey: 'test-key', model: 'classifier',
+        fetch: (async (_url: RequestInfo | URL, init?: RequestInit) => {
+          const request = JSON.parse(String(init?.body))
+          const text = String(request.input.at(-1).content)
+          const model = text.includes('use claude') ? 'claude-opus-5-5'
+            : text.includes('pro') ? 'gpt-5.4-pro' : 'gpt-5.5'
+          return Response.json({ answers: [
+            { name: 'selection_request', probability: 0.99, type: 'predicate' },
+            { name: 'model', choice: model, type: 'choice' }
+          ] })
+        }) as unknown as typeof fetch
+      })
+    })
+    const parent = await sendMessage(`<@${BOT_USER_ID}> --codex --model gpt-6.1-sol start here`)
+    await parent.finished()
+    for (const [text, harness, model] of [
+      ['use claude', 'claudecode', 'claude-opus-5-5'],
+      ['switch to codex 5.5', 'codex', 'gpt-5.5'],
+      ['switch to codex 5.4 pro', 'codex', 'gpt-5.4-pro']
+    ] as const) {
+      const followup = await sendMessage(`<@${BOT_USER_ID}> ${text}`, { threadTs: parent.ts })
+      await followup.finished()
+      expect(codexApi.creates.at(-1)!.body.harness_type).toBe(harness)
+      expect(JSON.parse(codexApi.executes.at(-1)!.body.input_lines.at(-1)!).model).toBe(model)
+      expect(await sharedState.get(`thread-state:${threadKey(parent.ts)}`)).toMatchObject({
+        harnessType: harness, model
+      })
+    }
+    expect(codexApi.executes).toHaveLength(4)
+  })
+
   it('keeps a top-level harness flag pinned when the LLM strategy guesses another harness', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()

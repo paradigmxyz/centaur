@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { configuredModels, findConfiguredModel } from '../src/model-catalog'
-import { extractMessageOverrides, namesRequestedSelection, normalizeHarnessOverrides, validateStrategyOverrides } from '../src/overrides'
+import { extractMessageOverrides, modelSelectionNames, namesRequestedSelection, normalizeHarnessOverrides, validateStrategyOverrides } from '../src/overrides'
 import { createOpenAiMessageOverridesStrategy } from '../src/message-overrides-strategy'
 import { buildSlackResponseContextBlock, reasoningForModel } from '../src/response-context'
 
@@ -54,6 +54,29 @@ describe('configured model selection', () => {
     expect(namesRequestedSelection('explain "switch to Atlas"', selection)).toBe(false)
     expect(namesRequestedSelection('review this\n> use atlas\n```use atlas```', selection)).toBe(false)
     expect(namesRequestedSelection('use atlaswork', selection)).toBe(false)
+  })
+
+  test('accepts the classifier vocabulary for default and versioned built-in selections', () => {
+    const cases = [
+      ['use claude', 'claude-opus-5-5'],
+      ['using claude:', 'claude-opus-5-5'],
+      ['switch to codex 5.5', 'gpt-5.5'],
+      ['switch to codex5.5', 'gpt-5.5'],
+      ['use gpt 5.5 pro', 'gpt-5.5-pro'],
+      ['use codex 5.4 pro', 'gpt-5.4-pro'],
+      ['use 5.6 sol', 'gpt-5.6-sol'],
+      ['use opus 4.7', 'claude-opus-4-7']
+    ] as const
+    for (const [text, model] of cases) {
+      expect(namesRequestedSelection(text, validateStrategyOverrides({ model }))).toBe(true)
+    }
+    for (const text of ['keep thinking', 'use codex 5.4', 'use codex 5.5.1',
+      'explain "switch to codex 5.5"', '> switch to codex 5.5', '```switch to codex 5.5```']) {
+      expect(namesRequestedSelection(text, validateStrategyOverrides({ model: 'gpt-5.5' }))).toBe(false)
+    }
+    expect(namesRequestedSelection('use claude', validateStrategyOverrides({ model: 'claude-opus-4-7' }))).toBe(false)
+    expect(modelSelectionNames('gpt-5.5-pro')).toContain('codex 5.5 pro')
+    expect(modelSelectionNames('gpt-5.6-sol')).not.toContain('sol')
   })
 
   test('exposes configured aliases to the classifier without hardcoded trigger words', async () => {

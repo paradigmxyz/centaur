@@ -63,7 +63,7 @@ export function mentionsSelectionName(text: string, names: string[]): boolean {
   const prose = text.replace(/```[\s\S]*?```/g, '').replace(/`([^`]+)`/g, '$1')
     .replace(/^\s*>.*$/gm, '').replace(/"[^"\n]*"|“[^”\n]*”/g, '')
   return names.some(name => name.length > 0 && new RegExp(
-    `(?<![a-z0-9])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-z0-9])`, 'i'
+    `(?<![a-z0-9])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-z0-9]|[.-][0-9])`, 'i'
   ).test(prose))
 }
 
