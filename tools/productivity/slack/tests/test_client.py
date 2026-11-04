@@ -964,6 +964,22 @@ def test_file_info_proxy_calls_centaur_api(
     assert urllib.parse.parse_qs(parsed.query) == {"channel_id": ["C123456789"]}
 
 
+def test_get_user_email_proxy_calls_centaur_api() -> None:
+    client, _ = _make_client()
+    calls: list[tuple[str, dict]] = []
+
+    def fake_get_json(path, params):
+        calls.append((path, params))
+        return {"ok": True, "user_id": "U123456789", "email": "person@example.com"}
+
+    client._centaur_api_get_json = fake_get_json  # type: ignore[method-assign]
+
+    assert client.get_user_email_proxy(" u123456789 ") == "person@example.com"
+    assert calls == [("/api/slack/users/U123456789/email", {})]
+    with pytest.raises(ValueError, match="user_id"):
+        client.get_user_email_proxy("C123456789")
+
+
 def test_get_channel_members_proxy_paginates_and_resolves_names() -> None:
     client, _ = _make_client()
     client._get_user_cache = lambda: {"U111111111": "alice", "U222222222": "bob"}  # type: ignore[method-assign]

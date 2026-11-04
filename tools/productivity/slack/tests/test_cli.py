@@ -257,6 +257,30 @@ def test_channel_members_calls_proxy_client(monkeypatch) -> None:
     assert json.loads(result.output) == [{"id": "U123456789", "name": "alice"}]
 
 
+@pytest.mark.parametrize(
+    ("command", "client_function"),
+    [
+        ("user-email", "get_user_email_proxy"),
+        ("user-email-direct", "get_user_email_direct"),
+    ],
+)
+def test_user_email_commands_call_matching_client(monkeypatch, command, client_function) -> None:
+    calls = []
+
+    def fake_get_user_email(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "person@example.com"
+
+    fake_client = types.SimpleNamespace(**{client_function: fake_get_user_email})
+    monkeypatch.setitem(sys.modules, "slack.client", fake_client)
+
+    result = CliRunner().invoke(app, [command, "U123456789"])
+
+    assert result.exit_code == 0
+    assert calls == [(("U123456789",), {})]
+    assert json.loads(result.output) == {"user_id": "U123456789", "email": "person@example.com"}
+
+
 def test_channel_members_direct_calls_direct_client(monkeypatch) -> None:
     calls = []
 
