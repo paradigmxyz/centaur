@@ -1199,6 +1199,74 @@ impl AgentSandboxBackend {
         }
     }
 
+    /// Grant a running proxy the observability egress its create path
+    /// applies when the capability is on. The proxy's own selectors omit the
+    /// observability label when created without it, so they still match the
+    /// relabeled pod. Missing resources are left to proxy repair, which
+    /// rebuilds them from the sandbox's recorded capability.
+    pub(crate) async fn enable_iron_proxy_observability(
+        &self,
+        id: &SandboxId,
+    ) -> SandboxResult<()> {
+        let Some(iron_proxy) = self.config.iron_proxy.as_ref() else {
+            return Ok(());
+        };
+        let params = ListParams::default().labels(&format!(
+            "{IRON_PROXY_LABEL}=true,{SANDBOX_ID_LABEL}={}",
+            id.as_str()
+        ));
+        let pods = self
+            .pods()
+            .list(&params)
+            .await
+            .map_err(|err| map_kube_error("list iron-proxy pods", err))?;
+        let label_patch = Patch::Merge(json!({
+            "metadata": { "labels": { OBSERVABILITY_ENABLED_LABEL: "true" } },
+        }));
+        for name in pods.items.into_iter().filter_map(|pod| pod.metadata.name) {
+            match self
+                .pods()
+                .patch(&name, &PatchParams::default(), &label_patch)
+                .await
+            {
+                Ok(_) => {}
+                Err(err) if is_not_found(&err) => {}
+                Err(err) => {
+                    return Err(map_kube_error(
+                        "label iron-proxy pod for observability",
+                        err,
+                    ));
+                }
+            }
+        }
+
+        let policy_name = iron_proxy_policy_name(id);
+        let policy = match self.network_policies().get(&policy_name).await {
+            Ok(policy) => policy,
+            Err(err) if is_not_found(&err) => return Ok(()),
+            Err(err) => return Err(map_kube_error("get iron-proxy network policy", err)),
+        };
+        let mut egress = policy.spec.and_then(|spec| spec.egress).unwrap_or_default();
+        let missing: Vec<_> =
+            observability_egress_rules(iron_proxy, self.config.otlp_egress.as_ref())
+                .into_iter()
+                .filter(|rule| !egress.contains(rule))
+                .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        egress.extend(missing);
+        self.network_policies()
+            .patch(
+                &policy_name,
+                &PatchParams::default(),
+                &Patch::Merge(json!({ "spec": { "egress": egress } })),
+            )
+            .await
+            .map_err(|err| map_kube_error("patch iron-proxy network policy", err))?;
+        Ok(())
+    }
+
     async fn patch_iron_control_principal_annotation(
         &self,
         id: &SandboxId,
@@ -1907,16 +1975,7 @@ fn proxy_egress_rules(
         ));
     }
     if observability_enabled {
-        rules.push(egress_to(
-            vec![pod_peer(iron_proxy.api_pod_labels.clone())],
-            vec![network_port(8000), network_port(8080)],
-        ));
-        if let Some(target) = otlp_egress {
-            rules.push(egress_to(
-                vec![namespace_peer(&target.namespace)],
-                vec![network_port(target.port)],
-            ));
-        }
+        rules.extend(observability_egress_rules(iron_proxy, otlp_egress));
     }
     if matches!(
         iron_proxy.source_policy.kind,
@@ -1928,6 +1987,23 @@ fn proxy_egress_rules(
                 iron_proxy.op_connect_app_name.clone(),
             )]))],
             vec![network_port(iron_proxy.op_connect_port)],
+        ));
+    }
+    rules
+}
+
+fn observability_egress_rules(
+    iron_proxy: &IronProxyConfig,
+    otlp_egress: Option<&OtlpEgressTarget>,
+) -> Vec<NetworkPolicyEgressRule> {
+    let mut rules = vec![egress_to(
+        vec![pod_peer(iron_proxy.api_pod_labels.clone())],
+        vec![network_port(8000), network_port(8080)],
+    )];
+    if let Some(target) = otlp_egress {
+        rules.push(egress_to(
+            vec![namespace_peer(&target.namespace)],
+            vec![network_port(target.port)],
         ));
     }
     rules
@@ -2113,12 +2189,8 @@ pub(crate) fn sandbox_observability_enabled(
     sandbox: &crate::crd::Sandbox,
     container_name: &str,
 ) -> Option<bool> {
-    sandbox_env_value(
-        sandbox,
-        "CENTAUR_SANDBOX_OBSERVABILITY_ENABLED",
-        container_name,
-    )
-    .and_then(|value| value.parse().ok())
+    sandbox_env_value(sandbox, crate::OBSERVABILITY_ENABLED_ENV, container_name)
+        .and_then(|value| value.parse().ok())
 }
 
 /// Prefer a present, parseable capability env. When env is missing/invalid,
