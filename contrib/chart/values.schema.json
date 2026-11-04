@@ -256,7 +256,8 @@
         "telemetry": {
           "type": "object",
           "properties": {
-            "captureTranscripts": { "type": "boolean" }
+            "captureTranscripts": { "type": "boolean" },
+            "redactToolTraces": { "type": "boolean" }
           }
         }
       }

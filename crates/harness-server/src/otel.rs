@@ -20,9 +20,12 @@ const LAMINAR_METADATA_PREFIX: &str = "lmnr.association.properties.metadata.";
 const MAX_SPAN_IO_BYTES: usize = 60 * 1024;
 const MAX_TOOL_COMMAND_BYTES: usize = 8 * 1024;
 const TRUNCATION_SUFFIX: &str = "…[truncated]";
-/// Transcript capture is opt-in: LLM prompt/response text and shell commands
-/// are only exported when this env var is set to a truthy value.
+/// Transcript capture is opt-in: LLM prompt/response text is only exported
+/// when this env var is set to a truthy value.
 const TRANSCRIPT_CAPTURE_ENV: &str = "CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS";
+/// Tool spans carry bounded shell commands and workspace-relative working
+/// directories unless this env var is set to a truthy value.
+const TOOL_TRACE_REDACTION_ENV: &str = "CENTAUR_TELEMETRY_REDACT_TOOL_TRACES";
 
 static TELEMETRY: OnceLock<Option<TelemetryRuntime>> = OnceLock::new();
 
@@ -108,6 +111,7 @@ pub(crate) struct TurnTelemetry {
     tools: HashMap<String, ActiveTool>,
     centaur_tool_names: BTreeSet<String>,
     capture_transcripts: bool,
+    capture_tool_commands: bool,
     observed_status: Option<TurnStatus>,
     finished: bool,
 }
@@ -151,7 +155,8 @@ impl TurnTelemetry {
             model_provider.into(),
             turn_id.into(),
             input,
-            transcript_capture_enabled(),
+            env_flag_enabled(TRANSCRIPT_CAPTURE_ENV),
+            !env_flag_enabled(TOOL_TRACE_REDACTION_ENV),
         )
     }
 
@@ -166,6 +171,7 @@ impl TurnTelemetry {
         turn_id: String,
         input: Option<String>,
         capture_transcripts: bool,
+        capture_tool_commands: bool,
     ) -> Self {
         Self {
             tracer,
@@ -186,6 +192,7 @@ impl TurnTelemetry {
             tools: HashMap::new(),
             centaur_tool_names: load_centaur_tool_names(),
             capture_transcripts,
+            capture_tool_commands,
             observed_status: None,
             finished: false,
         }
@@ -273,7 +280,7 @@ impl TurnTelemetry {
                     && let Some(id) = string_at_path(item, &["id"])
                     && let Some(labels) = tool_labels_from_item(item, &self.centaur_tool_names)
                 {
-                    let command = tool_command_details(item, self.capture_transcripts);
+                    let command = tool_command_details(item, self.capture_tool_commands);
                     self.start_tool(id, labels, command);
                 }
             }
@@ -378,7 +385,7 @@ impl TurnTelemetry {
         let Some(labels) = tool_labels_from_item(item, &self.centaur_tool_names) else {
             return;
         };
-        let command = tool_command_details(item, self.capture_transcripts);
+        let command = tool_command_details(item, self.capture_tool_commands);
         self.start_tool(id.clone(), labels, command);
         if let Some(mut tool) = self.tools.remove(&id) {
             finish_tool_span(&mut tool.span, status);
@@ -539,11 +546,8 @@ fn traces_export_disabled() -> bool {
     )
 }
 
-fn transcript_capture_enabled() -> bool {
-    env::var(TRANSCRIPT_CAPTURE_ENV)
-        .ok()
-        .as_deref()
-        .is_some_and(truthy_env_value)
+fn env_flag_enabled(name: &str) -> bool {
+    env::var(name).ok().as_deref().is_some_and(truthy_env_value)
 }
 
 fn truthy_env_value(value: &str) -> bool {
@@ -826,7 +830,7 @@ fn centaur_catalog_tool_labels(
     })
 }
 
-fn tool_command_details(item: &Value, capture_transcripts: bool) -> Option<ToolCommandDetails> {
+fn tool_command_details(item: &Value, capture_commands: bool) -> Option<ToolCommandDetails> {
     if !matches!(
         item.get("type").and_then(Value::as_str),
         Some("commandExecution" | "command_execution")
@@ -839,8 +843,8 @@ fn tool_command_details(item: &Value, capture_transcripts: bool) -> Option<ToolC
     let executable = executable_name(words.first()?).to_owned();
     Some(ToolCommandDetails {
         executable,
-        command: capture_transcripts.then(|| bounded_tool_command(&command)),
-        cwd: if capture_transcripts {
+        command: capture_commands.then(|| bounded_tool_command(&command)),
+        cwd: if capture_commands {
             workspace_relative_cwd(item)
         } else {
             None
@@ -1446,12 +1450,13 @@ mod tests {
     }
 
     fn test_turn(tracer: SdkTracer) -> TurnTelemetry {
-        test_turn_with_transcript_capture(tracer, false)
+        test_turn_with_capture(tracer, false, true)
     }
 
-    fn test_turn_with_transcript_capture(
+    fn test_turn_with_capture(
         tracer: SdkTracer,
         capture_transcripts: bool,
+        capture_tool_commands: bool,
     ) -> TurnTelemetry {
         let trace = trace_context();
         TurnTelemetry::with_tracer(
@@ -1464,6 +1469,7 @@ mod tests {
             "turn-1".to_owned(),
             Some("hello".to_owned()),
             capture_transcripts,
+            capture_tool_commands,
         )
     }
 
@@ -1471,15 +1477,15 @@ mod tests {
         tracer: SdkTracer,
         names: impl IntoIterator<Item = &'static str>,
     ) -> TurnTelemetry {
-        test_turn_with_centaur_tools_and_capture(tracer, names, false)
+        test_turn_with_centaur_tools_and_capture(tracer, names, true)
     }
 
     fn test_turn_with_centaur_tools_and_capture(
         tracer: SdkTracer,
         names: impl IntoIterator<Item = &'static str>,
-        capture_transcripts: bool,
+        capture_tool_commands: bool,
     ) -> TurnTelemetry {
-        let mut turn = test_turn_with_transcript_capture(tracer, capture_transcripts);
+        let mut turn = test_turn_with_capture(tracer, false, capture_tool_commands);
         turn.centaur_tool_names = names.into_iter().map(str::to_owned).collect();
         turn
     }
@@ -1596,9 +1602,9 @@ mod tests {
     }
 
     #[test]
-    fn centaur_cli_command_exports_the_tool_subcommand() {
+    fn redacted_centaur_cli_command_exports_only_the_tool_subcommand() {
         let (exporter, provider, tracer) = test_telemetry();
-        let mut turn = test_turn_with_centaur_tools(tracer, ["gsuite"]);
+        let mut turn = test_turn_with_centaur_tools_and_capture(tracer, ["gsuite"], false);
         for method in ["item/started", "item/completed"] {
             turn.observe_wire_value(&json!({
                 "method": method,
@@ -1633,9 +1639,9 @@ mod tests {
     }
 
     #[test]
-    fn transcript_capture_exports_bounded_command_and_relative_cwd() {
+    fn tool_spans_export_bounded_command_and_relative_cwd_without_transcripts() {
         let (exporter, provider, tracer) = test_telemetry();
-        let mut turn = test_turn_with_centaur_tools_and_capture(tracer, ["websearch"], true);
+        let mut turn = test_turn_with_centaur_tools(tracer, ["websearch"]);
         let cwd = env::current_dir().expect("current dir").join("src");
         for method in ["item/started", "item/completed"] {
             turn.observe_wire_value(&json!({
@@ -1770,6 +1776,7 @@ mod tests {
             "turn-1".to_owned(),
             None,
             false,
+            true,
         );
         turn.set_model("gpt-5.4");
         turn.observe_wire_value(&json!({
@@ -1846,7 +1853,7 @@ mod tests {
     #[test]
     fn transcript_capture_exports_prompt_and_response_when_enabled() {
         let (exporter, provider, tracer) = test_telemetry();
-        let mut turn = test_turn_with_transcript_capture(tracer, true);
+        let mut turn = test_turn_with_capture(tracer, true, true);
         turn.observe_wire_value(&json!({
             "method": "item/completed",
             "params": {"item": {
