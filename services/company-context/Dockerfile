@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1.7
 FROM rust:1-bookworm AS builder
-ARG SCCACHE_VERSION=0.18.0
+ARG SCCACHE_VERSION=0.19.0
 ARG TARGETARCH
 RUN case "$TARGETARCH" in \
-      amd64) archive_arch=x86_64; checksum=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89 ;; \
-      arm64) archive_arch=aarch64; checksum=2b3284d5da3b46a47dc4229e75bb7b88ac4aa99c8d754fb7d2f84997e5a4354a ;; \
+      amd64) archive_arch=x86_64; checksum=aa73c7270c997894038c0d8f0d297865f57569e1687883322bc431713d4bb9dd ;; \
+      arm64) archive_arch=aarch64; checksum=3e47fc4a71b1ddd1b4294a0de9d34498922fdf41e3cd0bda5df3954e3d6deb9d ;; \
       *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 2 ;; \
     esac && \
     archive="sccache-v${SCCACHE_VERSION}-${archive_arch}-unknown-linux-musl.tar.gz" && \
@@ -33,14 +33,14 @@ RUN --mount=type=cache,id=company-context-cargo-registry-${TARGETARCH},target=/u
 # Debian's pandoc predates the pptx and xlsx readers. The release binary is
 # static, so it is fetched on the build platform for the target architecture.
 FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS pandoc
-ARG PANDOC_VERSION=3.12.1
+ARG PANDOC_VERSION=3.13
 ARG TARGETARCH
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends ca-certificates curl
 RUN case "$TARGETARCH" in \
-      amd64) checksum=d0c90410e90204c9ca83b8539fac5c7aed01fd537207e4585849f8abc5df20b8 ;; \
-      arm64) checksum=445d96fd08801fe636cab1158b4f017ee320ac3b7446328b4fe2f902117b19b9 ;; \
+      amd64) checksum=38aa33b325a2bc96a4c39409631212db55702f564250bcdbead180b3bf646389 ;; \
+      arm64) checksum=21e1d4ba09bd0b334590d204580fd4f6629b21be4ab6a32b26cc98982e9e0c68 ;; \
       *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 2 ;; \
     esac && \
     archive="pandoc-${PANDOC_VERSION}-linux-${TARGETARCH}.tar.gz" && \

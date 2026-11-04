@@ -45,7 +45,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip3 install --break-system-packages --no-compile --ignore-installed "packaging>=24.2.0" \
     && pip3 install --break-system-packages --no-compile \
     python-docx==1.2.0 lxml==6.1.3 docx-revisions==0.1.5 \
-    matplotlib==3.11.2 numpy==2.5.4 pandas==3.0.6 \
+    matplotlib==3.11.2 numpy==2.5.4 pandas==3.1.0 \
     python-pptx==1.0.2 openpyxl==3.1.5 PyMuPDF==1.28.2 mammoth==1.13.0 \
     faster-whisper \
     asyncpg==0.32.0 \
@@ -67,7 +67,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     && find /usr/local/lib/python3.12 /usr/lib/python3 -type d -name __pycache__ -prune -exec rm -rf '{}' +
 
 # ── GitHub CLI + Node.js 24 (LTS) + Docker CLI + Google Cloud CLI (cached) ──
-ARG NODE_VERSION=24.22.1
+ARG NODE_VERSION=24.22.2
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -93,20 +93,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 RUN useradd -m -s /bin/bash -u 1001 agent \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/agent
 
-ARG CLAUDE_CODE_VERSION=2.1.310
+ARG CLAUDE_CODE_VERSION=2.1.312
 ARG CODEX_VERSION=0.165.0
 ARG PI_CODING_AGENT_VERSION=1.4.0
 # Hermes Agent (NousResearch) — pinned by commit SHA per the dependency policy.
-ARG HERMES_AGENT_REF=e5e2fb8b2dbe1cae85aa5ad6ce45aef376016e43
+ARG HERMES_AGENT_REF=bf0203a794a07aac3ff764972ab9087baa4e4f4e
 ARG NUSHELL_VERSION=0.116.1
-ARG KUBECTL_VERSION=v1.37.1
+ARG KUBECTL_VERSION=v1.37.2
 ARG KACHE_VERSION=v0.28.1
 # Bootstrap pnpm for agents working in JS monorepos. The exact baked version
 # doesn't constrain repos: when a repo's `packageManager` field declares a
 # different version, pnpm downloads and runs that one (v11 `pmOnFail=download`
 # default; `manage-package-manager-versions` in v10) over the same registry
 # egress a dependency install already needs.
-ARG PNPM_VERSION=11.28.7
+ARG PNPM_VERSION=11.28.9
 
 # ── kubectl ──────────────────────────────────────────────────────────────────
 RUN set -eux; \
@@ -157,7 +157,7 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
       "@openai/codex@${CODEX_VERSION}" \
       "@earendil-works/pi-coding-agent@${PI_CODING_AGENT_VERSION}" \
       "pnpm@${PNPM_VERSION}" \
-      agent-browser@0.39.1 \
+      agent-browser@0.39.4 \
     && find /usr/lib/node_modules -type f \( -name '*.map' -o -name '*.tsbuildinfo' \) -delete \
     && claude --version | grep -F "${CLAUDE_CODE_VERSION}" \
     && codex --version | grep -F "${CODEX_VERSION}" \
@@ -207,11 +207,11 @@ WORKDIR /home/agent
 
 ENV PATH="/home/agent/.cargo/bin:/home/agent/.local/bin:/home/agent/.foundry/bin:/home/agent/.bun/bin:${PATH}"
 
-ARG FOUNDRY_VERSION=v1.8.5
-ARG AMP_CLI_VERSION=0.0.1792995770-gba80ba
-ARG MANIM_VERSION=0.22.0
+ARG FOUNDRY_VERSION=v1.8.6
+ARG AMP_CLI_VERSION=0.0.1793203246-g5eab6d
+ARG MANIM_VERSION=0.22.1
 ARG BUN_VERSION=bun-v1.4.4
-ARG OMP_VERSION=18.13.2
+ARG OMP_VERSION=18.13.3
 
 # ── Agent-scoped toolchains ─────────────────────────────────────────────────
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
