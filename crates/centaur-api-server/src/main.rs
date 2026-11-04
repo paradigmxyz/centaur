@@ -131,9 +131,9 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     if let Some(config) = sandbox_capacity_config {
         runtime = runtime.with_sandbox_capacity(config);
     }
-    if let Some(config) = args.warm_pool_config(&iron_control.warm_pool_bootstrap_principal) {
-        runtime = runtime.with_warm_pool(config);
-    }
+    let (warm_pools, warm_pool_config) =
+        args.warm_pools(&iron_control.warm_pool_bootstrap_principal)?;
+    runtime = runtime.with_warm_pools(warm_pools, warm_pool_config);
     runtime = runtime.with_sandbox_reaper(args.sandbox_reaper_config());
     runtime = runtime.with_sandbox_cleanup(args.sandbox_cleanup_config());
     if let Some(config) = args.session_event_retention_config() {

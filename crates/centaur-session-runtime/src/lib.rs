@@ -20,8 +20,8 @@ use centaur_sandbox_core::{
     SandboxIoGuard, SandboxRead, SandboxResult, SandboxSpec, SandboxStatus, SandboxWrite,
 };
 use centaur_sandbox_manager::{
-    SandboxManager, SandboxReaper, SandboxReaperConfig, WarmPoolConfig, WarmPoolError,
-    WarmPoolManager, WarmSandboxSpecFactory,
+    SandboxManager, SandboxReaper, SandboxReaperConfig, WarmClaim, WarmPool, WarmPoolConfig,
+    WarmPoolError, WarmPoolManager,
 };
 use centaur_session_core::{
     ChatDestination, ExecutionStatus, HarnessType, MessageRole,
@@ -82,7 +82,9 @@ const PUBLIC_REPO_CACHE_SUBPATH: &str = "public";
 const CENTAUR_SKILL_DIRS_ENV: &str = "CENTAUR_SKILL_DIRS";
 const CENTAUR_PUBLIC_SKILL_DIRS_ENV: &str = "CENTAUR_PUBLIC_SKILL_DIRS";
 const SANDBOX_REPO_CACHE_LABEL: &str = "centaur.sandbox_repo_cache";
-const OBSERVABILITY_TOOL_BLOCKLIST: &str = "vlogs,vmetrics,grafana";
+/// Tools that need the observability capability. Each user turn tells the
+/// agent whether they work; the sandbox network policy enforces it.
+const OBSERVABILITY_TOOLS: &str = "vlogs,vmetrics,grafana";
 const ARTIFACT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 type SandboxSpecFactory = Arc<
@@ -171,7 +173,7 @@ pub struct SessionRuntime {
     execution_spans: ExecutionSpanRegistry,
     iron_control: Arc<dyn SessionPrincipalRegistrar>,
     session_principal_admission: SessionPrincipalAdmission,
-    warm_pool: Option<Arc<WarmPoolManager>>,
+    warm_pools: Option<WarmPools>,
     personas: Option<Arc<PersonaRegistry>>,
     session_title_generator: Option<SessionTitleGenerator>,
     session_title_in_flight: SessionTitleThreadSet,
@@ -361,11 +363,46 @@ pub struct SandboxRuntime {
     spec_factory: SandboxSpecFactory,
     /// Optional out-of-band transport supplied by runtimes that can read artifacts.
     artifact_reader: Option<SandboxArtifactReader>,
-    warm_spec_factory: Option<WarmSandboxSpecFactory>,
-    workload_key: Option<String>,
-    /// The harness warm sandboxes boot with. A warm claim is only valid for a
-    /// session on the same harness; other sessions get a cold sandbox.
-    warm_harness: Option<HarnessType>,
+    /// Builds the base spec a warm sandbox for a harness boots from. Warm
+    /// pools apply their repo-cache access on top of it.
+    warm_spec_factory: Option<WarmHarnessSpecFactory>,
+    /// The deployment's default harness (`SESSION_SANDBOX_HARNESS`).
+    default_harness: Option<HarnessType>,
+}
+
+type WarmHarnessSpecFactory = Arc<dyn Fn(&HarnessType) -> SandboxSpec + Send + Sync>;
+
+/// One configured warm pool: how many sandboxes to keep booted for sessions
+/// on `harness` with `repo_cache` access. Observability is not part of the
+/// pool: warm sandboxes boot without it and claims grant it when needed.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WarmPoolTarget {
+    pub harness: HarnessType,
+    pub repo_cache: SessionRepoCacheAccess,
+    pub size: usize,
+}
+
+#[derive(Clone)]
+struct WarmPools {
+    manager: Arc<WarmPoolManager>,
+    /// Workload key of each configured pool, by harness and repo-cache access.
+    keys: Vec<(HarnessType, SessionRepoCacheAccess, String)>,
+}
+
+impl WarmPools {
+    fn workload_key(
+        &self,
+        harness: &HarnessType,
+        repo_cache: &SessionRepoCacheAccess,
+    ) -> Option<&str> {
+        self.keys
+            .iter()
+            .find(|(pool_harness, pool_repo_cache, _)| {
+                pool_harness == harness && pool_repo_cache == repo_cache
+            })
+            .map(|(_, _, workload_key)| workload_key.as_str())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -375,8 +412,8 @@ pub struct SandboxWorkloadMode {
     pub mounts: Vec<Mount>,
     /// Applied to every sandbox pod, per-session and warm.
     pub resources: Option<ResourceRequirements>,
-    /// The harness used for warm sandboxes and as the workload default.
-    /// Per-session sandboxes run the session's own harness.
+    /// The workload default harness. Per-session sandboxes run the session's
+    /// own harness; warm pools name theirs.
     pub harness: HarnessType,
 }
 
@@ -787,7 +824,7 @@ impl SessionRuntime {
             execution_spans: Arc::new(Mutex::new(HashMap::new())),
             iron_control: Arc::new(iron_control),
             session_principal_admission: SessionPrincipalAdmission::default(),
-            warm_pool: None,
+            warm_pools: None,
             personas: None,
             session_title_generator: None,
             session_title_in_flight: Arc::new(DashSet::new()),
@@ -836,7 +873,7 @@ impl SessionRuntime {
     /// callers that create sessions without naming a harness.
     pub fn default_harness(&self) -> HarnessType {
         self.sandbox_runtime
-            .warm_harness
+            .default_harness
             .clone()
             .unwrap_or(HarnessType::Codex)
     }
@@ -1416,32 +1453,50 @@ impl SessionRuntime {
         Ok(principal.id)
     }
 
-    pub fn with_warm_pool(mut self, config: WarmPoolConfig) -> Self {
-        if config.target_size == 0 {
-            return self;
+    pub fn with_warm_pools(mut self, targets: Vec<WarmPoolTarget>, config: WarmPoolConfig) -> Self {
+        self.warm_pools = self.build_warm_pools(targets, config);
+        if let Some(pools) = &self.warm_pools {
+            pools.manager.clone().spawn_replenisher();
         }
+        self
+    }
 
-        let (Some(spec_factory), Some(workload_key)) = (
-            self.sandbox_runtime.warm_spec_factory.clone(),
-            self.sandbox_runtime.workload_key.clone(),
-        ) else {
-            warn!(
-                target_size = config.target_size,
-                "session sandbox warm pool requested for runtime without a warm sandbox spec"
-            );
-            return self;
+    fn build_warm_pools(
+        &self,
+        targets: Vec<WarmPoolTarget>,
+        config: WarmPoolConfig,
+    ) -> Option<WarmPools> {
+        let targets: Vec<_> = targets
+            .into_iter()
+            .filter(|target| target.size > 0)
+            .collect();
+        if targets.is_empty() {
+            return None;
+        }
+        let Some(spec_factory) = self.sandbox_runtime.warm_spec_factory.clone() else {
+            warn!("session sandbox warm pool requested for runtime without a warm sandbox spec");
+            return None;
         };
 
-        let pool = Arc::new(WarmPoolManager::new(
+        let mut pools = Vec::with_capacity(targets.len());
+        let mut keys = Vec::with_capacity(targets.len());
+        for target in targets {
+            let spec = warm_pool_spec(&spec_factory, &target);
+            let workload_key = sandbox_spec_key(&spec);
+            keys.push((target.harness, target.repo_cache, workload_key.clone()));
+            pools.push(WarmPool {
+                workload_key,
+                spec_factory: Arc::new(move || spec.clone()),
+                target_size: target.size,
+            });
+        }
+        let manager = Arc::new(WarmPoolManager::new(
             self.sandbox_runtime.manager.clone(),
             self.store.clone(),
-            spec_factory,
-            workload_key,
+            pools,
             config,
         ));
-        pool.clone().spawn_replenisher();
-        self.warm_pool = Some(pool);
-        self
+        Some(WarmPools { manager, keys })
     }
 
     pub fn with_sandbox_capacity(mut self, config: SandboxCapacityConfig) -> Self {
@@ -2398,7 +2453,12 @@ impl SessionRuntime {
                 traceparent.or_else(|| execution_traceparent(&execution).map(ToOwned::to_owned)),
                 Some(&execution.execution_id),
             );
-            let input_lines = input_lines_with_session_context(thread_key, &trace, &input_lines);
+            let input_lines = input_lines_with_session_context(
+                thread_key,
+                &trace,
+                Some(&desired_capabilities),
+                &input_lines,
+            );
             if let Err(error) = write_input_lines(
                 &pipe,
                 &input_lines,
@@ -2684,15 +2744,19 @@ impl SessionRuntime {
 
         // A steer that lands after the turn ends starts a new turn, which must
         // run the pinned model too.
-        let input_lines = match self.store.get_session(thread_key).await {
-            Ok(session) => match self.persona_model(&session) {
-                Some(model) => input_lines_with_persona_model(input_lines, model),
-                None => input_lines,
-            },
+        let session = match self.store.get_session(thread_key).await {
+            Ok(session) => Some(session),
             Err(error) => {
                 warn!(%thread_key, %error, "session lookup failed during steering");
-                input_lines
+                None
             }
+        };
+        let input_lines = match session
+            .as_ref()
+            .and_then(|session| self.persona_model(session))
+        {
+            Some(model) => input_lines_with_persona_model(input_lines, model),
+            None => input_lines,
         };
 
         // Steering joins the active execution's trace so harness spans for the
@@ -2708,7 +2772,16 @@ impl SessionRuntime {
             execution_traceparent(&execution).map(ToOwned::to_owned),
             Some(&execution.execution_id),
         );
-        let input_lines = input_lines_with_session_context(thread_key, &trace, &input_lines);
+        // Steering reaches the sandbox the session is already assigned, so its
+        // recorded capabilities are the ones in effect.
+        let input_lines = input_lines_with_session_context(
+            thread_key,
+            &trace,
+            session
+                .as_ref()
+                .and_then(|session| session.sandbox_capabilities.as_ref()),
+            &input_lines,
+        );
 
         let pipe = match self
             .wait_for_active_steering_pipe(thread_key, &execution.execution_id)
@@ -2781,6 +2854,7 @@ impl SessionRuntime {
         let input_lines = input_lines_with_session_context(
             thread_key,
             &trace,
+            None,
             &[interrupt_input_line(thread_key, reason)],
         );
 
@@ -3166,39 +3240,35 @@ impl SessionRuntime {
                 }
             }
 
-            // Warm sandboxes are pre-booted with the workload's default
-            // harness; a session on any other harness needs a cold sandbox.
-            let warm_harness_matches = self
-                .sandbox_runtime
-                .warm_harness
+            // Warm sandboxes are pre-booted per harness and repo-cache
+            // access; any other session needs a cold sandbox.
+            let warm_pool = self
+                .warm_pools
                 .as_ref()
-                .is_none_or(|warm| warm == harness_type);
-            let warm_persona_matches = persona_context.is_none();
-            if !warm_harness_matches && self.warm_pool.is_some() {
-                record_sandbox_warm_pool_claim("harness_mismatch");
-            }
-            if !warm_persona_matches && self.warm_pool.is_some() {
-                record_sandbox_warm_pool_claim("persona_specific");
-            }
-            if !desired_capabilities.is_default_enabled() && self.warm_pool.is_some() {
-                record_sandbox_warm_pool_claim("capabilities_non_default");
-            }
-            if let Some(warm_pool) = self
-                .warm_pool
-                .as_ref()
-                .filter(|_| {
-                    boot_mode.uses_warm_pool()
-                        && warm_harness_matches
-                        && warm_persona_matches
-                        && desired_capabilities.is_default_enabled()
-                })
-            {
+                .filter(|_| boot_mode.uses_warm_pool())
+                .and_then(|pools| {
+                    if persona_context.is_some() {
+                        record_sandbox_warm_pool_claim("persona_specific");
+                        return None;
+                    }
+                    let workload_key =
+                        pools.workload_key(harness_type, &desired_capabilities.repo_cache);
+                    if workload_key.is_none() {
+                        record_sandbox_warm_pool_claim("no_matching_pool");
+                    }
+                    Some((&pools.manager, workload_key?))
+                });
+            if let Some((warm_pool, workload_key)) = warm_pool {
                 match warm_pool
                     .claim(
-                        thread_key.as_str(),
-                        iron_control_principal,
-                        requester_principal,
-                        proxy_labels,
+                        workload_key,
+                        WarmClaim {
+                            thread_key: thread_key.as_str(),
+                            iron_control_principal,
+                            requester_principal_id: requester_principal,
+                            proxy_labels,
+                            observability_enabled: desired_capabilities.observability_enabled,
+                        },
                     )
                     .await
                 {
@@ -3221,7 +3291,7 @@ impl SessionRuntime {
                                 "session.warm_sandbox_claimed",
                                 json!({
                                     "sandbox_id": sandbox_id.as_str(),
-                                    "workload_key": warm_pool.workload_key(),
+                                    "workload_key": workload_key,
                                     "iron_control_principal": iron_control_principal,
                                     "requester_principal": requester_principal,
                                     "sandbox_capabilities": desired_capabilities,
@@ -3247,7 +3317,7 @@ impl SessionRuntime {
                             harness_type = %harness_type,
                             sandbox_ready_source = "warm_pool",
                             sandbox_ready_duration_ms = duration_millis_u64(ready_duration),
-                            workload_key = warm_pool.workload_key(),
+                            workload_key,
                             "claimed warm session sandbox"
                         );
                         return Ok(sandbox_id);
@@ -4281,7 +4351,7 @@ impl SandboxRuntime {
                   _execution_id: &str,
                   _harness: &HarnessType,
                   _persona: Option<&PersonaContext>| { spec.clone() };
-        let warm_spec_factory = move || warm_spec.clone();
+        let warm_spec_factory = move |_harness: &HarnessType| warm_spec.clone();
         Self::backend_with_warm_spec_factory(backend, spec_factory, warm_spec_factory)
     }
 
@@ -4289,16 +4359,16 @@ impl SandboxRuntime {
         backend: Arc<dyn SandboxBackend>,
         workload: SandboxWorkloadMode,
     ) -> Self {
-        let warm_harness = Some(workload.harness.clone());
+        let default_harness = Some(workload.harness.clone());
         let warm_workload = workload.clone();
         let mut runtime = Self::backend_with_warm_spec_factory(
             backend,
             move |thread_key, _execution_id, harness, persona| {
                 workload.spec(thread_key, harness, persona)
             },
-            move || warm_workload.warm_spec(),
+            move |harness| warm_workload.warm_spec(harness),
         );
-        runtime.warm_harness = warm_harness;
+        runtime.default_harness = default_harness;
         runtime
     }
 
@@ -4314,8 +4384,7 @@ impl SandboxRuntime {
             spec_factory: Arc::new(spec_factory),
             artifact_reader: None,
             warm_spec_factory: None,
-            workload_key: None,
-            warm_harness: None,
+            default_harness: None,
         }
     }
 
@@ -4329,17 +4398,14 @@ impl SandboxRuntime {
             + Send
             + Sync
             + 'static,
-        W: Fn() -> SandboxSpec + Send + Sync + 'static,
+        W: Fn(&HarnessType) -> SandboxSpec + Send + Sync + 'static,
     {
-        let warm_spec_factory: WarmSandboxSpecFactory = Arc::new(warm_spec_factory);
-        let workload_key = sandbox_spec_key(&warm_spec_factory());
         Self {
             manager: Arc::new(SandboxManager::new(backend)),
             spec_factory: Arc::new(spec_factory),
             artifact_reader: None,
-            warm_spec_factory: Some(warm_spec_factory),
-            workload_key: Some(workload_key),
-            warm_harness: None,
+            warm_spec_factory: Some(Arc::new(warm_spec_factory)),
+            default_harness: None,
         }
     }
 
@@ -4390,8 +4456,8 @@ impl SandboxWorkloadMode {
         self.spec_for(Some(thread_key), harness, persona)
     }
 
-    fn warm_spec(&self) -> SandboxSpec {
-        self.spec_for(None, &self.harness, None)
+    fn warm_spec(&self, harness: &HarnessType) -> SandboxSpec {
+        self.spec_for(None, harness, None)
     }
 
     fn spec_for(
@@ -4435,6 +4501,20 @@ fn harness_server_subcommand(harness: &HarnessType) -> &'static str {
         HarnessType::Pi => "pi",
         HarnessType::Omp => "omp",
     }
+}
+
+/// The spec a warm pool boots. Observability is always off so the pool can
+/// serve sessions with and without it; claims grant it when needed.
+fn warm_pool_spec(spec_factory: &WarmHarnessSpecFactory, target: &WarmPoolTarget) -> SandboxSpec {
+    let mut spec = spec_factory(&target.harness);
+    apply_sandbox_capabilities(
+        &mut spec,
+        &SessionSandboxCapabilities {
+            repo_cache: target.repo_cache.clone(),
+            observability_enabled: false,
+        },
+    );
+    spec
 }
 
 fn sandbox_spec_key(spec: &SandboxSpec) -> String {
@@ -6065,9 +6145,6 @@ fn apply_sandbox_capabilities(spec: &mut SandboxSpec, capabilities: &SessionSand
         }
     }
     remove_spec_env(spec, CENTAUR_PUBLIC_SKILL_DIRS_ENV);
-    if !capabilities.observability_enabled {
-        append_spec_env_csv(spec, "TOOL_BLOCKLIST", OBSERVABILITY_TOOL_BLOCKLIST);
-    }
 }
 
 fn tool_host_tool_filter_from_spec(
@@ -6075,6 +6152,9 @@ fn tool_host_tool_filter_from_spec(
     capabilities: &SessionSandboxCapabilities,
 ) -> ToolHostToolFilter {
     apply_sandbox_capabilities(&mut spec, capabilities);
+    if !capabilities.observability_enabled {
+        append_spec_env_csv(&mut spec, "TOOL_BLOCKLIST", OBSERVABILITY_TOOLS);
+    }
     ToolHostToolFilter {
         allowlist: spec
             .env
@@ -6819,17 +6899,19 @@ fn input_lines_with_persona_model(input_lines: Vec<String>, model: &str) -> Vec<
 fn input_lines_with_session_context(
     thread_key: &ThreadKey,
     trace: &SessionTraceContext,
+    capabilities: Option<&SessionSandboxCapabilities>,
     input_lines: &[String],
 ) -> Vec<String> {
     input_lines
         .iter()
-        .map(|line| input_line_with_session_context(thread_key, trace, line))
+        .map(|line| input_line_with_session_context(thread_key, trace, capabilities, line))
         .collect()
 }
 
 fn input_line_with_session_context(
     thread_key: &ThreadKey,
     trace: &SessionTraceContext,
+    capabilities: Option<&SessionSandboxCapabilities>,
     line: &str,
 ) -> String {
     let Ok(mut value) = serde_json::from_str::<Value>(line) else {
@@ -6857,34 +6939,44 @@ fn input_line_with_session_context(
                 .or_insert_with(|| Value::String(execution_id.to_owned()));
         }
     }
-    prepend_chat_surface_note(map, thread_key);
+    if let Some(capabilities) = capabilities {
+        prepend_user_note(map, sandbox_access_note(capabilities));
+    }
+    if let Some(destination) = thread_key.chat_destination() {
+        prepend_user_note(map, destination.context_line());
+    }
     merge_session_context(map, session_context_for_thread(thread_key));
     serde_json::to_string(&value).unwrap_or_else(|_| line.to_owned())
 }
 
-/// Prepend a terse chat-surface note to a user turn's content so the agent always
-/// knows which platform (Slack/Discord) and destination it is operating on.
+/// Prepend a terse note to a user turn's content.
 ///
-/// The static system prompt is platform-neutral, so this per-turn line is the
-/// agent's authoritative signal for where its reply and uploads land. It is added
-/// only to `user` turns whose content is an array of message parts and whose
-/// thread key resolves to a known chat destination; every other shape is left
+/// The static system prompt is shared by every sandbox, so per-turn notes are
+/// the agent's authoritative signal for where its reply lands (the chat
+/// surface) and what its sandbox can reach (which changes when a warm sandbox
+/// is claimed or a principal's access changes). Notes are added only to `user`
+/// turns whose content is an array of message parts; every other shape is left
 /// untouched.
-fn prepend_chat_surface_note(map: &mut serde_json::Map<String, Value>, thread_key: &ThreadKey) {
+fn prepend_user_note(map: &mut serde_json::Map<String, Value>, note: String) {
     if map.get("type").and_then(Value::as_str) != Some("user") {
         return;
     }
-    let Some(destination) = thread_key.chat_destination() else {
-        return;
-    };
     let Some(Value::Array(content)) = map.get_mut("message").and_then(|m| m.get_mut("content"))
     else {
         return;
     };
-    content.insert(
-        0,
-        json!({ "type": "text", "text": destination.context_line() }),
-    );
+    content.insert(0, json!({ "type": "text", "text": note }));
+}
+
+fn sandbox_access_note(capabilities: &SessionSandboxCapabilities) -> String {
+    let tools = OBSERVABILITY_TOOLS.replace(',', ", ");
+    if capabilities.observability_enabled {
+        format!("[sandbox access: observability enabled ({tools}).]")
+    } else {
+        format!(
+            "[sandbox access: observability disabled. {tools} requests are blocked for this sandbox.]"
+        )
+    }
 }
 
 fn merge_session_context(
@@ -7734,7 +7826,7 @@ mod tests {
         assert_eq!(filter.allowlist.as_deref(), Some("alpha,beta"));
         let blocklist = filter.blocklist.unwrap();
         assert!(blocklist.split(',').any(|tool| tool == "custom-script"));
-        for tool in OBSERVABILITY_TOOL_BLOCKLIST.split(',') {
+        for tool in OBSERVABILITY_TOOLS.split(',') {
             assert!(blocklist.split(',').any(|blocked| blocked == tool));
         }
     }
@@ -8842,7 +8934,10 @@ mod tests {
 
         let spec = workload.spec(&thread_key, &HarnessType::Codex, None);
         assert_eq!(spec.resources, Some(resources.clone()));
-        assert_eq!(workload.warm_spec().resources, Some(resources));
+        assert_eq!(
+            workload.warm_spec(&HarnessType::Codex).resources,
+            Some(resources)
+        );
 
         let unconstrained = SandboxWorkloadMode::codex_app_server(
             "centaur-agent:latest",
@@ -8879,8 +8974,11 @@ mod tests {
             env_value(&spec, "CENTAUR_PERSONA_SOURCE_REF"),
             Some("abc123")
         );
-        assert_eq!(env_value(&workload.warm_spec(), "AGENT_PERSONA"), None);
-        assert!(workload.warm_spec().files.is_empty());
+        assert_eq!(
+            env_value(&workload.warm_spec(&HarnessType::Codex), "AGENT_PERSONA"),
+            None
+        );
+        assert!(workload.warm_spec(&HarnessType::Codex).files.is_empty());
     }
 
     #[test]
@@ -8893,7 +8991,7 @@ mod tests {
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
 
         let claimed_spec = workload.spec(&thread_key, &HarnessType::ClaudeCode, None);
-        let warm_spec = workload.warm_spec();
+        let warm_spec = workload.warm_spec(&HarnessType::Codex);
 
         assert_eq!(
             env_value(&claimed_spec, "CENTAUR_THREAD_KEY"),
@@ -8948,7 +9046,7 @@ mod tests {
     }
 
     #[test]
-    fn warm_spec_uses_workload_default_harness() {
+    fn warm_spec_boots_the_pool_harness() {
         let workload = SandboxWorkloadMode::codex_app_server(
             "centaur-agent:latest",
             Vec::new(),
@@ -8956,18 +9054,9 @@ mod tests {
         );
 
         assert_eq!(
-            workload.warm_spec().args,
-            vec!["harness-server", "codex"],
-            "warm sandboxes boot the configured default harness"
-        );
-        // A session on a different harness produces a different spec, so a
-        // warm claim for it would hand over the wrong harness.
-        let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
-        assert_eq!(
-            workload
-                .spec(&thread_key, &HarnessType::ClaudeCode, None)
-                .args,
-            vec!["harness-server", "claude-code"]
+            workload.warm_spec(&HarnessType::ClaudeCode).args,
+            vec!["harness-server", "claude-code"],
+            "a warm pool boots its own harness, not the workload default"
         );
     }
 
@@ -9011,7 +9100,7 @@ mod tests {
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
         let trace = SessionTraceContext::new(None, None);
 
-        let line = input_line_with_session_context(&thread_key, &trace, r#"{"type":"user"}"#);
+        let line = input_line_with_session_context(&thread_key, &trace, None, r#"{"type":"user"}"#);
         let value: Value = serde_json::from_str(&line).unwrap();
 
         assert_eq!(value["type"], "user");
@@ -9034,6 +9123,7 @@ mod tests {
         let line = input_line_with_session_context(
             &thread_key,
             &trace,
+            None,
             r#"{"type":"user","trace_metadata":{"action":"execute"}}"#,
         );
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -9047,7 +9137,7 @@ mod tests {
         let thread_key = ThreadKey::parse("slack:T123:C123:1780000000.000000").unwrap();
         let trace = SessionTraceContext::new(None, None);
 
-        let line = input_line_with_session_context(&thread_key, &trace, r#"{"type":"user"}"#);
+        let line = input_line_with_session_context(&thread_key, &trace, None, r#"{"type":"user"}"#);
         let value: Value = serde_json::from_str(&line).unwrap();
 
         assert_eq!(value["session_context"]["platform"], "slack");
@@ -9063,7 +9153,7 @@ mod tests {
         let thread_key = ThreadKey::parse("discord:111:222:333").unwrap();
         let trace = SessionTraceContext::new(None, None);
 
-        let line = input_line_with_session_context(&thread_key, &trace, r#"{"type":"user"}"#);
+        let line = input_line_with_session_context(&thread_key, &trace, None, r#"{"type":"user"}"#);
         let value: Value = serde_json::from_str(&line).unwrap();
 
         assert_eq!(value["session_context"]["platform"], "discord");
@@ -9078,7 +9168,7 @@ mod tests {
         let thread_key = ThreadKey::parse("linear:ISSUE:s:SESS").unwrap();
         let trace = SessionTraceContext::new(None, None);
 
-        let line = input_line_with_session_context(&thread_key, &trace, r#"{"type":"user"}"#);
+        let line = input_line_with_session_context(&thread_key, &trace, None, r#"{"type":"user"}"#);
         let value: Value = serde_json::from_str(&line).unwrap();
 
         assert_eq!(value["session_context"]["platform"], "linear");
@@ -9100,7 +9190,7 @@ mod tests {
         let thread_key = ThreadKey::parse("github:0xSplits/centaur:704:rc:99").unwrap();
         let trace = SessionTraceContext::new(None, None);
 
-        let line = input_line_with_session_context(&thread_key, &trace, r#"{"type":"user"}"#);
+        let line = input_line_with_session_context(&thread_key, &trace, None, r#"{"type":"user"}"#);
         let value: Value = serde_json::from_str(&line).unwrap();
 
         assert_eq!(value["session_context"]["platform"], "github");
@@ -9119,6 +9209,7 @@ mod tests {
         let line = input_line_with_session_context(
             &thread_key,
             &trace,
+            None,
             r#"{"type":"user","session_context":{"requester":{"github_handle":"@ada"},"platform":"custom"}}"#,
         );
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -9142,6 +9233,7 @@ mod tests {
         let line = input_line_with_session_context(
             &thread_key,
             &trace,
+            None,
             r#"{"type":"user","thread_key":"chat:existing","trace_id":"caller-trace"}"#,
         );
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -9153,7 +9245,7 @@ mod tests {
             "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
         );
         assert_eq!(
-            input_line_with_session_context(&thread_key, &trace, "raw"),
+            input_line_with_session_context(&thread_key, &trace, None, "raw"),
             "raw"
         );
     }
@@ -9166,6 +9258,7 @@ mod tests {
         let line = input_line_with_session_context(
             &thread_key,
             &trace,
+            None,
             r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
         );
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -9180,6 +9273,48 @@ mod tests {
     }
 
     #[test]
+    fn input_line_states_current_observability_access_after_chat_surface() {
+        let thread_key = ThreadKey::parse("slack:C123:123.456").unwrap();
+        let trace = SessionTraceContext::new(None, None);
+        let line =
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        let notes = |observability_enabled| {
+            let capabilities = SessionSandboxCapabilities {
+                repo_cache: SessionRepoCacheAccess::All,
+                observability_enabled,
+            };
+            let line =
+                input_line_with_session_context(&thread_key, &trace, Some(&capabilities), line);
+            let value: Value = serde_json::from_str(&line).unwrap();
+            let content = value["message"]["content"].as_array().unwrap().clone();
+            assert_eq!(content.len(), 3);
+            assert!(
+                content[0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Slack channel")
+            );
+            assert_eq!(content[2]["text"], "hi");
+            content[1]["text"].as_str().unwrap().to_owned()
+        };
+
+        assert!(notes(true).contains("observability enabled"));
+        let restricted = notes(false);
+        assert!(restricted.contains("observability disabled"));
+        assert!(restricted.contains("vlogs"));
+
+        // Control lines carry no message content and stay untouched.
+        let capabilities = SessionSandboxCapabilities::default_enabled();
+        let control = input_line_with_session_context(
+            &thread_key,
+            &trace,
+            Some(&capabilities),
+            r#"{"type":"interrupt"}"#,
+        );
+        assert!(!control.contains("observability"));
+    }
+
+    #[test]
     fn input_line_prepends_slack_channel_tool_policy_to_user_content() {
         let thread_key = ThreadKey::parse("slack:C123:123.456").unwrap();
         let trace = SessionTraceContext::new(None, None);
@@ -9187,6 +9322,7 @@ mod tests {
         let line = input_line_with_session_context(
             &thread_key,
             &trace,
+            None,
             r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
         );
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -9207,6 +9343,7 @@ mod tests {
         let line = input_line_with_session_context(
             &thread_key,
             &trace,
+            None,
             r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
         );
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -9227,6 +9364,7 @@ mod tests {
         let line = input_line_with_session_context(
             &thread_key,
             &trace,
+            None,
             r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
         );
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -9247,6 +9385,7 @@ mod tests {
         let line = input_line_with_session_context(
             &thread_key,
             &trace,
+            None,
             r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
         );
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -9268,6 +9407,7 @@ mod tests {
         let line = input_line_with_session_context(
             &thread_key,
             &trace,
+            None,
             r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
         );
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -9562,6 +9702,7 @@ mod adoption_tests {
         stopped: std::sync::Mutex<Vec<String>>,
         proxy_ensures: std::sync::Mutex<Vec<ProxyEnsure>>,
         missing_on_stop: std::sync::Mutex<BTreeSet<String>>,
+        observability_enabled: std::sync::Mutex<Vec<String>>,
     }
 
     impl MockBackend {
@@ -9583,7 +9724,12 @@ mod adoption_tests {
                 stopped: std::sync::Mutex::new(Vec::new()),
                 proxy_ensures: std::sync::Mutex::new(Vec::new()),
                 missing_on_stop: std::sync::Mutex::new(BTreeSet::new()),
+                observability_enabled: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        fn observability_enabled(&self) -> Vec<String> {
+            self.observability_enabled.lock().unwrap().clone()
         }
 
         async fn push_io(&self, io: SandboxIo) {
@@ -9659,6 +9805,14 @@ mod adoption_tests {
     impl SandboxBackend for MockBackend {
         fn name(&self) -> &'static str {
             "mock"
+        }
+
+        async fn enable_observability(&self, id: &SandboxId) -> SandboxResult<()> {
+            self.observability_enabled
+                .lock()
+                .unwrap()
+                .push(id.as_str().to_owned());
+            Ok(())
         }
 
         async fn create(&self, spec: SandboxSpec) -> SandboxResult<SandboxHandle> {
@@ -9995,13 +10149,13 @@ mod adoption_tests {
         let thread_key = tool_host_thread_key(&principal_id).unwrap();
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
         let mut runtime = runtime_with(&store, backend);
-        runtime.sandbox_runtime.warm_harness = Some(HarnessType::Codex);
+        runtime.sandbox_runtime.default_harness = Some(HarnessType::Codex);
         runtime
             .create_or_get_tool_host_session(&thread_key, &principal_id, None, None)
             .await
             .expect("create tool host session under codex");
 
-        runtime.sandbox_runtime.warm_harness = Some(HarnessType::ClaudeCode);
+        runtime.sandbox_runtime.default_harness = Some(HarnessType::ClaudeCode);
         runtime
             .create_or_get_tool_host_session(
                 &thread_key,
@@ -10699,10 +10853,12 @@ mod adoption_tests {
         }
     }
 
-    fn runtime_with_warm_pool(
+    /// A runtime with one codex warm pool per listed repo-cache access.
+    fn runtime_with_warm_pools(
         store: &PgSessionStore,
         backend: Arc<MockBackend>,
         workload_marker: impl Into<String>,
+        repo_cache_pools: Vec<SessionRepoCacheAccess>,
     ) -> SessionRuntime {
         let workload_marker = Arc::new(workload_marker.into());
         let claimed_marker = workload_marker.clone();
@@ -10721,24 +10877,43 @@ mod adoption_tests {
                         ))
                         .env("WARM_POOL_TEST_MARKER", claimed_marker.as_str())
                 },
-                move || SandboxSpec::new("mock").env("WARM_POOL_TEST_MARKER", warm_marker.as_str()),
+                move |harness| {
+                    SandboxSpec::new("mock")
+                        .env("WARM_POOL_TEST_MARKER", warm_marker.as_str())
+                        .env("WARM_POOL_TEST_HARNESS", harness.to_string())
+                },
             ),
             TestSessionPrincipalRegistrar,
         );
-        let warm_pool = Arc::new(WarmPoolManager::new(
-            runtime.sandbox_runtime.manager.clone(),
-            store.clone(),
-            runtime.sandbox_runtime.warm_spec_factory.clone().unwrap(),
-            runtime.sandbox_runtime.workload_key.clone().unwrap(),
+        // Built without the replenisher so tests control the warm rows.
+        runtime.warm_pools = runtime.build_warm_pools(
+            repo_cache_pools
+                .into_iter()
+                .map(|repo_cache| WarmPoolTarget {
+                    harness: HarnessType::Codex,
+                    repo_cache,
+                    size: 1,
+                })
+                .collect(),
             WarmPoolConfig {
-                target_size: 1,
                 replenish_interval: Duration::from_secs(60),
                 bootstrap_iron_control_principal: "prn_test_bootstrap".to_owned(),
                 max_running_sandboxes: None,
             },
-        ));
-        runtime.warm_pool = Some(warm_pool);
+        );
         runtime
+    }
+
+    fn codex_warm_pool_key(
+        runtime: &SessionRuntime,
+        repo_cache: &SessionRepoCacheAccess,
+    ) -> String {
+        runtime
+            .warm_pools
+            .as_ref()
+            .and_then(|pools| pools.workload_key(&HarnessType::Codex, repo_cache))
+            .expect("configured warm pool")
+            .to_owned()
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10772,7 +10947,12 @@ mod adoption_tests {
             .execution_id;
 
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
-        let runtime = runtime_with_warm_pool(&store, backend.clone(), thread_key.as_str());
+        let runtime = runtime_with_warm_pools(
+            &store,
+            backend.clone(),
+            thread_key.as_str(),
+            vec![SessionRepoCacheAccess::All],
+        );
         let sandbox_id = runtime
             .ensure_session_sandbox(EnsureSessionSandboxRequest {
                 thread_key: &thread_key,
@@ -10804,10 +10984,6 @@ mod adoption_tests {
             env_value(&spec, "CENTAUR_SANDBOX_OBSERVABILITY_ENABLED"),
             Some("false")
         );
-        let blocklist = env_value(&spec, "TOOL_BLOCKLIST").unwrap_or("");
-        for tool in OBSERVABILITY_TOOL_BLOCKLIST.split(',') {
-            assert!(blocklist.split(',').any(|blocked| blocked == tool));
-        }
         assert!(
             !spec
                 .mounts
@@ -10823,7 +10999,7 @@ mod adoption_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn non_default_capabilities_skip_warm_pool() {
+    async fn warm_pool_requires_matching_repo_cache_access() {
         let Some(store) = test_store().await else {
             return;
         };
@@ -10848,13 +11024,13 @@ mod adoption_tests {
             .execution_id;
 
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
-        let runtime = runtime_with_warm_pool(&store, backend.clone(), thread_key.as_str());
-        let workload_key = runtime
-            .warm_pool
-            .as_ref()
-            .unwrap()
-            .workload_key()
-            .to_owned();
+        let runtime = runtime_with_warm_pools(
+            &store,
+            backend.clone(),
+            thread_key.as_str(),
+            vec![SessionRepoCacheAccess::All],
+        );
+        let workload_key = codex_warm_pool_key(&runtime, &SessionRepoCacheAccess::All);
         let warm_sandbox_id = format!("warm-sbx-{}", uuid::Uuid::new_v4());
         store
             .insert_ready_warm_sandbox(&warm_sandbox_id, &workload_key)
@@ -10894,6 +11070,113 @@ mod adoption_tests {
         assert!(!spec.capabilities.repo_cache.enabled());
         assert!(!spec.capabilities.observability_enabled);
         reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn warm_claim_uses_the_repo_cache_pool_and_grants_observability() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:warm-public-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution
+            .execution_id;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with_warm_pools(
+            &store,
+            backend.clone(),
+            thread_key.as_str(),
+            vec![SessionRepoCacheAccess::All, SessionRepoCacheAccess::Public],
+        );
+        let all_key = codex_warm_pool_key(&runtime, &SessionRepoCacheAccess::All);
+        let public_key = codex_warm_pool_key(&runtime, &SessionRepoCacheAccess::Public);
+        assert_ne!(all_key, public_key);
+        let all_sandbox = format!("warm-all-{}", uuid::Uuid::new_v4());
+        let public_sandbox = format!("warm-public-{}", uuid::Uuid::new_v4());
+        for (sandbox_id, workload_key) in [(&all_sandbox, &all_key), (&public_sandbox, &public_key)]
+        {
+            store
+                .insert_ready_warm_sandbox(sandbox_id, workload_key)
+                .await
+                .expect("insert warm sandbox");
+        }
+        let desired = SessionSandboxCapabilities {
+            repo_cache: SessionRepoCacheAccess::Public,
+            observability_enabled: true,
+        };
+
+        let sandbox_id = runtime
+            .ensure_session_sandbox(EnsureSessionSandboxRequest {
+                thread_key: &thread_key,
+                harness_type: &HarnessType::Codex,
+                persona_id: None,
+                existing_sandbox_id: None,
+                existing_sandbox_capabilities: None,
+                iron_control_principal: None,
+                requester_principal: None,
+                proxy_labels: &BTreeMap::new(),
+                desired_capabilities: &desired,
+                execution_id: &execution_id,
+            })
+            .await
+            .expect("ensure sandbox");
+
+        assert_eq!(sandbox_id, public_sandbox);
+        assert!(backend.created_specs().is_empty());
+        assert_eq!(backend.observability_enabled(), vec![public_sandbox]);
+        let session = store.get_session(&thread_key).await.unwrap();
+        assert_eq!(session.sandbox_capabilities, Some(desired));
+        assert_eq!(
+            store
+                .count_ready_warm_sandboxes(&all_key)
+                .await
+                .expect("count ready warm sandboxes"),
+            1
+        );
+        reset_test_store(&store).await;
+    }
+
+    #[test]
+    fn warm_pool_specs_boot_without_observability() {
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let workload = SandboxWorkloadMode::codex_app_server(
+            "centaur-agent:latest",
+            Vec::new(),
+            HarnessType::Codex,
+        );
+        let runtime = SandboxRuntime::backend_with_workload(backend, workload);
+        let spec = warm_pool_spec(
+            &runtime.warm_spec_factory.expect("warm spec factory"),
+            &WarmPoolTarget {
+                harness: HarnessType::ClaudeCode,
+                repo_cache: SessionRepoCacheAccess::Public,
+                size: 1,
+            },
+        );
+
+        assert_eq!(spec.args, vec!["harness-server", "claude-code"]);
+        assert_eq!(spec.capabilities.repo_cache, RepoCacheAccess::Public);
+        assert!(!spec.capabilities.observability_enabled);
+        assert_eq!(
+            env_value(&spec, "CENTAUR_SANDBOX_OBSERVABILITY_ENABLED"),
+            Some("false")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
