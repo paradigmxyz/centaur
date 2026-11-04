@@ -679,7 +679,6 @@ dependencies = [
  "centaur-sandbox-core",
  "clap",
  "jiff",
- "json-patch",
  "k8s-openapi",
  "kube",
  "reqwest",

@@ -44,7 +44,6 @@ const OBSERVABILITY_ENABLED_LABEL: &str = "centaur.ai/observability-enabled";
 const MANAGED_BY_VALUE: &str = "api-rs";
 const SANDBOX_FILES_VOLUME: &str = "sandbox-files";
 const ARTIFACT_GET_COMMAND: &str = "/usr/local/bin/centaur-artifact-get";
-const OBSERVABILITY_ENABLED_ENV: &str = "CENTAUR_SANDBOX_OBSERVABILITY_ENABLED";
 const ARTIFACT_ERROR_MAX_BYTES: usize = 64 * 1024;
 /// Capacity of each attach stdin/stdout pipe. kube-rs services an attach
 /// connection from one loop that blocks while a pipe is full, so its 1 KiB
@@ -811,33 +810,13 @@ impl SandboxBackend for AgentSandboxBackend {
     }
 
     async fn enable_observability(&self, id: &SandboxId) -> SandboxResult<()> {
-        let sandbox = self
-            .get_sandbox(id)
-            .await?
-            .ok_or_else(|| SandboxError::NotFound(id.as_str().to_owned()))?;
-        // Record the capability on the durable template first: resume and
-        // proxy repair rebuild the pod, its labels, and the proxy from it.
-        // Template changes do not restart the running pod.
-        let patch = serde_json::from_value(sandbox_observability_env_patch(
-            &sandbox,
-            &self.config.container_name,
-        )?)
-        .map_err(|error| {
-            SandboxError::backend(format!("build sandbox observability patch: {error}"))
-        })?;
-        self.sandboxes()
-            .patch(
-                id.as_str(),
-                &PatchParams::default(),
-                &Patch::Json::<crd::Sandbox>(patch),
-            )
-            .await
-            .map_err(|err| map_kube_error("patch sandbox observability env", err))?;
+        // The Sandbox label is the durable record resume and proxy repair
+        // rebuild from; the pod template label covers a recreated pod. Label
+        // changes never restart the running pod.
         let labels = BTreeMap::from([(OBSERVABILITY_ENABLED_LABEL, true)]);
         self.patch_sandbox_merge(id, sandbox_capability_labels_patch(&labels))
             .await?;
-        // The live pod label is what the chart's observability egress
-        // policies select.
+        // Live pod labels are what the observability egress policies select.
         self.pods()
             .patch(
                 id.as_str(),
@@ -848,7 +827,7 @@ impl SandboxBackend for AgentSandboxBackend {
             )
             .await
             .map_err(|err| map_kube_error("label sandbox pod for observability", err))?;
-        self.enable_iron_proxy_observability(id).await
+        self.label_iron_proxy_for_observability(id).await
     }
 
     async fn pause(&self, id: &SandboxId) -> SandboxResult<()> {
@@ -895,17 +874,12 @@ impl SandboxBackend for AgentSandboxBackend {
         }
         // A pod that was deleted out from under a `Suspended`/`Created`
         // sandbox (janitor, node pressure, manual reap) comes back through
-        // this same resume path. Re-derive the capability labels from the
-        // sandbox's own recorded env (the durable source of truth `resolve_
-        // iron_proxy_for_resume` already reads for the same purpose) and
-        // reassert them on both the Sandbox and its pod template, so the
-        // recreated agent pod keeps the observability label the create path
-        // applied.
+        // this same resume path. Reassert the capability labels recorded on
+        // the Sandbox onto its pod template, so the recreated agent pod keeps
+        // the observability label.
         let capability_labels = sandbox
             .as_ref()
-            .map(|sandbox| {
-                sandbox_capability_labels(sandbox, &self.config.container_name, id.as_str())
-            })
+            .map(sandbox_capability_labels)
             .unwrap_or_default();
         // Do not scale up with stale fleet policy. The container-name test
         // makes the replacement atomic against a reordered pod template.
@@ -1025,54 +999,6 @@ fn sandbox_capability_labels_patch(capability_labels: &BTreeMap<&'static str, bo
     })
 }
 
-/// Record an enabled observability capability in the agent container env,
-/// which `sandbox_capability_labels` and proxy repair read back.
-fn sandbox_observability_env_patch(
-    sandbox: &crd::Sandbox,
-    container_name: &str,
-) -> SandboxResult<Value> {
-    let containers = &sandbox.spec.pod_template.spec.containers;
-    let index = containers
-        .iter()
-        .position(|container| container.name == container_name)
-        .ok_or_else(|| {
-            SandboxError::backend(format!("sandbox has no container named {container_name:?}"))
-        })?;
-    let container_path = format!("/spec/podTemplate/spec/containers/{index}");
-    let var = json!({ "name": OBSERVABILITY_ENABLED_ENV, "value": "true" });
-    let mut ops = vec![json!({
-        "op": "test",
-        "path": format!("{container_path}/name"),
-        "value": container_name,
-    })];
-    let env = containers[index].env.as_deref();
-    match env.and_then(|env| {
-        env.iter()
-            .position(|var| var.name == OBSERVABILITY_ENABLED_ENV)
-    }) {
-        Some(env_index) => {
-            let var_path = format!("{container_path}/env/{env_index}");
-            ops.push(json!({
-                "op": "test",
-                "path": format!("{var_path}/name"),
-                "value": OBSERVABILITY_ENABLED_ENV,
-            }));
-            ops.push(json!({ "op": "replace", "path": var_path, "value": var }));
-        }
-        None if env.is_some() => {
-            ops.push(
-                json!({ "op": "add", "path": format!("{container_path}/env/-"), "value": var }),
-            );
-        }
-        None => {
-            ops.push(
-                json!({ "op": "add", "path": format!("{container_path}/env"), "value": [var] }),
-            );
-        }
-    }
-    Ok(Value::Array(ops))
-}
-
 fn capability_labels_json(capability_labels: &BTreeMap<&'static str, bool>) -> Value {
     // A JSON merge patch null removes a key, so a disabled capability clears
     // its label rather than writing "false" — matching `build_agent_sandbox`,
@@ -1103,31 +1029,15 @@ fn sandbox_resume_patch(capability_labels: &BTreeMap<&'static str, bool>) -> Val
     })
 }
 
-/// Re-derive the capability labels `build_agent_sandbox` would apply for this
-/// sandbox's recorded capabilities, reading them back from the durable env
-/// vars `apply_sandbox_capabilities` stamped on the container at create time.
-/// Missing or invalid env values use the same fail-closed CR-label fallback as
-/// `resolve_iron_proxy_for_resume`. Used to reassert the labels on resume,
-/// since a pod recreated after external deletion (janitor, node pressure,
-/// manual reap) only inherits whatever the Sandbox's `podTemplate` currently
-/// carries.
-fn sandbox_capability_labels(
-    sandbox: &crd::Sandbox,
-    container_name: &str,
-    sandbox_id: &str,
-) -> BTreeMap<&'static str, bool> {
-    let mut labels = BTreeMap::new();
-    labels.insert(
+/// The capability labels recorded on the Sandbox. Used to reassert them on
+/// resume, since a pod recreated after external deletion (janitor, node
+/// pressure, manual reap) only inherits whatever the Sandbox's `podTemplate`
+/// currently carries.
+fn sandbox_capability_labels(sandbox: &crd::Sandbox) -> BTreeMap<&'static str, bool> {
+    BTreeMap::from([(
         OBSERVABILITY_ENABLED_LABEL,
-        iron_proxy::resolve_resume_capability(
-            iron_proxy::sandbox_observability_enabled(sandbox, container_name),
-            sandbox.metadata.labels.as_ref(),
-            OBSERVABILITY_ENABLED_LABEL,
-            "observability",
-            sandbox_id,
-        ),
-    );
-    labels
+        iron_proxy::sandbox_observability_enabled(sandbox),
+    )])
 }
 
 fn sandbox_creation_time(sandbox: &crd::Sandbox) -> Option<SystemTime> {
@@ -2020,62 +1930,6 @@ mod tests {
     }
 
     #[test]
-    fn observability_patch_records_the_capability_for_resume() {
-        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
-        let id = SandboxId::new("asbx-test");
-        let restricted = SandboxSpec::new("centaur-agent:latest")
-            .capabilities(SandboxCapabilities {
-                repo_cache: RepoCacheAccess::All,
-                observability_enabled: false,
-            })
-            .env(OBSERVABILITY_ENABLED_ENV, "false");
-        let without_env =
-            SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
-                repo_cache: RepoCacheAccess::All,
-                observability_enabled: false,
-            });
-
-        for spec in [restricted, without_env] {
-            let mut sandbox = build_agent_sandbox(&id, &spec, &config).unwrap();
-            let mut sidecar = sandbox.spec.pod_template.spec.containers[0].clone();
-            sidecar.name = "sidecar".to_owned();
-            sandbox.spec.pod_template.spec.containers.insert(0, sidecar);
-            assert_eq!(
-                sandbox_capability_labels(&sandbox, "agent", id.as_str())
-                    .get(OBSERVABILITY_ENABLED_LABEL),
-                Some(&false)
-            );
-
-            let patch: json_patch::Patch =
-                serde_json::from_value(sandbox_observability_env_patch(&sandbox, "agent").unwrap())
-                    .unwrap();
-            let mut value = serde_json::to_value(&sandbox).unwrap();
-            json_patch::patch(&mut value, &patch).unwrap();
-            let patched: crd::Sandbox = serde_json::from_value(value).unwrap();
-
-            assert_eq!(
-                sandbox_capability_labels(&patched, "agent", id.as_str())
-                    .get(OBSERVABILITY_ENABLED_LABEL),
-                Some(&true)
-            );
-            let observability_vars = |sandbox: &crd::Sandbox, index: usize| {
-                sandbox.spec.pod_template.spec.containers[index]
-                    .env
-                    .iter()
-                    .flatten()
-                    .filter(|var| var.name == OBSERVABILITY_ENABLED_ENV)
-                    .count()
-            };
-            assert_eq!(observability_vars(&patched, 1), 1);
-            assert_eq!(
-                observability_vars(&patched, 0),
-                observability_vars(&sandbox, 0),
-                "the sidecar is untouched"
-            );
-        }
-    }
-
-    #[test]
     fn resource_patch_can_atomically_clear_stale_resources() {
         let config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
         let sandbox = build_agent_sandbox(
@@ -2401,31 +2255,19 @@ mod tests {
     }
 
     /// A pod deleted out from under a sandbox (janitor, node pressure, manual
-    /// reap) comes back through `resume`, which only has the sandbox id, not
-    /// the original `SandboxSpec`. Regression test for the recreated agent
-    /// pod losing `centaur.ai/observability-enabled`: the resume patch must
-    /// restore the label (derived from the sandbox's own recorded capability
-    /// env, the same durable source `resolve_iron_proxy_for_resume` already trusts)
-    /// on the Sandbox and its pod template, matching what `build_agent_sandbox`
-    /// would have applied for these capabilities.
+    /// reap) comes back through `resume`, which only has the sandbox id.
+    /// Regression test for the recreated agent pod losing
+    /// `centaur.ai/observability-enabled`: the resume patch must restore the
+    /// label recorded on the Sandbox onto its pod template.
     #[test]
-    fn resume_reasserts_capability_labels_from_recorded_env() {
-        // Mirrors what `apply_sandbox_capabilities` (centaur-session-runtime)
-        // stamps onto the spec env alongside `.capabilities(..)`, since that's
-        // the durable record `sandbox_capability_labels` reads back on resume.
-        let spec = SandboxSpec::new("centaur-agent:latest")
-            .capabilities(SandboxCapabilities {
-                repo_cache: RepoCacheAccess::All,
-                observability_enabled: true,
-            })
-            .env(OBSERVABILITY_ENABLED_ENV, "true");
+    fn resume_reasserts_recorded_capability_labels_on_the_pod_template() {
+        let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
+            repo_cache: RepoCacheAccess::All,
+            observability_enabled: true,
+        });
         let config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
         let mut sandbox =
             build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
-
-        // Simulate the observed production bug: the recreated pod's template
-        // lost the capability labels even though the container's capability
-        // env (the create path's durable record) is untouched.
         if let Some(labels) = sandbox
             .spec
             .pod_template
@@ -2435,11 +2277,8 @@ mod tests {
         {
             labels.remove(OBSERVABILITY_ENABLED_LABEL);
         }
-        if let Some(labels) = sandbox.metadata.labels.as_mut() {
-            labels.remove(OBSERVABILITY_ENABLED_LABEL);
-        }
 
-        let labels = sandbox_capability_labels(&sandbox, DEFAULT_CONTAINER_NAME, "asbx-test");
+        let labels = sandbox_capability_labels(&sandbox);
         assert_eq!(labels.get(OBSERVABILITY_ENABLED_LABEL), Some(&true));
 
         let patch = sandbox_resume_patch(&labels);
@@ -2455,8 +2294,6 @@ mod tests {
 
     #[test]
     fn resume_patch_clears_labels_for_restricted_capabilities() {
-        // Exercise the fail-closed fallback for callers that set the backend
-        // capabilities without duplicating them into the container env.
         let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
             repo_cache: RepoCacheAccess::All,
             observability_enabled: false,
@@ -2464,7 +2301,7 @@ mod tests {
         let config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
         let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
 
-        let labels = sandbox_capability_labels(&sandbox, DEFAULT_CONTAINER_NAME, "asbx-test");
+        let labels = sandbox_capability_labels(&sandbox);
         assert_eq!(labels.get(OBSERVABILITY_ENABLED_LABEL), Some(&false));
 
         // A JSON merge patch null removes the key rather than writing

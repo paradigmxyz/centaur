@@ -345,13 +345,7 @@ impl AgentSandboxBackend {
             .cloned();
         let pg = self.resolved_pg_for_recreation(Some(&sandbox));
         let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
-        let observability_enabled = resolve_resume_capability(
-            sandbox_observability_enabled(&sandbox, &self.config.container_name),
-            sandbox.metadata.labels.as_ref(),
-            OBSERVABILITY_ENABLED_LABEL,
-            "observability",
-            id.as_str(),
-        );
+        let observability_enabled = sandbox_observability_enabled(&sandbox);
         Ok(Some(self.resolved_iron_proxy_for_principal(
             id,
             principal_id,
@@ -441,7 +435,6 @@ impl AgentSandboxBackend {
             iron_proxy,
             &control_targets,
             self.config.otlp_egress.as_ref(),
-            resolved.observability_enabled,
         ) {
             self.network_policies()
                 .create(&PostParams::default(), &policy)
@@ -574,10 +567,7 @@ impl AgentSandboxBackend {
                 map_kube_error("adopt iron-proxy service", err)
             ));
         }
-        for name in [
-            iron_proxy_sandbox_egress_policy_name(id),
-            iron_proxy_policy_name(id),
-        ] {
+        for name in iron_proxy_policy_names(id) {
             if let Err(err) = self.network_policies().patch(&name, &params, &patch).await
                 && !is_not_found(&err)
             {
@@ -629,10 +619,7 @@ impl AgentSandboxBackend {
                 map_kube_error("delete iron-proxy service", err)
             ));
         }
-        for name in [
-            iron_proxy_sandbox_egress_policy_name(id),
-            iron_proxy_policy_name(id),
-        ] {
+        for name in iron_proxy_policy_names(id) {
             if let Err(err) = self
                 .network_policies()
                 .delete(&name, &DeleteParams::default())
@@ -903,15 +890,7 @@ impl AgentSandboxBackend {
         let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
         let observability_enabled = sandbox
             .as_ref()
-            .map(|sandbox| {
-                resolve_resume_capability(
-                    sandbox_observability_enabled(sandbox, &self.config.container_name),
-                    sandbox.metadata.labels.as_ref(),
-                    OBSERVABILITY_ENABLED_LABEL,
-                    "observability",
-                    id.as_str(),
-                )
-            })
+            .map(sandbox_observability_enabled)
             .unwrap_or_else(|| {
                 tracing::warn!(
                     sandbox_id = id.as_str(),
@@ -1199,18 +1178,17 @@ impl AgentSandboxBackend {
         }
     }
 
-    /// Grant a running proxy the observability egress its create path
-    /// applies when the capability is on. The proxy's own selectors omit the
-    /// observability label when created without it, so they still match the
-    /// relabeled pod. Missing resources are left to proxy repair, which
-    /// rebuilds them from the sandbox's recorded capability.
-    pub(crate) async fn enable_iron_proxy_observability(
+    /// Label a running sandbox's proxy pods for observability. The proxy's
+    /// observability egress policy and the chart's label-selected policies
+    /// apply to labeled pods, so no policy changes. Missing pods are left to
+    /// proxy repair, which rebuilds them from the sandbox's recorded label.
+    pub(crate) async fn label_iron_proxy_for_observability(
         &self,
         id: &SandboxId,
     ) -> SandboxResult<()> {
-        let Some(iron_proxy) = self.config.iron_proxy.as_ref() else {
+        if self.config.iron_proxy.is_none() {
             return Ok(());
-        };
+        }
         let params = ListParams::default().labels(&format!(
             "{IRON_PROXY_LABEL}=true,{SANDBOX_ID_LABEL}={}",
             id.as_str()
@@ -1239,31 +1217,6 @@ impl AgentSandboxBackend {
                 }
             }
         }
-
-        let policy_name = iron_proxy_policy_name(id);
-        let policy = match self.network_policies().get(&policy_name).await {
-            Ok(policy) => policy,
-            Err(err) if is_not_found(&err) => return Ok(()),
-            Err(err) => return Err(map_kube_error("get iron-proxy network policy", err)),
-        };
-        let mut egress = policy.spec.and_then(|spec| spec.egress).unwrap_or_default();
-        let missing: Vec<_> =
-            observability_egress_rules(iron_proxy, self.config.otlp_egress.as_ref())
-                .into_iter()
-                .filter(|rule| !egress.contains(rule))
-                .collect();
-        if missing.is_empty() {
-            return Ok(());
-        }
-        egress.extend(missing);
-        self.network_policies()
-            .patch(
-                &policy_name,
-                &PatchParams::default(),
-                &Patch::Merge(json!({ "spec": { "egress": egress } })),
-            )
-            .await
-            .map_err(|err| map_kube_error("patch iron-proxy network policy", err))?;
         Ok(())
     }
 
@@ -1876,12 +1829,14 @@ fn build_iron_proxy_network_policies(
     iron_proxy: &IronProxyConfig,
     control_targets: &[ControlPlaneEgressTarget],
     otlp_egress: Option<&OtlpEgressTarget>,
-    observability_enabled: bool,
 ) -> Vec<NetworkPolicy> {
+    // Selectors omit the observability label so they match the proxy pod
+    // whether or not it has observability.
+    let proxy_labels = iron_proxy_labels(id, false);
     let sandbox_to_proxy_ports = sandbox_to_proxy_ports(resolved);
     let sandbox_egress = vec![
         egress_to(
-            vec![pod_peer(iron_proxy_labels(id, observability_enabled))],
+            vec![pod_peer(proxy_labels.clone())],
             sandbox_to_proxy_ports.clone(),
         ),
         dns_egress_rule(),
@@ -1900,12 +1855,9 @@ fn build_iron_proxy_network_policies(
             }),
         },
         NetworkPolicy {
-            metadata: object_meta(
-                iron_proxy_policy_name(id),
-                iron_proxy_labels(id, observability_enabled),
-            ),
+            metadata: object_meta(iron_proxy_policy_name(id), proxy_labels.clone()),
             spec: Some(NetworkPolicySpec {
-                pod_selector: Some(label_selector(iron_proxy_labels(id, observability_enabled))),
+                pod_selector: Some(label_selector(proxy_labels.clone())),
                 policy_types: Some(vec!["Ingress".to_owned(), "Egress".to_owned()]),
                 ingress: Some(vec![
                     NetworkPolicyIngressRule {
@@ -1919,12 +1871,18 @@ fn build_iron_proxy_network_policies(
                         ports: Some(vec![network_port(PROXY_MANAGEMENT_PORT)]),
                     },
                 ]),
-                egress: Some(proxy_egress_rules(
-                    iron_proxy,
-                    control_targets,
-                    otlp_egress,
-                    observability_enabled,
-                )),
+                egress: Some(proxy_egress_rules(iron_proxy, control_targets)),
+            }),
+        },
+        // Applies only once the proxy pod carries the observability label,
+        // so granting observability to a running sandbox is a relabel.
+        NetworkPolicy {
+            metadata: object_meta(iron_proxy_observability_policy_name(id), proxy_labels),
+            spec: Some(NetworkPolicySpec {
+                pod_selector: Some(label_selector(iron_proxy_labels(id, true))),
+                policy_types: Some(vec!["Egress".to_owned()]),
+                egress: Some(observability_egress_rules(iron_proxy, otlp_egress)),
+                ..Default::default()
             }),
         },
     ]
@@ -1939,8 +1897,6 @@ fn sandbox_to_proxy_ports(resolved: &ResolvedIronProxy) -> Vec<NetworkPolicyPort
 fn proxy_egress_rules(
     iron_proxy: &IronProxyConfig,
     control_targets: &[ControlPlaneEgressTarget],
-    otlp_egress: Option<&OtlpEgressTarget>,
-    observability_enabled: bool,
 ) -> Vec<NetworkPolicyEgressRule> {
     // Console and proxy-sync can use different pods and ports. Allow both
     // explicitly; public upstream rules exclude private/cluster CIDRs.
@@ -1973,9 +1929,6 @@ fn proxy_egress_rules(
             vec![peer],
             vec![network_port(iron_proxy.database_port)],
         ));
-    }
-    if observability_enabled {
-        rules.extend(observability_egress_rules(iron_proxy, otlp_egress));
     }
     if matches!(
         iron_proxy.source_policy.kind,
@@ -2185,58 +2138,16 @@ fn pg_from_sandbox_env(
     pg_from_sandbox_dsn(dsn, listen, port)
 }
 
-pub(crate) fn sandbox_observability_enabled(
-    sandbox: &crate::crd::Sandbox,
-    container_name: &str,
-) -> Option<bool> {
-    sandbox_env_value(sandbox, crate::OBSERVABILITY_ENABLED_ENV, container_name)
-        .and_then(|value| value.parse().ok())
-}
-
-/// Prefer a present, parseable capability env. When env is missing/invalid,
-/// fall back to the sandbox CR label (`"true"` => enabled; absent => disabled).
-/// Never default missing state to enabled (fail closed).
-pub(crate) fn resolve_resume_capability(
-    env_enabled: Option<bool>,
-    labels: Option<&BTreeMap<String, String>>,
-    label_key: &str,
-    capability: &str,
-    sandbox_id: &str,
-) -> bool {
-    if let Some(enabled) = env_enabled {
-        return enabled;
-    }
-    let label_enabled = labels
-        .and_then(|labels| labels.get(label_key))
-        .is_some_and(|value| value == "true");
-    tracing::warn!(
-        sandbox_id,
-        capability,
-        label_key,
-        label_enabled,
-        "sandbox capability env missing or invalid; using CR label fallback (fail closed when absent)"
-    );
-    label_enabled
-}
-
-fn sandbox_env_value(
-    sandbox: &crate::crd::Sandbox,
-    name: &str,
-    fallback_container_name: &str,
-) -> Option<String> {
+/// Observability is recorded as the Sandbox CR label: set at create for an
+/// observability-capable sandbox and added when a warm sandbox is granted it.
+/// Absent means disabled (fail closed).
+pub(crate) fn sandbox_observability_enabled(sandbox: &crate::crd::Sandbox) -> bool {
     sandbox
-        .spec
-        .pod_template
-        .spec
-        .containers
-        .iter()
-        .find(|container| container.name == fallback_container_name)
-        .or_else(|| sandbox.spec.pod_template.spec.containers.first())?
-        .env
-        .as_ref()?
-        .iter()
-        .find(|env| env.name == name)
-        .and_then(|env| env.value.clone())
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get(OBSERVABILITY_ENABLED_LABEL))
+        .is_some_and(|value| value == "true")
 }
 
 fn pg_from_sandbox_dsn(dsn: &str, listen: &str, port: u16) -> Option<ResolvedPg> {
@@ -2503,6 +2414,18 @@ fn iron_proxy_sandbox_egress_policy_name(id: &SandboxId) -> String {
 
 fn iron_proxy_policy_name(id: &SandboxId) -> String {
     format!("{}-proxy-net", id.as_str())
+}
+
+fn iron_proxy_observability_policy_name(id: &SandboxId) -> String {
+    format!("{}-proxy-observability", id.as_str())
+}
+
+fn iron_proxy_policy_names(id: &SandboxId) -> [String; 3] {
+    [
+        iron_proxy_sandbox_egress_policy_name(id),
+        iron_proxy_policy_name(id),
+        iron_proxy_observability_policy_name(id),
+    ]
 }
 
 fn sandbox_labels(id: &SandboxId) -> BTreeMap<String, String> {
@@ -2944,20 +2867,12 @@ mod tests {
             &iron_proxy,
             &[control_target()],
             None,
-            true,
         );
-        let proxy_policy = &policies[1];
+        // The observability egress policy only selects proxy pods that carry
+        // the label, so relabeling a running proxy grants it.
+        let observability_policy = &policies[2];
         assert_eq!(
-            proxy_policy
-                .metadata
-                .labels
-                .as_ref()
-                .and_then(|labels| labels.get(OBSERVABILITY_ENABLED_LABEL))
-                .map(String::as_str),
-            Some("true")
-        );
-        assert_eq!(
-            proxy_policy
+            observability_policy
                 .spec
                 .as_ref()
                 .and_then(|spec| spec.pod_selector.as_ref())
@@ -2995,7 +2910,6 @@ mod tests {
             &iron_proxy,
             &[control_target()],
             None,
-            false,
         );
         let proxy_policy = &policies[1];
         let policy_labels = proxy_policy.metadata.labels.as_ref().unwrap();
@@ -3102,41 +3016,6 @@ mod tests {
     }
 
     #[test]
-    fn resume_capability_prefers_valid_env_and_fails_closed_without_it() {
-        let mut labels = BTreeMap::new();
-        labels.insert(OBSERVABILITY_ENABLED_LABEL.to_owned(), "true".to_owned());
-
-        assert!(resolve_resume_capability(
-            Some(true),
-            Some(&labels),
-            OBSERVABILITY_ENABLED_LABEL,
-            "observability",
-            "asbx-test",
-        ));
-        assert!(!resolve_resume_capability(
-            Some(false),
-            Some(&labels),
-            OBSERVABILITY_ENABLED_LABEL,
-            "observability",
-            "asbx-test",
-        ));
-        assert!(resolve_resume_capability(
-            None,
-            Some(&labels),
-            OBSERVABILITY_ENABLED_LABEL,
-            "observability",
-            "asbx-test",
-        ));
-        assert!(!resolve_resume_capability(
-            None,
-            Some(&BTreeMap::new()),
-            OBSERVABILITY_ENABLED_LABEL,
-            "observability",
-            "asbx-test",
-        ));
-    }
-
-    #[test]
     fn sandbox_egress_policy_does_not_inline_otlp_collector_rule() {
         let id = SandboxId::new("asbx-test");
         let iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
@@ -3152,7 +3031,6 @@ mod tests {
             &iron_proxy,
             std::slice::from_ref(&control_target),
             Some(&target),
-            true,
         );
         let sandbox_egress = policies[0]
             .spec
@@ -3168,12 +3046,13 @@ mod tests {
                 .any(|rule| rule_allows_namespace_port(rule, "laminar", 8000))
         );
         let proxy_egress = policies[1].spec.as_ref().unwrap().egress.as_ref().unwrap();
+        assert!(!proxy_egress.iter().any(|rule| rule.to.is_none()));
+        let observability_egress = policies[2].spec.as_ref().unwrap().egress.as_ref().unwrap();
         assert!(
-            proxy_egress
+            observability_egress
                 .iter()
                 .any(|rule| rule_allows_namespace_port(rule, "laminar", 8000))
         );
-        assert!(!proxy_egress.iter().any(|rule| rule.to.is_none()));
 
         let policies = build_iron_proxy_network_policies(
             &id,
@@ -3181,7 +3060,6 @@ mod tests {
             &iron_proxy,
             std::slice::from_ref(&control_target),
             None,
-            true,
         );
         let sandbox_egress = policies[0]
             .spec
@@ -3214,7 +3092,6 @@ mod tests {
             &iron_proxy,
             std::slice::from_ref(&control_target),
             Some(&target),
-            false,
         );
         let sandbox_egress = policies[0].spec.as_ref().unwrap().egress.as_ref().unwrap();
         assert!(
@@ -3291,7 +3168,6 @@ mod tests {
             &iron_proxy,
             &[control_target()],
             None,
-            false,
         );
         let allows_database = |rule: &NetworkPolicyEgressRule| {
             let cidrs: Vec<&str> = rule
@@ -3332,7 +3208,6 @@ mod tests {
                 iron_proxy,
                 &[control_target()],
                 None,
-                false,
             )[1]
             .spec
             .clone()
@@ -3424,7 +3299,6 @@ mod tests {
             &iron_proxy,
             std::slice::from_ref(&control_target),
             None,
-            true,
         );
         let ingress = policies[1]
             .spec
