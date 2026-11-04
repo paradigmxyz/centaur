@@ -627,7 +627,20 @@ apiRs:
   # Expose the experimental centaur MCP dispatcher (currently action=list).
   mcpV2Enabled: false
   sandboxReadyTimeoutSecs: 90
+  # Warm pool of default-harness sandboxes with full repo-cache access.
+  # Ignored when sandboxWarmPools is set.
   sandboxWarmPoolSize: 3
+  # Warm pools per harness and repo-cache access, so sessions that differ in
+  # either still get a ready sandbox. Observability is granted at claim time
+  # and does not split pools. Example:
+  # sandboxWarmPools:
+  #   - harness: codex
+  #     repoCache: all      # all | public | none
+  #     size: 3
+  #   - harness: claudecode
+  #     repoCache: public
+  #     size: 1
+  sandboxWarmPools: []
   sandboxWarmPoolReplenishIntervalSecs: 5
   # Best-effort admission gate: when nonzero, api-rs rejects sandbox creates
   # and resumes at or above this observed running count, excluding ready warm

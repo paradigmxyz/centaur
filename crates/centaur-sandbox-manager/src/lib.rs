@@ -9,4 +9,6 @@ mod warm_pool;
 
 pub use manager::SandboxManager;
 pub use reaper::{SandboxReaper, SandboxReaperConfig};
-pub use warm_pool::{WarmPoolConfig, WarmPoolError, WarmPoolManager, WarmSandboxSpecFactory};
+pub use warm_pool::{
+    WarmClaim, WarmPool, WarmPoolConfig, WarmPoolError, WarmPoolManager, WarmSandboxSpecFactory,
+};
