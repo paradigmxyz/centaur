@@ -393,6 +393,18 @@ impl AgentSandboxBackend {
         id: &SandboxId,
         resolved: Option<&ResolvedIronProxy>,
     ) -> SandboxResult<()> {
+        self.start_iron_proxy_resources(id, resolved).await?;
+        self.wait_for_iron_proxy(id, resolved).await
+    }
+
+    /// Create the proxy's service, egress policies, and pod without waiting
+    /// for the pod to boot, so callers can overlap that boot with other work.
+    /// Pair with [`Self::wait_for_iron_proxy`].
+    pub(crate) async fn start_iron_proxy_resources(
+        &self,
+        id: &SandboxId,
+        resolved: Option<&ResolvedIronProxy>,
+    ) -> SandboxResult<()> {
         let (Some(resolved), Some(iron_proxy)) = (resolved, self.config.iron_proxy.as_ref()) else {
             return Ok(());
         };
@@ -455,6 +467,19 @@ impl AgentSandboxBackend {
             )
             .await
             .map_err(|err| map_kube_error("create iron-proxy pod", err))?;
+        Ok(())
+    }
+
+    /// Wait until a proxy started by [`Self::start_iron_proxy_resources`] is
+    /// running and serving the resolved principal's config.
+    pub(crate) async fn wait_for_iron_proxy(
+        &self,
+        id: &SandboxId,
+        resolved: Option<&ResolvedIronProxy>,
+    ) -> SandboxResult<()> {
+        let (Some(resolved), Some(_)) = (resolved, self.config.iron_proxy.as_ref()) else {
+            return Ok(());
+        };
         self.wait_until_proxy_running(resolved).await?;
         self.wait_for_cold_proxy_principal_applied(id, &resolved.principal_id)
             .await;
@@ -1006,7 +1031,7 @@ impl AgentSandboxBackend {
     /// Cold-created sandboxes do not go through the warm-pool claim barrier,
     /// but the harness can make credentialed calls immediately after create
     /// returns. Ask the proxy to report the requested principal's config before
-    /// creating the sandbox pod. If the management API cannot prove readiness,
+    /// create returns. If the management API cannot prove readiness,
     /// fall back to the fixed delay instead of failing the sandbox create.
     async fn wait_for_cold_proxy_principal_applied(&self, id: &SandboxId, principal_id: &str) {
         let started = Instant::now();

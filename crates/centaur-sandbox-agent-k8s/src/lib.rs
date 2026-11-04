@@ -622,8 +622,12 @@ impl SandboxBackend for AgentSandboxBackend {
         if let Some(resolved) = &resolved_iron_proxy {
             iron_proxy::apply_proxy_env(&mut spec, resolved);
         }
+        // Start the proxy but create the Sandbox before waiting for it, so the
+        // proxy boot overlaps volume provisioning and scheduling. The egress
+        // policies still exist before the sandbox pod; tools-bootstrap retries
+        // until the proxy accepts connections.
         if let Err(err) = self
-            .create_iron_proxy_resources(&id, resolved_iron_proxy.as_ref())
+            .start_iron_proxy_resources(&id, resolved_iron_proxy.as_ref())
             .await
         {
             self.unwind_iron_proxy_resources(&id).await;
@@ -669,6 +673,13 @@ impl SandboxBackend for AgentSandboxBackend {
                 %error,
                 "failed to set ownerReference on sandbox files config map"
             );
+        }
+        if let Err(err) = self
+            .wait_for_iron_proxy(&id, resolved_iron_proxy.as_ref())
+            .await
+        {
+            let _ = self.stop(&id).await;
+            return Err(err);
         }
         if let Err(err) = self.wait_until_running(&id).await {
             let _ = self.stop(&id).await;
