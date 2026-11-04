@@ -250,10 +250,11 @@ Spans may carry:
 - `centaur.tool.entry_point`
 
 Tool spans must not carry command output, tool results, or prompt content.
-Bounded shell commands, including their arguments, workspace-relative working
-directories, and LLM input and output are exported only when
-`CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS` is explicitly enabled. No span may
-carry raw metadata or secrets.
+Bounded shell commands, including their arguments, and workspace-relative
+working directories are exported on tool spans only when
+`CENTAUR_TELEMETRY_CAPTURE_TOOL_TRACES` is explicitly enabled. LLM input and
+output are exported only when `CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS` is
+explicitly enabled. The two settings are independent. No span may carry raw metadata or secrets.
 
 ## Trace Continuity
 
@@ -347,10 +348,11 @@ grouping calls by the stable `mcp:<principal_id>` Laminar session association.
 - Dropping the telemetry guard flushes pending spans.
 - Metrics labels stay bounded.
 - Logs and tool spans do not record message text, stdout lines, or tool results.
-  LLM input, LLM output, shell command text, and working-directory attributes
-  are absent by default; when `CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS` is
-  enabled, they are bounded. Executable names remain available without content
-  capture. No telemetry path records raw metadata, secrets, or auth headers.
+  LLM input and output are absent by default and bounded when
+  `CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS` is enabled. Shell command text and
+  working-directory attributes are absent by default and bounded when
+  `CENTAUR_TELEMETRY_CAPTURE_TOOL_TRACES` is enabled. Executable names
+  remain available either way. No telemetry path records raw metadata, secrets, or auth headers.
 - Harness tool spans close at the end of their turn, including failure and
   cancellation paths.
 - Every harness LLM and tool span is searchable by Laminar session ID and

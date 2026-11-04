@@ -358,11 +358,14 @@ sandbox:
   # model/thinking footer aligned with the policy the sandbox actually runs.
   extraEnv: {}
   telemetry:
-    # Include user prompts, assistant responses, and bounded shell commands on
-    # harness spans.
+    # Include user prompts and assistant responses on harness LLM spans.
     # Token usage, cost, status, session, and tool telemetry remain available
     # when this is disabled.
     captureTranscripts: false
+    # Include bounded shell commands and workspace-relative working directories
+    # on harness tool spans, independently of captureTranscripts. Tool names,
+    # executables, and status remain available when this is disabled.
+    captureToolTraces: false
   # New agent-k8s sandboxes get a ReadWriteOnce PVC at /home/agent/state. The
   # entrypoint keeps the session's workspace clone, uploads, branches, and native
   # Codex/Claude files there, so they survive idle pause and pod replacement, but
