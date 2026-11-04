@@ -236,6 +236,7 @@ class SlackClient:
     _NUMERIC_TS_RE = re.compile(r"^\d+(?:\.\d+)?$")
     _CHANNEL_ID_RE = re.compile(r"^[CGD][A-Z0-9]+$")
     _FILE_ID_RE = re.compile(r"^F[A-Z0-9]+$")
+    _USER_ID_RE = re.compile(r"^[UW][A-Z0-9]{8,}$")
     _USER_ID_RE = re.compile(r"^[UW][A-Z0-9]+$")
     _AUTH_ERROR_CODES: ClassVar[frozenset[str]] = frozenset(
         {
@@ -1587,8 +1588,25 @@ class SlackClient:
         members = self.get_channel_members(channel)
         return [m["email"] for m in members if m.get("email")]
 
-    def get_user_email(self, user_id: str) -> str | None:
-        """Get a user's email address by their Slack user ID.
+    def get_user_email_proxy(self, user_id: str) -> str | None:
+        """Get a user's email address through the Centaur API server proxy.
+
+        Args:
+            user_id: Slack user ID (e.g., 'U123ABC')
+
+        Returns:
+            Email address or None if the profile has no email
+        """
+        normalized_user_id = str(user_id).strip().upper()
+        if not self._USER_ID_RE.fullmatch(normalized_user_id):
+            raise ValueError("user_id must be a Slack user ID like U123456789")
+        response = self._centaur_api_get_json(
+            f"/api/slack/users/{urllib.parse.quote(normalized_user_id, safe='')}/email", {}
+        )
+        return response.get("email")
+
+    def get_user_email_direct(self, user_id: str) -> str | None:
+        """Get a user's email address directly with the Slack SDK.
 
         Args:
             user_id: Slack user ID (e.g., 'U123ABC')
@@ -2607,8 +2625,12 @@ def get_channel_member_emails(*args, **kwargs):
     return _client().get_channel_member_emails(*args, **kwargs)
 
 
-def get_user_email(*args, **kwargs):
-    return _client().get_user_email(*args, **kwargs)
+def get_user_email_proxy(*args, **kwargs):
+    return _client().get_user_email_proxy(*args, **kwargs)
+
+
+def get_user_email_direct(*args, **kwargs):
+    return _client().get_user_email_direct(*args, **kwargs)
 
 
 def send_message(*args, **kwargs):

@@ -20,7 +20,8 @@ app = typer.Typer(
         "token. Use direct commands when a user token is available, including in Slack DM chat "
         "surfaces and MCP. Exception: inside a Slack DM, upload files with regular `upload`, not "
         "`upload-direct`. Choose the command flavor that matches the current surface and credential "
-        "context."
+        "context. For example, look up a user's email with `user-email` on channel surfaces and "
+        "`user-email-direct` in DMs."
     ),
 )
 
@@ -848,6 +849,39 @@ def channel_members_direct_cmd(
         raise typer.Exit(1)
 
     _render_channel_members(channel, members, emails_only, json_output)
+
+
+@app.command("user-email-proxy")
+@app.command("user-email")
+def user_email_cmd(
+    user_id: str = typer.Argument(..., help="Slack user ID, e.g. U1234567890"),
+):
+    """Get a user's email through the Centaur API server Slack proxy.
+
+    Prints {"user_id": ..., "email": ...}; email is null when the profile has none.
+    """
+    from .client import get_user_email_proxy
+
+    try:
+        email = get_user_email_proxy(user_id)
+    except (RuntimeError, ValueError) as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+    _print_json({"user_id": user_id, "email": email})
+
+
+@app.command("user-email-direct")
+def user_email_direct_cmd(
+    user_id: str = typer.Argument(..., help="Slack user ID, e.g. U1234567890"),
+):
+    """Get a user's email directly with the Slack SDK.
+
+    Prints {"user_id": ..., "email": ...}; email is null when it is unavailable.
+    """
+    from .client import get_user_email_direct
+
+    _print_json({"user_id": user_id, "email": get_user_email_direct(user_id)})
 
 
 @app.command()
