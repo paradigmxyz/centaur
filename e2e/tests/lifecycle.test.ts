@@ -71,7 +71,7 @@ test('a harness switch removes the old sandbox and its proxy', async () => {
   expect(owned).toContain(`pod/${before.sandbox.id}`)
   expect(owned).toContainEqual(expect.stringMatching(new RegExp(`^pod/${before.sandbox.id}-proxy-`)))
   expect(owned).toContain(`service/${before.sandbox.id}-proxy`)
-  expect(owned.filter(name => name.startsWith('networkpolicy'))).toHaveLength(2)
+  expect(owned.filter(name => name.startsWith('networkpolicy'))).toHaveLength(3)
 
   await thread.mention('--claude Switch.', second)
   const after = await thread.nextTurn()
