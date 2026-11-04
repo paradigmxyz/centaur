@@ -1,6 +1,11 @@
 import { escapeRegExp } from './utils'
 
-export type SlackDisplayTextSource = 'text' | 'raw_blocks' | 'raw_attachments' | 'empty'
+export type SlackDisplayTextSource =
+  | 'text'
+  | 'text_with_unfurls'
+  | 'raw_blocks'
+  | 'raw_attachments'
+  | 'empty'
 
 export type SlackDisplayText = {
   rawAttachmentCount: number
@@ -29,13 +34,16 @@ export function renderSlackDisplayText(input: { raw: unknown; text: string }): S
   const records = slackMessageRecords(input.raw)
   const rawBlockCount = countArrayFields(records, 'blocks')
   const rawAttachmentCount = countArrayFields(records, 'attachments')
+  // Slack includes the shared message's content in message-unfurl attachments,
+  // even when the bot cannot read the source conversation, so render it inline.
+  const unfurlText = renderMessageUnfurls(records)
 
   if (input.text.trim()) {
     return {
       rawAttachmentCount,
       rawBlockCount,
-      source: 'text',
-      text: input.text
+      source: unfurlText ? 'text_with_unfurls' : 'text',
+      text: appendUnfurlText(input.text, unfurlText)
     }
   }
 
@@ -45,7 +53,7 @@ export function renderSlackDisplayText(input: { raw: unknown; text: string }): S
       rawAttachmentCount,
       rawBlockCount,
       source: 'raw_blocks',
-      text: blockText
+      text: appendUnfurlText(blockText, unfurlText)
     }
   }
 
@@ -75,7 +83,8 @@ export function slackMessagePromptText(message: {
 }): string {
   const source = message.displayTextSource
   const text =
-    (source === 'raw_blocks' || source === 'raw_attachments') && message.displayText
+    (source === 'text_with_unfurls' || source === 'raw_blocks' || source === 'raw_attachments')
+    && message.displayText
       ? message.displayText
       : message.text
   const links = promptLinksText(message.links, text)
@@ -179,6 +188,39 @@ function collectRawAttachmentLines(records: UnknownRecord[]): string[] {
     for (const attachment of attachments) collectSlackAttachmentText(attachment, lines)
   }
   return lines
+}
+
+function renderMessageUnfurls(records: UnknownRecord[]): string {
+  const sections: string[] = []
+  const seen = new Set<string>()
+  for (const record of records) {
+    const attachments = record.attachments
+    if (!Array.isArray(attachments)) continue
+    for (const attachment of attachments) {
+      if (!isRecord(attachment) || attachment.is_msg_unfurl !== true) continue
+      const body = normalizeSlackFallbackText(
+        stringField(attachment.text) || stringField(attachment.fallback)
+      )
+      if (!body) continue
+      const url = stringField(attachment.from_url) || stringField(attachment.original_url)
+      const key = `${url}\n${body}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      const author = stringField(attachment.author_name) || stringField(attachment.author_subname)
+      const header = [
+        'Shared Slack message',
+        author ? `from ${author}` : '',
+        url ? `(${url})` : ''
+      ].filter(Boolean).join(' ')
+      const quoted = body.split('\n').map(line => `> ${line}`)
+      sections.push([`${header}:`, ...quoted].join('\n'))
+    }
+  }
+  return sections.length > 0 ? truncateRawDisplayText(sections.join('\n\n')) : ''
+}
+
+function appendUnfurlText(text: string, unfurlText: string): string {
+  return unfurlText ? `${text}\n\n${unfurlText}` : text
 }
 
 function richValueMentionsUser(value: unknown, userId: string, mention: RegExp): boolean {
