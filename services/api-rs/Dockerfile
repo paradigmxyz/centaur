@@ -33,6 +33,8 @@ ENV CARGO_INCREMENTAL=0 \
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+# Embedded by centaur-sandbox-agent-k8s, which installs them from a chart hook.
+COPY contrib/chart/charts/agent-sandbox/crds/ contrib/chart/charts/agent-sandbox/crds/
 ARG RUST_BUILD_PROFILE=release
 RUN --mount=type=cache,id=api-rs-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=api-rs-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \

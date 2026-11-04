@@ -14,7 +14,7 @@ use thiserror::Error;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
-use args::{Args, MigrateArgs};
+use args::{Args, InstallAgentSandboxCrdsArgs, MigrateArgs};
 
 #[tokio::main]
 async fn main() -> Result<(), ServerError> {
@@ -23,6 +23,11 @@ async fn main() -> Result<(), ServerError> {
 
     if let Some(args) = MigrateArgs::from_command_line() {
         let result = migrate(args).await;
+        telemetry.shutdown();
+        return result;
+    }
+    if let Some(args) = InstallAgentSandboxCrdsArgs::from_command_line() {
+        let result = install_agent_sandbox_crds(args).await;
         telemetry.shutdown();
         return result;
     }
@@ -82,6 +87,12 @@ async fn migrate(args: MigrateArgs) -> Result<(), ServerError> {
     let store = PgSessionStore::connect(&args.database_url).await?;
     store.run_migrations(args.text_search).await?;
     info!(text_search = %args.text_search, "database migrations applied");
+    Ok(())
+}
+
+async fn install_agent_sandbox_crds(args: InstallAgentSandboxCrdsArgs) -> Result<(), ServerError> {
+    let client = kube::Client::try_default().await?;
+    centaur_sandbox_agent_k8s::install_agent_sandbox_crds(&client, &args.stop_deployments).await?;
     Ok(())
 }
 
@@ -226,6 +237,8 @@ pub(crate) enum ServerError {
     Kube(#[from] kube::Error),
     #[error(transparent)]
     Sandbox(#[from] centaur_sandbox_core::SandboxError),
+    #[error(transparent)]
+    AgentSandboxCrds(#[from] centaur_sandbox_agent_k8s::CrdMigrationError),
     #[error(transparent)]
     IronProxy(#[from] centaur_iron_proxy::IronProxyConfigError),
     #[error(transparent)]

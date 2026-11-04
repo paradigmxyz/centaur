@@ -83,6 +83,7 @@ jobs:
           set_output rust_checks \
             '^Cargo\.(toml|lock)$' \
             '^crates/' \
+            '^contrib/chart/charts/agent-sandbox/crds/' \
             '^\.github/workflows/ci\.yml$'
           set_output harness_server_checks \
             '^Cargo\.(toml|lock)$' \
@@ -117,6 +118,7 @@ jobs:
             '^crates/active-record-encryption/' \
             '^crates/centaur-' \
             '^services/api-rs/' \
+            '^contrib/chart/charts/agent-sandbox/crds/' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^services/workflow-python/' \
             '^workflows/' \

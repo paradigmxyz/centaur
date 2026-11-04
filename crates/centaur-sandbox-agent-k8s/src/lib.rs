@@ -27,11 +27,13 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep};
 
+pub use crd_migration::{CrdMigrationError, DeploymentRef, install_agent_sandbox_crds};
 pub use generated::agents_x_k8s_io as crd;
 pub use iron_proxy::IronProxyConfig;
 pub use k8s_openapi::api::core::v1::{SecurityContext, Toleration};
 pub use tools::{GitHubTokenRef, ToolSource, ToolsConfig};
 
+mod crd_migration;
 pub mod generated;
 mod iron_proxy;
 mod tools;
@@ -348,9 +350,8 @@ impl AgentSandboxBackend {
         id: &SandboxId,
         sandbox: &crd::Sandbox,
     ) -> SandboxResult<ObservedSandbox> {
-        let replicas = sandbox.spec.replicas.unwrap_or(1);
         let pod = self.get_pod(id).await?;
-        let status = sandbox_status_from_pod(replicas, pod.as_ref());
+        let status = sandbox_status_from_pod(sandbox_suspended(sandbox), pod.as_ref());
         Ok(ObservedSandbox::new(id.clone(), BACKEND_NAME, status)
             .with_labels(sandbox.metadata.labels.clone().unwrap_or_default())
             .with_created_at(sandbox_creation_time(sandbox))
@@ -392,7 +393,7 @@ impl AgentSandboxBackend {
         // `resume` also repairs Created sandboxes, whose old Pod can already
         // exist. Recreate that Pod after updating the durable template so the
         // running container cannot retain the previous resources.
-        self.recreate_existing_pod(id, sandbox.spec.replicas.unwrap_or(1) == 0)
+        self.recreate_existing_pod(id, sandbox_suspended(sandbox))
             .await
     }
 
@@ -560,7 +561,7 @@ impl AgentSandboxBackend {
 
     async fn quiesce_sandbox(&self, id: &SandboxId) -> SandboxResult<()> {
         match self
-            .patch_sandbox_merge(id, json!({ "spec": { "replicas": 0 } }))
+            .patch_sandbox_merge(id, json!({ "spec": { "operatingMode": "Suspended" } }))
             .await
         {
             Ok(()) => self.wait_until_pod_gone(id).await,
@@ -722,9 +723,11 @@ impl SandboxBackend for AgentSandboxBackend {
         let Some(sandbox) = self.get_sandbox(id).await? else {
             return Ok(SandboxStatus::Gone);
         };
-        let replicas = sandbox.spec.replicas.unwrap_or(1);
         let pod = self.get_pod(id).await?;
-        Ok(sandbox_status_from_pod(replicas, pod.as_ref()))
+        Ok(sandbox_status_from_pod(
+            sandbox_suspended(&sandbox),
+            pod.as_ref(),
+        ))
     }
 
     async fn observe(&self, id: &SandboxId) -> SandboxResult<ObservedSandbox> {
@@ -985,7 +988,7 @@ async fn read_stream_bounded(
 
 fn sandbox_pause_patch(paused_at: jiff::Timestamp) -> Value {
     json!({
-        "spec": { "replicas": 0 },
+        "spec": { "operatingMode": "Suspended" },
         "metadata": { "annotations": { PAUSED_AT_ANNOTATION: paused_at.to_string() } },
     })
 }
@@ -1019,7 +1022,7 @@ fn sandbox_resume_patch(capability_labels: &BTreeMap<&'static str, bool>) -> Val
     let labels = capability_labels_json(capability_labels);
     json!({
         "spec": {
-            "replicas": 1,
+            "operatingMode": "Running",
             "podTemplate": { "metadata": { "labels": labels } },
         },
         "metadata": {
@@ -1069,8 +1072,13 @@ fn sandbox_attach_params(container_name: &str) -> AttachParams {
         .max_stdout_buf_size(ATTACH_STREAM_BUF_SIZE)
 }
 
-fn sandbox_status_from_pod(replicas: i32, pod: Option<&Pod>) -> SandboxStatus {
-    if replicas == 0 {
+/// An unset operating mode is the CRD default, `Running`.
+fn sandbox_suspended(sandbox: &crd::Sandbox) -> bool {
+    sandbox.spec.operating_mode == Some(crd::SandboxOperatingMode::Suspended)
+}
+
+fn sandbox_status_from_pod(suspended: bool, pod: Option<&Pod>) -> SandboxStatus {
+    if suspended {
         return SandboxStatus::Suspended;
     }
     // The backing Pod Ready condition is the attach boundary; phase alone can be Running while
@@ -1364,7 +1372,7 @@ fn build_agent_sandbox(
     let mut pod_annotations = config.annotations.clone();
     pod_annotations.extend(config.pod_annotations.clone());
     let mut agent_spec = json!({
-        "replicas": 1,
+        "operatingMode": "Running",
         "service": false,
         "shutdownPolicy": "Retain",
         "podTemplate": {
@@ -1761,7 +1769,10 @@ mod tests {
         let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
 
         assert_eq!(sandbox.metadata.name.as_deref(), Some("asbx-test"));
-        assert_eq!(sandbox.spec.replicas, Some(1));
+        assert_eq!(
+            sandbox.spec.operating_mode,
+            Some(crd::SandboxOperatingMode::Running)
+        );
         assert_eq!(
             sandbox.spec.shutdown_policy,
             Some(crd::SandboxShutdownPolicy::Retain)
@@ -2424,27 +2435,27 @@ mod tests {
     }
 
     #[test]
-    fn maps_agent_sandbox_replicas_and_pod_readiness_to_status() {
+    fn maps_agent_sandbox_operating_mode_and_pod_readiness_to_status() {
         let ready_pod = pod_with_phase_and_ready("Running", true);
         assert_eq!(
-            sandbox_status_from_pod(0, Some(&ready_pod)),
+            sandbox_status_from_pod(true, Some(&ready_pod)),
             SandboxStatus::Suspended
         );
         assert_eq!(
-            sandbox_status_from_pod(1, Some(&ready_pod)),
+            sandbox_status_from_pod(false, Some(&ready_pod)),
             SandboxStatus::Running
         );
 
         let unready_pod = pod_with_phase_and_ready("Running", false);
         assert_eq!(
-            sandbox_status_from_pod(1, Some(&unready_pod)),
+            sandbox_status_from_pod(false, Some(&unready_pod)),
             SandboxStatus::Created
         );
-        assert_eq!(sandbox_status_from_pod(1, None), SandboxStatus::Created);
+        assert_eq!(sandbox_status_from_pod(false, None), SandboxStatus::Created);
 
         let failed_pod = pod_with_phase_and_ready("Failed", false);
         assert_eq!(
-            sandbox_status_from_pod(1, Some(&failed_pod)),
+            sandbox_status_from_pod(false, Some(&failed_pod)),
             SandboxStatus::Stopped
         );
     }
