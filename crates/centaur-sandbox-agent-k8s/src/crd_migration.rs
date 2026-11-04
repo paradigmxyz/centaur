@@ -9,6 +9,12 @@
 //! `spec.operatingMode`; it is carried over explicitly. SandboxClaims, whose
 //! conversion is not mechanical, must not exist.
 //!
+//! The bundled CRDs list `v1alpha1` as an unserved version, so they stay valid
+//! while objects are still stored in it: a GitOps server-side dry run of them
+//! succeeds before this hook runs, and nothing breaks if they were applied by
+//! hand first. During the migration that version is served, without
+//! conversion, so every object still stored in it can be read in its old form.
+//!
 //! Every step is idempotent, so a failed run is repaired by running it again.
 //! Writers that only understand `v1alpha1` (the old controller and api-rs) are
 //! deleted before any CRD changes; the release recreates them afterwards.
@@ -19,9 +25,7 @@ use std::time::Duration;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{ConfigMap, PersistentVolumeClaim, Pod, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
-use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::{
-    CustomResourceConversion, CustomResourceDefinition,
-};
+use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use kube::api::{
     ApiResource, DeleteParams, DynamicObject, ListParams, Patch, PatchParams, PostParams,
 };
@@ -145,7 +149,7 @@ async fn migrate(
 ) -> Result<()> {
     // Refuse before changing anything.
     for live in pending {
-        if stores_version(live, OLD_VERSION) && conversion_strategy(live) == "Webhook" {
+        if stored_versions_include(live, OLD_VERSION) && conversion_strategy(live) == "Webhook" {
             return Err(CrdMigrationError::Refused(format!(
                 "CRD {} uses a conversion webhook and still stores {OLD_VERSION} objects; finish \
                  the upstream agent-sandbox v0.5 storage migration first",
@@ -169,21 +173,15 @@ async fn migrate(
     }
 
     for live in pending {
-        if !stores_version(live, OLD_VERSION) {
+        if !stored_versions_include(live, OLD_VERSION) {
             continue;
         }
-        if live.spec.names.kind == SANDBOX_KIND {
-            record_replicas(client, live).await?;
-        }
         let bundled = bundled_for(bundled, live);
-        let intermediate = intermediate_crd(live, bundled);
-        crds.replace(crd_name(live), &PostParams::default(), &intermediate)
-            .await
-            .map_err(kube_error(format!(
-                "store {NEW_VERSION} for CRD {}",
-                crd_name(live)
-            )))?;
+        install_crd(crds, &serving_old_version(bundled)).await?;
         tracing::info!(crd = crd_name(live), "CRD now stores {NEW_VERSION}");
+        if bundled.spec.names.kind == SANDBOX_KIND {
+            record_replicas(client, bundled).await?;
+        }
     }
 
     let now = jiff::Timestamp::now().to_string();
@@ -261,19 +259,30 @@ fn bundled_for<'a>(
 }
 
 fn needs_migration(crd: &CustomResourceDefinition) -> bool {
-    crd.spec.versions.iter().any(|v| v.name == OLD_VERSION)
-        || crd
-            .status
-            .as_ref()
-            .and_then(|status| status.stored_versions.as_ref())
-            .is_some_and(|stored| stored.iter().any(|v| v == OLD_VERSION))
-}
-
-fn stores_version(crd: &CustomResourceDefinition, version: &str) -> bool {
     crd.spec
         .versions
         .iter()
-        .any(|v| v.name == version && v.storage)
+        .any(|v| v.name == OLD_VERSION && v.served)
+        || stored_versions_include(crd, OLD_VERSION)
+}
+
+fn stored_versions_include(crd: &CustomResourceDefinition, version: &str) -> bool {
+    crd.status
+        .as_ref()
+        .and_then(|status| status.stored_versions.as_ref())
+        .is_some_and(|stored| stored.iter().any(|v| v == version))
+}
+
+/// The bundled CRD with its `v1alpha1` stub served. The stub's schema keeps
+/// unknown fields, so an object still stored in `v1alpha1` reads back intact.
+fn serving_old_version(bundled: &CustomResourceDefinition) -> CustomResourceDefinition {
+    let mut crd = bundled.clone();
+    for version in &mut crd.spec.versions {
+        if version.name == OLD_VERSION {
+            version.served = true;
+        }
+    }
+    crd
 }
 
 fn conversion_strategy(crd: &CustomResourceDefinition) -> &str {
@@ -281,46 +290,6 @@ fn conversion_strategy(crd: &CustomResourceDefinition) -> &str {
         .conversion
         .as_ref()
         .map_or("None", |conversion| conversion.strategy.as_str())
-}
-
-/// The live CRD switched to `v1beta1` storage while still serving `v1alpha1`,
-/// with no conversion: reading an old object as `v1beta1` only relabels it,
-/// which is correct for every field except the replicas recorded beforehand.
-fn intermediate_crd(
-    live: &CustomResourceDefinition,
-    bundled: &CustomResourceDefinition,
-) -> CustomResourceDefinition {
-    let mut crd = live.clone();
-    let mut versions: Vec<_> = live
-        .spec
-        .versions
-        .iter()
-        .filter(|v| v.name == OLD_VERSION)
-        .cloned()
-        .map(|mut v| {
-            v.served = true;
-            v.storage = false;
-            v
-        })
-        .collect();
-    versions.extend(
-        bundled
-            .spec
-            .versions
-            .iter()
-            .filter(|v| v.name == NEW_VERSION)
-            .cloned()
-            .map(|mut v| {
-                v.storage = true;
-                v
-            }),
-    );
-    crd.spec.versions = versions;
-    crd.spec.conversion = Some(CustomResourceConversion {
-        strategy: "None".to_owned(),
-        webhook: None,
-    });
-    crd
 }
 
 fn resource(crd: &CustomResourceDefinition, version: &str) -> ApiResource {
@@ -386,15 +355,15 @@ async fn delete_deployment(client: &Client, deployment: &DeploymentRef) -> Resul
 
 async fn record_replicas(client: &Client, crd: &CustomResourceDefinition) -> Result<()> {
     let resource = resource(crd, OLD_VERSION);
-    let sandboxes = list_all(client, &resource).await?;
-    for sandbox in &sandboxes {
-        let (Some(namespace), Some(name)) = (
+    let mut recorded = 0;
+    for sandbox in &list_all(client, &resource).await? {
+        let (Some(namespace), Some(name), Some(replicas)) = (
             sandbox.metadata.namespace.as_deref(),
             sandbox.metadata.name.as_deref(),
+            replicas_to_record(sandbox),
         ) else {
             continue;
         };
-        let replicas = sandbox.data["spec"]["replicas"].as_i64().unwrap_or(1);
         Api::<DynamicObject>::namespaced_with(client.clone(), namespace, &resource)
             .patch(
                 name,
@@ -407,9 +376,23 @@ async fn record_replicas(client: &Client, crd: &CustomResourceDefinition) -> Res
             .map_err(kube_error(format!(
                 "record replicas of Sandbox {namespace}/{name}"
             )))?;
+        recorded += 1;
     }
-    tracing::info!(count = sandboxes.len(), "recorded Sandbox replicas");
+    tracing::info!(count = recorded, "recorded Sandbox replicas");
     Ok(())
+}
+
+/// The `spec.replicas` of a Sandbox read through `v1alpha1`, unless an earlier
+/// run already recorded it (the recording write may have moved the object to
+/// `v1beta1` storage, dropping the field) or already rewrote the object.
+fn replicas_to_record(sandbox: &DynamicObject) -> Option<i64> {
+    let annotations = sandbox.metadata.annotations.as_ref();
+    if annotations.is_some_and(|a| {
+        a.contains_key(REPLICAS_ANNOTATION) || a.contains_key(MIGRATED_AT_ANNOTATION)
+    }) {
+        return None;
+    }
+    Some(sandbox.data["spec"]["replicas"].as_i64().unwrap_or(1))
 }
 
 /// A write that changes the object, so the API server stores it again in the
@@ -545,11 +528,11 @@ async fn install_crd(
 mod tests {
     use super::*;
 
+    /// A Sandbox CRD as agent-sandbox v0.4.x installed it.
     fn live_v1alpha1_sandbox_crd() -> CustomResourceDefinition {
         let mut crd = bundled_crds().unwrap().remove(0);
-        for version in &mut crd.spec.versions {
-            version.name = OLD_VERSION.to_owned();
-        }
+        crd.spec.versions.retain(|v| v.name == NEW_VERSION);
+        crd.spec.versions[0].name = OLD_VERSION.to_owned();
         crd
     }
 
@@ -568,35 +551,43 @@ mod tests {
     }
 
     #[test]
-    fn bundled_crds_serve_and_store_only_v1beta1() {
+    fn bundled_crds_serve_only_v1beta1_and_keep_v1alpha1_unserved() {
         let crds = bundled_crds().unwrap();
         assert_eq!(crds.len(), 4);
         for crd in &crds {
+            let versions: Vec<_> = crd
+                .spec
+                .versions
+                .iter()
+                .map(|v| (v.name.as_str(), v.served, v.storage))
+                .collect();
+            assert_eq!(
+                versions,
+                [(NEW_VERSION, true, true), (OLD_VERSION, false, false)],
+                "{}",
+                crd_name(crd)
+            );
             assert!(!needs_migration(crd), "{}", crd_name(crd));
-            assert!(stores_version(crd, NEW_VERSION), "{}", crd_name(crd));
         }
+        assert!(needs_migration(&live_v1alpha1_sandbox_crd()));
     }
 
     #[test]
-    fn intermediate_crd_serves_both_versions_and_stores_v1beta1_without_conversion() {
-        let live = live_v1alpha1_sandbox_crd();
-        assert!(needs_migration(&live));
-        let bundled = &bundled_crds().unwrap()[0];
-
-        let crd = intermediate_crd(&live, bundled);
-
-        let versions: Vec<_> = crd
-            .spec
-            .versions
-            .iter()
-            .map(|v| (v.name.as_str(), v.served, v.storage))
-            .collect();
+    fn replicas_are_recorded_once_from_the_v1alpha1_form() {
+        let mut paused = object(&[], json!([]));
+        paused.data = json!({ "spec": { "replicas": 0 } });
+        assert_eq!(replicas_to_record(&paused), Some(0));
+        // Unset replicas meant one running pod in v1alpha1.
+        assert_eq!(replicas_to_record(&object(&[], json!([]))), Some(1));
+        // A re-run must not overwrite a recorded value with a pruned form.
         assert_eq!(
-            versions,
-            [(OLD_VERSION, true, false), (NEW_VERSION, true, true)]
+            replicas_to_record(&object(&[(REPLICAS_ANNOTATION, "0")], json!([]))),
+            None
         );
-        assert_eq!(conversion_strategy(&crd), "None");
-        assert!(!stores_version(&crd, OLD_VERSION));
+        assert_eq!(
+            replicas_to_record(&object(&[(MIGRATED_AT_ANNOTATION, "t")], json!([]))),
+            None
+        );
     }
 
     #[test]

@@ -92,3 +92,14 @@ spec:
         specReplicasPath: .spec.replicas
         statusReplicasPath: .status.replicas
       status: {}
+  # Not upstream: an unserved v1alpha1 keeps this CRD valid against a cluster
+  # whose status.storedVersions still lists v1alpha1, so a server-side dry run
+  # (Argo CD's diff under ServerSideApply) succeeds and the chart's
+  # agent-sandbox-crds hook can migrate it. Re-add after vendoring a new release.
+  - name: v1alpha1
+    served: false
+    storage: false
+    schema:
+      openAPIV3Schema:
+        type: object
+        x-kubernetes-preserve-unknown-fields: true
