@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  appendSteeringOutcome,
   clearConversationNameCacheForTests,
   clearRequesterIdentityCacheForTests,
   DEFAULT_SESSION_IDLE_TIMEOUT_MS,
@@ -786,6 +787,35 @@ describe('forwardToSessionApi overrides', () => {
         forwardInput(apiMessage('hi'))
       )
     ).rejects.toThrow('create session timed out after 25ms')
+  })
+})
+
+describe('append steering outcome', () => {
+  test('reads the reported outcome and ignores unknown or absent values', () => {
+    expect(appendSteeringOutcome({ ok: true, message_ids: [], steering: 'no_active_execution' }))
+      .toBe('no_active_execution')
+    expect(appendSteeringOutcome({ ok: true, message_ids: [], steering: 'delivered' }))
+      .toBe('delivered')
+    expect(appendSteeringOutcome({ ok: true, message_ids: [] })).toBeUndefined()
+    expect(appendSteeringOutcome({ ok: true, steering: 'later' })).toBeUndefined()
+    expect(appendSteeringOutcome(undefined)).toBeUndefined()
+  })
+
+  test('hands the append outcome to onMessagesAppended', async () => {
+    const api = fakeApi()
+    const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (String(input).endsWith('/messages')) {
+        return Response.json({ message_ids: ['m1'], ok: true, steering: 'no_active_execution' })
+      }
+      return api.fetchFn(input, init)
+    }
+    const outcomes: unknown[] = []
+    await forwardToSessionApi(
+      options(fetchFn),
+      forwardInput(apiMessage('one more thing'), { executeMessage: undefined }),
+      { onMessagesAppended: async steering => { outcomes.push(steering) } }
+    )
+    expect(outcomes).toEqual(['no_active_execution'])
   })
 })
 

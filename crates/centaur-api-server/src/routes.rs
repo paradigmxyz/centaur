@@ -703,13 +703,14 @@ async fn append_messages(
     Json(request): Json<AppendMessagesRequest>,
 ) -> Result<Json<AppendMessagesResponse>, ApiError> {
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
-    let message_ids = state
+    let appended = state
         .runtime()?
         .append_messages(&thread_key, &request.messages)
         .await?;
     Ok(Json(AppendMessagesResponse {
         ok: true,
-        message_ids,
+        message_ids: appended.message_ids,
+        steering: Some(appended.steering),
     }))
 }
 

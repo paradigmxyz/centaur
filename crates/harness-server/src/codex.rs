@@ -4,7 +4,6 @@ use std::io::{self, BufRead, Write};
 use std::process::{Child, ChildStdin, Command as ProcessCommand, Stdio};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
     mpsc::{self, Receiver, RecvTimeoutError},
 };
 use std::thread;
@@ -13,11 +12,11 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use self::citations::CodexCitationFilter;
-use crate::otel::{TurnStatus as TelemetryTurnStatus, TurnTelemetry};
+use crate::otel::{TraceContext, TurnStatus as TelemetryTurnStatus, TurnTelemetry};
 use crate::protocol::UserInput;
 use crate::server::{
-    BlocksCommand, BlocksState, parse_blocks_line_with_state, usage_span_input_value,
-    write_blocks_error,
+    BlocksCommand, BlocksState, BlocksTurns, is_steer, parse_blocks_line_with_state,
+    usage_span_input_value, write_blocks_error, write_blocks_steer_rejected,
 };
 use crate::{AppServerRuntime, HarnessServerError, Result};
 
@@ -142,10 +141,10 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
     let mut thread_provider: Option<String> = None;
     let (command_tx, command_rx) = mpsc::channel();
     let (active_turn_tx, active_turn_rx) = mpsc::channel();
-    let turn_active = Arc::new(AtomicBool::new(false));
+    let turns = Arc::new(BlocksTurns::default());
 
     {
-        let turn_active = Arc::clone(&turn_active);
+        let turns = Arc::clone(&turns);
         thread::spawn(move || {
             let stdin = io::stdin();
             let mut blocks_state = BlocksState::default();
@@ -158,8 +157,10 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                     continue;
                 }
 
-                match parse_blocks_line_with_state(trimmed, &mut blocks_state) {
-                    Ok(BlocksCommand::Interrupt) if turn_active.load(Ordering::SeqCst) => {
+                let parsed = parse_blocks_line_with_state(trimmed, &mut blocks_state);
+                let mut turns = turns.lock();
+                match parsed {
+                    Ok(BlocksCommand::Interrupt) if *turns > 0 => {
                         if active_turn_tx
                             .send(CodexActiveTurnRequest::Interrupt)
                             .is_err()
@@ -172,15 +173,12 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                         client_user_message_id,
                         trace_context,
                         ..
-                    }) if turn_active.load(Ordering::SeqCst)
-                        && trace_context.metadata.get("action").and_then(Value::as_str)
-                            == Some("steer_active_execution") =>
-                    {
+                    }) if *turns > 0 && is_steer(&trace_context) => {
                         if active_turn_tx
                             .send(CodexActiveTurnRequest::Steer {
                                 input,
                                 client_user_message_id,
-                                traceparent: trace_context.effective_traceparent(),
+                                trace_context,
                             })
                             .is_err()
                         {
@@ -188,7 +186,11 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                         }
                     }
                     Ok(command @ BlocksCommand::User { .. }) => {
-                        turn_active.store(true, Ordering::SeqCst);
+                        // A steer with no turn to join goes to the turn loop
+                        // only to be refused there, in stdout order.
+                        if !command.is_steer() {
+                            *turns += 1;
+                        }
                         if command_tx
                             .send(CodexBlocksReaderInput::Command(command))
                             .is_err()
@@ -219,6 +221,15 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
 
     while let Ok(input) = command_rx.recv() {
         match input {
+            CodexBlocksReaderInput::Command(BlocksCommand::User { trace_context, .. })
+                if is_steer(&trace_context) =>
+            {
+                write_blocks_steer_rejected(
+                    &mut stdout,
+                    thread_id.as_deref().unwrap_or("codex"),
+                    &trace_context,
+                )?;
+            }
             CodexBlocksReaderInput::Command(BlocksCommand::User {
                 input,
                 client_user_message_id,
@@ -239,7 +250,6 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                     "",
                     usage_span_input_value(&input),
                 );
-                turn_active.store(true, Ordering::SeqCst);
                 let result = (|| -> Result<()> {
                     if let Some(child) = codex.as_mut()
                         && child.child.try_wait()?.is_some()
@@ -297,8 +307,8 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                 } else {
                     TelemetryTurnStatus::Failed
                 });
-                turn_active.store(false, Ordering::SeqCst);
-                drain_codex_active_turn_requests(&active_turn_rx);
+                let missed_steers =
+                    turns.finish_turn(|| drain_codex_active_turn_requests(&active_turn_rx));
                 if let Err(error) = result {
                     if matches!(
                         error,
@@ -313,6 +323,13 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                     let fallback_thread_id = thread_id.as_deref().unwrap_or("codex");
                     eprintln!("Codex blocks turn failed: {error:#}");
                     write_blocks_error(&mut stdout, fallback_thread_id, "turn", error.to_string())?;
+                }
+                for steer in missed_steers {
+                    write_blocks_steer_rejected(
+                        &mut stdout,
+                        thread_id.as_deref().unwrap_or("codex"),
+                        &steer,
+                    )?;
                 }
             }
             CodexBlocksReaderInput::Command(BlocksCommand::Interrupt) => {
@@ -344,12 +361,19 @@ enum CodexActiveTurnRequest {
     Steer {
         input: Vec<UserInput>,
         client_user_message_id: Option<String>,
-        traceparent: Option<String>,
+        trace_context: TraceContext,
     },
 }
 
-fn drain_codex_active_turn_requests(rx: &Receiver<CodexActiveTurnRequest>) {
-    while rx.try_recv().is_ok() {}
+/// Discards requests left for a turn that has ended and returns the trace
+/// context of each steer among them, so the caller can refuse it.
+fn drain_codex_active_turn_requests(rx: &Receiver<CodexActiveTurnRequest>) -> Vec<TraceContext> {
+    rx.try_iter()
+        .filter_map(|request| match request {
+            CodexActiveTurnRequest::Steer { trace_context, .. } => Some(trace_context),
+            CodexActiveTurnRequest::Interrupt => None,
+        })
+        .collect()
 }
 
 fn initialize_codex<W: Write>(
@@ -838,8 +862,9 @@ impl CodexJsonRpcChild {
                 CodexActiveTurnRequest::Steer {
                     input,
                     client_user_message_id,
-                    traceparent: steer_traceparent,
+                    trace_context,
                 } => {
+                    let steer_traceparent = trace_context.effective_traceparent();
                     let id = next_request_id(request_id);
                     let mut params = json!({
                         "threadId": thread_id,
