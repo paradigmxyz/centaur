@@ -6,6 +6,37 @@ require_relative "../config/environment"
 require "rails/test_help"
 require "minitest/mock"
 
+# Backport rails/rails#58875: Rails 8.1.4 casts an unqualified table name to
+# regclass when validating fixture foreign keys, so tables outside the search
+# path fail. Remove after upgrading to a Rails release that includes the fix.
+ActiveRecord::ConnectionAdapters::PostgreSQLAdapter.prepend(Module.new do
+  def check_all_foreign_keys_valid!
+    sql = <<~SQL
+      do $$
+        declare r record;
+      BEGIN
+      FOR r IN (
+        SELECT FORMAT(
+          'UPDATE pg_catalog.pg_constraint SET convalidated=false WHERE conname = ''%1$I'' AND connamespace::regnamespace = ''%2$I''::regnamespace AND conrelid::regclass = ''%2$I.%3$I''::regclass; ALTER TABLE %2$I.%3$I VALIDATE CONSTRAINT %1$I;',
+          constraint_name,
+          table_schema,
+          table_name
+        ) AS constraint_check
+        FROM information_schema.table_constraints WHERE constraint_type = 'FOREIGN KEY'
+      )
+        LOOP
+          EXECUTE (r.constraint_check);
+        END LOOP;
+      END;
+      $$;
+    SQL
+
+    transaction(requires_new: true) do
+      execute(sql)
+    end
+  end
+end)
+
 module ActiveSupport
   class TestCase
     # Run tests in parallel with specified workers
