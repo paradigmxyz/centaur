@@ -363,9 +363,9 @@ sandbox:
     # when this is disabled.
     captureTranscripts: false
     # Include bounded shell commands and workspace-relative working directories
-    # on harness tool spans. Tool names, executables, and status remain
-    # available when this is disabled.
-    captureToolTraces: true
+    # on harness tool spans, independently of captureTranscripts. Tool names,
+    # executables, and status remain available when this is disabled.
+    captureToolTraces: false
   # New agent-k8s sandboxes get a ReadWriteOnce PVC at /home/agent/state. The
   # entrypoint keeps the session's workspace clone, uploads, branches, and native
   # Codex/Claude files there, so they survive idle pause and pod replacement, but
