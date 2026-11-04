@@ -10,6 +10,10 @@ use crate::SandboxManager;
 
 pub type WarmSandboxSpecFactory = Arc<dyn Fn() -> SandboxSpec + Send + Sync>;
 const STALE_EVICTING_WARM_SANDBOX_AGE: Duration = Duration::from_secs(300);
+/// How long a ready warm sandbox from an unconfigured pool survives. Covers a
+/// rolling deploy, where a replica with the previous configuration may still
+/// be filling its pools.
+const UNCONFIGURED_WARM_SANDBOX_GRACE: Duration = Duration::from_secs(900);
 
 /// One warm pool: interchangeable sandboxes booted from the same spec and
 /// claimed by its workload key.
@@ -145,6 +149,7 @@ impl WarmPoolManager {
     async fn replenish_once(&self) -> Result<(), WarmPoolError> {
         self.prune_stale_ready_sandboxes().await?;
         self.prune_stale_evicting_sandboxes().await?;
+        self.evict_unconfigured_sandboxes().await?;
 
         let mut available = self.available_running_slots().await?;
         for pool in &self.pools {
@@ -203,6 +208,41 @@ impl WarmPoolManager {
             self.store
                 .mark_warm_sandbox_failed(&sandbox_id, &failure)
                 .await?;
+        }
+        Ok(())
+    }
+
+    /// Stop ready warm sandboxes no configured pool can claim, so a removed
+    /// pool or a changed sandbox spec does not hold running capacity until the
+    /// max-lifetime reaper. The evicted rows are finalized once the sandbox
+    /// is gone, like reaper evictions.
+    async fn evict_unconfigured_sandboxes(&self) -> Result<(), WarmPoolError> {
+        let workload_keys: Vec<String> = self
+            .pools
+            .iter()
+            .map(|pool| pool.workload_key.clone())
+            .collect();
+        for sandbox_id in self
+            .store
+            .list_unclaimable_ready_warm_sandbox_ids(
+                &workload_keys,
+                UNCONFIGURED_WARM_SANDBOX_GRACE,
+            )
+            .await?
+        {
+            if !self.store.evict_unclaimed_warm_sandbox(&sandbox_id).await? {
+                continue;
+            }
+            match self
+                .manager
+                .stop(&SandboxId::new(sandbox_id.as_str()))
+                .await
+            {
+                Ok(()) | Err(SandboxError::NotFound(_)) => {}
+                Err(error) => {
+                    warn!(%sandbox_id, %error, "failed to stop unconfigured warm sandbox");
+                }
+            }
         }
         Ok(())
     }
@@ -559,6 +599,63 @@ mod tests {
                 "{workload_key}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn replenisher_evicts_ready_rows_no_pool_can_claim() {
+        let _serial = TEST_LOCK.lock().await;
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let suffix = unique_suffix();
+        let configured_key = format!("test-configured-{suffix}");
+        let removed_key = format!("test-removed-{suffix}");
+        let configured_sandbox = format!("configured-{suffix}");
+        let old_removed_sandbox = format!("removed-old-{suffix}");
+        let new_removed_sandbox = format!("removed-new-{suffix}");
+        let backend = Arc::new(TestBackend::new(format!("fresh-{suffix}")));
+        for (sandbox_id, workload_key) in [
+            (&configured_sandbox, &configured_key),
+            (&old_removed_sandbox, &removed_key),
+            (&new_removed_sandbox, &removed_key),
+        ] {
+            store
+                .insert_ready_warm_sandbox(sandbox_id, workload_key)
+                .await
+                .expect("insert warm sandbox");
+            backend.set_status(sandbox_id, SandboxStatus::Running);
+        }
+        sqlx::query(
+            "update session_warm_sandboxes set created_at = now() - interval '1 hour' \
+             where sandbox_id = any($1)",
+        )
+        .bind(vec![
+            configured_sandbox.clone(),
+            old_removed_sandbox.clone(),
+        ])
+        .execute(store.pool())
+        .await
+        .expect("age warm sandboxes");
+        let pool = test_pool(backend.clone(), &store, &[(&configured_key, 1)]);
+
+        pool.replenish_once().await.expect("replenish warm pools");
+
+        let status = |sandbox_id: String| {
+            let backend = backend.clone();
+            async move { backend.status(&SandboxId::new(sandbox_id)).await.unwrap() }
+        };
+        assert_eq!(status(old_removed_sandbox).await, SandboxStatus::Stopped);
+        // A recent row may belong to a replica still rolling out.
+        assert_eq!(status(new_removed_sandbox).await, SandboxStatus::Running);
+        assert_eq!(status(configured_sandbox).await, SandboxStatus::Running);
+        assert_eq!(
+            store
+                .count_ready_warm_sandboxes(&removed_key)
+                .await
+                .expect("count ready warm sandboxes"),
+            1
+        );
+        assert!(backend.created().is_empty());
     }
 
     #[tokio::test]

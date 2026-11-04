@@ -21,7 +21,7 @@ use centaur_sandbox_core::{
 };
 use centaur_sandbox_manager::{
     SandboxManager, SandboxReaper, SandboxReaperConfig, WarmClaim, WarmPool, WarmPoolConfig,
-    WarmPoolError, WarmPoolManager,
+    WarmPoolManager,
 };
 use centaur_session_core::{
     ChatDestination, ExecutionStatus, HarnessType, MessageRole,
@@ -1466,15 +1466,18 @@ impl SessionRuntime {
         targets: Vec<WarmPoolTarget>,
         config: WarmPoolConfig,
     ) -> Option<WarmPools> {
+        // Built even with no pools, so ready sandboxes of pools that were
+        // removed still get evicted.
         let targets: Vec<_> = targets
             .into_iter()
             .filter(|target| target.size > 0)
             .collect();
-        if targets.is_empty() {
-            return None;
-        }
         let Some(spec_factory) = self.sandbox_runtime.warm_spec_factory.clone() else {
-            warn!("session sandbox warm pool requested for runtime without a warm sandbox spec");
+            if !targets.is_empty() {
+                warn!(
+                    "session sandbox warm pool requested for runtime without a warm sandbox spec"
+                );
+            }
             return None;
         };
 
@@ -3245,7 +3248,7 @@ impl SessionRuntime {
             let warm_pool = self
                 .warm_pools
                 .as_ref()
-                .filter(|_| boot_mode.uses_warm_pool())
+                .filter(|pools| boot_mode.uses_warm_pool() && !pools.keys.is_empty())
                 .and_then(|pools| {
                     if persona_context.is_some() {
                         record_sandbox_warm_pool_claim("persona_specific");
@@ -3323,9 +3326,19 @@ impl SessionRuntime {
                         return Ok(sandbox_id);
                     }
                     Ok(None) => record_sandbox_warm_pool_claim("miss"),
+                    // The failed warm sandbox is marked failed and left to
+                    // cleanup; the session still gets a cold sandbox.
                     Err(error) => {
                         record_sandbox_warm_pool_claim("error");
-                        return Err(SessionRuntimeError::WarmPool(error));
+                        warn!(
+                            component = COMPONENT_SESSION_RUNTIME,
+                            event = "sandbox_ensure_warm_claim_failed",
+                            thread_key = %thread_key,
+                            execution_id,
+                            workload_key,
+                            %error,
+                            "warm sandbox claim failed; creating a cold sandbox"
+                        );
                     }
                 }
             }
@@ -6125,11 +6138,6 @@ fn apply_sandbox_capabilities(spec: &mut SandboxSpec, capabilities: &SessionSand
         "CENTAUR_SANDBOX_REPO_CACHE_ACCESS",
         capabilities.repo_cache.as_str().to_owned(),
     );
-    upsert_spec_env(
-        spec,
-        "CENTAUR_SANDBOX_OBSERVABILITY_ENABLED",
-        capabilities.observability_enabled.to_string(),
-    );
     match capabilities.repo_cache {
         SessionRepoCacheAccess::None => {
             spec.mounts
@@ -6152,9 +6160,6 @@ fn tool_host_tool_filter_from_spec(
     capabilities: &SessionSandboxCapabilities,
 ) -> ToolHostToolFilter {
     apply_sandbox_capabilities(&mut spec, capabilities);
-    if !capabilities.observability_enabled {
-        append_spec_env_csv(&mut spec, "TOOL_BLOCKLIST", OBSERVABILITY_TOOLS);
-    }
     ToolHostToolFilter {
         allowlist: spec
             .env
@@ -6202,28 +6207,6 @@ fn scope_skill_dirs_to_public(spec: &mut SandboxSpec) {
         Some(public_skill_dirs) => upsert_spec_env(spec, CENTAUR_SKILL_DIRS_ENV, public_skill_dirs),
         None => remove_spec_env(spec, CENTAUR_SKILL_DIRS_ENV),
     }
-}
-
-fn append_spec_env_csv(spec: &mut SandboxSpec, name: &str, values: &str) {
-    let existing = spec
-        .env
-        .iter()
-        .find(|env| env.name == name)
-        .map(|env| env.value.as_str())
-        .unwrap_or("");
-    let mut merged = existing
-        .split(',')
-        .chain(values.split(','))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .fold(Vec::<String>::new(), |mut acc, value| {
-            if !acc.iter().any(|existing| existing == value) {
-                acc.push(value.to_owned());
-            }
-            acc
-        });
-    merged.sort();
-    upsert_spec_env(spec, name, merged.join(","));
 }
 
 fn apply_persona_spec(mut spec: SandboxSpec, persona: Option<&PersonaContext>) -> SandboxSpec {
@@ -6313,7 +6296,6 @@ fn runtime_error_failure_class(error: &SessionRuntimeError) -> &'static str {
         SessionRuntimeError::Sandbox(SandboxError::Backend { .. }) => "sandbox_backend",
         SessionRuntimeError::Sandbox(SandboxError::InvalidSpec(_)) => "sandbox_invalid_spec",
         SessionRuntimeError::IronControl(_) => "iron_control",
-        SessionRuntimeError::WarmPool(_) => "warm_pool",
         SessionRuntimeError::CapacityExceeded { .. } => "capacity",
     }
 }
@@ -7645,8 +7627,6 @@ pub enum SessionRuntimeError {
     Sandbox(#[from] SandboxError),
     #[error(transparent)]
     IronControl(#[from] centaur_iron_control::IronControlError),
-    #[error(transparent)]
-    WarmPool(#[from] WarmPoolError),
     #[error(
         "sandbox running capacity exceeded during {operation}: running={running}, max_running={max_running}"
     )]
@@ -7824,11 +7804,7 @@ mod tests {
         let filter = tool_host_tool_filter_from_spec(spec, &capabilities);
 
         assert_eq!(filter.allowlist.as_deref(), Some("alpha,beta"));
-        let blocklist = filter.blocklist.unwrap();
-        assert!(blocklist.split(',').any(|tool| tool == "custom-script"));
-        for tool in OBSERVABILITY_TOOLS.split(',') {
-            assert!(blocklist.split(',').any(|blocked| blocked == tool));
-        }
+        assert_eq!(filter.blocklist.as_deref(), Some("custom-script"));
     }
 
     fn test_principal(
@@ -9703,6 +9679,7 @@ mod adoption_tests {
         proxy_ensures: std::sync::Mutex<Vec<ProxyEnsure>>,
         missing_on_stop: std::sync::Mutex<BTreeSet<String>>,
         observability_enabled: std::sync::Mutex<Vec<String>>,
+        observability_fails: AtomicBool,
     }
 
     impl MockBackend {
@@ -9725,6 +9702,7 @@ mod adoption_tests {
                 proxy_ensures: std::sync::Mutex::new(Vec::new()),
                 missing_on_stop: std::sync::Mutex::new(BTreeSet::new()),
                 observability_enabled: std::sync::Mutex::new(Vec::new()),
+                observability_fails: AtomicBool::new(false),
             }
         }
 
@@ -9808,6 +9786,9 @@ mod adoption_tests {
         }
 
         async fn enable_observability(&self, id: &SandboxId) -> SandboxResult<()> {
+            if self.observability_fails.load(Ordering::SeqCst) {
+                return Err(SandboxError::backend("observability grant failed"));
+            }
             self.observability_enabled
                 .lock()
                 .unwrap()
@@ -10835,13 +10816,6 @@ mod adoption_tests {
         reset_test_store(&store).await;
     }
 
-    fn env_value<'a>(spec: &'a SandboxSpec, name: &str) -> Option<&'a str> {
-        spec.env
-            .iter()
-            .find(|env| env.name == name)
-            .map(|env| env.value.as_str())
-    }
-
     fn default_capabilities() -> SessionSandboxCapabilities {
         SessionSandboxCapabilities::default_enabled()
     }
@@ -10980,10 +10954,6 @@ mod adoption_tests {
         let spec = backend.created_specs().pop().expect("created cold spec");
         assert!(!spec.capabilities.repo_cache.enabled());
         assert!(!spec.capabilities.observability_enabled);
-        assert_eq!(
-            env_value(&spec, "CENTAUR_SANDBOX_OBSERVABILITY_ENABLED"),
-            Some("false")
-        );
         assert!(
             !spec
                 .mounts
@@ -11152,6 +11122,73 @@ mod adoption_tests {
         reset_test_store(&store).await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_warm_claim_falls_back_to_a_cold_sandbox() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:warm-fallback-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution
+            .execution_id;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        backend.observability_fails.store(true, Ordering::SeqCst);
+        let runtime = runtime_with_warm_pools(
+            &store,
+            backend.clone(),
+            thread_key.as_str(),
+            vec![SessionRepoCacheAccess::All],
+        );
+        let workload_key = codex_warm_pool_key(&runtime, &SessionRepoCacheAccess::All);
+        let warm_sandbox_id = format!("warm-sbx-{}", uuid::Uuid::new_v4());
+        store
+            .insert_ready_warm_sandbox(&warm_sandbox_id, &workload_key)
+            .await
+            .expect("insert warm sandbox");
+
+        let sandbox_id = runtime
+            .ensure_session_sandbox(EnsureSessionSandboxRequest {
+                thread_key: &thread_key,
+                harness_type: &HarnessType::Codex,
+                persona_id: None,
+                existing_sandbox_id: None,
+                existing_sandbox_capabilities: None,
+                iron_control_principal: None,
+                requester_principal: None,
+                proxy_labels: &BTreeMap::new(),
+                desired_capabilities: &default_capabilities(),
+                execution_id: &execution_id,
+            })
+            .await
+            .expect("fall back to a cold sandbox");
+
+        assert_eq!(sandbox_id, "mock-sbx");
+        let status: String =
+            sqlx::query_scalar("select status from session_warm_sandboxes where sandbox_id = $1")
+                .bind(&warm_sandbox_id)
+                .fetch_one(store.pool())
+                .await
+                .expect("load warm sandbox status");
+        assert_eq!(status, "failed");
+        reset_test_store(&store).await;
+    }
+
     #[test]
     fn warm_pool_specs_boot_without_observability() {
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
@@ -11173,10 +11210,6 @@ mod adoption_tests {
         assert_eq!(spec.args, vec!["harness-server", "claude-code"]);
         assert_eq!(spec.capabilities.repo_cache, RepoCacheAccess::Public);
         assert!(!spec.capabilities.observability_enabled);
-        assert_eq!(
-            env_value(&spec, "CENTAUR_SANDBOX_OBSERVABILITY_ENABLED"),
-            Some("false")
-        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1738,6 +1738,31 @@ impl PgSessionStore {
         Ok(sandbox_ids)
     }
 
+    /// Ready warm sandboxes, older than `min_age`, whose workload key is not
+    /// one of `workload_keys`: left over from a removed pool or a previous
+    /// sandbox spec, so no claim can ever take them.
+    pub async fn list_unclaimable_ready_warm_sandbox_ids(
+        &self,
+        workload_keys: &[String],
+        min_age: Duration,
+    ) -> Result<Vec<String>, SessionStoreError> {
+        let sandbox_ids = sqlx::query_scalar::<_, String>(
+            r#"
+            select sandbox_id
+            from session_warm_sandboxes
+            where status = 'ready'
+              and workload_key <> all($1)
+              and created_at <= now() - ($2::float8 * interval '1 second')
+            order by created_at, sandbox_id
+            "#,
+        )
+        .bind(workload_keys)
+        .bind(min_age.as_secs_f64())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(sandbox_ids)
+    }
+
     pub async fn claim_ready_warm_sandbox(
         &self,
         workload_key: &str,
