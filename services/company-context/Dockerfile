@@ -18,31 +18,29 @@ ENV CARGO_INCREMENTAL=0 \
     RUSTC_WRAPPER=/usr/local/bin/sccache \
     SCCACHE_DIR=/var/cache/sccache
 WORKDIR /build
-COPY crates/absurd-sdk/ crates/absurd-sdk/
-COPY crates/active-record-encryption/ crates/active-record-encryption/
-COPY services/company-context/ services/company-context/
-WORKDIR /build/services/company-context
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
 ARG RUST_BUILD_PROFILE=release
 RUN --mount=type=cache,id=company-context-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=company-context-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=company-context-sccache-${TARGETARCH},target=/var/cache/sccache,sharing=locked \
     case "$RUST_BUILD_PROFILE" in \
-      release) cargo build --release --locked && cp target/release/centaur-company-context /usr/local/bin/centaur-company-context ;; \
-      debug|dev) cargo build --locked && cp target/debug/centaur-company-context /usr/local/bin/centaur-company-context ;; \
+      release) cargo build --release --locked -p centaur-company-context && cp target/release/centaur-company-context /usr/local/bin/centaur-company-context ;; \
+      debug|dev) cargo build --locked -p centaur-company-context && cp target/debug/centaur-company-context /usr/local/bin/centaur-company-context ;; \
       *) echo "unsupported RUST_BUILD_PROFILE=$RUST_BUILD_PROFILE" >&2; exit 2 ;; \
     esac
 
 # Debian's pandoc predates the pptx and xlsx readers. The release binary is
 # static, so it is fetched on the build platform for the target architecture.
 FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS pandoc
-ARG PANDOC_VERSION=3.12
+ARG PANDOC_VERSION=3.12.1
 ARG TARGETARCH
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends ca-certificates curl
 RUN case "$TARGETARCH" in \
-      amd64) checksum=67d7d011fed8c8543306022b985b9b2499ab9b74818df91d8727c7e9ebc5ba06 ;; \
-      arm64) checksum=6cefcf7100e23a99447c26f89d1ff5b253f3407fcef99a9e27ae06f3ed16cb82 ;; \
+      amd64) checksum=d0c90410e90204c9ca83b8539fac5c7aed01fd537207e4585849f8abc5df20b8 ;; \
+      arm64) checksum=445d96fd08801fe636cab1158b4f017ee320ac3b7446328b4fe2f902117b19b9 ;; \
       *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 2 ;; \
     esac && \
     archive="pandoc-${PANDOC_VERSION}-linux-${TARGETARCH}.tar.gz" && \

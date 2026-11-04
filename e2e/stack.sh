@@ -3,7 +3,8 @@
 #
 #   e2e/stack.sh up            create/update the cluster and deploy everything
 #   e2e/stack.sh test [files]  run the e2e scenarios (or the given files)
-#   e2e/stack.sh logs          print pods, events, and component logs
+#   e2e/stack.sh logs          print pods, events, and component logs, and
+#                              save full logs to CENTAUR_E2E_LOG_DIR
 #   e2e/stack.sh down          delete the cluster
 #
 # The stack is the chart's Slack path (Postgres, console, proxy-sync, api-rs,
@@ -46,11 +47,13 @@ CODEX_ACCESS_TOKEN=e2e-chatgpt-access-token
 CLAUDE_ACCESS_TOKEN=e2e-claude-access-token
 CHATGPT_ACCOUNT_ID=e2e00000-0000-4000-8000-00000000c0de
 AUTH_MODE="${CENTAUR_E2E_AUTH_MODE:-api_key}"
+# Full component logs, including those of pods a test restarted.
+LOG_DIR="${CENTAUR_E2E_LOG_DIR:-${TMPDIR:-/tmp}/${CLUSTER}-logs}"
 case "$AUTH_MODE" in
   api_key | access_token) ;;
   *) echo "CENTAUR_E2E_AUTH_MODE must be api_key or access_token, not $AUTH_MODE" >&2; exit 2 ;;
 esac
-IMAGES=(api-rs:apiRs proxy-sync:proxySync iron-proxy:ironProxy slackbotv2:slackbotv2 agent:sandbox console:console)
+IMAGES=(api-rs:apiRs proxy-sync:proxySync token-broker:tokenBroker iron-proxy:ironProxy slackbotv2:slackbotv2 agent:sandbox console:console)
 
 export KUBECONFIG
 KUBECONFIG="$(mktemp)"
@@ -150,6 +153,7 @@ up() {
   wait "$helm_pid"
   kubectl apply -f e2e/infra/test-access.yaml > /dev/null
   wait_for_test_access
+  admit_external_team
 }
 
 # The NodePorts and the policy admitting them take a moment to start routing;
@@ -167,8 +171,15 @@ wait_for_test_access() {
   return 1
 }
 
-# Stores the subscription access tokens as the console's broker would after a
-# refresh. Without a refresh token the console never tries to refresh them.
+# Admits EXTERNAL_TEAM in e2e/fakes/slack-fixture.ts, a Slack Connect partner.
+admit_external_team() {
+  curl -fsS -o /dev/null -X PUT http://127.0.0.1:30081/api/slack/external-team-ids \
+    -H "Authorization: Bearer $API_ADMIN_KEY" -H 'Content-Type: application/json' \
+    -d '{"slack_external_team_ids":["TE2EEXT01"]}'
+}
+
+# Stores the subscription access tokens as token-broker would after a refresh.
+# Without a refresh token token-broker never tries to refresh them.
 seed_broker_credentials() {
   local console="deploy/${RELEASE}-centaur-console"
   until kubectl -n "$NAMESPACE" get "$console" > /dev/null 2>&1; do sleep 2; done
@@ -249,6 +260,9 @@ run_tests() {
   # Arguments pick test files (e.g. e2e/tests/lifecycle.test.ts); default is all.
   local targets=("$@")
   [[ "${#targets[@]}" -gt 0 ]] || targets=(./e2e/tests)
+  mkdir -p "$LOG_DIR"
+  rm -f "$LOG_DIR"/*.log
+  export E2E_LOG_DIR="$LOG_DIR"
   if ! bun test --max-concurrency=4 "${targets[@]}"; then
     dump_logs
     return 1
@@ -268,6 +282,16 @@ dump_logs() {
     | grep -E '"level":"(WARN|ERROR)"' | tail -50 || true
   kubectl -n "$MODEL_NAMESPACE" logs deploy/model-server --tail=100 || true
   kubectl -n "$SLACK_NAMESPACE" logs deploy/fake-slack --tail=-1 | grep -v '_delivered"' | tail -100 || true
+
+  mkdir -p "$LOG_DIR"
+  local component
+  for component in slackbotv2 api-rs; do
+    kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-${component}" --tail=-1 \
+      > "$LOG_DIR/${component}.log" 2>&1 || true
+  done
+  kubectl -n "$SLACK_NAMESPACE" logs deploy/fake-slack --tail=-1 > "$LOG_DIR/fake-slack.log" 2>&1 || true
+  kubectl -n "$MODEL_NAMESPACE" logs deploy/model-server --tail=-1 > "$LOG_DIR/model-server.log" 2>&1 || true
+  echo "full logs: $LOG_DIR"
 }
 
 # Earlier runs leave a sandbox and iron-proxy per thread (they idle for hours).

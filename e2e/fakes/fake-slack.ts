@@ -30,6 +30,11 @@ type Message = {
 
 type Ephemeral = { channel: string; user: string; text: string; thread_ts?: string }
 
+// Where Slack's native streaming is unavailable, as in a DM, the Chat SDK posts
+// this placeholder and edits the reply into it. Until that edit the reply is
+// still streaming, though Slack itself does not mark it.
+const CHAT_SDK_STREAM_PLACEHOLDER = '...'
+
 const port = Number(process.env.PORT ?? 443)
 const botToken = requiredEnv('SLACK_BOT_TOKEN')
 const signingSecret = requiredEnv('SLACK_SIGNING_SECRET')
@@ -122,11 +127,12 @@ function handle(method: string, actor: Actor, body: Record<string, unknown>) {
     case 'chat.postMessage':
     case 'chat.startStream': {
       if (!conversation(channel)) return { ok: false, error: 'channel_not_found' }
+      const text = str(body.markdown_text) || str(body.text) || chunksText(body.chunks)
       const message = post(actor, channel, {
-        text: str(body.markdown_text) || str(body.text) || chunksText(body.chunks),
+        text,
         thread_ts: str(body.thread_ts) || undefined,
         blocks: Array.isArray(body.blocks) ? body.blocks : undefined,
-        streaming: method === 'chat.startStream'
+        streaming: method === 'chat.startStream' || (actor === 'bot' && text === CHAT_SDK_STREAM_PLACEHOLDER)
       })
       if (actor !== 'bot') void deliverMessage(message, actor)
       return { ok: true, channel, ts: message.ts, message }
@@ -143,6 +149,7 @@ function handle(method: string, actor: Actor, body: Record<string, unknown>) {
       if (!message) return { ok: false, error: 'message_not_found' }
       const text = str(body.markdown_text) || str(body.text) || chunksText(body.chunks)
       if (method === 'chat.update') {
+        if (message.text === CHAT_SDK_STREAM_PLACEHOLDER) message.streaming = false
         message.text = text
       } else {
         message.text += text

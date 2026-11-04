@@ -1,15 +1,14 @@
 use std::env;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use codex_app_server_protocol::UserInput;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::{HarnessServerError, Result};
+use crate::Result;
+use crate::protocol::UserInput;
 
 pub(crate) fn command_from_override(env_key: &str) -> Option<ProcessCommand> {
     let raw = env::var(env_key).ok()?;
@@ -53,14 +52,25 @@ pub(crate) fn write_value<W: Write>(stdout: &mut W, value: &Value) -> Result<()>
     Ok(())
 }
 
-pub(crate) fn absolute_path(path: PathBuf) -> Result<AbsolutePathBuf> {
+/// Resolves `path` against the current directory and lexically removes `.`
+/// and `..` components.
+pub(crate) fn absolute_path(path: PathBuf) -> Result<PathBuf> {
     let path = if path.is_absolute() {
         path
     } else {
         env::current_dir()?.join(path)
     };
-    AbsolutePathBuf::from_absolute_path(&path)
-        .map_err(|_| HarnessServerError::PathMustBeAbsolute { path })
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component),
+        }
+    }
+    Ok(normalized)
 }
 
 pub(crate) fn default_codex_home() -> PathBuf {

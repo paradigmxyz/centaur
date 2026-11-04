@@ -7,6 +7,8 @@ import {
   createFlagMessageOverridesStrategy,
   createOpenAiMessageOverridesStrategy
 } from './message-overrides-strategy'
+import { createOpenAiProactiveClassifier } from './proactive-classifier'
+import { loadProactivityRules } from './proactivity-rules'
 
 const port = numberEnv('PORT', 3002)
 const apiUrl = stringEnv('CENTAUR_API_URL', 'http://127.0.0.1:8080')
@@ -86,6 +88,7 @@ const options: SlackbotV2Options = {
   idleTimeoutMs: optionalNumberEnv('SESSION_IDLE_TIMEOUT_MS'),
   maxDurationMs: optionalNumberEnv('SESSION_MAX_DURATION_MS'),
   messageOverridesStrategy: createMessageOverridesStrategy(),
+  proactivity: createProactivityOptions(),
   postgresUrl:
     optionalEnv('SLACKBOTV2_DATABASE_URL') ??
     optionalEnv('DATABASE_URL') ??
@@ -98,6 +101,8 @@ const options: SlackbotV2Options = {
   slackApiUrl,
   slackApiTimeoutMs,
   stateKeyPrefix: optionalEnv('SLACKBOTV2_STATE_KEY_PREFIX'),
+  ackReactionEnabled: booleanEnv('SLACKBOTV2_ACK_REACTION_ENABLED', true),
+  ackReactionName: stringEnv('SLACKBOTV2_ACK_REACTION', 'eyes'),
   steeringReactionEnabled: booleanEnv('SLACKBOTV2_STEERING_REACTION_ENABLED', false),
   steeringReactionName: stringEnv(
     'SLACKBOTV2_STEERING_REACTION',
@@ -108,7 +113,7 @@ const options: SlackbotV2Options = {
 }
 options.slackHomeTeamId = await resolveSlackHomeTeamId(options)
 
-const { app } = createSlackbotV2(options)
+const { app, drain } = createSlackbotV2(options)
 const server = Bun.serve({
   port,
   fetch: app.fetch
@@ -125,16 +130,47 @@ console.log(
     auto_join_created_channels_enabled: options.autoJoinCreatedChannels,
     message_overrides_strategy: messageOverridesStrategyMode,
     enabled_harnesses: enabledHarnesses,
+    proactivity_classifier: options.proactivity ? proactivityClassifierBackend() : undefined,
+    proactivity_debounce_ms: options.proactivity?.debounceMs,
+    proactivity_default_rules: options.proactivity ? options.proactivity.rules?.default?.length ?? 0 : undefined,
+    proactivity_rule_channels: options.proactivity
+      ? Object.keys(options.proactivity.rules?.channels ?? {})
+      : undefined,
     message_overrides_strategy_enabled:
       messageOverridesStrategyMode !== 'llm' || Boolean(messageOverridesStrategyApiKey),
     response_metadata_mode: options.responseMetadataMode,
     response_service_tier_enabled: options.responseServiceTierEnabled,
+    ack_reaction_enabled: options.ackReactionEnabled,
+    ack_reaction_name: options.ackReactionName,
     steering_reaction_enabled: options.steeringReactionEnabled,
     steering_reaction_name: options.steeringReactionName,
     port: server.port,
     api_url: apiUrl
   })
 )
+
+// Kubernetes removes a terminating pod from its Service while SIGTERM is
+// delivered, so keep accepting requests for a moment before draining.
+const SHUTDOWN_LINGER_MS = 5_000
+// How long SIGTERM then waits for in-flight replies; linger plus drain stays
+// under the pod's termination grace period (30s by default). A reply still
+// running then is recovered by the next process from its render obligation.
+const shutdownDrainMs = numberEnv('SLACKBOTV2_SHUTDOWN_DRAIN_MS', 20_000)
+let shuttingDown = false
+const shutdown = async (signal: string): Promise<void> => {
+  if (shuttingDown) return
+  shuttingDown = true
+  log('info', 'slackbotv2_shutdown_started', { signal, drain_ms: shutdownDrainMs })
+  await new Promise(resolve => setTimeout(resolve, SHUTDOWN_LINGER_MS))
+  const unfinished = await drain(shutdownDrainMs)
+  // Lets requests still in progress send their responses.
+  await server.stop()
+  log('info', 'slackbotv2_shutdown_complete', { signal, unfinished })
+  process.exit(0)
+}
+// As PID 1 the process would otherwise ignore SIGTERM until the kubelet's SIGKILL.
+process.on('SIGTERM', () => void shutdown('SIGTERM'))
+process.on('SIGINT', () => void shutdown('SIGINT'))
 
 function optionalEnv(name: string): string | undefined {
   const value = process.env[name]?.trim()
@@ -188,10 +224,64 @@ function createMessageOverridesStrategy(): SlackbotV2Options['messageOverridesSt
     apiKey: messageOverridesStrategyApiKey,
     baseUrl: optionalEnv('SLACKBOTV2_MESSAGE_OVERRIDES_OPENAI_BASE_URL'),
     logger: consoleLogger,
-    maxOutputTokens: optionalNumberEnv('SLACKBOTV2_MESSAGE_OVERRIDES_MAX_OUTPUT_TOKENS'),
-    model: stringEnv('SLACKBOTV2_MESSAGE_OVERRIDES_MODEL', 'gpt-5.4-nano'),
+    model: stringEnv('SLACKBOTV2_MESSAGE_OVERRIDES_MODEL', 'gpt-6-luna'),
     timeoutMs: optionalNumberEnv('SLACKBOTV2_MESSAGE_OVERRIDES_TIMEOUT_MS')
   })
+}
+
+function proactivityClassifierBackend(): string {
+  return stringEnv('SLACKBOTV2_PROACTIVITY_CLASSIFIER', 'openai').toLowerCase()
+}
+
+function createProactivityOptions(): SlackbotV2Options['proactivity'] {
+  if (!booleanEnv('SLACKBOTV2_PROACTIVITY_ENABLED', false)) return undefined
+  return {
+    classifier: createProactiveClassifier(proactivityClassifierBackend()),
+    debounceMs: optionalNumberEnv('SLACKBOTV2_PROACTIVITY_DEBOUNCE_MS'),
+    rules: proactivityRules(),
+    timeoutMs: optionalNumberEnv('SLACKBOTV2_PROACTIVITY_TIMEOUT_MS')
+  }
+}
+
+function proactivityRules(): NonNullable<SlackbotV2Options['proactivity']>['rules'] {
+  const dir = optionalEnv('SLACKBOTV2_PROACTIVITY_RULES_DIR')
+  if (!dir) return undefined
+  try {
+    return loadProactivityRules(dir)
+  } catch (error) {
+    // Run without any rules rather than a partial set: a missing empty
+    // channel file would otherwise let the default rules apply there.
+    consoleLogger.warn('slackbotv2_proactivity_rules_unreadable', {
+      dir,
+      error: error instanceof Error ? error.message : String(error)
+    })
+    return undefined
+  }
+}
+
+// Each model backend implements ProactiveClassifier (see proactive-classifier.ts
+// for the shared prompt and schema); add one by adding a case here.
+function createProactiveClassifier(
+  backend: string
+): NonNullable<SlackbotV2Options['proactivity']>['classifier'] {
+  switch (backend) {
+    case 'openai': {
+      const apiKey =
+        optionalEnv('SLACKBOTV2_PROACTIVITY_OPENAI_API_KEY') ?? optionalEnv('OPENAI_API_KEY')
+      if (!apiKey) {
+        throw new Error(
+          'SLACKBOTV2_PROACTIVITY_OPENAI_API_KEY or OPENAI_API_KEY is required for the openai proactivity classifier'
+        )
+      }
+      return createOpenAiProactiveClassifier({
+        apiKey,
+        baseUrl: optionalEnv('SLACKBOTV2_PROACTIVITY_OPENAI_BASE_URL'),
+        model: stringEnv('SLACKBOTV2_PROACTIVITY_MODEL', 'gpt-6-luna')
+      })
+    }
+    default:
+      throw new Error(`SLACKBOTV2_PROACTIVITY_CLASSIFIER must be "openai" (got "${backend}")`)
+  }
 }
 
 function optionalNumberEnv(name: string): number | undefined {

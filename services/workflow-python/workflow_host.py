@@ -85,6 +85,7 @@ class RegisteredWorkflow:
     webhooks: Any
     schedule: Any
     principal: Any = None
+    starters: Any = None
     agent_defaults: dict[str, Any] | None = None
 
 
@@ -155,6 +156,7 @@ def load_workflow_file(path: Path) -> RegisteredWorkflow | None:
         webhooks=getattr(module, "WEBHOOKS", None),
         schedule=getattr(module, "SCHEDULE", None),
         principal=getattr(module, "WORKFLOW_PRINCIPAL", None),
+        starters=getattr(module, "WORKFLOW_STARTERS", None),
         agent_defaults=agent_defaults,
     )
 
@@ -366,6 +368,24 @@ def normalize_principal(workflow: RegisteredWorkflow) -> bool | str | None:
     return None
 
 
+def normalize_starters(workflow: RegisteredWorkflow) -> list[str] | None:
+    """Return the API caller classes allowed to start this workflow.
+
+    ``None`` means undeclared (any caller with workflow write access). A
+    declared but malformed value yields ``[]`` so no API caller may start it.
+    """
+    raw = workflow.starters
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple, set, frozenset)) or not all(
+        isinstance(starter, str) for starter in raw
+    ):
+        return []
+    return sorted({starter.strip() for starter in raw if starter.strip()})
+
+
 async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any]:
     workflows = discover_workflows()
     workflow_name = str(message.get("workflow_name") or "")
@@ -416,6 +436,7 @@ def discovery_payload() -> dict[str, Any]:
                 "webhooks": normalize_webhooks(workflow),
                 "schedule": normalize_schedule(workflow),
                 "principal": normalize_principal(workflow),
+                "starters": normalize_starters(workflow),
             }
             for workflow in workflows.values()
         ],

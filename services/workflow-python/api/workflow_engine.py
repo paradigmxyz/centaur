@@ -207,12 +207,12 @@ class WorkflowContext:
         buttons: dict[str, str | Button], input: dict[str, Any] | None = None,
         thread_ts: str | None = None,
     ) -> dict[str, Any]:
-        """Post workflow buttons to a channel ID or raw channel name."""
+        """Post workflow buttons to a Slack channel ID (buttons are signed against the ID)."""
         normalized = {action: Button(button) if isinstance(button, str) else button
                       for action, button in buttons.items()}
         if (
             not name.strip() or len(name) > 200 or name in self._action_names
-            or not channel.strip() or not workflow.strip() or not text.strip() or len(text) > 3000
+            or not re.fullmatch(r"[CDG][A-Z0-9]+", channel) or not workflow.strip() or not text.strip() or len(text) > 3000
             or not 1 <= len(buttons) <= 5
             or any(not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", action)
                    or not isinstance(button, Button)
@@ -221,7 +221,10 @@ class WorkflowContext:
                    for action, button in normalized.items())
             or (input is not None and not isinstance(input, dict))
         ):
-            raise ValueError("invalid Slack button configuration or duplicate step name")
+            raise ValueError(
+                "invalid Slack button configuration (channel must be a Slack channel ID) "
+                "or duplicate step name"
+            )
         value = json.dumps({"workflow_name": workflow, "input": input or {}}, separators=(",", ":"))
         if len(value.encode("utf-8")) > 2000:
             raise ValueError("Slack button workflow and input must fit within 2000 bytes")
@@ -236,15 +239,9 @@ class WorkflowContext:
                 for action, button in normalized.items()
             ]},
         ]
-        async def post() -> Any:
-            destination = channel
-            if not re.fullmatch(r"[CDG][A-Z0-9]+", destination):
-                destination = await self.call_tool("slack", "resolve_channel", {"channel": channel})
-            return await self.post_to_slack(
-                destination, text, blocks=blocks, client_msg_id=group_id, thread_ts=thread_ts,
-            )
-
-        return await self.step(f"{name}.post", post)
+        return await self.step(f"{name}.post", lambda: self.post_to_slack(
+            channel, text, blocks=blocks, client_msg_id=group_id, thread_ts=thread_ts,
+        ))
 
     async def update_slack(self, channel: str, message_ts: str, text: str, **kwargs: Any) -> Any:
         return await self._rpc.request({

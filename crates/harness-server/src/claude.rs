@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
-use codex_app_server_protocol::UserInput;
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::protocol::UserInput;
 use crate::{
     HarnessKind, HarnessServer, NormalizedContent, NormalizedEvent, NormalizedToolResult, Result,
     ThreadState, TurnHold,
@@ -468,9 +468,9 @@ impl HarnessServer for ClaudeCodeHarness {
 
 #[cfg(test)]
 mod tests {
-    use codex_app_server_protocol::UserInput;
     use serde_json::{Value, json};
 
+    use crate::protocol::UserInput;
     use crate::{
         HarnessServer, NormalizedContent, NormalizedEvent, TurnHold,
         anthropic::AnthropicStreamEvent,

@@ -78,3 +78,6 @@ next-env.d.ts
 *.tsbuildinfo
 _
 .notes
+
+# Rust
+/target/

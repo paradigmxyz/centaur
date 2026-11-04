@@ -76,6 +76,14 @@ requires `apiRs.workflowHostSandbox=true`, which renders
 `WORKFLOW_HOST_SANDBOX=true`; startup fails if workflow-host sandboxing is
 disabled.
 
+`WORKFLOW_STARTERS` is optional. Set it to the API caller classes allowed to
+start the workflow through `POST /api/workflows/runs`, such as
+`WORKFLOW_STARTERS = {"console"}`. Valid classes are `console`, `admin`,
+`ingress`, and `principal` (sandboxes and other principal tokens). Other callers
+receive `403`, and a malformed value blocks every API caller. Use it when the
+workflow trusts its input, for example when the input selects the principal an
+agent turn runs as. Schedules, webhooks, and child workflows are not affected.
+
 ## Durable primitives
 
 | Primitive | Use it for |

@@ -74,8 +74,8 @@ const scenarios: Record<string, Scenario> = {
   },
   'a model flag sticks to the thread': {
     steps: [
-      { say: '--codex --model gpt-5.4 hello', harness: 'codex', model: 'gpt-5.4', effort: CODEX_EFFORT, footer: 'GPT 5.4 · Codex · Medium' },
-      { say: 'again', harness: 'codex', model: 'gpt-5.4', effort: CODEX_EFFORT, sandbox: 'same' }
+      { say: '--codex --model gpt-6.1-terra hello', harness: 'codex', model: 'gpt-6.1-terra', effort: CODEX_EFFORT, footer: 'Terra 6.1 · Codex · Medium' },
+      { say: 'again', harness: 'codex', model: 'gpt-6.1-terra', effort: CODEX_EFFORT, sandbox: 'same' }
     ]
   },
   'a harness switch drops the sticky model': {
@@ -87,12 +87,12 @@ const scenarios: Record<string, Scenario> = {
   },
   'a Claude model shortcut picks the harness and model': {
     steps: [
-      { say: '--sonnet hello', harness: 'claudecode', model: 'claude-sonnet-5', footer: 'Sonnet 5 · Claude Code' },
-      { say: 'again', harness: 'claudecode', model: 'claude-sonnet-5', sandbox: 'same' }
+      { say: '--sonnet hello', harness: 'claudecode', model: 'claude-sonnet-5-5', footer: 'Sonnet 5.5 · Claude Code' },
+      { say: 'again', harness: 'claudecode', model: 'claude-sonnet-5-5', sandbox: 'same' }
     ]
   },
   'a Claude alias works as a --model value': {
-    steps: [{ say: '--claude --model sonnet hello', harness: 'claudecode', model: 'claude-sonnet-5' }]
+    steps: [{ say: '--claude --model sonnet hello', harness: 'claudecode', model: 'claude-sonnet-5-5' }]
   },
   'claude reasoning effort applies to one turn': {
     steps: [
@@ -137,8 +137,8 @@ const scenarios: Record<string, Scenario> = {
   'a channel default picks the persona, harness, and model': {
     channel: DEFAULTS_CHANNEL,
     steps: [
-      { say: 'hello', harness: 'claudecode', model: 'claude-sonnet-5', persona: 'eng', footer: 'Sonnet 5 · Claude Code · High' },
-      { say: 'again', harness: 'claudecode', model: 'claude-sonnet-5', persona: 'eng', sandbox: 'same', sees: [1] }
+      { say: 'hello', harness: 'claudecode', model: 'claude-sonnet-5-5', persona: 'eng', footer: 'Sonnet 5.5 · Claude Code · High' },
+      { say: 'again', harness: 'claudecode', model: 'claude-sonnet-5-5', persona: 'eng', sandbox: 'same', sees: [1] }
     ]
   },
   'flags beat the channel default': {

@@ -64,42 +64,24 @@ jobs:
       - name: Lint chart
         run: helm lint contrib/chart
 
-      - name: Install yq
-        uses: mikefarah/yq@504fc38780cc46be8444ea1b72fb55919fc0bfb0 # v4.54.1
-
-      - name: Validate chart version bump
+      # chart-version.yml bumps the version in its own PR, so chart changes
+      # merged before that bump reuse an already-released version. Publish
+      # only versions that have no release tag yet.
+      - name: Check for unreleased chart version
+        id: version
+        if: github.event_name == 'push'
         run: |
-          set -e
-
-          CHART_YAML="contrib/chart/Chart.yaml"
-
-          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
-            git fetch --no-tags origin "${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}"
-            BASE_REF="origin/${GITHUB_BASE_REF}"
-            CHANGED_FILES=$(git diff --name-only "${BASE_REF}...HEAD" 2>/dev/null || echo "")
-            PREVIOUS_VERSION=$(git show "${BASE_REF}:${CHART_YAML}" 2>/dev/null | yq '.version' 2>/dev/null || echo "")
+          set -euo pipefail
+          version="$(awk '$1 == "version:" { print $2; exit }' contrib/chart/Chart.yaml)"
+          if git rev-parse -q --verify "refs/tags/centaur-${version}" >/dev/null; then
+            echo "Chart ${version} is already released"
+            echo "unreleased=false" >>"${GITHUB_OUTPUT}"
           else
-            CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
-            PREVIOUS_VERSION=$(git show HEAD~1:"$CHART_YAML" 2>/dev/null | yq '.version' 2>/dev/null || echo "")
+            echo "unreleased=true" >>"${GITHUB_OUTPUT}"
           fi
-
-          if ! echo "$CHANGED_FILES" | grep -q "^contrib/chart/"; then
-            echo "No chart changes detected"
-            exit 0
-          fi
-
-          CURRENT_VERSION=$(yq '.version' "$CHART_YAML")
-
-          if [ -n "$PREVIOUS_VERSION" ] && [ "$CURRENT_VERSION" != "$PREVIOUS_VERSION" ]; then
-            echo "Version already bumped ($PREVIOUS_VERSION -> $CURRENT_VERSION)"
-            exit 0
-          fi
-
-          echo "::error file=${CHART_YAML}::contrib/chart changed but chart version stayed at ${CURRENT_VERSION}. Bump .version in the PR."
-          exit 1
 
       - name: Run chart-releaser
-        if: github.event_name == 'push'
+        if: steps.version.outputs.unreleased == 'true'
         uses: helm/chart-releaser-action@cae68fefc6b5f367a0275617c9f83181ba54714f # v1.7.0
         with:
           skip_existing: true

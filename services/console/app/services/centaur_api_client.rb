@@ -57,6 +57,15 @@ class CentaurApiClient
     post("/api/admin/granola/sync/batch", payload)
   end
 
+  def slack_external_team_ids
+    Array(get("/api/slack/external-team-ids")["slack_external_team_ids"])
+  end
+
+  def replace_slack_external_team_ids(team_ids)
+    response = request(:put, "/api/slack/external-team-ids", { slack_external_team_ids: team_ids })
+    Array(response["slack_external_team_ids"])
+  end
+
   def create_session(thread_key:, harness_type:, metadata: {}, persona_id: nil,
                      on_harness_conflict: "reject")
     payload = {

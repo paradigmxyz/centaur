@@ -111,3 +111,32 @@
     <a href="<%= console_principals_path %>" class="btn-secondary">Cancel</a>
   </div>
 <% end %>
+
+<section class="form-section mt-6" id="slack-connect">
+  <h2 class="form-section-heading">Slack Connect</h2>
+  <% if @slack_external_teams_error %>
+    <div class="alert-error mb-4"><%= @slack_external_teams_error %></div>
+  <% end %>
+  <% if @slack_external_team_ids_text.nil? %>
+    <p class="text-sm text-zinc-500">The allowed external workspaces could not be loaded from the Centaur API. Reload the page to try again.</p>
+  <% else %>
+    <%= form_with url: slack_external_teams_console_system_settings_path,
+                  method: :patch,
+                  data: { turbo: false },
+                  class: "space-y-4" do |form| %>
+      <label class="block max-w-xl">
+        <span class="form-label">Allowed external workspaces</span>
+        <%= form.text_area :slack_external_team_ids,
+                           value: @slack_external_team_ids_text,
+                           rows: 4,
+                           placeholder: "T01234567",
+                           spellcheck: false,
+                           class: "form-input font-mono" %>
+        <span class="form-hint">
+          Slack team ids, one per line or comma-separated. Centaur ignores messages and actions from any other external workspace.
+        </span>
+      </label>
+      <%= form.submit "Save Slack Connect workspaces", class: "btn-primary" %>
+    <% end %>
+  <% end %>
+</section>

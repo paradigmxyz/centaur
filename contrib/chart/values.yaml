@@ -308,6 +308,14 @@ sandbox:
   # `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`). Empty adds none.
   podAnnotations: {}
   #   karpenter.sh/do-not-disrupt: "true"
+  # Sandbox pods only: false enables Pod user namespaces on supported nodes.
+  # null omits hostUsers and preserves the Kubernetes default.
+  hostUsers: null
+  # Kubernetes SecurityContext for the agent container only. Bootstrap init
+  # containers and iron-proxy are unaffected. procMount: Unmasked requires
+  # hostUsers: false. Changing either option drains incompatible retained
+  # sandbox pods at api-rs startup, including warm and active pods.
+  containerSecurityContext: {}
   tolerations: []
   # - key: centaur.ai/sandbox
   #   operator: Exists
@@ -460,6 +468,38 @@ proxySync:
     annotations: {}
   resources: {}
 
+# Refreshes the console's broker credentials (OAuth access tokens) before they
+# expire. It serves only /healthz and /metrics; its egress is Postgres and
+# HTTPS to token endpoints. Replicas coordinate through row locks, so a rolling
+# update never refreshes a credential twice.
+tokenBroker:
+  # Set false to run no broker, for example while another deployment refreshes
+  # the same credentials. The console's own refresh jobs are unaffected.
+  enabled: true
+  replicaCount: 1
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  image:
+    repository: centaur-token-broker
+    tag: latest
+    pullPolicy: Always
+  port: 8080
+  # Seconds between checks for credentials due for refresh.
+  pollIntervalSeconds: 15
+  # Credentials refreshed at once; each holds a database connection for the
+  # duration of its token request, so keep it below databaseMaxConnections.
+  concurrency: 4
+  databaseMaxConnections: 5
+  # Lets in-flight refreshes finish storing a just-rotated refresh token. A
+  # refresh makes at most two token requests of up to 60 seconds each.
+  terminationGracePeriodSeconds: 150
+  metrics:
+    scrapeAnnotations: true
+    path: /metrics
+    annotations: {}
+  resources: {}
+
 # v1 company-context ingestion: the api-rs Slack workflows (slack_sync,
 # slack_backfill, slack_retention) and the Console Slack DM, Google Docs, and
 # Granola sync jobs. Set false to stop all of them, for example to roll out
@@ -469,9 +509,9 @@ companyContextV1:
   enabled: true
 
 # Standalone company-context ingestion service. It indexes Google Docs and PDFs
-# from Google Drive and Granola meeting notes into its private system and data
-# schemas. Disabled while the corpus is validated alongside the legacy Python
-# workflows.
+# from Google Drive, Google Calendar events, and Granola meeting notes into its
+# private system and data schemas. Disabled while the corpus is validated
+# alongside the legacy Python workflows.
 experimentalCompanyContext:
   enabled: false
   replicaCount: 1
@@ -489,19 +529,31 @@ experimentalCompanyContext:
   indexers:
     drive:
       enabled: true
+    calendar:
+      enabled: true
     granola:
       enabled: true
     slack:
       enabled: true
+    # Projects rows written to company_context_system.custom_documents.
+    custom:
+      enabled: true
   # Rails Console OAuth app whose live per-user Google broker credentials are
-  # synchronized. The embeddings API key comes from OPENAI_API_KEY in the
-  # shared Kubernetes Secret.
+  # synchronized: those with drive.readonly for Drive and those with
+  # calendar.readonly for Calendar. The embeddings API key comes from
+  # OPENAI_API_KEY in the shared Kubernetes Secret.
   googleOauthAppSlug: google
   # Rails Console OAuth app whose live per-user Granola MCP credentials are
   # synchronized.
   granolaOauthAppSlug: granola
   scanIntervalSeconds: 300
+  calendarSyncIntervalSeconds: 1800
+  # Days of past Calendar events to index, by when they ended; recurring events
+  # are kept regardless. Raising it backfills older events on the next sync;
+  # lowering it removes the events that fall outside.
+  calendarHistoryDays: 90
   granolaSyncIntervalSeconds: 1800
+  customProjectIntervalSeconds: 60
   # Slack conversations are discovered through the same per-user Slack
   # credentials as the Console DM sync (console.slackDmSync.oauthAppSlug).
   # Workspace users are listed with SLACK_BOT_TOKEN from the shared Secret, so
@@ -523,6 +575,7 @@ experimentalCompanyContext:
   # list removes indexed data that only the excluded users or conversations kept.
   syncLimits:
     googleDriveUserEmails: []
+    googleCalendarUserEmails: []
     granolaUserEmails: []
     slackUserIds: []
     # Slack conversation IDs (channels and DMs).
@@ -653,8 +706,11 @@ apiRs:
       # migration, index rebuild, and re-embedding existing rows. pgvector will
       # not build an HNSW or IVFFlat index above 2000.
       dimensions: 1536
-  # Reaper: stop sandboxes older than the max lifetime, regardless of whether
-  # they are running or suspended. 0 disables the sweep. Interval must be >= 1.
+  # Reaper: stop sandboxes older than the max lifetime, whether running or
+  # suspended. Warm-pool sandboxes age from when a session claims them, and a
+  # sandbox with a queued or running turn waits for a later sweep unless that
+  # turn has itself run longer than the max lifetime. 0 disables the sweep.
+  # Interval must be >= 1.
   sandboxMaxLifetimeSecs: 259200 # 3 days
   sandboxReapIntervalSecs: 300
   # Delete session.output.line events older than this many days, once their
@@ -689,6 +745,13 @@ apiRs:
     # the whole budget reasoning and returns no message. Empty omits the
     # parameter, for a server that rejects it outright.
     reasoningEffort: low
+    # Post a model-written progress message to the chat thread once an
+    # execution has run afterSecs, then at most every intervalSecs while new
+    # activity arrives. Requires activitySummary.enabled.
+    progressUpdates:
+      enabled: false
+      afterSecs: 60
+      intervalSecs: 120
   metrics:
     # The Rust API always serves Prometheus text metrics at /metrics. This flag
     # only controls scrape annotations for Prometheus/VictoriaMetrics-style
@@ -730,10 +793,18 @@ slackbotv2:
     tag: latest
     pullPolicy: Always
   userName: centaur
+  # Legacy Assistant loading text. With agentViewEnabled, Slack shows its
+  # native working indicator and Stop button instead.
   assistantStatus: ""
   # Match Slack's features.agent_view manifest setting. Changing Slack's
   # manifest is irreversible; this switch only controls the service behavior.
   agentViewEnabled: false
+  # React to mentioned messages that start a turn, then remove the reaction
+  # after the assistant response is posted, so slow turns visibly register.
+  # Requires the Slack app to grant reactions:write. Slackbot disables
+  # reactions for the running process if Slack reports the scope is missing.
+  ackReactionEnabled: true
+  ackReaction: eyes
   # React to mentioned follow-ups while an execution is active, then remove
   # their reactions after the assistant response is posted. Requires the Slack
   # app to grant reactions:write. Slackbot disables the feature for the running
@@ -753,7 +824,6 @@ slackbotv2:
   # Public/local MCP endpoint shown in MCP SSO setup messages. The default
   # assumes users connect through `kubectl port-forward ... 3000:8080`.
   mcpPublicUrl: "http://localhost:3000"
-  externalOrgAllowlist: ""
   triggerBotAllowlist: ""
   # Per-channel default persona / harness / model / provider / reasoning, keyed
   # by Slack conversation id (the C…/G…/D… id). Each value is an object of
@@ -772,17 +842,59 @@ slackbotv2:
   #     C0TRIAGE: { reasoning: low }
   channelDefaults: {}
   # Message overrides strategy for Slack message text. "flags" keeps the legacy
-  # deterministic --model/--claude/-rsn strategy. "llm" asks a small model for
-  # normalized overrides, allowing natural language requests such as
-  # "use max effort and the sol model". In llm mode,
+  # deterministic --model/--claude/-rsn strategy. "llm" classifies the message
+  # with the OpenAI Decisions API (which supports only gpt-6-luna), allowing
+  # natural language requests such as "use max effort and the sol model". In
+  # llm mode,
   # set OPENAI_API_KEY in the shared secret or provide
   # SLACKBOTV2_MESSAGE_OVERRIDES_OPENAI_API_KEY via extraEnv.
   messageOverridesStrategy:
     mode: flags
-    model: gpt-5.4-nano
+    model: gpt-6-luna
     openaiBaseUrl: https://api.openai.com/v1
     timeoutMs: 1500
-    maxOutputTokens: 300
+  # Proactive replies without a mention. Once mentioned in a thread, the bot
+  # replies to later unmentioned messages there that its built-in rules
+  # accept. Operator rules remove the need for a mention: the bot replies to
+  # any unmentioned message in the channel that meets a rule's `when`,
+  # starting a thread under a top-level message. Rules are checked in order and
+  # the first match wins; its optional `context` tells the agent how to
+  # respond, once per rule per thread. A stop command silences proactive
+  # replies in its thread until the next mention. The openai classifier reads
+  # OPENAI_API_KEY from the shared secret, or
+  # SLACKBOTV2_PROACTIVITY_OPENAI_API_KEY via extraEnv.
+  proactivity:
+    enabled: false
+    classifier: openai
+    model: gpt-6-luna
+    openaiBaseUrl: https://api.openai.com/v1
+    timeoutMs: 2000
+    # Milliseconds of quiet an idle thread waits for before classifying, so a
+    # message sent in parts (a name, then context) gets one decision and one
+    # turn that sees every part. Every proactive reply waits this long; 0
+    # classifies each message at once. Later parts steer the turn when the
+    # classifier accepts them.
+    debounceMs: 0
+    # Rules are mounted from a ConfigMap, so `when` and `context` can be long
+    # and span lines. Rules for every channel; empty means no rule matching by
+    # default.
+    defaultRules: []
+    # Rules keyed by Slack conversation id. Each list replaces defaultRules in
+    # its channel; an empty list turns rule matching off there. A list holds at
+    # most 20 rules with unique names. Example:
+    #   channelRules:
+    #     C0123456789:
+    #       - name: incident
+    #         when: |
+    #           Questions about an active incident: outages, rollbacks, and
+    #           alerts for services we own.
+    #         context: |
+    #           Check the service's dashboards and recent deploys first, then
+    #           reply in a few lines with what changed and a suggested next step.
+    #       - name: general
+    #         when: A direct question about a service we own.
+    #     C0987654321: []
+    channelRules: {}
   metrics:
     # slackbotv2 serves Prometheus text metrics at /metrics. This flag only
     # controls scrape annotations for Prometheus/VictoriaMetrics-style discovery.
@@ -951,6 +1063,17 @@ externalDatabase:
   # networkPolicy.enabled=true; must be empty while postgres.enabled=true.
   cidrs: []
   #   - 10.0.32.0/20
+  # Labels of the database's pods, for a database running in the cluster such
+  # as a CloudNativePG cluster. Control-plane pods and per-sandbox iron-proxies
+  # may reach these pods on port. Use this instead of cidrs for an in-cluster
+  # database: NetworkPolicy ipBlock rules may not match pod traffic. One of
+  # cidrs or podSelector is required when networkPolicy.enabled=true; both
+  # must be empty while postgres.enabled=true.
+  podSelector: {}
+  #   cnpg.io/cluster: core-db
+  # Namespace of those pods; requires podSelector. Empty means the release
+  # namespace.
+  namespace: ""
   port: 5432
   # Keyword search backend for company context. "postgres" (used when empty)
   # uses built-in full-text search and works on RDS and Cloud SQL; "paradedb"

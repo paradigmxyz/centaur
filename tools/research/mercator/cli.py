@@ -17,7 +17,8 @@ app = typer.Typer(
     help="Find, quote, and pay for external API calls through Mercator.",
     epilog=(
         "Agent workflow: search for the complete outcome, describe an endpoint when its "
-        "inputs are unclear, write a plan and quote it, then submit it with --max-spend and "
+        "inputs are unclear, write a plan containing only nodes, and pass the returned search "
+        "id via --search-id to quote and submit (never inside the plan). Submit with --max-spend and "
         "a new --idempotency-key. If submit fails, retry with the same key. Poll "
         "`mercator job JOB_ID` until the status is succeeded, partially_succeeded, or "
         "failed. Never resubmit a pending job.\n\n"
@@ -76,7 +77,13 @@ def search(
     ),
 ) -> None:
     """Find and rank service endpoints for an outcome. Free."""
-    _echo(_run(lambda client: client.search(query, limit=limit)))
+    result = _run(lambda client: client.search(query, limit=limit))
+    result["next_action"] = (
+        f"{result.get('next_action', '')} "
+        "In this CLI, pass the returned id via --search-id to quote and submit. "
+        "Keep id and searchId outside the plan JSON."
+    ).strip()
+    _echo(result)
 
 
 @app.command()
@@ -92,9 +99,12 @@ def describe(
 @app.command()
 def quote(
     plan_path: str = typer.Argument(..., help="Plan JSON file, or - for stdin."),
+    search_id: str | None = typer.Option(
+        None, "--search-id", help="Search response id; sent beside the plan, not inside it."
+    ),
 ) -> None:
     """Validate a plan and price every node without paying. Free."""
-    _echo(_run(lambda client: client.quote(_load_plan(plan_path))))
+    _echo(_run(lambda client: client.quote(_load_plan(plan_path), search_id=search_id)))
 
 
 @app.command()
@@ -108,12 +118,18 @@ def submit(
         "--idempotency-key",
         help="New key per job; reuse it only to retry a submit whose response was lost.",
     ),
+    search_id: str | None = typer.Option(
+        None, "--search-id", help="Search response id; sent beside the plan, not inside it."
+    ),
 ) -> None:
     """Quote a plan and pay for it if the total is within --max-spend."""
     _echo(
         _run(
             lambda client: client.submit(
-                _load_plan(plan_path), max_spend=max_spend, idempotency_key=idempotency_key
+                _load_plan(plan_path),
+                max_spend=max_spend,
+                idempotency_key=idempotency_key,
+                search_id=search_id,
             )
         )
     )

@@ -33,8 +33,8 @@ import pytest
 DATABASE_URL_ENV = "COMPANY_CONTEXT_TEST_DATABASE_URL"
 TOOL_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[4]
-SESSION_SQLX = REPO_ROOT / "services/api-rs/crates/centaur-session-sqlx"
-COMPANY_CONTEXT_SERVICE_MIGRATIONS = REPO_ROOT / "services/company-context/migrations"
+SESSION_SQLX = REPO_ROOT / "crates/centaur-session-sqlx"
+COMPANY_CONTEXT_SERVICE_MIGRATIONS = REPO_ROOT / "crates/centaur-company-context/migrations"
 IRON_PROXY_DOCKERFILE = REPO_ROOT / "services/iron-proxy/Dockerfile"
 EMBEDDING_DIMENSIONS = 1_536
 EMBEDDINGS_MODEL = "text-embedding-3-small"

@@ -20,10 +20,12 @@ jobs:
     runs-on: depot-ubuntu-24.04
     outputs:
       migration_order: ${{ steps.filter.outputs.migration_order }}
+      rust_checks: ${{ steps.filter.outputs.rust_checks }}
       harness_server_checks: ${{ steps.filter.outputs.harness_server_checks }}
       company_context_checks: ${{ steps.filter.outputs.company_context_checks }}
       rust_api: ${{ steps.filter.outputs.rust_api }}
       proxy_sync_checks: ${{ steps.filter.outputs.proxy_sync_checks }}
+      token_broker_checks: ${{ steps.filter.outputs.token_broker_checks }}
       sandbox_tests: ${{ steps.filter.outputs.sandbox_tests }}
       workflow_python_tests: ${{ steps.filter.outputs.workflow_python_tests }}
       tool_tests: ${{ steps.filter.outputs.tool_tests }}
@@ -62,45 +64,6 @@ jobs:
             return 1
           }
 
-          # Print a chart file without YAML/template comments and blank lines.
-          strip_chart_comments() {
-            case "$1" in
-              *.yaml | *.yml | *.tpl)
-                perl -0pe 's/\{\{-?\s*\/\*.*?\*\/\s*-?\}\}//gs; s/^[ \t]*#.*(\n|\z)//mg; s/^[ \t]*(\n|\z)//mg'
-                ;;
-              *) cat ;;
-            esac
-          }
-
-          chart_changed() {
-            local file
-            while IFS= read -r file; do
-              [[ -n "${file}" ]] || continue
-              if ! cmp -s \
-                <(git show "${base}:${file}" 2>/dev/null | strip_chart_comments "${file}") \
-                <(git show "HEAD:${file}" 2>/dev/null | strip_chart_comments "${file}"); then
-                return 0
-              fi
-            done < <(git diff --name-only --no-renames "${base}...HEAD" -- contrib/chart/)
-            return 1
-          }
-
-          if chart_changed; then
-            chart_yaml="contrib/chart/Chart.yaml"
-            previous_version="$(git show "${base}:${chart_yaml}" | awk '$1 == "version:" { print $2; exit }')"
-            current_version="$(awk '$1 == "version:" { print $2; exit }' "${chart_yaml}")"
-
-            if [[ -z "${previous_version}" || -z "${current_version}" ]]; then
-              echo "::error file=${chart_yaml}::Could not read chart version"
-              exit 1
-            fi
-
-            if [[ "${current_version}" == "${previous_version}" ]]; then
-              echo "::error file=${chart_yaml}::contrib/chart changed but chart version stayed at ${current_version}. Bump .version in the PR."
-              exit 1
-            fi
-          fi
-
           set_output() {
             local name="$1"
             shift
@@ -112,28 +75,47 @@ jobs:
           }
 
           set_output migration_order \
-            '^services/api-rs/crates/centaur-session-sqlx/migrations/' \
-            '^services/api-rs/crates/centaur-session-sqlx/search-migrations/' \
+            '^crates/centaur-session-sqlx/migrations/' \
+            '^crates/centaur-session-sqlx/search-migrations/' \
             '^services/console/db/migrate/' \
             '^\.github/scripts/check-migration-order\.sh$' \
             '^\.github/workflows/ci\.yml$'
+          set_output rust_checks \
+            '^Cargo\.(toml|lock)$' \
+            '^crates/' \
+            '^\.github/workflows/ci\.yml$'
           set_output harness_server_checks \
+            '^Cargo\.(toml|lock)$' \
             '^crates/harness-server/' \
+            '^crates/harness-server-conformance/' \
             '^\.github/workflows/ci\.yml$'
           set_output company_context_checks \
+            '^Cargo\.(toml|lock)$' \
             '^crates/absurd-sdk/' \
             '^crates/active-record-encryption/' \
-            '^services/company-context/' \
+            '^crates/centaur-company-context/' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
           set_output proxy_sync_checks \
+            '^Cargo\.(toml|lock)$' \
             '^crates/active-record-encryption/' \
-            '^services/proxy-sync/' \
+            '^crates/centaur-proxy-sync/' \
+            '^crates/centaur-console-db/' \
+            '^services/console/' \
+            '^\.github/scripts/start-test-postgres\.sh$' \
+            '^\.github/workflows/ci\.yml$'
+          set_output token_broker_checks \
+            '^Cargo\.(toml|lock)$' \
+            '^crates/active-record-encryption/' \
+            '^crates/centaur-token-broker/' \
             '^services/console/' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
           set_output rust_api \
+            '^Cargo\.(toml|lock)$' \
             '^crates/absurd-sdk/' \
+            '^crates/active-record-encryption/' \
+            '^crates/centaur-' \
             '^services/api-rs/' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^services/workflow-python/' \
@@ -151,8 +133,8 @@ jobs:
             '^centaur_sdk/' \
             '^\.github/scripts/run-tool-tests\.sh$' \
             '^\.github/scripts/start-test-postgres\.sh$' \
-            '^services/api-rs/crates/centaur-session-sqlx/(search-)?migrations/' \
-            '^services/company-context/migrations/' \
+            '^crates/centaur-session-sqlx/(search-)?migrations/' \
+            '^crates/centaur-company-context/migrations/' \
             '^services/iron-proxy/Dockerfile$' \
             '^\.github/workflows/ci\.yml$'
           set_output slackbotv2_tests \
@@ -195,8 +177,33 @@ jobs:
       - name: Check migration versions
         run: .github/scripts/check-migration-order.sh "origin/${{ github.base_ref || 'main' }}"
 
+  rust-checks:
+    name: Rust fmt and clippy
+    runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.rust_checks == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
   harness-server-checks:
-    name: Harness server fmt, clippy, and tests
+    name: Harness server tests
     runs-on: depot-ubuntu-24.04-16
     needs: ci_changes
     if: needs.ci_changes.outputs.harness_server_checks == 'true'
@@ -205,119 +212,101 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
-          components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          workspaces: crates/harness-server
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Format
-        working-directory: crates/harness-server
-        run: cargo fmt --all --check
-
-      - name: Clippy
-        working-directory: crates/harness-server
-        run: cargo clippy --locked --all-targets -- -D warnings
-
       - name: Test
-        working-directory: crates/harness-server
-        run: cargo test --locked
+        run: cargo test --locked -p harness-server
 
-  company-context-checks:
-    name: Company context fmt, clippy, and tests
+  harness-server-conformance:
+    name: Harness server Codex protocol conformance
     runs-on: depot-ubuntu-24.04-16
     needs: ci_changes
-    if: needs.ci_changes.outputs.company_context_checks == 'true'
-    defaults:
-      run:
-        working-directory: services/company-context
+    if: needs.ci_changes.outputs.harness_server_checks == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          workspaces: |
-            crates/absurd-sdk
-            crates/active-record-encryption
-            services/company-context
+          workspaces: crates/harness-server-conformance
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Format
+        working-directory: crates/harness-server-conformance
         run: cargo fmt --all --check
 
       - name: Clippy
+        working-directory: crates/harness-server-conformance
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Test
+        working-directory: crates/harness-server-conformance
+        run: cargo test --locked
+
+  company-context-checks:
+    name: Company context tests
+    runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.company_context_checks == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
       - name: Start Test Postgres
-        working-directory: .
         run: .github/scripts/start-test-postgres.sh company-context-test-postgres 5432 postgres
 
       - name: Test
         env:
           COMPANY_CONTEXT_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-        run: cargo test --locked
+        run: cargo test --locked -p centaur-company-context
 
   proxy-sync-checks:
-    name: Proxy sync fmt, clippy, and tests
+    name: Proxy sync tests
     runs-on: depot-ubuntu-24.04-16
     needs: ci_changes
     if: needs.ci_changes.outputs.proxy_sync_checks == 'true'
-    defaults:
-      run:
-        working-directory: services/proxy-sync
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
-          components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          workspaces: |
-            crates/active-record-encryption
-            services/proxy-sync
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Format Active Record encryption crate
-        working-directory: crates/active-record-encryption
-        run: cargo fmt --all --check
-
-      - name: Clippy Active Record encryption crate
-        working-directory: crates/active-record-encryption
-        run: cargo clippy --locked --all-targets -- -D warnings
-
       - name: Test Active Record encryption crate
-        working-directory: crates/active-record-encryption
-        run: cargo test --locked
-
-      - name: Format
-        run: cargo fmt --all --check
-
-      - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo test --locked -p active-record-encryption
 
       - name: Start test database
-        working-directory: .
         run: .github/scripts/start-test-postgres.sh proxy-sync-test-postgres 5432 proxy_sync_test pgvector
 
       - name: Install Console packages
         run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
 
-      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
         with:
           working-directory: services/console
           bundler-cache: true
@@ -331,13 +320,74 @@ jobs:
           CENTAUR_CONSOLE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/proxy_sync_test
         run: bin/rails db:prepare
 
+      - name: Test Console database crate
+        env:
+          CONSOLE_DB_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/proxy_sync_test
+        run: cargo test --locked -p centaur-console-db
+
       - name: Test
         env:
           PROXY_SYNC_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/proxy_sync_test
-        run: cargo test --locked
+        run: cargo test --locked -p centaur-proxy-sync
+
+  token-broker-checks:
+    name: Token broker tests
+    runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.token_broker_checks == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Start test database
+        run: .github/scripts/start-test-postgres.sh token-broker-test-postgres 5432 token_broker_test pgvector
+
+      - name: Install Console packages
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
+
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
+        with:
+          working-directory: services/console
+          bundler-cache: true
+
+      # token-broker reads and writes Console's tables directly, so its
+      # integration tests run against the schema Console currently ships.
+      - name: Load Console schema
+        working-directory: services/console
+        env:
+          RAILS_ENV: test
+          CENTAUR_CONSOLE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/token_broker_test
+        run: bin/rails db:prepare
+
+      - name: Test
+        env:
+          TOKEN_BROKER_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/token_broker_test
+        run: cargo test --locked -p centaur-token-broker
+
+      # The tests store tokens encrypted by token-broker; Console must read them.
+      - name: Decrypt token-broker's writes with Console
+        working-directory: services/console
+        env:
+          RAILS_ENV: test
+          CENTAUR_CONSOLE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/token_broker_test
+        run: |
+          bin/rails runner '
+            credentials = BrokerCredential.where.not(access_token: nil).to_a
+            abort "token-broker tests stored no tokens" if credentials.empty?
+            credentials.each { |credential| [credential.access_token, credential.refresh_token] }
+            puts "Console decrypted #{credentials.size} credentials token-broker wrote"'
 
   rust-api:
-    name: Rust API fmt, clippy, and tests
+    name: Rust API tests
     runs-on: depot-ubuntu-24.04-16
     needs: ci_changes
     if: needs.ci_changes.outputs.rust_api == 'true'
@@ -349,55 +399,41 @@ jobs:
       - name: Start Test Postgres
         run: .github/scripts/start-test-postgres.sh centaur-api-test-postgres 5432 centaur
 
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
-          components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          workspaces: |
-            crates/absurd-sdk
-            services/api-rs
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Format Absurd SDK
-        working-directory: crates/absurd-sdk
-        run: cargo fmt --all --check
-
-      - name: Clippy Absurd SDK
-        working-directory: crates/absurd-sdk
-        run: cargo clippy --locked --all-targets -- -D warnings
-
       - name: Test Absurd SDK
-        working-directory: crates/absurd-sdk
         env:
           ABSURD_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/absurd_sdk
         run: |
           docker exec centaur-api-test-postgres createdb -U postgres absurd_sdk
           docker exec -i centaur-api-test-postgres \
             psql -v ON_ERROR_STOP=1 -U postgres -d absurd_sdk \
-            < ../../services/api-rs/crates/centaur-session-sqlx/migrations/0007_absurd_workflows.sql
-          cargo test --locked -- --test-threads=1
+            < crates/centaur-session-sqlx/migrations/0007_absurd_workflows.sql
+          cargo test --locked -p absurd-sdk -- --test-threads=1
 
-      - name: Format
-        working-directory: services/api-rs
-        run: cargo fmt --all --check
-
-      - name: Clippy
-        working-directory: services/api-rs
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
+      # Every workspace crate not covered by its own service job above.
       - name: Test
-        working-directory: services/api-rs
         env:
           SESSION_SQLX_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: |
-          cargo test --workspace
+          cargo test --locked --workspace \
+            --exclude absurd-sdk \
+            --exclude active-record-encryption \
+            --exclude harness-server \
+            --exclude centaur-company-context \
+            --exclude centaur-proxy-sync \
+            --exclude centaur-token-broker \
+            --exclude centaur-console-db
 
           PGPASSWORD=postgres createdb --host localhost --username postgres session_runtime
           SESSION_RUNTIME_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/session_runtime \
-            cargo test -p centaur-session-runtime -- --test-threads=1
+            cargo test --locked -p centaur-session-runtime -- --test-threads=1
 
       - name: Cleanup Test Postgres
         if: ${{ always() }}
@@ -416,19 +452,17 @@ jobs:
       - name: Start Test Postgres
         run: .github/scripts/start-test-postgres.sh centaur-api-plain-postgres 5432 postgres pgvector
 
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          workspaces: services/api-rs
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Core migrations and the postgres text-search backend must not need
       # ParadeDB. The rust-api job covers both backends on ParadeDB.
       - name: Test SQLx migrations
-        working-directory: services/api-rs
         env:
           SESSION_SQLX_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: cargo test --locked -p centaur-session-sqlx
@@ -447,12 +481,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
 
       # Tool-host integration tests execute real CLIs through uvx.
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
 
       - name: Sandbox Python tests
         env:
@@ -470,11 +504,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
           prune-cache: true
@@ -502,11 +536,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
           prune-cache: true
@@ -530,13 +564,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24"
+          node-version: "24.22.1"
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
-          version: 10.28.1
+          version: 10.34.7
           run_install: false
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -556,13 +590,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24"
+          node-version: "24.22.1"
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
-          version: 10.28.1
+          version: 10.34.7
           run_install: false
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -588,13 +622,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24"
+          node-version: "24.22.1"
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
-          version: 10.28.1
+          version: 10.34.7
           run_install: false
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -622,13 +656,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24"
+          node-version: "24.22.1"
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
-          version: 10.28.1
+          version: 10.34.7
           run_install: false
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -656,13 +690,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24"
+          node-version: "24.22.1"
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
-          version: 10.28.1
+          version: 10.34.7
           run_install: false
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -685,9 +719,12 @@ jobs:
     needs:
       - ci_changes
       - migration-order
+      - rust-checks
       - harness-server-checks
+      - harness-server-conformance
       - company-context-checks
       - proxy-sync-checks
+      - token-broker-checks
       - rust-api
       - rust-api-postgres
       - sandbox-tests
@@ -702,5 +739,5 @@ jobs:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
-          allowed-skips: migration-order, harness-server-checks, company-context-checks, proxy-sync-checks, rust-api, rust-api-postgres, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
+          allowed-skips: migration-order, rust-checks, harness-server-checks, harness-server-conformance, company-context-checks, proxy-sync-checks, token-broker-checks, rust-api, rust-api-postgres, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
           jobs: ${{ toJSON(needs) }}

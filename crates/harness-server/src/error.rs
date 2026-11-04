@@ -16,8 +16,6 @@ pub enum HarnessServerError {
     Json(#[from] serde_json::Error),
     #[error("Codex App Server protocol conversion failed: {0}")]
     Protocol(String),
-    #[error("notification is not a Codex App Server V2 server notification: {message}")]
-    InvalidServerNotification { message: String },
     #[error("invalid request params: {source}")]
     InvalidParams {
         #[source]
@@ -31,10 +29,6 @@ pub enum HarnessServerError {
     Nanocodex(String),
     #[error("unknown threadId {thread_id}")]
     UnknownThread { thread_id: String },
-    #[error("cwd must be absolute: {path}")]
-    CwdMustBeAbsolute { path: PathBuf },
-    #[error("path must be absolute: {path}")]
-    PathMustBeAbsolute { path: PathBuf },
     #[error("failed to spawn harness command in {cwd}: {source}")]
     SpawnHarness {
         cwd: PathBuf,
@@ -73,6 +67,8 @@ pub enum HarnessServerError {
     CodexStdoutUnavailable,
     #[error("Codex stderr was not piped")]
     CodexStderrUnavailable,
+    #[error("Codex app-server transport disconnected: {0}")]
+    CodexTransport(#[source] io::Error),
     #[error("codex app-server exited with status {status}")]
     CodexExited { status: ExitStatus },
 }

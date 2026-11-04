@@ -4,11 +4,11 @@ use std::process::{Child, ChildStdin, Command as ProcessCommand};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
-use codex_app_server_protocol::{ThreadStartParams, Turn, UserInput};
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::error::Result;
+use crate::protocol::{ThreadStartParams, Turn, UserInput};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HarnessKind {

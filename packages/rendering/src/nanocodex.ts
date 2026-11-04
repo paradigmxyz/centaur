@@ -144,7 +144,7 @@ export class NanocodexRendererEventMapper
   }
 
   private interrupt(): RendererEvent[] {
-    if (!this.answer) this.answer = 'Execution interrupted'
+    if (!this.answer) this.answer = 'Execution interrupted.'
     return this.complete()
   }
 

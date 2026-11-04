@@ -31,7 +31,7 @@ Build from the repository root:
 
 ```bash
 sh -n services/iron-proxy/entrypoint.sh
-(cd services/api-rs && cargo test -p centaur-iron-proxy)
+cargo test -p centaur-iron-proxy
 ```
 
 For entrypoint changes, exercise both managed and unmanaged modes and the

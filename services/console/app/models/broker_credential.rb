@@ -1,7 +1,5 @@
-# A managed OAuth credential whose token lifecycle centaur-console owns itself:
-# the in-control port of iron-token-broker. control drives a refresh loop
-# (Broker::PollRefreshJob -> Broker::RefreshCredentialJob -> #refresh!) that
-# mints fresh access tokens before expiry.
+# A managed OAuth credential. centaur-token-broker refreshes its access token
+# before expiry, working directly on this table.
 #
 # The minted access token reaches iron-proxy through the normal /sync path: a
 # `token_broker` SecretSource on some grantable secret references this credential
@@ -11,7 +9,7 @@
 #
 # The OAuth credentials it refreshes with -- client_id, optional client_secret,
 # optional username/password/api_key, and any token-endpoint headers -- are fields
-# on the credential, resolved by control itself. client_id is not secret; every
+# on the credential. client_id is not secret; every
 # other credential value is encrypted at rest.
 class BrokerCredential < ApplicationRecord
   oid_prefix "bcr"
@@ -21,19 +19,15 @@ class BrokerCredential < ApplicationRecord
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
   URL_SAFE_MESSAGE = "must contain only URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)"
 
-  PREQIN_TOKEN_ENDPOINT = Broker::CredentialGrants::PREQIN_TOKEN_ENDPOINT
-  GRANTS = Broker::CredentialGrants::GRANTS
+  PREQIN_TOKEN_ENDPOINT = "https://api.preqin.com/connect/token".freeze
+  GRANTS = %w[refresh_token client_credentials password preqin].freeze
 
   # The access token must keep at least this much life past the scheduled
-  # refresh, regardless of slack/fraction. Mirrors the 60s floor in
-  # iron-token-broker's nextRefreshAt.
+  # refresh, regardless of slack/fraction. Matches centaur-token-broker.
   REFRESH_FLOOR_SECONDS = 60
-  # IdPs that omit expires_in get a conservative default so the loop refreshes
-  # before the token quietly stops working. Mirrors refreshOnce.
+  # IdPs that omit expires_in get a conservative default so the token is
+  # refreshed before it quietly stops working. Matches centaur-token-broker.
   DEFAULT_EXPIRES_IN_SECONDS = 5 * 60
-  # Exponential backoff for retryable failures: base 5s, doubling, capped at 5m.
-  BACKOFF_BASE_SECONDS = 5
-  BACKOFF_MAX_SECONDS = 5 * 60
 
   # Optional: a flow-minted credential has no console operator behind it (the
   # public consent flow runs unauthenticated).
@@ -46,8 +40,6 @@ class BrokerCredential < ApplicationRecord
   # the before_destroy guard below already blocks deletion while a token_broker
   # source still references the credential.
   has_one :static_secret, dependent: :nullify
-
-  attr_writer :refresh_client
 
   # Refuse to delete a credential that token_broker sources still reference: there
   # is no FK to cascade or nullify, so deletion would silently leave those secrets
@@ -66,15 +58,6 @@ class BrokerCredential < ApplicationRecord
   encrypts :api_key
   encrypts :token_endpoint_headers
 
-  scope :refreshable, -> {
-    where(dead: false)
-      .where("(\"broker_credentials\".\"grant\" = ? AND " \
-             "(last_refresh IS NULL OR refresh_token IS NOT NULL)) OR " \
-             "\"broker_credentials\".\"grant\" IN (?)",
-             "refresh_token", Broker::CredentialGrants::REFRESHABLE_WITHOUT_TOKEN_GRANTS)
-      .where("next_attempt_at IS NULL OR next_attempt_at <= ?", Time.current)
-  }
-
   validates :grant, inclusion: { in: GRANTS, message: "must be one of #{GRANTS.join(", ")}" }
   validates :foreign_id, uniqueness: { allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
@@ -82,7 +65,7 @@ class BrokerCredential < ApplicationRecord
   validates :token_endpoint, presence: true
   # client_id is sourced from the linked OauthApp for flow-minted credentials, so
   # it is only required for standalone grants whose strategy uses it.
-  validates :client_id, presence: true, if: -> { Broker::CredentialGrants.client_id_required?(self) }
+  validates :client_id, presence: true, if: -> { grant != "preqin" && !oauth_app_id? }
   validates :external_user_key, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE },
             length: { maximum: 128 }, allow_nil: true
   validates :early_refresh_fraction,
@@ -110,19 +93,7 @@ class BrokerCredential < ApplicationRecord
 
   def preqin? = grant == "preqin"
 
-  # Used by broker grant strategies. Kept public so tests can inject a stub via
-  # attr_writer and the strategy registry can stay outside the ActiveRecord model.
-  def refresh_client
-    @refresh_client ||= Broker::RefreshClient.new
-  end
-
-  def refresh_scopes_for_provider
-    oauth_app&.provider_strategy&.refresh_scopes(scopes) || scopes
-  end
-
-  # --- Refresh state machine (ported from iron-token-broker credential.go) ----
-
-  # The wall-clock time the loop should next refresh. min(early-trigger,
+  # The wall-clock time centaur-token-broker should next refresh. min(early-trigger,
   # max-interval-ceiling) with a 60s floor before expiry. A credential that has
   # never refreshed (no blob) is due immediately.
   def compute_next_attempt_at(now: Time.current)
@@ -141,88 +112,10 @@ class BrokerCredential < ApplicationRecord
     [ early, ceiling ].min
   end
 
-  # Performs one refresh attempt under a row lock (the single-writer guarantee:
-  # concurrent refresh attempts serialize on the same row, so the refresh family
-  # is never used twice concurrently). Persists the outcome --
-  # success advances the blob + schedules the next refresh, a retryable failure
-  # schedules a backoff retry, and an unrecoverable failure marks the credential
-  # dead. Never raises for an IdP/config failure; the state is in the row.
-  def refresh!(now: Time.current)
-    with_lock do
-      return if dead?
-      # Poll ticks can enqueue the same credential more than once while an
-      # earlier refresh job is still waiting. Re-check the schedule after
-      # taking the row lock so jobs queued before a successful refresh become
-      # no-ops instead of rotating the newly issued token again.
-      return if next_attempt_at.present? && next_attempt_at > now
-
-      outcome = perform_refresh
-      if outcome.dead_reason
-        mark_dead!(outcome.dead_reason)
-      elsif outcome.result
-        apply_success!(
-          outcome.result,
-          now: now,
-          clear_refresh_token: outcome.clear_refresh_token
-        )
-      end
-    rescue Broker::RefreshError => e
-      if e.retryable?
-        record_retryable_failure(e.message, now: now)
-      else
-        mark_dead!(e.reason)
-      end
-    end
-  end
-
   private
 
   def auto_grant_matching_principals
     PrincipalCredentialReconciliation.new.apply_for_credential(self)
-  end
-
-  def perform_refresh
-    Broker::CredentialGrants.refresh(self)
-  end
-
-  def apply_success!(result, now:, clear_refresh_token:)
-    expires_in = result.expires_in&.positive? ? result.expires_in : DEFAULT_EXPIRES_IN_SECONDS
-    attrs = {
-      access_token: result.access_token,
-      expires_at: now + expires_in,
-      last_refresh: now,
-      failure_count: 0,
-      dead: false,
-      dead_reason: nil
-    }
-    # Carry the previous refresh_token forward when the IdP did not rotate.
-    if result.refresh_token.present?
-      attrs[:refresh_token] = result.refresh_token
-    elsif clear_refresh_token
-      attrs[:refresh_token] = nil
-    end
-    assign_attributes(attrs)
-    self.next_attempt_at = compute_next_attempt_at(now: now)
-    save!
-    Rails.logger.info { "broker credential #{oid} refreshed; expires_at=#{expires_at.iso8601}" }
-  end
-
-  def record_retryable_failure(reason, now:)
-    self.failure_count += 1
-    self.next_attempt_at = now + backoff_delay(failure_count)
-    save!
-    Rails.logger.warn { "broker credential #{oid} refresh failed (retryable, attempt #{failure_count}): #{reason}" }
-  end
-
-  def mark_dead!(reason)
-    assign_attributes(dead: true, dead_reason: reason)
-    save!(validate: false)
-    Rails.logger.error { "broker credential #{oid} marked dead; human re-auth required: reason=#{reason}" }
-  end
-
-  def backoff_delay(attempt)
-    exp = BACKOFF_BASE_SECONDS * (2**[ attempt - 1, 6 ].min)
-    [ exp, BACKOFF_MAX_SECONDS ].min
   end
 
   def foreign_id_cannot_change
@@ -262,7 +155,16 @@ class BrokerCredential < ApplicationRecord
   end
 
   def grant_credentials_present
-    Broker::CredentialGrants.validate(self)
+    case grant
+    when "client_credentials"
+      errors.add(:client_secret, "can't be blank for the client_credentials grant") if effective_client_secret.blank?
+    when "password"
+      errors.add(:username, "can't be blank for the password grant") if username.blank?
+      errors.add(:password, "can't be blank for the password grant") if password.blank?
+    when "preqin"
+      errors.add(:username, "can't be blank for the Preqin broker grant") if username.blank?
+      errors.add(:api_key, "can't be blank for the Preqin broker grant") if api_key.blank?
+    end
   end
 
   def token_endpoint_headers_valid
@@ -275,6 +177,6 @@ class BrokerCredential < ApplicationRecord
   def default_preqin_token_endpoint
     return unless grant == "preqin"
 
-    self.token_endpoint = Broker::CredentialGrants.default_token_endpoint(grant)
+    self.token_endpoint = PREQIN_TOKEN_ENDPOINT
   end
 end

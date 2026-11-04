@@ -148,7 +148,7 @@ check_migrations() {
   fi
 }
 
-sqlx_crate="services/api-rs/crates/centaur-session-sqlx"
+sqlx_crate="crates/centaur-session-sqlx"
 check_migrations \
   "SQLx" \
   '^([0-9]+)_.+\.sql$' \

@@ -14,7 +14,7 @@ description: "Write, run, and debug Centaur's end-to-end tests under e2e/. Use w
 
 Tests in `e2e/tests/*.test.ts` run under `bun test` on the host and reach the fakes, Postgres, and api-rs through NodePorts. `e2e/lib/index.ts` is the test vocabulary: `slack`, `model`, `api`, `cluster`, `workflows`, `ironControl`, and `Thread`. Shared Slack identities live in `e2e/fakes/slack-fixture.ts`. Stack configuration lives in `e2e/infra/`.
 
-CI (`.github/workflows/publish-images.yml`) runs every scenario against the published images with API keys, and runs `harnesses.test.ts` alone in subscription (`access_token`) mode.
+CI (`.github/workflows/e2e.yml`, called by `publish-images.yml` and runnable manually against any published tag) runs every scenario against the published images with API keys, and runs `harnesses.test.ts` alone in subscription (`access_token`) mode.
 
 ## Running
 

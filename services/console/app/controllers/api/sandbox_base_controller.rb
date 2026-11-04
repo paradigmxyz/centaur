@@ -1,6 +1,7 @@
 module Api
   class SandboxBaseController < ActionController::API
     include ApiRequestSupport
+    include SandboxTokenAuthentication
 
     before_action :authenticate_sandbox_token!
 
@@ -9,25 +10,7 @@ module Api
     rescue_from ActiveRecord::RecordNotUnique, with: :render_record_not_unique
     rescue_from ActiveRecord::StaleObjectError, with: :render_stale_object
 
-    attr_reader :current_proxy, :sandbox_claims
-
     private
-
-    def authenticate_sandbox_token!
-      token = bearer_token
-      return render_error(status: :unauthorized, message: "invalid or missing sandbox token") if token.blank?
-
-      claims = SandboxEntitlements::Jwt.decode(token)
-      proxy = Proxy.find_by_oid(claims["proxy_id"])
-      valid = proxy&.assigned? && proxy.principal&.oid == claims["principal_id"] &&
-        proxy.name == claims["sandbox_id"]
-      return render_error(status: :unauthorized, message: "invalid sandbox token") unless valid
-
-      @sandbox_claims = claims
-      @current_proxy = proxy
-    rescue CentaurJwt::Hs256::VerificationError
-      render_error(status: :unauthorized, message: "invalid or missing sandbox token")
-    end
 
     def render_not_found(error)
       render_error(status: :not_found, message: error.message)

@@ -7,7 +7,8 @@ sandbox assignment and recovery, execution serialization, workflow state,
 service authentication, and control-plane telemetry. Postgres is the source of
 truth; process-local maps and attach streams are recoverable caches.
 
-Important crate boundaries:
+Its crates live in the repository-root `crates/` directory and build in the
+repository-wide Cargo workspace. Important crate boundaries:
 
 - `centaur-api-server`: HTTP routes, middleware, startup, health, and metrics.
 - `centaur-session-core`: shared session types and backend-neutral contracts.
@@ -15,7 +16,7 @@ Important crate boundaries:
 - `centaur-session-sqlx`: persistence and embedded SQLx migrations.
 - `centaur-sandbox-*`: backend-neutral sandbox contract and implementations.
 - `centaur-workflows`: durable workflow scheduling and state, built on the
-  shared `crates/absurd-sdk` library.
+  shared `absurd-sdk` crate.
 - `centaur-iron-control`, `centaur-iron-proxy`, and `centaur-perms`: credential
   control-plane integration and authorization resources.
 - `centaur-telemetry`: shared tracing and metrics support.
@@ -62,7 +63,7 @@ disposable Postgres as required by the packages you run:
 - `SESSION_RUNTIME_TEST_DATABASE_URL`: session SQLx, runtime, and warm-pool
   tests; the SQLx RLS integration tests also accept it as a fallback.
 - `SESSION_SQLX_TEST_DATABASE_URL`: SQLx RLS integration tests specifically.
-- `ABSURD_TEST_DATABASE_URL`: top-level `crates/absurd-sdk` database tests;
+- `ABSURD_TEST_DATABASE_URL`: `absurd-sdk` database tests;
   initialize the database with the Absurd schema before running them.
 
 Tests that share `SESSION_RUNTIME_TEST_DATABASE_URL` migrate it with the
@@ -77,7 +78,7 @@ relevant variables were set and the database-backed tests actually ran.
 
 ## Validation
 
-From `services/api-rs`:
+From the repository root:
 
 ```bash
 cargo fmt --all --check
@@ -91,12 +92,7 @@ During iteration, prefer a focused package/test first, for example:
 cargo test -p centaur-session-runtime
 cargo test -p centaur-session-sqlx
 cargo test -p centaur-workflows
-```
-
-The shared Absurd SDK is validated separately from the API workspace:
-
-```bash
-cargo test --manifest-path ../../crates/absurd-sdk/Cargo.toml
+cargo test -p absurd-sdk
 ```
 
 Sandbox lifecycle, session handoff, and harness selection are covered end to

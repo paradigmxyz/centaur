@@ -9,7 +9,8 @@ class HttpClient
   REQUEST_CLASSES = {
     delete: Net::HTTP::Delete,
     get: Net::HTTP::Get,
-    post: Net::HTTP::Post
+    post: Net::HTTP::Post,
+    put: Net::HTTP::Put
   }.freeze
 
   Response = Struct.new(:status, :body, :headers, keyword_init: true) do

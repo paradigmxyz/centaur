@@ -276,6 +276,12 @@ spec:
 {{- end }}
             - name: IRON_CONTROL_SYNC_INFRA_SECRETS
               value: {{ .Values.apiRs.syncInfraSecrets | quote }}
+{{- with .Values.slackbotv2.externalOrgAllowlist }}
+            # Deprecated: seeds the Slack Connect allowlist once when upgrading
+            # from this Helm value. Manage it in Console Settings.
+            - name: SLACKBOT_EXTERNAL_ORG_ALLOWLIST
+              value: {{ . | quote }}
+{{- end }}
             - name: RUST_LOG
               value: info
             - name: TOOL_DIRS
@@ -364,6 +370,12 @@ spec:
               value: {{ .Values.apiRs.activitySummary.maxOutputTokens | quote }}
             - name: SESSION_ACTIVITY_SUMMARY_REASONING_EFFORT
               value: {{ .Values.apiRs.activitySummary.reasoningEffort | default "" | quote }}
+            - name: SESSION_PROGRESS_UPDATE_ENABLED
+              value: {{ .Values.apiRs.activitySummary.progressUpdates.enabled | quote }}
+            - name: SESSION_PROGRESS_UPDATE_AFTER_SECS
+              value: {{ .Values.apiRs.activitySummary.progressUpdates.afterSecs | quote }}
+            - name: SESSION_PROGRESS_UPDATE_INTERVAL_SECS
+              value: {{ .Values.apiRs.activitySummary.progressUpdates.intervalSecs | quote }}
 {{- end }}
             - name: SESSION_SANDBOX_K8S_NAMESPACE
               value: {{ .Release.Namespace | quote }}
@@ -402,6 +414,14 @@ spec:
             - name: SESSION_SANDBOX_POD_ANNOTATIONS
               value: {{ toJson .Values.sandbox.podAnnotations | quote }}
 {{- end }}
+{{- if and (kindIs "bool" .Values.sandbox.hostUsers) (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_HOST_USERS")) }}
+            - name: SESSION_SANDBOX_HOST_USERS
+              value: {{ .Values.sandbox.hostUsers | quote }}
+{{- end }}
+{{- if and .Values.sandbox.containerSecurityContext (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_CONTAINER_SECURITY_CONTEXT")) }}
+            - name: SESSION_SANDBOX_CONTAINER_SECURITY_CONTEXT
+              value: {{ toJson .Values.sandbox.containerSecurityContext | quote }}
+{{- end }}
 {{- if and .Values.sandbox.tolerations (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_TOLERATIONS")) }}
             - name: SESSION_SANDBOX_TOLERATIONS
               value: {{ toJson .Values.sandbox.tolerations | quote }}
@@ -435,11 +455,35 @@ spec:
               value: {{ .Values.ironProxy.image.pullPolicy | quote }}
             - name: KUBERNETES_IRON_PROXY_UPSTREAM_DENY_CIDRS
               value: {{ join "," .Values.ironProxy.upstreamDenyCidrs | quote }}
-{{- if and (not .Values.postgres.enabled) .Values.externalDatabase.cidrs }}
             # Per-sandbox iron-proxies forward the tool-server sidecar's pool to
-            # the core database; allow them to reach the external database.
+            # the core database; allow them to reach it and no other in-cluster
+            # Postgres.
+{{- if .Values.postgres.enabled }}
+{{- $databasePodLabels := list }}
+{{- range $key, $value := fromYaml (include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres")) }}
+{{- $databasePodLabels = append $databasePodLabels (printf "%s=%s" $key $value) }}
+{{- end }}
+            - name: KUBERNETES_IRON_PROXY_DATABASE_POD_LABEL_SELECTOR
+              value: {{ join "," $databasePodLabels | quote }}
+            - name: KUBERNETES_IRON_PROXY_DATABASE_PORT
+              value: "5432"
+{{- else if or .Values.externalDatabase.cidrs .Values.externalDatabase.podSelector }}
+{{- with .Values.externalDatabase.cidrs }}
             - name: KUBERNETES_IRON_PROXY_DATABASE_CIDRS
-              value: {{ join "," .Values.externalDatabase.cidrs | quote }}
+              value: {{ join "," . | quote }}
+{{- end }}
+{{- with .Values.externalDatabase.podSelector }}
+{{- $databasePodLabels := list }}
+{{- range $key, $value := . }}
+{{- $databasePodLabels = append $databasePodLabels (printf "%s=%s" $key $value) }}
+{{- end }}
+            - name: KUBERNETES_IRON_PROXY_DATABASE_POD_LABEL_SELECTOR
+              value: {{ join "," $databasePodLabels | quote }}
+{{- with $.Values.externalDatabase.namespace }}
+            - name: KUBERNETES_IRON_PROXY_DATABASE_NAMESPACE
+              value: {{ . | quote }}
+{{- end }}
+{{- end }}
             - name: KUBERNETES_IRON_PROXY_DATABASE_PORT
               value: {{ .Values.externalDatabase.port | quote }}
 {{- end }}
@@ -555,6 +599,15 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sIRON_CONTROL_INITIAL_API_KEY" .Values.secretManager.envPrefix }}
+            # Principals and their effective config are read from the console
+            # database directly, in read-only sessions.
+            - name: IRON_CONTROL_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sIRON_CONTROL_DATABASE_URL" .Values.secretManager.envPrefix }}
+            - name: IRON_CONTROL_DATABASE_NAME
+              value: {{ $console.database.name | quote }}
 {{- if and .Values.toolServer.enabled (not .Values.toolServer.repo) (eq (len $toolSources) 0) }}
 {{- fail "toolServer.repo (owner/name) must be set when toolServer.enabled=true" }}
 {{- end }}
@@ -671,10 +724,6 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {{ $apiRsName }}
-{{- with $apiRsMetricsAnnotations }}
-  annotations:
-{{ toYaml . | nindent 4 }}
-{{- end }}
   labels:
 {{ include "centaur.componentLabels" (dict "root" . "component" "api-rs") | nindent 4 }}
 spec:

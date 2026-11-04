@@ -132,6 +132,85 @@ class Api::V1::SandboxSkillsControllerTest < ActionDispatch::IntegrationTest
     assert_not_nil skill.reload.archived_at
   end
 
+  test "creates a private skill visible only to its owner" do
+    with_token(@member_proxy) do |headers|
+      post "/api/v1/sandbox/skills",
+           params: { data: { name: "personal-checks", description: "Personal checklist.",
+                             instructions: "# Personal checks", visibility: "private" } },
+           headers: headers,
+           as: :json
+    end
+    assert_response :created
+    assert_equal "private", json_body.dig("data", "visibility")
+    skill = users(:member_user).skills.find_by!(name: "personal-checks")
+    assert_nil skill.shared_at
+
+    with_token(@member_proxy) do |headers|
+      get "/api/v1/sandbox/skills/#{skill.oid}", headers: headers
+    end
+    assert_response :ok
+
+    with_token(@member_proxy) do |headers|
+      get "/api/v1/sandbox/skills", params: { scope: "private" }, headers: headers
+    end
+    assert_response :ok
+    assert_includes json_body.fetch("data").pluck("id"), skill.oid
+
+    other_proxy = proxies(:globex_proxy)
+    other_proxy.principal.update!(console_user: users(:globex_admin))
+    [ @channel_proxy, other_proxy ].each do |proxy|
+      with_token(proxy) do |headers|
+        get "/api/v1/sandbox/skills/#{skill.oid}", headers: headers
+      end
+      assert_response :not_found
+
+      with_token(proxy) do |headers|
+        get "/api/v1/sandbox/skills", headers: headers
+      end
+      assert_response :ok
+      refute_includes json_body.fetch("data").pluck("id"), skill.oid
+
+      with_token(proxy) do |headers|
+        get "/api/v1/sandbox/skills/search", params: { q: "personal-checks" }, headers: headers
+      end
+      assert_response :ok
+      refute_includes json_body.fetch("data").pluck("id"), skill.oid
+    end
+  end
+
+  test "creates an explicitly shared skill" do
+    with_token(@member_proxy) do |headers|
+      post "/api/v1/sandbox/skills",
+           params: { data: { name: "shared-checks", description: "Team checklist.",
+                             instructions: "# Team checks", visibility: "shared" } },
+           headers: headers,
+           as: :json
+    end
+    assert_response :created
+    assert_equal "shared", json_body.dig("data", "visibility")
+    skill = users(:member_user).skills.find_by!(name: "shared-checks")
+    assert_not_nil skill.shared_at
+
+    with_token(@channel_proxy) do |headers|
+      get "/api/v1/sandbox/skills/#{skill.oid}", headers: headers
+    end
+    assert_response :ok
+  end
+
+  test "rejects invalid visibility without creating a skill" do
+    assert_no_difference("Skill.count") do
+      with_token(@member_proxy) do |headers|
+        post "/api/v1/sandbox/skills",
+             params: { data: { name: "invalid-checks", description: "Invalid checklist.",
+                               instructions: "# Checks", visibility: "invalid" } },
+             headers: headers,
+             as: :json
+      end
+    end
+    assert_response :unprocessable_entity
+    assert_includes json_body.dig("error", "details"), "visibility"
+  end
+
   test "editor principal reads and updates a private skill but cannot archive it" do
     skill = skills(:other_private)
     skill.editors << users(:member_user)
@@ -147,6 +226,7 @@ class Api::V1::SandboxSkillsControllerTest < ActionDispatch::IntegrationTest
               data: {
                 name: skill.name,
                 description: "Updated by a collaborator.",
+                visibility: "shared",
                 instructions: skill.content,
                 lock_version: skill.lock_version
               }
@@ -156,6 +236,8 @@ class Api::V1::SandboxSkillsControllerTest < ActionDispatch::IntegrationTest
     end
     assert_response :ok
     assert_equal "Updated by a collaborator.", skill.reload.description
+    assert_equal "private", skill.visibility
+    assert_nil skill.shared_at
 
     with_token(@member_proxy) do |headers|
       delete "/api/v1/sandbox/skills/#{skill.oid}", headers: headers

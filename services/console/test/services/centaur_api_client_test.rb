@@ -71,6 +71,19 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     http.verify
   end
 
+  test "replaces Slack external team ids" do
+    http = Minitest::Mock.new
+    expect_request(http, status: 200, body: { slack_external_team_ids: [ "T0PARTNER" ] }.to_json) do |request|
+      assert_equal :put, request[:method]
+      assert_equal "http://api.internal:8080/api/slack/external-team-ids", request[:url]
+      assert_equal({ "slack_external_team_ids" => [ "t0partner" ] }, JSON.parse(request[:body]))
+    end
+    client = api_client(base_url: "http://api.internal:8080", http: http)
+
+    assert_equal [ "T0PARTNER" ], client.replace_slack_external_team_ids([ "t0partner" ])
+    http.verify
+  end
+
   test "supports a longer read timeout for sync batches" do
     http = Minitest::Mock.new
     expect_request(http, status: 200, body: { ok: true }.to_json) do |request|

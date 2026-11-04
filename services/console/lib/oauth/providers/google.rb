@@ -1,16 +1,11 @@
-require "base64"
-require "json"
-
 module Oauth
   module Providers
     # Google consent-flow strategy. Owns Google's authorization/token endpoints,
     # the extra authorization params that guarantee a refresh token, and how to
     # pull a stable account identity (sub/email) out of a code-exchange result.
-    #
-    # SECURITY: identity extraction touches the id_token, which carries the
-    # account identity but no tokens. As elsewhere under Broker/Oauth, nothing
-    # here logs token material.
     class Google
+      include IdTokenIdentity
+
       KEY = "google"
       AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
       TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
@@ -46,23 +41,11 @@ module Oauth
       def extra_authorization_params = { "access_type" => "offline", "prompt" => "consent" }
 
       # Extracts { subject:, email: } from a successful code-exchange result.
-      # Decodes the id_token payload without verifying its signature: the token
-      # came directly from Google's token endpoint over TLS, which OIDC Core
-      # 3.1.3.7.6 accepts as sufficient. Sanity-checks aud == client_id and
-      # iss in the known Google issuers. Raises Broker::ExchangeError on any
-      # mismatch or a missing/undecodable id_token.
+      # Sanity-checks aud == client_id and iss in the known Google issuers. Raises
+      # Broker::ExchangeError on any mismatch or a missing/undecodable id_token.
       def identity_from(result, client_id:, http_client: nil)
-        if result.id_token.blank?
-          raise Broker::ExchangeError.new("token response carried no id_token",
-                                          stage: "oauth", code: "missing_id_token")
-        end
-
-        claims = decode_id_token_claims(result.id_token)
-
-        unless claims["aud"] == client_id
-          raise Broker::ExchangeError.new("id_token aud did not match client_id",
-                                          stage: "oauth", code: "id_token_aud_mismatch")
-        end
+        claims = id_token_claims(result)
+        require_audience!(claims, client_id)
         unless VALID_ISSUERS.include?(claims["iss"])
           raise Broker::ExchangeError.new("id_token iss was not a Google issuer",
                                           stage: "oauth", code: "id_token_iss_invalid")
@@ -75,18 +58,6 @@ module Oauth
         end
 
         { subject: subject, email: claims["email"] }
-      end
-
-      private
-
-      # Decodes the JWT payload (second segment), tolerating the unpadded
-      # base64url JWTs use. No signature verification -- see identity_from.
-      def decode_id_token_claims(id_token)
-        seg = id_token.split(".")[1].to_s
-        seg += "=" * ((4 - seg.length % 4) % 4)
-        JSON.parse(Base64.urlsafe_decode64(seg))
-      rescue ArgumentError, JSON::ParserError
-        raise Broker::ExchangeError.new("id_token payload did not decode", stage: "parse")
       end
     end
   end

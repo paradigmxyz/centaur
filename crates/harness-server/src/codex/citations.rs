@@ -1,18 +1,19 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 
-use codex_utils_stream_parser::{InlineHiddenTagParser, InlineTagSpec, StreamTextParser};
 use serde_json::{Value, json};
 
+use self::inline_tag::{InlineTagParser, InlineTagSpec};
 use self::sources::CitationSources;
 use crate::Result;
 use crate::util::write_value;
 
+mod inline_tag;
 mod sources;
 
 #[derive(Default)]
 pub(super) struct CodexCitationFilter {
-    parsers: BTreeMap<(String, String, String), InlineHiddenTagParser<()>>,
+    parsers: BTreeMap<(String, String, String), InlineTagParser>,
     sources: BTreeMap<String, CitationSources>,
 }
 
@@ -131,15 +132,13 @@ impl CodexCitationFilter {
     }
 }
 
-fn citation_parser() -> InlineHiddenTagParser<()> {
-    InlineHiddenTagParser::new(vec![
+fn citation_parser() -> InlineTagParser {
+    InlineTagParser::new(vec![
         InlineTagSpec {
-            tag: (),
             open: "cite",
             close: "",
         },
         InlineTagSpec {
-            tag: (),
             open: "cite:ship:",
             close: ":walking:",
         },
@@ -188,11 +187,7 @@ fn normalize_thread(thread: &mut Value, sources: &mut CitationSources) {
     }
 }
 
-fn render_chunk(
-    parser: &mut InlineHiddenTagParser<()>,
-    text: &str,
-    sources: &mut CitationSources,
-) -> String {
+fn render_chunk(parser: &mut InlineTagParser, text: &str, sources: &mut CitationSources) -> String {
     let mut visible = String::new();
     let mut start = 0;
     for (index, character) in text.char_indices() {
@@ -201,7 +196,7 @@ fn render_chunk(
             let parsed = parser.push_str(&text[start..end]);
             visible.push_str(&parsed.visible_text);
             for citation in parsed.extracted {
-                visible.push_str(&sources.render(&citation.content));
+                visible.push_str(&sources.render(&citation));
             }
             start = end;
         }
@@ -210,17 +205,17 @@ fn render_chunk(
         let parsed = parser.push_str(&text[start..]);
         visible.push_str(&parsed.visible_text);
         for citation in parsed.extracted {
-            visible.push_str(&sources.render(&citation.content));
+            visible.push_str(&sources.render(&citation));
         }
     }
     visible
 }
 
-fn finish_text(parser: &mut InlineHiddenTagParser<()>, sources: &mut CitationSources) -> String {
+fn finish_text(parser: &mut InlineTagParser, sources: &mut CitationSources) -> String {
     let parsed = parser.finish();
     let mut visible = parsed.visible_text;
     for citation in parsed.extracted {
-        visible.push_str(&sources.render(&citation.content));
+        visible.push_str(&sources.render(&citation));
     }
     visible
 }

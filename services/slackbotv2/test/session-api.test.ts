@@ -339,7 +339,7 @@ describe('session event streaming', () => {
 
     expect(events).toEqual([
       {
-        data: { error: 'Execution interrupted' },
+        data: { error: 'Execution interrupted.' },
         event: 'session.execution_cancelled',
         eventId: 1,
         eventKind: 'session.execution_cancelled'

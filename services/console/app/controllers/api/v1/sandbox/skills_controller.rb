@@ -26,7 +26,9 @@ module Api
         end
 
         def create
-          skill = authoring_user.skills.create!(skill_params.except(:lock_version))
+          attributes = skill_params.except(:lock_version)
+          attributes.merge!(params.require(:data).permit(:visibility))
+          skill = authoring_user.skills.create!(attributes)
           render json: { data: author_payload(skill) }, status: :created
         end
 

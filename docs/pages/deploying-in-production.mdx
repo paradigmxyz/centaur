@@ -75,7 +75,7 @@ component. Add these keys to the same infra Secret:
 
 | Secret | Required for | Notes |
 |--------|--------------|-------|
-| `IRON_CONTROL_DATABASE_URL` | Console database | May use the bundled Postgres server. Keep the Console in its own logical database. |
+| `IRON_CONTROL_DATABASE_URL` | Console database, also read by api-rs and proxy-sync | May use the bundled Postgres server. Keep the Console in its own logical database. |
 | `IRON_CONTROL_INITIAL_USER_EMAIL` | Initial Console admin | Used only to create the first user when no user exists. |
 | `IRON_CONTROL_INITIAL_USER_PASSWORD` | Initial Console admin | Minimum 12 characters. Use a generated break-glass password. |
 | `IRON_CONTROL_INITIAL_API_KEY` | api-rs and `centaur-perms` | Must be `iak_` followed by 64 lowercase hexadecimal characters. |
@@ -122,7 +122,7 @@ Codex credential in a 1Password item named `OPENAI_API_KEY`. To run Codex
 through OpenRouter, store `OPENROUTER_API_KEY` and set `OPENROUTER_MODEL` to a
 model slug such as `openrouter/auto`, or set `CODEX_MODEL_PROVIDER=openrouter`
 alongside `CODEX_MODEL`. Per-turn Codex model overrides with provider-style
-slugs such as `--model anthropic/claude-fable-5` also select the OpenRouter
+slugs such as `--model anthropic/claude-fable-5-1` also select the OpenRouter
 provider even when `OPENROUTER_MODEL` is unset.
 
 To run Codex through Meta AI direct, store `META_AI_API_KEY` and select the
@@ -215,7 +215,7 @@ To bootstrap `access_token` mode:
 3. Create the broker credential with the refresh token from the same login:
 
    ```bash
-   cargo run --manifest-path services/api-rs/Cargo.toml -p centaur-perms -- \
+   cargo run -p centaur-perms -- \
      broker create --foreign-id openai-codex \
      --token-endpoint https://auth.openai.com/oauth/token \
      --client-id app_EMoamEEZ73f0CkXaXp7hrann \
@@ -289,7 +289,7 @@ export CLAUDE_CODE_REFRESH_TOKEN="$(
 Create the broker credential from the root of the checkout:
 
 ```bash
-cargo run --manifest-path services/api-rs/Cargo.toml -p centaur-perms -- \
+cargo run -p centaur-perms -- \
   broker create --foreign-id anthropic-claude \
   --token-endpoint https://platform.claude.com/v1/oauth/token \
   --client-id 9d1c250a-e61b-44d9-88ed-5944d1962f5e \
@@ -338,8 +338,8 @@ Use the app page to install the bot, copy the Bot User OAuth Token for
    newly-created public channels, set `slackbotv2.autoJoinCreatedChannels` to
    `true` and subscribe to `channel_created`. For Slack agent view, complete the
    [Slack app migration](/quickstart) and set `slackbotv2.agentViewEnabled` to
-   `true`. The toggle defaults to `false`. Leave `agent_session_stopped`
-   unsubscribed until native Stop handling is implemented.
+   `true`. The toggle defaults to `false`. Subscribe to `agent_session_stopped`
+   to show Slack's Stop button, which interrupts the running execution.
 8. Enable Interactivity and set its Request URL to the same
    `https://<your-host>/api/webhooks/slack` URL. Block Kit actions are emitted
    to the workflow engine as `slack.block_action.<action_id>` events.
@@ -406,8 +406,10 @@ Sandbox lifecycle has two separate timers:
 - Slackbot v2 sends `idle_timeout_ms` on execute requests, defaulting to up to
   3 hours, so api-rs can pause an idle sandbox after a turn finishes.
 - api-rs deletes old sandboxes through `apiRs.sandboxMaxLifetimeSecs`, default
-  72 hours, regardless of whether the sandbox is still running or already
-  suspended.
+  72 hours, whether the sandbox is still running or already suspended.
+  Warm-pool sandboxes age from when a session claims them, and the reaper
+  skips a sandbox while its session has a queued or running turn, unless that
+  turn has itself run longer than the max lifetime.
 
 There is no suspended-only delete setting. If you want sandboxes gone after N
 hours, set `apiRs.sandboxMaxLifetimeSecs` to N hours in seconds.
@@ -445,6 +447,40 @@ sandbox:
 Malformed selector/toleration JSON fails api-rs startup. Empty values keep
 default scheduling.
 
+### Configure Sandbox User Namespaces and Container Security
+
+`sandbox.hostUsers` and `sandbox.containerSecurityContext` are passed through
+api-rs as `SESSION_SANDBOX_HOST_USERS` and
+`SESSION_SANDBOX_CONTAINER_SECURITY_CONTEXT`. The former sets the sandbox
+Pod's `hostUsers`; the latter accepts a Kubernetes `SecurityContext` for the
+agent container. Neither changes the paired iron-proxy pod, and the container
+setting does not change bootstrap init containers. Defaults omit both fields.
+
+For example, request an isolated Pod user namespace and a non-root agent:
+
+```yaml
+sandbox:
+  hostUsers: false
+  containerSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+```
+
+The cluster's Kubernetes version, container runtime, and volume filesystems
+must support Pod user namespaces. Setting `procMount: Unmasked` requires
+`hostUsers: false`; malformed security-context JSON or that incompatible
+combination fails api-rs startup. Cluster admission policies still apply.
+Enabling nested containers also requires a compatible image, UID/GID maps,
+device access, and node configuration; these settings alone do not provide a
+Docker daemon.
+
+These Pod settings are immutable. Before enabling reuse, api-rs stops retained
+sandboxes whose user namespace or agent security context differs from the
+configured profile, using the same reconciliation as ServiceAccount changes.
+This includes warm pods and active sessions, and applies when reverting a
+profile as well. Schedule these changes after active turns finish. Leaving
+both options unset preserves existing default sandboxes.
+
 ### Use an External PostgreSQL
 
 By default the chart runs a bundled PostgreSQL built on ParadeDB. To use a
@@ -472,7 +508,7 @@ The deployment uses these databases on the server:
 | Database | Used by | Connection |
 | --- | --- | --- |
 | Any name, for example `centaur` | api-rs, Slackbot, and ETL workflows | `DATABASE_URL`, including the database name. |
-| `iron_control_production`, plus `_cache`, `_queue`, and `_cable` variants | Console | `IRON_CONTROL_DATABASE_URL` without a database name; the Console selects each database itself. The Console init container creates missing databases with the `DATABASE_URL` credentials. |
+| `iron_control_production`, plus `_cache`, `_queue`, and `_cable` variants | Console; api-rs and proxy-sync read `iron_control_production` | `IRON_CONTROL_DATABASE_URL` without a database name; the Console selects each database itself. The Console init container creates missing databases with the `DATABASE_URL` credentials. |
 
 Managed servers usually require TLS, so add `sslmode=require` to both URLs.
 `POSTGRES_PASSWORD` is not needed. Tools that declare `pg_dsn` secrets connect
@@ -499,6 +535,26 @@ because NetworkPolicy cannot match hostnames. Use the RDS DB subnet group's
 CIDRs, since the endpoint address moves on failover, or the Cloud SQL private IP
 as a `/32`. Control-plane pods and per-sandbox iron-proxies may reach only these
 ranges on `port`; see [Security](/security).
+
+For a database that runs in the cluster, such as a CloudNativePG cluster, set
+`externalDatabase.podSelector` to its pods' labels instead of `cidrs`, and
+`externalDatabase.namespace` if it runs outside the release namespace. Some
+CNIs do not apply `ipBlock` rules to pod traffic, so ranges cannot reliably
+admit an in-cluster database. If the database shares the release namespace,
+the chart's default-deny policy also covers its pods: allow their ingress, and
+the egress their operator needs, with your own NetworkPolicy.
+
+```yaml
+externalDatabase:
+  podSelector:
+    cnpg.io/cluster: core-db
+```
+
+Per-sandbox iron-proxies reach only the core database on Postgres ports inside
+the cluster. Earlier releases let them reach any in-cluster pod on port 5432,
+so an in-cluster database configured with `cidrs` alone may have worked without
+matching those ranges. Set `podSelector` before upgrading such a deployment.
+`pg_dsn` secrets for other in-cluster Postgres servers are no longer reachable.
 
 `externalDatabase.textSearch` selects how company-context keyword search is
 indexed. Set it only with `postgres.enabled: false`; the bundled Postgres always

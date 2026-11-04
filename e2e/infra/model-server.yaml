@@ -22,7 +22,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: model-server
-          image: oven/bun:1.4.2-slim
+          image: oven/bun:1.4.4-slim
           command: ["bun", "/app/model-server.ts"]
           envFrom:
             - secretRef:

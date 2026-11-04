@@ -15,6 +15,7 @@ module Oauth
     ATTIO_CLIENT_ID = "acme-attio-client-id".freeze
     LINEAR_CLIENT_ID = "acme-linear-client-id".freeze
     ZOOM_CLIENT_ID = "acme-zoom-client-id".freeze
+    MICROSOFT_CLIENT_ID = "acme-microsoft-client-id".freeze
 
     setup do
       @exchange_http_mocks = []
@@ -26,6 +27,7 @@ module Oauth
       oauth_apps(:acme_attio).update!(client_secret: "attio-secret")
       oauth_apps(:acme_linear).update!(client_secret: "linear-secret")
       oauth_apps(:acme_zoom).update!(client_secret: "zoom-secret")
+      oauth_apps(:acme_microsoft).update!(client_secret: "microsoft-secret")
       @user = users(:member_user)
       sign_in @user
       clear_enqueued_jobs
@@ -149,6 +151,19 @@ module Oauth
       }.merge(overrides).to_json
     end
 
+    def microsoft_token_body(scope: "Mail.Read Calendars.Read", **overrides)
+      {
+        access_token: "ms-access-token", refresh_token: "ms-refresh-token", token_type: "Bearer",
+        expires_in: 3600, scope: scope,
+        id_token: id_token({
+          "aud" => MICROSOFT_CLIENT_ID,
+          "iss" => "https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0",
+          "oid" => "0c6b8a4e-1a2b-4c3d-9e8f-123456789abc", "sub" => "pairwise-sub",
+          "email" => "mailbox@example.com", "xms_edov" => true, "name" => "Mailbox Owner"
+        })
+      }.merge(overrides).to_json
+    end
+
     def sign_in(user)
       post login_url, params: { email: user.email, password: "password123456" }
     end
@@ -205,7 +220,7 @@ module Oauth
       assert_equal "google-sub-1", credential.reload.provider_subject
     end
 
-    test "Mercator shared consent creates a narrowly scoped secret and refresh preserves role access" do
+    test "Mercator shared consent creates a narrowly scoped secret" do
       provider = Oauth::Providers.fetch("mercator")
       app = OauthApp.create!(provider.preset.merge(provider: provider.key, client_id: "mercator-client", client_secret: "synthetic", created_by: users(:acme_admin)))
       sign_in users(:acme_admin)
@@ -224,16 +239,6 @@ module Oauth
       assert_equal [ { "host" => "mercator.sh", "methods" => [ "POST" ], "paths" => [ "/mcp/auth" ] } ], secret.rules.map(&:to_proxy_rule)
       assert_empty secret.labels
       assert_empty secret.grants
-      grant = Grant.create!(role: roles(:acme_infra), static_secret: secret, created_by: users(:acme_admin))
-      credential.update!(next_attempt_at: 1.minute.ago)
-      credential.refresh_client = Broker::RefreshClient.new(http: ->(**request) {
-        assert_equal "mercator-client", request[:form]["client_id"]
-        HttpClient::Response.new(status: 200, body: { access_token: "rotated-synthetic", refresh_token: "rotated-refresh", expires_in: 3600 }.to_json)
-      })
-      credential.refresh!
-      assert_not credential.dead?
-      assert_equal "rotated-synthetic", credential.static_secret.source.to_proxy_source["value"]
-      assert Grant.exists?(grant.id)
     end
 
     # --- start ----------------------------------------------------------------
@@ -348,6 +353,19 @@ module Oauth
       assert_equal %w[meeting:write user:read:user], q["scope"].split
     end
 
+    test "start redirects to Microsoft with the identity and offline_access scopes" do
+      get oauth_start_url(slug: "microsoft"), params: { scopes: "Mail.Read" }
+      assert_response :redirect
+      uri = URI.parse(response.location)
+      assert_equal "login.microsoftonline.com", uri.host
+      assert_equal "/common/oauth2/v2.0/authorize", uri.path
+      q = URI.decode_www_form(uri.query).to_h
+      assert_equal MICROSOFT_CLIENT_ID, q["client_id"]
+      assert_equal "http://www.example.com/oauth/microsoft/callback", q["redirect_uri"]
+      assert_equal "select_account", q["prompt"]
+      assert_equal %w[Mail.Read openid email profile offline_access], q["scope"].split
+    end
+
     test "start redirects signed-out users to login" do
       sign_out
 
@@ -459,7 +477,6 @@ module Oauth
       assert_nil cred.refresh_token
       assert_nil cred.expires_at
       assert_nil cred.next_attempt_at
-      refute_includes BrokerCredential.refreshable, cred
     end
 
     test "callback happy path supports non-rotating Slack bot tokens" do
@@ -484,7 +501,6 @@ module Oauth
       assert_nil cred.next_attempt_at
       assert_equal "TACME", cred.labels["slack_team_id"]
       assert_equal [ "slack.com" ], cred.static_secret.rules.map(&:host)
-      refute_includes BrokerCredential.refreshable, cred
     end
 
     test "callback happy path supports Attio workspace tokens" do
@@ -521,7 +537,6 @@ module Oauth
       assert_nil cred.next_attempt_at
       assert_equal [ "api.attio.com" ], cred.static_secret.rules.map(&:host)
       assert_equal "Attio – Acme Sales token", cred.static_secret.name
-      refute_includes BrokerCredential.refreshable, cred
     end
 
     test "callback happy path supports GitHub OAuth app tokens" do
@@ -570,7 +585,6 @@ module Oauth
         },
         cred.static_secret.replace_config
       )
-      refute_includes BrokerCredential.refreshable, cred
     end
 
     test "callback happy path supports Linear OAuth app tokens" do
@@ -647,6 +661,33 @@ module Oauth
       assert_equal "zoom-refresh-token", cred.refresh_token
       assert cred.next_attempt_at.present?
       assert_equal [ "api.zoom.us" ], cred.static_secret.rules.map(&:host)
+    end
+
+    test "callback happy path supports Microsoft OAuth app tokens" do
+      state = start_flow(slug: "microsoft")
+      stub_exchange(status: 200, body: microsoft_token_body) do |request|
+        assert_equal Oauth::Providers::Microsoft::TOKEN_ENDPOINT, request[:url]
+        assert_equal MICROSOFT_CLIENT_ID, request[:form]["client_id"]
+        assert_equal "microsoft-secret", request[:form]["client_secret"]
+      end
+
+      assert_difference -> { BrokerCredential.count } => 1 do
+        get oauth_callback_url(slug: "microsoft"), params: { state: state, code: "auth-code" }
+      end
+      assert_redirected_to console_integrations_path
+      assert_equal "microsoft connected as mailbox@example.com.", flash[:notice]
+
+      app = oauth_apps(:acme_microsoft)
+      cred = BrokerCredential.find_by!(oauth_app: app, provider_subject: "0c6b8a4e-1a2b-4c3d-9e8f-123456789abc")
+      assert_equal "microsoft-microsoft-0c6b8a4e-1a2b-4c3d-9e8f-123456789abc", cred.foreign_id
+      assert_equal "Microsoft – Mailbox Owner", cred.name
+      assert_equal Oauth::Providers::Microsoft::TOKEN_ENDPOINT, cred.token_endpoint
+      assert_equal "mailbox@example.com", cred.provider_email
+      assert_equal %w[Mail.Read Calendars.Read], cred.scopes
+      assert_equal "ms-access-token", cred.access_token
+      assert_equal "ms-refresh-token", cred.refresh_token
+      assert cred.next_attempt_at.present?
+      assert_equal [ "graph.microsoft.com" ], cred.static_secret.rules.map(&:host)
     end
 
     test "GitHub re-consent updates the existing credential synchronously" do

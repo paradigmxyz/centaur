@@ -94,12 +94,12 @@ Bun.serve<Caller & { path: string }>({
       return new Response('websocket upgrade failed', { status: 400 })
     }
     if (request.method === 'POST' && RESPONSES_PATHS.includes(url.pathname)) {
-      const { events, delayMs } = openaiEvents(url.pathname, caller, await request.json())
+      const { events, delayMs } = openaiEvents(url.pathname, caller, await providerBody(request))
       await Bun.sleep(delayMs)
       return sse(events)
     }
     if (request.method === 'POST' && url.pathname === '/v1/messages') {
-      return anthropicMessage(url.pathname, caller, await request.json())
+      return anthropicMessage(url.pathname, caller, await providerBody(request))
     }
     // ChatGPT workspace discovery: the workspaces the subscription can use.
     // Codex refuses to run in a workspace it selected that is not listed.
@@ -128,6 +128,14 @@ Bun.serve<Caller & { path: string }>({
   }
 })
 log('model_server_started', {})
+
+/** OMP compresses large provider requests; decode them before parsing JSON. */
+async function providerBody(request: Request): Promise<any> {
+  if (request.headers.get('content-encoding')?.toLowerCase() === 'gzip' && request.body) {
+    return new Response(request.body.pipeThrough(new DecompressionStream('gzip'))).json()
+  }
+  return request.json()
+}
 
 /** A scripted answer as OpenAI events, and how long to wait before sending them. */
 function openaiEvents(

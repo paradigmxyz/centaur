@@ -15,6 +15,8 @@ import type { ServerNotification } from '@centaur/harness-events'
 import {
   createSlackbotV2,
   normalizeSlackText,
+  type ProactiveClassifierInput,
+  type ProactiveDecision,
   type SlackbotV2,
   type SlackbotV2AppendMessagesRequest,
   type SlackbotV2ApiMessage,
@@ -25,6 +27,7 @@ import {
 } from '../src/index'
 import { clearRequesterIdentityCacheForTests } from '../src/session-api'
 import { slackbotMetrics } from '../src/metrics'
+import type { ProactivityRules } from '../src/proactivity-rules'
 import { createOpenAiMessageOverridesStrategy } from '../src/message-overrides-strategy'
 import { modelDisplayName } from '../src/response-context'
 import claudeSettings from '../../../harness/claude/settings.json'
@@ -54,6 +57,13 @@ describe('normalizeSlackText', () => {
   it('preserves Slack channel IDs when rendering labeled channel mentions', () => {
     expect(normalizeSlackText('<#C0AJ07U8Z1N|eng-centaur>')).toBe(
       '#eng-centaur (C0AJ07U8Z1N)'
+    )
+  })
+
+  it('decodes Slack escapes once, keeping escaped entities literal', () => {
+    expect(normalizeSlackText('a &lt; b &amp;&amp; c &gt; d')).toBe('a < b && c > d')
+    expect(normalizeSlackText('Write &amp;lt;br&amp;gt; or &amp;amp;')).toBe(
+      'Write &lt;br&gt; or &amp;'
     )
   })
 })
@@ -172,6 +182,247 @@ describe('slackbotv2', () => {
     expect(codexApi.executes.at(-1)?.threadKey).toBe(`slack:${channel}:${roots[0]}`)
     expect(slackApi.calls.some(call => call.method === 'chat.stopStream')).toBe(true)
     expect(slackApi.calls.some(call => call.method === 'agents.sessions.rename')).toBe(true)
+    const statuses = slackApi.calls
+      .filter(call => call.method === 'agents.sessions.setStatus')
+      .map(call => stringField(call.body.status))
+    expect(statuses).toContain('processing')
+    expect(statuses.at(-1)).toBe('active')
+    expect(slackApi.calls.some(call => call.method === 'assistant.threads.setStatus')).toBe(false)
+  })
+
+  it('uses native session lifecycle for agent-view channel mentions', async () => {
+    bot = createTestBot({ agentViewEnabled: true })
+    const parent = await postUserMessage('Channel context.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> check the deployment`, {
+      threadTs: parent.ts
+    })
+    await mention.finished()
+    const statuses = slackApi.calls.filter(call => call.method === 'agents.sessions.setStatus')
+    expect(slackApi.calls.some(call => call.method === 'chat.startStream')).toBe(true)
+    expect(statuses.some(call => call.body.status === 'processing')).toBe(true)
+    expect(statuses.at(-1)?.body).toMatchObject({
+      channel_id: CHANNEL_ID, thread_ts: parent.ts, status: 'active'
+    })
+    expect(slackApi.calls.some(call => call.method === 'assistant.threads.setStatus')).toBe(false)
+    expect(await threadText(parent.ts)).toContain('Executed request 1.')
+  })
+
+  it.each([
+    ['legacy channel', false, false],
+    ['agent-view DM', true, true],
+    ['agent-view channel', true, false]
+  ] as const)('still renders the answer when status fails (%s)', async (_, agentViewEnabled, directMessage) => {
+    const logs: CapturedLog[] = []
+    bot = createTestBot({ agentViewEnabled, logger: captureLogger(logs) })
+    Object.assign(bot.chat.getAdapter('slack'), {
+      [agentViewEnabled ? 'setSessionStatus' : 'setAssistantStatus']: async () => {
+        throw new Error('Slack status rejected')
+      }
+    })
+    const dm = directMessage ? await sendDirectMessage('Answer despite the status failure.') : null
+    const parent = dm ?? await postUserMessage('Context before the status failure.')
+    const delivery = dm ?? await sendMessage(`<@${BOT_USER_ID}> answer despite the status failure`, {
+      threadTs: parent.ts
+    })
+    await delivery.finished()
+    const replies = await slackBot.conversations.replies({
+      channel: dm?.channel ?? CHANNEL_ID, ts: parent.ts
+    })
+    expect((replies.messages ?? []).map(message => message.text ?? '').join('\n'))
+      .toContain('Executed request 1.')
+    expect(logData(logs, 'slackbotv2_forward_initial_status_set')).toEqual(
+      expect.objectContaining({ visible: false })
+    )
+    if (agentViewEnabled) {
+      expect(slackApi.calls.some(call => call.method === 'assistant.threads.setStatus')).toBe(false)
+    }
+  })
+
+  it('interrupts the active execution when Slack sends agent_session_stopped', async () => {
+    const threadTs = '1700000000.000100'
+    const key = threadKey(threadTs)
+    const interrupts: Array<{ body: unknown; url: string }> = []
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({
+      agentViewEnabled: true,
+      state: sharedState,
+      fetch: async (input, init) => {
+        if (String(input).endsWith('/interrupt')) {
+          interrupts.push({ body: JSON.parse(String(init?.body)), url: String(input) })
+          return Response.json({
+            ok: true,
+            interrupted: true,
+            execution_id: 'exe-stopped',
+            thread_key: key
+          })
+        }
+        return globalThis.fetch(input, init)
+      }
+    })
+    const stateKey = `thread-state:${key}`
+    await sharedState.set(stateKey, { activeExecution: true, lastEventId: 7 })
+
+    const delivery = await deliverEvent({
+      type: 'agent_session_stopped',
+      channel: CHANNEL_ID,
+      thread_ts: threadTs,
+      streaming_message_ts: ['1700000000.000200'],
+      user: USER_ID
+    })
+
+    expect(delivery.response.status).toBe(200)
+    await delivery.finished()
+    // finished() does not cover the stop handler: the adapter registers it
+    // through a second waitUntil after resetting the session status.
+    await waitFor(async () =>
+      (await sharedState.get<Record<string, unknown>>(stateKey))?.activeExecution === false
+    )
+    expect(interrupts).toEqual([{
+      body: { reason: `Interrupted from Slack by ${USER_ID}` },
+      url: `${codexApi.url}/api/session/${encodeURIComponent(key)}/interrupt`
+    }])
+    expect(await sharedState.get<Record<string, unknown>>(stateKey)).toMatchObject({
+      activeExecution: false,
+      lastEventId: 7,
+      renderObligation: null
+    })
+  })
+
+  it('logs a failed native stop without failing the webhook', async () => {
+    const logs: CapturedLog[] = []
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({
+      agentViewEnabled: true,
+      logger: captureLogger(logs),
+      state: sharedState,
+      fetch: async (input, init) => {
+        if (String(input).endsWith('/interrupt')) {
+          return new Response('unavailable', { status: 503, statusText: 'Service Unavailable' })
+        }
+        return globalThis.fetch(input, init)
+      }
+    })
+    const stateKey = `thread-state:${threadKey('1700000000.000300')}`
+    await sharedState.set(stateKey, { activeExecution: true, lastEventId: 3 })
+
+    const delivery = await deliverEvent({
+      type: 'agent_session_stopped',
+      channel: CHANNEL_ID,
+      thread_ts: '1700000000.000300',
+      streaming_message_ts: [],
+      user: USER_ID
+    })
+
+    expect(delivery.response.status).toBe(200)
+    await delivery.finished()
+    await waitFor(() => hasLog(logs, 'slackbotv2_stop_command_failed'))
+    expect(logData(logs, 'slackbotv2_stop_command_failed')).toMatchObject({
+      trigger: 'agent_session_stopped'
+    })
+    await waitFor(() => slackApi.calls.some(call => call.method === 'chat.postEphemeral'))
+    expect(slackApi.calls.find(call => call.method === 'chat.postEphemeral')?.body).toMatchObject({
+      channel: CHANNEL_ID,
+      thread_ts: '1700000000.000300',
+      user: USER_ID
+    })
+    expect(await sharedState.get<Record<string, unknown>>(stateKey)).toMatchObject({
+      activeExecution: true,
+      lastEventId: 3
+    })
+  })
+
+  it('does not start an execution stopped during its handoff', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    let appendStarted = false
+    let releaseAppend = () => {}
+    const appendHeld = new Promise<void>(resolve => { releaseAppend = resolve })
+    let interruptCount = 0
+    bot = createTestBot({
+      state: sharedState,
+      fetch: async (input, init) => {
+        const url = String(input)
+        if (url.endsWith('/interrupt')) {
+          interruptCount += 1
+          return Response.json({ ok: true, interrupted: false, thread_key: 'unused' })
+        }
+        if (url.endsWith('/messages') && init?.method === 'POST') {
+          appendStarted = true
+          await appendHeld
+        }
+        return globalThis.fetch(input, init)
+      }
+    })
+    const parent = await postUserMessage('Context before a stopped run.')
+    const text = `<@${BOT_USER_ID}> start, then get stopped`
+    const mention = await postUserMessage(text, parent.ts)
+    const mentionDelivery = deliverEvent({
+      type: 'app_mention', user: USER_ID, channel: CHANNEL_ID, team: TEAM_ID,
+      ts: mention.ts, thread_ts: parent.ts, text
+    })
+    await waitFor(() => appendStarted)
+
+    const stop = await deliverEvent({
+      type: 'agent_session_stopped', channel: CHANNEL_ID, thread_ts: parent.ts,
+      streaming_message_ts: [], user: USER_ID
+    })
+    expect(stop.response.status).toBe(200)
+    await stop.finished()
+    await waitFor(() => interruptCount === 1)
+    releaseAppend()
+    const delivery = await mentionDelivery
+    expect(delivery.response.status).toBe(200)
+    await delivery.finished()
+
+    expect(codexApi.appends).toHaveLength(1)
+    expect(codexApi.executes).toHaveLength(0)
+    expect(await sharedState.get<Record<string, unknown>>(`thread-state:${threadKey(parent.ts)}`))
+      .toMatchObject({ activeExecution: false })
+  })
+
+  it('interrupts an execution stopped while execute is in flight', async () => {
+    const interrupts: unknown[] = []
+    bot = createTestBot({
+      fetch: async (input, init) => {
+        if (String(input).endsWith('/interrupt')) {
+          // Nothing is active until the held execute returns.
+          interrupts.push(JSON.parse(String(init?.body)))
+          return Response.json({
+            ok: true,
+            interrupted: interrupts.length > 1,
+            thread_key: 'unused'
+          })
+        }
+        return globalThis.fetch(input, init)
+      }
+    })
+    const releaseExecute = codexApi.holdNextExecute()
+    const parent = await postUserMessage('Context before a stopped run.')
+    const text = `<@${BOT_USER_ID}> start, then get stopped`
+    const mention = await postUserMessage(text, parent.ts)
+    const mentionDelivery = deliverEvent({
+      type: 'app_mention', user: USER_ID, channel: CHANNEL_ID, team: TEAM_ID,
+      ts: mention.ts, thread_ts: parent.ts, text
+    })
+    await waitFor(() => codexApi.executes.length === 1)
+
+    const stop = await deliverEvent({
+      type: 'agent_session_stopped', channel: CHANNEL_ID, thread_ts: parent.ts,
+      streaming_message_ts: [], user: USER_ID
+    })
+    await stop.finished()
+    await waitFor(() => interrupts.length === 1)
+    releaseExecute()
+    const delivery = await mentionDelivery
+    await waitFor(() => interrupts.length === 2)
+    await delivery.finished()
+
+    expect(interrupts).toEqual([
+      { reason: `Interrupted from Slack by ${USER_ID}` },
+      { reason: 'Interrupted from Slack' }
+    ])
   })
 
   it('accepts Slack events on the legacy route', async () => {
@@ -384,7 +635,8 @@ describe('slackbotv2', () => {
     expect(denied.status).toBe(200)
     expect(codexApi.workflowEvents).toHaveLength(0)
 
-    bot = createTestBot({ allowedExternalTeamIds: ['TEXTERNAL'] })
+    codexApi.externalTeamIds = ['TEXTERNAL']
+    bot = createTestBot()
     const waits: Promise<unknown>[] = []
     const allowed = await bot.app.request(
       '/api/webhooks/slack',
@@ -750,26 +1002,20 @@ describe('slackbotv2', () => {
         apiKey: 'test-key',
         fetch: (async () => {
           strategyRequestCount += 1
+          const guess = strategyRequestCount === 1
+          // Model the production false positive: an ordinary follow-up is
+          // classified as a different harness.
           return Response.json({
-            output: [
-              {
-                content: [
-                  {
-                    text: JSON.stringify({
-                      // Model the production false positive: an ordinary
-                      // follow-up is classified as a different harness.
-                      harness: strategyRequestCount === 1 ? 'codex' : null,
-                      model: strategyRequestCount === 1 ? 'gpt-5.6-sol' : null,
-                      provider: strategyRequestCount === 1 ? 'responses' : null,
-                      reasoning: 'max'
-                    })
-                  }
-                ]
-              }
+            answers: [
+              { name: 'selection_request', probability: 0.9, type: 'predicate' },
+              { choice: guess ? 'codex' : 'unspecified', name: 'harness', type: 'choice' },
+              { choice: guess ? 'gpt-5.6-sol' : 'unspecified', name: 'model', type: 'choice' },
+              { choice: guess ? 'responses' : 'unspecified', name: 'provider', type: 'choice' },
+              { choice: 'max', name: 'reasoning', type: 'choice' }
             ]
           })
         }) as unknown as typeof fetch,
-        model: 'gpt-5.4-nano'
+        model: 'gpt-6-luna'
       }),
       state: sharedState
     })
@@ -1418,6 +1664,14 @@ describe('slackbotv2', () => {
     })
   })
 
+  it('ignores plain-text @centaur that is not a Slack mention', async () => {
+    const message = await sendMessage('To mute it, send "@centaur stop".')
+    await message.finished()
+
+    expect(codexApi.creates).toHaveLength(0)
+    expect(codexApi.executes).toHaveLength(0)
+  })
+
   it('ignores non-JSON sandbox bootstrap output lines instead of ending the stream', async () => {
     codexApi.autoRespond = false
 
@@ -1435,6 +1689,35 @@ describe('slackbotv2', () => {
     expect(await threadText(mention.ts)).not.toContain(
       'Execution completed, but no final text was captured.'
     )
+  })
+
+  it('acknowledges a turn-starting mention until its response is posted', async () => {
+    bot = createTestBot({ ackReactionEnabled: true })
+    codexApi.autoRespond = false
+
+    const mention = await sendMessage(`<@${BOT_USER_ID}> take a while`)
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.streamCount === 1)
+    const reactionCalls = () =>
+      slackApi.calls
+        .filter(call => call.method === 'reactions.add' || call.method === 'reactions.remove')
+        .map(call => ({
+          method: call.method,
+          name: stringField(call.body.name),
+          timestamp: stringField(call.body.timestamp)
+        }))
+    expect(reactionCalls()).toEqual([
+      { method: 'reactions.add', name: 'eyes', timestamp: mention.ts }
+    ])
+
+    codexApi.emitOutputLines(threadKey(mention.ts), sampleCodexOutputLines('Done thinking.'))
+    await mention.finished()
+    await waitFor(() => slackApi.calls.some(call => call.method === 'reactions.remove'), 3000)
+    expect(reactionCalls()).toEqual([
+      { method: 'reactions.add', name: 'eyes', timestamp: mention.ts },
+      { method: 'reactions.remove', name: 'eyes', timestamp: mention.ts }
+    ])
+    expect(await threadText(mention.ts)).toContain('Done thinking.')
   })
 
   it('auto-disables steering reactions when reactions:write is missing', async () => {
@@ -1584,12 +1867,12 @@ describe('slackbotv2', () => {
     expect(markdownChunks).toEqual([
       {
         type: 'markdown_text',
-        text: 'Execution interrupted'
+        text: 'Execution interrupted.'
       }
     ])
     const renderedText = transcripts[0]!.chunks.map(chunkText).filter(Boolean).join('\n')
     expect(renderedText).toContain('Command execution')
-    expect(renderedText.trim().endsWith('Execution interrupted')).toBe(true)
+    expect(renderedText.trim().endsWith('Execution interrupted.')).toBe(true)
     expect(renderedText).not.toContain('Execution completed, but no final text was captured.')
   })
 
@@ -3213,6 +3496,78 @@ describe('slackbotv2', () => {
     expect(text).not.toContain('Thinking')
   })
 
+  it('posts only the terminal answer when unphased agent messages surround tool calls', async () => {
+    bot = createProductionDefaultTestBot({ activitySummaryStatusEnabled: true })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before unphased narration.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> update the config`, {
+      threadTs: parent.ts
+    })
+
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    // OpenRouter models leave agentMessage phase unset, so narration before a
+    // tool call arrives exactly like the final answer.
+    const key = threadKey(parent.ts)
+    const narration = ['Let me read the config.', 'I found the setting. Let me run the tests.']
+    const finalAnswer = 'The tests pass and the config change is ready.'
+    const agentMessage = (id: string, text: string) => [
+      {
+        method: 'item/agentMessage/delta',
+        params: { threadId: 'thread-1', turnId: 'turn-1', itemId: id, delta: text }
+      },
+      {
+        method: 'item/completed',
+        params: {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          item: { type: 'agentMessage', id, text, memoryCitation: null }
+        }
+      }
+    ]
+    const command = (id: string) => [
+      {
+        method: 'item/started',
+        params: {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          item: { type: 'commandExecution', id, command: 'pnpm test', status: 'inProgress' }
+        }
+      },
+      {
+        method: 'item/completed',
+        params: {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          item: { type: 'commandExecution', id, command: 'pnpm test', status: 'completed', exitCode: 0 }
+        }
+      }
+    ]
+    codexApi.emitOutputLines(
+      key,
+      [
+        ...agentMessage('msg-1', narration[0]!),
+        ...command('cmd-1'),
+        ...agentMessage('msg-2', narration[1]!),
+        ...command('cmd-2'),
+        ...agentMessage('msg-3', finalAnswer)
+      ].map(notification => JSON.stringify(notification))
+    )
+    codexApi.emitSessionEvent(key, 'session.execution_completed', {
+      execution_id: 'exe-unphased-narration',
+      status: 'completed',
+      result_text: finalAnswer
+    })
+
+    await mention.finished()
+    const text = await threadText(parent.ts)
+    expect(text).toContain(finalAnswer)
+    for (const line of narration) expect(text).not.toContain(line)
+  })
+
   it('restores the latest activity summary status after a steering message is delivered', async () => {
     bot = createProductionDefaultTestBot({ activitySummaryStatusEnabled: true })
     codexApi.autoRespond = false
@@ -3256,6 +3611,119 @@ describe('slackbotv2', () => {
     ])
     expect(codexApi.executes).toHaveLength(1)
     expect(await threadText(parent.ts)).toContain('Deploy is fine.')
+  })
+
+  it('posts progress updates as separate thread messages once, even when recovery replays them', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createProductionDefaultTestBot({ activitySummaryStatusEnabled: true, state: sharedState })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before a long task.')
+    const mentionText = `<@${BOT_USER_ID}> audit every service`
+    const mention = await sendMessage(mentionText, { threadTs: parent.ts })
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    const key = threadKey(parent.ts)
+    const summary = "I'm auditing the billing service"
+    const progress = 'I audited billing and found two stale configs; now checking the search service.'
+    codexApi.emitSessionEvent(key, 'session.activity_summary', { summary })
+    codexApi.emitSessionEvent(key, 'session.progress_update', { elapsed_secs: 120, text: progress })
+    await waitFor(async () => (await threadTexts(parent.ts)).includes(progress))
+    codexApi.emitOutputLine(key, JSON.stringify({ type: 'turn.done', result: 'Audit complete.' }))
+    await mention.finished()
+
+    const texts = await threadTexts(parent.ts)
+    expect(texts.filter(text => text === progress)).toHaveLength(1)
+    expect(texts.indexOf(progress)).toBeLessThan(
+      texts.findIndex(text => text.includes('Audit complete.'))
+    )
+    // Posting in the thread clears Slack's assistant status, so it is restored.
+    const statuses = slackApi.calls
+      .filter(call => call.method === 'assistant.threads.setStatus')
+      .map(call => stringField(call.body.status))
+    expect(statuses).toEqual(['Thinking...', summary, summary, ''])
+
+    // A recovery render replays the execution from its start.
+    const stopStreams = () => slackApi.calls.filter(call => call.method === 'chat.stopStream').length
+    const stopStreamsBeforeRecovery = stopStreams()
+    await sharedState.set(`thread-state:${key}`, {
+      activeExecution: true,
+      renderObligation: {
+        afterEventId: 0,
+        executionId: 'exe-progress-replay',
+        message: apiMessageFromSlackEvent({
+          isMention: true,
+          text: mentionText,
+          threadId: key,
+          ts: mention.ts
+        })
+      }
+    })
+    await sharedState.appendToList('slackbotv2:render:index', key)
+    bot = createProductionDefaultTestBot({ activitySummaryStatusEnabled: true, state: sharedState })
+    await waitFor(() => stopStreams() > stopStreamsBeforeRecovery, 2000)
+
+    expect((await threadTexts(parent.ts)).filter(text => text === progress)).toHaveLength(1)
+  })
+
+  it('skips a progress update once the answer is already streaming', async () => {
+    bot = createProductionDefaultTestBot({ activitySummaryStatusEnabled: true })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before a streaming answer.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> audit every service`, {
+      threadTs: parent.ts
+    })
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    const key = threadKey(parent.ts)
+    // Complete lines, long enough to flush the Slack SDK's stream buffer.
+    const answer = `Audit started streaming.\n\n${'x'.repeat(300)}\n\n`
+    const lines = sampleCodexOutputLines(answer)
+    const turnCompleted = lines.pop()!
+    const answerDelta = lines.at(-1)!
+    codexApi.emitOutputLines(key, lines)
+    // Buffered answer text flushes on the first event after the pre-stream grace.
+    await new Promise(resolve => setTimeout(resolve, 600))
+    codexApi.emitOutputLine(key, answerDelta.replace(answer, ' Still going.'))
+    await waitFor(() => slackApi.calls.some(call => call.method === 'chat.startStream'))
+    const progress = 'I audited billing; now checking the search service.'
+    codexApi.emitSessionEvent(key, 'session.progress_update', { elapsed_secs: 120, text: progress })
+    codexApi.emitOutputLine(key, turnCompleted)
+    await mention.finished()
+
+    const texts = await threadTexts(parent.ts)
+    expect(texts.some(text => text.includes('Audit started streaming.'))).toBe(true)
+    expect(texts).not.toContain(progress)
+  })
+
+  it('drops progress updates that are already stale when rendered', async () => {
+    bot = createProductionDefaultTestBot({ activitySummaryStatusEnabled: true })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before a long-running task.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> audit every service`, {
+      threadTs: parent.ts
+    })
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    const key = threadKey(parent.ts)
+    const stale = 'I am starting with the billing service.'
+    const current = 'I audited billing; now checking the search service.'
+    codexApi.emitSessionEvent(key, 'session.progress_update', {
+      created_at_ms: Date.now() - 10 * 60 * 1000,
+      text: stale
+    })
+    codexApi.emitSessionEvent(key, 'session.progress_update', { created_at_ms: Date.now(), text: current })
+    await waitFor(async () => (await threadTexts(parent.ts)).includes(current))
+    codexApi.emitOutputLine(key, JSON.stringify({ type: 'turn.done', result: 'Audit complete.' }))
+    await mention.finished()
+
+    expect(await threadTexts(parent.ts)).not.toContain(stale)
   })
 
   it('restores the default status after a steering message when no summary was published', async () => {
@@ -3378,22 +3846,32 @@ describe('slackbotv2', () => {
     )
   })
 
-  it('clears a status write that lands after its render cleared the status', async () => {
+  it.each([
+    ['legacy channel', false, false],
+    ['agent-view DM', true, true],
+    ['agent-view channel', true, false]
+  ] as const)('clears a late status write (%s)', async (_, agentViewEnabled, directMessage) => {
     const logs: CapturedLog[] = []
-    bot = createProductionDefaultTestBot({ logger: captureLogger(logs), slackApiTimeoutMs: 25 })
+    bot = createProductionDefaultTestBot({
+      agentViewEnabled, logger: captureLogger(logs), slackApiTimeoutMs: 25
+    })
     codexApi.autoRespond = false
 
-    const parent = await postUserMessage('Context before a slow status write.')
-    const mention = await sendMessage(`<@${BOT_USER_ID}> check the deploy`, {
+    const dm = directMessage ? await sendDirectMessage('Check the deploy.') : null
+    const parent = dm ?? await postUserMessage('Context before a slow status write.')
+    const mention = dm ?? await sendMessage(`<@${BOT_USER_ID}> check the deploy`, {
       threadTs: parent.ts
     })
     expect(mention.response.status).toBe(200)
     await waitFor(() => codexApi.streamCount === 1)
 
-    const key = threadKey(parent.ts)
+    const key = `slack:${dm?.channel ?? CHANNEL_ID}:${parent.ts}`
+    const method = agentViewEnabled ? 'agents.sessions.setStatus' : 'assistant.threads.setStatus'
+    const processing = agentViewEnabled ? 'processing' : 'Thinking...'
+    const active = agentViewEnabled ? 'active' : ''
     const statuses = () =>
       slackApi.calls
-        .filter(call => call.method === 'assistant.threads.setStatus')
+        .filter(call => call.method === method)
         .map(call => stringField(call.body.status))
     // Hold the next non-empty status request: the steering restore reaches
     // Slack, outlives the 25ms Slack API timeout, and lands only after the
@@ -3407,7 +3885,7 @@ describe('slackbotv2', () => {
       await waitFor(() => statuses().length === 2)
       codexApi.emitOutputLine(key, JSON.stringify({ type: 'turn.done', result: 'Deploy is fine.' }))
       await mention.finished()
-      expect(statuses()).toEqual(['Thinking...', 'Thinking...', ''])
+      expect(statuses()).toEqual([processing, processing, active])
       expect(hasLog(logs, 'slackbotv2_assistant_status_late_write_reverted')).toBe(false)
     } finally {
       releaseStatus()
@@ -3415,7 +3893,7 @@ describe('slackbotv2', () => {
 
     await waitFor(() => hasLog(logs, 'slackbotv2_assistant_status_late_write_reverted'))
     await waitFor(() => statuses().length === 4)
-    expect(statuses()).toEqual(['Thinking...', 'Thinking...', '', ''])
+    expect(statuses()).toEqual([processing, processing, active, active])
     expect(logData(logs, 'slackbotv2_assistant_status_late_write_reverted')).toEqual(
       expect.objectContaining({ restored_newer_render_status: false })
     )
@@ -3553,6 +4031,97 @@ describe('slackbotv2', () => {
         renderObligation: expect.objectContaining({ executionId: 'exe-hung-recovery' })
       })
     )
+  })
+
+  describe('render index append conflicts', () => {
+    const postgresError = (code: string, message: string): Error =>
+      Object.assign(new Error(message), { code })
+
+    async function runWithFailingIndexAppend(
+      failures: Array<Error | undefined>,
+      answer: string
+    ): Promise<{ appendCalls: number; logs: CapturedLog[]; parentTs: string }> {
+      const sharedState = createMemoryState()
+      await sharedState.connect()
+      const logs: CapturedLog[] = []
+      let appendCalls = 0
+      const flakyState = new Proxy(sharedState, {
+        get(target, prop, receiver) {
+          if (prop !== 'appendToList') return Reflect.get(target, prop, receiver)
+          return async (key: string, value: unknown, options?: unknown) => {
+            if (key === 'slackbotv2:render:index') {
+              const failure = failures[appendCalls++]
+              if (failure) throw failure
+            }
+            return target.appendToList(key, value, options as never)
+          }
+        }
+      })
+      bot = createTestBot({ state: flakyState, logger: captureLogger(logs) })
+      codexApi.autoRespond = false
+
+      const parent = await postUserMessage('Context before the index conflict.')
+      const mentionText = `<@${BOT_USER_ID}> start despite the index conflict`
+      const mention = await postUserMessage(mentionText, parent.ts)
+      const key = threadKey(parent.ts)
+      const delivery = await deliverEvent({
+        type: 'app_mention',
+        user: USER_ID,
+        channel: CHANNEL_ID,
+        team: TEAM_ID,
+        ts: mention.ts,
+        thread_ts: parent.ts,
+        text: mentionText
+      })
+      expect(delivery.response.status).toBe(200)
+      await waitFor(() => codexApi.executes.length === 1, 2000)
+      await waitFor(() => hasLog(logs, 'slackbotv2_forward_execution_committed'), 5000)
+      const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+      expect(threadState?.activeExecution).toBe(true)
+
+      codexApi.emitOutputLines(key, sampleCodexOutputLines(answer))
+      await delivery.finished()
+      expect(await threadText(parent.ts)).toContain(answer)
+      expect(await threadText(parent.ts)).not.toContain('Execution failed')
+      return { appendCalls, logs, parentTs: parent.ts }
+    }
+
+    it('retries a deadlocked render index append and indexes the thread', async () => {
+      const deadlock = postgresError('40P01', 'deadlock detected')
+      const { appendCalls, logs } = await runWithFailingIndexAppend(
+        [deadlock, deadlock],
+        'Indexed after retries.'
+      )
+      expect(appendCalls).toBe(3)
+      expect(hasLog(logs, 'slackbotv2_render_obligation_indexed')).toBe(true)
+      expect(hasLog(logs, 'slackbotv2_render_obligation_index_failed')).toBe(false)
+    })
+
+    it('continues the execution when the render index append keeps deadlocking', async () => {
+      const deadlock = postgresError('40P01', 'deadlock detected')
+      const { appendCalls, logs, parentTs } = await runWithFailingIndexAppend(
+        [deadlock, deadlock, deadlock, deadlock, deadlock],
+        'Answered without the index.'
+      )
+      expect(appendCalls).toBe(4)
+      expect(hasLog(logs, 'slackbotv2_render_obligation_indexed')).toBe(false)
+      const warning = logs.find(log => log.event === 'slackbotv2_render_obligation_index_failed')
+      expect(warning?.level).toBe('warn')
+      expect(warning?.data).toMatchObject({
+        attempts: 4,
+        error: 'deadlock detected',
+        thread_id: `slack:${CHANNEL_ID}:${parentTs}`
+      })
+    })
+
+    it('does not retry a non-conflict index error but still continues the execution', async () => {
+      const { appendCalls, logs } = await runWithFailingIndexAppend(
+        [postgresError('57P01', 'terminating connection')],
+        'Answered after a hard index error.'
+      )
+      expect(appendCalls).toBe(1)
+      expect(hasLog(logs, 'slackbotv2_render_obligation_index_failed')).toBe(true)
+    })
   })
 
   it('does not duplicate the live render while the recovery sweep is cycling', async () => {
@@ -3706,6 +4275,29 @@ describe('slackbotv2', () => {
       claimSpy.mockRestore()
       setSpy.mockRestore()
     }
+  })
+
+  it('drain waits for an in-flight reply to finish', async () => {
+    codexApi.autoRespond = false
+    const parent = await postUserMessage('Context before a shutdown.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> answer before exiting`, {
+      threadTs: parent.ts
+    })
+    expect(mention.response.status).toBe(200)
+    const key = threadKey(parent.ts)
+    await waitFor(() => codexApi.eventRequests.some(request => request.threadKey === key), 2000)
+
+    let unfinished: number | undefined
+    const drained = bot.drain(5000).then(count => {
+      unfinished = count
+    })
+    await sleep(200)
+    expect(unfinished).toBeUndefined()
+
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('Answered before exiting.'))
+    await drained
+    expect(unfinished).toBe(0)
+    expect(await threadText(parent.ts)).toContain('Answered before exiting.')
   })
 
   it('abandons an obligation after repeated non-retryable recovery failures', async () => {
@@ -4106,6 +4698,56 @@ describe('slackbotv2', () => {
     }
   })
 
+  it('rejects an unsigned external org event before checking the allowlist', async () => {
+    codexApi.externalTeamIds = null
+    const forged = signedSlackEvent({
+      event_id: 'Ev-allowlist-forged',
+      event: { type: 'app_mention', user: USER_ID, channel: CHANNEL_ID, user_team: 'TEXTERNAL' }
+    })
+    const response = await bot.app.request('/api/webhooks/slack', {
+      ...forged,
+      headers: { ...(forged.headers as Record<string, string>), 'x-slack-signature': 'v0=0' }
+    })
+
+    expect(response.status).toBe(401)
+  })
+
+  it("asks Slack to retry an external org's event until the allowlist loads", async () => {
+    const realNow = performance.now.bind(performance)
+    let clockOffsetMs = 0
+    const clock = spyOn(performance, 'now').mockImplementation(() => realNow() + clockOffsetMs)
+    try {
+      codexApi.externalTeamIds = null
+      const mention = await postUserMessage(`<@${BOT_USER_ID}> from a partner during an outage`)
+      const event = {
+        type: 'app_mention',
+        user: USER_ID,
+        channel: CHANNEL_ID,
+        team: 'TEXTERNAL',
+        user_team: 'TEXTERNAL',
+        ts: mention.ts,
+        text: `<@${BOT_USER_ID}> from a partner during an outage`
+      }
+      const deliver = async (retryNum?: string) => {
+        const delivery = await deliverEvent(event, { eventId: 'Ev-allowlist-outage', retryNum })
+        await delivery.finished()
+        return delivery.response.status
+      }
+
+      expect(await deliver()).toBe(503)
+      // Slack's immediate first retry lands inside the failed lookup's retry window.
+      codexApi.externalTeamIds = ['TEXTERNAL']
+      expect(await deliver('1')).toBe(503)
+      expect(codexApi.appends).toHaveLength(0)
+
+      clockOffsetMs += 6_000
+      expect(await deliver('2')).toBe(200)
+      expect(codexApi.appends).toHaveLength(1)
+    } finally {
+      clock.mockRestore()
+    }
+  })
+
   it('enforces external org and trigger-bot member allowlists', async () => {
     const externalMention = await postUserMessage(`<@${BOT_USER_ID}> from external org`)
     const externalDelivery = await deliverEvent({
@@ -4122,7 +4764,8 @@ describe('slackbotv2', () => {
     expect(codexApi.appends).toHaveLength(0)
     expect(codexApi.executes).toHaveLength(0)
 
-    bot = createTestBot({ allowedExternalTeamIds: ['TEXTERNAL'] })
+    codexApi.externalTeamIds = ['TEXTERNAL']
+    bot = createTestBot()
     const allowedExternalMention = await postUserMessage(`<@${BOT_USER_ID}> allowed external org`)
     const allowedExternalDelivery = await deliverEvent({
       type: 'app_mention',
@@ -4309,6 +4952,430 @@ describe('slackbotv2', () => {
     expect(slackApi.botInfoRequestCount('BOTHERBOT')).toBe(1)
     expect(await threadText(botTrigger.ts)).toContain('Executed request 1.')
     expect(hasLog(logs, 'slackbotv2_render_failed')).toBe(false)
+  })
+})
+
+describe('proactive replies', () => {
+  function createProactiveBot(
+    decide: (input: ProactiveClassifierInput) => ProactiveDecision | Promise<ProactiveDecision>,
+    overrides: Partial<Parameters<typeof createSlackbotV2>[0]> = {},
+    rules?: ProactivityRules,
+    debounceMs?: number
+  ): ProactiveClassifierInput[] {
+    const calls: ProactiveClassifierInput[] = []
+    bot = createTestBot({
+      proactivity: {
+        classifier: async input => {
+          calls.push(input)
+          return decide(input)
+        },
+        debounceMs,
+        rules
+      },
+      ...overrides
+    })
+    return calls
+  }
+
+  // A proactive turn renders after the webhook's scheduled work settles, so
+  // wait for the thread to go idle before the next message.
+  async function reply(text: string, threadTs: string): Promise<void> {
+    const delivery = await sendMessage(text, { threadTs })
+    expect(delivery.response.status).toBe(200)
+    await delivery.finished()
+    await waitFor(async () =>
+      (await bot.chat.getState().get<Record<string, unknown>>(`thread-state:${threadKey(threadTs)}`))
+        ?.activeExecution !== true
+    )
+  }
+
+  async function mentionThread(parentText: string): Promise<string> {
+    const parent = await postUserMessage(parentText)
+    const mention = await sendMessage(`<@${BOT_USER_ID}> check the deploy`, { threadTs: parent.ts })
+    expect(mention.response.status).toBe(200)
+    await mention.finished()
+    expect(codexApi.executes).toHaveLength(1)
+    return parent.ts
+  }
+
+  it('answers an unmentioned follow-up the classifier accepts', async () => {
+    const calls = createProactiveBot(() => ({ respond: true }))
+    const threadTs = await mentionThread('Proactive accept context.')
+
+    await reply('what about staging?', threadTs)
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.message).toMatchObject({ fromBot: false, text: 'what about staging?' })
+    expect(calls[0]!.history.map(item => item.text)).toContain('Proactive accept context.')
+    // Chat SDK resolves mentions to display names, as the proactive-response
+    // eval's thread texts assume.
+    expect(calls[0]!.history.map(item => item.text)).toContain('@centaur check the deploy')
+    expect(calls[0]!.history.some(item => item.fromBot)).toBe(true)
+    expect(codexApi.executes).toHaveLength(2)
+    expect(sessionMessageTexts(codexApi.appends.flatMap(append => append.body.messages)))
+      .toContain('what about staging?')
+    expect(await threadText(threadTs)).toContain('Executed request 2.')
+  })
+
+  it('stays quiet when the classifier declines or fails', async () => {
+    let fail = false
+    const calls = createProactiveBot(() => {
+      if (fail) throw new Error('backend unavailable')
+      return { respond: false }
+    })
+    const threadTs = await mentionThread('Proactive decline context.')
+
+    const declined = await sendMessage('thanks, looks good', { threadTs })
+    await declined.finished()
+    fail = true
+    const failed = await sendMessage('anything else?', { threadTs })
+    await failed.finished()
+
+    expect(calls).toHaveLength(2)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(sessionMessageTexts(codexApi.appends.flatMap(append => append.body.messages)))
+      .not.toContain('thanks, looks good')
+  })
+
+  const deployRules = [{ name: 'deploy', when: 'Questions about deploys.' }]
+
+  it('answers a top-level message that matches a channel rule', async () => {
+    let repliesRequestsWhenClassified = -1
+    const calls = createProactiveBot(() => {
+      repliesRequestsWhenClassified = slackApi.repliesRequestCount()
+      return { respond: true, rule: 'deploy' }
+    }, {}, {
+      default: [{ name: 'anything', when: 'Questions about anything.' }],
+      channels: { [CHANNEL_ID]: deployRules }
+    })
+    const repliesRequestsBefore = slackApi.repliesRequestCount()
+
+    const message = await sendMessage('is staging deployed?')
+    await message.finished()
+    await waitFor(async () => (await threadText(message.ts)).includes('Executed request 1.'))
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({ history: [], rules: deployRules })
+    // A top-level message has no earlier thread messages to read.
+    expect(repliesRequestsWhenClassified).toBe(repliesRequestsBefore)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(codexApi.executes[0]!.threadKey).toBe(threadKey(message.ts))
+  })
+
+  it('treats a thread it answered on a rule match as mentioned', async () => {
+    const calls = createProactiveBot(input => ({ respond: input.rules !== undefined }), {}, {
+      default: deployRules
+    })
+    const message = await sendMessage('is staging deployed?')
+    await message.finished()
+    await waitFor(async () => (await threadText(message.ts)).includes('Executed request 1.'))
+    expect(calls.map(call => call.rules)).toEqual([deployRules])
+
+    await reply('and production?', message.ts)
+
+    expect(calls.slice(1).map(call => call.rules)).toContainEqual(deployRules)
+    expect(calls.slice(1).map(call => call.rules)).toContainEqual(undefined)
+    expect(codexApi.executes).toHaveLength(2)
+  })
+
+  describe('rule context', () => {
+    const rules = [
+      { context: 'Link the deploy dashboard.', name: 'deploy', when: 'Questions about deploys.' },
+      { context: 'Page the on-call engineer.', name: 'incident', when: 'An active incident.' }
+    ]
+    const executeText = (index: number) => JSON.stringify(
+      JSON.parse(codexApi.executes[index]!.body.input_lines.at(-1)!).message.content
+    )
+
+    // Messages mentioning an outage match the incident rule; others match deploy.
+    async function startRuleThread(): Promise<string> {
+      createProactiveBot(input => {
+        if (!input.rules) return { respond: true }
+        return { respond: true, rule: input.message.text.includes('outage') ? 'incident' : 'deploy' }
+      }, {}, { default: rules })
+      const message = await sendMessage('is staging deployed?')
+      await message.finished()
+      await waitFor(async () => (await threadText(message.ts)).includes('Executed request 1.'))
+      expect(executeText(0)).toContain('proactive reply rule \\"deploy\\"')
+      expect(executeText(0)).toContain('Link the deploy dashboard.')
+      return message.ts
+    }
+
+    it('sends each rule\'s context only on the first turn it starts in a thread', async () => {
+      const threadTs = await startRuleThread()
+
+      await reply('is production deployed too?', threadTs)
+      await reply('is there an outage on staging?', threadTs)
+
+      expect(codexApi.executes).toHaveLength(3)
+      expect(executeText(1)).not.toContain('Link the deploy dashboard.')
+      expect(executeText(2)).toContain('Page the on-call engineer.')
+      expect(executeText(2)).not.toContain('Link the deploy dashboard.')
+    })
+
+    it('resends the matched rule\'s context after a harness restart', async () => {
+      const threadTs = await startRuleThread()
+      codexApi.queueCreateResponse({ harness_switched: true, harness_type: 'claudecode' })
+
+      await reply('is production deployed too? --claude', threadTs)
+
+      expect(codexApi.executes).toHaveLength(2)
+      expect(executeText(1)).toContain('restarted on a different agent harness')
+      expect(executeText(1)).toContain('Link the deploy dashboard.')
+    })
+  })
+
+  it('debounces a message sent in parts into one decision and one turn', async () => {
+    const calls = createProactiveBot(
+      () => ({ respond: true, rule: 'deploy' }),
+      {},
+      { default: deployRules },
+      300
+    )
+
+    const name = await sendMessage('checkout-api')
+    const parts = [
+      await sendMessage('the deploy to staging is stuck', { threadTs: name.ts }),
+      await sendMessage('since the 2pm release', { threadTs: name.ts })
+    ]
+    await Promise.all([name, ...parts].map(delivery => delivery.finished()))
+    await waitFor(async () => (await threadText(name.ts)).includes('Executed request 1.'))
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({
+      burst: [{ text: 'checkout-api' }, { text: 'the deploy to staging is stuck' }],
+      history: [],
+      message: { text: 'since the 2pm release' }
+    })
+    expect(codexApi.executes).toHaveLength(1)
+    expect(sessionMessageTexts(codexApi.appends.flatMap(append => append.body.messages)))
+      .toEqual(['checkout-api', 'the deploy to staging is stuck', 'since the 2pm release'])
+  })
+
+  it('ends a burst at its newest message whatever order the parts are handled in', async () => {
+    const calls = createProactiveBot(
+      () => ({ respond: true, rule: 'deploy' }),
+      {},
+      { default: deployRules },
+      300
+    )
+    const name = await postUserMessage('checkout-api')
+    const first = await postUserMessage('the deploy to staging is stuck', name.ts)
+    // Slack timestamps further apart than the window still form one burst
+    // when both messages arrive within it.
+    await sleep(1100)
+    const second = await postUserMessage('since the 2pm release', name.ts)
+    const replyEvent = (text: string, ts: string) => ({
+      type: 'message', user: USER_ID, channel: CHANNEL_ID, team: TEAM_ID, text, ts, thread_ts: name.ts
+    })
+
+    const later = await deliverEvent(replyEvent('since the 2pm release', second.ts))
+    const earlier = await deliverEvent(replyEvent('the deploy to staging is stuck', first.ts))
+    await Promise.all([later.finished(), earlier.finished()])
+    await waitFor(async () => (await threadText(name.ts)).includes('Executed request 1.'))
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({
+      burst: [{ text: 'the deploy to staging is stuck' }],
+      history: [{ text: 'checkout-api' }],
+      message: { text: 'since the 2pm release' }
+    })
+    expect(codexApi.executes).toHaveLength(1)
+  })
+
+  it('keeps a decided burst out of the next one in its thread', async () => {
+    const calls = createProactiveBot(() => ({ respond: false }), {}, { default: deployRules }, 300)
+    const sendBurst = async (messages: Array<[string, string?]>) => {
+      const deliveries = []
+      for (const [text, threadTs] of messages) deliveries.push(await sendMessage(text, { threadTs }))
+      await Promise.all(deliveries.map(delivery => delivery.finished()))
+    }
+
+    const name = await postUserMessage('checkout-api')
+    await sendBurst([['the deploy to staging is stuck', name.ts], ['since the 2pm release', name.ts]])
+    await sendBurst([['never mind', name.ts], ['is production stuck too?', name.ts]])
+
+    expect(calls.map(call => call.message.text)).toEqual(['since the 2pm release', 'is production stuck too?'])
+    expect(calls[1]!.burst).toEqual([expect.objectContaining({ text: 'never mind' })])
+    expect(calls[1]!.history.map(item => item.text)).toEqual([
+      'checkout-api', 'the deploy to staging is stuck', 'since the 2pm release'
+    ])
+  })
+
+  it('leaves a debounced message to a mention\'s turn that already carries it', async () => {
+    const calls = createProactiveBot(
+      () => ({ respond: true, rule: 'deploy' }),
+      {},
+      { default: deployRules },
+      500
+    )
+
+    const name = await sendMessage('checkout-api')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> check the deploy`, { threadTs: name.ts })
+    await Promise.all([name.finished(), mention.finished()])
+    await waitFor(async () => (await threadText(name.ts)).includes('Executed request 1.'))
+
+    expect(calls).toHaveLength(0)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(sessionMessageTexts(codexApi.appends.flatMap(append => append.body.messages)))
+      .toContain('checkout-api')
+  })
+
+  it('ignores top-level messages in a channel whose rule list is empty', async () => {
+    const calls = createProactiveBot(() => ({ respond: true }), {}, {
+      default: deployRules,
+      channels: { [CHANNEL_ID]: [] }
+    })
+
+    const message = await sendMessage('is staging deployed?')
+    await message.finished()
+
+    expect(calls).toHaveLength(0)
+    expect(codexApi.creates).toHaveLength(0)
+  })
+
+  it('only classifies replies in threads eligible since a mention', async () => {
+    const calls = createProactiveBot(() => ({ respond: true }))
+    const parent = await postUserMessage('Subscribed before proactivity.')
+    await bot.chat.getState().subscribe(threadKey(parent.ts))
+
+    const reply = await sendMessage('can someone check this?', { threadTs: parent.ts })
+    await reply.finished()
+    const topLevel = await sendMessage('can someone check this too?')
+    await topLevel.finished()
+
+    expect(calls).toHaveLength(0)
+    expect(codexApi.creates).toHaveLength(0)
+  })
+
+  // Whether a person mention addresses that person ("Bob, can you...") or
+  // only copies them in ("do X, cc @name") is the classifier's call.
+  it('leaves replies that mention a person to the classifier', async () => {
+    const calls = createProactiveBot(() => ({ respond: true }))
+    const threadTs = await mentionThread('Proactive cc context.')
+
+    await reply(`retry the deploy, cc <@${USER_B_ID}>`, threadTs)
+
+    expect(calls).toHaveLength(1)
+    expect(codexApi.executes).toHaveLength(2)
+  })
+
+  it('steers an execution that started while classifying', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    let threadTs = ''
+    const calls = createProactiveBot(
+      async () => {
+        await sharedState.set(`thread-state:${threadKey(threadTs)}`, {
+          ...(await sharedState.get<Record<string, unknown>>(`thread-state:${threadKey(threadTs)}`)),
+          activeExecution: true
+        })
+        return { respond: true }
+      },
+      { state: sharedState }
+    )
+    threadTs = await mentionThread('Proactive race context.')
+    const appendCount = codexApi.appends.length
+
+    const reply = await sendMessage('and the rollback?', { threadTs })
+    await reply.finished()
+
+    expect(calls).toHaveLength(1)
+    expect(sessionMessageTexts(codexApi.appends.slice(appendCount).flatMap(append => append.body.messages)))
+      .toEqual(['and the rollback?'])
+    expect(codexApi.executes).toHaveLength(1)
+  })
+
+  it('steers instead of stopping on an accepted unmentioned stop phrase', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    let threadTs = ''
+    let interrupts = 0
+    createProactiveBot(
+      async () => {
+        await sharedState.set(`thread-state:${threadKey(threadTs)}`, {
+          ...(await sharedState.get<Record<string, unknown>>(`thread-state:${threadKey(threadTs)}`)),
+          activeExecution: true
+        })
+        return { respond: true }
+      },
+      {
+        fetch: async (input, init) => {
+          if (String(input).endsWith('/interrupt')) interrupts += 1
+          return globalThis.fetch(input, init)
+        },
+        state: sharedState
+      }
+    )
+    threadTs = await mentionThread('Proactive stop phrase context.')
+    const appendCount = codexApi.appends.length
+
+    const reply = await sendMessage('stop that', { threadTs })
+    await reply.finished()
+
+    expect(interrupts).toBe(0)
+    expect(sessionMessageTexts(codexApi.appends.slice(appendCount).flatMap(append => append.body.messages)))
+      .toEqual(['stop that'])
+  })
+
+  it('steers one turn with two replies accepted at once', async () => {
+    let releaseClassifiers = () => {}
+    const bothClassifying = new Promise<void>(resolve => {
+      releaseClassifiers = resolve
+    })
+    const calls = createProactiveBot(async () => {
+      if (calls.length === 2) releaseClassifiers()
+      await bothClassifying
+      return { respond: true }
+    })
+    const threadTs = await mentionThread('Proactive concurrent context.')
+    // Keep the proactive turn running so the other reply finds it active.
+    codexApi.autoRespond = false
+
+    const first = await sendMessage('is staging deployed?', { threadTs })
+    const second = await sendMessage('and production?', { threadTs })
+    await Promise.all([first.finished(), second.finished()])
+    await waitFor(() => codexApi.executes.length === 2 && codexApi.eventRequests.length >= 2, 3000)
+    codexApi.emitSessionEvent(threadKey(threadTs), 'session.execution_completed', {})
+    await waitFor(async () =>
+      (await bot.chat.getState().get<Record<string, unknown>>(`thread-state:${threadKey(threadTs)}`))
+        ?.activeExecution !== true
+    )
+
+    expect(calls).toHaveLength(2)
+    // The mention's turn and one proactive turn; the other reply steers it.
+    expect(codexApi.executes).toHaveLength(2)
+    expect(sessionMessageTexts(codexApi.appends.flatMap(append => append.body.messages)))
+      .toEqual(expect.arrayContaining(['is staging deployed?', 'and production?']))
+  })
+
+  it('ends proactive replies at a stop until the next mention', async () => {
+    const calls = createProactiveBot(
+      () => ({ respond: true }),
+      {
+        fetch: async (input, init) => String(input).endsWith('/interrupt')
+          ? Response.json({ ok: true, interrupted: false, thread_key: 'unused' })
+          : globalThis.fetch(input, init)
+      }
+    )
+    const threadTs = await mentionThread('Proactive stop context.')
+
+    await reply('first follow-up?', threadTs)
+    await reply('second follow-up?', threadTs)
+    expect(calls).toHaveLength(2)
+    expect(codexApi.executes).toHaveLength(3)
+
+    await reply(`<@${BOT_USER_ID}> stop`, threadTs)
+    await reply('are you still there?', threadTs)
+    expect(calls).toHaveLength(2)
+    expect(codexApi.executes).toHaveLength(3)
+
+    // Emulator timestamps have whole-second precision, so runs for messages in
+    // the stop's second are suppressed as stopped; only eligibility is checked.
+    await reply(`<@${BOT_USER_ID}> one more`, threadTs)
+    await reply('and after that?', threadTs)
+    expect(calls).toHaveLength(3)
+    expect(calls[2]!.message.text).toBe('and after that?')
   })
 })
 
@@ -4741,6 +5808,20 @@ async function sendMessage(
   return { ...posted, ...delivery }
 }
 
+async function sendDirectMessage(text: string): Promise<{ channel: string; ts: string } & Delivery> {
+  const members = await slackBot.users.list({})
+  const userId = members.members?.find(member => member.name === 'tester')?.id
+  expect(userId).toBeDefined()
+  const dm = await slackBot.conversations.open({ users: userId! })
+  const channel = dm.channel!.id!
+  const posted = await slackBot.chat.postMessage({ channel, text })
+  const ts = String(posted.ts)
+  const delivery = await deliverEvent({
+    type: 'message', channel_type: 'im', channel, user: USER_ID, ts, text
+  })
+  return { channel, ts, ...delivery }
+}
+
 function waitUntilContext(waits: Promise<unknown>[]) {
   return {
     waitUntil(promise: Promise<unknown>) {
@@ -4789,6 +5870,8 @@ type MockSessionApi = {
   failNextEvents: boolean
   failNextExecute: boolean
   failNextExecuteAfterAccept: boolean
+  /** Slack Connect allowlist api-rs returns; null makes the lookup fail. */
+  externalTeamIds: string[] | null
   holdNextExecute(): () => void
   queueCreateResponse(body: Record<string, unknown>, status?: number): void
   reset(): void
@@ -4814,6 +5897,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
   let failNextEvents = false
   let failNextExecute = false
   let failNextExecuteAfterAccept = false
+  let externalTeamIds: string[] | null = []
   const port = await availablePort(4063)
   const closeStreams = () => {
     for (const stream of streams) stream.end()
@@ -4829,6 +5913,9 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
       executes,
       get autoRespond() {
         return autoRespond
+      },
+      get externalTeamIds() {
+        return externalTeamIds
       },
       get executeHold() {
         return executeHold
@@ -4888,6 +5975,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
       failNextEvents = false
       failNextExecute = false
       failNextExecuteAfterAccept = false
+      externalTeamIds = []
       workflowEvents.length = 0
     },
     queueCreateResponse(body: Record<string, unknown>, status = 200) {
@@ -4919,6 +6007,12 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
     },
     set failNextEvents(value: boolean) {
       failNextEvents = value
+    },
+    get externalTeamIds() {
+      return externalTeamIds
+    },
+    set externalTeamIds(value: string[] | null) {
+      externalTeamIds = value
     },
     holdNextExecute() {
       if (executeHoldRelease) throw new Error('execute is already held')
@@ -4980,6 +6074,7 @@ async function handleMockCodexRequest(
     eventRequests: MockSessionEventRequest[]
     executeHold: Promise<void> | null
     executes: MockSessionRequest<SlackbotV2ExecuteSessionRequest>[]
+    externalTeamIds: string[] | null
     failNextExecuteAfterAccept: boolean
     failNextEvents: boolean
     failNextExecute: boolean
@@ -4994,6 +6089,15 @@ async function handleMockCodexRequest(
   }
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://127.0.0.1:${input.port}`)
+  if (url.pathname === '/api/slack/external-team-ids') {
+    await sendWebResponse(
+      res,
+      input.externalTeamIds
+        ? Response.json({ slack_external_team_ids: input.externalTeamIds })
+        : new Response('unavailable', { status: 503 })
+    )
+    return
+  }
   if (url.pathname === '/api/workflows/events') {
     const request = await nodeRequestToWebRequest(req, url)
     input.workflowEvents.push((await request.json()) as MockWorkflowEventRequest)
@@ -5159,6 +6263,7 @@ type PatchedSlackApi = {
   calls: StreamCall[]
   close(): Promise<void>
   failRepliesWithThreadNotFound(channel: string, ts: string): void
+  repliesRequestCount(): number
   failStreamAppendsAfter(count: number, error: string): void
   failStreamStopsLongerThan(maxChars: number): void
   failNextStreamStop(): void
@@ -5182,6 +6287,7 @@ type StreamCall = {
     | 'agents.sessions.rename'
     | 'assistant.threads.setStatus'
     | 'assistant.threads.setTitle'
+    | 'chat.postEphemeral'
     | 'chat.postMessage'
     | 'chat.update'
     | 'chat.startStream'
@@ -5227,6 +6333,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
   const userProfiles = new Map<string, Record<string, unknown>>()
   const userProfileRequests = new Map<string, number>()
   const threadNotFoundReplies = new Set<string>()
+  const repliesRequests = { count: 0 }
   let assistantStatusGate: Promise<void> | null = null
   let releaseAssistantStatusGate: (() => void) | null = null
   let maxStreamStopChars: number | null = null
@@ -5261,6 +6368,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       reactionResponses,
       streams,
       threadNotFoundReplies,
+      repliesRequests,
       threadMessageFiles,
       userProfiles,
       userProfileRequests,
@@ -5283,6 +6391,9 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
     url: `http://127.0.0.1:${port}`,
     failRepliesWithThreadNotFound(channel: string, ts: string) {
       threadNotFoundReplies.add(slackReplyKey(channel, ts))
+    },
+    repliesRequestCount() {
+      return repliesRequests.count
     },
     failStreamAppendsAfter(count: number, error: string) {
       appendFailure.remaining = count
@@ -5316,6 +6427,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       conversationsJoinResponses.length = 0
       reactionResponses.length = 0
       threadNotFoundReplies.clear()
+      repliesRequests.count = 0
       threadMessageFiles.clear()
       fileInfo.clear()
       fileInfoRequests.clear()
@@ -5366,6 +6478,7 @@ async function handlePatchedSlackRequest(
     reactionResponses: QueuedSlackApiResponse[]
     streams: Map<string, StreamRecord>
     threadNotFoundReplies: Set<string>
+    repliesRequests: { count: number }
     threadMessageFiles: Map<string, Record<string, unknown>[]>
     userProfiles: Map<string, Record<string, unknown>>
     userProfileRequests: Map<string, number>
@@ -5399,9 +6512,18 @@ async function handlePatchedSlackRequest(
   }
 
   const path = normalizeApiPath(url.pathname)
+  if (path === '/api/chat.postEphemeral') {
+    input.calls.push({ method: 'chat.postEphemeral', body: await requestBody(request) })
+    await sendWebResponse(res, Response.json({ ok: true, message_ts: '1700000000.999999' }))
+    return
+  }
   if (path === '/api/agents.sessions.setStatus' || path === '/api/agents.sessions.rename') {
     const body = await requestBody(request)
     input.calls.push({ method: path.slice('/api/'.length) as StreamCall['method'], body })
+    if (path === '/api/agents.sessions.setStatus' && body.status === 'processing') {
+      const gate = input.assistantStatusGate('processing')
+      if (gate) await gate
+    }
     await sendWebResponse(res, Response.json({ ok: true }))
     return
   }
@@ -5566,6 +6688,7 @@ async function handlePatchedSlackRequest(
   }
   if (path === '/api/conversations.replies') {
     const body = await requestBody(request.clone())
+    input.repliesRequests.count += 1
     if (
       input.threadNotFoundReplies.has(
         slackReplyKey(stringField(body.channel), stringField(body.ts))

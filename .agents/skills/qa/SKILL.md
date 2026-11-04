@@ -33,6 +33,8 @@ For promotion or deploy-readiness requests, the final status is `PASS` only if t
 
 Use direct tool CLIs when available. Use `centaur-tools call <tool> <method> '<json>'` when a tool has no standalone CLI command for the method you need.
 
+Slack file transfers must use the proxied commands, which route through the Centaur API server Slack proxy: `slack upload` and `slack download <file_id> <channel_id>`. Do not use `upload-direct`, `download-direct`, `slack files --download`, `centaur-tools call slack upload_file`, or raw `url_private` fetches; those bypass the proxy and do not prove the user-facing path.
+
 First capture session context:
 
 ```bash
@@ -54,40 +56,36 @@ Verify that the list is non-empty and includes at least `slack`, `company_contex
 
 ### 2. Upload File To Current Thread
 
-Upload a tiny deterministic file to the current Slack thread:
+Upload a tiny deterministic file to the current Slack thread through the proxy:
 
 ```bash
 QA_TOKEN="centaur-qa-$(date +%s)"
-QA_B64=$(printf '%s\n' "$QA_TOKEN" | base64 | tr -d '\n')
-centaur-tools call slack upload_file "{
-  \"channel_id\": \"${SLACK_CHANNEL_ID}\",
-  \"thread_ts\": \"${SLACK_THREAD_TS}\",
-  \"filename\": \"centaur-qa-upload.txt\",
-  \"title\": \"Centaur QA Upload\",
-  \"comment\": \"QA upload smoke test: ${QA_TOKEN}\",
-  \"content_base64\": \"${QA_B64}\"
-}"
+QA_UPLOAD_DIR="/tmp/centaur-qa-upload-${QA_TOKEN}"
+mkdir -p "$QA_UPLOAD_DIR"
+printf '%s\n' "$QA_TOKEN" > "$QA_UPLOAD_DIR/centaur-qa-upload.txt"
+slack upload "${SLACK_CHANNEL_ID}" "$QA_UPLOAD_DIR/centaur-qa-upload.txt" \
+  --thread "${SLACK_THREAD_TS}" \
+  --comment "QA upload smoke test: ${QA_TOKEN}"
 ```
 
-Verify the response contains a Slack file object, permalink, or URL. Save any `url_private` value for the next step. If the response omits file metadata, use thread history in step 4 to find the uploaded file.
+Verify the command prints `Uploaded centaur-qa-upload.txt` and a Slack file ID (`F...`). Save the file ID for the next step. If no file ID is printed, use thread history in step 3 to find the uploaded file's `id`.
 
 ### 3. Download File From Current Thread
 
-Fetch the current thread history and find the uploaded file's `url_private`:
+If step 2 did not print a file ID, fetch the current thread history and take the uploaded file's `id`:
 
 ```bash
 slack thread "${SLACK_CHANNEL_ID}:${SLACK_THREAD_TS}" --json --limit 20
 ```
 
-Then download it to a sandbox-local temp directory:
+Download it through the proxy to a sandbox-local temp directory:
 
 ```bash
 QA_DOWNLOAD_DIR="/tmp/centaur-qa-files-${QA_TOKEN}"
-mkdir -p "$QA_DOWNLOAD_DIR"
-slack files "${URL_PRIVATE_FROM_CURRENT_THREAD}" --download --output "$QA_DOWNLOAD_DIR"
+slack download "${FILE_ID_FROM_CURRENT_THREAD}" "${SLACK_CHANNEL_ID}" --output "$QA_DOWNLOAD_DIR"
 ```
 
-Verify the command prints a downloaded path and that the file exists with non-zero size.
+Verify the JSON output includes `output_path` and a non-zero `size_bytes`, and that the downloaded file contains `$QA_TOKEN`.
 
 ### 4. Current Thread History
 
@@ -125,18 +123,17 @@ Pass when the command succeeds and returns valid search output. Empty results ar
 Find another accessible Slack file from the current channel. Prefer a result outside the current thread, but do not use files from other channels. `search_files` filters by filename or title, so start broad with an empty query:
 
 ```bash
-centaur-tools call slack search_files '{"channel_id":"'"${SLACK_CHANNEL_ID}"'","query":"","max_results":5}'
+slack search-files "${SLACK_CHANNEL_ID}" "" --limit 5
 ```
 
-Pick a result whose `channels` includes `${SLACK_CHANNEL_ID}`. If possible, avoid the file uploaded earlier in this QA run so the check proves download-and-reupload of an existing channel file. Download it:
+Pick a result whose `channels` includes `${SLACK_CHANNEL_ID}`. If possible, avoid the file uploaded earlier in this QA run so the check proves download-and-reupload of an existing channel file. Download it through the proxy by file ID:
 
 ```bash
 QA_REUPLOAD_DIR="/tmp/centaur-qa-reupload-${QA_TOKEN}"
-mkdir -p "$QA_REUPLOAD_DIR"
-slack files "${URL_PRIVATE_FROM_CURRENT_CHANNEL}" --download --output "$QA_REUPLOAD_DIR"
+slack download "${FILE_ID_FROM_CURRENT_CHANNEL}" "${SLACK_CHANNEL_ID}" --output "$QA_REUPLOAD_DIR"
 ```
 
-Save the downloaded file path, then re-upload it to the current thread:
+Save the `output_path` from the JSON output, then re-upload it to the current thread through the proxy:
 
 ```bash
 slack upload "${SLACK_CHANNEL_ID}" "${DOWNLOADED_FILE_FROM_CURRENT_CHANNEL}" \
@@ -144,7 +141,7 @@ slack upload "${SLACK_CHANNEL_ID}" "${DOWNLOADED_FILE_FROM_CURRENT_CHANNEL}" \
   --comment "QA re-upload from current channel"
 ```
 
-Verify the current thread now shows the re-uploaded file. If no accessible current-channel file exists, record `SKIP: no readable file in current channel` and include the `search_files` result.
+Verify the current thread now shows the re-uploaded file. If no accessible current-channel file exists, record `SKIP: no readable file in current channel` and include the `search-files` result.
 
 ### 8. Company Context
 
@@ -182,11 +179,11 @@ Do not run broad error searches such as `level:error`, `vlogs errors`, or `error
 
 ```bash
 vmetrics health
-vmetrics query 'count({__name__=~".+"})' --json
-vmetrics series '{__name__=~".+"}' --limit 5 --json
+vmetrics query 'count(up)' --json
+vmetrics series 'up' --limit 5 --json
 ```
 
-Pass when VictoriaMetrics is reachable and the responses prove that at least one metric series exists. Do not assert exact sample values, counter values, gauge values, label values, or a specific `up` value; those are environment-dependent. Fail on DNS, HTTP, malformed response errors, or a valid response that proves no metric names or series exist.
+Pass when VictoriaMetrics is reachable and the responses prove that at least one `up` series exists. Do not use catch-all selectors such as `{__name__=~".+"}`; they scan every series and are too expensive on shared environments. Do not assert exact sample values, counter values, gauge values, label values, or a specific `up` value; those are environment-dependent. Fail on DNS, HTTP, malformed response errors, or a valid response that proves no metric names or series exist.
 
 ## Extended Checks
 
@@ -251,7 +248,7 @@ responses; Slack does not render them reliably. Use this exact shape:
 *Data + Observability*
 - *Company context:* PASS - list 0, search 0, status ok
 - *VictoriaLogs:* PASS - health ok, sample 3, thread query 0
-- *VictoriaMetrics:* PASS - reachable, metric existence confirmed, series found
+- *VictoriaMetrics:* PASS - reachable, `up` series found
 
 *Extended*
 - *Tool health:* SKIP - not requested
@@ -290,7 +287,7 @@ one Slack message.
 | Symptom | Likely Cause | Action |
 |---------|--------------|--------|
 | Missing Slack env vars | Invocation did not come through Slack, or runtime metadata was not injected | Derive from `CENTAUR_THREAD_KEY`; otherwise fail early |
-| `slack files --download` rejects URL | URL is not a Slack `url_private` file URL | Read thread history or `search_files` JSON and use `url_private` |
+| `slack download` rejects arguments | Passed a URL or permalink instead of a file ID, or the channel is not where the file is shared | Read thread history or `search-files` JSON and pass the file `id` (`F...`) plus the channel ID it is shared in |
 | Search cannot find just-uploaded token | Slack search indexing lag | Retry up to three total attempts, then warn and run the separate overall message search |
 | `company_context` permission denied | Principal lacks DB-backed reader grant | Report principal/channel and ask owner to grant company context access |
 | `company_context` upstream connection failed | Database proxy upstream, database selection, or secret-resolution failure | Check thread logs and vlogs for upstream connect and secret fetch errors before proposing a code change |
@@ -307,7 +304,7 @@ When a flow fails, inspect runtime evidence before redesigning:
 
 - Stuck execution: check `session_executions`, `session_events`, and `centaur-tools call vlogs thread_trace '{"thread_key":"..."}'`.
 - Missing Slack response: check Slackbot logs, final delivery state, and the Slack thread surface.
-- File failure: check Slack file metadata, `url_private`, downloaded byte size, and upload response.
+- File failure: check `slack file-info <file_id> <channel_id>`, downloaded byte size, and the proxied upload response.
 - Tool failure: classify credential, DNS, upstream, schema, timeout, or runtime errors separately.
 - Brokered-auth failure: verify whether the tool should work without local env vars and whether the proxy injected the expected headers.
 - Context bug: inspect thread history, requester context, and message ordering.

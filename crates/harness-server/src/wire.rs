@@ -1,11 +1,7 @@
-use codex_app_server_protocol::{JSONRPCMessage, JSONRPCNotification, ServerNotification};
 use serde_json::Value;
 
 use crate::Result;
-
-pub fn is_known_untyped_server_notification(method: &str) -> bool {
-    matches!(method, "remoteControl/status/changed")
-}
+use crate::protocol::{JSONRPCMessage, JSONRPCNotification, ServerNotification};
 
 pub fn notification_to_jsonrpc(notification: &ServerNotification) -> Result<JSONRPCNotification> {
     let value = serde_json::to_value(notification)?;

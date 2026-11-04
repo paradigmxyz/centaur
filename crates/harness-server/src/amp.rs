@@ -3,9 +3,9 @@ use std::env;
 use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
-use codex_app_server_protocol::UserInput;
 use serde_json::json;
 
+use crate::protocol::UserInput;
 use crate::{
     HarnessKind, HarnessServer, NormalizedContent, NormalizedEvent, Result, ThreadState,
     anthropic::{AnthropicEventNormalizer, AnthropicStreamEvent},
@@ -216,10 +216,10 @@ fn amp_user_stdin(input: &[UserInput], steer: bool) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use codex_app_server_protocol::UserInput;
     use serde_json::Value;
 
     use crate::HarnessServer;
+    use crate::protocol::UserInput;
 
     use super::AmpHarness;
 

@@ -1,0 +1,11 @@
+{
+  "attio": { "refresh_scopes": false, "token_endpoint_auth_method": "client_secret_post" },
+  "github": { "refresh_scopes": false, "token_endpoint_auth_method": "client_secret_post" },
+  "google": { "refresh_scopes": true, "token_endpoint_auth_method": "client_secret_post" },
+  "granola": { "refresh_scopes": true, "token_endpoint_auth_method": "client_secret_post" },
+  "linear": { "refresh_scopes": true, "token_endpoint_auth_method": "client_secret_post" },
+  "mercator": { "refresh_scopes": true, "token_endpoint_auth_method": "client_secret_post" },
+  "microsoft": { "refresh_scopes": true, "token_endpoint_auth_method": "client_secret_post" },
+  "slack": { "refresh_scopes": false, "token_endpoint_auth_method": "client_secret_post" },
+  "zoom": { "refresh_scopes": false, "token_endpoint_auth_method": "client_secret_basic" }
+}
