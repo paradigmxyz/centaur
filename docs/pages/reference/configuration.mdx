@@ -275,7 +275,7 @@ Sandbox entrypoint and wrappers:
 | `CENTAUR_OMP_MODEL` | `sandbox.extraEnv`. | OMP harness default model (`provider/modelId`). The chart mirrors it into slackbotv2 so the Slack footer names the model. See [Using the OMP Harness](/extend/omp-harness). |
 | `CLAUDE_CODE_AUTH_MODE` | `sandbox.claudeCodeAuthMode`. | Claude Code auth flow: `api_key` (default, uses `ANTHROPIC_API_KEY`) or `access_token` (Claude.ai Pro or Max via the brokered OAuth login). The chart sets this on api-rs, which propagates it into sandboxes. See [Claude Auth Modes](/deploying-in-production#claude-auth-modes). |
 | `CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS` | `sandbox.telemetry.captureTranscripts`; defaults to `false`. | Includes user prompts and assistant responses on harness LLM spans. Usage, cost, status, session association, and tool telemetry do not require transcript capture. |
-| `CENTAUR_TELEMETRY_REDACT_TOOL_TRACES` | `sandbox.telemetry.redactToolTraces`; defaults to `false`. | Omits bounded shell commands and workspace-relative working directories from harness tool spans. Tool names, executables, and status are still exported. |
+| `CENTAUR_TELEMETRY_CAPTURE_TOOL_TRACES` | `sandbox.telemetry.captureToolTraces`; defaults to `true`. | Includes bounded shell commands and workspace-relative working directories on harness tool spans. Only an explicit `0`, `false`, `no`, or `off` disables it. Tool names, executables, and status are exported either way. |
 | `DEPLOY_ENV`, `ENVIRONMENT`, `TRACEPARENT` | Deployment env or wrapper-generated. | Runtime environment and trace context. |
 | `CALL_TIMEOUT_SECONDS` | Sandbox env before running `call`. | Curl watchdog for API tool calls. |
 | `SLACK_CHANNEL`, `SLACK_THREAD_TS` | Sandbox env. | File-upload helper target. |

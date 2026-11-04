@@ -23,9 +23,10 @@ const TRUNCATION_SUFFIX: &str = "…[truncated]";
 /// Transcript capture is opt-in: LLM prompt/response text is only exported
 /// when this env var is set to a truthy value.
 const TRANSCRIPT_CAPTURE_ENV: &str = "CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS";
-/// Tool spans carry bounded shell commands and workspace-relative working
-/// directories unless this env var is set to a truthy value.
-const TOOL_TRACE_REDACTION_ENV: &str = "CENTAUR_TELEMETRY_REDACT_TOOL_TRACES";
+/// Tool trace capture is on by default: tool spans carry bounded shell commands
+/// and workspace-relative working directories unless this env var is set to a
+/// falsy value.
+const TOOL_TRACE_CAPTURE_ENV: &str = "CENTAUR_TELEMETRY_CAPTURE_TOOL_TRACES";
 
 static TELEMETRY: OnceLock<Option<TelemetryRuntime>> = OnceLock::new();
 
@@ -156,7 +157,7 @@ impl TurnTelemetry {
             turn_id.into(),
             input,
             env_flag_enabled(TRANSCRIPT_CAPTURE_ENV),
-            !env_flag_enabled(TOOL_TRACE_REDACTION_ENV),
+            !env_flag_disabled(TOOL_TRACE_CAPTURE_ENV),
         )
     }
 
@@ -548,6 +549,17 @@ fn traces_export_disabled() -> bool {
 
 fn env_flag_enabled(name: &str) -> bool {
     env::var(name).ok().as_deref().is_some_and(truthy_env_value)
+}
+
+fn env_flag_disabled(name: &str) -> bool {
+    env::var(name).ok().as_deref().is_some_and(falsy_env_value)
+}
+
+fn falsy_env_value(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    )
 }
 
 fn truthy_env_value(value: &str) -> bool {
@@ -1602,7 +1614,7 @@ mod tests {
     }
 
     #[test]
-    fn redacted_centaur_cli_command_exports_only_the_tool_subcommand() {
+    fn uncaptured_centaur_cli_command_exports_only_the_tool_subcommand() {
         let (exporter, provider, tracer) = test_telemetry();
         let mut turn = test_turn_with_centaur_tools_and_capture(tracer, ["gsuite"], false);
         for method in ["item/started", "item/completed"] {
@@ -1897,6 +1909,22 @@ mod tests {
             assert!(
                 !truthy_env_value(value),
                 "expected {value} to leave capture disabled"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_trace_capture_is_disabled_only_by_explicit_falsy_values() {
+        for value in ["0", "false", "FALSE", "no", "off"] {
+            assert!(
+                falsy_env_value(value),
+                "expected {value} to disable capture"
+            );
+        }
+        for value in ["", "1", "true", "disabled"] {
+            assert!(
+                !falsy_env_value(value),
+                "expected {value} to leave capture enabled"
             );
         }
     }

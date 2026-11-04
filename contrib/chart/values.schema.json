@@ -257,7 +257,7 @@
           "type": "object",
           "properties": {
             "captureTranscripts": { "type": "boolean" },
-            "redactToolTraces": { "type": "boolean" }
+            "captureToolTraces": { "type": "boolean" }
           }
         }
       }
