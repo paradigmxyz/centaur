@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use sqids::Sqids;
-use sqlx::{PgPool, Postgres, Transaction, types::Json as SqlJson};
+use sqlx::{Acquire, PgPool, Postgres, Transaction, types::Json as SqlJson};
 use tracing::{error, warn};
 
 use crate::{
@@ -716,8 +716,12 @@ pub async fn search(
                 visible = source.visible,
                 filters = source.filters(),
             );
-            let rows = lane(
-                &mut tx,
+            // A slow or failing vector lane, such as an HNSW scan hitting the
+            // statement timeout under a selective visibility filter, falls
+            // back to keyword ranks. The savepoint keeps the transaction usable.
+            let mut savepoint = tx.begin().await?;
+            match lane(
+                &mut savepoint,
                 &semantic,
                 vector,
                 Some(model),
@@ -726,8 +730,20 @@ pub async fn search(
                 &params,
             )
             .await
-            .with_context(|| format!("vector search {data_type:?}"))?;
-            lanes.push((data_type, rows));
+            {
+                Ok(rows) => {
+                    savepoint.commit().await?;
+                    lanes.push((data_type, rows));
+                }
+                Err(error) => {
+                    savepoint.rollback().await?;
+                    warn!(
+                        event = "company_context_vector_search_failed",
+                        data_type = ?data_type,
+                        error = %format!("{error:#}"),
+                    );
+                }
+            }
         }
     }
     tx.commit().await?;

@@ -1482,7 +1482,12 @@ impl SessionRuntime {
         if !config.is_enabled() {
             return self;
         }
-        SandboxReaper::new(self.sandbox_runtime.manager.clone(), config).spawn();
+        SandboxReaper::new(
+            self.sandbox_runtime.manager.clone(),
+            self.store.clone(),
+            config,
+        )
+        .spawn();
         self
     }
 

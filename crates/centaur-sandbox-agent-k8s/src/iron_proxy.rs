@@ -1563,7 +1563,10 @@ fn iron_proxy_container(
         env_from: iron_proxy_env_from(iron_proxy),
         resources: iron_proxy.resources.as_ref().and_then(container_resources),
         ports: Some(container_ports(resolved)),
-        readiness_probe: Some(health_probe(Some(5), Some(30))),
+        // Probe every second so cold creates see readiness as soon as the
+        // proxy is up (a 5s period added ~4s per create). The threshold keeps
+        // the same 150s failure tolerance.
+        readiness_probe: Some(health_probe(Some(1), Some(150))),
         liveness_probe: Some(health_probe(None, None)),
         security_context: Some(SecurityContext {
             allow_privilege_escalation: Some(false),

@@ -273,8 +273,21 @@ RUN set -eux; \
     amp --version >/dev/null
 
 # ── agent-browser: download Chrome binary (runs as agent, deps already installed) ─
+# Pinned to the Chrome for Testing Beta build because Stable (156) is affected by
+# CVE-2026-121030, -121035, -121071 and -121189 (fixed in 157.0.8103.38). Switch
+# back to `agent-browser install` once CfT Stable is at or above 157.0.8103.38.
+# agent-browser discovers the browser at ~/.agent-browser/browsers/chrome-<version>.
+ARG CHROME_FOR_TESTING_VERSION=158.0.8127.2
 RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
-      agent-browser install; \
+      set -eux; \
+      dest="$HOME/.agent-browser/browsers/chrome-${CHROME_FOR_TESTING_VERSION}"; \
+      curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_FOR_TESTING_VERSION}/linux64/chrome-linux64.zip" \
+        -o /tmp/chrome-linux64.zip; \
+      unzip -q /tmp/chrome-linux64.zip -d /tmp; \
+      mkdir -p "$(dirname "$dest")"; \
+      mv /tmp/chrome-linux64 "$dest"; \
+      rm /tmp/chrome-linux64.zip; \
+      "$dest/chrome" --version | grep -F "${CHROME_FOR_TESTING_VERSION}"; \
     fi
 
 # Keep Playwright in uv's image-backed cache so isolated tool environments do

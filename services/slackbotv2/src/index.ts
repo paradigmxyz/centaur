@@ -52,6 +52,7 @@ import {
   serializeAttachment,
   serializeMessageLinks,
   serializeMessage,
+  SESSION_PROGRESS_UPDATE_EVENT,
   SESSION_STEERING_DELIVERED_EVENT,
   SESSION_STEERING_FAILED_EVENT,
   sessionStreamError,
@@ -189,6 +190,11 @@ const RENDER_RECOVERY_MAX_THREAD_FAILURES = 5
 const RENDER_RETRY_INITIAL_DELAY_MS = 250
 const RENDER_RETRY_MAX_DELAY_MS = 5_000
 const ASSISTANT_STATUS_MAX_CHARS = 50
+// Outlives render recovery, which only replays obligations up to a day old.
+const PROGRESS_UPDATE_DEDUPE_TTL_MS = 2 * 24 * 60 * 60 * 1000
+// Recovery replays every update of a long execution at once; only recent ones
+// still describe what the agent is doing.
+const PROGRESS_UPDATE_MAX_AGE_MS = 2 * 60 * 1000
 const SLACK_TASK_DETAILS_MAX_CHARS = 256
 const SLACK_FALLBACK_TEXT_MAX_CHARS = 35_000
 // Leave room below Slack's 12,000-character limit for adapter mention and emoji expansion.
@@ -357,6 +363,8 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     logger
   })
   const state = options.state ?? createDefaultState(options, logger)
+  // Renders dedupe replayed progress updates through the shared state.
+  options = { ...options, state }
   const chat = new Chat<{ slack: typeof slack }, SlackbotV2ThreadState>({
     userName,
     adapters: { slack },
@@ -3234,6 +3242,7 @@ async function renderExecutionStream(
     phase_ms: elapsedMs(titleStartedAtMs)
   })
   const capture = { diverged: false }
+  const answerStream: AnswerStreamProgress = { started: false }
   let visibleStream: FirstChunkStream | null = null
   try {
     const taskDisplayMode = slackStreamTaskDisplayMode(options)
@@ -3242,10 +3251,18 @@ async function renderExecutionStream(
         slackSafeChatSdkStream(
           slackVisibleChatSdkStream(
             harnessToChatSdkStream(
-              restoreAssistantStatusAfterSteering(thread, stream, statusTracker, options, trace),
+              restoreAssistantStatusAfterSteering(
+                thread,
+                stream,
+                statusTracker,
+                options,
+                trace,
+                answerStream
+              ),
               rendererOptions(thread, options, capture, trace, statusTracker)
             ),
-            taskDisplayMode
+            taskDisplayMode,
+            answerStream
           )
         )
       )
@@ -3293,6 +3310,7 @@ async function renderRecoveredExecutionStream(
     phase_ms: elapsedMs(titleStartedAtMs)
   })
   const capture = { diverged: false }
+  const answerStream: AnswerStreamProgress = { started: false }
   let visibleStream: FirstChunkStream | null = null
   try {
     const taskDisplayMode = slackStreamTaskDisplayMode(options)
@@ -3301,10 +3319,18 @@ async function renderRecoveredExecutionStream(
         slackSafeChatSdkStream(
           slackVisibleChatSdkStream(
             harnessToChatSdkStream(
-              restoreAssistantStatusAfterSteering(thread, stream, statusTracker, options, trace),
+              restoreAssistantStatusAfterSteering(
+                thread,
+                stream,
+                statusTracker,
+                options,
+                trace,
+                answerStream
+              ),
               rendererOptions(thread, options, capture, trace, statusTracker)
             ),
-            taskDisplayMode
+            taskDisplayMode,
+            answerStream
           )
         )
       )
@@ -3468,12 +3494,17 @@ function slackStreamTaskDisplayMode(options: SlackbotV2Options): SlackStreamTask
   return options.streamTaskDisplayMode ?? (options.activitySummaryStatusEnabled ? 'none' : 'plan')
 }
 
+/** Marks when the streamed answer message has visible content. */
+type AnswerStreamProgress = { started: boolean }
+
 async function* slackVisibleChatSdkStream(
   stream: AsyncIterable<ChatSDKStreamChunk>,
-  taskDisplayMode: SlackStreamTaskDisplayMode
+  taskDisplayMode: SlackStreamTaskDisplayMode,
+  answerStream: AnswerStreamProgress
 ): AsyncIterable<ChatSDKStreamChunk> {
   for await (const chunk of stream) {
     if (taskDisplayMode === 'none' && chunk.type !== 'markdown_text') continue
+    answerStream.started = true
     yield chunk
   }
 }
@@ -4356,9 +4387,15 @@ async function* restoreAssistantStatusAfterSteering(
   stream: AsyncIterable<SlackbotV2RendererSource>,
   tracker: AssistantStatusTracker,
   options: SlackbotV2Options,
-  trace?: SlackbotV2Trace
+  trace?: SlackbotV2Trace,
+  /** Absent when the answer is posted only after the stream ends. */
+  answerStream?: AnswerStreamProgress
 ): AsyncIterable<SlackbotV2RendererSource> {
   for await (const event of stream) {
+    if (sessionEventKind(event) === SESSION_PROGRESS_UPDATE_EVENT) {
+      await postProgressUpdate(thread, event, tracker, options, trace, answerStream)
+      continue
+    }
     const steeringEvent = steeringEventKind(event)
     if (steeringEvent) {
       traceLog(
@@ -4377,11 +4414,68 @@ async function* restoreAssistantStatusAfterSteering(
 }
 
 function steeringEventKind(event: SlackbotV2RendererSource): string | null {
-  if (!event || typeof event !== 'object') return null
-  const eventKind = 'eventKind' in event ? event.eventKind : 'event' in event ? event.event : ''
+  const eventKind = sessionEventKind(event)
   return eventKind === SESSION_STEERING_DELIVERED_EVENT || eventKind === SESSION_STEERING_FAILED_EVENT
     ? eventKind
     : null
+}
+
+function sessionEventKind(event: SlackbotV2RendererSource): unknown {
+  if (!event || typeof event !== 'object') return null
+  return 'eventKind' in event ? event.eventKind : 'event' in event ? event.event : ''
+}
+
+/**
+ * Posts an api-rs progress update as its own thread message. Render recovery
+ * replays the whole execution, so each durable event is handled at most once,
+ * and updates that are already stale when replayed are dropped.
+ */
+async function postProgressUpdate(
+  thread: Thread,
+  event: SlackbotV2RendererSource,
+  tracker: AssistantStatusTracker,
+  options: SlackbotV2Options,
+  trace?: SlackbotV2Trace,
+  /** Absent when the answer is posted only after the stream ends. */
+  answerStream?: AnswerStreamProgress
+): Promise<void> {
+  const data = 'data' in event ? event.data : undefined
+  const eventId = 'eventId' in event ? event.eventId : undefined
+  if (!isJsonObject(data) || typeof eventId !== 'number' || !options.state) return
+  const text = stringValue(data.text)
+  if (!text) return
+  const fields = { event_id: eventId }
+  try {
+    // Claim before deciding to skip so a replay cannot post an update the
+    // original render deliberately skipped.
+    const claimed = await options.state.setIfNotExists(
+      `slackbotv2:progress:${thread.id}:${eventId}`,
+      true,
+      PROGRESS_UPDATE_DEDUPE_TTL_MS
+    )
+    if (!claimed) {
+      traceLog(options, 'slackbotv2_progress_update_duplicate_skipped', trace, fields)
+      return
+    }
+    // A message posted now would land below the answer, which is already
+    // streaming into an earlier message.
+    if (answerStream?.started) {
+      traceLog(options, 'slackbotv2_progress_update_skipped_answer_streaming', trace, fields)
+      return
+    }
+    const createdAtMs = typeof data.created_at_ms === 'number' ? data.created_at_ms : undefined
+    if (createdAtMs !== undefined && Date.now() - createdAtMs > PROGRESS_UPDATE_MAX_AGE_MS) {
+      traceLog(options, 'slackbotv2_progress_update_skipped_stale', trace, fields)
+      return
+    }
+    await withSlackApiTimeout(options, 'post progress update', () => thread.post({ markdown: text }))
+    traceLog(options, 'slackbotv2_progress_update_posted', trace, fields)
+  } catch (error) {
+    traceWarn(options, 'slackbotv2_progress_update_failed', trace, { ...fields, error: errorMessage(error) })
+    return
+  }
+  // Slack clears the assistant status when the app replies in the thread.
+  await setTrackedAssistantStatus(thread, tracker, tracker.current, options, trace)
 }
 
 function rendererOptions(
