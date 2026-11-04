@@ -700,6 +700,9 @@ pub async fn search(
         lanes.push((data_type, rows));
 
         if let (Some((model, vector)), Some(embeddings)) = (&vector, source.embeddings) {
+            // Order by distance alone: the HNSW index cannot serve a
+            // tie-breaker, and without the index every visible embedding is
+            // compared and sorted.
             let semantic = format!(
                 r#"
                 SELECT {columns}
@@ -708,7 +711,7 @@ pub async fn search(
                 WHERE e.model = $10
                   AND {visible}
                   AND {filters}
-                ORDER BY e.embedding <=> $1::text::vector, d.document_id
+                ORDER BY e.embedding <=> $1::text::vector
                 LIMIT $3
                 "#,
                 columns = source.columns,
