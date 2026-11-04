@@ -10827,67 +10827,128 @@ mod adoption_tests {
         }
     }
 
-    /// A runtime with one codex warm pool per listed repo-cache access.
-    fn runtime_with_warm_pools(
-        store: &PgSessionStore,
+    /// A codex session with an execution, served by a runtime with one codex
+    /// warm pool (built without the replenisher) per listed repo-cache access.
+    struct WarmPoolCase {
+        store: PgSessionStore,
+        thread_key: ThreadKey,
+        execution_id: String,
         backend: Arc<MockBackend>,
-        workload_marker: impl Into<String>,
-        repo_cache_pools: Vec<SessionRepoCacheAccess>,
-    ) -> SessionRuntime {
-        let workload_marker = Arc::new(workload_marker.into());
-        let claimed_marker = workload_marker.clone();
-        let warm_marker = workload_marker.clone();
-        let mut runtime = SessionRuntime::new(
-            store.clone(),
-            SandboxRuntime::backend_with_warm_spec_factory(
-                backend,
-                move |_thread_key, _execution_id, _harness, _persona| {
-                    SandboxSpec::new("mock")
-                        .mount(Mount::new(
+        runtime: SessionRuntime,
+    }
+
+    impl WarmPoolCase {
+        async fn new(store: &PgSessionStore, repo_cache_pools: &[SessionRepoCacheAccess]) -> Self {
+            let thread_key =
+                ThreadKey::parse(format!("test:warm-{}", uuid::Uuid::new_v4())).unwrap();
+            store
+                .create_or_get_session(
+                    &thread_key,
+                    &HarnessType::Codex,
+                    None,
+                    json!({}),
+                    Default::default(),
+                )
+                .await
+                .expect("create session");
+            let execution_id = store
+                .create_execution(&thread_key, None, json!({}))
+                .await
+                .expect("create execution")
+                .execution
+                .execution_id;
+            let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+            // The thread key keeps each case's workload keys distinct.
+            let marker = thread_key.as_str().to_owned();
+            let mut runtime = SessionRuntime::new(
+                store.clone(),
+                SandboxRuntime::backend_with_warm_spec_factory(
+                    backend.clone(),
+                    |_thread_key, _execution_id, _harness, _persona| {
+                        SandboxSpec::new("mock").mount(Mount::new(
                             centaur_sandbox_core::MountKind::Bind {
                                 source_path: "/var/lib/centaur/repos".to_owned(),
                             },
                             SANDBOX_REPOS_MOUNT_PATH,
                         ))
-                        .env("WARM_POOL_TEST_MARKER", claimed_marker.as_str())
+                    },
+                    move |harness| {
+                        SandboxSpec::new("mock")
+                            .env("WARM_POOL_TEST_MARKER", marker.as_str())
+                            .env("WARM_POOL_TEST_HARNESS", harness.to_string())
+                    },
+                ),
+                TestSessionPrincipalRegistrar,
+            );
+            runtime.warm_pools = runtime.build_warm_pools(
+                repo_cache_pools
+                    .iter()
+                    .map(|repo_cache| WarmPoolTarget {
+                        harness: HarnessType::Codex,
+                        repo_cache: repo_cache.clone(),
+                        size: 1,
+                    })
+                    .collect(),
+                WarmPoolConfig {
+                    replenish_interval: Duration::from_secs(60),
+                    bootstrap_iron_control_principal: "prn_test_bootstrap".to_owned(),
+                    max_running_sandboxes: None,
                 },
-                move |harness| {
-                    SandboxSpec::new("mock")
-                        .env("WARM_POOL_TEST_MARKER", warm_marker.as_str())
-                        .env("WARM_POOL_TEST_HARNESS", harness.to_string())
-                },
-            ),
-            TestSessionPrincipalRegistrar,
-        );
-        // Built without the replenisher so tests control the warm rows.
-        runtime.warm_pools = runtime.build_warm_pools(
-            repo_cache_pools
-                .into_iter()
-                .map(|repo_cache| WarmPoolTarget {
-                    harness: HarnessType::Codex,
-                    repo_cache,
-                    size: 1,
-                })
-                .collect(),
-            WarmPoolConfig {
-                replenish_interval: Duration::from_secs(60),
-                bootstrap_iron_control_principal: "prn_test_bootstrap".to_owned(),
-                max_running_sandboxes: None,
-            },
-        );
-        runtime
-    }
+            );
+            Self {
+                store: store.clone(),
+                thread_key,
+                execution_id,
+                backend,
+                runtime,
+            }
+        }
 
-    fn codex_warm_pool_key(
-        runtime: &SessionRuntime,
-        repo_cache: &SessionRepoCacheAccess,
-    ) -> String {
-        runtime
-            .warm_pools
-            .as_ref()
-            .and_then(|pools| pools.workload_key(&HarnessType::Codex, repo_cache))
-            .expect("configured warm pool")
-            .to_owned()
+        fn pool_key(&self, repo_cache: &SessionRepoCacheAccess) -> String {
+            self.runtime
+                .warm_pools
+                .as_ref()
+                .and_then(|pools| pools.workload_key(&HarnessType::Codex, repo_cache))
+                .expect("configured warm pool")
+                .to_owned()
+        }
+
+        /// Insert a ready warm sandbox into the pool for `repo_cache`.
+        async fn insert_ready(&self, repo_cache: &SessionRepoCacheAccess) -> String {
+            let sandbox_id = format!("warm-sbx-{}", uuid::Uuid::new_v4());
+            self.store
+                .insert_ready_warm_sandbox(&sandbox_id, &self.pool_key(repo_cache))
+                .await
+                .expect("insert warm sandbox");
+            sandbox_id
+        }
+
+        async fn warm_status(&self, sandbox_id: &str) -> String {
+            sqlx::query_scalar("select status from session_warm_sandboxes where sandbox_id = $1")
+                .bind(sandbox_id)
+                .fetch_one(self.store.pool())
+                .await
+                .expect("load warm sandbox status")
+        }
+
+        async fn ensure(&self, desired: &SessionSandboxCapabilities) -> String {
+            let session = self.store.get_session(&self.thread_key).await.unwrap();
+            self.runtime
+                .ensure_session_sandbox(EnsureSessionSandboxRequest {
+                    thread_key: &self.thread_key,
+                    harness_type: &HarnessType::Codex,
+                    persona_id: None,
+                    existing_sandbox_id: session.sandbox_id.as_deref(),
+                    existing_sandbox_capabilities: session.sandbox_capabilities.as_ref(),
+                    iron_control_principal: None,
+                    requester_principal: None,
+                    proxy_labels: &BTreeMap::new(),
+                    desired_capabilities: desired,
+                    execution_id: &self.execution_id,
+                })
+                .await
+                .expect("ensure sandbox")
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10896,62 +10957,26 @@ mod adoption_tests {
             return;
         };
         let _serial = TEST_LOCK.lock().await;
-        let thread_key =
-            ThreadKey::parse(format!("test:cap-replace-{}", uuid::Uuid::new_v4())).unwrap();
+        let case = WarmPoolCase::new(&store, &[SessionRepoCacheAccess::All]).await;
         store
-            .create_or_get_session(
-                &thread_key,
-                &HarnessType::Codex,
-                None,
-                json!({}),
-                Default::default(),
-            )
-            .await
-            .expect("create session");
-        store
-            .update_sandbox_assignment(&thread_key, "sbx-full", &default_capabilities())
+            .update_sandbox_assignment(&case.thread_key, "sbx-full", &default_capabilities())
             .await
             .expect("assign default sandbox");
-        let session = store.get_session(&thread_key).await.unwrap();
-        let execution_id = store
-            .create_execution(&thread_key, None, json!({}))
-            .await
-            .expect("create execution")
-            .execution
-            .execution_id;
 
-        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
-        let runtime = runtime_with_warm_pools(
-            &store,
-            backend.clone(),
-            thread_key.as_str(),
-            vec![SessionRepoCacheAccess::All],
-        );
-        let sandbox_id = runtime
-            .ensure_session_sandbox(EnsureSessionSandboxRequest {
-                thread_key: &thread_key,
-                harness_type: &HarnessType::Codex,
-                persona_id: None,
-                existing_sandbox_id: session.sandbox_id.as_deref(),
-                existing_sandbox_capabilities: session.sandbox_capabilities.as_ref(),
-                iron_control_principal: None,
-                requester_principal: None,
-                proxy_labels: &BTreeMap::new(),
-                desired_capabilities: &restricted_capabilities(),
-                execution_id: &execution_id,
-            })
-            .await
-            .expect("replace sandbox");
+        assert_eq!(case.ensure(&restricted_capabilities()).await, "mock-sbx");
 
-        assert_eq!(sandbox_id, "mock-sbx");
-        assert_eq!(backend.stopped(), vec!["sbx-full".to_owned()]);
-        let session = store.get_session(&thread_key).await.unwrap();
+        assert_eq!(case.backend.stopped(), vec!["sbx-full".to_owned()]);
+        let session = store.get_session(&case.thread_key).await.unwrap();
         assert_eq!(session.sandbox_id.as_deref(), Some("mock-sbx"));
         assert_eq!(
             session.sandbox_capabilities,
             Some(restricted_capabilities())
         );
-        let spec = backend.created_specs().pop().expect("created cold spec");
+        let spec = case
+            .backend
+            .created_specs()
+            .pop()
+            .expect("created cold spec");
         assert!(!spec.capabilities.repo_cache.enabled());
         assert!(!spec.capabilities.observability_enabled);
         assert!(
@@ -10960,9 +10985,10 @@ mod adoption_tests {
                 .iter()
                 .any(|mount| mount.target_path == SANDBOX_REPOS_MOUNT_PATH)
         );
-        let all = events(&store, &thread_key).await;
         assert!(
-            all.iter()
+            events(&store, &case.thread_key)
+                .await
+                .iter()
                 .any(|event| event.event_type == "session.sandbox_capabilities_replaced")
         );
         reset_test_store(&store).await;
@@ -10974,69 +11000,17 @@ mod adoption_tests {
             return;
         };
         let _serial = TEST_LOCK.lock().await;
-        let thread_key =
-            ThreadKey::parse(format!("test:cap-warm-skip-{}", uuid::Uuid::new_v4())).unwrap();
-        store
-            .create_or_get_session(
-                &thread_key,
-                &HarnessType::Codex,
-                None,
-                json!({}),
-                Default::default(),
-            )
-            .await
-            .expect("create session");
-        let execution_id = store
-            .create_execution(&thread_key, None, json!({}))
-            .await
-            .expect("create execution")
-            .execution
-            .execution_id;
+        let case = WarmPoolCase::new(&store, &[SessionRepoCacheAccess::All]).await;
+        let warm_sandbox_id = case.insert_ready(&SessionRepoCacheAccess::All).await;
 
-        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
-        let runtime = runtime_with_warm_pools(
-            &store,
-            backend.clone(),
-            thread_key.as_str(),
-            vec![SessionRepoCacheAccess::All],
-        );
-        let workload_key = codex_warm_pool_key(&runtime, &SessionRepoCacheAccess::All);
-        let warm_sandbox_id = format!("warm-sbx-{}", uuid::Uuid::new_v4());
-        store
-            .insert_ready_warm_sandbox(&warm_sandbox_id, &workload_key)
-            .await
-            .expect("insert warm sandbox");
+        assert_eq!(case.ensure(&restricted_capabilities()).await, "mock-sbx");
 
-        let sandbox_id = runtime
-            .ensure_session_sandbox(EnsureSessionSandboxRequest {
-                thread_key: &thread_key,
-                harness_type: &HarnessType::Codex,
-                persona_id: None,
-                existing_sandbox_id: None,
-                existing_sandbox_capabilities: None,
-                iron_control_principal: None,
-                requester_principal: None,
-                proxy_labels: &BTreeMap::new(),
-                desired_capabilities: &restricted_capabilities(),
-                execution_id: &execution_id,
-            })
-            .await
-            .expect("ensure sandbox");
-
-        assert_eq!(sandbox_id, "mock-sbx");
-        assert_eq!(
-            store
-                .claim_ready_warm_sandbox(&workload_key, thread_key.as_str())
-                .await
-                .expect("warm row should remain ready"),
-            Some(warm_sandbox_id)
-        );
-        let session = store.get_session(&thread_key).await.unwrap();
-        assert_eq!(
-            session.sandbox_capabilities,
-            Some(restricted_capabilities())
-        );
-        let spec = backend.created_specs().pop().expect("created cold spec");
+        assert_eq!(case.warm_status(&warm_sandbox_id).await, "ready");
+        let spec = case
+            .backend
+            .created_specs()
+            .pop()
+            .expect("created cold spec");
         assert!(!spec.capabilities.repo_cache.enabled());
         assert!(!spec.capabilities.observability_enabled);
         reset_test_store(&store).await;
@@ -11048,77 +11022,25 @@ mod adoption_tests {
             return;
         };
         let _serial = TEST_LOCK.lock().await;
-        let thread_key =
-            ThreadKey::parse(format!("test:warm-public-{}", uuid::Uuid::new_v4())).unwrap();
-        store
-            .create_or_get_session(
-                &thread_key,
-                &HarnessType::Codex,
-                None,
-                json!({}),
-                Default::default(),
-            )
-            .await
-            .expect("create session");
-        let execution_id = store
-            .create_execution(&thread_key, None, json!({}))
-            .await
-            .expect("create execution")
-            .execution
-            .execution_id;
-
-        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
-        let runtime = runtime_with_warm_pools(
+        let case = WarmPoolCase::new(
             &store,
-            backend.clone(),
-            thread_key.as_str(),
-            vec![SessionRepoCacheAccess::All, SessionRepoCacheAccess::Public],
-        );
-        let all_key = codex_warm_pool_key(&runtime, &SessionRepoCacheAccess::All);
-        let public_key = codex_warm_pool_key(&runtime, &SessionRepoCacheAccess::Public);
-        assert_ne!(all_key, public_key);
-        let all_sandbox = format!("warm-all-{}", uuid::Uuid::new_v4());
-        let public_sandbox = format!("warm-public-{}", uuid::Uuid::new_v4());
-        for (sandbox_id, workload_key) in [(&all_sandbox, &all_key), (&public_sandbox, &public_key)]
-        {
-            store
-                .insert_ready_warm_sandbox(sandbox_id, workload_key)
-                .await
-                .expect("insert warm sandbox");
-        }
+            &[SessionRepoCacheAccess::All, SessionRepoCacheAccess::Public],
+        )
+        .await;
+        let all_sandbox = case.insert_ready(&SessionRepoCacheAccess::All).await;
+        let public_sandbox = case.insert_ready(&SessionRepoCacheAccess::Public).await;
         let desired = SessionSandboxCapabilities {
             repo_cache: SessionRepoCacheAccess::Public,
             observability_enabled: true,
         };
 
-        let sandbox_id = runtime
-            .ensure_session_sandbox(EnsureSessionSandboxRequest {
-                thread_key: &thread_key,
-                harness_type: &HarnessType::Codex,
-                persona_id: None,
-                existing_sandbox_id: None,
-                existing_sandbox_capabilities: None,
-                iron_control_principal: None,
-                requester_principal: None,
-                proxy_labels: &BTreeMap::new(),
-                desired_capabilities: &desired,
-                execution_id: &execution_id,
-            })
-            .await
-            .expect("ensure sandbox");
+        assert_eq!(case.ensure(&desired).await, public_sandbox);
 
-        assert_eq!(sandbox_id, public_sandbox);
-        assert!(backend.created_specs().is_empty());
-        assert_eq!(backend.observability_enabled(), vec![public_sandbox]);
-        let session = store.get_session(&thread_key).await.unwrap();
+        assert!(case.backend.created_specs().is_empty());
+        assert_eq!(case.backend.observability_enabled(), vec![public_sandbox]);
+        let session = store.get_session(&case.thread_key).await.unwrap();
         assert_eq!(session.sandbox_capabilities, Some(desired));
-        assert_eq!(
-            store
-                .count_ready_warm_sandboxes(&all_key)
-                .await
-                .expect("count ready warm sandboxes"),
-            1
-        );
+        assert_eq!(case.warm_status(&all_sandbox).await, "ready");
         reset_test_store(&store).await;
     }
 
@@ -11128,64 +11050,15 @@ mod adoption_tests {
             return;
         };
         let _serial = TEST_LOCK.lock().await;
-        let thread_key =
-            ThreadKey::parse(format!("test:warm-fallback-{}", uuid::Uuid::new_v4())).unwrap();
-        store
-            .create_or_get_session(
-                &thread_key,
-                &HarnessType::Codex,
-                None,
-                json!({}),
-                Default::default(),
-            )
-            .await
-            .expect("create session");
-        let execution_id = store
-            .create_execution(&thread_key, None, json!({}))
-            .await
-            .expect("create execution")
-            .execution
-            .execution_id;
+        let case = WarmPoolCase::new(&store, &[SessionRepoCacheAccess::All]).await;
+        case.backend
+            .observability_fails
+            .store(true, Ordering::SeqCst);
+        let warm_sandbox_id = case.insert_ready(&SessionRepoCacheAccess::All).await;
 
-        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
-        backend.observability_fails.store(true, Ordering::SeqCst);
-        let runtime = runtime_with_warm_pools(
-            &store,
-            backend.clone(),
-            thread_key.as_str(),
-            vec![SessionRepoCacheAccess::All],
-        );
-        let workload_key = codex_warm_pool_key(&runtime, &SessionRepoCacheAccess::All);
-        let warm_sandbox_id = format!("warm-sbx-{}", uuid::Uuid::new_v4());
-        store
-            .insert_ready_warm_sandbox(&warm_sandbox_id, &workload_key)
-            .await
-            .expect("insert warm sandbox");
+        assert_eq!(case.ensure(&default_capabilities()).await, "mock-sbx");
 
-        let sandbox_id = runtime
-            .ensure_session_sandbox(EnsureSessionSandboxRequest {
-                thread_key: &thread_key,
-                harness_type: &HarnessType::Codex,
-                persona_id: None,
-                existing_sandbox_id: None,
-                existing_sandbox_capabilities: None,
-                iron_control_principal: None,
-                requester_principal: None,
-                proxy_labels: &BTreeMap::new(),
-                desired_capabilities: &default_capabilities(),
-                execution_id: &execution_id,
-            })
-            .await
-            .expect("fall back to a cold sandbox");
-
-        assert_eq!(sandbox_id, "mock-sbx");
-        let status: String =
-            sqlx::query_scalar("select status from session_warm_sandboxes where sandbox_id = $1")
-                .bind(&warm_sandbox_id)
-                .fetch_one(store.pool())
-                .await
-                .expect("load warm sandbox status");
-        assert_eq!(status, "failed");
+        assert_eq!(case.warm_status(&warm_sandbox_id).await, "failed");
         reset_test_store(&store).await;
     }
 

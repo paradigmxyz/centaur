@@ -504,7 +504,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claim_binds_the_turn_requester_to_the_warm_proxy() {
+    async fn claim_binds_each_turns_requester_and_observability() {
         let _serial = TEST_LOCK.lock().await;
         let Some(store) = test_store().await else {
             return;
@@ -523,11 +523,7 @@ mod tests {
         let pool = test_pool(backend.clone(), &store, &[(&workload_key, 0)]);
         let labels = BTreeMap::from([("centaur.slack_channel_id".to_owned(), "C1".to_owned())]);
 
-        store
-            .insert_ready_warm_sandbox(&first_sandbox, &workload_key)
-            .await
-            .expect("insert first warm sandbox");
-        backend.set_status(&first_sandbox, SandboxStatus::Running);
+        insert_running(&store, &backend, &first_sandbox, &workload_key).await;
         let claimed = pool
             .claim(
                 &workload_key,
@@ -537,15 +533,11 @@ mod tests {
             .expect("claim first warm sandbox");
         assert_eq!(claimed, Some(first_sandbox.clone()));
 
-        store
-            .insert_ready_warm_sandbox(&second_sandbox, &workload_key)
-            .await
-            .expect("insert second warm sandbox");
-        backend.set_status(&second_sandbox, SandboxStatus::Running);
+        insert_running(&store, &backend, &second_sandbox, &workload_key).await;
         let claimed = pool
             .claim(
                 &workload_key,
-                test_claim(&second_thread, None, &labels, false),
+                test_claim(&second_thread, None, &labels, true),
             )
             .await
             .expect("claim second warm sandbox");
@@ -562,9 +554,12 @@ mod tests {
                     Some("prn_req".to_owned()),
                     labels.clone()
                 ),
-                (second_sandbox, "prn_conv".to_owned(), None, labels),
+                (second_sandbox.clone(), "prn_conv".to_owned(), None, labels),
             ]
         );
+        // Warm sandboxes boot without observability; only the claim that
+        // asks for it grants it.
+        assert_eq!(backend.observability_enabled(), vec![second_sandbox]);
     }
 
     #[tokio::test]
@@ -619,11 +614,7 @@ mod tests {
             (&old_removed_sandbox, &removed_key),
             (&new_removed_sandbox, &removed_key),
         ] {
-            store
-                .insert_ready_warm_sandbox(sandbox_id, workload_key)
-                .await
-                .expect("insert warm sandbox");
-            backend.set_status(sandbox_id, SandboxStatus::Running);
+            insert_running(&store, &backend, sandbox_id, workload_key).await;
         }
         sqlx::query(
             "update session_warm_sandboxes set created_at = now() - interval '1 hour' \
@@ -658,39 +649,17 @@ mod tests {
         assert!(backend.created().is_empty());
     }
 
-    #[tokio::test]
-    async fn claim_grants_observability_only_when_requested() {
-        let _serial = TEST_LOCK.lock().await;
-        let Some(store) = test_store().await else {
-            return;
-        };
-        let suffix = unique_suffix();
-        let workload_key = format!("test-claim-observability-{suffix}");
-        let backend = Arc::new(TestBackend::new(format!("fresh-{suffix}")));
-        let pool = test_pool(backend.clone(), &store, &[(&workload_key, 0)]);
-        let mut claimed = Vec::new();
-        for (name, observability_enabled) in [("restricted", false), ("observed", true)] {
-            let sandbox_id = format!("{name}-{suffix}");
-            let thread_key = format!("test:claim-{name}-{suffix}");
-            insert_session_row(&store, &thread_key).await;
-            store
-                .insert_ready_warm_sandbox(&sandbox_id, &workload_key)
-                .await
-                .expect("insert warm sandbox");
-            backend.set_status(&sandbox_id, SandboxStatus::Running);
-            let labels = BTreeMap::new();
-            claimed.push(
-                pool.claim(
-                    &workload_key,
-                    test_claim(&thread_key, None, &labels, observability_enabled),
-                )
-                .await
-                .expect("claim warm sandbox")
-                .expect("warm sandbox available"),
-            );
-        }
-
-        assert_eq!(backend.observability_enabled(), vec![claimed[1].clone()]);
+    async fn insert_running(
+        store: &PgSessionStore,
+        backend: &TestBackend,
+        sandbox_id: &str,
+        workload_key: &str,
+    ) {
+        store
+            .insert_ready_warm_sandbox(sandbox_id, workload_key)
+            .await
+            .expect("insert warm sandbox");
+        backend.set_status(sandbox_id, SandboxStatus::Running);
     }
 
     fn test_pool(
