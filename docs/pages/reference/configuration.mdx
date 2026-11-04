@@ -115,7 +115,7 @@ created. Changing a default does not rewrite existing principals.
 | `OTEL_TRACES_EXPORTER` | `apiRs.extraEnv`. | Set to `otlp` to force OTLP trace export, or `none`/`off` to disable it. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `apiRs.extraEnv`. | Enables OTLP trace export to Tempo, Jaeger, or another OTLP collector. |
 | `apiRs.workflowHostSandbox`, `WORKFLOW_HOST_SANDBOX` | Helm value, default `true`; override with `apiRs.extraEnv`. | Runs workflow hosts in Kubernetes sandboxes instead of the api-rs process. Required for workflow-scoped principals. |
-| `apiRs.metrics.scrapeAnnotations` | Helm value, default `true`. | Adds Prometheus scrape annotations to the API-RS Pod template and Service. |
+| `apiRs.metrics.scrapeAnnotations` | Helm value, default `true`. | Adds Prometheus scrape annotations to the API-RS Pod template. The Service is not annotated, so collectors that scrape both pods and service endpoints scrape each pod once. |
 | `apiRs.metrics.path` | Helm value, default `/metrics`. | Metrics scrape path for annotation-based discovery. |
 | `apiRs.metrics.annotations` | Helm value. | Additional scrape annotations for Prometheus-compatible collectors. |
 | `apiRs.activitySummary.*` | Helm values, default disabled. | Enables API-RS to summarize live session activity into durable `session.activity_summary` events. |
