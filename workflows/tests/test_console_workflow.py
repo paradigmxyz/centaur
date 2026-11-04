@@ -340,6 +340,27 @@ def test_handler_uses_a_generic_footer_for_an_in_flight_run_without_an_author():
     ]
 
 
+def test_handler_skips_slack_delivery_when_the_agent_has_nothing_to_report():
+    context = FakeContext(result_text="NO_UPDATE")
+
+    result = asyncio.run(
+        console_workflow.handler(
+            {
+                "prompt": "Report new fills; stay silent if there are none",
+                "principal": "principal-123",
+                "channel": "D0123456789",
+                "scheduled_task_id": "scheduled-task-123",
+                "slack_user_id": "U0123456789",
+            },
+            context,
+        )
+    )
+
+    assert context.step_calls == ["agent_result"]
+    assert context.slack_calls == []
+    assert result["delivery"] is None
+
+
 def test_handler_rejects_missing_required_input_before_starting_an_agent():
     context = FakeContext()
 
