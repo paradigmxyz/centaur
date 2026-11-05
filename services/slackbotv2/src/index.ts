@@ -48,6 +48,8 @@ import {
   interruptSessionExecution,
   isRetryableSessionApiError,
   isSessionPrincipalAdmissionDenied,
+  isSlackFileUrl,
+  NON_SLACK_FILE_URL_ERROR,
   openSessionEventStream,
   serializeAttachment,
   serializeMessageLinks,
@@ -3950,6 +3952,7 @@ function slackFileAttachment(
 }
 
 async function fetchSlackFile(options: SlackbotV2Options, url: string): Promise<Buffer> {
+  if (!isSlackFileUrl(url, options.slackApiUrl)) throw new Error(NON_SLACK_FILE_URL_ERROR)
   const fetchFn = options.fetch ?? fetch
   const controller = new AbortController()
   try {

@@ -25,7 +25,7 @@ import {
   type SlackbotV2ExecuteSessionRequest,
   type SlackbotV2SessionMessage
 } from '../src/index'
-import { clearRequesterIdentityCacheForTests } from '../src/session-api'
+import { clearRequesterIdentityCacheForTests, NON_SLACK_FILE_URL_ERROR } from '../src/session-api'
 import { slackbotMetrics } from '../src/metrics'
 import { createOpenAiMessageOverridesStrategy } from '../src/message-overrides-strategy'
 import { modelDisplayName } from '../src/response-context'
@@ -1483,6 +1483,42 @@ describe('slackbotv2', () => {
     expect(executeInput).toContain('"type":"attachment"')
     expect(executeInput).toContain(`"dataBase64":"${Buffer.from('captured-image').toString('base64')}"`)
     expect(executeInput).not.toContain('data:image/png;base64')
+  })
+
+  it('does not fetch a thread attachment hosted outside Slack', async () => {
+    let elsewhereRequests = 0
+    const elsewhere = createServer((_req, res) => {
+      elsewhereRequests += 1
+      res.end('elsewhere-bytes')
+    })
+    await new Promise<void>(resolve => elsewhere.listen(0, '127.0.0.1', resolve))
+    try {
+      // Another origin than the Slack API emulator, and reachable, so a fetch
+      // would be counted rather than fail to connect.
+      const fileUrl = `http://127.0.0.1:${(elsewhere.address() as { port: number }).port}/files/elsewhere.png`
+      const parent = await postUserMessage('Root context before an attachment.')
+      const priorReply = await postUserMessage('A file from elsewhere is attached here.', parent.ts)
+      slackApi.addFileToMessage(CHANNEL_ID, priorReply.ts, {
+        id: 'F-thread-context-elsewhere',
+        mimetype: 'image/png',
+        name: 'elsewhere.png',
+        size: 15,
+        url_private: fileUrl
+      })
+      const mention = await sendMessage(`<@${BOT_USER_ID}> inspect the earlier file`, {
+        threadTs: parent.ts
+      })
+
+      expect(mention.response.status).toBe(200)
+      await mention.finished()
+
+      expect(elsewhereRequests).toBe(0)
+      const executeInput = JSON.stringify(JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!))
+      expect(executeInput).toContain(`fetch_error=${NON_SLACK_FILE_URL_ERROR}`)
+      expect(executeInput).not.toContain(Buffer.from('elsewhere-bytes').toString('base64'))
+    } finally {
+      await new Promise<void>(resolve => elsewhere.close(() => resolve()))
+    }
   })
 
   it('caches Slack requester identity across mentions from the same user', async () => {
