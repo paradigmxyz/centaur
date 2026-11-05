@@ -16,7 +16,7 @@
 //! Queries run as [`QUERY_ROLE`], which can only read `company_context_data`.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, LazyLock},
     time::Duration,
 };
@@ -451,7 +451,7 @@ pub struct Document {
     pub metadata: Value,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow)]
 struct Row {
     document_id: String,
     title: String,
@@ -459,6 +459,15 @@ struct Row {
     url: Option<String>,
     occurred_at: Option<DateTime<Utc>>,
     metadata: SqlJson<Value>,
+}
+
+/// A document matched by one ranked lane, with its BM25 score or its cosine
+/// distance from the query.
+#[derive(sqlx::FromRow)]
+struct Hit {
+    #[sqlx(flatten)]
+    row: Row,
+    rank_score: f64,
 }
 
 impl Row {
@@ -618,8 +627,8 @@ fn ids(values: &[String], name: &str) -> Result<Option<Vec<String>>> {
 }
 
 /// Searches the requested data types visible to `identity`, fusing keyword and
-/// vector ranks. Without embeddings, or when embedding the query fails, only
-/// keyword ranks are used.
+/// vector ranks, each taken across every type. Without embeddings, or when
+/// embedding the query fails, only keyword ranks are used.
 pub async fn search(
     pool: &PgPool,
     embeddings: Option<&EmbeddingsClient>,
@@ -674,12 +683,13 @@ pub async fn search(
         .execute(&mut *tx)
         .await?;
 
-    let mut lanes = Vec::new();
+    let mut keyword_hits: Vec<(DataType, Hit)> = Vec::new();
+    let mut semantic_hits: Vec<(DataType, Hit)> = Vec::new();
     for (data_type, subjects) in searches {
         let source = data_type.source();
         let keyword = format!(
             r#"
-            SELECT {columns}
+            SELECT {columns}, paradedb.score(d.document_id)::float8 AS rank_score
             FROM {documents} d
             WHERE (d.title ||| $1::text::pdb.boost(2) OR d.body ||| $1::text)
               AND {visible}
@@ -692,12 +702,11 @@ pub async fn search(
             visible = source.visible,
             filters = source.filters(),
         );
-        let rows = lane(
+        let hits = lane(
             &mut tx, &keyword, query, None, &subjects, candidates, &params,
         )
         .await
         .with_context(|| format!("keyword search {data_type:?}"))?;
-        lanes.push((data_type, rows));
 
         if let (Some((model, vector)), Some(embeddings)) = (&vector, source.embeddings) {
             // Order by distance alone: the HNSW index cannot serve a
@@ -705,7 +714,7 @@ pub async fn search(
             // compared and sorted.
             let semantic = format!(
                 r#"
-                SELECT {columns}
+                SELECT {columns}, (e.embedding <=> $1::text::vector)::float8 AS rank_score
                 FROM {embeddings} e
                 JOIN {documents} d ON d.document_id = e.document_id
                 WHERE e.model = $10
@@ -719,24 +728,60 @@ pub async fn search(
                 visible = source.visible,
                 filters = source.filters(),
             );
+            // Keyword matches are ranked by similarity too, even when they are
+            // not among the nearest neighbors, as a long document mentioning
+            // the query once may not be. They are already visible and filtered.
+            let distances = format!(
+                r#"
+                SELECT e.document_id, (e.embedding <=> $1::text::vector)::float8
+                FROM {embeddings} e
+                WHERE e.model = $2 AND e.document_id = ANY($3)
+                "#
+            );
+            let ids: Vec<&str> = hits
+                .iter()
+                .map(|hit| hit.row.document_id.as_str())
+                .collect();
             // A slow or failing vector lane, such as an HNSW scan hitting the
             // statement timeout under a selective visibility filter, falls
             // back to keyword ranks. The savepoint keeps the transaction usable.
             let mut savepoint = tx.begin().await?;
-            match lane(
-                &mut savepoint,
-                &semantic,
-                vector,
-                Some(model),
-                &subjects,
-                candidates,
-                &params,
-            )
-            .await
-            {
-                Ok(rows) => {
+            let result = async {
+                let nearest = lane(
+                    &mut savepoint,
+                    &semantic,
+                    vector,
+                    Some(model),
+                    &subjects,
+                    candidates,
+                    &params,
+                )
+                .await?;
+                let distances: HashMap<String, f64> = sqlx::query_as(&distances)
+                    .bind(vector)
+                    .bind(model)
+                    .bind(&ids)
+                    .fetch_all(&mut *savepoint)
+                    .await?
+                    .into_iter()
+                    .collect();
+                anyhow::Ok((nearest, distances))
+            }
+            .await;
+            match result {
+                Ok((nearest, distances)) => {
                     savepoint.commit().await?;
-                    lanes.push((data_type, rows));
+                    semantic_hits.extend(nearest.into_iter().map(|hit| (data_type, hit)));
+                    semantic_hits.extend(hits.iter().filter_map(|hit| {
+                        let distance = *distances.get(&hit.row.document_id)?;
+                        Some((
+                            data_type,
+                            Hit {
+                                row: hit.row.clone(),
+                                rank_score: distance,
+                            },
+                        ))
+                    }));
                 }
                 Err(error) => {
                     savepoint.rollback().await?;
@@ -748,9 +793,30 @@ pub async fn search(
                 }
             }
         }
+        keyword_hits.extend(hits.into_iter().map(|hit| (data_type, hit)));
     }
     tx.commit().await?;
-    Ok(fuse(lanes, limit))
+
+    // Rank across types, so each type does not place its own best match,
+    // however weak, first. Distances share one model; BM25 scores come from
+    // separate indexes, but are close enough to compare.
+    keyword_hits.sort_by(|(_, a), (_, b)| {
+        b.rank_score
+            .total_cmp(&a.rank_score)
+            .then_with(|| a.row.document_id.cmp(&b.row.document_id))
+    });
+    if let Some(embeddings) = embeddings {
+        semantic_hits.retain(|(_, hit)| hit.rank_score <= embeddings.max_query_distance());
+    }
+    semantic_hits.sort_by(|(_, a), (_, b)| {
+        a.rank_score
+            .total_cmp(&b.rank_score)
+            .then_with(|| a.row.document_id.cmp(&b.row.document_id))
+    });
+    // A keyword match may also be a nearest neighbor.
+    let mut seen = HashSet::new();
+    semantic_hits.retain(|(_, hit)| seen.insert(hit.row.document_id.clone()));
+    Ok(fuse([keyword_hits, semantic_hits], limit))
 }
 
 /// Returns the document with `document_id` if it is visible to `identity`.
@@ -825,7 +891,7 @@ async fn lane(
     subjects: &[String],
     limit: i64,
     params: &FilterParams,
-) -> Result<Vec<Row>> {
+) -> Result<Vec<Hit>> {
     let mut query = sqlx::query_as(sql)
         .bind(input)
         .bind(subjects)
@@ -842,11 +908,11 @@ async fn lane(
     Ok(query.fetch_all(&mut **tx).await?)
 }
 
-/// Reciprocal rank fusion across every lane of every data type.
-fn fuse(lanes: Vec<(DataType, Vec<Row>)>, limit: usize) -> Vec<QueryResult> {
+/// Reciprocal rank fusion of ranked lanes.
+fn fuse(lanes: impl IntoIterator<Item = Vec<(DataType, Hit)>>, limit: usize) -> Vec<QueryResult> {
     let mut fused: HashMap<String, QueryResult> = HashMap::new();
-    for (data_type, rows) in lanes {
-        for (rank, row) in rows.into_iter().enumerate() {
+    for lane in lanes {
+        for (rank, (data_type, Hit { row, .. })) in lane.into_iter().enumerate() {
             let score = 1.0 / (RRF_K + rank as f64 + 1.0);
             fused
                 .entry(row.document_id.clone())
@@ -1452,6 +1518,97 @@ mod tests {
             )
             .await,
             ["slack-file:SF2", "slack:C3:2024-02-01:000000"]
+        );
+
+        server.abort();
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    async fn search_ranks_matches_across_types_by_relevance() {
+        let Ok(database_url) = env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
+            eprintln!("skipping: set COMPANY_CONTEXT_TEST_DATABASE_URL to a ParadeDB Postgres URL");
+            return;
+        };
+        let database = TestDatabase::create(&database_url, "query_ranking").await;
+        let pool = &database.pool;
+        seed(pool).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route("/embeddings", post(fake_embeddings));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let base_url = format!("http://{address}");
+        let embeddings = EmbeddingsClient::new(&config(&["--openai-base-url", &base_url])).unwrap();
+        let ranked = |body: Value| {
+            let embeddings = &embeddings;
+            async move {
+                search(pool, Some(embeddings), &ada(), &request(body))
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|result| result.document.document_id)
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        // Every query embeds to the all-0.5 vector: N1 is at cosine distance
+        // 0, F1 at 0.5, and C1 at 1, beyond the default maximum.
+        pool.execute(
+            r#"
+            INSERT INTO company_context_data.granola_document_embeddings
+                (document_id, model, dimensions, content_hash, embedding)
+            VALUES ('granola:N1:000000', 'text-embedding-3-small', 1536, 'hash',
+                    array_fill(0.5, ARRAY[1536])::vector);
+            INSERT INTO company_context_data.google_drive_document_embeddings
+                (document_id, model, dimensions, content_hash, embedding)
+            VALUES ('google-drive:F1', 'text-embedding-3-small', 1536, 'hash',
+                    array_cat(array_fill(1, ARRAY[384]), array_fill(0, ARRAY[1152]))::vector);
+            INSERT INTO company_context_data.slack_document_embeddings
+                (document_id, model, dimensions, content_hash, embedding)
+            VALUES ('slack:C1:2024-01-02:000000', 'text-embedding-3-small', 1536, 'hash',
+                    array_cat(array_fill(1, ARRAY[768]), array_fill(-1, ARRAY[768]))::vector);
+            "#,
+        )
+        .await
+        .unwrap();
+        // Semantic matches rank by similarity across types, down to a floor.
+        assert_eq!(
+            ranked(json!({ "query": "unrelated" })).await,
+            ["granola:N1:000000", "google-drive:F1"]
+        );
+
+        // C3 mentions falcon but is not among the nearest neighbors the
+        // vector lane returns; its distance still counts.
+        pool.execute(
+            r#"
+            INSERT INTO company_context_data.slack_document_embeddings
+                (document_id, model, dimensions, content_hash, embedding)
+            VALUES ('slack:C3:2024-02-01:000000', 'text-embedding-3-small', 1536, 'hash',
+                    array_cat(array_fill(1, ARRAY[384]), array_fill(0, ARRAY[1152]))::vector);
+            INSERT INTO company_context_data.slack_documents
+                (document_id, conversation_id, day, chunk_id, title, body, channel_name,
+                 conversation_kind, first_message_at, last_message_at, content_hash)
+            SELECT format('slack:C1:2024-01-02:n%s', n), 'C1', '2024-01-02', format('n%s', n),
+                   '#general', 'weekly notes', 'general', 'public_channel',
+                   '2024-01-02T09:00Z', '2024-01-02T17:00Z', 'hash'
+            FROM generate_series(10, 34) n;
+            INSERT INTO company_context_data.slack_document_embeddings
+                (document_id, model, dimensions, content_hash, embedding)
+            SELECT document_id, 'text-embedding-3-small', 1536, 'hash', array_fill(0.5, ARRAY[1536])::vector
+            FROM company_context_data.slack_documents
+            WHERE chunk_id LIKE 'n%';
+            "#,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            ranked(json!({
+                "query": "falcon",
+                "filters": { "types": ["slack_message"] },
+                "limit": 1,
+            }))
+            .await,
+            ["slack:C3:2024-02-01:000000"]
         );
 
         server.abort();

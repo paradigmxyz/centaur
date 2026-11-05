@@ -137,6 +137,7 @@ Common optional settings:
 - `COMPANY_CONTEXT_WORKER_CONCURRENCY` (default `4`)
 - `COMPANY_CONTEXT_EMBEDDINGS_MODEL` (default `text-embedding-3-small`)
 - `COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS` (currently required to be `1536`)
+- `COMPANY_CONTEXT_EMBEDDINGS_MAX_QUERY_DISTANCE` (default `0.8`, greater than 0 and at most 2): the largest cosine distance from the query at which a document counts as a semantic match
 
 ## Backfilling newly supported Drive file types
 
@@ -241,8 +242,11 @@ Filters combine with AND:
 `channel_ids`, `file_ids`, `sources`, and `metadata` restrict the search to the types they apply to; a
 request whose types cannot satisfy every filter is rejected. `limit` defaults
 to 10 and is at most 50; there is no pagination, so narrow the filters instead.
-Keyword (BM25) and embedding similarity ranks are combined with reciprocal rank
-fusion; if the query cannot be embedded, keyword ranks alone are used.
+Keyword (BM25) and embedding similarity ranks, each taken across every
+searched type, are combined with reciprocal rank fusion. A keyword match is
+ranked by its similarity too, and a document farther from the query than
+`COMPANY_CONTEXT_EMBEDDINGS_MAX_QUERY_DISTANCE` gets no similarity rank. If the
+query cannot be embedded, keyword ranks alone are used.
 Calendar events have only a keyword rank, so they tend to rank below other
 types' documents that match both ways. A result's `score` is its fused rank
 score, comparable only within one response.
