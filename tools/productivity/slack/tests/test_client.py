@@ -1,7 +1,9 @@
 import base64
 import datetime as dt
 import email.message
+import io
 import json
+from pathlib import Path
 
 import pytest
 import slack.client as slack_client
@@ -891,38 +893,42 @@ def test_upload_file_proxy_posts_file_bytes_to_centaur_api(
     }
 
 
-def test_download_file_proxy_returns_base64_file(
-    monkeypatch: pytest.MonkeyPatch,
+def test_download_file_proxy_streams_file_to_disk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import urllib.parse
     import urllib.request
 
     client, _ = _make_client()
     request_info: dict[str, str | None] = {}
+    body = b"%PDF" + b"x" * (3 * 64 * 1024)
 
     def fake_urlopen(req, *args, **kwargs):
         request_info["url"] = req.full_url
         request_info["authorization"] = req.get_header("Authorization")
         return _FakeHTTPResponse(
-            b"%PDF",
+            body,
             "application/pdf",
-            {"Content-Disposition": 'attachment; filename="report.pdf"'},
+            {"Content-Disposition": 'attachment; filename="../report.pdf"'},
         )
 
     monkeypatch.setenv("CENTAUR_API_URL", "http://api.internal:8080")
     monkeypatch.setenv("CENTAUR_API_BEARER_TOKEN", "test-jwt")
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    result = client.download_file_proxy(file_id="F123456789", channel_id="C123456789")
+    result = client.download_file_proxy(
+        file_id="F123456789", channel_id="C123456789", output_dir=tmp_path
+    )
 
     assert result == {
         "file_id": "F123456789",
         "channel_id": "C123456789",
         "filename": "report.pdf",
         "content_type": "application/pdf",
-        "size_bytes": 4,
-        "content_base64": base64.b64encode(b"%PDF").decode(),
+        "size_bytes": len(body),
+        "output_path": str((tmp_path / "report.pdf").absolute()),
     }
+    assert (tmp_path / "report.pdf").read_bytes() == body
     assert request_info["authorization"] == "Bearer test-jwt"
     parsed = urllib.parse.urlparse(request_info["url"])
     assert parsed.path == "/api/slack/files/F123456789/download"
@@ -1682,7 +1688,7 @@ class _FakeHTTPResponse:
     def __init__(
         self, body: bytes, content_type: str, headers: dict[str, str] | None = None
     ) -> None:
-        self._body = body
+        self._body = io.BytesIO(body)
         self._content_type = content_type
         self._headers = headers or {}
 
@@ -1692,8 +1698,8 @@ class _FakeHTTPResponse:
     def __exit__(self, *exc: object) -> bool:
         return False
 
-    def read(self, _amt: int = -1) -> bytes:
-        return self._body
+    def read(self, amt: int = -1) -> bytes:
+        return self._body.read(amt)
 
     @property
     def headers(self) -> "email.message.Message":
@@ -1704,19 +1710,19 @@ class _FakeHTTPResponse:
         return msg
 
 
-def test_fetch_slack_file_rejects_non_files_host() -> None:
+def test_fetch_slack_file_rejects_non_files_host(tmp_path: Path) -> None:
     client, _ = _make_client()
     client.token = "SLACK_BOT_TOKEN"
 
     with pytest.raises(ValueError, match=r"files\.slack\.com"):
-        client._fetch_slack_file("https://slack.com/api/api.test?x=SLACK_BOT_TOKEN")
+        client._fetch_slack_file("https://slack.com/api/api.test?x=SLACK_BOT_TOKEN", tmp_path)
 
     with pytest.raises(ValueError, match=r"files\.slack\.com"):
-        client._fetch_slack_file("http://files.slack.com/files-pri/T1-F1/report.pdf")
+        client._fetch_slack_file("http://files.slack.com/files-pri/T1-F1/report.pdf", tmp_path)
 
 
-def test_fetch_slack_file_returns_file_metadata_and_bytes(
-    monkeypatch: pytest.MonkeyPatch,
+def test_fetch_slack_file_streams_file_to_disk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import urllib.request
 
@@ -1731,13 +1737,40 @@ def test_fetch_slack_file_returns_file_metadata_and_bytes(
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    filename, mime_type, body = client._fetch_slack_file(
-        "https://files.slack.com/files-pri/T1-F1/report.pdf"
+    out_path, size = client._fetch_slack_file(
+        "https://files.slack.com/files-pri/T1-F1/report.pdf", tmp_path
     )
 
-    assert filename == "report.pdf"
-    assert mime_type == "application/pdf"
-    assert body == b"%PDF-1.4 report"
+    assert out_path == tmp_path / "report.pdf"
+    assert size == len(b"%PDF-1.4 report")
+    assert out_path.read_bytes() == b"%PDF-1.4 report"
+
+
+def test_fetch_slack_file_interrupted_download_leaves_no_partial_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import urllib.request
+
+    client, _ = _make_client()
+    client.token = "SLACK_BOT_TOKEN"
+
+    class _InterruptedResponse(_FakeHTTPResponse):
+        def read(self, amt: int = -1) -> bytes:
+            chunk = super().read(amt)
+            if not chunk:
+                raise ConnectionResetError("connection reset")
+            return chunk
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _InterruptedResponse(b"partial", "application/pdf"),
+    )
+
+    with pytest.raises(ConnectionResetError):
+        client._fetch_slack_file("https://files.slack.com/files-pri/T1-F1/report.pdf", tmp_path)
+
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_get_file_info_direct_fetches_file_metadata() -> None:
