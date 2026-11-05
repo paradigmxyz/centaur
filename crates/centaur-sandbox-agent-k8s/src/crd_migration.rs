@@ -59,6 +59,7 @@ const REPLICAS_ANNOTATION: &str = "centaur.ai/agent-sandbox-v1alpha1-replicas";
 const MIGRATED_AT_ANNOTATION: &str = "agents.x-k8s.io/storage-migrated-at";
 const FIELD_MANAGER: &str = "centaur-agent-sandbox-migration";
 const STOP_TIMEOUT: Duration = Duration::from_secs(300);
+const SERVE_TIMEOUT: Duration = Duration::from_secs(60);
 const OWNER_GROUPS: [&str; 2] = ["agents.x-k8s.io", "extensions.agents.x-k8s.io"];
 
 #[derive(Debug, thiserror::Error)]
@@ -178,6 +179,9 @@ async fn migrate(
         }
         let bundled = bundled_for(bundled, live);
         install_crd(crds, &serving_old_version(bundled)).await?;
+        for version in [OLD_VERSION, NEW_VERSION] {
+            wait_until_served(client, &resource(bundled, version)).await?;
+        }
         tracing::info!(crd = crd_name(live), "CRD now stores {NEW_VERSION}");
         if bundled.spec.names.kind == SANDBOX_KIND {
             record_replicas(client, bundled).await?;
@@ -316,6 +320,27 @@ async fn list_all(client: &Client, resource: &ApiResource) -> Result<Vec<Dynamic
         .await
         .map(|list| list.items)
         .map_err(kube_error(format!("list {}", resource.plural)))
+}
+
+/// A version a CRD update just started serving answers 404 until the API
+/// server's handler for it is up, which takes a moment.
+async fn wait_until_served(client: &Client, resource: &ApiResource) -> Result<()> {
+    let api = Api::<DynamicObject>::all_with(client.clone(), resource);
+    let deadline = Instant::now() + SERVE_TIMEOUT;
+    loop {
+        match api.list(&ListParams::default().limit(1)).await {
+            Ok(_) => return Ok(()),
+            Err(kube::Error::Api(status)) if status.code == 404 && Instant::now() < deadline => {
+                sleep(Duration::from_millis(500)).await;
+            }
+            Err(error) => {
+                return Err(kube_error(format!(
+                    "wait for {} to be served",
+                    resource.api_version
+                ))(error));
+            }
+        }
+    }
 }
 
 async fn delete_deployment(client: &Client, deployment: &DeploymentRef) -> Result<()> {
