@@ -505,6 +505,12 @@ tokenBroker:
 companyContextV1:
   enabled: true
 
+# API clients: machine callers, such as eval runners, that exchange a client
+# secret for a session API token at api-rs /oauth/token. Off hides them in the
+# Console, removes the token endpoint, and rejects their existing tokens.
+apiClients:
+  enabled: false
+
 # Standalone company-context ingestion service. It indexes Google Docs and PDFs
 # from Google Drive, Google Calendar events, and Granola meeting notes into its
 # private system and data schemas. Disabled while the corpus is validated

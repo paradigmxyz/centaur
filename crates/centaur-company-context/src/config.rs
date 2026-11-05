@@ -226,20 +226,6 @@ pub struct Config {
         hide_env_values = true
     )]
     pub jwt_signing_secret: String,
-    #[arg(
-        long,
-        env = "CENTAUR_API_JWT_AUDIENCE",
-        default_value = "centaur-api",
-        value_parser = nonempty
-    )]
-    pub jwt_audience: String,
-    #[arg(
-        long,
-        env = "CENTAUR_API_JWT_ISSUER",
-        default_value = "centaur-console",
-        value_parser = nonempty
-    )]
-    pub jwt_issuer: String,
     #[arg(long, env = "BIND_ADDR", default_value = "0.0.0.0:8080")]
     pub bind_addr: SocketAddr,
     #[arg(

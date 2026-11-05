@@ -1,0 +1,47 @@
+<% content_for :title, "API Clients · Centaur Console" %>
+
+<%= render "console/control_tabs" %>
+
+<%= render "console/page_header",
+           title: "API Clients",
+           subtitle: "Machine callers of the session API, such as eval runners. Each runs sessions as one of its attached principals.",
+           actions: link_to("Add API Client", new_console_api_client_path, class: "btn-primary") %>
+
+<div class="console-panel">
+  <table class="console-table">
+    <thead class="console-table-head">
+      <tr>
+        <th class="console-th">Client ID</th>
+        <th class="console-th">Name</th>
+        <th class="console-th">Scopes</th>
+        <th class="console-th">Principals</th>
+        <th class="console-th">Status</th>
+        <th class="console-th text-right"></th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-ink-700">
+      <% if @api_clients.empty? %>
+        <tr><td colspan="6" class="px-5 py-10 text-center text-zinc-600">No API clients yet.</td></tr>
+      <% end %>
+      <% @api_clients.each do |client| %>
+        <tr class="group cursor-pointer console-row-hover"
+            onclick="window.location='<%= console_api_client_path(client) %>'">
+          <td class="console-td-nowrap">
+            <span class="text-centaur-400 group-hover:glow"><%= client.oid %></span>
+          </td>
+          <td class="console-td-nowrap text-zinc-100"><%= client.name %></td>
+          <td class="console-td">
+            <div class="flex flex-wrap gap-1">
+              <% client.scopes.each do |scope| %>
+                <span class="label-chip"><%= scope %></span>
+              <% end %>
+            </div>
+          </td>
+          <td class="console-td text-zinc-400"><%= client.principals.size %></td>
+          <td class="console-td text-zinc-400"><%= client.disabled? ? "disabled" : "active" %></td>
+          <td class="console-td text-right text-zinc-600 group-hover:text-centaur-400">→</td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+</div>

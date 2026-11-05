@@ -274,6 +274,8 @@ spec:
 {{- end }}
             - name: CENTAUR_CONSOLE_COMPANY_CONTEXT_V1_ENABLED
               value: {{ .Values.companyContextV1.enabled | quote }}
+            - name: CENTAUR_CONSOLE_API_CLIENTS_ENABLED
+              value: {{ .Values.apiClients.enabled | quote }}
             - name: PORT
               value: {{ $console.service.httpPort | quote }}
             - name: RAILS_LOG_TO_STDOUT

@@ -1,0 +1,44 @@
+<%= render "errors", api_client: api_client %>
+
+<%= form_with model: [ :console, api_client ], data: { turbo: false }, class: "space-y-6" do %>
+  <section class="form-section">
+    <h2 class="form-section-heading">Client</h2>
+    <div class="grid gap-5 sm:grid-cols-2">
+      <div>
+        <label class="form-label" for="api_client_name">Name *</label>
+        <%= text_field_tag "api_client[name]", api_client.name, id: "api_client_name", required: true,
+              class: "form-input #{field_error_class(api_client, :name)}", placeholder: "eval-runner" %>
+        <%= field_error(api_client, :name) %>
+      </div>
+      <% if api_client.new_record? %>
+        <div class="sm:col-span-2">
+          <label class="form-label" for="api_client_principal">Default principal</label>
+          <%= text_field_tag "api_client[principal]", params.dig(:api_client, :principal), id: "api_client_principal",
+                class: "form-input", placeholder: "prn_… or foreign ID" %>
+          <p class="form-hint">Principal OID or foreign ID. Sessions use it unless they name another attached principal. You can attach more after creating the client.</p>
+        </div>
+      <% end %>
+    </div>
+  </section>
+
+  <section class="form-section">
+    <h2 class="form-section-heading">Scopes</h2>
+    <%= hidden_field_tag "api_client[scopes][]", "", id: nil %>
+    <div class="grid gap-3">
+      <% ApiClient::SCOPES.each do |scope| %>
+        <% id = "api_client_scope_#{scope.parameterize(separator: "_")}" %>
+        <div class="flex items-center gap-2">
+          <%= check_box_tag "api_client[scopes][]", scope, Array(api_client.scopes).include?(scope), id: id, class: "h-4 w-4" %>
+          <label class="form-label mb-0" for="<%= id %>"><%= scope %></label>
+        </div>
+      <% end %>
+    </div>
+    <%= field_error(api_client, :scopes) %>
+    <p class="form-hint">sessions:write creates sessions and starts turns; sessions:read reads session state and events.</p>
+  </section>
+
+  <div class="flex items-center gap-3">
+    <%= submit_tag api_client.new_record? ? "Create API client" : "Save API client", class: "btn-primary" %>
+    <a href="<%= api_client.persisted? ? console_api_client_path(api_client) : console_api_clients_path %>" class="btn-secondary">Cancel</a>
+  </div>
+<% end %>
