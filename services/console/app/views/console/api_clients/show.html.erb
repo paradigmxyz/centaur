@@ -1,0 +1,108 @@
+<% content_for :title, "#{@api_client.name} · Centaur Console" %>
+
+<div class="mb-8">
+  <a href="<%= console_api_clients_path %>" class="back-link">← back to API clients</a>
+  <div class="mt-2 flex flex-wrap items-center gap-3">
+    <h1 class="page-title"><%= @api_client.name %></h1>
+    <div class="ml-auto flex flex-wrap items-center gap-2">
+      <a href="<%= edit_console_api_client_path(@api_client) %>" class="btn-secondary">Edit</a>
+      <%= button_to "Rotate secret", rotate_secret_console_api_client_path(@api_client), method: :post,
+            form: { data: { turbo: false, turbo_confirm: "Rotate the secret? The current secret stops working immediately." } },
+            class: "btn-secondary cursor-pointer" %>
+      <% if @api_client.disabled? %>
+        <%= button_to "Enable", enable_console_api_client_path(@api_client), method: :post, class: "btn-secondary cursor-pointer" %>
+      <% else %>
+        <%= button_to "Disable", disable_console_api_client_path(@api_client), method: :post,
+              form: { data: { turbo_confirm: "Disable this client? Its access tokens stop working immediately." } },
+              class: "btn-secondary cursor-pointer" %>
+      <% end %>
+      <%= button_to "Delete", console_api_client_path(@api_client), method: :delete,
+            form: { data: { turbo_confirm: "Delete #{@api_client.name}? This cannot be undone." } },
+            class: "cursor-pointer rounded border border-ink-600 px-3 py-1.5 text-zinc-400 transition-colors hover:border-red-500/40 hover:text-red-300" %>
+    </div>
+  </div>
+  <div class="mt-2 flex flex-wrap items-center gap-2 text-sm">
+    <span class="text-zinc-400">client_id:</span>
+    <span class="text-centaur-400 glow"><%= @api_client.oid %></span>
+    <span class="text-zinc-600">·</span>
+    <span class="text-zinc-400"><%= @api_client.disabled? ? "disabled" : "active" %></span>
+    <span class="text-zinc-600">·</span>
+    <span class="text-zinc-400">max concurrent sessions: <span class="text-zinc-200"><%= @api_client.max_concurrent_sessions || "unlimited" %></span></span>
+  </div>
+  <div class="mt-3 flex flex-wrap gap-1">
+    <% @api_client.scopes.each do |scope| %>
+      <span class="label-chip"><%= scope %></span>
+    <% end %>
+  </div>
+</div>
+
+<% if @secret %>
+  <section class="mb-8 rounded-xl border border-amber-500/30 bg-amber-500/[0.04] p-5" aria-labelledby="api-client-secret-heading">
+    <h2 id="api-client-secret-heading" class="mb-2 text-sm font-semibold text-amber-300">Client secret</h2>
+    <p class="mb-3 text-sm text-zinc-400">Copy it now. It is shown only once; rotate the secret if it is lost.</p>
+    <label class="sr-only" for="api_client_secret">Client secret</label>
+    <input id="api_client_secret" type="text" readonly value="<%= @secret %>" autocomplete="off" spellcheck="false"
+           class="form-input font-mono" onfocus="this.select()">
+  </section>
+<% end %>
+
+<section>
+  <div class="mb-4 flex flex-wrap items-end justify-between gap-3">
+    <div>
+      <h2 class="mb-1 text-xs font-semibold uppercase tracking-wider text-zinc-500">Principals</h2>
+      <p class="text-sm text-zinc-500">A session runs as the principal it names, or the default. Its sandbox gets that principal's grants.</p>
+    </div>
+    <%= form_with url: attach_principal_console_api_client_path(@api_client), method: :post, data: { turbo: false }, class: "flex flex-wrap items-center gap-3" do %>
+      <label class="sr-only" for="attach_principal">Principal OID or foreign ID</label>
+      <%= text_field_tag :principal, nil, id: "attach_principal", class: "form-input w-80 max-w-full", placeholder: "prn_… or foreign ID", required: true %>
+      <%= submit_tag "Attach principal", class: "btn-primary" %>
+    <% end %>
+  </div>
+
+  <% if @principal_links.any? %>
+    <div class="console-panel">
+      <table class="console-table">
+        <thead class="console-table-head">
+          <tr>
+            <th class="console-th">ID</th>
+            <th class="console-th">Name</th>
+            <th class="console-th">Kind</th>
+            <th class="console-th"></th>
+            <th class="console-th text-right"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-ink-700">
+          <% @principal_links.each do |link| %>
+            <% principal = link.principal %>
+            <tr class="console-row-hover">
+              <td class="console-td-nowrap">
+                <%= link_to principal.oid, console_principal_path(principal.oid), class: "console-link" %>
+                <% if principal.foreign_id.present? %>
+                  <div class="text-xs text-zinc-500" title="<%= principal.foreign_id %>"><%= truncate_middle(principal.foreign_id) %></div>
+                <% end %>
+              </td>
+              <td class="console-td text-zinc-100"><%= principal.name.presence || "unnamed" %></td>
+              <td class="console-td-nowrap"><span class="resource-badge"><%= principal.kind %></span></td>
+              <td class="console-td-nowrap">
+                <% if link.default %><span class="label-chip">default</span><% end %>
+              </td>
+              <td class="console-td">
+                <div class="flex items-center justify-end gap-2">
+                  <% unless link.default %>
+                    <%= button_to "Make default", make_default_principal_console_api_client_path(@api_client, link.oid), method: :post,
+                          class: "cursor-pointer rounded border border-ink-600 px-3 py-1.5 text-zinc-400 transition-colors hover:border-centaur-500/40 hover:text-centaur-300" %>
+                  <% end %>
+                  <%= button_to "Detach", detach_principal_console_api_client_path(@api_client, link.oid), method: :delete,
+                        form: { data: { turbo_confirm: "Detach this principal? Sessions already bound to it stop accepting turns." } },
+                        class: "cursor-pointer rounded border border-ink-600 px-3 py-1.5 text-zinc-400 transition-colors hover:border-red-500/40 hover:text-red-300" %>
+                </div>
+              </td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+  <% else %>
+    <div class="empty-state">No principals attached. The client cannot create sessions until one is attached.</div>
+  <% end %>
+</section>

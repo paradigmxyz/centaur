@@ -10,9 +10,34 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_10_10_025431) do
+ActiveRecord::Schema[8.1].define(version: 2026_11_04_232304) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
+
+  create_table "api_client_principals", force: :cascade do |t|
+    t.bigint "api_client_id", null: false
+    t.bigint "principal_id", null: false
+    t.boolean "default", default: false, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["api_client_id", "principal_id"], name: "index_api_client_principals_on_api_client_id_and_principal_id", unique: true
+    t.index ["api_client_id"], name: "index_api_client_principals_on_api_client_id"
+    t.index ["api_client_id"], name: "index_api_client_principals_on_default", unique: true, where: "\"default\""
+    t.index ["principal_id"], name: "index_api_client_principals_on_principal_id"
+  end
+
+  create_table "api_clients", force: :cascade do |t|
+    t.string "name", null: false
+    t.string "secret_digest", null: false
+    t.jsonb "scopes", default: [], null: false
+    t.integer "max_concurrent_sessions"
+    t.datetime "disabled_at"
+    t.bigint "created_by_id", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["created_by_id"], name: "index_api_clients_on_created_by_id"
+    t.index ["secret_digest"], name: "index_api_clients_on_secret_digest", unique: true
+  end
 
   create_table "api_keys", force: :cascade do |t|
     t.datetime "created_at", null: false
@@ -571,6 +596,9 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_10_025431) do
     t.index ["email"], name: "index_users_on_email", unique: true
   end
 
+  add_foreign_key "api_client_principals", "api_clients", on_delete: :cascade
+  add_foreign_key "api_client_principals", "principals", on_delete: :cascade
+  add_foreign_key "api_clients", "users", column: "created_by_id"
   add_foreign_key "api_keys", "users"
   add_foreign_key "aws_auth_secrets", "users", column: "created_by_id"
   add_foreign_key "broker_credentials", "oauth_apps"

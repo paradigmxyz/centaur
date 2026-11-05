@@ -1,0 +1,8 @@
+<% content_for :title, "New API Client · Centaur Console" %>
+
+<div class="mb-8">
+  <a href="<%= console_api_clients_path %>" class="back-link">← back to API clients</a>
+  <h1 class="mt-2 page-title">New API Client</h1>
+</div>
+
+<%= render "form", api_client: @api_client %>
