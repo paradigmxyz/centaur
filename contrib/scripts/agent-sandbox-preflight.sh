@@ -69,7 +69,12 @@ info "context $CONTEXT, release namespace $NAMESPACE, controller namespace $CONT
 # the hook applies.
 present=0
 pending=0
-switched=0 # pending CRDs whose storage the hook already moved to v1beta1
+# Pending CRDs that already store v1beta1: the hook keeps v1alpha1 served while
+# it migrates, so a CRD that stores v1beta1 and no longer serves v1alpha1 was
+# switched by something else, such as applying the chart's crds/ by hand.
+switched_by_hook=0
+switched_elsewhere=0
+claims_pending=0
 for crd in "${CRDS[@]}"; do
   state="$(jq -r --arg name "$crd" '
     .items[] | select(.metadata.name == $name) |
@@ -88,7 +93,12 @@ for crd in "${CRDS[@]}"; do
   detail="serves [$served], stores [$storage], storedVersions [$stored], conversion $conversion"
   if [[ ",$served," == *,v1alpha1,* || ",$stored," == *,v1alpha1,* ]]; then
     pending=$((pending + 1))
-    [[ "$storage" == v1beta1 ]] && switched=$((switched + 1))
+    [[ "$crd" == sandboxclaims.* ]] && claims_pending=1
+    if [[ "$storage" == v1beta1 && ",$served," == *,v1alpha1,* ]]; then
+      switched_by_hook=$((switched_by_hook + 1))
+    elif [[ "$storage" == v1beta1 ]]; then
+      switched_elsewhere=$((switched_elsewhere + 1))
+    fi
     info "$crd: needs migration ($detail)"
     if [[ "$conversion" == Webhook && ",$stored," == *,v1alpha1,* ]]; then
       fail "$crd still stores v1alpha1 behind a conversion webhook: finish upstream's v0.5 storage migration first; the hook refuses this state"
@@ -103,7 +113,7 @@ crd_present() { jq -e --arg name "$1" 'any(.items[]; .metadata.name == $name)' <
 # --- Objects --------------------------------------------------------------------
 if crd_present sandboxclaims.extensions.agents.x-k8s.io; then
   claims="$(k get sandboxclaims.extensions.agents.x-k8s.io -A -o json | jq '.items | length')"
-  if [[ "$claims" -gt 0 && $pending -gt 0 ]]; then
+  if [[ "$claims" -gt 0 && $claims_pending -eq 1 ]]; then
     fail "$claims SandboxClaims exist; the hook refuses to migrate them (delete unused claims, or migrate them with upstream's v0.5 release first)"
   elif [[ "$claims" -gt 0 ]]; then
     info "$claims SandboxClaims exist"
@@ -148,10 +158,20 @@ if crd_present sandboxes.agents.x-k8s.io; then
 fi
 
 # --- Writers the hook does and does not stop ------------------------------------
+# The hook has started once it serves v1alpha1 on a v1beta1-stored CRD or has
+# recorded replica counts; by then it has deleted the Deployments it stops.
+started=$(( switched_by_hook > 0 || recorded > 0 ))
 deployments="$(k get deployments -A -o json)"
 controllers="$(jq -r '.items[] |
   select(any(.spec.template.spec.containers[]; .image | test("agent-sandbox-controller"))) |
   "\(.metadata.namespace)/\(.metadata.name)\t\([.spec.template.spec.containers[].image] | join(","))"' <<< "$deployments")"
+if [[ $pending -gt 0 ]] && ! grep -q "^$CONTROLLER_NAMESPACE/agent-sandbox-controller"$'\t' <<< "$controllers"; then
+  if [[ $started -eq 1 ]]; then
+    warn "no agent-sandbox-controller Deployment in $CONTROLLER_NAMESPACE: the interrupted migration below most likely deleted it; the upgrade recreates it"
+  else
+    warn "no agent-sandbox-controller Deployment in $CONTROLLER_NAMESPACE, which is the one the hook stops: set --controller-namespace to the chart's agentSandbox.namespace.name (an empty value means the release namespace)"
+  fi
+fi
 if [[ -z "$controllers" ]]; then
   info "no agent-sandbox controller Deployment found"
 else
@@ -169,7 +189,6 @@ fi
 api_rs="$(jq -r '.items[] |
   select(.metadata.labels["app.kubernetes.io/component"] == "api-rs") |
   "\(.metadata.namespace)/\(.metadata.name)\t\(.spec.template.spec.containers[0].image)"' <<< "$deployments")"
-started=$(( switched > 0 || recorded > 0 ))
 if [[ $present -gt 0 ]] && ! grep -q "^$NAMESPACE/" <<< "$api_rs"; then
   if [[ $pending -gt 0 && $started -eq 1 ]]; then
     warn "no api-rs Deployment in $NAMESPACE: the interrupted migration below most likely deleted it; the upgrade recreates it"
@@ -201,12 +220,15 @@ elif [[ $pending -eq 0 ]]; then
     warn "$owned owner references still point at v1alpha1 Sandboxes, which garbage collection cannot resolve; see \"Children of a deleted Sandbox are not garbage-collected\" in contrib/MIGRATING_AGENT_SANDBOX.md"
 elif [[ $started -eq 1 ]]; then
   evidence=()
-  [[ $switched -gt 0 ]] && evidence+=("$switched of $pending CRDs already store v1beta1")
+  [[ $switched_by_hook -gt 0 ]] && evidence+=("$switched_by_hook of $pending CRDs already store v1beta1")
   [[ $recorded -gt 0 ]] && evidence+=("$recorded Sandboxes have a recorded replica count")
   [[ $rewritten -gt 0 ]] && evidence+=("$rewritten Sandboxes already rewritten")
   joined="$(printf '; %s' "${evidence[@]}")"
   warn "a migration started but did not finish (${joined:2}); the upgrade resumes it. Do not roll back"
   [[ $owned -gt 0 ]] && info "$owned owner references still point at v1alpha1 Sandboxes; the hook rewrites them"
+elif [[ $switched_elsewhere -gt 0 ]]; then
+  warn "$switched_elsewhere of $pending CRDs were switched to v1beta1 storage without the hook (for example by applying crds/ by hand), so v1alpha1 is no longer served: the old api-rs and controller now fail, and a paused Sandbox written through v1beta1 before the hook runs can come back Running. Run the upgrade soon; the hook migrates the rest"
+  [[ $owned -gt 0 ]] && info "$owned owner references point at v1alpha1 Sandboxes; the hook rewrites them"
 else
   info "the migration has not run; the upgrade will migrate this cluster (one-way; see contrib/MIGRATING_AGENT_SANDBOX.md)"
   [[ $owned -gt 0 ]] && info "$owned owner references point at v1alpha1 Sandboxes; the hook rewrites them"

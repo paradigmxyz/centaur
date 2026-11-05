@@ -186,7 +186,7 @@ k get clusterrole,clusterrolebinding -o name | grep agent-sandbox-crds
 ```
 
 `<controller-namespace>` is `agentSandbox.namespace.name` (default
-`agent-sandbox-system`).
+`agent-sandbox-system`; an empty value means the release namespace).
 
 Finally, send a message to a conversation whose sandbox was paused before the
 upgrade. It should answer, and its `session.sandbox_ready` event should report
