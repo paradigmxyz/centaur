@@ -894,8 +894,8 @@ impl JwtVerifier {
         let mut validation = Validation::new(Algorithm::HS256);
         validation.leeway = JWT_LEEWAY_SECONDS;
         validation.validate_nbf = true;
-        validation.set_audience(&[&config.jwt_audience]);
-        validation.set_issuer(&[&config.jwt_issuer]);
+        validation.set_audience(&["centaur-api"]);
+        validation.set_issuer(&["centaur-console"]);
         validation.set_required_spec_claims(&["exp", "iss", "sub", "aud"]);
         Self {
             key: DecodingKey::from_secret(config.jwt_signing_secret.as_bytes()),

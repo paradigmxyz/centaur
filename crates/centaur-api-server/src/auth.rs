@@ -8,11 +8,11 @@ use thiserror::Error;
 
 use crate::{
     ApiError,
-    api_jwt::{bearer_token, decode_jwt_payload, verify_hs256_jwt},
+    api_jwt::{
+        API_JWT_AUDIENCE, CONSOLE_JWT_ISSUER, bearer_token, decode_jwt_payload, verify_hs256_jwt,
+    },
 };
 
-const DEFAULT_API_JWT_AUDIENCE: &str = "centaur-api";
-const DEFAULT_API_JWT_ISSUER: &str = "centaur-console";
 const CONSOLE_SERVICE_SUBJECT: &str = "centaur-console";
 const STATIC_ADMIN_IDENTITY: &str = "api-rs-admin";
 /// Issuer of the access tokens api-rs mints for API clients. Distinct from
@@ -126,17 +126,11 @@ struct StaticCaller {
 pub struct ApiAuthConfig {
     static_callers: Arc<Vec<StaticCaller>>,
     jwt_secret: Arc<str>,
-    jwt_audience: Arc<str>,
-    jwt_issuer: Arc<str>,
 }
 
 impl ApiAuthConfig {
     pub fn from_env() -> Result<Self, ApiAuthConfigError> {
         let jwt_secret = required_env("CENTAUR_JWT_SIGNING_SECRET")?;
-        let jwt_audience = optional_env("CENTAUR_API_JWT_AUDIENCE")
-            .unwrap_or_else(|| DEFAULT_API_JWT_AUDIENCE.to_owned());
-        let jwt_issuer = optional_env("CENTAUR_API_JWT_ISSUER")
-            .unwrap_or_else(|| DEFAULT_API_JWT_ISSUER.to_owned());
 
         let mut callers = Vec::new();
         if let Some(token) = optional_env("CENTAUR_APIRS_ADMIN_API_KEY") {
@@ -173,8 +167,6 @@ impl ApiAuthConfig {
         Ok(Self {
             static_callers: Arc::new(callers),
             jwt_secret: jwt_secret.into(),
-            jwt_audience: jwt_audience.into(),
-            jwt_issuer: jwt_issuer.into(),
         })
     }
 
@@ -182,8 +174,6 @@ impl ApiAuthConfig {
         Self {
             static_callers: Arc::new(Vec::new()),
             jwt_secret: Arc::from(jwt_secret.into()),
-            jwt_audience: Arc::from(DEFAULT_API_JWT_AUDIENCE),
-            jwt_issuer: Arc::from(DEFAULT_API_JWT_ISSUER),
         }
     }
 
@@ -208,8 +198,6 @@ impl ApiAuthConfig {
         Self {
             static_callers: Arc::new(callers),
             jwt_secret: Arc::from(jwt_secret.into()),
-            jwt_audience: Arc::from(DEFAULT_API_JWT_AUDIENCE),
-            jwt_issuer: Arc::from(DEFAULT_API_JWT_ISSUER),
         }
     }
 
@@ -247,8 +235,8 @@ impl ApiAuthConfig {
         let claims = verify_hs256_jwt::<ApiJwtClaims>(
             token,
             self.jwt_secret.as_bytes(),
-            &self.jwt_audience,
-            &self.jwt_issuer,
+            API_JWT_AUDIENCE,
+            CONSOLE_JWT_ISSUER,
         )?;
         let subject = claims.sub.trim().to_owned();
         match claims.token_use {
@@ -308,7 +296,7 @@ impl ApiAuthConfig {
     ) -> Result<String, ApiError> {
         let claims = serde_json::json!({
             "iss": API_CLIENT_TOKEN_ISSUER,
-            "aud": &*self.jwt_audience,
+            "aud": API_JWT_AUDIENCE,
             "sub": client_id,
             "iat": now,
             "nbf": now,
@@ -331,7 +319,7 @@ impl ApiAuthConfig {
         let claims = verify_hs256_jwt::<ApiClientClaims>(
             token,
             self.jwt_secret.as_bytes(),
-            &self.jwt_audience,
+            API_JWT_AUDIENCE,
             API_CLIENT_TOKEN_ISSUER,
         )?;
         if claims.token_use != API_CLIENT_TOKEN_USE {
@@ -543,8 +531,6 @@ mod tests {
                 None,
             )]),
             jwt_secret: Arc::from("jwt-secret"),
-            jwt_audience: Arc::from(DEFAULT_API_JWT_AUDIENCE),
-            jwt_issuer: Arc::from(DEFAULT_API_JWT_ISSUER),
         };
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, "Bearer admin-key".parse().unwrap());

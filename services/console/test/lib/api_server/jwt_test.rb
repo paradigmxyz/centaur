@@ -13,8 +13,8 @@ class ApiServerJwtTest < ActiveSupport::TestCase
       claims = CentaurJwt::Hs256.decode(
         ApiServer::Jwt.encode_for_principal(principal),
         signing_secret: "test-secret",
-        iss: ApiServer::Jwt::DEFAULT_ISSUER,
-        aud: ApiServer::Jwt::DEFAULT_AUDIENCE
+        iss: ApiServer::Jwt::ISSUER,
+        aud: ApiServer::Jwt::AUDIENCE
       )
 
       assert_equal false, claims.dig("capabilities", "sessions_read")
@@ -31,8 +31,8 @@ class ApiServerJwtTest < ActiveSupport::TestCase
       claims = CentaurJwt::Hs256.decode(
         token,
         signing_secret: "test-secret",
-        iss: ApiServer::Jwt::DEFAULT_ISSUER,
-        aud: ApiServer::Jwt::DEFAULT_AUDIENCE
+        iss: ApiServer::Jwt::ISSUER,
+        aud: ApiServer::Jwt::AUDIENCE
       )
 
       assert_equal ApiServer::Jwt::CONSOLE_SERVICE_SUBJECT, claims.fetch("sub")
