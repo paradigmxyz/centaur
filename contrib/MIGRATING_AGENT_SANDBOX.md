@@ -49,6 +49,21 @@ api-rs, usually well under a minute.
 
 ## Before you start
 
+Run the read-only preflight check against the cluster first. It reports
+whether the upgrade will migrate it, finds anything that would make the hook
+refuse (SandboxClaims, an unfinished upstream webhook migration), and warns
+about writers the hook does not stop, such as another agent-sandbox controller
+or another release's api-rs sharing the cluster-wide CRDs:
+
+```bash
+contrib/scripts/agent-sandbox-preflight.sh --context <ctx> \
+  [--namespace <namespace>] [--controller-namespace <controller-namespace>]
+```
+
+It exits 0 when the cluster is ready (review any warnings) and 1 when the
+upgrade would be refused. The points below are what it checks, plus the ones
+only you can decide.
+
 - **The migration is one-way.** Once the hook has run, the previous chart
   cannot be restored: its CRDs are rejected by the API server, and its
   `v1alpha1`-only api-rs cannot find any Sandbox. Fix problems forward by
