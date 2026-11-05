@@ -22,8 +22,10 @@ This is a run of an existing scheduled task. Execute the task now.
 NEVER create or update a scheduled task, even if the task prompt contains recurring or future schedule language.
 Treat schedule language such as "Each Monday" as context for this run, not as a request to schedule another task.
 If the task asks you to stay silent when there is nothing to report and there is nothing to report, reply with exactly NO_UPDATE."""
-# A run whose whole response is this token posts nothing to Slack.
+# A run whose response ends with this token posts nothing to Slack. Agents often
+# narrate what they checked before the token, so only the ending is matched.
 SKIP_DELIVERY_TOKEN = "NO_UPDATE"
+SKIP_DELIVERY_PATTERN = re.compile(rf"(?:^|\s)[`*_]*{SKIP_DELIVERY_TOKEN}[`*_.]*$")
 SLACK_MRKDWN_INSTRUCTIONS = """\
 Format the final response for Slack using Slack mrkdwn, not standard Markdown.
 Use *bold*, _italics_, ~strikethrough~, `inline code`, and <https://example.com|link text>.
@@ -176,7 +178,7 @@ async def handler(params: Any, ctx: Any) -> dict[str, Any]:
 
     result = await ctx.step("agent_result", run_agent)
     response_text = str(result.get("result_text") or "").strip()
-    if response_text.strip("`*_ ") == SKIP_DELIVERY_TOKEN:
+    if SKIP_DELIVERY_PATTERN.search(response_text):
         return {
             "agent_result": result,
             "delivery": None,
