@@ -665,6 +665,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn token_endpoint_is_routed_only_while_api_clients_are_enabled() {
+        for (enabled, status) in [
+            (true, StatusCode::BAD_REQUEST),
+            (false, StatusCode::NOT_FOUND),
+        ] {
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/oauth/token")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("grant_type=password"))
+                .unwrap();
+            let response = build_router_with_app_state(AppState::unready(
+                test_auth().with_api_clients_enabled(enabled),
+            ))
+            .oneshot(request)
+            .await
+            .unwrap();
+            assert_eq!(response.status(), status, "enabled={enabled}");
+        }
+    }
+
+    #[tokio::test]
     async fn runtime_routes_report_unavailable_until_runtime_is_ready() {
         for mut request in [
             Request::builder()

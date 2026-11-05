@@ -3,11 +3,38 @@ require "test_helper"
 module Console
   class ApiClientsControllerTest < ActionDispatch::IntegrationTest
     setup do
+      ENV["CENTAUR_CONSOLE_API_CLIENTS_ENABLED"] = "true"
       post login_url, params: { email: users(:acme_admin).email, password: "password123456" }
+    end
+
+    teardown do
+      ENV.delete("CENTAUR_CONSOLE_API_CLIENTS_ENABLED")
     end
 
     def create_client(name: "eval-runner")
       ApiClient.create!(name: name, scopes: ApiClient::SCOPES, created_by: users(:acme_admin))
+    end
+
+    test "API clients are hidden and unreachable while the feature is off" do
+      client = create_client
+      ENV.delete("CENTAUR_CONSOLE_API_CLIENTS_ENABLED")
+
+      get console_principals_url
+      assert_select "a[href=?]", console_api_clients_path, count: 0
+
+      get console_api_clients_url
+      assert_response :not_found
+      post rotate_secret_console_api_client_url(client)
+      assert_response :not_found
+      assert_no_difference -> { ApiClient.count } do
+        post console_api_clients_url, params: { api_client: { name: "x", scopes: ApiClient::SCOPES } }
+      end
+      assert_response :not_found
+    end
+
+    test "the API Clients tab shows for admins while the feature is on" do
+      get console_principals_url
+      assert_select "a[href=?]", console_api_clients_path, text: "API Clients"
     end
 
     test "non-admins cannot manage API clients" do

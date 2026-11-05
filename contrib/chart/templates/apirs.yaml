@@ -270,6 +270,8 @@ spec:
             - name: CENTAUR_SESSION_PRINCIPAL_ADMISSION
               value: {{ .Values.apiRs.sessionPrincipalAdmission | quote }}
 {{- end }}
+            - name: CENTAUR_API_CLIENTS_ENABLED
+              value: {{ .Values.apiClients.enabled | quote }}
 {{- if not (hasKey .Values.apiRs.extraEnv "CENTAUR_MCP_V2_ENABLED") }}
             - name: CENTAUR_MCP_V2_ENABLED
               value: {{ .Values.apiRs.mcpV2Enabled | quote }}

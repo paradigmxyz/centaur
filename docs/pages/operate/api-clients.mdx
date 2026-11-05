@@ -13,6 +13,13 @@ Each client runs its sessions as one of the principals an admin attached to it,
 so a session's sandbox gets exactly that principal's grants. A client can only
 use thread keys that start with `api:<client id>:`.
 
+## Enable API clients
+
+API clients are off by default. Set `apiClients.enabled: true` in your Helm
+values. While the flag is off, the console hides **API Clients**, api-rs does
+not serve `/oauth/token`, and api-rs rejects tokens issued earlier. Clients you
+created are kept.
+
 ## Create a client
 
 In the console, open **API Clients** (admins only) and add a client:

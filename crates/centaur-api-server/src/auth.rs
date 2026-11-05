@@ -141,6 +141,9 @@ struct StaticCaller {
 pub struct ApiAuthConfig {
     static_callers: Arc<Vec<StaticCaller>>,
     jwt_secret: Arc<str>,
+    /// Whether API clients may get and use access tokens
+    /// (`CENTAUR_API_CLIENTS_ENABLED`).
+    api_clients_enabled: bool,
 }
 
 impl ApiAuthConfig {
@@ -182,6 +185,8 @@ impl ApiAuthConfig {
         Ok(Self {
             static_callers: Arc::new(callers),
             jwt_secret: jwt_secret.into(),
+            api_clients_enabled: optional_env("CENTAUR_API_CLIENTS_ENABLED")
+                .is_some_and(|value| value.eq_ignore_ascii_case("true")),
         })
     }
 
@@ -189,6 +194,7 @@ impl ApiAuthConfig {
         Self {
             static_callers: Arc::new(Vec::new()),
             jwt_secret: Arc::from(jwt_secret.into()),
+            api_clients_enabled: true,
         }
     }
 
@@ -213,7 +219,18 @@ impl ApiAuthConfig {
         Self {
             static_callers: Arc::new(callers),
             jwt_secret: Arc::from(jwt_secret.into()),
+            api_clients_enabled: true,
         }
+    }
+
+    /// Enables or disables API clients, overriding the environment.
+    pub fn with_api_clients_enabled(mut self, enabled: bool) -> Self {
+        self.api_clients_enabled = enabled;
+        self
+    }
+
+    pub(crate) const fn api_clients_enabled(&self) -> bool {
+        self.api_clients_enabled
     }
 
     pub(crate) fn verify_workflow_button(
@@ -245,6 +262,11 @@ impl ApiAuthConfig {
             return Err(ApiError::Unauthorized("invalid bearer token".to_owned()));
         }
         if unverified_issuer(token).as_deref() == Some(API_CLIENT_TOKEN_ISSUER) {
+            if !self.api_clients_enabled {
+                return Err(ApiError::Unauthorized(
+                    "API clients are disabled".to_owned(),
+                ));
+            }
             return self.authenticate_api_client(token);
         }
         let claims = verify_hs256_jwt::<ApiJwtClaims>(
@@ -558,6 +580,7 @@ mod tests {
                 None,
             )]),
             jwt_secret: Arc::from("jwt-secret"),
+            api_clients_enabled: true,
         };
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, "Bearer admin-key".parse().unwrap());
@@ -699,6 +722,21 @@ mod tests {
             .unwrap();
         assert!(matches!(
             auth.authenticate(&bearer(&expired)),
+            Err(ApiError::Unauthorized(_))
+        ));
+    }
+
+    #[test]
+    fn api_client_tokens_are_rejected_while_api_clients_are_disabled() {
+        let enabled = ApiAuthConfig::testing("jwt-secret");
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let token = enabled
+            .mint_api_client_token("acl_test", "fp", &["sessions:read".to_owned()], now)
+            .unwrap();
+
+        let disabled = enabled.with_api_clients_enabled(false);
+        assert!(matches!(
+            disabled.authenticate(&bearer(&token)),
             Err(ApiError::Unauthorized(_))
         ));
     }

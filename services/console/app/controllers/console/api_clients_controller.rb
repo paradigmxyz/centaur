@@ -5,6 +5,7 @@ module Console
   class ApiClientsController < ApplicationController
     layout "console"
 
+    before_action :require_api_clients_enabled
     before_action :require_admin
     before_action :set_api_client, except: %i[index new create]
     before_action :set_principal_link, only: %i[detach_principal make_default_principal]
@@ -94,6 +95,11 @@ module Console
     end
 
     private
+
+    # Answers as for an unknown route, so a disabled feature is not advertised.
+    def require_api_clients_enabled
+      render status: :not_found, json: { error: { message: "not found" } } unless ApiClientsFeature.enabled?
+    end
 
     def set_api_client
       @api_client = ApiClient.find_by_oid!(params[:id])
