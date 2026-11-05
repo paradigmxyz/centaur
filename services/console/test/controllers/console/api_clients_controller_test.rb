@@ -52,9 +52,12 @@ module Console
       assert_response :unprocessable_entity
     end
 
-    test "rotate_secret issues a new secret" do
+    test "rotate_secret asks for confirmation and issues a new secret" do
       client = create_client
       original = client.secret_digest
+
+      get console_api_client_url(client)
+      assert_select "form[action=?][onsubmit*=confirm]", rotate_secret_console_api_client_path(client)
 
       post rotate_secret_console_api_client_url(client)
 

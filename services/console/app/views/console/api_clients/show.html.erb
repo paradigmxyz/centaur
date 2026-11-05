@@ -6,8 +6,12 @@
     <h1 class="page-title"><%= @api_client.name %></h1>
     <div class="ml-auto flex flex-wrap items-center gap-2">
       <a href="<%= edit_console_api_client_path(@api_client) %>" class="btn-secondary">Edit</a>
+      <%# Not a Turbo form: the response renders the new secret, and Turbo's confirm applies only to its own forms. %>
       <%= button_to "Rotate secret", rotate_secret_console_api_client_path(@api_client), method: :post,
-            form: { data: { turbo: false, turbo_confirm: "Rotate the secret? The current secret stops working immediately." } },
+            form: {
+              data: { turbo: false },
+              onsubmit: "return confirm(#{"Rotate the secret? The current secret and its access tokens stop working immediately.".to_json})"
+            },
             class: "btn-secondary cursor-pointer" %>
       <% if @api_client.disabled? %>
         <%= button_to "Enable", enable_console_api_client_path(@api_client), method: :post, class: "btn-secondary cursor-pointer" %>

@@ -392,6 +392,19 @@ export const apiClients = {
     if (!line) throw new Error('creating an API client printed no result')
     return JSON.parse(line.slice('E2E_API_CLIENT '.length))
   },
+  /** Rotates the client's secret; returns the client with its new secret. */
+  async rotate(client: ApiClient): Promise<ApiClient> {
+    const out = await kubectl(
+      {},
+      'exec', `deploy/${release}-centaur-console`, '--', 'bin/rails', 'runner', `
+        client = ApiClient.find_by_oid!(${JSON.stringify(client.clientId)})
+        client.rotate_secret!
+        puts "E2E_API_CLIENT_SECRET " + client.secret`
+    )
+    const line = out.split('\n').find(line => line.startsWith('E2E_API_CLIENT_SECRET '))
+    if (!line) throw new Error('rotating the API client secret printed no secret')
+    return { ...client, secret: line.slice('E2E_API_CLIENT_SECRET '.length) }
+  },
   async disable(client: ApiClient): Promise<void> {
     await kubectl(
       {},

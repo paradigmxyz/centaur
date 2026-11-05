@@ -1,7 +1,8 @@
 // API clients: machine callers of the session API, such as eval runners. An
 // operator creates one in the console; it exchanges its secret for an access
 // token, then runs sessions as its attached principal, only under its own
-// api:<client id>: thread keys, until the operator disables it.
+// api:<client id>: thread keys. Rotating its secret revokes its tokens, and
+// disabling it revokes all access.
 import { randomUUID } from 'node:crypto'
 import { expect, test } from 'bun:test'
 import { apiClients, ironControl, model, turnTimeoutMs } from '../lib'
@@ -44,9 +45,17 @@ test('an API client runs a turn as its principal, only in its own namespace', as
   expect(proxy.requester).toBeNull()
   expect(await model.requests(script)).toHaveLength(1)
 
-  await apiClients.disable(client)
+  const rotated = await apiClients.rotate(client)
   expect((await session.request('GET', sessionPath(key))).status).toBe(401)
   expect((await apiClients.token(client)).status).toBe(401)
+  const renewed = await apiClients.token(rotated)
+  expect(renewed.status).toBe(200)
+  const renewedSession = apiClients.as(renewed.body.access_token)
+  expect((await renewedSession.request('GET', sessionPath(key))).status).toBe(200)
+
+  await apiClients.disable(client)
+  expect((await renewedSession.request('GET', sessionPath(key))).status).toBe(401)
+  expect((await apiClients.token(rotated)).status).toBe(401)
 }, turnTimeoutMs + 120_000)
 
 test('an API client token carries only the scopes it asked for', async () => {

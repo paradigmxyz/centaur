@@ -70,8 +70,8 @@ fn thread_key_prefix(client_id: &str) -> String {
 }
 
 /// Re-reads the client behind an API client access token. A deleted or
-/// disabled client is rejected, and the caller keeps only the capabilities the
-/// client still has.
+/// disabled client, or a token issued for a secret since rotated, is
+/// rejected, and the caller keeps only the capabilities the client still has.
 pub(crate) async fn refresh_api_client(
     pool: &PgPool,
     caller: &mut AuthenticatedCaller,
@@ -80,6 +80,13 @@ pub(crate) async fn refresh_api_client(
         .await?
         .filter(|client| !client.disabled)
         .ok_or_else(|| ApiError::Unauthorized("API client is disabled or deleted".to_owned()))?;
+    let current = secret_fingerprint(&client.secret_digest);
+    let presented = caller.api_client_secret_fingerprint().unwrap_or_default();
+    if !bool::from(current.as_bytes().ct_eq(presented.as_bytes())) {
+        return Err(ApiError::Unauthorized(
+            "API client secret was rotated; request a new token".to_owned(),
+        ));
+    }
     let live: Vec<Capability> = client
         .scopes
         .iter()
@@ -208,7 +215,12 @@ async fn issue_token(
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     let access_token = state
         .auth()
-        .mint_api_client_token(&client_id, &scopes, now)
+        .mint_api_client_token(
+            &client_id,
+            &secret_fingerprint(&client.secret_digest),
+            &scopes,
+            now,
+        )
         .map_err(|error| {
             tracing::error!(error = %error, "failed to mint API client token");
             OAuthError::unavailable()
@@ -273,6 +285,13 @@ fn client_credentials(
         return Err(OAuthError::invalid_client());
     }
     Ok((client_id, secret))
+}
+
+/// Identifies a client secret in its access tokens without revealing its
+/// digest.
+fn secret_fingerprint(secret_digest: &str) -> String {
+    let digest = Sha256::digest(format!("centaur-api-client-token:{secret_digest}").as_bytes());
+    hex::encode(&digest[..16])
 }
 
 fn secret_matches(stored_digest: &str, secret: &str) -> bool {
@@ -501,6 +520,15 @@ mod tests {
                 .error,
             "invalid_client"
         );
+    }
+
+    #[test]
+    fn rotating_the_secret_changes_its_fingerprint() {
+        let original = hex::encode(Sha256::digest(b"acs_original"));
+        let rotated = hex::encode(Sha256::digest(b"acs_rotated"));
+        assert_eq!(secret_fingerprint(&original), secret_fingerprint(&original));
+        assert_ne!(secret_fingerprint(&original), secret_fingerprint(&rotated));
+        assert!(!original.contains(&secret_fingerprint(&original)));
     }
 
     #[test]

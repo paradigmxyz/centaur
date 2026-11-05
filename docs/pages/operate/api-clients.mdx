@@ -22,8 +22,9 @@ In the console, open **API Clients** (admins only) and add a client:
 - **Default principal**: an OID or foreign ID. Sessions run as it unless they
   name another attached principal. Attach more principals on the client's page.
 
-The secret is shown once. Rotate it if it is lost or leaked. Disabling a client
-rejects its existing access tokens on the next request.
+The secret is shown once. Rotate it if it is lost or leaked: rotating rejects
+the old secret and every access token issued for it on their next use.
+Disabling a client rejects all of its access tokens the same way.
 
 ## Get an access token
 
