@@ -1591,8 +1591,10 @@ impl PgSessionStore {
     }
 
     /// Detach the session's sandbox when no turn is queued or running, and
-    /// return the detached id (`None` if the session had no sandbox). A
-    /// workflow-owned session is refused: its run keeps the sandbox between
+    /// return the detached id (`None` if the session had no sandbox). Its
+    /// warm-pool row, if any, leaves the pool in the same transaction so the
+    /// detached sandbox is unreferenced even if the caller never stops it.
+    /// A workflow-owned session is refused: its run keeps the sandbox between
     /// agent steps and stops it when the run ends. Locking
     /// the session row blocks a concurrent execution insert at its foreign-key
     /// check, so a new turn either is seen here and refused, or starts after
@@ -1657,6 +1659,16 @@ impl PgSessionStore {
             "#,
         )
         .bind(thread_key.as_str())
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            update session_warm_sandboxes
+            set status = 'failed', last_error = 'session sandbox released', updated_at = now()
+            where sandbox_id = $1
+            "#,
+        )
+        .bind(&sandbox_id)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;

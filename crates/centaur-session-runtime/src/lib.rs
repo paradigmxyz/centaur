@@ -2022,13 +2022,6 @@ impl SessionRuntime {
             return Ok(None);
         };
         self.sandbox_pipes.remove(&sandbox_id);
-        if let Err(error) = self
-            .store
-            .mark_warm_sandbox_failed(&sandbox_id, "session sandbox released")
-            .await
-        {
-            warn!(thread_key = %thread_key, sandbox_id, %error, "failed to mark released warm sandbox failed");
-        }
         let stopped = match self
             .sandbox_runtime
             .manager
@@ -11673,6 +11666,27 @@ mod adoption_tests {
             event.event_type == "session.sandbox_release_failed"
                 && event.payload["sandbox_id"] == json!("sbx-release-fail")
         }));
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn detached_warm_sandbox_is_unreferenced_before_it_is_stopped() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key = session_with_warm_sandbox(&store, "detach", json!({}), "sbx-detach").await;
+
+        // A crash after the detach commits must still leave the sandbox to the
+        // cleanup worker.
+        assert_eq!(
+            store
+                .detach_idle_session_sandbox(&thread_key)
+                .await
+                .expect("detach sandbox"),
+            Some("sbx-detach".to_owned())
+        );
+        assert!(!is_referenced(&store, "sbx-detach").await);
         reset_test_store(&store).await;
     }
 
