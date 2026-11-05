@@ -1746,21 +1746,28 @@ def test_fetch_slack_file_streams_file_to_disk(
     assert out_path.read_bytes() == b"%PDF-1.4 report"
 
 
-def test_fetch_slack_file_rejects_oversized_file_without_leaving_partial(
+def test_fetch_slack_file_interrupted_download_leaves_no_partial_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import urllib.request
 
     client, _ = _make_client()
     client.token = "SLACK_BOT_TOKEN"
-    monkeypatch.setattr(slack_client, "MAX_DOWNLOAD_BYTES", 4)
+
+    class _InterruptedResponse(_FakeHTTPResponse):
+        def read(self, amt: int = -1) -> bytes:
+            chunk = super().read(amt)
+            if not chunk:
+                raise ConnectionResetError("connection reset")
+            return chunk
+
     monkeypatch.setattr(
         urllib.request,
         "urlopen",
-        lambda *_args, **_kwargs: _FakeHTTPResponse(b"too large", "application/pdf"),
+        lambda *_args, **_kwargs: _InterruptedResponse(b"partial", "application/pdf"),
     )
 
-    with pytest.raises(ValueError, match="4-byte download limit"):
+    with pytest.raises(ConnectionResetError):
         client._fetch_slack_file("https://files.slack.com/files-pri/T1-F1/report.pdf", tmp_path)
 
     assert list(tmp_path.iterdir()) == []

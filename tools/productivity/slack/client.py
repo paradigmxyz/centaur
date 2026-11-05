@@ -28,8 +28,6 @@ from centaur_sdk.tool_sdk import COMPANY_CONTEXT_DSN_ENV, company_context_databa
 # configure_structlog() pipeline, like the rest of the service's logs.
 logger = structlog.get_logger()
 
-# Downloads stream to disk, so this caps disk use rather than memory.
-MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 _DOWNLOAD_CHUNK_BYTES = 64 * 1024
 
 
@@ -43,25 +41,18 @@ def _download_path(output_dir: str | Path, filename: str, fallback: str) -> Path
     return directory / name
 
 
-def _stream_response_to_file(response: Any, path: Path, max_bytes: int) -> int:
-    """Stream an HTTP response body to ``path`` without exceeding ``max_bytes``.
+def _stream_response_to_file(response: Any, path: Path) -> int:
+    """Stream an HTTP response body to ``path`` and return the byte count.
 
-    Writes to a sibling temp file and renames it into place, so a failed or
-    oversized download never leaves a truncated file at ``path``.
+    Writes to a sibling temp file and renames it into place, so a failed
+    download never leaves a truncated file at ``path``.
     """
-    limit_error = ValueError(f"Slack file exceeds the {max_bytes}-byte download limit")
-    content_length = response.headers.get("Content-Length")
-    if content_length and content_length.isdigit() and int(content_length) > max_bytes:
-        raise limit_error
-
     temp_path = path.with_name(f".{path.name}.part")
     total = 0
     try:
         with temp_path.open("wb") as file:
             while chunk := response.read(_DOWNLOAD_CHUNK_BYTES):
                 total += len(chunk)
-                if total > max_bytes:
-                    raise limit_error
                 file.write(chunk)
         temp_path.replace(path)
     except BaseException:
@@ -583,7 +574,7 @@ class SlackClient:
                     or default_filename
                 )
                 out_path = _download_path(output_dir, filename, default_filename)
-                size = _stream_response_to_file(response, out_path, MAX_DOWNLOAD_BYTES)
+                size = _stream_response_to_file(response, out_path)
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
             detail = raw
@@ -2324,7 +2315,7 @@ class SlackClient:
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
         out_path = _download_path(output_dir, filename or Path(parsed.path).name, "slack-file")
         with urllib.request.urlopen(req) as response:
-            size = _stream_response_to_file(response, out_path, MAX_DOWNLOAD_BYTES)
+            size = _stream_response_to_file(response, out_path)
         return out_path, size
 
     def search_files(
