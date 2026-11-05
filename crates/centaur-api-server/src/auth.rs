@@ -19,7 +19,7 @@ const STATIC_ADMIN_IDENTITY: &str = "api-rs-admin";
 /// Console's issuer so neither kind of token can be read as the other.
 pub(crate) const API_CLIENT_TOKEN_ISSUER: &str = "centaur-api-rs";
 const API_CLIENT_TOKEN_USE: &str = "api_client";
-pub(crate) const API_CLIENT_TOKEN_TTL_SECONDS: i64 = 15 * 60;
+pub(crate) const API_CLIENT_TOKEN_TTL_SECONDS: i64 = 60 * 60;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum Capability {

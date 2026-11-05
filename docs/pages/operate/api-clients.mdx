@@ -37,7 +37,7 @@ TOKEN=$(curl -s -u "$CLIENT_ID:$CLIENT_SECRET" \
   https://api.example.com/oauth/token | jq -r .access_token)
 ```
 
-Tokens are valid for 15 minutes. When one expires, request a new one. You can
+Tokens are valid for 1 hour. When one expires, request a new one. You can
 pass `scope` to request a subset of the client's scopes.
 
 ## Run a session
