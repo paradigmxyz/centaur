@@ -437,7 +437,7 @@ agentSandbox:
     name: agent-sandbox-system
   image:
     repository: registry.k8s.io/agent-sandbox/agent-sandbox-controller
-    tag: v0.4.6
+    tag: v1.0.9
     pullPolicy: IfNotPresent
   controller:
     extensions: false

@@ -1,6 +1,6 @@
 //! Background garbage collection for leaked sandboxes.
 //!
-//! Sessions pause idle sandboxes (replicas to zero), but paused sandboxes and
+//! Sessions pause idle sandboxes (suspending them), but paused sandboxes and
 //! sandboxes whose sessions never go idle still need a restart-surviving
 //! backstop. The reaper sweeps the backend's observed sandboxes and stops any
 //! that exceed the configured max lifetime, releasing the sandbox, its proxy

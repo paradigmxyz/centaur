@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.19.0
+    controller-gen.kubebuilder.io/version: v0.21.0
   name: sandboxclaims.extensions.agents.x-k8s.io
 spec:
   group: extensions.agents.x-k8s.io
@@ -16,7 +16,20 @@ spec:
     singular: sandboxclaim
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .status.sandbox.name
+      name: Sandbox
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].reason
+      name: Reason
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
     schema:
       openAPIV3Schema:
         properties:
@@ -71,18 +84,135 @@ spec:
                     minimum: 0
                     type: integer
                 type: object
-              sandboxTemplateRef:
+              volumeClaimTemplates:
+                items:
+                  properties:
+                    metadata:
+                      properties:
+                        annotations:
+                          additionalProperties:
+                            type: string
+                          type: object
+                        labels:
+                          additionalProperties:
+                            type: string
+                          type: object
+                        name:
+                          maxLength: 63
+                          type: string
+                      type: object
+                    spec:
+                      properties:
+                        accessModes:
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        dataSource:
+                          properties:
+                            apiGroup:
+                              type: string
+                            kind:
+                              type: string
+                            name:
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        dataSourceRef:
+                          properties:
+                            apiGroup:
+                              type: string
+                            kind:
+                              type: string
+                            name:
+                              type: string
+                            namespace:
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                        resources:
+                          properties:
+                            limits:
+                              additionalProperties:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              type: object
+                            requests:
+                              additionalProperties:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              type: object
+                          type: object
+                        selector:
+                          properties:
+                            matchExpressions:
+                              items:
+                                properties:
+                                  key:
+                                    type: string
+                                  operator:
+                                    type: string
+                                  values:
+                                    items:
+                                      type: string
+                                    type: array
+                                    x-kubernetes-list-type: atomic
+                                required:
+                                - key
+                                - operator
+                                type: object
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            matchLabels:
+                              additionalProperties:
+                                type: string
+                              type: object
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        storageClassName:
+                          type: string
+                        volumeAttributesClassName:
+                          type: string
+                        volumeMode:
+                          type: string
+                        volumeName:
+                          type: string
+                      type: object
+                  required:
+                  - spec
+                  type: object
+                  x-kubernetes-validations:
+                  - message: metadata.name must not be empty
+                    rule: has(self.metadata) && has(self.metadata.name) && size(self.metadata.name)
+                      > 0
+                maxItems: 128
+                type: array
+                x-kubernetes-list-type: atomic
+                x-kubernetes-validations:
+                - message: volumeClaimTemplates names must be unique
+                  rule: self.all(a, !has(a.metadata) || !has(a.metadata.name) || self.exists_one(b,
+                    has(b.metadata) && has(b.metadata.name) && b.metadata.name ==
+                    a.metadata.name))
+              warmPoolRef:
                 properties:
                   name:
                     type: string
                 required:
                 - name
                 type: object
-              warmpool:
-                default: default
-                type: string
             required:
-            - sandboxTemplateRef
+            - warmPoolRef
             type: object
           status:
             properties:
@@ -130,6 +260,8 @@ spec:
                     items:
                       type: string
                     type: array
+                  serviceFQDN:
+                    type: string
                 type: object
             type: object
         required:
@@ -139,3 +271,14 @@ spec:
     storage: true
     subresources:
       status: {}
+  # Not upstream: an unserved v1alpha1 keeps this CRD valid against a cluster
+  # whose status.storedVersions still lists v1alpha1, so a server-side dry run
+  # (Argo CD's diff under ServerSideApply) succeeds and the chart's
+  # agent-sandbox-crds hook can migrate it. Re-add after vendoring a new release.
+  - name: v1alpha1
+    served: false
+    storage: false
+    schema:
+      openAPIV3Schema:
+        type: object
+        x-kubernetes-preserve-unknown-fields: true

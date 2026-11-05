@@ -25,8 +25,9 @@ use centaur_iron_proxy::{
     harness_auth_fragment, infra_fragment,
 };
 use centaur_sandbox_agent_k8s::{
-    AgentSandboxBackend, AgentSandboxConfig, GitHubTokenRef, IronControlSettings, IronProxyConfig,
-    OtlpEgressTarget, SecurityContext, StateVolumeConfig, Toleration, ToolSource, ToolsConfig,
+    AgentSandboxBackend, AgentSandboxConfig, DeploymentRef, GitHubTokenRef, IronControlSettings,
+    IronProxyConfig, OtlpEgressTarget, SecurityContext, StateVolumeConfig, Toleration, ToolSource,
+    ToolsConfig,
 };
 use centaur_sandbox_core::{Mount, MountKind, ResourceRequirements, SandboxSpec};
 use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
@@ -686,6 +687,33 @@ impl MigrateArgs {
     /// Parse `migrate` arguments when the command line starts with `migrate`.
     pub(crate) fn from_command_line() -> Option<Self> {
         if env::args_os().nth(1)? != "migrate" {
+            return None;
+        }
+        Some(Self::parse_from(env::args_os().skip(1)))
+    }
+}
+
+// `centaur-api-server install-agent-sandbox-crds` runs as the chart's
+// pre-upgrade hook, so like `migrate` it needs none of the server's
+// configuration; it reaches the Kubernetes API through the pod's service
+// account.
+#[derive(Debug, Parser)]
+#[command(
+    bin_name = "centaur-api-server install-agent-sandbox-crds",
+    about = "Install the bundled agent-sandbox CRDs, migrating v1alpha1 objects to v1beta1"
+)]
+pub(crate) struct InstallAgentSandboxCrdsArgs {
+    /// Deployment (<namespace>/<name>) whose pods only understand the
+    /// v1alpha1 API. It is deleted before a migration changes the CRDs, and
+    /// the release recreates it. Repeatable.
+    #[arg(long = "stop-deployment")]
+    pub(crate) stop_deployments: Vec<DeploymentRef>,
+}
+
+impl InstallAgentSandboxCrdsArgs {
+    /// Parse the arguments when the command line starts with the subcommand.
+    pub(crate) fn from_command_line() -> Option<Self> {
+        if env::args_os().nth(1)? != "install-agent-sandbox-crds" {
             return None;
         }
         Some(Self::parse_from(env::args_os().skip(1)))

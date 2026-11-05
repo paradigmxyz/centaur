@@ -4,6 +4,6 @@ dependencies:
   version: 2.4.1
 - name: agent-sandbox
   repository: ""
-  version: 0.1.0
-digest: sha256:88c0076a4876c85f8459899d7adf5bf93c02edf995cc2b8255ce6f720aa1ba47
-generated: "2026-10-23T12:10:03.600468-07:00"
+  version: 0.1.4
+digest: sha256:78e4aefa2d8c81dbe7d896729e944eb8bcc28df2d9d65b158dcee13758fbb8e4
+generated: "2026-11-04T17:10:10.046949395Z"
