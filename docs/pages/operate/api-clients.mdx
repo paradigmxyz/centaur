@@ -1,0 +1,77 @@
+---
+title: API Clients
+description: Let machine clients such as eval runners run Centaur sessions through the api-rs session API with OAuth client credentials.
+---
+
+# API Clients
+
+An API client is a machine caller of the session API, such as an eval runner.
+It exchanges a client secret for a short-lived access token, then creates
+sessions, starts turns, and reads their events directly from api-rs.
+
+Each client runs its sessions as one of the principals an admin attached to it,
+so a session's sandbox gets exactly that principal's grants. A client can only
+use thread keys that start with `api:<client id>:`.
+
+## Create a client
+
+In the console, open **API Clients** (admins only) and add a client:
+
+- **Scopes**: `sessions:write` creates sessions, appends messages, and starts
+  or interrupts turns. `sessions:read` reads session state and events.
+- **Default principal**: an OID or foreign ID. Sessions run as it unless they
+  name another attached principal. Attach more principals on the client's page.
+- **Max concurrent sessions**: an optional limit on sessions with a queued or
+  running turn. A turn over the limit is rejected with `429`.
+
+The secret is shown once. Rotate it if it is lost or leaked. Disabling a client
+rejects its existing access tokens on the next request.
+
+## Get an access token
+
+Expose `/oauth/token` and `/api/session/*` on api-rs to the client, for example
+through `httpRoutes`. Keep other api-rs routes internal.
+
+```bash
+TOKEN=$(curl -s -u "$CLIENT_ID:$CLIENT_SECRET" \
+  -d grant_type=client_credentials \
+  https://api.example.com/oauth/token | jq -r .access_token)
+```
+
+Tokens are valid for 15 minutes. When one expires, request a new one. You can
+pass `scope` to request a subset of the client's scopes.
+
+## Run a session
+
+```bash
+THREAD_KEY="api:$CLIENT_ID:eval-$(uuidgen)"
+THREAD_PATH=$(jq -rn --arg key "$THREAD_KEY" '$key|@uri')
+API=https://api.example.com
+
+curl -s -X POST "$API/api/session/$THREAD_PATH" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"harness_type":"codex"}'
+
+curl -s -X POST "$API/api/session/$THREAD_PATH/messages" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","parts":[{"type":"text","text":"Reply with exactly PONG."}]}]}'
+
+EXECUTION_ID=$(curl -s -X POST "$API/api/session/$THREAD_PATH/execute" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"idempotency_key":"eval-1","input_lines":["{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Reply with exactly PONG.\"}]}}"]}' \
+  | jq -r .execution_id)
+
+curl -s -N -H "Authorization: Bearer $TOKEN" \
+  "$API/api/session/$THREAD_PATH/events?execution_id=$EXECUTION_ID&after_event_id=0"
+```
+
+To pick another attached principal, add `"principal": "<OID or foreign ID>"`
+when creating the session. A session keeps the principal it was created with.
+If that principal is detached, the session rejects new turns.
+
+The event stream is replayable. Pass the last event id you received as
+`after_event_id` to resume, and stop at `session.execution_completed`,
+`session.execution_failed`, or `session.execution_cancelled`.
+
+Metadata a client sends with a session or turn is stored under
+`client_metadata`. It is never treated as a Slack user or requester identity.
