@@ -69,6 +69,7 @@ info "context $CONTEXT, release namespace $NAMESPACE, controller namespace $CONT
 # the hook applies.
 present=0
 pending=0
+switched=0 # pending CRDs whose storage the hook already moved to v1beta1
 for crd in "${CRDS[@]}"; do
   state="$(jq -r --arg name "$crd" '
     .items[] | select(.metadata.name == $name) |
@@ -87,6 +88,7 @@ for crd in "${CRDS[@]}"; do
   detail="serves [$served], stores [$storage], storedVersions [$stored], conversion $conversion"
   if [[ ",$served," == *,v1alpha1,* || ",$stored," == *,v1alpha1,* ]]; then
     pending=$((pending + 1))
+    [[ "$storage" == v1beta1 ]] && switched=$((switched + 1))
     info "$crd: needs migration ($detail)"
     if [[ "$conversion" == Webhook && ",$stored," == *,v1alpha1,* ]]; then
       fail "$crd still stores v1alpha1 behind a conversion webhook: finish upstream's v0.5 storage migration first; the hook refuses this state"
@@ -95,14 +97,6 @@ for crd in "${CRDS[@]}"; do
     info "$crd: migrated ($detail)"
   fi
 done
-
-if [[ $present -eq 0 ]]; then
-  pass "no agent-sandbox CRDs: a fresh install; the hook installs them and migrates nothing"
-elif [[ $pending -eq 0 ]]; then
-  pass "all agent-sandbox CRDs already serve and store only v1beta1; the upgrade migrates nothing"
-else
-  info "the upgrade will migrate this cluster (one-way; see contrib/MIGRATING_AGENT_SANDBOX.md)"
-fi
 
 crd_present() { jq -e --arg name "$1" 'any(.items[]; .metadata.name == $name)' <<< "$crd_list" > /dev/null; }
 
@@ -125,19 +119,32 @@ for crd in sandboxtemplates.extensions.agents.x-k8s.io sandboxwarmpools.extensio
   fi
 done
 
+# Markers the hook leaves on each Sandbox: the replica count it recorded (removed
+# again when it rewrites the object) and the time of that rewrite.
+REPLICAS_ANNOTATION=centaur.ai/agent-sandbox-v1alpha1-replicas
+MIGRATED_AT_ANNOTATION=agents.x-k8s.io/storage-migrated-at
+recorded=0
+rewritten=0
+last_rewrite=""
+owned=0
 if crd_present sandboxes.agents.x-k8s.io; then
   # Through the preferred version: replicas in v1alpha1, operatingMode in v1beta1.
-  k get sandboxes.agents.x-k8s.io -A -o json | jq -r '
+  sandboxes="$(k get sandboxes.agents.x-k8s.io -A -o json)"
+  jq -r '
     .items | group_by(.metadata.namespace)[] |
-    "\(.[0].metadata.namespace)\t\(length)\t\([.[] | select(.spec.replicas == 0 or .spec.operatingMode == "Suspended")] | length)"' |
+    "\(.[0].metadata.namespace)\t\(length)\t\([.[] | select(.spec.replicas == 0 or .spec.operatingMode == "Suspended")] | length)"' \
+    <<< "$sandboxes" |
     while IFS=$'\t' read -r ns total paused; do
       info "$total Sandboxes in $ns, $paused paused"
     done
-  if [[ $pending -gt 0 ]]; then
-    owned="$(k get pods,services,configmaps,persistentvolumeclaims,networkpolicies -A -o json | jq '
-      [.items[].metadata.ownerReferences[]? | select(.kind == "Sandbox" and (.apiVersion | endswith("/v1alpha1")))] | length')"
-    info "$owned owner references point at v1alpha1 Sandboxes; the hook rewrites them"
-  fi
+  IFS=$'\t' read -r recorded rewritten last_rewrite < <(jq -r \
+    --arg recorded "$REPLICAS_ANNOTATION" --arg rewritten "$MIGRATED_AT_ANNOTATION" '
+    [.items[].metadata.annotations // {}] |
+    [([.[] | select(has($recorded))] | length),
+     ([.[] | select(has($rewritten))] | length),
+     ([.[][$rewritten] // empty] | max // "")] | @tsv' <<< "$sandboxes")
+  owned="$(k get pods,services,configmaps,persistentvolumeclaims,networkpolicies -A -o json | jq '
+    [.items[].metadata.ownerReferences[]? | select(.kind == "Sandbox" and (.apiVersion | endswith("/v1alpha1")))] | length')"
 fi
 
 # --- Writers the hook does and does not stop ------------------------------------
@@ -162,8 +169,13 @@ fi
 api_rs="$(jq -r '.items[] |
   select(.metadata.labels["app.kubernetes.io/component"] == "api-rs") |
   "\(.metadata.namespace)/\(.metadata.name)\t\(.spec.template.spec.containers[0].image)"' <<< "$deployments")"
+started=$(( switched > 0 || recorded > 0 ))
 if [[ $present -gt 0 ]] && ! grep -q "^$NAMESPACE/" <<< "$api_rs"; then
-  warn "no api-rs Deployment in $NAMESPACE; check --namespace"
+  if [[ $pending -gt 0 && $started -eq 1 ]]; then
+    warn "no api-rs Deployment in $NAMESPACE: the interrupted migration below most likely deleted it; the upgrade recreates it"
+  else
+    warn "no api-rs Deployment in $NAMESPACE; check --namespace"
+  fi
 fi
 while IFS=$'\t' read -r name image; do
   [[ -z "$name" ]] && continue
@@ -173,6 +185,32 @@ while IFS=$'\t' read -r name image; do
     warn "api-rs $name ($image) belongs to another release; the CRDs are cluster-wide, so it fails once v1alpha1 is gone unless it is upgraded too"
   fi
 done <<< "$api_rs"
+
+# --- Has the migration run? ------------------------------------------------------
+if [[ $present -eq 0 ]]; then
+  pass "no agent-sandbox CRDs: a fresh install; the hook installs them and migrates nothing"
+elif [[ $pending -eq 0 ]]; then
+  if [[ $rewritten -gt 0 ]]; then
+    pass "the migration already ran: CRDs serve and store only v1beta1, $rewritten Sandboxes rewritten (last at $last_rewrite); the upgrade migrates nothing"
+  else
+    pass "CRDs already serve and store only v1beta1 with no migration recorded (installed on v1beta1, or migrated another way); the upgrade migrates nothing"
+  fi
+  [[ $recorded -gt 0 ]] &&
+    warn "$recorded Sandboxes still carry $REPLICAS_ANNOTATION, which a completed migration removes; check their spec.operatingMode against your backup"
+  [[ $owned -gt 0 ]] &&
+    warn "$owned owner references still point at v1alpha1 Sandboxes, which garbage collection cannot resolve; see \"Children of a deleted Sandbox are not garbage-collected\" in contrib/MIGRATING_AGENT_SANDBOX.md"
+elif [[ $started -eq 1 ]]; then
+  evidence=()
+  [[ $switched -gt 0 ]] && evidence+=("$switched of $pending CRDs already store v1beta1")
+  [[ $recorded -gt 0 ]] && evidence+=("$recorded Sandboxes have a recorded replica count")
+  [[ $rewritten -gt 0 ]] && evidence+=("$rewritten Sandboxes already rewritten")
+  joined="$(printf '; %s' "${evidence[@]}")"
+  warn "a migration started but did not finish (${joined:2}); the upgrade resumes it. Do not roll back"
+  [[ $owned -gt 0 ]] && info "$owned owner references still point at v1alpha1 Sandboxes; the hook rewrites them"
+else
+  info "the migration has not run; the upgrade will migrate this cluster (one-way; see contrib/MIGRATING_AGENT_SANDBOX.md)"
+  [[ $owned -gt 0 ]] && info "$owned owner references point at v1alpha1 Sandboxes; the hook rewrites them"
+fi
 
 # --- What the hook needs ----------------------------------------------------------
 # The hook's ClusterRole and ClusterRoleBinding are created by whoever applies

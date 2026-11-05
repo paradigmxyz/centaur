@@ -50,10 +50,13 @@ api-rs, usually well under a minute.
 ## Before you start
 
 Run the read-only preflight check against the cluster first. It reports
-whether the upgrade will migrate it, finds anything that would make the hook
-refuse (SandboxClaims, an unfinished upstream webhook migration), and warns
-about writers the hook does not stop, such as another agent-sandbox controller
-or another release's api-rs sharing the cluster-wide CRDs:
+whether the migration has not run, was interrupted (the upgrade resumes it),
+or already completed; finds anything that would make the hook refuse
+(SandboxClaims, an unfinished upstream webhook migration); and warns about
+writers the hook does not stop, such as another agent-sandbox controller or
+another release's api-rs sharing the cluster-wide CRDs. After an upgrade, it
+also flags leftovers: recorded replica annotations or `v1alpha1` owner
+references a completed migration should have removed:
 
 ```bash
 contrib/scripts/agent-sandbox-preflight.sh --context <ctx> \
@@ -198,7 +201,9 @@ order by event_id desc limit 1;
 
 ## Troubleshooting
 
-Start with the hook's log. While the Job exists (it is kept when it fails):
+Run `contrib/scripts/agent-sandbox-preflight.sh` to see where the migration
+stands, then read the hook's log. While the Job exists (it is kept when it
+fails):
 
 ```bash
 kubectl --context <ctx> -n <namespace> logs -l app.kubernetes.io/component=agent-sandbox-crds --tail=-1
