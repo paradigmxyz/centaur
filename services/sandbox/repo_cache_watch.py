@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refresh sandbox tools when mounted repo-cache checkouts change."""
+"""Refresh sandbox tools and the system prompt when mounted repo-cache checkouts change."""
 
 from __future__ import annotations
 
@@ -125,25 +125,46 @@ def _refresh_if_changed(
     return fingerprint, True
 
 
-def watch_repo_cache(tool_dirs: list[Path]) -> int:
-    if not _repo_cache_watches(tool_dirs):
+def _refresh_system_prompt(target_prompt: Path) -> None:
+    # Composition only reads the live mounts and rewrites the prompt when it changed.
+    try:
+        status = subprocess.call(
+            ["compose-system-prompt", "--target-prompt", str(target_prompt)]
+        )
+    except OSError as exc:
+        print(f"warning: failed to run compose-system-prompt: {exc}", file=sys.stderr)
+        return
+    if status != 0:
+        print("warning: compose-system-prompt failed", file=sys.stderr)
+
+
+def watch_repo_cache(tool_dirs: list[Path], target_prompt: Path | None) -> int:
+    watch_tools = bool(_repo_cache_watches(tool_dirs))
+    if not watch_tools and target_prompt is None:
         print(
-            "repo-cache tool auto-reload disabled: no repo-cache tool sources",
+            "repo-cache auto-reload disabled: no repo-cache tool sources or prompt",
             file=sys.stderr,
         )
         return 0
 
     interval = _env_float("CENTAUR_TOOLS_RELOAD_INTERVAL_SECONDS", 10.0)
-    applied_fingerprint = _repo_cache_fingerprint(tool_dirs)
-    print("repo-cache tool auto-reload watcher started", file=sys.stderr)
+    applied_fingerprint = _repo_cache_fingerprint(tool_dirs) if watch_tools else None
+    print("repo-cache auto-reload watcher started", file=sys.stderr)
 
     while True:
         time.sleep(interval)
-        applied_fingerprint, _ = _refresh_if_changed(tool_dirs, applied_fingerprint)
+        if watch_tools:
+            applied_fingerprint, _ = _refresh_if_changed(tool_dirs, applied_fingerprint)
+        if target_prompt is not None:
+            _refresh_system_prompt(target_prompt)
 
 
 def main() -> int:
-    return watch_repo_cache(_split_paths(os.environ.get("TOOL_DIRS", "")))
+    workspace_dir = os.environ.get("WORKSPACE_DIR", "")
+    return watch_repo_cache(
+        _split_paths(os.environ.get("TOOL_DIRS", "")),
+        Path(workspace_dir) / "AGENTS.md" if workspace_dir else None,
+    )
 
 
 if __name__ == "__main__":
