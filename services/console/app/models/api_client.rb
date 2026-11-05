@@ -19,7 +19,6 @@ class ApiClient < ApplicationRecord
 
   validates :name, presence: true
   validates :secret_digest, presence: true, uniqueness: true
-  validates :max_concurrent_sessions, numericality: { only_integer: true, greater_than: 0 }, allow_nil: true
   validate :scopes_supported
 
   before_validation :issue_secret, on: :create

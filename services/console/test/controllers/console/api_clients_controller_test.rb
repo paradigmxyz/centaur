@@ -95,13 +95,12 @@ module Console
       digest = client.secret_digest
 
       patch console_api_client_url(client), params: {
-        api_client: { name: "evals", max_concurrent_sessions: "4", scopes: [ "", "sessions:read" ] }
+        api_client: { name: "evals", scopes: [ "", "sessions:read" ] }
       }
 
       assert_redirected_to console_api_client_path(client)
       client.reload
-      assert_equal [ "evals", 4, %w[sessions:read], digest ],
-                   [ client.name, client.max_concurrent_sessions, client.scopes, client.secret_digest ]
+      assert_equal [ "evals", %w[sessions:read], digest ], [ client.name, client.scopes, client.secret_digest ]
     end
   end
 end

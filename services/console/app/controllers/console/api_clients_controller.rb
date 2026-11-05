@@ -105,8 +105,7 @@ module Console
 
     def api_client_attributes
       fields = params.fetch(:api_client, ActionController::Parameters.new)
-                     .permit(:name, :max_concurrent_sessions, scopes: [])
-      fields[:max_concurrent_sessions] = fields[:max_concurrent_sessions].presence if fields.key?(:max_concurrent_sessions)
+                     .permit(:name, scopes: [])
       fields[:scopes] = Array(fields[:scopes]).compact_blank if fields.key?(:scopes)
       fields
     end

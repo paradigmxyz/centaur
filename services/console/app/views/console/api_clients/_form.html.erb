@@ -10,14 +10,6 @@
               class: "form-input #{field_error_class(api_client, :name)}", placeholder: "eval-runner" %>
         <%= field_error(api_client, :name) %>
       </div>
-      <div>
-        <label class="form-label" for="api_client_max_concurrent_sessions">Max concurrent sessions</label>
-        <%= number_field_tag "api_client[max_concurrent_sessions]", api_client.max_concurrent_sessions,
-              id: "api_client_max_concurrent_sessions", min: 1,
-              class: "form-input #{field_error_class(api_client, :max_concurrent_sessions)}" %>
-        <%= field_error(api_client, :max_concurrent_sessions) %>
-        <p class="form-hint">Sessions with a running or queued turn. Blank for no limit.</p>
-      </div>
       <% if api_client.new_record? %>
         <div class="sm:col-span-2">
           <label class="form-label" for="api_client_principal">Default principal</label>

@@ -370,11 +370,10 @@ export type SessionEvent = { event: string; data: string }
  * secret for.
  */
 export const apiClients = {
-  async create(options: { scopes?: string[]; maxConcurrentSessions?: number } = {}): Promise<ApiClient> {
+  async create(options: { scopes?: string[] } = {}): Promise<ApiClient> {
     const params = JSON.stringify({
       name: `e2e-${randomUUID().slice(0, 8)}`,
-      scopes: options.scopes ?? ['sessions:read', 'sessions:write'],
-      max: options.maxConcurrentSessions ?? null
+      scopes: options.scopes ?? ['sessions:read', 'sessions:write']
     })
     const out = await kubectl(
       {},
@@ -384,14 +383,13 @@ export const apiClients = {
         principal = Principal.new(kind: "unknown", foreign_id: params["name"], name: params["name"], created_by: admin)
         principal.apply_default_sandbox_capabilities!
         principal.save!
-        client = ApiClient.create!(name: params["name"], scopes: params["scopes"],
-                                   max_concurrent_sessions: params["max"], created_by: admin)
+        client = ApiClient.create!(name: params["name"], scopes: params["scopes"], created_by: admin)
         client.attach_principal!(principal)
         puts "E2E_API_CLIENT " + { clientId: client.oid, secret: client.secret, principalId: principal.oid,
                                    principalForeignId: principal.foreign_id }.to_json`
     )
     const line = out.split('\n').find(line => line.startsWith('E2E_API_CLIENT '))
-    if (!line) throw new Error(`creating an API client printed no result: ${out}`)
+    if (!line) throw new Error('creating an API client printed no result')
     return JSON.parse(line.slice('E2E_API_CLIENT '.length))
   },
   async disable(client: ApiClient): Promise<void> {

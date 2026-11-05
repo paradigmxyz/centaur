@@ -26,8 +26,6 @@
     <span class="text-centaur-400 glow"><%= @api_client.oid %></span>
     <span class="text-zinc-600">·</span>
     <span class="text-zinc-400"><%= @api_client.disabled? ? "disabled" : "active" %></span>
-    <span class="text-zinc-600">·</span>
-    <span class="text-zinc-400">max concurrent sessions: <span class="text-zinc-200"><%= @api_client.max_concurrent_sessions || "unlimited" %></span></span>
   </div>
   <div class="mt-3 flex flex-wrap gap-1">
     <% @api_client.scopes.each do |scope| %>

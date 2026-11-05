@@ -4,7 +4,6 @@ class CreateApiClients < ActiveRecord::Migration[8.1]
       t.string :name, null: false
       t.string :secret_digest, null: false
       t.jsonb :scopes, null: false, default: []
-      t.integer :max_concurrent_sessions
       t.datetime :disabled_at
       t.references :created_by, null: false, foreign_key: { to_table: :users }
 

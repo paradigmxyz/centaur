@@ -35,7 +35,6 @@ const PRINCIPAL_OID_PREFIX: &str = "prn";
 pub(crate) struct ApiClientContext {
     id: i64,
     client_id: String,
-    max_concurrent_sessions: Option<i32>,
 }
 
 impl ApiClientContext {
@@ -54,10 +53,6 @@ impl ApiClientContext {
 
     pub(crate) fn client_id(&self) -> &str {
         &self.client_id
-    }
-
-    pub(crate) const fn max_concurrent_sessions(&self) -> Option<i32> {
-        self.max_concurrent_sessions
     }
 
     pub(crate) async fn principals(
@@ -94,7 +89,6 @@ pub(crate) async fn refresh_api_client(
     Ok(ApiClientContext {
         id: client.id,
         client_id: caller.identity().to_owned(),
-        max_concurrent_sessions: client.max_concurrent_sessions,
     })
 }
 
@@ -442,7 +436,6 @@ mod tests {
         let client = ApiClientContext {
             id: 1,
             client_id: "acl_abc".to_owned(),
-            max_concurrent_sessions: None,
         };
         let owns = |key: &str| client.owns_thread_key(&ThreadKey::parse(key).unwrap());
 

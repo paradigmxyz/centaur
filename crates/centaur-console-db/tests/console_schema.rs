@@ -407,8 +407,8 @@ async fn reads_api_clients_and_their_principals() {
     let default = fixture.principal("default").await;
     let other = fixture.principal("other").await;
     let client: i64 = sqlx::query_scalar(
-        "INSERT INTO api_clients (name, secret_digest, scopes, max_concurrent_sessions, disabled_at, created_by_id, created_at, updated_at) \
-         VALUES ($1, $2, '[\"sessions:read\", \"sessions:write\"]', 3, now(), $3, now(), now()) RETURNING id",
+        "INSERT INTO api_clients (name, secret_digest, scopes, disabled_at, created_by_id, created_at, updated_at) \
+         VALUES ($1, $2, '[\"sessions:read\", \"sessions:write\"]', now(), $3, now(), now()) RETURNING id",
     )
     .bind(fixture.name("client"))
     .bind(fixture.name("digest"))
@@ -436,7 +436,6 @@ async fn reads_api_clients_and_their_principals() {
             name: fixture.name("client"),
             secret_digest: fixture.name("digest"),
             scopes: vec!["sessions:read".to_owned(), "sessions:write".to_owned()],
-            max_concurrent_sessions: Some(3),
             disabled: true,
         })
     );

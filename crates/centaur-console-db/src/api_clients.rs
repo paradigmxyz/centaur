@@ -11,7 +11,6 @@ pub struct ApiClient {
     /// Lowercase hex SHA-256 of the client secret.
     pub secret_digest: String,
     pub scopes: Vec<String>,
-    pub max_concurrent_sessions: Option<i32>,
     pub disabled: bool,
 }
 
@@ -25,7 +24,7 @@ pub struct ApiClientPrincipal {
 
 pub async fn find_api_client(pool: &PgPool, id: i64) -> Result<Option<ApiClient>> {
     let Some(row) = sqlx::query(
-        "SELECT id, name, secret_digest, scopes, max_concurrent_sessions, \
+        "SELECT id, name, secret_digest, scopes, \
                 disabled_at IS NOT NULL AS disabled \
          FROM api_clients WHERE id = $1",
     )
@@ -50,7 +49,6 @@ pub async fn find_api_client(pool: &PgPool, id: i64) -> Result<Option<ApiClient>
         name: row.try_get("name")?,
         secret_digest: row.try_get("secret_digest")?,
         scopes,
-        max_concurrent_sessions: row.try_get("max_concurrent_sessions")?,
         disabled: row.try_get("disabled")?,
     }))
 }

@@ -847,9 +847,7 @@ async fn execute_session(
 }
 
 /// An API client may start a turn only while the session's principal is still
-/// attached to it and it is under its concurrent-session limit. The limit is
-/// checked before the turn is persisted, so concurrent requests can briefly
-/// exceed it.
+/// attached to it.
 async fn admit_api_client_execution(
     state: &AppState,
     runtime: &SessionRuntime,
@@ -864,16 +862,6 @@ async fn admit_api_client_execution(
     };
     let attached = client.principals(&state.console_db()?).await?;
     select_principal(&attached, None, Some(bound))?;
-    if let Some(limit) = client.max_concurrent_sessions() {
-        let active = runtime
-            .count_active_sessions_with_thread_prefix(&client.thread_key_prefix(), thread_key)
-            .await?;
-        if active >= u64::try_from(limit).unwrap_or_default() {
-            return Err(ApiError::TooManyRequests(format!(
-                "API client already has {active} active sessions (limit {limit})"
-            )));
-        }
-    }
     Ok(())
 }
 

@@ -30,7 +30,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_04_232304) do
     t.string "name", null: false
     t.string "secret_digest", null: false
     t.jsonb "scopes", default: [], null: false
-    t.integer "max_concurrent_sessions"
     t.datetime "disabled_at"
     t.bigint "created_by_id", null: false
     t.datetime "created_at", null: false

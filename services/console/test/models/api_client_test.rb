@@ -23,7 +23,7 @@ class ApiClientTest < ActiveSupport::TestCase
     assert_equal ApiClient.digest_secret(client.secret), client.secret_digest
   end
 
-  test "requires known, non-empty scopes and a positive concurrency limit" do
+  test "requires known, non-empty scopes" do
     client = ApiClient.new(name: "eval-runner", created_by: users(:acme_admin), scopes: [])
     assert_not client.valid?
     assert_includes client.errors[:scopes], "must include at least one scope"
@@ -31,11 +31,6 @@ class ApiClientTest < ActiveSupport::TestCase
     client.scopes = %w[sessions:read admin]
     assert_not client.valid?
     assert_includes client.errors[:scopes], "contains unsupported values: admin"
-
-    client.scopes = %w[sessions:read]
-    client.max_concurrent_sessions = 0
-    assert_not client.valid?
-    assert client.errors[:max_concurrent_sessions].any?
   end
 
   test "the first attached principal becomes the default and make_default moves it" do

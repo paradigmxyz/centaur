@@ -25,8 +25,6 @@ pub enum ApiError {
     #[error("{0}")]
     PayloadTooLarge(String),
     #[error("{0}")]
-    TooManyRequests(String),
-    #[error("{0}")]
     ServiceUnavailable(String),
     /// Server-side misconfiguration or invariant failure. The message is
     /// logged but never returned to the client.
@@ -57,7 +55,6 @@ impl IntoResponse for ApiError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::MethodNotAllowed(_) => StatusCode::METHOD_NOT_ALLOWED,
             Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
-            Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Runtime(SessionRuntimeError::BadRequest(_)) => StatusCode::BAD_REQUEST,
             Self::Runtime(SessionRuntimeError::ShuttingDown) => StatusCode::SERVICE_UNAVAILABLE,
