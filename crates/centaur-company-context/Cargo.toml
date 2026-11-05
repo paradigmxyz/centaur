@@ -13,7 +13,7 @@ chrono = { version = "0.4", features = ["clock", "serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
 hex = "0.4"
-jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
+jsonwebtoken.workspace = true
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "query", "rustls", "stream"] }
