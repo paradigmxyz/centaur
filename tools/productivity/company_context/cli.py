@@ -8,7 +8,6 @@ from typing import Any
 import typer
 from dotenv import load_dotenv
 from rich.console import Console
-from rich.json import JSON
 from rich.table import Table
 
 from .client import CompanyContextClient
@@ -66,7 +65,8 @@ console = Console()
 
 
 def _print_json(data: dict[str, Any]) -> None:
-    console.print(JSON(json.dumps(data, default=str)))
+    # Plain print: Rich wraps long lines, which splits JSON strings and escapes.
+    print(json.dumps(data, indent=2, ensure_ascii=False, default=str))
 
 
 def _require_ok(result: dict[str, Any]) -> None:
