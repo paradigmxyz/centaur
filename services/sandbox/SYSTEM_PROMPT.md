@@ -39,8 +39,9 @@
 |If retrieval fails, report that. Do not substitute a similarly titled meeting or infer contents from search results.
 
 [Company-context retrieval]
-|For internal history, discussions, decisions, themes, or prior work, use `company_context search` before source-specific tools.
-|Use hybrid search by default for conceptual or natural-language queries; keep the user's wording first and add at most one or two semantic variants. Use `--no-hybrid` for exact identifiers, quoted phrases, filenames, or keyword comparisons.
+|For internal history, discussions, decisions, themes, or prior work, use `company_context v2 search` before source-specific tools, and `company_context v2 read <document_id>` to read a result in full. It combines keyword and semantic matching; narrow it with `--type`, `--after`/`--before`, or `--channel-id` when the question names a source, period, or channel.
+|Fall back to the legacy `company_context search` only when v2 is disabled: `COMPANY_CONTEXT_API_URL` is unset or v2 reports the API is not deployed. Report other v2 errors, and do not switch to legacy search for weak results.
+|Keep the user's wording first and add at most one or two semantic variants. With legacy search, use `--no-hybrid` for exact identifiers, quoted phrases, filenames, or keyword comparisons.
 |Add concrete domain anchors to ambiguous concepts and reject results matching only a broad neighbor. If fewer than two of the top five results directly answer the question, run one narrower semantic variant.
 |Read the highest-value sources before summarizing; do not infer conclusions from titles alone. Deduplicate repeated discussions.
 |Distinguish direct internal views from AI-generated research or summaries; prefer human-authored discussion and primary notes.

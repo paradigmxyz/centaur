@@ -14,9 +14,13 @@ class SystemPromptTest(unittest.TestCase):
         prompt = SYSTEM_PROMPT.read_text()
 
         self.assertIn("[Company-context retrieval]", prompt)
-        self.assertIn("use `company_context search` before source-specific tools", prompt)
-        self.assertIn("Use hybrid search by default", prompt)
-        self.assertIn("Use `--no-hybrid` for exact identifiers", prompt)
+        self.assertIn("use `company_context v2 search` before source-specific tools", prompt)
+        self.assertIn("`company_context v2 read <document_id>`", prompt)
+        self.assertIn(
+            "Fall back to the legacy `company_context search` only when v2 is disabled", prompt
+        )
+        self.assertIn("`COMPANY_CONTEXT_API_URL` is unset", prompt)
+        self.assertIn("use `--no-hybrid` for exact identifiers", prompt)
         self.assertIn("fewer than two of the top five results", prompt)
         self.assertIn("do not infer conclusions from titles alone", prompt)
         self.assertIn("Distinguish direct internal views from AI-generated research", prompt)
