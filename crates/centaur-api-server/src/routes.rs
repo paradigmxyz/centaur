@@ -17,7 +17,7 @@ use axum::{
         IntoResponse, Response, Sse,
         sse::{Event, KeepAlive},
     },
-    routing::{any, get, post},
+    routing::{any, delete, get, post},
 };
 use base64::{Engine as _, engine::general_purpose};
 use centaur_session_core::{ChatDestination, ThreadKey};
@@ -250,6 +250,10 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .route(
             "/api/session/{thread_key}/pause",
             post(pause_session_sandbox),
+        )
+        .route(
+            "/api/session/{thread_key}/sandbox",
+            delete(release_session_sandbox),
         )
         .route("/api/sandboxes/drain", post(drain_sandboxes))
         .route(
@@ -554,7 +558,8 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
         (&Method::POST, "/api/session/{thread_key}")
         | (&Method::POST, "/api/session/{thread_key}/messages")
         | (&Method::POST, "/api/session/{thread_key}/execute")
-        | (&Method::POST, "/api/session/{thread_key}/interrupt") => {
+        | (&Method::POST, "/api/session/{thread_key}/interrupt")
+        | (&Method::DELETE, "/api/session/{thread_key}/sandbox") => {
             capability(Capability::SessionsWrite)
         }
         (&Method::POST, "/api/sandboxes/drain")
@@ -946,6 +951,26 @@ async fn pause_session_sandbox(
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
     let paused = state.runtime()?.pause_idle_session(&thread_key).await?;
     Ok(Json(json!({ "ok": true, "paused": paused })))
+}
+
+/// Stops and deletes a session's sandbox for a caller that will not use it
+/// again, such as an eval run; a later turn gets a fresh sandbox. Refused
+/// while a turn is queued or running. API clients reach only sessions in
+/// their own namespace, so they release only sandboxes they created.
+async fn release_session_sandbox(
+    State(state): State<AppState>,
+    Path(raw_thread_key): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    let sandbox_id = state
+        .runtime()?
+        .release_session_sandbox(&thread_key)
+        .await?;
+    Ok(Json(json!({
+        "ok": true,
+        "released": sandbox_id.is_some(),
+        "sandbox_id": sandbox_id,
+    })))
 }
 
 async fn stream_events(

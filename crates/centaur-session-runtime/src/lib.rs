@@ -2007,6 +2007,55 @@ impl SessionRuntime {
         .await
     }
 
+    /// Stop and delete a session's sandbox for a caller that will not use it
+    /// again; a later turn provisions a fresh one. Refuses while a turn is
+    /// queued or running. Returns the released sandbox id, or `None` if the
+    /// session had none.
+    ///
+    /// The sandbox is detached before it is stopped, so if the stop fails the
+    /// unreferenced sandbox is still reaped by the cleanup worker.
+    pub async fn release_session_sandbox(
+        &self,
+        thread_key: &ThreadKey,
+    ) -> Result<Option<String>, SessionRuntimeError> {
+        let Some(sandbox_id) = self.store.detach_idle_session_sandbox(thread_key).await? else {
+            return Ok(None);
+        };
+        self.sandbox_pipes.remove(&sandbox_id);
+        if let Err(error) = self
+            .store
+            .mark_warm_sandbox_failed(&sandbox_id, "session sandbox released")
+            .await
+        {
+            warn!(thread_key = %thread_key, sandbox_id, %error, "failed to mark released warm sandbox failed");
+        }
+        let stopped = match self
+            .sandbox_runtime
+            .manager
+            .stop(&SandboxId::new(sandbox_id.clone()))
+            .await
+        {
+            Ok(()) | Err(SandboxError::NotFound(_)) => Ok(()),
+            Err(error) => Err(error),
+        };
+        let mut payload = json!({
+            "thread_key": thread_key.as_str(),
+            "sandbox_id": sandbox_id,
+        });
+        let event_type = match &stopped {
+            Ok(()) => "session.sandbox_released",
+            Err(error) => {
+                payload["error"] = json!(error.to_string());
+                "session.sandbox_release_failed"
+            }
+        };
+        self.store
+            .append_event(thread_key, None, event_type, payload)
+            .await?;
+        stopped?;
+        Ok(Some(sandbox_id))
+    }
+
     /// Stop every non-terminal sandbox the backend currently owns.
     ///
     /// Intended for a clean control-plane shutdown (e.g. before a deploy):
@@ -11473,6 +11522,79 @@ mod adoption_tests {
                 && event.payload["workflow_run_id"] == json!(workflow_run_id)
                 && event.payload["cleared"] == json!(true)
         }));
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn release_session_sandbox_refuses_active_turn_then_stops_and_clears() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:release-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        store
+            .update_sandbox_id(&thread_key, Some("sbx-release"))
+            .await
+            .expect("set sandbox id");
+        let execution = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution;
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with(&store, backend.clone());
+
+        let refused = runtime.release_session_sandbox(&thread_key).await;
+        assert!(matches!(
+            refused,
+            Err(SessionRuntimeError::Store(
+                SessionStoreError::ExecutionActive { .. }
+            ))
+        ));
+        assert!(backend.stopped().is_empty());
+        assert_eq!(
+            store.get_session(&thread_key).await.unwrap().sandbox_id,
+            Some("sbx-release".to_owned())
+        );
+
+        store
+            .complete_execution(&execution.execution_id)
+            .await
+            .expect("complete execution");
+        assert_eq!(
+            runtime
+                .release_session_sandbox(&thread_key)
+                .await
+                .expect("release sandbox"),
+            Some("sbx-release".to_owned())
+        );
+        assert_eq!(backend.stopped(), vec!["sbx-release".to_owned()]);
+        assert_eq!(
+            store.get_session(&thread_key).await.unwrap().sandbox_id,
+            None
+        );
+        assert!(events(&store, &thread_key).await.iter().any(|event| {
+            event.event_type == "session.sandbox_released"
+                && event.payload["sandbox_id"] == json!("sbx-release")
+        }));
+        assert_eq!(
+            runtime
+                .release_session_sandbox(&thread_key)
+                .await
+                .expect("release without sandbox"),
+            None
+        );
         reset_test_store(&store).await;
     }
 

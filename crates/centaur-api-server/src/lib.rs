@@ -399,6 +399,24 @@ mod tests {
             ),
             (
                 Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/session/slack%3AC123%3A123.456/sandbox")
+                    .header(header::AUTHORIZATION, &authorized)
+                    .body(Body::empty())
+                    .unwrap(),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/session/discord%3A123%3A456/sandbox")
+                    .header(header::AUTHORIZATION, &authorized)
+                    .body(Body::empty())
+                    .unwrap(),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Request::builder()
                     .method(Method::POST)
                     .uri("/api/sandboxes/drain")
                     .header(header::AUTHORIZATION, &authorized)
@@ -550,6 +568,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(write_response.status(), StatusCode::FORBIDDEN);
+
+        let release_response = build_router_with_app_state(AppState::unready(test_auth()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/session/slack%3AC123%3A123.456/sandbox")
+                    .header(header::AUTHORIZATION, format!("Bearer {principal}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(release_response.status(), StatusCode::FORBIDDEN);
 
         let slack_response = build_router_with_app_state(AppState::unready(test_auth()))
             .oneshot(

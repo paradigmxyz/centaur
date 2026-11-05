@@ -84,5 +84,17 @@ or within 30 seconds of the client being disabled, its secret rotated, or its
 `sessions:read` scope removed. Request a new token and resume from the last
 event id.
 
+When a session will not be used again, for example at the end of an eval,
+release its sandbox instead of waiting for the idle timeout:
+
+```bash
+curl -s -X DELETE -H "Authorization: Bearer $TOKEN" \
+  "$API/api/session/$THREAD_PATH/sandbox"
+```
+
+This stops and deletes the sandbox and its state, and needs `sessions:write`.
+It returns `409` while a turn is queued or running. The transcript and events
+remain; a later turn starts in a fresh sandbox.
+
 Metadata a client sends with a session or turn is stored under
 `client_metadata`. It is never treated as a Slack user or requester identity.
