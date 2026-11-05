@@ -628,28 +628,25 @@ describe('Slack attachment serialization', () => {
     expect(attachment.fetchError).toBe('fetch Slack attachment timed out after 25ms')
   })
 
-  test('trusts only Slack file origins and files on the configured Slack API origin', () => {
-    const slackApiUrl = 'http://slack.test/api/'
+  test('trusts only Slack file origins', () => {
     for (const url of [
       'https://files.slack.com/files-pri/T1-F1/download/a.png',
-      'https://files.slack-gov.com/files-pri/T1-F1/a.png',
-      'http://slack.test/files/a.png'
+      'https://files.slack-gov.com/files-pri/T1-F1/a.png'
     ]) {
-      expect(isSlackFileUrl(url, slackApiUrl), url).toBe(true)
+      expect(isSlackFileUrl(url), url).toBe(true)
     }
     for (const url of [
       'https://slack.com/api/auth.test',
-      'http://slack.test/api/files.info',
+      'https://slack.com/files/a.png',
+      'http://slack.test/files/a.png',
       'https://files.example/a.png',
       'https://files.slack.com.example/a.png',
       'https://files.slack.com@files.example/a.png',
       'http://files.slack.com/a.png',
-      'https://slack.test/files/a.png',
       'not a url'
     ]) {
-      expect(isSlackFileUrl(url, slackApiUrl), url).toBe(false)
+      expect(isSlackFileUrl(url), url).toBe(false)
     }
-    expect(isSlackFileUrl('http://slack.test/files/a.png')).toBe(false)
   })
 
   test('sends the bot token only to Slack-hosted raw event files', async () => {

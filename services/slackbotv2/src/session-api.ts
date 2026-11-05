@@ -319,29 +319,24 @@ function slackRawFileAttachment(
 // Where Slack serves private file downloads (url_private and
 // url_private_download). A file's URL comes from event or API payload data, so
 // it must not decide where the bot token goes, nor make the bot call a Web API
-// method with it: Slack's API origins are left out.
+// method with it. Any other URL is refused rather than fetched without the
+// token, so file metadata cannot point the bot at arbitrary hosts either. Only
+// the first URL needs checking: fetch drops Authorization when a redirect
+// leaves the origin.
 const SLACK_FILE_ORIGINS = new Set(['https://files.slack.com', 'https://files.slack-gov.com'])
 
 export const NON_SLACK_FILE_URL_ERROR = 'refusing to fetch a file outside Slack with the bot token'
 
-// True for Slack's file origins, and for files on the configured Slack API
-// origin (an emulator) outside its API path. Other URLs are refused rather than
-// fetched without the token, so file metadata cannot point the bot at
-// arbitrary hosts either.
-export function isSlackFileUrl(url: string, slackApiUrl?: string): boolean {
+export function isSlackFileUrl(url: string): boolean {
   try {
-    const target = new URL(url)
-    if (SLACK_FILE_ORIGINS.has(target.origin)) return true
-    if (slackApiUrl === undefined) return false
-    const api = new URL(slackApiUrl)
-    return target.origin === api.origin && !target.pathname.startsWith(api.pathname)
+    return SLACK_FILE_ORIGINS.has(new URL(url).origin)
   } catch {
     return false
   }
 }
 
 async function fetchSlackRawFile(options: SlackbotV2Options, url: string): Promise<Buffer> {
-  if (!isSlackFileUrl(url, options.slackApiUrl)) throw new Error(NON_SLACK_FILE_URL_ERROR)
+  if (!isSlackFileUrl(url)) throw new Error(NON_SLACK_FILE_URL_ERROR)
   const fetchFn = options.fetch ?? fetch
   const response = await fetchFn(url, {
     headers: { authorization: `Bearer ${options.botToken}` }
