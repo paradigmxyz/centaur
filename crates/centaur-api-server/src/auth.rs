@@ -87,14 +87,22 @@ pub(crate) struct AuthenticatedCaller {
     capabilities: BTreeSet<Capability>,
     platform_prefixes: Option<&'static [&'static str]>,
     principal_subject: Option<String>,
-    /// For API clients: the fingerprint of the secret the token was issued
-    /// for. Rotating the secret changes it, revoking the token.
-    api_client_secret_fingerprint: Option<String>,
+    api_client_token: Option<ApiClientToken>,
+}
+
+/// What an API client access token says about its validity.
+#[derive(Clone, Debug)]
+pub(crate) struct ApiClientToken {
+    /// Fingerprint of the secret the token was issued for. Rotating the
+    /// secret changes it, revoking the token.
+    pub(crate) secret_fingerprint: String,
+    /// Unix seconds.
+    pub(crate) expires_at: i64,
 }
 
 impl AuthenticatedCaller {
-    pub(crate) fn api_client_secret_fingerprint(&self) -> Option<&str> {
-        self.api_client_secret_fingerprint.as_deref()
+    pub(crate) fn api_client_token(&self) -> Option<&ApiClientToken> {
+        self.api_client_token.as_ref()
     }
 
     /// Drops every capability `keep` rejects.
@@ -254,7 +262,7 @@ impl ApiAuthConfig {
                     capabilities: Capability::ALL.into_iter().collect(),
                     platform_prefixes: None,
                     principal_subject: None,
-                    api_client_secret_fingerprint: None,
+                    api_client_token: None,
                 })
             }
             Some(ApiJwtTokenUse::ConsoleService) => Err(ApiError::Unauthorized(
@@ -287,7 +295,7 @@ impl ApiAuthConfig {
                     capabilities,
                     platform_prefixes: None,
                     principal_subject: Some(subject),
-                    api_client_secret_fingerprint: None,
+                    api_client_token: None,
                 })
             }
         }
@@ -349,7 +357,10 @@ impl ApiAuthConfig {
                 .collect(),
             platform_prefixes: None,
             principal_subject: None,
-            api_client_secret_fingerprint: Some(claims.secret_fingerprint),
+            api_client_token: Some(ApiClientToken {
+                secret_fingerprint: claims.secret_fingerprint,
+                expires_at: claims.exp,
+            }),
         })
     }
 }
@@ -369,6 +380,7 @@ struct ApiClientClaims {
     sub: String,
     token_use: String,
     secret_fingerprint: String,
+    exp: i64,
     #[serde(default)]
     scope: String,
 }
@@ -469,7 +481,7 @@ fn static_caller(
             capabilities: capabilities.into_iter().collect(),
             platform_prefixes,
             principal_subject: None,
-            api_client_secret_fingerprint: None,
+            api_client_token: None,
         },
     }
 }
@@ -673,7 +685,9 @@ mod tests {
         assert!(!caller.has_capability(Capability::SessionsWrite));
         assert_eq!(caller.principal_subject(), None);
         assert_eq!(caller.platform_prefixes(), None);
-        assert_eq!(caller.api_client_secret_fingerprint(), Some("fp"));
+        let token_claims = caller.api_client_token().unwrap();
+        assert_eq!(token_claims.secret_fingerprint, "fp");
+        assert_eq!(token_claims.expires_at, now + API_CLIENT_TOKEN_TTL_SECONDS);
 
         let expired = auth
             .mint_api_client_token(

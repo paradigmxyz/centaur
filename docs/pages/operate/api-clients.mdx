@@ -72,5 +72,10 @@ The event stream is replayable. Pass the last event id you received as
 `after_event_id` to resume, and stop at `session.execution_completed`,
 `session.execution_failed`, or `session.execution_cancelled`.
 
+An open stream ends with a `session.stream_error` event when its token expires,
+or within 30 seconds of the client being disabled, its secret rotated, or its
+`sessions:read` scope removed. Request a new token and resume from the last
+event id.
+
 Metadata a client sends with a session or turn is stored under
 `client_metadata`. It is never treated as a Slack user or requester identity.

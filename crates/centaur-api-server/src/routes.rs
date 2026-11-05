@@ -47,8 +47,8 @@ use tracing::Span;
 use crate::{
     ApiError,
     api_clients::{
-        ApiClientContext, api_client_metadata, issue_api_client_token, refresh_api_client,
-        select_principal,
+        ApiClientContext, api_client_metadata, api_client_read_access_ended, end_events_when,
+        issue_api_client_token, refresh_api_client, select_principal,
     },
     api_jwt::{bearer_jwt_from_headers, decode_jwt_payload, verify_console_jwt},
     auth::{ApiAuthConfig, AuthenticatedCaller, CallerClass, Capability},
@@ -979,6 +979,14 @@ async fn stream_events(
         };
         Ok(sse)
     });
+    // An API client's access is checked per request; an open stream re-checks
+    // it so revocation and token expiry also end long-lived streams.
+    let stream = if caller.class() == CallerClass::ApiClient {
+        let ended = api_client_read_access_ended(state.console_db()?, caller.clone());
+        end_events_when(stream, ended).boxed()
+    } else {
+        stream.boxed()
+    };
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 

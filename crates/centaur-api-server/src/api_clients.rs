@@ -6,15 +6,26 @@
 //! client on every request so disabling it takes effect immediately, and
 //! confines it to the `api:<client id>:` thread-key namespace.
 
+use std::{
+    convert::Infallible,
+    future::{Future, ready},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+
 use axum::{
     Json,
     extract::{State, rejection::FormRejection},
     http::{HeaderMap, StatusCode, header},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Response, sse::Event},
 };
 use base64::{Engine as _, engine::general_purpose};
 use centaur_console_db::{ApiClient, ApiClientPrincipal, decode_oid, oid};
 use centaur_session_core::ThreadKey;
+use futures_util::{Stream, StreamExt, stream};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -25,9 +36,12 @@ use crate::{
     ApiError,
     auth::{API_CLIENT_TOKEN_TTL_SECONDS, AuthenticatedCaller, Capability},
     routes::AppState,
+    types::stream_error_sse,
 };
 
 const API_CLIENT_OID_PREFIX: &str = "acl";
+/// How often an open event stream re-checks the API client reading it.
+const EVENT_STREAM_RECHECK_INTERVAL: Duration = Duration::from_secs(30);
 const PRINCIPAL_OID_PREFIX: &str = "prn";
 
 /// The client a request authenticated as, after its live record was checked.
@@ -81,7 +95,10 @@ pub(crate) async fn refresh_api_client(
         .filter(|client| !client.disabled)
         .ok_or_else(|| ApiError::Unauthorized("API client is disabled or deleted".to_owned()))?;
     let current = secret_fingerprint(&client.secret_digest);
-    let presented = caller.api_client_secret_fingerprint().unwrap_or_default();
+    let presented = caller
+        .api_client_token()
+        .map(|token| token.secret_fingerprint.as_str())
+        .unwrap_or_default();
     if !bool::from(current.as_bytes().ct_eq(presented.as_bytes())) {
         return Err(ApiError::Unauthorized(
             "API client secret was rotated; request a new token".to_owned(),
@@ -97,6 +114,58 @@ pub(crate) async fn refresh_api_client(
         id: client.id,
         client_id: caller.identity().to_owned(),
     })
+}
+
+/// Resolves once the API client behind `caller` may no longer read session
+/// events: its token expired, or the client was disabled, deleted, or lost
+/// `sessions:read`, or its secret was rotated. A failed lookup leaves access
+/// as it was until the next check.
+pub(crate) async fn api_client_read_access_ended(pool: PgPool, caller: AuthenticatedCaller) {
+    let Some(expires_at) = caller.api_client_token().map(|token| token.expires_at) else {
+        return;
+    };
+    loop {
+        let remaining = expires_at - time::OffsetDateTime::now_utc().unix_timestamp();
+        let Ok(remaining @ 1..) = u64::try_from(remaining) else {
+            return;
+        };
+        tokio::time::sleep(EVENT_STREAM_RECHECK_INTERVAL.min(Duration::from_secs(remaining))).await;
+        let mut refreshed = caller.clone();
+        match refresh_api_client(&pool, &mut refreshed).await {
+            Ok(_) if refreshed.has_capability(Capability::SessionsRead) => {}
+            Ok(_) | Err(ApiError::Unauthorized(_)) => return,
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to re-check API client on an event stream");
+            }
+        }
+    }
+}
+
+/// `events`, ended with a stream error event once `ended` resolves.
+pub(crate) fn end_events_when<S>(
+    events: S,
+    ended: impl Future<Output = ()> + Send + 'static,
+) -> impl Stream<Item = Result<Event, Infallible>> + Send + 'static
+where
+    S: Stream<Item = Result<Event, Infallible>> + Send + 'static,
+{
+    let cut = Arc::new(AtomicBool::new(false));
+    let ended = {
+        let cut = cut.clone();
+        async move {
+            ended.await;
+            cut.store(true, Ordering::SeqCst);
+        }
+    };
+    events.take_until(ended).chain(
+        stream::once(async move { cut.load(Ordering::SeqCst) }).filter_map(|cut| {
+            ready(cut.then(|| {
+                Ok(stream_error_sse(
+                    "API client access ended; request a new token",
+                ))
+            }))
+        }),
+    )
 }
 
 async fn find_client(pool: &PgPool, client_id: &str) -> Result<Option<ApiClient>, ApiError> {
@@ -519,6 +588,27 @@ mod tests {
                 .unwrap_err()
                 .error,
             "invalid_client"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_streams_end_with_an_error_only_when_access_ends() {
+        let cut: Vec<_> =
+            end_events_when(stream::pending::<Result<Event, Infallible>>(), ready(()))
+                .collect()
+                .await;
+        assert_eq!(cut.len(), 1, "a revoked stream ends with one error event");
+
+        let finished: Vec<_> = end_events_when(
+            stream::iter([Ok(Event::default().data("line"))]),
+            std::future::pending(),
+        )
+        .collect()
+        .await;
+        assert_eq!(
+            finished.len(),
+            1,
+            "a stream that finishes on its own adds nothing"
         );
     }
 
