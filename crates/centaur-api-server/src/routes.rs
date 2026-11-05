@@ -17,7 +17,7 @@ use axum::{
         IntoResponse, Response, Sse,
         sse::{Event, KeepAlive},
     },
-    routing::{any, get, post},
+    routing::{any, delete, get, post},
 };
 use base64::{Engine as _, engine::general_purpose};
 use centaur_session_core::{ChatDestination, ThreadKey};
@@ -251,6 +251,10 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
             "/api/session/{thread_key}/pause",
             post(pause_session_sandbox),
         )
+        .route(
+            "/api/session/{thread_key}/sandbox",
+            delete(release_session_sandbox),
+        )
         .route("/api/sandboxes/drain", post(drain_sandboxes))
         .route(
             "/api/slack/external-team-ids",
@@ -422,6 +426,9 @@ async fn metrics(State(state): State<AppState>) -> Response {
 enum RouteAccess {
     Capability(Capability),
     PrincipalOnly,
+    /// Session write access, held by an API client (confined to its own
+    /// namespace) or an operator; ingress keys are excluded.
+    ApiClientOrOperatorSessionWrite,
 }
 
 async fn authorize_api_request(
@@ -473,6 +480,13 @@ async fn authorize_api_request(
     let allowed = match access {
         RouteAccess::Capability(capability) => caller.has_capability(capability),
         RouteAccess::PrincipalOnly => caller.class() == CallerClass::Principal,
+        RouteAccess::ApiClientOrOperatorSessionWrite => {
+            caller.has_capability(Capability::SessionsWrite)
+                && matches!(
+                    caller.class(),
+                    CallerClass::ApiClient | CallerClass::Admin | CallerClass::Console
+                )
+        }
     };
     if !allowed {
         record_api_authentication(caller.class().as_str(), "forbidden");
@@ -535,7 +549,7 @@ async fn authorize_api_request(
 
 /// API clients reach only session routes, and only for thread keys in their
 /// own `api:<client id>:` namespace.
-fn api_client_may_touch(
+pub(crate) fn api_client_may_touch(
     client: &ApiClientContext,
     route: &str,
     thread_key: Option<ThreadKey>,
@@ -556,6 +570,9 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
         | (&Method::POST, "/api/session/{thread_key}/execute")
         | (&Method::POST, "/api/session/{thread_key}/interrupt") => {
             capability(Capability::SessionsWrite)
+        }
+        (&Method::DELETE, "/api/session/{thread_key}/sandbox") => {
+            Some(RouteAccess::ApiClientOrOperatorSessionWrite)
         }
         (&Method::POST, "/api/sandboxes/drain")
         | (&Method::POST, "/api/session/{thread_key}/pause") => {
@@ -946,6 +963,27 @@ async fn pause_session_sandbox(
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
     let paused = state.runtime()?.pause_idle_session(&thread_key).await?;
     Ok(Json(json!({ "ok": true, "paused": paused })))
+}
+
+/// Stops and deletes a session's sandbox for a caller that will not use it
+/// again, such as an eval run; a later turn gets a fresh sandbox. Refused
+/// while a turn is queued or running, or for a workflow-owned session. API
+/// clients reach only sessions in their own namespace, so they release only
+/// sandboxes they created.
+async fn release_session_sandbox(
+    State(state): State<AppState>,
+    Path(raw_thread_key): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    let sandbox_id = state
+        .runtime()?
+        .release_session_sandbox(&thread_key)
+        .await?;
+    Ok(Json(json!({
+        "ok": true,
+        "released": sandbox_id.is_some(),
+        "sandbox_id": sandbox_id,
+    })))
 }
 
 async fn stream_events(

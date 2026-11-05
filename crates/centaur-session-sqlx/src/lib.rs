@@ -1590,6 +1590,91 @@ impl PgSessionStore {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Detach the session's sandbox when no turn is queued or running, and
+    /// return the detached id (`None` if the session had no sandbox). Its
+    /// warm-pool row, if any, leaves the pool in the same transaction so the
+    /// detached sandbox is unreferenced even if the caller never stops it.
+    /// A workflow-owned session is refused: its run keeps the sandbox between
+    /// agent steps and stops it when the run ends. Locking
+    /// the session row blocks a concurrent execution insert at its foreign-key
+    /// check, so a new turn either is seen here and refused, or starts after
+    /// the detach and provisions a fresh sandbox.
+    pub async fn detach_idle_session_sandbox(
+        &self,
+        thread_key: &ThreadKey,
+    ) -> Result<Option<String>, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        let (sandbox_id, workflow_owned) = sqlx::query_as::<_, (Option<String>, bool)>(
+            r#"
+            select sandbox_id, coalesce(metadata->>'workflow_owned_thread' = 'true', false)
+            from sessions
+            where thread_key = $1
+            for update
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| SessionStoreError::NotFound {
+            thread_key: thread_key.as_str().to_owned(),
+        })?;
+        if workflow_owned {
+            return Err(SessionStoreError::WorkflowOwnedSandbox {
+                thread_key: thread_key.as_str().to_owned(),
+            });
+        }
+        let active = sqlx::query_scalar::<_, String>(
+            r#"
+            select execution_id
+            from session_executions
+            where thread_key = $1 and status in ($2, $3)
+            limit 1
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .bind(ExecutionStatus::Queued.as_ref())
+        .bind(ExecutionStatus::Running.as_ref())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(execution_id) = active {
+            return Err(SessionStoreError::ExecutionActive {
+                thread_key: thread_key.as_str().to_owned(),
+                execution_id,
+            });
+        }
+        let Some(sandbox_id) = sandbox_id else {
+            return Ok(None);
+        };
+        sqlx::query(
+            r#"
+            update sessions
+            set
+                sandbox_id = null,
+                sandbox_repo_cache_enabled = null,
+                sandbox_repo_cache_access = null,
+                sandbox_observability_enabled = null,
+                sandbox_last_active_at = null,
+                updated_at = now()
+            where thread_key = $1
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            update session_warm_sandboxes
+            set status = 'failed', last_error = 'session sandbox released', updated_at = now()
+            where sandbox_id = $1
+            "#,
+        )
+        .bind(&sandbox_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(sandbox_id))
+    }
+
     /// Move an existing session onto a different harness. Clears the sandbox
     /// and harness thread state (they belong to the old harness) and resets
     /// the session to idle; messages and events are preserved. The persona is
@@ -1965,6 +2050,13 @@ pub enum SessionStoreError {
     InvalidPersistedValue(String),
     #[error("session execution not found for execution_id {execution_id}")]
     ExecutionNotFound { execution_id: String },
+    #[error("session {thread_key} has an active execution {execution_id}")]
+    ExecutionActive {
+        thread_key: String,
+        execution_id: String,
+    },
+    #[error("session {thread_key} sandbox is owned by its workflow run")]
+    WorkflowOwnedSandbox { thread_key: String },
     #[error("invalid notification payload on {channel}: {payload}: {error}")]
     InvalidNotification {
         channel: String,

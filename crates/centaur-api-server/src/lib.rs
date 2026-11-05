@@ -289,6 +289,12 @@ mod tests {
                 .body(Body::empty())
                 .unwrap(),
             Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/session/slack%3AC123%3A123.456/sandbox")
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
                 .uri("/api/workflows/runs")
                 .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                 .body(Body::empty())
@@ -394,6 +400,15 @@ mod tests {
                     .header(header::AUTHORIZATION, &authorized)
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(r#"{"harness_type":"codex"}"#))
+                    .unwrap(),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/session/slack%3AC123%3A123.456/sandbox")
+                    .header(header::AUTHORIZATION, &authorized)
+                    .body(Body::empty())
                     .unwrap(),
                 StatusCode::FORBIDDEN,
             ),
@@ -550,6 +565,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(write_response.status(), StatusCode::FORBIDDEN);
+
+        let release_response = build_router_with_app_state(AppState::unready(test_auth()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/session/slack%3AC123%3A123.456/sandbox")
+                    .header(header::AUTHORIZATION, format!("Bearer {principal}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(release_response.status(), StatusCode::FORBIDDEN);
 
         let slack_response = build_router_with_app_state(AppState::unready(test_auth()))
             .oneshot(

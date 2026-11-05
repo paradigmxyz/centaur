@@ -67,6 +67,10 @@ impl IntoResponse for ApiError {
             Self::Runtime(SessionRuntimeError::Store(SessionStoreError::PrincipalConflict {
                 ..
             })) => StatusCode::CONFLICT,
+            Self::Runtime(SessionRuntimeError::Store(
+                SessionStoreError::ExecutionActive { .. }
+                | SessionStoreError::WorkflowOwnedSandbox { .. },
+            )) => StatusCode::CONFLICT,
             Self::Runtime(SessionRuntimeError::IronControl(
                 centaur_iron_control::IronControlError::PrincipalDerivation(_),
             )) => StatusCode::BAD_REQUEST,
