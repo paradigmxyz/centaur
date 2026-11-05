@@ -1462,8 +1462,8 @@ class SlackEtlClient:
                 )
 
             for user in response.get("members", []):
-                if user.get("deleted"):
-                    continue
+                # users.list reports deactivated accounts with deleted=true;
+                # keep them so the directory upsert can mark them is_deleted.
                 profile = user.get("profile", {}) or {}
                 users.append(
                     {

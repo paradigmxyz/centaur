@@ -230,12 +230,27 @@ def _max_slack_ts(*values: Any) -> str | None:
     return best
 
 
-async def _upsert_channels(pool, channels: list[dict[str, Any]]) -> None:
-    """Refresh Slack sync channel rows and mark absent channels out of scope."""
+async def _upsert_channels(
+    pool,
+    channels: list[dict[str, Any]],
+    syncable_ids: set[str],
+) -> None:
+    """Refresh Slack sync channel rows and mark absent channels out of scope.
+
+    ``channels`` is the full discovery listing — its payloads carry verified
+    privacy state. ``syncable_ids`` is the subset that passed exclusion and
+    membership filters; discovered-but-unsyncable channels keep their verified
+    ``is_private`` while staying out of sync scope.
+    """
     async with pool.acquire() as conn:
         async with conn.transaction():
+            # Fail closed on privacy: a channel that leaves discovery keeps
+            # whatever is_private it last had, and reader policy keys on
+            # is_private alone — mark undiscovered channels private so stale
+            # "public" history stops being served while they are unverifiable.
             await conn.execute(
-                "UPDATE slack_sync_channels SET is_syncable = FALSE, updated_at = NOW()",
+                "UPDATE slack_sync_channels SET is_syncable = FALSE, "
+                "is_private = TRUE, updated_at = NOW()",
             )
             for channel in channels:
                 channel_id = str(channel.get("id") or "")
@@ -245,12 +260,12 @@ async def _upsert_channels(pool, channels: list[dict[str, Any]]) -> None:
                     "INSERT INTO slack_sync_channels ("
                     "channel_id, channel_name, is_archived, is_private, is_syncable, "
                     "topic, purpose, member_count, raw_payload, last_seen_at, updated_at"
-                    ") VALUES ($1, $2, $3, $4, TRUE, $5, $6, $7, $8::jsonb, NOW(), NOW()) "
+                    ") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, NOW(), NOW()) "
                     "ON CONFLICT (channel_id) DO UPDATE SET "
                     "channel_name = EXCLUDED.channel_name, "
                     "is_archived = EXCLUDED.is_archived, "
                     "is_private = EXCLUDED.is_private, "
-                    "is_syncable = TRUE, "
+                    "is_syncable = EXCLUDED.is_syncable, "
                     "topic = EXCLUDED.topic, "
                     "purpose = EXCLUDED.purpose, "
                     "member_count = EXCLUDED.member_count, "
@@ -261,6 +276,7 @@ async def _upsert_channels(pool, channels: list[dict[str, Any]]) -> None:
                     str(channel.get("name") or ""),
                     bool(channel.get("is_archived")),
                     bool(channel.get("is_private")),
+                    channel_id in syncable_ids,
                     str(channel.get("topic") or ""),
                     str(channel.get("purpose") or ""),
                     int(channel.get("member_count") or 0),
@@ -268,10 +284,29 @@ async def _upsert_channels(pool, channels: list[dict[str, Any]]) -> None:
                 )
 
 
-async def _upsert_users(pool, users: list[dict[str, Any]]) -> int:
-    """Refresh Slack user directory rows."""
+async def _upsert_users(
+    pool,
+    users: list[dict[str, Any]],
+    *,
+    listing_complete: bool = True,
+) -> int:
+    """Refresh Slack user directory rows and mark departed users deleted.
+
+    ``users`` is the full users.list result, deactivated accounts included.
+    A user absent from a *complete* listing can no longer be verified, so
+    their row is marked ``is_deleted`` — same fail-closed direction as
+    channels. An empty or capped (possibly truncated) listing skips the
+    reset rather than mass-marking live users.
+    """
+    if not users:
+        return 0
     async with pool.acquire() as conn:
         async with conn.transaction():
+            if listing_complete:
+                await conn.execute(
+                    "UPDATE slack_sync_users SET is_deleted = TRUE, "
+                    "updated_at = NOW()",
+                )
             for user in users:
                 user_id = str(user.get("id") or "")
                 if not user_id:
@@ -442,8 +477,19 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             channels=non_member_channels,
         )
     skipped_channels = list(excluded_channels) + list(non_member_channels)
-    await _upsert_channels(ctx._pool, channels_to_sync)
-    record_etl_items_upserted("slack", "channel", "channel", len(channels_to_sync))
+    if channels:
+        # Refresh privacy state for every discovered channel — filtered-out
+        # channels were still verified this tick — and fail closed for rows
+        # absent from discovery. An empty listing skips mutation entirely.
+        syncable_ids = {
+            channel_id
+            for channel in channels_to_sync
+            if (channel_id := str(channel.get("id") or ""))
+        }
+        await _upsert_channels(ctx._pool, channels, syncable_ids)
+        record_etl_items_upserted(
+            "slack", "channel", "channel", len(channels_to_sync)
+        )
 
     if not channels:
         reason = "no_channels"
@@ -488,8 +534,9 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             "channels_skipped": skipped_channels,
         }
 
+    users_limit = 10_000
     try:
-        users = client._list_etl_users(limit=10_000)
+        users = client._list_etl_users(limit=users_limit)
         record_slack_retention_api_request("list_users", "success")
     except Exception as exc:
         reason = failure_reason(str(exc))
@@ -502,7 +549,13 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         )
         raise
     record_etl_items_seen("slack", "user", "user", len(users))
-    users_upserted = await _upsert_users(ctx._pool, users)
+    users_upserted = await _upsert_users(
+        ctx._pool,
+        users,
+        # A listing at the cap may be truncated — don't reset on a
+        # possibly-partial view of the workspace directory.
+        listing_complete=len(users) < users_limit,
+    )
     record_etl_items_upserted("slack", "user", "user", users_upserted)
 
     run_id = workflow_run_id_to_sync_run_id(ctx.run_id)
