@@ -127,6 +127,8 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         .with_session_principal_admission(args.session_principal_admission())
         .with_openai_session_title_generator_from_env();
     runtime = runtime.with_personas(args.persona_registry()?);
+    runtime =
+        runtime.with_keep_sandbox_on_transient_resume_failure(args.sandbox_state_volume_enabled());
     let sandbox_capacity_config = args.sandbox_capacity_config();
     if let Some(config) = sandbox_capacity_config {
         runtime = runtime.with_sandbox_capacity(config);
