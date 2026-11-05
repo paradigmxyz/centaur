@@ -927,6 +927,33 @@ impl PgSessionStore {
         Ok(u64::try_from(count).unwrap_or_default())
     }
 
+    /// Counts sessions under `thread_key_prefix`, other than `excluding`, with
+    /// a queued or running execution.
+    pub async fn count_active_sessions_with_thread_prefix(
+        &self,
+        thread_key_prefix: &str,
+        excluding: &ThreadKey,
+    ) -> Result<u64, SessionStoreError> {
+        // `left(...) =` rather than LIKE: the prefix may contain `_` and `%`.
+        let count = sqlx::query_scalar::<_, i64>(
+            r#"
+            select count(distinct thread_key)
+            from session_executions
+            where status in ($1, $2)
+              and left(thread_key, length($3)) = $3
+              and thread_key <> $4
+            "#,
+        )
+        .bind(ExecutionStatus::Queued.as_ref())
+        .bind(ExecutionStatus::Running.as_ref())
+        .bind(thread_key_prefix)
+        .bind(excluding.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(u64::try_from(count).unwrap_or_default())
+    }
+
     /// Releases every active stdout-owner lease held by `owner_id` in one
     /// statement, returning the affected executions. Used by a clean
     /// control-plane shutdown so a peer's adoption scan can claim the
@@ -3251,6 +3278,66 @@ mod tests {
             .map(|event| event.event_type.as_str())
             .collect::<Vec<_>>();
         assert_eq!(delivered, ["test.slow", "test.fast"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn counts_active_sessions_under_a_thread_key_prefix() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        // `_` must match literally, not as a LIKE wildcard.
+        let prefix = format!("api:acl_{}:", Uuid::new_v4().simple());
+        let lookalike = prefix.replacen('_', "x", 1);
+        let mut threads = Vec::new();
+        for (key, status) in [
+            (format!("{prefix}running"), Some(true)),
+            (format!("{prefix}queued"), Some(false)),
+            (format!("{prefix}idle"), None),
+            (format!("{lookalike}running"), Some(true)),
+        ] {
+            let thread_key = ThreadKey::parse(key).unwrap();
+            store
+                .create_or_get_session(
+                    &thread_key,
+                    &HarnessType::Codex,
+                    None,
+                    json!({}),
+                    Default::default(),
+                )
+                .await
+                .expect("create session");
+            if let Some(running) = status {
+                let execution = store
+                    .create_execution(&thread_key, None, json!({}))
+                    .await
+                    .expect("create execution")
+                    .execution
+                    .execution_id;
+                if running {
+                    store
+                        .mark_execution_running(&execution)
+                        .await
+                        .expect("mark running");
+                }
+            }
+            threads.push(thread_key);
+        }
+        let unrelated = ThreadKey::parse(format!("{prefix}new")).unwrap();
+
+        assert_eq!(
+            store
+                .count_active_sessions_with_thread_prefix(&prefix, &unrelated)
+                .await
+                .expect("count active sessions"),
+            2
+        );
+        assert_eq!(
+            store
+                .count_active_sessions_with_thread_prefix(&prefix, &threads[0])
+                .await
+                .expect("count active sessions excluding one"),
+            1
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

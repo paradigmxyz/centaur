@@ -97,6 +97,11 @@ impl Args {
         self.sandbox.iron_control_runtime().await
     }
 
+    /// Console's database pool, when configured. Call within a Tokio runtime.
+    pub(crate) fn console_db(&self) -> Option<PgPool> {
+        self.sandbox.iron_control.console_db().ok()
+    }
+
     pub(crate) fn persona_registry(&self) -> Result<PersonaRegistry, ServerError> {
         self.sandbox.persona_registry()
     }

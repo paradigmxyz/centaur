@@ -1,6 +1,7 @@
 //! Reads Console's PostgreSQL schema: principals, the credentials granted to
 //! them, and the proxy configuration built from those credentials.
 
+mod api_clients;
 mod config;
 mod conflicts;
 mod credentials;
@@ -9,6 +10,7 @@ pub mod models;
 mod oid;
 mod principals;
 
+pub use api_clients::{ApiClient, ApiClientPrincipal, api_client_principals, find_api_client};
 pub use config::{REDACTED, SecretValues, Subject, build_config};
 pub use credentials::{SlackChannels, slack_channels};
 pub use error::{Error, Result};

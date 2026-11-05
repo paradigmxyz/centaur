@@ -890,6 +890,19 @@ impl SessionRuntime {
         Ok(self.store.get_session(thread_key).await?)
     }
 
+    /// Sessions under `thread_key_prefix`, other than `excluding`, with a
+    /// queued or running turn.
+    pub async fn count_active_sessions_with_thread_prefix(
+        &self,
+        thread_key_prefix: &str,
+        excluding: &ThreadKey,
+    ) -> Result<u64, SessionRuntimeError> {
+        Ok(self
+            .store
+            .count_active_sessions_with_thread_prefix(thread_key_prefix, excluding)
+            .await?)
+    }
+
     fn resolve_stored_persona(
         &self,
         persona_id: Option<&str>,

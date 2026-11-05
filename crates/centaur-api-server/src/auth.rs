@@ -8,13 +8,18 @@ use thiserror::Error;
 
 use crate::{
     ApiError,
-    api_jwt::{bearer_token, verify_hs256_jwt},
+    api_jwt::{bearer_token, decode_jwt_payload, verify_hs256_jwt},
 };
 
 const DEFAULT_API_JWT_AUDIENCE: &str = "centaur-api";
 const DEFAULT_API_JWT_ISSUER: &str = "centaur-console";
 const CONSOLE_SERVICE_SUBJECT: &str = "centaur-console";
 const STATIC_ADMIN_IDENTITY: &str = "api-rs-admin";
+/// Issuer of the access tokens api-rs mints for API clients. Distinct from
+/// Console's issuer so neither kind of token can be read as the other.
+pub(crate) const API_CLIENT_TOKEN_ISSUER: &str = "centaur-api-rs";
+const API_CLIENT_TOKEN_USE: &str = "api_client";
+pub(crate) const API_CLIENT_TOKEN_TTL_SECONDS: i64 = 15 * 60;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum Capability {
@@ -43,6 +48,15 @@ impl Capability {
         Self::SlackExternalTeamsRead,
         Self::SlackExternalTeamsWrite,
     ];
+
+    /// The capability an API client OAuth scope grants.
+    pub(crate) fn from_api_client_scope(scope: &str) -> Option<Self> {
+        match scope {
+            "sessions:read" => Some(Self::SessionsRead),
+            "sessions:write" => Some(Self::SessionsWrite),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,6 +65,7 @@ pub(crate) enum CallerClass {
     Console,
     Ingress,
     Principal,
+    ApiClient,
 }
 
 impl CallerClass {
@@ -60,6 +75,7 @@ impl CallerClass {
             Self::Console => "console",
             Self::Ingress => "ingress",
             Self::Principal => "principal",
+            Self::ApiClient => "api_client",
         }
     }
 }
@@ -74,6 +90,11 @@ pub(crate) struct AuthenticatedCaller {
 }
 
 impl AuthenticatedCaller {
+    /// Drops every capability `keep` rejects.
+    pub(crate) fn retain_capabilities(&mut self, keep: impl Fn(Capability) -> bool) {
+        self.capabilities.retain(|capability| keep(*capability));
+    }
+
     pub(crate) fn has_capability(&self, capability: Capability) -> bool {
         self.capabilities.contains(&capability)
     }
@@ -220,6 +241,9 @@ impl ApiAuthConfig {
         if token.matches('.').count() != 2 {
             return Err(ApiError::Unauthorized("invalid bearer token".to_owned()));
         }
+        if unverified_issuer(token).as_deref() == Some(API_CLIENT_TOKEN_ISSUER) {
+            return self.authenticate_api_client(token);
+        }
         let claims = verify_hs256_jwt::<ApiJwtClaims>(
             token,
             self.jwt_secret.as_bytes(),
@@ -271,6 +295,80 @@ impl ApiAuthConfig {
             }
         }
     }
+}
+
+impl ApiAuthConfig {
+    /// Mints the access token for API client `client_id` (its oid), granting
+    /// `scopes`, valid from `now` (Unix seconds).
+    pub(crate) fn mint_api_client_token(
+        &self,
+        client_id: &str,
+        scopes: &[String],
+        now: i64,
+    ) -> Result<String, ApiError> {
+        let claims = serde_json::json!({
+            "iss": API_CLIENT_TOKEN_ISSUER,
+            "aud": &*self.jwt_audience,
+            "sub": client_id,
+            "iat": now,
+            "nbf": now,
+            "exp": now + API_CLIENT_TOKEN_TTL_SECONDS,
+            "jti": uuid::Uuid::new_v4().to_string(),
+            "token_use": API_CLIENT_TOKEN_USE,
+            "scope": scopes.join(" "),
+        });
+        jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(self.jwt_secret.as_bytes()),
+        )
+        .map_err(|error| ApiError::Internal(format!("failed to sign API client token: {error}")))
+    }
+
+    /// Verifies an API client access token. The caller's capabilities are its
+    /// token scopes; the request path narrows them to the client's live scopes.
+    fn authenticate_api_client(&self, token: &str) -> Result<AuthenticatedCaller, ApiError> {
+        let claims = verify_hs256_jwt::<ApiClientClaims>(
+            token,
+            self.jwt_secret.as_bytes(),
+            &self.jwt_audience,
+            API_CLIENT_TOKEN_ISSUER,
+        )?;
+        if claims.token_use != API_CLIENT_TOKEN_USE {
+            return Err(ApiError::Unauthorized(
+                "invalid API client token use".to_owned(),
+            ));
+        }
+        Ok(AuthenticatedCaller {
+            class: CallerClass::ApiClient,
+            identity: claims.sub.trim().to_owned(),
+            capabilities: claims
+                .scope
+                .split_whitespace()
+                .filter_map(Capability::from_api_client_scope)
+                .collect(),
+            platform_prefixes: None,
+            principal_subject: None,
+        })
+    }
+}
+
+/// The `iss` claim of a JWT, before its signature is checked. Used only to
+/// pick which verifier to apply.
+fn unverified_issuer(token: &str) -> Option<String> {
+    decode_jwt_payload(token)
+        .ok()?
+        .get("iss")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+#[derive(Deserialize)]
+struct ApiClientClaims {
+    sub: String,
+    token_use: String,
+    #[serde(default)]
+    scope: String,
 }
 
 #[derive(Debug, Error)]
@@ -548,6 +646,84 @@ mod tests {
         assert!(!caller.has_capability(Capability::SessionsRead));
         assert!(caller.has_capability(Capability::WorkflowsRead));
         assert!(caller.has_capability(Capability::WorkflowsWrite));
+    }
+
+    fn bearer(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        headers
+    }
+
+    #[test]
+    fn minted_api_client_tokens_authenticate_with_their_scopes() {
+        let auth = ApiAuthConfig::testing("jwt-secret");
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let token = auth
+            .mint_api_client_token("acl_test", &["sessions:read".to_owned()], now)
+            .unwrap();
+
+        let caller = auth.authenticate(&bearer(&token)).unwrap();
+        assert_eq!(caller.class(), CallerClass::ApiClient);
+        assert_eq!(caller.identity(), "acl_test");
+        assert!(caller.has_capability(Capability::SessionsRead));
+        assert!(!caller.has_capability(Capability::SessionsWrite));
+        assert_eq!(caller.principal_subject(), None);
+        assert_eq!(caller.platform_prefixes(), None);
+
+        let expired = auth
+            .mint_api_client_token(
+                "acl_test",
+                &["sessions:read".to_owned()],
+                now - API_CLIENT_TOKEN_TTL_SECONDS - 60,
+            )
+            .unwrap();
+        assert!(matches!(
+            auth.authenticate(&bearer(&expired)),
+            Err(ApiError::Unauthorized(_))
+        ));
+    }
+
+    #[test]
+    fn api_client_and_console_tokens_cannot_pose_as_each_other() {
+        let auth = ApiAuthConfig::testing("jwt-secret");
+        let sign = |claims: serde_json::Value| {
+            encode(
+                &Header::new(Algorithm::HS256),
+                &claims,
+                &EncodingKey::from_secret(b"jwt-secret"),
+            )
+            .unwrap()
+        };
+        for claims in [
+            // A Console-issued token claiming to be an API client token.
+            json!({
+                "iss": "centaur-console", "sub": "acl_test", "aud": "centaur-api",
+                "iat": 1_700_000_000i64, "exp": 4_102_444_800i64,
+                "token_use": "api_client", "scope": "sessions:write",
+            }),
+            // An api-rs-issued token without the API client token use.
+            json!({
+                "iss": API_CLIENT_TOKEN_ISSUER, "sub": "centaur-console", "aud": "centaur-api",
+                "iat": 1_700_000_000i64, "exp": 4_102_444_800i64,
+                "token_use": "console_service",
+            }),
+            json!({
+                "iss": API_CLIENT_TOKEN_ISSUER, "sub": "prn_test", "aud": "centaur-api",
+                "iat": 1_700_000_000i64, "exp": 4_102_444_800i64,
+                "capabilities": { "sessions_read": true },
+            }),
+        ] {
+            assert!(
+                matches!(
+                    auth.authenticate(&bearer(&sign(claims.clone()))),
+                    Err(ApiError::Unauthorized(_))
+                ),
+                "{claims}"
+            );
+        }
     }
 
     #[test]
