@@ -1,6 +1,7 @@
 """Tests for the Notion CLI's page property updates against a mocked Notion API."""
 
 import json
+import re
 
 import httpx
 import pytest
@@ -17,6 +18,11 @@ UPDATED_PAGE = {
 }
 
 runner = CliRunner()
+
+
+def _plain(text: str) -> str:
+    """Strip ANSI styling; Typer colours its output when CI is detected."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
 @pytest.fixture
@@ -57,7 +63,7 @@ def test_update_page_patches_properties_as_given(notion_api):
     result = _invoke(PAGE_ID, "--properties", json.dumps(properties))
 
     assert result.exit_code == 0, result.output
-    assert "Updated: Task" in result.output
+    assert "Updated: Task" in _plain(result.output)
     [request] = requests
     assert request.method == "PATCH"
     assert request.url.path == f"/v1/pages/{PAGE_ID}"
@@ -127,7 +133,7 @@ def test_update_page_rejects_non_object_properties(notion_api, value):
     result = _invoke(PAGE_ID, "--properties", value)
 
     assert result.exit_code == 2
-    assert "--properties" in result.output
+    assert "--properties" in _plain(result.output)
     assert requests == []
 
 
