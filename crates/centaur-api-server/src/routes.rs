@@ -426,6 +426,9 @@ async fn metrics(State(state): State<AppState>) -> Response {
 enum RouteAccess {
     Capability(Capability),
     PrincipalOnly,
+    /// Session write access, held by an API client (confined to its own
+    /// namespace) or an operator; ingress keys are excluded.
+    ApiClientOrOperatorSessionWrite,
 }
 
 async fn authorize_api_request(
@@ -477,6 +480,13 @@ async fn authorize_api_request(
     let allowed = match access {
         RouteAccess::Capability(capability) => caller.has_capability(capability),
         RouteAccess::PrincipalOnly => caller.class() == CallerClass::Principal,
+        RouteAccess::ApiClientOrOperatorSessionWrite => {
+            caller.has_capability(Capability::SessionsWrite)
+                && matches!(
+                    caller.class(),
+                    CallerClass::ApiClient | CallerClass::Admin | CallerClass::Console
+                )
+        }
     };
     if !allowed {
         record_api_authentication(caller.class().as_str(), "forbidden");
@@ -539,7 +549,7 @@ async fn authorize_api_request(
 
 /// API clients reach only session routes, and only for thread keys in their
 /// own `api:<client id>:` namespace.
-fn api_client_may_touch(
+pub(crate) fn api_client_may_touch(
     client: &ApiClientContext,
     route: &str,
     thread_key: Option<ThreadKey>,
@@ -558,9 +568,11 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
         (&Method::POST, "/api/session/{thread_key}")
         | (&Method::POST, "/api/session/{thread_key}/messages")
         | (&Method::POST, "/api/session/{thread_key}/execute")
-        | (&Method::POST, "/api/session/{thread_key}/interrupt")
-        | (&Method::DELETE, "/api/session/{thread_key}/sandbox") => {
+        | (&Method::POST, "/api/session/{thread_key}/interrupt") => {
             capability(Capability::SessionsWrite)
+        }
+        (&Method::DELETE, "/api/session/{thread_key}/sandbox") => {
+            Some(RouteAccess::ApiClientOrOperatorSessionWrite)
         }
         (&Method::POST, "/api/sandboxes/drain")
         | (&Method::POST, "/api/session/{thread_key}/pause") => {
@@ -955,8 +967,9 @@ async fn pause_session_sandbox(
 
 /// Stops and deletes a session's sandbox for a caller that will not use it
 /// again, such as an eval run; a later turn gets a fresh sandbox. Refused
-/// while a turn is queued or running. API clients reach only sessions in
-/// their own namespace, so they release only sandboxes they created.
+/// while a turn is queued or running, or for a workflow-owned session. API
+/// clients reach only sessions in their own namespace, so they release only
+/// sandboxes they created.
 async fn release_session_sandbox(
     State(state): State<AppState>,
     Path(raw_thread_key): Path<String>,

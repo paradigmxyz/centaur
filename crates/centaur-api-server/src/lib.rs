@@ -289,6 +289,12 @@ mod tests {
                 .body(Body::empty())
                 .unwrap(),
             Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/session/slack%3AC123%3A123.456/sandbox")
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
                 .uri("/api/workflows/runs")
                 .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                 .body(Body::empty())
@@ -401,15 +407,6 @@ mod tests {
                 Request::builder()
                     .method(Method::DELETE)
                     .uri("/api/session/slack%3AC123%3A123.456/sandbox")
-                    .header(header::AUTHORIZATION, &authorized)
-                    .body(Body::empty())
-                    .unwrap(),
-                StatusCode::SERVICE_UNAVAILABLE,
-            ),
-            (
-                Request::builder()
-                    .method(Method::DELETE)
-                    .uri("/api/session/discord%3A123%3A456/sandbox")
                     .header(header::AUTHORIZATION, &authorized)
                     .body(Body::empty())
                     .unwrap(),

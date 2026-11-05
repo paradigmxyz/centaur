@@ -540,6 +540,25 @@ mod tests {
     }
 
     #[test]
+    fn clients_release_only_sandboxes_of_their_own_sessions() {
+        let client = ApiClientContext {
+            id: 1,
+            client_id: "acl_abc".to_owned(),
+        };
+        let may_release = |key: &str| {
+            crate::routes::api_client_may_touch(
+                &client,
+                "/api/session/{thread_key}/sandbox",
+                Some(ThreadKey::parse(key).unwrap()),
+            )
+        };
+
+        assert!(may_release("api:acl_abc:eval-1"));
+        assert!(!may_release("api:acl_other:eval-1"));
+        assert!(!may_release("slack:T1:C1:1.2"));
+    }
+
+    #[test]
     fn api_client_metadata_nests_caller_keys() {
         assert_eq!(
             api_client_metadata(

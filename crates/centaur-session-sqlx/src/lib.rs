@@ -1591,7 +1591,9 @@ impl PgSessionStore {
     }
 
     /// Detach the session's sandbox when no turn is queued or running, and
-    /// return the detached id (`None` if the session had no sandbox). Locking
+    /// return the detached id (`None` if the session had no sandbox). A
+    /// workflow-owned session is refused: its run keeps the sandbox between
+    /// agent steps and stops it when the run ends. Locking
     /// the session row blocks a concurrent execution insert at its foreign-key
     /// check, so a new turn either is seen here and refused, or starts after
     /// the detach and provisions a fresh sandbox.
@@ -1600,8 +1602,13 @@ impl PgSessionStore {
         thread_key: &ThreadKey,
     ) -> Result<Option<String>, SessionStoreError> {
         let mut tx = self.pool.begin().await?;
-        let sandbox_id = sqlx::query_scalar::<_, Option<String>>(
-            "select sandbox_id from sessions where thread_key = $1 for update",
+        let (sandbox_id, workflow_owned) = sqlx::query_as::<_, (Option<String>, bool)>(
+            r#"
+            select sandbox_id, coalesce(metadata->>'workflow_owned_thread' = 'true', false)
+            from sessions
+            where thread_key = $1
+            for update
+            "#,
         )
         .bind(thread_key.as_str())
         .fetch_optional(&mut *tx)
@@ -1609,6 +1616,11 @@ impl PgSessionStore {
         .ok_or_else(|| SessionStoreError::NotFound {
             thread_key: thread_key.as_str().to_owned(),
         })?;
+        if workflow_owned {
+            return Err(SessionStoreError::WorkflowOwnedSandbox {
+                thread_key: thread_key.as_str().to_owned(),
+            });
+        }
         let active = sqlx::query_scalar::<_, String>(
             r#"
             select execution_id
@@ -2031,6 +2043,8 @@ pub enum SessionStoreError {
         thread_key: String,
         execution_id: String,
     },
+    #[error("session {thread_key} sandbox is owned by its workflow run")]
+    WorkflowOwnedSandbox { thread_key: String },
     #[error("invalid notification payload on {channel}: {payload}: {error}")]
     InvalidNotification {
         channel: String,

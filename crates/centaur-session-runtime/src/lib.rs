@@ -2384,6 +2384,11 @@ impl SessionRuntime {
                 );
                 return Ok(execution);
             }
+            // Re-read now that this execution's row is committed: a sandbox
+            // release that ran before it was visible has detached the sandbox
+            // read above, and this turn must not reuse it.
+            let session = self.store.get_session(thread_key).await?;
+            correlation_sandbox_id = session.sandbox_id.clone();
             if let Err(error) = self.claim_stdout_owner(&execution.execution_id).await {
                 self.handle_stdout_claim_failure(thread_key, &execution.execution_id, &error)
                     .await;
@@ -9724,6 +9729,7 @@ mod adoption_tests {
         create_id: String,
         created_specs: std::sync::Mutex<Vec<SandboxSpec>>,
         resume_fails: AtomicBool,
+        stop_fails: AtomicBool,
         stopped: std::sync::Mutex<Vec<String>>,
         proxy_ensures: std::sync::Mutex<Vec<ProxyEnsure>>,
         missing_on_stop: std::sync::Mutex<BTreeSet<String>>,
@@ -9747,6 +9753,7 @@ mod adoption_tests {
                 create_id: "mock-sbx".to_owned(),
                 created_specs: std::sync::Mutex::new(Vec::new()),
                 resume_fails: AtomicBool::new(false),
+                stop_fails: AtomicBool::new(false),
                 stopped: std::sync::Mutex::new(Vec::new()),
                 proxy_ensures: std::sync::Mutex::new(Vec::new()),
                 missing_on_stop: std::sync::Mutex::new(BTreeSet::new()),
@@ -9806,6 +9813,10 @@ mod adoption_tests {
 
         fn fail_resume(&self) {
             self.resume_fails.store(true, Ordering::SeqCst);
+        }
+
+        fn fail_stop(&self) {
+            self.stop_fails.store(true, Ordering::SeqCst);
         }
 
         fn mark_stop_missing(&self, sandbox_id: &str) {
@@ -9906,6 +9917,9 @@ mod adoption_tests {
         async fn stop(&self, id: &SandboxId) -> SandboxResult<()> {
             if self.missing_on_stop.lock().unwrap().contains(id.as_str()) {
                 return Err(SandboxError::NotFound(id.as_str().to_owned()));
+            }
+            if self.stop_fails.load(Ordering::SeqCst) {
+                return Err(SandboxError::backend("stop failed"));
             }
             self.stopped.lock().unwrap().push(id.as_str().to_owned());
             self.set_observed_status(id.as_str(), SandboxStatus::Stopped);
@@ -11525,6 +11539,47 @@ mod adoption_tests {
         reset_test_store(&store).await;
     }
 
+    /// A session holding `sandbox_id`, claimed from the warm pool.
+    async fn session_with_warm_sandbox(
+        store: &PgSessionStore,
+        name: &str,
+        metadata: Value,
+        sandbox_id: &str,
+    ) -> ThreadKey {
+        let thread_key = ThreadKey::parse(format!("test:{name}-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                metadata,
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        store
+            .update_sandbox_id(&thread_key, Some(sandbox_id))
+            .await
+            .expect("set sandbox id");
+        store
+            .insert_ready_warm_sandbox(sandbox_id, "test-workload")
+            .await
+            .expect("insert warm sandbox");
+        store
+            .claim_ready_warm_sandbox("test-workload", thread_key.as_str())
+            .await
+            .expect("claim warm sandbox");
+        thread_key
+    }
+
+    async fn is_referenced(store: &PgSessionStore, sandbox_id: &str) -> bool {
+        store
+            .list_referenced_sandbox_ids()
+            .await
+            .expect("list referenced sandboxes")
+            .contains(&sandbox_id.to_owned())
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn release_session_sandbox_refuses_active_turn_then_stops_and_clears() {
         let Some(store) = test_store().await else {
@@ -11532,21 +11587,7 @@ mod adoption_tests {
         };
         let _serial = TEST_LOCK.lock().await;
         let thread_key =
-            ThreadKey::parse(format!("test:release-{}", uuid::Uuid::new_v4())).unwrap();
-        store
-            .create_or_get_session(
-                &thread_key,
-                &HarnessType::Codex,
-                None,
-                json!({}),
-                Default::default(),
-            )
-            .await
-            .expect("create session");
-        store
-            .update_sandbox_id(&thread_key, Some("sbx-release"))
-            .await
-            .expect("set sandbox id");
+            session_with_warm_sandbox(&store, "release", json!({}), "sbx-release").await;
         let execution = store
             .create_execution(&thread_key, None, json!({}))
             .await
@@ -11555,13 +11596,20 @@ mod adoption_tests {
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
         let runtime = runtime_with(&store, backend.clone());
 
-        let refused = runtime.release_session_sandbox(&thread_key).await;
-        assert!(matches!(
-            refused,
-            Err(SessionRuntimeError::Store(
-                SessionStoreError::ExecutionActive { .. }
-            ))
-        ));
+        let refused = |result: Result<Option<String>, SessionRuntimeError>| {
+            matches!(
+                result,
+                Err(SessionRuntimeError::Store(
+                    SessionStoreError::ExecutionActive { .. }
+                ))
+            )
+        };
+        assert!(refused(runtime.release_session_sandbox(&thread_key).await));
+        store
+            .mark_execution_running(&execution.execution_id)
+            .await
+            .expect("mark execution running");
+        assert!(refused(runtime.release_session_sandbox(&thread_key).await));
         assert!(backend.stopped().is_empty());
         assert_eq!(
             store.get_session(&thread_key).await.unwrap().sandbox_id,
@@ -11584,6 +11632,7 @@ mod adoption_tests {
             store.get_session(&thread_key).await.unwrap().sandbox_id,
             None
         );
+        assert!(!is_referenced(&store, "sbx-release").await);
         assert!(events(&store, &thread_key).await.iter().any(|event| {
             event.event_type == "session.sandbox_released"
                 && event.payload["sandbox_id"] == json!("sbx-release")
@@ -11594,6 +11643,69 @@ mod adoption_tests {
                 .await
                 .expect("release without sandbox"),
             None
+        );
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn release_session_sandbox_leaves_failed_stop_for_cleanup() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            session_with_warm_sandbox(&store, "release-fail", json!({}), "sbx-release-fail").await;
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        backend.fail_stop();
+        let runtime = runtime_with(&store, backend.clone());
+
+        assert!(matches!(
+            runtime.release_session_sandbox(&thread_key).await,
+            Err(SessionRuntimeError::Sandbox(_))
+        ));
+        // Detached and unreferenced, so the cleanup worker reaps it.
+        assert_eq!(
+            store.get_session(&thread_key).await.unwrap().sandbox_id,
+            None
+        );
+        assert!(!is_referenced(&store, "sbx-release-fail").await);
+        assert!(events(&store, &thread_key).await.iter().any(|event| {
+            event.event_type == "session.sandbox_release_failed"
+                && event.payload["sandbox_id"] == json!("sbx-release-fail")
+        }));
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn release_session_sandbox_refuses_workflow_owned_session() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key = session_with_warm_sandbox(
+            &store,
+            "release-wf",
+            json!({
+                "source": "absurd_workflow",
+                "workflow_run_id": "run-release",
+                "workflow_owned_thread": true,
+            }),
+            "sbx-release-wf",
+        )
+        .await;
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with(&store, backend.clone());
+
+        assert!(matches!(
+            runtime.release_session_sandbox(&thread_key).await,
+            Err(SessionRuntimeError::Store(
+                SessionStoreError::WorkflowOwnedSandbox { .. }
+            ))
+        ));
+        assert!(backend.stopped().is_empty());
+        assert_eq!(
+            store.get_session(&thread_key).await.unwrap().sandbox_id,
+            Some("sbx-release-wf".to_owned())
         );
         reset_test_store(&store).await;
     }
