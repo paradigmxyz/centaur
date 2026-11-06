@@ -4,9 +4,16 @@
 # an identity of the target so callers that derive or stored the old id keep
 # reaching the same principal.
 # Where both hold the same grant, role, client link, or Slack channel, the
-# target's row is kept; Slack channel flags combine so neither side loses
-# access it had.
+# target's row is kept; Slack channel flags and sandbox capabilities combine,
+# and identity fields the target lacks come from the source, so neither side
+# loses access or identity it had.
 class PrincipalMerge
+  SANDBOX_FLAGS = %i[
+    sandbox_observability_enabled sandbox_sessions_read_enabled
+    sandbox_workflows_read_enabled sandbox_workflows_write_enabled
+  ].freeze
+  IDENTITY_FIELDS = %i[slack_user_id slack_team_id slack_email console_user_id].freeze
+
   def self.call(source:, target:)
     new(source: source, target: target).call
   end
@@ -33,10 +40,10 @@ class PrincipalMerge
       McpOauthAuthorizationCode.where(principal_id: source.id).update_all(principal_id: target.id)
       McpOauthRefreshToken.where(principal_id: source.id).update_all(principal_id: target.id)
 
-      labels = source.labels.to_h.merge(target.labels.to_h)
+      attributes = merged_attributes
       source.reload.destroy!
       identity_ids.each { |foreign_id| target.identities.find_or_create_by!(foreign_id: foreign_id) }
-      target.update!(labels: labels)
+      target.update!(attributes)
       Principal.bump_sync_config_cache_versions(target.id)
       target
     end
@@ -45,6 +52,17 @@ class PrincipalMerge
   private
 
   attr_reader :source, :target
+
+  def merged_attributes
+    repo_caches = [ target.sandbox_repo_cache, source.sandbox_repo_cache ]
+    {
+      labels: source.labels.to_h.merge(target.labels.to_h),
+      sandbox_repo_cache: repo_caches.max_by { |value| Principal::SANDBOX_REPO_CACHE_VALUES.index(value).to_i }
+    }.merge(
+      SANDBOX_FLAGS.index_with { |flag| target[flag] || source[flag] },
+      IDENTITY_FIELDS.index_with { |field| target[field].presence || source[field] }
+    )
+  end
 
   def move_grants
     Grant::GRANTABLE_ASSOCIATIONS.each do |grantable|

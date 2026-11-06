@@ -33,6 +33,21 @@ class PrincipalMergeTest < ActiveSupport::TestCase
     assert_equal({ "team" => "finance", "shared" => "target" }, @target.reload.labels.except(Principal::SANDBOX_REPO_CACHE_LABEL))
   end
 
+  test "keeps the broader sandbox access and fills identity fields the target lacks" do
+    @source.update!(sandbox_repo_cache: "all", sandbox_workflows_write_enabled: true,
+                    slack_email: "ada@example.com", console_user: users(:member_user))
+    @target.update!(sandbox_repo_cache: "public", sandbox_observability_enabled: true, slack_email: nil)
+
+    PrincipalMerge.call(source: @source, target: @target)
+
+    @target.reload
+    assert_equal "all", @target.sandbox_repo_cache
+    assert @target.sandbox_workflows_write_enabled
+    assert @target.sandbox_observability_enabled
+    assert_equal "ada@example.com", @target.slack_email
+    assert_equal users(:member_user), @target.console_user
+  end
+
   test "carries the source's own identities over to the target" do
     @source.identities.create!(foreign_id: "slack-user-legacy")
 

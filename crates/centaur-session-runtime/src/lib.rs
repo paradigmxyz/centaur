@@ -2448,6 +2448,7 @@ impl SessionRuntime {
             let requester_principal_id = self
                 .resolve_requester_principal(thread_key, requester_metadata.as_ref())
                 .await;
+            let proxy_labels = session_proxy_labels(thread_key, &session.proxy_labels);
             let desired_capabilities = match pre_resolved_sandbox_capabilities {
                 Some(capabilities) => capabilities,
                 None => {
@@ -2465,7 +2466,7 @@ impl SessionRuntime {
                     existing_sandbox_capabilities: session.sandbox_capabilities.as_ref(),
                     iron_control_principal: session.iron_control_principal.as_deref(),
                     requester_principal: requester_principal_id.as_deref(),
-                    proxy_labels: &session.proxy_labels,
+                    proxy_labels: &proxy_labels,
                     desired_capabilities: &desired_capabilities,
                     execution_id: &execution.execution_id,
                 })
@@ -7514,22 +7515,29 @@ fn proxy_labels_from_session_metadata(
         "centaur.slack_channel_id",
         metadata.get("slack_channel_id"),
     );
-    let thread_channel_id = slack_conversation_id(thread_key);
-    // Derived from the thread key alone, never caller metadata: Console lets a
-    // Console-user principal act as a Slack admin only on a proxy carrying it.
-    if let Some(channel_id) = thread_channel_id
-        .as_deref()
-        .filter(|channel_id| channel_id.starts_with('D'))
-    {
-        labels.insert(
-            "centaur.slack_dm_channel_id".to_owned(),
-            channel_id.to_owned(),
-        );
-    }
     if !labels.contains_key("centaur.slack_channel_id")
-        && let Some(channel_id) = thread_channel_id
+        && let Some(channel_id) = slack_conversation_id(thread_key)
     {
         labels.insert("centaur.slack_channel_id".to_owned(), channel_id);
+    }
+    labels
+}
+
+/// The labels a session's proxy carries on this turn: those stored when the
+/// session was created, plus labels derived from the thread key alone.
+/// Deriving them per turn gives sessions created before a label existed that
+/// label too.
+fn session_proxy_labels(
+    thread_key: &ThreadKey,
+    stored: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut labels = stored.clone();
+    // Never from caller metadata: Console lets a user principal act as a Slack
+    // admin only on a proxy bound to its own DM thread.
+    if let Some(channel_id) =
+        slack_conversation_id(thread_key).filter(|channel_id| channel_id.starts_with('D'))
+    {
+        labels.insert("centaur.slack_dm_channel_id".to_owned(), channel_id);
     }
     labels
 }
@@ -9477,21 +9485,30 @@ mod tests {
 
     #[test]
     fn proxy_labels_mark_slack_dm_threads_from_the_thread_key_only() {
+        // Stored before the DM label existed: the turn still carries it.
+        let stored = BTreeMap::from([("centaur.slack_user_id".to_owned(), "U123".to_owned())]);
         let dm = ThreadKey::parse("slack:T123:D123:1700000000.000000").unwrap();
-        let labels = proxy_labels_from_session_metadata(&dm, &json!({"slack_user_id": "U123"}));
+        let labels = session_proxy_labels(&dm, &stored);
         assert_eq!(
             labels
                 .get("centaur.slack_dm_channel_id")
                 .map(String::as_str),
             Some("D123")
         );
+        assert_eq!(
+            labels.get("centaur.slack_user_id").map(String::as_str),
+            Some("U123")
+        );
 
         let api = ThreadKey::parse("api:client:run-1").unwrap();
-        let labels = proxy_labels_from_session_metadata(
+        let stored = proxy_labels_from_session_metadata(
             &api,
             &json!({"slack_user_id": "U123", "slack_channel_id": "D123"}),
         );
-        assert_eq!(labels.get("centaur.slack_dm_channel_id"), None);
+        assert_eq!(
+            session_proxy_labels(&api, &stored).get("centaur.slack_dm_channel_id"),
+            None
+        );
     }
 
     #[test]

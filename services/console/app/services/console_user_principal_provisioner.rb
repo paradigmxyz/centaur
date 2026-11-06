@@ -3,7 +3,9 @@
 # when the user's verified Slack SSO identity names it, Console attaches the
 # user to that principal rather than creating a second one. Only when no
 # principal identifies the user does Console create one, reserving their Slack
-# identity on it so a later DM reaches the same principal.
+# identity on it so a later DM reaches the same principal. A user who ended up
+# with both, because they used Console before Console could link their Slack
+# identity, has the Console principal merged into the Slack one.
 class ConsoleUserPrincipalProvisioner
   USER_MCP_ROLE_FOREIGN_ID = "user-mcp".freeze
 
@@ -50,10 +52,15 @@ class ConsoleUserPrincipalProvisioner
 
   def existing_principal(slack_foreign_id)
     by_console = Principal.resolve_foreign_id(console_foreign_id)
-    return by_console if by_console || slack_foreign_id.nil?
+    by_slack = slack_foreign_id && Principal.resolve_foreign_id(slack_foreign_id)
+    by_slack = nil unless by_slack && attachable?(by_slack)
+    return by_console || by_slack unless by_console && by_slack && by_console != by_slack
 
-    by_slack = Principal.resolve_foreign_id(slack_foreign_id)
-    by_slack if by_slack && attachable?(by_slack)
+    # Keep the Slack principal: api-rs binds the user's DM sessions to it and
+    # cannot rebind them, while Console's MCP and scheduled-task callers look
+    # the principal up afresh through the Console identity the merge carries.
+    PrincipalMerge.call(source: by_console, target: by_slack)
+    by_slack.reload
   end
 
   # A user principal that is no one else's: not linked to another Console
@@ -62,16 +69,12 @@ class ConsoleUserPrincipalProvisioner
     principal.kind == Principal::USER_KIND && principal.console_user_id.in?([ nil, user.id ])
   end
 
-  # Makes the user's Slack identity name +principal+. A separate principal
-  # already holding it, created from Slack before Console could link the two,
-  # is merged in.
+  # Reserves the user's Slack identity for +principal+ before they ever DM.
+  # One already held by a principal linked to another user stays there.
   def claim_slack_identity(principal, slack_foreign_id)
-    holder = Principal.resolve_foreign_id(slack_foreign_id)
-    if holder.nil?
-      principal.identities.create!(foreign_id: slack_foreign_id)
-    elsif holder != principal && attachable?(holder)
-      PrincipalMerge.call(source: holder, target: principal)
-    end
+    return if Principal.resolve_foreign_id(slack_foreign_id)
+
+    principal.identities.create!(foreign_id: slack_foreign_id)
   end
 
   def assign_user_mcp_role(principal)

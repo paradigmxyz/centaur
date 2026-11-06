@@ -47,17 +47,20 @@ class ConsoleUserPrincipalProvisionerTest < ActiveSupport::TestCase
     assert_equal principal, Principal.resolve_foreign_id(SLACK_FOREIGN_ID)
   end
 
-  test "a Slack principal created before the user linked Slack merges into their Console principal" do
+  test "a user's earlier Console principal merges into their Slack principal, which DM sessions are bound to" do
     user = users(:member_user)
-    principal = ConsoleUserPrincipalProvisioner.call(user)
+    console = ConsoleUserPrincipalProvisioner.call(user)
+    console.grants.create!(static_secret: static_secrets(:acme_staging_api_key), created_by: users(:acme_admin))
     slack = slack_principal
-    slack.grants.create!(static_secret: static_secrets(:acme_staging_api_key), created_by: users(:acme_admin))
 
     sign_in_with_slack(user)
 
-    assert_not Principal.exists?(slack.id)
-    assert_equal principal, Principal.resolve_foreign_id(SLACK_FOREIGN_ID)
-    assert_includes principal.granted_static_secrets, static_secrets(:acme_staging_api_key)
+    assert_not Principal.exists?(console.id)
+    slack.reload
+    assert_equal slack, Principal.resolve_foreign_id(Principal.console_user_foreign_id(user))
+    assert slack.console_user_principal?
+    assert_includes slack.granted_static_secrets, static_secrets(:acme_staging_api_key)
+    assert_includes slack.roles, Role.find_by!(foreign_id: "user-mcp")
   end
 
   test "a Slack principal linked to another Console user is left alone" do
