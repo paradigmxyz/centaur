@@ -211,10 +211,72 @@ class Api::V1::SandboxScheduledTasksControllerTest < ActionDispatch::Integration
   end
 
   test "principal without an active linked user cannot manage tasks" do
-    with_token(proxies(:acme_proxy)) do |headers|
+    with_token(proxies(:globex_proxy)) do |headers|
       get "/api/v1/sandbox/scheduled_tasks", headers: headers
     end
     assert_response :forbidden
+  end
+
+  test "anyone in a channel thread manages that channel's tasks" do
+    channel = principals(:acme_channel)
+    channel_proxy = proxies(:acme_proxy)
+    channel_proxy.update!(requester_principal: slack_user_principal("U0123456789"))
+    user_task = create_task(author: @user, name: "Personal task")
+
+    with_token(channel_proxy) do |headers|
+      post "/api/v1/sandbox/scheduled_tasks",
+           params: {
+             data: {
+               name: "Channel digest",
+               prompt: "Summarize this channel.",
+               delivery_channel: "dm",
+               cron_expression: "0 9 * * 1"
+             }
+           },
+           headers: headers,
+           as: :json
+    end
+    assert_response :created
+    task = channel.scheduled_tasks.find_by!(name: "Channel digest")
+    assert_nil task.author
+    assert_equal channel.slack_channel_id, task.delivery_channel
+
+    channel_proxy.update!(requester_principal: slack_user_principal("U2222222222"))
+    with_token(channel_proxy) do |headers|
+      get "/api/v1/sandbox/scheduled_tasks", headers: headers
+      assert_response :ok
+      assert_equal [ task.oid ], json_body.fetch("data").map { |row| row.fetch("id") }
+
+      get "/api/v1/sandbox/scheduled_tasks/#{user_task.oid}", headers: headers
+      assert_response :not_found
+
+      patch "/api/v1/sandbox/scheduled_tasks/#{task.oid}",
+            params: { data: { prompt: "Summarize this channel briefly." } },
+            headers: headers,
+            as: :json
+      assert_response :ok
+
+      assert_enqueued_jobs 1, only: ScheduledTaskRunJob do
+        post "/api/v1/sandbox/scheduled_tasks/#{task.oid}/run", headers: headers
+      end
+      assert_response :accepted
+
+      delete "/api/v1/sandbox/scheduled_tasks/#{task.oid}", headers: headers
+      assert_response :no_content
+    end
+    assert_not ScheduledTask.exists?(task.id)
+  end
+
+  test "channel session without a Slack requester cannot manage channel tasks" do
+    with_token(proxies(:acme_proxy)) do |headers|
+      post "/api/v1/sandbox/scheduled_tasks",
+           params: { data: { name: "Recursive", prompt: "Schedule more work." } },
+           headers: headers,
+           as: :json
+    end
+
+    assert_response :forbidden
+    assert_empty principals(:acme_channel).scheduled_tasks
   end
 
   test "disabled linked user cannot manage tasks" do
@@ -236,6 +298,18 @@ class Api::V1::SandboxScheduledTasksControllerTest < ActionDispatch::Integration
       author: author,
       delivery_channel: "C0123456789",
       cron_expression: "0 * * * *"
+    )
+  end
+
+  def slack_user_principal(slack_user_id)
+    Principal.create!(
+      foreign_id: "slack-user-t0123456789-#{slack_user_id.downcase}",
+      name: "Slack User #{slack_user_id}",
+      kind: :slack_dm,
+      slack_user_id: slack_user_id,
+      slack_team_id: "T0123456789",
+      labels: {},
+      created_by: @user
     )
   end
 

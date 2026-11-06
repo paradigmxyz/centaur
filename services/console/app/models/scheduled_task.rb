@@ -37,7 +37,11 @@ class ScheduledTask < ApplicationRecord
   ].freeze
   DELIVERY_DESTINATION_FORMAT = /\A[CDGUW][A-Z0-9]{8,}\z/
 
-  belongs_to :author, class_name: "User"
+  # A task is owned by exactly one of a Console user (author) or a Slack channel
+  # principal. Channel tasks run with the channel's permissions and always
+  # deliver to that channel.
+  belongs_to :author, class_name: "User", optional: true
+  belongs_to :principal, optional: true
 
   scope :due, ->(now = Time.current) { where(enabled: true, next_run_at: ..now) }
 
@@ -46,10 +50,12 @@ class ScheduledTask < ApplicationRecord
   normalizes :prompt, with: ->(value) { value.to_s.gsub("\r\n", "\n").strip }
 
   before_validation :set_default_timezone
+  before_validation :set_channel_delivery, if: :principal
   before_validation :refresh_next_run_at, if: :schedule_requires_refresh?
 
   validates :name, presence: true, length: { maximum: 100 },
-                   uniqueness: { scope: :author_id }
+                   uniqueness: { scope: :author_id, if: :author_id? }
+  validates :name, uniqueness: { scope: :principal_id, if: :principal_id? }
   validates :prompt, presence: true, length: { maximum: 64.kilobytes }
   validates :delivery_channel, presence: true,
                                format: {
@@ -58,7 +64,8 @@ class ScheduledTask < ApplicationRecord
                                }
   validates :timezone, presence: true
   validate :cron_schedule_is_valid
-  validate :delivery_destination_is_available_to_author
+  validate :owner_is_valid
+  validate :delivery_destination_is_available
 
   def self.cron_for(preset, custom_expression = nil, custom_days: [], custom_time: nil)
     return if preset.to_s == "manual"
@@ -110,23 +117,24 @@ class ScheduledTask < ApplicationRecord
   end
 
   def execution_principal
-    ConsoleUserPrincipalProvisioner.call(author)
+    principal || ConsoleUserPrincipalProvisioner.call(author)
   end
 
   def api_input
-    delivery_policy = SlackDeliveryPolicy.new(author)
-    unless delivery_policy.allowed?(delivery_channel)
-      raise DeliveryDestinationUnavailable, "Slack delivery destination is no longer available to the author"
+    unless delivery_destination_available?
+      raise DeliveryDestinationUnavailable, "Slack delivery destination is no longer available to the task owner"
     end
 
     {
       prompt: prompt,
       principal: execution_principal.foreign_id,
       channel: delivery_channel,
-      slack_user_id: delivery_policy.slack_user_id,
+      # Anyone in a channel can edit its tasks, so their output is not
+      # attributed to a person.
+      slack_user_id: author && SlackDeliveryPolicy.new(author).slack_user_id,
       scheduled_task_id: oid,
       scheduled_task_name: name
-    }
+    }.compact
   end
 
   private
@@ -183,6 +191,10 @@ class ScheduledTask < ApplicationRecord
     nil
   end
 
+  def set_channel_delivery
+    self.delivery_channel = principal.slack_channel_id
+  end
+
   def set_default_timezone
     self.timezone = DEFAULT_TIMEZONE if timezone.blank?
   end
@@ -202,11 +214,28 @@ class ScheduledTask < ApplicationRecord
     errors.add(:cron_expression, "is not a valid cron schedule") unless parsed_cron
   end
 
-  def delivery_destination_is_available_to_author
-    return if author.blank? || delivery_channel.blank?
-    return unless DELIVERY_DESTINATION_FORMAT.match?(delivery_channel)
-    return if SlackDeliveryPolicy.new(author).allowed?(delivery_channel)
+  def delivery_destination_available?
+    if principal
+      SlackBotChannel.active.exists?(channel_id: delivery_channel)
+    else
+      SlackDeliveryPolicy.new(author).allowed?(delivery_channel)
+    end
+  end
 
-    errors.add(:delivery_channel, "is not available to the author")
+  def owner_is_valid
+    unless [ author, principal ].compact.one?
+      return errors.add(:base, "must be owned by exactly one of a user or a Slack channel")
+    end
+    return if principal.blank? || principal.kind == "slack_channel"
+
+    errors.add(:principal, "must be a Slack channel")
+  end
+
+  def delivery_destination_is_available
+    return if [ author, principal ].compact.empty? || delivery_channel.blank?
+    return unless DELIVERY_DESTINATION_FORMAT.match?(delivery_channel)
+    return if delivery_destination_available?
+
+    errors.add(:delivery_channel, principal ? "is not a channel the Slack bot is in" : "is not available to the author")
   end
 end

@@ -1472,7 +1472,9 @@ Returns `201`. The plaintext `token` is included **only** in this create respons
 
 Tasks run one agent prompt and deliver the result to Slack. A task may have a five-field cron schedule in Pacific Time; omitting `cron_expression` or sending `null` or an empty string makes it manual-only. Task IDs use the `tsk_` prefix. The `delivery_channel` can be a Slack channel ID available to the task author, or the special value `dm`, which resolves to the linked user's Slack direct message when the task is created or updated.
 
-These endpoints use the sandbox entitlement JWT injected by `iron-proxy`. Every operation requires an active Console user linked to the sandbox principal and is scoped to tasks owned by that user. A task owned by another user returns `404`.
+These endpoints use the sandbox entitlement JWT injected by `iron-proxy`. For most sandboxes, every operation requires an active Console user linked to the sandbox principal and is scoped to tasks owned by that user. A task owned by another user returns `404`.
+
+When the sandbox principal is a Slack channel, the endpoints manage that channel's tasks instead. Any Slack user requesting the current turn may list, create, update, delete, or run them; no Console account is required. A turn without a Slack requester, such as a scheduled run, receives `403`. Channel tasks run with the channel principal's permissions and always deliver to the channel, so `data.delivery_channel` is ignored.
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |

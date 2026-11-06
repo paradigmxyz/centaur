@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_11_04_232304) do
+ActiveRecord::Schema[8.1].define(version: 2026_11_06_204641) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -405,7 +405,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_04_232304) do
   end
 
   create_table "scheduled_tasks", force: :cascade do |t|
-    t.bigint "author_id", null: false
+    t.bigint "author_id"
     t.datetime "created_at", null: false
     t.string "cron_expression"
     t.string "delivery_channel", null: false
@@ -419,9 +419,12 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_04_232304) do
     t.text "prompt", null: false
     t.string "timezone", default: "America/Los_Angeles", null: false
     t.datetime "updated_at", null: false
+    t.bigint "principal_id"
     t.index ["author_id", "name"], name: "index_scheduled_tasks_on_author_id_and_name", unique: true
     t.index ["author_id"], name: "index_scheduled_tasks_on_author_id"
     t.index ["enabled", "next_run_at"], name: "index_scheduled_tasks_on_enabled_and_next_run_at"
+    t.index ["principal_id", "name"], name: "index_scheduled_tasks_on_principal_id_and_name", unique: true
+    t.check_constraint "(author_id IS NULL) <> (principal_id IS NULL)", name: "scheduled_tasks_exactly_one_owner"
   end
 
   create_table "secret_sources", force: :cascade do |t|
@@ -638,6 +641,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_04_232304) do
   add_foreign_key "request_rules", "oauth_token_secrets"
   add_foreign_key "request_rules", "static_secrets"
   add_foreign_key "roles", "users", column: "created_by_id"
+  add_foreign_key "scheduled_tasks", "principals", on_delete: :cascade
   add_foreign_key "scheduled_tasks", "users", column: "author_id"
   add_foreign_key "secret_sources", "aws_auth_secrets"
   add_foreign_key "secret_sources", "broker_credentials"
