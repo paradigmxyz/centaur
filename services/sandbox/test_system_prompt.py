@@ -90,9 +90,9 @@ class SystemPromptTest(unittest.TestCase):
         self.assertIn(
             "`task`, `create-task`, `update-task`, `delete-task`, or `run-task`", prompt
         )
-        self.assertIn("Only create tasks from MCP or direct-message (DM) sessions", prompt)
+        self.assertIn("deliver to `dm` or an allowed Slack channel ID", prompt)
+        self.assertIn("In a Slack channel thread, tasks belong to that channel", prompt)
         self.assertIn("five-field cron expressions in Pacific Time", prompt)
-        self.assertIn("Deliver to `dm`", prompt)
         self.assertIn("Encode recurrence only in the cron expression", prompt)
         self.assertIn('strip cadence phrases like "Each Monday"', prompt)
         self.assertIn("keep time windows that affect the work", prompt)

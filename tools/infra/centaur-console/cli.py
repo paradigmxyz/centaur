@@ -12,7 +12,7 @@ load_dotenv()
 
 app = typer.Typer(
     name="centaur-console",
-    help="Inspect Console permissions and manage the current user's scheduled tasks",
+    help="Inspect Console permissions and manage the current user's or channel's scheduled tasks",
 )
 console = Console()
 admin_app = typer.Typer(
@@ -85,7 +85,7 @@ def scheduled_tasks(
         envvar="CENTAUR_CONSOLE_BEARER_TOKEN",
     ),
 ) -> None:
-    """List scheduled tasks owned by the current Console user."""
+    """List scheduled tasks owned by the current user, or by the channel in a Slack channel thread."""
     with get_client(url=url, bearer_token=bearer_token) as client:
         result = client.scheduled_tasks()
     console.print_json(json.dumps({"data": result}, default=str))
@@ -102,7 +102,7 @@ def scheduled_task(
         envvar="CENTAUR_CONSOLE_BEARER_TOKEN",
     ),
 ) -> None:
-    """Read one scheduled task owned by the current Console user."""
+    """Read one scheduled task owned by the current user, or by the channel in a Slack channel thread."""
     with get_client(url=url, bearer_token=bearer_token) as client:
         result = client.scheduled_task(task_id)
     console.print_json(json.dumps({"data": result}, default=str))
@@ -117,10 +117,10 @@ def create_scheduled_task(
         "--cron",
         help="Optional five-field cron expression in Pacific Time",
     ),
-    delivery_channel: str = typer.Option(
-        "dm",
+    delivery_channel: str | None = typer.Option(
+        None,
         "--delivery-channel",
-        help="dm or a permitted Slack channel ID",
+        help="dm (default) or a permitted Slack channel ID; omit in a Slack channel thread",
     ),
     enabled: bool = typer.Option(True, "--enabled/--disabled"),
     url: str | None = typer.Option(None, "--url", help="centaur-console base URL"),
@@ -131,7 +131,7 @@ def create_scheduled_task(
         envvar="CENTAUR_CONSOLE_BEARER_TOKEN",
     ),
 ) -> None:
-    """Create an ad-hoc or scheduled task owned by the current Console user."""
+    """Create an ad-hoc or scheduled task owned by the current user, or by the channel in a Slack channel thread."""
     with get_client(url=url, bearer_token=bearer_token) as client:
         result = client.create_scheduled_task(
             name=name,
@@ -156,7 +156,7 @@ def update_scheduled_task(
     delivery_channel: str | None = typer.Option(
         None,
         "--delivery-channel",
-        help="dm or a permitted Slack channel ID",
+        help="dm or a permitted Slack channel ID; channel tasks keep their channel",
     ),
     enabled: bool | None = typer.Option(None, "--enabled/--disabled"),
     url: str | None = typer.Option(None, "--url", help="centaur-console base URL"),
@@ -194,7 +194,7 @@ def delete_scheduled_task(
         envvar="CENTAUR_CONSOLE_BEARER_TOKEN",
     ),
 ) -> None:
-    """Delete a scheduled task owned by the current Console user."""
+    """Delete a scheduled task owned by the current user, or by the channel in a Slack channel thread."""
     with get_client(url=url, bearer_token=bearer_token) as client:
         client.delete_scheduled_task(task_id)
     console.print_json(json.dumps({"data": {"id": task_id, "deleted": True}}))

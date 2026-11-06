@@ -135,22 +135,26 @@ class ConsoleClient:
         name: str,
         prompt: str,
         cron_expression: str | None = None,
-        delivery_channel: str = "dm",
+        delivery_channel: str | None = None,
         enabled: bool = True,
     ) -> dict[str, Any]:
-        """Create an ad-hoc or Pacific Time cron task."""
+        """Create an ad-hoc or Pacific Time cron task.
+
+        Omitting ``delivery_channel`` delivers to the user's DM, or to the
+        channel when called from a Slack channel thread.
+        """
+        data: dict[str, Any] = {
+            "name": name,
+            "prompt": prompt,
+            "cron_expression": cron_expression,
+            "enabled": enabled,
+        }
+        if delivery_channel is not None:
+            data["delivery_channel"] = delivery_channel
         result = self._scheduled_task_request(
             SANDBOX_SCHEDULED_TASKS_PATH,
             method="POST",
-            json={
-                "data": {
-                    "name": name,
-                    "prompt": prompt,
-                    "cron_expression": cron_expression,
-                    "delivery_channel": delivery_channel,
-                    "enabled": enabled,
-                }
-            },
+            json={"data": data},
         )
         if not isinstance(result, dict):
             raise RuntimeError(
