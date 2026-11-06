@@ -698,6 +698,90 @@ fn fake_claude_blocks_mode_applies_reasoning_effort_per_turn() {
 }
 
 #[test]
+fn fake_claude_blocks_mode_steers_active_turn_and_keeps_queued_answer() {
+    // The steer reaches Claude Code's stdin during the turn. The fake reads it
+    // before answering, then behaves like Claude Code when a steer arrives
+    // during the final answer: echoes each message as it consumes it, answers
+    // the first message with a `result`, then runs a turn of its own for the
+    // steer. Both answers belong to the one turn; the next turn is clean.
+    let stdin_log = temp_path("fake-claude-steer-stdin.jsonl");
+    let reply = |n: u32, text: &str| {
+        format!(
+            concat!(
+                "'{{\"type\":\"user\",\"isReplay\":true,\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"echo\"}}]}}}}' ",
+                "'{{\"type\":\"assistant\",\"is_partial\":false,\"message\":{{\"id\":\"msg_{n}\",\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}]}}}}' ",
+                "'{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"{text}\"}}' "
+            ),
+            n = n,
+            text = text
+        )
+    };
+    let fake_claude = format!(
+        concat!(
+            "printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}}'; ",
+            "IFS= read -r line; printf '%s\\n' \"$line\" >> '{log}'; ",
+            "IFS= read -r line; printf '%s\\n' \"$line\" >> '{log}'; ",
+            "printf '%s\\n' {first}{second}; ",
+            "while IFS= read -r line; do printf '%s\\n' \"$line\" >> '{log}'; printf '%s\\n' {next}; done"
+        ),
+        log = stdin_log.display(),
+        first = reply(1, "first answer"),
+        second = reply(2, "steered answer"),
+        next = reply(3, "next answer"),
+    );
+
+    let mut bridge =
+        BridgeProcess::spawn_harness_blocks(Harness::ClaudeCode, Some(fake_claude), None);
+    let turn = bridge.run_blocks_steered_turn(
+        "start a long turn",
+        "use this steering update",
+        Duration::from_secs(10),
+    );
+    assert_completed_turn(&turn);
+    assert_eq!(turn.text_from_deltas, "first answersteered answer");
+    assert_eq!(
+        turn.methods
+            .iter()
+            .filter(|method| *method == "turn/started")
+            .count(),
+        1,
+        "steering must not start a second turn"
+    );
+
+    let next = bridge.run_blocks_user_line(
+        json!({
+            "type": "user",
+            "thread_key": "slack:C123:123.456",
+            "message": {"role": "user", "content": [{"type": "text", "text": "next"}]},
+        }),
+        Duration::from_secs(10),
+    );
+    assert_completed_turn(&next);
+    assert_eq!(next.text_from_deltas, "next answer");
+    bridge.finish_successfully();
+
+    let stdin = std::fs::read_to_string(&stdin_log).expect("read fake claude stdin log");
+    let texts: Vec<Value> = stdin
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("fake claude stdin JSON"))
+        .map(|line| {
+            assert_eq!(line["type"], "user", "stdin={stdin}");
+            line["message"]["content"][0]["text"].clone()
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            json!("start a long turn"),
+            json!("use this steering update"),
+            json!("next"),
+        ]
+    );
+
+    let _ = std::fs::remove_file(stdin_log);
+}
+
+#[test]
 fn fake_amp_blocks_mode_accepts_user_blocks_by_default() {
     let fake_amp = concat!(
         "printf '%s\\n' ",
