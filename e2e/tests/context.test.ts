@@ -61,7 +61,7 @@ test.concurrent('a DM is one conversation that acts for its user', async () => {
   expect(second.sandbox.id).toBe(first.sandbox.id)
   expect(second.request?.assistantTurns).toContain('Hi.')
   const proxy = await ironControl.proxy(second.sandbox.id)
-  expect(proxy.principal).toMatchObject({ kind: 'slack_dm', slackUserId: USER.id, slackTeamId: TEAM.id, slackEmail: USER.email })
+  expect(proxy.principal).toMatchObject({ kind: 'person', slackUserId: USER.id, slackTeamId: TEAM.id, slackEmail: USER.email })
   expect(proxy.requester).toBeNull()
 }, 3 * turnTimeoutMs)
 
@@ -71,5 +71,5 @@ test.concurrent("a Slack Connect partner's DM keeps their email out of iron-cont
 
   expect(turn.reply).toBe('Hello, partner.')
   const proxy = await ironControl.proxy(turn.sandbox.id)
-  expect(proxy.principal).toMatchObject({ kind: 'slack_dm', slackUserId: EXTERNAL_USER.id, slackTeamId: EXTERNAL_TEAM.id, slackEmail: null })
+  expect(proxy.principal).toMatchObject({ kind: 'person', slackUserId: EXTERNAL_USER.id, slackTeamId: EXTERNAL_TEAM.id, slackEmail: null })
 }, 2 * turnTimeoutMs)

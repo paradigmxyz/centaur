@@ -28,7 +28,7 @@ use thiserror::Error;
 use crate::models::PrincipalInput;
 use crate::util::{managed_labels, slugify};
 
-const SLACK_DM_KIND: &str = "slack_dm";
+const PERSON_KIND: &str = "person";
 const SLACK_CHANNEL_KIND: &str = "slack_channel";
 const DISCORD_CHANNEL_KIND: &str = "discord_channel";
 const GITHUB_USER_KIND: &str = "github_user";
@@ -347,7 +347,7 @@ fn slack_user_principal(user: &str, team: &str, display_name: Option<&str>) -> P
         name: display_name
             .map(|name| format!("Slack DM @{name}"))
             .unwrap_or_else(|| format!("Slack User {user} (team {team})")),
-        kind: Some(SLACK_DM_KIND.to_owned()),
+        kind: Some(PERSON_KIND.to_owned()),
         slack_user_id: Some(user.to_owned()),
         slack_channel_id: None,
         slack_team_id: Some(team.to_owned()),
@@ -480,7 +480,7 @@ mod tests {
         assert_eq!(principal.name, "Slack User U07ABC (team T123)");
         assert_eq!(principal.slack_user_id.as_deref(), Some("U07ABC"));
         assert_eq!(principal.slack_team_id.as_deref(), Some("T123"));
-        assert_eq!(principal.kind.as_deref(), Some("slack_dm"));
+        assert_eq!(principal.kind.as_deref(), Some("person"));
         assert!(principal.labels.is_empty());
     }
 
@@ -772,7 +772,7 @@ mod tests {
         .unwrap();
         assert_eq!(principal.foreign_id, "slack-user-t123-u07abc");
         assert_eq!(principal.name, "Slack DM @Ada Lovelace");
-        assert_eq!(principal.kind.as_deref(), Some("slack_dm"));
+        assert_eq!(principal.kind.as_deref(), Some("person"));
         assert_eq!(principal.slack_user_id.as_deref(), Some("U07ABC"));
         assert_eq!(principal.slack_team_id.as_deref(), Some("T123"));
         assert!(principal.labels.is_empty());

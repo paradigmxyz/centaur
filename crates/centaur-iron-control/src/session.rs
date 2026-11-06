@@ -205,9 +205,9 @@ fn merge_labels(existing: &BTreeMap<String, String>, input: &mut PrincipalInput)
 #[derive(Debug, Eq, PartialEq)]
 enum PrincipalWrite {
     /// Return the existing record without a create-capable upsert. Always the
-    /// case when the derived foreign id is an alias Console kept for a merged
-    /// principal: Console owns the principal it was merged into, so api-rs
-    /// must not overwrite its identity.
+    /// case when the derived foreign id is another identity of a person whose
+    /// principal Console owns (they signed in to Console first), so api-rs
+    /// must not overwrite its fields.
     UseExisting(Principal),
     /// Upsert the derived identity (creating it, or refreshing its metadata).
     Upsert,
@@ -577,7 +577,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dm_merged_into_a_console_user_uses_that_principal_without_overwriting_it() {
+    async fn a_dm_from_a_console_person_uses_their_principal_without_overwriting_it() {
         let (base_url, requests, server) =
             spawn_iron_control_stub(|method, path| match (method, path) {
                 ("GET", "/api/v1/principals/lookup/slack-user-t123-u123") => {
@@ -603,14 +603,14 @@ mod tests {
         let requests = requests.lock().unwrap();
         assert!(
             requests.iter().all(|request| request.method != "PUT"),
-            "a merged principal must not be upserted through its alias"
+            "a person must not be upserted through another identity"
         );
         assert!(
             requests
                 .iter()
                 .any(|request| request.path
                     == "/api/v1/principals/prn_person/slack_channel_permissions"),
-            "the DM stays reachable on the merged principal"
+            "the DM stays reachable on the person principal"
         );
         drop(requests);
         server.abort();
