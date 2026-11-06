@@ -101,6 +101,9 @@ def test_v2_search_forwards_filters(monkeypatch):
             '{"author": "Ada"}',
             "-n",
             "5",
+            "--keyword",
+            "--cursor",
+            "2024-01-02T09:00:00Z|slack:C1:2024-01-02:000000",
         ],
     )
 
@@ -116,6 +119,8 @@ def test_v2_search_forwards_filters(monkeypatch):
             "file_ids": None,
             "sources": ["archive"],
             "metadata": {"author": "Ada"},
+            "keyword": True,
+            "cursor": "2024-01-02T09:00:00Z|slack:C1:2024-01-02:000000",
         }
     ]
 

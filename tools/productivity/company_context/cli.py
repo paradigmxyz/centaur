@@ -444,6 +444,17 @@ def v2_search(
             """e.g. '{"author": "Ada"}'. Matches exactly and case-sensitively."""
         ),
     ),
+    keyword: bool = typer.Option(
+        False,
+        "--keyword",
+        help=(
+            "Return every document containing all query terms, newest first and unranked, "
+            "instead of ranking by relevance. Page with --cursor to enumerate history."
+        ),
+    ),
+    cursor: str | None = typer.Option(
+        None, "--cursor", help="next_cursor from the previous --keyword page."
+    ),
     json_output: bool = typer.Option(
         True,
         "--json/--table",
@@ -461,6 +472,8 @@ def v2_search(
         file_ids=file_ids,
         sources=sources,
         metadata=metadata,
+        keyword=keyword,
+        cursor=cursor,
     )
     _require_ok(result)
     if json_output:
@@ -485,6 +498,8 @@ def v2_search(
             " ".join(str(item.get("text") or "").split())[:200],
         )
     console.print(table)
+    if result.get("next_cursor"):
+        console.print(f"Next page: --cursor '{result['next_cursor']}'")
 
 
 @v2_app.command("read")
