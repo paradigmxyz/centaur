@@ -496,6 +496,7 @@ mod tests {
         query::search(pool, None, identity, &request)
             .await
             .unwrap()
+            .results
             .into_iter()
             .map(|result| result.document.text)
             .collect()

@@ -66,8 +66,15 @@ class CompanyContextV2Client:
         file_ids: list[str] | None = None,
         sources: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        keyword: bool = False,
+        cursor: str | None = None,
     ) -> dict:
-        """Search documents visible to the requester; the API validates every field."""
+        """Search documents visible to the requester; the API validates every field.
+
+        ``keyword`` returns every document containing all query terms, newest
+        first and unranked; pass a response's ``next_cursor`` as ``cursor`` for
+        the next page.
+        """
         filters = {
             "types": types,
             "occurred_after": occurred_after,
@@ -81,8 +88,12 @@ class CompanyContextV2Client:
             "query": query,
             "filters": {name: value for name, value in filters.items() if value},
         }
+        if keyword:
+            body["mode"] = "keyword"
         if limit is not None:
             body["limit"] = limit
+        if cursor:
+            body["cursor"] = cursor
         return self._request("POST", "/query", body)
 
     def read_document(self, document_id: str) -> dict:
