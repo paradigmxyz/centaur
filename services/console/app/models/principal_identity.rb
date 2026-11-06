@@ -1,4 +1,4 @@
-# A foreign id, beyond the principal's own, that names the same person: the
+# A foreign id, beyond the principal's own, that names the same user: the
 # Slack user or Console account they are also known by, or the foreign id of a
 # principal merged into theirs. Lookups by any of them reach the one principal.
 class PrincipalIdentity < ApplicationRecord

@@ -744,12 +744,12 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
   # Mirrors the principal shape minted by Mcp::OauthController#principal_for_current_user.
   # The label override simulates tampered cached identity, which matching must
   # ignore for console-user principals.
-  # The person principal ConsoleUserPrincipalProvisioner creates for +user+.
+  # The principal ConsoleUserPrincipalProvisioner creates for +user+.
   def create_console_user_principal(user, extra_labels: {})
     Principal.create!(
       foreign_id: Principal.console_user_foreign_id(user),
       name: user.name.presence || user.email,
-      kind: "person",
+      kind: "user",
       console_user_id: user.id,
       labels: {
         "managed-by" => "centaur"
@@ -766,7 +766,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
   )
     Principal.create!(
       foreign_id: foreign_id,
-      kind: PrincipalCredentialReconciliation::USER_KIND,
+      kind: Principal::USER_KIND,
       slack_user_id: slack_user_id,
       slack_team_id: slack_team_id,
       created_by: created_by

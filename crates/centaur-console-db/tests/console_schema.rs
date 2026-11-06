@@ -400,7 +400,7 @@ async fn reads_principals_users_and_direct_slack_permissions() {
 }
 
 #[tokio::test]
-async fn another_identity_of_a_person_finds_their_principal() {
+async fn another_identity_of_a_user_finds_their_principal() {
     let Some(fixture) = Fixture::new().await else {
         return;
     };

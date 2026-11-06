@@ -1,4 +1,4 @@
-# Folds +source+ into +target+ when the same person ended up with two
+# Folds +source+ into +target+ when the same user ended up with two
 # principals: everything that references the source moves to the target, the
 # source is deleted, and its foreign_id (plus any identities it held) becomes
 # an identity of the target so callers that derive or stored the old id keep

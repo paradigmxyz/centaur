@@ -20,8 +20,8 @@ module Api
 
       # GET /api/v1/principals/lookup/:foreign_id
       #
-      # A person's other identities (a principal_identities foreign_id)
-      # resolve to that person's principal.
+      # A user's other identities (a principal_identities foreign_id)
+      # resolve to that user's principal.
       def lookup
         render json: { data: record_payload(find_by_foreign_id!(Principal)) }
       end
@@ -42,9 +42,9 @@ module Api
 
       # PUT/PATCH upserts: an opaque id updates that record, any other identifier
       # is a foreign_id that is created when absent. foreign_id is immutable.
-      # Another identity of a person is refused rather than written through,
+      # Another identity of a user is refused rather than written through,
       # so a caller deriving it can neither create a second principal for the
-      # person nor overwrite the fields of the one they have.
+      # user nor overwrite the fields of the one they have.
       def update
         if (identity = PrincipalIdentity.find_by(foreign_id: params[:id].to_s))
           return render_error(status: :conflict,

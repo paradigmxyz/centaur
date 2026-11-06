@@ -1,8 +1,8 @@
 # Lets a sandbox use selected admin API endpoints on behalf of a Console admin,
 # but only from that admin's Slack DM with the bot. The principal must be a
-# person in the bot's own workspace (per the Slack channel catalog) linked to
-# an active admin, and the proxy must be bound to that person's own Slack DM
-# thread: the same person principal also runs their MCP sessions and
+# user principal in the bot's own workspace (per the Slack channel catalog)
+# linked to an active admin, and the proxy must be bound to that user's own
+# Slack DM thread: the same principal also runs their MCP sessions and
 # scheduled tasks, where no admin is present. Channel and Slack Connect
 # principals are refused. Include into a subclass of an Api::V1 admin
 # controller.
@@ -47,7 +47,7 @@ module SandboxAdminAuthentication
   # claim it.
   def serves_slack_dm?(principal)
     labels = current_proxy.labels.to_h
-    principal.kind == Principal::PERSON_KIND && labels["centaur.slack_dm_channel_id"].present? &&
+    principal.kind == Principal::USER_KIND && labels["centaur.slack_dm_channel_id"].present? &&
       principal.slack_user_id.present? && labels["centaur.slack_user_id"] == principal.slack_user_id
   end
 

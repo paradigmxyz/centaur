@@ -1,7 +1,7 @@
-# One principal per person: the foreign ids a person is known by beyond their
+# One principal per user: the foreign ids a user is known by beyond their
 # principal's own (their Slack user, their Console account) name the same
-# principal, and the per-surface Slack DM and Console-user kinds become one
-# person kind.
+# principal, and the per-surface Slack DM and Console-user kinds become the
+# user kind.
 class CreatePrincipalIdentities < ActiveRecord::Migration[8.1]
   def up
     create_table :principal_identities do |t|
@@ -13,7 +13,7 @@ class CreatePrincipalIdentities < ActiveRecord::Migration[8.1]
 
     execute <<~SQL
       UPDATE principals
-      SET kind = 'person',
+      SET kind = 'user',
           sync_config_cache_version = sync_config_cache_version + 1,
           updated_at = CURRENT_TIMESTAMP
       WHERE kind IN ('slack_dm', 'console_user')
@@ -26,7 +26,7 @@ class CreatePrincipalIdentities < ActiveRecord::Migration[8.1]
       SET kind = CASE WHEN foreign_id LIKE 'console-user-%' THEN 'console_user' ELSE 'slack_dm' END,
           sync_config_cache_version = sync_config_cache_version + 1,
           updated_at = CURRENT_TIMESTAMP
-      WHERE kind = 'person'
+      WHERE kind = 'user' AND (foreign_id LIKE 'console-user-%' OR foreign_id LIKE 'slack-user-%')
     SQL
     drop_table :principal_identities
   end

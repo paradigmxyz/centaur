@@ -19,7 +19,7 @@ class PrincipalTest < ActiveSupport::TestCase
 
   test "identity fields are stored only in columns" do
     principal = Principal.create!(default_attrs(
-      kind: "person",
+      kind: "user",
       slack_user_id: "U0123456789",
       slack_channel_id: "D0123456789",
       slack_team_id: "T0123456789",
@@ -28,7 +28,7 @@ class PrincipalTest < ActiveSupport::TestCase
     ))
 
     principal.reload
-    assert_equal "person", principal.kind
+    assert_equal "user", principal.kind
     assert_equal "U0123456789", principal.slack_user_id
     assert_equal "D0123456789", principal.slack_channel_id
     assert_equal "T0123456789", principal.slack_team_id
@@ -46,16 +46,16 @@ class PrincipalTest < ActiveSupport::TestCase
     )
   end
 
-  test "the per-surface kinds older callers send are stored as person" do
+  test "the per-surface kinds older callers send are stored as user" do
     %w[slack_dm console_user].each do |kind|
       principal = Principal.create!(default_attrs(foreign_id: "legacy-#{kind.dasherize}", kind: kind))
-      assert_equal "person", principal.reload.kind
+      assert_equal "user", principal.reload.kind
     end
   end
 
   test "identity-named labels remain ordinary metadata" do
     principal = Principal.create!(default_attrs(
-      kind: "person",
+      kind: "user",
       slack_user_id: "U0123456789",
       labels: {
         "kind" => "custom",
@@ -66,7 +66,7 @@ class PrincipalTest < ActiveSupport::TestCase
     ))
 
     principal.reload
-    assert_equal "person", principal.kind
+    assert_equal "user", principal.kind
     assert_equal "U0123456789", principal.slack_user_id
     assert_nil principal.slack_team_id
     assert_nil principal.slack_email
@@ -77,7 +77,7 @@ class PrincipalTest < ActiveSupport::TestCase
   test "console user identity is stored as an association" do
     user = users(:acme_admin)
     principal = Principal.create!(default_attrs(
-      kind: "person",
+      kind: "user",
       console_user_id: user.id,
       labels: { "managed-by" => "centaur" }
     ))
@@ -132,7 +132,7 @@ class PrincipalTest < ActiveSupport::TestCase
   test "console user principals permit missing user references" do
     user = users(:acme_admin)
     principal = Principal.new(default_attrs(
-      kind: "person",
+      kind: "user",
       console_user_id: user.id
     ))
     assert principal.valid?
@@ -504,7 +504,7 @@ class PrincipalTest < ActiveSupport::TestCase
     previous_version = principal.sync_config_cache_version
 
     principal.update!(
-      kind: "person",
+      kind: "user",
       slack_user_id: "U0123456789",
       slack_team_id: "T0123456789",
       slack_email: "a@example.com"

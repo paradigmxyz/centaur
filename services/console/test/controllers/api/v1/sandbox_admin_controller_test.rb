@@ -165,7 +165,7 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
     proxies = {
       "non-admin DM" => dm_proxy_for(users(:member_user)),
       "Slack Connect DM" => dm_proxy_for(admin, slack_team_id: "T0EXTERNAL1"),
-      "Console session" => proxy_for(admin, kind: :person, slack_team_id: nil),
+      "Console session" => proxy_for(admin, kind: :user, slack_team_id: nil),
       "admin-linked channel" => proxy_for(admin, kind: :slack_channel, slack_team_id: nil,
                                                  slack_user_id: nil, slack_channel_id: "C0555555555"),
       "unlinked channel" => Proxy.create!(name: "channel-proxy", principal: @channel,
@@ -182,12 +182,12 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
     assert_not_includes @channel.reload.roles, @role
   end
 
-  test "an admin's person principal acts as admin only on its own Slack DM thread" do
+  test "an admin's user principal acts as admin only on its own Slack DM thread" do
     admin = users(:acme_admin)
     allowed = dm_proxy_for(admin)
     refused = {
-      "MCP or scheduled session" => proxy_for(admin, kind: :person, slack_team_id: "T0123456789"),
-      "another user's DM" => proxy_for(admin, kind: :person, slack_team_id: "T0123456789",
+      "MCP or scheduled session" => proxy_for(admin, kind: :user, slack_team_id: "T0123456789"),
+      "another user's DM" => proxy_for(admin, kind: :user, slack_team_id: "T0123456789",
                                               labels: dm_labels.merge("centaur.slack_user_id" => "U0999999999"))
     }
 
@@ -283,7 +283,7 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
            params: { data: { kind: "slack_dm", slack_user_id: "U0NEWUSER1" } }, headers: headers, as: :json
       assert_response :created
       user = Principal.find_by_oid!(json_body.dig("data", "id"))
-      assert_equal [ "slack-user-t0123456789-u0newuser1", "person", "U0NEWUSER1", "T0123456789" ],
+      assert_equal [ "slack-user-t0123456789-u0newuser1", "user", "U0NEWUSER1", "T0123456789" ],
                    [ user.foreign_id, user.kind, user.slack_user_id, user.slack_team_id ]
 
       post "/api/v1/sandbox/admin/principals",
@@ -480,7 +480,7 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
 
   # The Slack channel catalog fixtures put the bot in T0123456789.
   def dm_proxy_for(user, slack_team_id: "T0123456789")
-    proxy_for(user, kind: :person, slack_team_id: slack_team_id, labels: dm_labels)
+    proxy_for(user, kind: :user, slack_team_id: slack_team_id, labels: dm_labels)
   end
 
   # The labels api-rs puts on a proxy bound to a Slack DM thread.

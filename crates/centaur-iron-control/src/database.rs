@@ -13,7 +13,7 @@ use crate::models::{EffectiveConfig, Principal, PrincipalInput, SlackChannelPerm
 const PRINCIPAL_OID_PREFIX: &str = "prn";
 /// Console stores the principal's repo-cache access as this label too.
 const SANDBOX_REPO_CACHE_LABEL: &str = "centaur.sandbox_repo_cache";
-const PERSON_KIND: &str = "person";
+const USER_KIND: &str = "user";
 
 /// The principal named by an OID (`prn_…`) or `foreign_id`, as the admin
 /// API's principal lookup returns it.
@@ -41,7 +41,7 @@ pub(crate) async fn unchanged_principal(
     let Some(row) = find_principal_by_foreign_id(pool, &input.foreign_id).await? else {
         return Ok(None);
     };
-    let linked_user = match person_email(&row, input) {
+    let linked_user = match slack_user_email(&row, input) {
         Some(email) => Some(centaur_console_db::find_user_id_by_email(pool, &email).await?),
         None => None,
     };
@@ -51,14 +51,14 @@ pub(crate) async fn unchanged_principal(
     principal_record(row).map(Some)
 }
 
-/// The normalized email Console links a person principal's user by when
+/// The normalized email Console links a user principal's Console account by when
 /// `input` is upserted, if it does.
-fn person_email(row: &centaur_console_db::Principal, input: &PrincipalInput) -> Option<String> {
+fn slack_user_email(row: &centaur_console_db::Principal, input: &PrincipalInput) -> Option<String> {
     let email = input
         .slack_email
         .as_deref()
         .filter(|email| !email.trim().is_empty())?;
-    (input.kind.as_deref().unwrap_or(&row.kind) == PERSON_KIND).then(|| email.trim().to_lowercase())
+    (input.kind.as_deref().unwrap_or(&row.kind) == USER_KIND).then(|| email.trim().to_lowercase())
 }
 
 /// Whether Console's principal upsert of `input` leaves `row` as it is:
@@ -174,7 +174,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{person_email, principal_record, upsert_changes_nothing};
+    use super::{principal_record, slack_user_email, upsert_changes_nothing};
     use crate::models::PrincipalInput;
 
     fn row() -> centaur_console_db::Principal {
@@ -182,7 +182,7 @@ mod tests {
             id: 123,
             foreign_id: Some("slack-dm-u1".to_owned()),
             name: Some("Ada".to_owned()),
-            kind: "person".to_owned(),
+            kind: "user".to_owned(),
             labels: json!({ "team": "core", "centaur.sandbox_repo_cache": "public" }),
             slack_user_id: Some("U12345678".to_owned()),
             slack_channel_id: None,
@@ -199,7 +199,7 @@ mod tests {
             foreign_id: "slack-dm-u1".to_owned(),
             name: "Ada".to_owned(),
             labels: BTreeMap::from([("team".to_owned(), "core".to_owned())]),
-            kind: Some("person".to_owned()),
+            kind: Some("user".to_owned()),
             slack_user_id: Some("U12345678".to_owned()),
             slack_channel_id: None,
             slack_team_id: Some("T12345678".to_owned()),
@@ -261,28 +261,28 @@ mod tests {
     }
 
     #[test]
-    fn a_person_email_that_links_another_user_needs_an_upsert() {
+    fn a_slack_email_that_links_another_account_needs_an_upsert() {
         assert!(!upsert_changes_nothing(&row(), &input(), Some(Some(8))));
         assert!(!upsert_changes_nothing(&row(), &input(), Some(None)));
     }
 
     #[test]
-    fn only_person_emails_link_users() {
+    fn only_user_principal_emails_link_accounts() {
         let mut input = input();
         input.slack_email = Some(" Ada@Example.com ".to_owned());
         assert_eq!(
-            person_email(&row(), &input).as_deref(),
+            slack_user_email(&row(), &input).as_deref(),
             Some("ada@example.com")
         );
-        input.kind = Some("user".to_owned());
-        assert_eq!(person_email(&row(), &input), None);
+        input.kind = Some("slack_channel".to_owned());
+        assert_eq!(slack_user_email(&row(), &input), None);
     }
 
     #[test]
-    fn blank_person_emails_link_no_user() {
+    fn blank_slack_emails_link_no_account() {
         let mut input = input();
         input.slack_email = Some("  ".to_owned());
-        assert_eq!(person_email(&row(), &input), None);
+        assert_eq!(slack_user_email(&row(), &input), None);
     }
 
     #[test]

@@ -375,7 +375,7 @@ module Api
 
         assert_response :created
         principal = Principal.find_by!(foreign_id: "direct-slack-identity")
-        assert_equal "person", principal.kind
+        assert_equal "user", principal.kind
         assert_equal "U0123456789", principal.slack_user_id
         assert_equal "T0123456789", principal.slack_team_id
         assert_equal "ada@example.com", principal.slack_email
@@ -532,7 +532,7 @@ module Api
              params: {
                data: {
                  foreign_id: "matching-console-user-identity",
-                 kind: "person",
+                 kind: "user",
                  console_user_id: user.id,
                  labels: {
                    "kind" => "custom",
@@ -604,7 +604,7 @@ module Api
         assert_response :ok
 
         principal.reload
-        assert_equal "person", principal.kind
+        assert_equal "user", principal.kind
         assert_equal "U0123456789", principal.slack_user_id
         assert_nil principal.slack_channel_id
         assert_equal "T0123456789", principal.slack_team_id
@@ -1142,7 +1142,7 @@ module Api
         user = users(:acme_admin)
         Principal.create!(
           foreign_id: "console-user-admin",
-          kind: "person",
+          kind: "user",
           console_user_id: user.id,
           labels: {
             "kind" => "custom",

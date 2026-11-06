@@ -47,7 +47,7 @@ pub async fn find_principal(pool: &PgPool, id: i64) -> Result<Option<Principal>>
 }
 
 /// The principal `foreign_id` names: its own, or, for another identity of a
-/// person (a `principal_identities` row), that person's principal. The
+/// user (a `principal_identities` row), that user's principal. The
 /// returned row's `foreign_id` then differs from the one asked for.
 pub async fn find_principal_by_foreign_id(
     pool: &PgPool,

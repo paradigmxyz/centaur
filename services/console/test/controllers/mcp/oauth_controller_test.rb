@@ -172,7 +172,7 @@ module Mcp
       assert_equal @operator, stored_code.user
       assert_equal "http://localhost:3000/mcp", stored_code.resource
       assert_match(/\Aprn_/, stored_code.principal.oid)
-      assert_equal "person", stored_code.principal.kind
+      assert_equal "user", stored_code.principal.kind
       assert_equal @operator.id, stored_code.principal.console_user_id
       assert_empty stored_code.principal.labels.slice("console-user-id", "email")
 
@@ -221,7 +221,7 @@ module Mcp
     end
 
     test "authorization approval leaves Slack labels unset for ambiguous Slack SSO identities" do
-      # Both identities predate the person principal, so neither was linked.
+      # Both identities predate the user principal, so neither was linked.
       UserIdentity.insert_all!([
         { user_id: @operator.id, provider: "slack", subject: "U0123456789", team_id: "T0123456789",
           email: @operator.email, email_verified: true },

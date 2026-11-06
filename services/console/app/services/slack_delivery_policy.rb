@@ -52,8 +52,8 @@ class SlackDeliveryPolicy
   end
 
   def principal_identity_candidates
-    Principal.where(kind: Principal::PERSON_KIND, console_user: user).includes(:console_user, :identities)
-             .select(&:console_person?).map { |principal| [ principal.slack_user_id, principal.slack_team_id ] }
+    Principal.where(kind: Principal::USER_KIND, console_user: user).includes(:console_user, :identities)
+             .select(&:console_user_principal?).map { |principal| [ principal.slack_user_id, principal.slack_team_id ] }
   end
 
   def credential_identity_candidates

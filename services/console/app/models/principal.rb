@@ -38,12 +38,12 @@ class Principal < ApplicationRecord
   # A human, however they reach Centaur: from Slack before they ever sign in to
   # Console, from Console, or both. Their other identities are PrincipalIdentity
   # rows naming this one principal.
-  PERSON_KIND = "person".freeze
-  # The per-surface kinds a person principal had before there was one person
-  # kind. Callers that still send them (older api-rs, admin tools) get a person.
-  LEGACY_PERSON_KINDS = %w[slack_dm console_user].freeze
+  USER_KIND = "user".freeze
+  # The per-surface kinds a user principal had before there was one user kind.
+  # Callers that still send them (older api-rs, admin tools) get a user.
+  LEGACY_USER_KINDS = %w[slack_dm console_user].freeze
   KINDS = %w[
-    unknown user person workflow slack_channel discord_channel linear_issue
+    unknown user workflow slack_channel discord_channel linear_issue
     github_user teams_user teams_conversation
   ].freeze
   SLACK_USER_ID_FORMAT = /\A(?:[UW][A-Z0-9]{8,}|USLACK)\z/
@@ -65,7 +65,7 @@ class Principal < ApplicationRecord
                           allow_nil: true, if: :will_save_change_to_slack_email?
   validate :foreign_id_is_not_an_identity, if: :will_save_change_to_foreign_id?
 
-  normalizes :kind, with: ->(kind) { LEGACY_PERSON_KINDS.include?(kind) ? PERSON_KIND : kind }
+  normalizes :kind, with: ->(kind) { LEGACY_USER_KINDS.include?(kind) ? USER_KIND : kind }
 
   # Stand-in for an inline secret value in redacted config: operator inspection
   # reports that a control_plane source carries a value without revealing it.
@@ -76,7 +76,7 @@ class Principal < ApplicationRecord
   # proxy resolves to.
   EMPTY_CONFIG = { "secrets" => [], "transforms" => [], "postgres" => [] }.freeze
 
-  # The principal +foreign_id+ names: its own, or the person it identifies.
+  # The principal +foreign_id+ names: its own, or the user it identifies.
   def self.resolve_foreign_id(foreign_id)
     find_by(foreign_id: foreign_id) || PrincipalIdentity.find_by(foreign_id: foreign_id)&.principal
   end
@@ -91,7 +91,7 @@ class Principal < ApplicationRecord
     "slack-user-#{slack_team_id.downcase}-#{slack_user_id.downcase}"
   end
 
-  # The foreign_id that identifies a Console user's person principal.
+  # The foreign_id that identifies a Console user's principal.
   def self.console_user_foreign_id(user)
     normalized = user.email.to_s.downcase.strip
     safe = normalized.gsub(/[^A-Za-z0-9\-._~]/, "-").gsub(/-+/, "-").first(48)
@@ -106,13 +106,12 @@ class Principal < ApplicationRecord
     identities.exists?(foreign_id: foreign_id)
   end
 
-  # A person who is their linked Console user, as opposed to a Slack person
-  # merely linked to that user's account by Slack email. Console provisioned
-  # or attached this principal for the user, so it acts for them in MCP
-  # sessions and scheduled tasks too, and matches credentials only through
-  # that user.
-  def console_person?
-    kind == PERSON_KIND && console_user.present? &&
+  # A user principal that is its linked Console user, as opposed to a Slack
+  # user merely linked to that account by Slack email. Console provisioned or
+  # attached this principal for the user, so it acts for them in MCP sessions
+  # and scheduled tasks too, and matches credentials only through that user.
+  def console_user_principal?
+    kind == USER_KIND && console_user.present? &&
       identified_by?(self.class.console_user_foreign_id(console_user))
   end
 
@@ -233,11 +232,11 @@ class Principal < ApplicationRecord
   # bridge to the corresponding Console account. This is called from the API
   # upsert boundary rather than a model callback so an omitted email never
   # activates a stale value already stored on the principal. A supplied email
-  # with no matching account clears any previous link. A Console person keeps
-  # the account Console linked it to.
+  # with no matching account clears any previous link. A Console user principal
+  # keeps the account Console linked it to.
   def link_console_user_by_slack_email
-    return unless kind == PERSON_KIND && slack_email.present?
-    return if console_person?
+    return unless kind == USER_KIND && slack_email.present?
+    return if console_user_principal?
 
     self.console_user = User.find_by(email: slack_email.to_s.strip.downcase)
   end

@@ -3,9 +3,9 @@ require "test_helper"
 class PrincipalMergeTest < ActiveSupport::TestCase
   setup do
     @admin = users(:acme_admin)
-    @source = Principal.create!(foreign_id: "slack-user-t0123456789-u0123456789", kind: "person",
+    @source = Principal.create!(foreign_id: "slack-user-t0123456789-u0123456789", kind: "user",
                                 labels: { "team" => "finance", "shared" => "source" }, created_by: @admin)
-    @target = Principal.create!(foreign_id: "console-user-ada", kind: "person",
+    @target = Principal.create!(foreign_id: "console-user-ada", kind: "user",
                                 labels: { "shared" => "target" }, created_by: @admin)
   end
 
@@ -45,7 +45,7 @@ class PrincipalMergeTest < ActiveSupport::TestCase
   test "an identity cannot be reused as a principal's foreign_id" do
     PrincipalMerge.call(source: @source, target: @target)
 
-    principal = Principal.new(foreign_id: "slack-user-t0123456789-u0123456789", kind: "person", created_by: @admin)
+    principal = Principal.new(foreign_id: "slack-user-t0123456789-u0123456789", kind: "user", created_by: @admin)
     assert_not principal.valid?
     assert principal.errors.of_kind?(:foreign_id, :taken)
   end

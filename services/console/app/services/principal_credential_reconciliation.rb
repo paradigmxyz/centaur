@@ -27,9 +27,8 @@ class PrincipalCredentialReconciliation
     end
   end
 
-  USER_KIND = "user"
-  # Console persons (Principal#console_person?, provisioned or attached by
-  # ConsoleUserPrincipalProvisioner) match credentials only through their
+  # Console user principals (Principal#console_user_principal?, provisioned or
+  # attached by ConsoleUserPrincipalProvisioner) match credentials only through their
   # console User record (credential ownership, primary email, or verified
   # identity emails) -- never through mutable principal labels or
   # provider-subject labels, which would widen the trust boundary beyond the
@@ -209,7 +208,7 @@ class PrincipalCredentialReconciliation
 
   def user_principal?(principal)
     labels = principal.labels || {}
-    return true if principal.kind == USER_KIND || console_user_principal?(principal)
+    return true if principal.kind == Principal::USER_KIND
     return true if principal.slack_user_id.present? || principal.slack_email.present?
 
     (EMAIL_LABELS + PROVIDER_SUBJECT_LABELS.values.flatten).any? do |key|
@@ -427,8 +426,10 @@ class PrincipalCredentialReconciliation
   end
 
   def console_user_principal?(principal)
-    @console_people ||= {}
-    @console_people.fetch(principal.id) { @console_people[principal.id] = principal.console_person? }
+    @console_user_principals ||= {}
+    @console_user_principals.fetch(principal.id) do
+      @console_user_principals[principal.id] = principal.console_user_principal?
+    end
   end
 
   def principal_emails(principal)
