@@ -400,6 +400,34 @@ async fn reads_principals_users_and_direct_slack_permissions() {
 }
 
 #[tokio::test]
+async fn a_merged_principals_old_foreign_id_finds_the_principal_it_was_merged_into() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let principal = fixture.principal("merged-into").await;
+    sqlx::query(
+        "INSERT INTO principal_aliases (principal_id, foreign_id, created_at, updated_at) \
+         VALUES ($1, $2, now(), now())",
+    )
+    .bind(principal)
+    .bind(fixture.name("retired"))
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+
+    let found = find_principal_by_foreign_id(&fixture.pool, &fixture.name("retired"))
+        .await
+        .unwrap()
+        .expect("the alias resolves");
+
+    assert_eq!(found.id, principal);
+    assert_eq!(
+        found.foreign_id.as_deref(),
+        Some(fixture.name("merged-into").as_str())
+    );
+}
+
+#[tokio::test]
 async fn reads_api_clients_and_their_principals() {
     let Some(fixture) = Fixture::new().await else {
         return;

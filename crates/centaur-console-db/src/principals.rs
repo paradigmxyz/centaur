@@ -46,12 +46,17 @@ pub async fn find_principal(pool: &PgPool, id: i64) -> Result<Option<Principal>>
     row.as_ref().map(principal).transpose()
 }
 
+/// The principal `foreign_id` names: its own, or, for the retired foreign id
+/// of a merged principal, the principal it was merged into. The returned
+/// row's `foreign_id` then differs from the one asked for.
 pub async fn find_principal_by_foreign_id(
     pool: &PgPool,
     foreign_id: &str,
 ) -> Result<Option<Principal>> {
     let row = sqlx::query(&format!(
-        "SELECT {PRINCIPAL_COLUMNS} FROM principals WHERE foreign_id = $1"
+        "SELECT {PRINCIPAL_COLUMNS} FROM principals WHERE foreign_id = $1 \
+         OR id = (SELECT principal_id FROM principal_aliases WHERE foreign_id = $1) \
+         ORDER BY foreign_id IS NOT DISTINCT FROM $1 DESC LIMIT 1"
     ))
     .bind(foreign_id)
     .fetch_optional(pool)

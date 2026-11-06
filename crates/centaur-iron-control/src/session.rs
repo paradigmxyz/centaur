@@ -101,7 +101,7 @@ impl SessionRegistrar {
         apply_slack_dm_email(thread_key, metadata.slack_user_email, &mut input);
         let existing = self.merge_existing_labels(&mut input).await?;
         let slack_permission = session_slack_permission(thread_key, &input, existing.is_some());
-        let record = match principal_write(existing, create_if_missing) {
+        let record = match principal_write(existing, &input.foreign_id, create_if_missing) {
             PrincipalWrite::UseExisting(record) => record,
             PrincipalWrite::Upsert => self.client.refresh_principal(&input).await?,
             PrincipalWrite::Reject => {
@@ -164,7 +164,7 @@ impl SessionRegistrar {
                     metadata.get("slack_user_email").and_then(Value::as_str),
                 );
                 let existing = self.merge_existing_labels(&mut input).await?;
-                match principal_write(existing, create_if_missing) {
+                match principal_write(existing, &input.foreign_id, create_if_missing) {
                     PrincipalWrite::UseExisting(principal) => Ok(Some(principal)),
                     PrincipalWrite::Upsert => {
                         Ok(Some(self.client.refresh_principal(&input).await?))
@@ -204,7 +204,10 @@ fn merge_labels(existing: &BTreeMap<String, String>, input: &mut PrincipalInput)
 /// How a derived principal is resolved against iron-control.
 #[derive(Debug, Eq, PartialEq)]
 enum PrincipalWrite {
-    /// Return the existing record without a create-capable upsert.
+    /// Return the existing record without a create-capable upsert. Always the
+    /// case when the derived foreign id is an alias Console kept for a merged
+    /// principal: Console owns the principal it was merged into, so api-rs
+    /// must not overwrite its identity.
     UseExisting(Principal),
     /// Upsert the derived identity (creating it, or refreshing its metadata).
     Upsert,
@@ -212,8 +215,15 @@ enum PrincipalWrite {
     Reject,
 }
 
-fn principal_write(existing: Option<Principal>, create_if_missing: bool) -> PrincipalWrite {
+fn principal_write(
+    existing: Option<Principal>,
+    foreign_id: &str,
+    create_if_missing: bool,
+) -> PrincipalWrite {
     match (existing, create_if_missing) {
+        (Some(existing), _) if existing.foreign_id.as_deref() != Some(foreign_id) => {
+            PrincipalWrite::UseExisting(existing)
+        }
         (_, true) => PrincipalWrite::Upsert,
         (Some(existing), false) => PrincipalWrite::UseExisting(existing),
         (None, false) => PrincipalWrite::Reject,
@@ -567,6 +577,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_dm_merged_into_a_console_user_uses_that_principal_without_overwriting_it() {
+        let (base_url, requests, server) =
+            spawn_iron_control_stub(|method, path| match (method, path) {
+                ("GET", "/api/v1/principals/lookup/slack-user-t123-u123") => {
+                    principal("prn_person", "console-user-ada", json!({}))
+                }
+                ("POST", "/api/v1/principals/prn_person/slack_channel_permissions") => {
+                    ("200 OK", r#"{"data":{"ok":true}}"#.to_owned())
+                }
+                _ => not_found(),
+            })
+            .await;
+        let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+
+        let record = registrar
+            .register_session(
+                "slack:T123:D123:1773364194.179929",
+                Some(&json!({"slack_user_id": "U123", "slack_team_id": "T123"})),
+            )
+            .await
+            .expect("register DM session");
+
+        assert_eq!(record.id, "prn_person");
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests.iter().all(|request| request.method != "PUT"),
+            "a merged principal must not be upserted through its alias"
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.path
+                    == "/api/v1/principals/prn_person/slack_channel_permissions"),
+            "the DM stays reachable on the merged principal"
+        );
+        drop(requests);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn unknown_console_requester_is_an_error_not_an_omitted_requester() {
         let (base_url, _requests, server) = spawn_iron_control_stub(|_, _| not_found()).await;
         let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
@@ -639,15 +689,21 @@ mod tests {
         };
 
         assert_eq!(
-            principal_write(Some(existing.clone()), false),
+            principal_write(Some(existing.clone()), "slack-channel-t123-c123", false),
             PrincipalWrite::UseExisting(existing.clone())
         );
-        assert_eq!(principal_write(None, false), PrincipalWrite::Reject);
         assert_eq!(
-            principal_write(Some(existing), true),
+            principal_write(None, "slack-channel-t123-c123", false),
+            PrincipalWrite::Reject
+        );
+        assert_eq!(
+            principal_write(Some(existing), "slack-channel-t123-c123", true),
             PrincipalWrite::Upsert
         );
-        assert_eq!(principal_write(None, true), PrincipalWrite::Upsert);
+        assert_eq!(
+            principal_write(None, "slack-channel-t123-c123", true),
+            PrincipalWrite::Upsert
+        );
     }
 
     #[test]
