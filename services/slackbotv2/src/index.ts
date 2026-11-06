@@ -69,6 +69,7 @@ import {
   reasoningForModel,
   type SlackContextBlock
 } from './response-context'
+import { findConfiguredModel } from './model-catalog'
 import { resolveChannelDefault } from './channel-defaults'
 import { proactiveThreadMessage } from './proactive-classifier'
 import { resolveProactivityRules, type ProactivityRule } from './proactivity-rules'
@@ -76,6 +77,7 @@ import {
   extractMessageOverrides,
   extractPersonaOverride,
   isHarnessEnabled,
+  namesRequestedSelection,
   validateStrategyOverrides,
   type HarnessOverrides
 } from './overrides'
@@ -1677,18 +1679,27 @@ async function syncThreadMessageToSession(
     setMessageText(serializedMessage, messageOverrides.cleanedText)
   }
   const overrides = messageOverrides.overrides
+  const selectionError = overrides.selectionError
+  if (selectionError) {
+    await withSlackApiTimeout(input.options, 'post model selection error', () =>
+      thread.post(selectionError))
+    finishSteeringReaction(input, trace)
+    await setAssistantStatus(thread, '', input.options, trace)
+    return
+  }
   const requestedStickyOverrides = preservePinnedPersona(
     state,
     stickyThreadOverrideUpdate(overrides)
   )
-  // Once the thread's model configuration is sticky, only another explicit
-  // model or harness flag may move it. The persona is handled separately by
+  // A pinned selection changes only for flags or a classifier selection that
+  // actually names its target. The persona is handled separately by
   // preservePinnedPersona and never moves after the API persists it.
   const preserveStickyModelOverrides = Boolean(
     requestedStickyOverrides &&
       hasStickyModelOverride(requestedStickyOverrides) &&
       hasStickyModelOverride(state) &&
-      !hasStickyModelOverride(explicitOverrides)
+      !hasStickyModelOverride(explicitOverrides) &&
+      !namesRequestedSelection(serializedMessage.text, overrides)
   )
   let stickyOverridesUpdate = preserveStickyModelOverrides
     ? personaOnlyStickyOverride(requestedStickyOverrides)
@@ -1698,6 +1709,16 @@ async function syncThreadMessageToSession(
       pinned_harness_type: state.harnessType,
       requested_harness_type: requestedStickyOverrides?.harnessType
     })
+  }
+  // Codex pins its provider independently of the model. Explicitly reset it
+  // when a user selects the default route after using a configured provider.
+  if (state.provider && stickyOverridesUpdate &&
+    (stickyOverridesUpdate.harnessType ?? state.harnessType) === 'codex' &&
+    (stickyOverridesUpdate.provider === null ||
+      (!overrides.provider && stickyOverridesUpdate.model?.includes('/')))) {
+    stickyOverridesUpdate.provider = process.env.CODEX_MODEL_PROVIDER?.trim() ||
+      (stickyOverridesUpdate.model?.includes('/') || process.env.OPENROUTER_MODEL?.trim()
+        ? 'openrouter' : 'openai')
   }
   const effectiveOverrides = resolveStickyThreadOverrides(state, stickyOverridesUpdate)
   // The default response-metadata mode renders on the first assistant message
@@ -1770,17 +1791,22 @@ async function syncThreadMessageToSession(
   const resolvedReasoning = reasoningForModel(
     effectiveHarnessType,
     effectiveModel,
-    requestedReasoning
+    requestedReasoning,
+    resolvedProvider
   )
-  const effectiveReasoning = effectiveReasoningForHarness(
-    effectiveHarnessType,
-    resolvedReasoning,
-    input.options.harnessDefaultReasoning
-  )
+  const effectiveReasoning = effectiveHarnessType === 'codex' &&
+    findConfiguredModel(effectiveModel, resolvedProvider)
+    ? resolvedReasoning
+    : effectiveReasoningForHarness(
+      effectiveHarnessType, resolvedReasoning, input.options.harnessDefaultReasoning
+    )
   const responseMetadataMode = input.options.responseMetadataMode ?? 'first'
+  const modelSelectionChanged = stickyOverridesUpdate &&
+    (['model', 'provider', 'harnessType'] as const).some(key =>
+      stickyOverridesUpdate?.[key] !== undefined && stickyOverridesUpdate?.[key] !== state[key])
   const includeResponseMetadata =
     responseMetadataMode === 'always' ||
-    (responseMetadataMode === 'first' && isFirstAssistantMessage)
+    (responseMetadataMode === 'first' && (isFirstAssistantMessage || Boolean(modelSelectionChanged)))
   if (
     overrides.harnessType ||
     overrides.model ||
@@ -2100,12 +2126,13 @@ async function syncThreadMessageToSession(
             defaultModelForHarness(harnessType, input.options.harnessDefaultModels)
           // Validate the raw request: resolvedReasoning was filtered against
           // the model expected before the session resolved.
-          const modelReasoning = reasoningForModel(harnessType, model, requestedReasoning)
-          reasoning = effectiveReasoningForHarness(
-            harnessType,
-            modelReasoning,
-            input.options.harnessDefaultReasoning
-          )
+          const provider = personaModel ? undefined : resolvedProvider
+          const modelReasoning = reasoningForModel(harnessType, model, requestedReasoning, provider)
+          reasoning = harnessType === 'codex' && findConfiguredModel(model, provider)
+            ? modelReasoning
+            : effectiveReasoningForHarness(
+              harnessType, modelReasoning, input.options.harnessDefaultReasoning
+            )
           forwardInput.metadataModel = model
           forwardInput.reasoning = modelReasoning
           if (personaModel) {
@@ -2123,11 +2150,12 @@ async function syncThreadMessageToSession(
         responseContextBlock = buildSlackResponseContextBlock({
           harnessType,
           metadataEnabled: includeResponseMetadata,
+          provider: personaModel ? undefined : resolvedProvider,
           model,
           notice: fallbackNotice,
           reasoning,
           serviceTier:
-            input.options.responseServiceTierEnabled === true && (personaModel || !resolvedProvider)
+            input.options.responseServiceTierEnabled === true && (personaModel || !resolvedProvider || resolvedProvider === 'openai')
               ? defaultServiceTierForHarness(harnessType)
               : undefined
         })

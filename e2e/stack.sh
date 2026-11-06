@@ -41,6 +41,7 @@ SLACK_SIGNING_SECRET=centaur-e2e-signing-secret
 API_ADMIN_KEY=centaur-e2e-api-admin-key
 OPENAI_TEST_KEY=sk-e2e-openai-test-key
 ANTHROPIC_TEST_KEY=sk-ant-e2e-anthropic-test-key
+CUSTOM_TEST_KEY=e2e-custom-provider-test-key
 # Subscription access tokens as the console's broker would mint them, and the
 # ChatGPT workspace the e2e subscription belongs to.
 CODEX_ACCESS_TOKEN=e2e-chatgpt-access-token
@@ -123,7 +124,7 @@ up() {
     contrib/scripts/bootstrap-k8s-secrets.sh --namespace "$NAMESPACE"
   # iron-proxy's env secret source resolves the provider keys from here.
   kubectl -n "$NAMESPACE" patch secret centaur-infra-env --type merge -p \
-    "{\"stringData\":{\"OPENAI_API_KEY\":\"$OPENAI_TEST_KEY\",\"ANTHROPIC_API_KEY\":\"$ANTHROPIC_TEST_KEY\",\"OPENAI_CODEX_ACCOUNT_ID\":\"$CHATGPT_ACCOUNT_ID\",\"CENTAUR_APIRS_ADMIN_API_KEY\":\"$API_ADMIN_KEY\"}}" > /dev/null
+    "{\"stringData\":{\"OPENAI_API_KEY\":\"$OPENAI_TEST_KEY\",\"ANTHROPIC_API_KEY\":\"$ANTHROPIC_TEST_KEY\",\"E2E_CUSTOM_API_KEY\":\"$CUSTOM_TEST_KEY\",\"OPENAI_CODEX_ACCOUNT_ID\":\"$CHATGPT_ACCOUNT_ID\",\"CENTAUR_APIRS_ADMIN_API_KEY\":\"$API_ADMIN_KEY\"}}" > /dev/null
   # iron-proxy pods mount the release CA at this path; trusting it lets them
   # verify the model server, whose certificate the same CA signs below.
   kubectl -n "$NAMESPACE" create secret generic centaur-e2e-iron-proxy-env \
@@ -201,7 +202,7 @@ deploy_model_server() {
     | base64 -d > "$WORK/ca-key.pem"
   openssl req -new -newkey rsa:2048 -nodes -subj /CN=api.openai.com \
     -keyout "$WORK/tls.key" -out "$WORK/tls.csr" 2> /dev/null
-  printf 'subjectAltName=DNS:api.openai.com,DNS:chatgpt.com,DNS:api.anthropic.com\nextendedKeyUsage=serverAuth\n' \
+  printf 'subjectAltName=DNS:api.openai.com,DNS:chatgpt.com,DNS:api.anthropic.com,DNS:custom-provider.test\nextendedKeyUsage=serverAuth\n' \
     > "$WORK/ext.cnf"
   openssl x509 -req -in "$WORK/tls.csr" -CA "$WORK/ca.pem" -CAkey "$WORK/ca-key.pem" \
     -CAcreateserial -days 30 -sha256 -extfile "$WORK/ext.cnf" -out "$WORK/tls.crt" 2> /dev/null

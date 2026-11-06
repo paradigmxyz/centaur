@@ -163,6 +163,12 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     && codex --version | grep -F "${CODEX_VERSION}" \
     && pi --version | grep -Fx "${PI_CODING_AGENT_VERSION}" \
     && pnpm --version | grep -F "${PNPM_VERSION}"
+# Keep custom-model instructions aligned with the pinned native Codex fallback.
+RUN mkdir -p /etc/centaur \
+    && curl -fsSL --retry 3 \
+      "https://raw.githubusercontent.com/openai/codex/rust-v${CODEX_VERSION}/codex-rs/models-manager/prompt.md" \
+      -o /etc/centaur/codex-base-instructions.md \
+    && test -s /etc/centaur/codex-base-instructions.md
 # Keep every pi run, the harness's and the agent's own, from phoning home.
 ENV PI_TELEMETRY=0 \
     PI_SKIP_VERSION_CHECK=1
@@ -356,6 +362,7 @@ COPY --link --chmod=755 services/sandbox/centaur_tool_host.py /usr/local/bin/cen
 COPY --link --chmod=755 services/sandbox/compose_system_prompt.py /usr/local/bin/compose-system-prompt
 COPY --link --chmod=755 services/sandbox/repo_cache_sync.py /usr/local/bin/repo-cache-sync
 COPY --link --chmod=755 services/sandbox/repo_cache_watch.py /usr/local/bin/repo-cache-watch
+COPY --link --chmod=755 services/sandbox/configure_codex_models.py /usr/local/bin/configure-codex-models
 COPY --link --chmod=755 services/sandbox/entrypoint.sh /entrypoint.sh
 COPY --link --chown=1001:1001 --from=harness-server-build /home/agent/harness-server/bin/harness-server /home/agent/.local/bin/harness-server
 
