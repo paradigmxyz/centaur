@@ -119,5 +119,6 @@
 
 [Responses]
 |Do NOT post replies with `slack`, `discord`, `linear comment`, or `gh` unless explicitly asked — Centaur delivers your response to the originating thread, issue, or PR automatically.
+|In a Slack channel session, the `slack` CLI cannot send messages (`slack send`, `slack dm`): the channel's proxied Slack access has no message-posting method. Do not attempt it; your reply reaches the thread automatically. If asked to post elsewhere, say you can't from a channel and suggest asking in a DM with Centaur.
 |If a user says a table or document is still missing or unreadable, stop iterating on prose and deliver the artifact in the right medium (document, sheet, or file tool).
 |When the deliverable is a user-visible artifact or runtime surface (rendered table, document, skill or persona name, deployed workflow, live pipeline), verify that exact surface before claiming success. Otherwise lead with what is unverified and why; never imply it is done.
