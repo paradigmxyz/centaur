@@ -1,5 +1,9 @@
-require "digest"
-
+# Provisions a Console user's person principal. A person first seen in Slack
+# already has one, created by api-rs for their Slack DMs and channel turns, so
+# when the user's verified Slack SSO identity names it, Console attaches the
+# user to that principal rather than creating a second one. Only when no
+# principal identifies the user does Console create one, reserving their Slack
+# identity on it so a later DM reaches the same person.
 class ConsoleUserPrincipalProvisioner
   USER_MCP_ROLE_FOREIGN_ID = "user-mcp".freeze
 
@@ -13,20 +17,23 @@ class ConsoleUserPrincipalProvisioner
 
   def call
     Principal.transaction do
-      principal = Principal.find_or_initialize_by(foreign_id: foreign_id)
-      newly_created = principal.new_record?
-      principal.created_by ||= user
-      principal.name = user.name.presence || user.email
-      principal.kind = "console_user"
+      slack_user_id, slack_team_id = UserIdentity.unambiguous_slack_identity(user.user_identities.slack.order(:id))
+      slack_foreign_id = Principal.slack_user_foreign_id(slack_team_id, slack_user_id) if slack_user_id
+      principal = existing_person(slack_foreign_id) ||
+                  Principal.new(foreign_id: console_foreign_id, created_by: user)
+      newly_linked = principal.new_record? || !principal.identified_by?(console_foreign_id)
+      # A person attached from Slack keeps the name api-rs maintains for it.
+      principal.name = user.name.presence || user.email if principal.foreign_id == console_foreign_id
+      principal.kind = Principal::PERSON_KIND
       principal.console_user = user
-      slack_user_id, slack_team_id = slack_identity
       principal.assign_attributes(slack_user_id: slack_user_id, slack_team_id: slack_team_id) if slack_user_id
       principal.labels = principal.labels.merge("managed-by" => "centaur")
       # Runs once per console execute: skip the write (and its after_commit
       # hooks) when nothing changed.
       principal.save! if principal.changed?
-      assign_user_mcp_role(principal) if newly_created
-      absorb_slack_principal(principal, slack_user_id, slack_team_id) if slack_user_id
+      principal.identities.create!(foreign_id: console_foreign_id) unless principal.identified_by?(console_foreign_id)
+      assign_user_mcp_role(principal) if newly_linked
+      claim_slack_identity(principal, slack_foreign_id) if slack_foreign_id
       principal
     end
   rescue ActiveRecord::RecordNotUnique
@@ -37,29 +44,33 @@ class ConsoleUserPrincipalProvisioner
 
   attr_reader :user
 
-  def foreign_id
-    normalized = user.email.to_s.downcase.strip
-    safe = normalized.gsub(/[^A-Za-z0-9\-._~]/, "-").gsub(/-+/, "-").first(48)
-    digest = Digest::SHA256.hexdigest(normalized).first(12)
-    "console-user-#{safe}-#{digest}"
+  def console_foreign_id
+    @console_foreign_id ||= Principal.console_user_foreign_id(user)
   end
 
-  def slack_identity
-    UserIdentity.unambiguous_slack_identity(user.user_identities.slack.order(:id))
+  def existing_person(slack_foreign_id)
+    by_console = Principal.resolve_foreign_id(console_foreign_id)
+    return by_console if by_console || slack_foreign_id.nil?
+
+    by_slack = Principal.resolve_foreign_id(slack_foreign_id)
+    by_slack if by_slack && attachable?(by_slack)
   end
 
-  # The user's verified Slack identity makes the DM principal api-rs derives
-  # for it an alias of this principal, merging that principal in first when it
-  # exists, so the person has one principal from Slack and Console alike. A
-  # DM principal linked to a different Console user, or an alias already held
-  # by another principal, is conflicting evidence and is left alone.
-  def absorb_slack_principal(principal, slack_user_id, slack_team_id)
-    foreign_id = Principal.slack_user_foreign_id(slack_team_id, slack_user_id)
-    existing = Principal.resolve_foreign_id(foreign_id)
-    if existing.nil?
-      principal.foreign_id_aliases.create!(foreign_id: foreign_id)
-    elsif existing.foreign_id == foreign_id && existing.console_user_id.in?([ nil, user.id ])
-      PrincipalMerge.call(source: existing, target: principal)
+  # A person who is no one else's: not linked to another Console user. A
+  # person linked to another user is conflicting evidence and is left alone.
+  def attachable?(principal)
+    principal.kind == Principal::PERSON_KIND && principal.console_user_id.in?([ nil, user.id ])
+  end
+
+  # Makes the user's Slack identity name +principal+. A separate person
+  # already holding it, created from Slack before Console could link the two,
+  # is merged in.
+  def claim_slack_identity(principal, slack_foreign_id)
+    holder = Principal.resolve_foreign_id(slack_foreign_id)
+    if holder.nil?
+      principal.identities.create!(foreign_id: slack_foreign_id)
+    elsif holder != principal && attachable?(holder)
+      PrincipalMerge.call(source: holder, target: principal)
     end
   end
 

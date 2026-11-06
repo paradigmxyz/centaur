@@ -1109,13 +1109,13 @@ The sandbox permissions response includes an `oauth_credentials` array with non-
 
 ### Sandbox Admin Permission Management
 
-An active admin Console user's Slack DM sandbox may create Slack channel, Slack user, and workflow principals, create and edit static, Postgres DSN, and GCP ID token secrets whose sources reference an external store, grant secrets to roles, inspect a principal's effective grants, manage its roles, direct secret grants, Slack channel permissions, and sandbox capabilities, and edit the Slack Connect allowlist with its sandbox entitlement JWT. The sandbox principal must be a `slack_dm` principal linked to that admin whose Slack team is the bot's workspace, as recorded by the Slack channel catalog. Other sandboxes, including channel, Slack Connect, and Console-user sessions, receive `403`. Request and response shapes match the corresponding admin endpoints.
+An active admin Console user's Slack DM sandbox may create Slack channel, Slack user, and workflow principals, create and edit static, Postgres DSN, and GCP ID token secrets whose sources reference an external store, grant secrets to roles, inspect a principal's effective grants, manage its roles, direct secret grants, Slack channel permissions, and sandbox capabilities, and edit the Slack Connect allowlist with its sandbox entitlement JWT. The sandbox principal must be a `person` principal linked to that admin whose Slack team is the bot's workspace, as recorded by the Slack channel catalog, and the sandbox must belong to that person's own Slack DM thread. Other sandboxes, including channel, Slack Connect, MCP, and scheduled-task sessions, receive `403`. Request and response shapes match the corresponding admin endpoints.
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
 | `GET` | `/api/v1/sandbox/admin/principals` | List principals. `slack_channel_id=<id>` returns only principals bound to that channel. |
 | `GET` | `/api/v1/sandbox/admin/principals/:id` | Fetch one by OID. |
-| `POST` | `/api/v1/sandbox/admin/principals` | Create a Slack channel (`data: { kind: "slack_channel", slack_channel_id }`), Slack user (`data: { kind: "slack_dm", slack_user_id }`), or workflow (`data: { kind: "workflow", workflow_name }`) principal. The foreign ID, kind, and Slack fields match what api-rs derives: `slack-channel-<channel>`, `slack-user-<team>-<user>` in the admin's workspace, or `workflow-<slugged workflow_name>` for `WORKFLOW_PRINCIPAL = True`. A new channel principal gets full Slack access to its own channel. Other kinds and DM channel IDs return `400`; invalid IDs and existing principals return `422`. |
+| `POST` | `/api/v1/sandbox/admin/principals` | Create a Slack channel (`data: { kind: "slack_channel", slack_channel_id }`), Slack user (`data: { kind: "slack_dm", slack_user_id }`), or workflow (`data: { kind: "workflow", workflow_name }`) principal. The foreign ID, kind, and Slack fields match what api-rs derives: `slack-channel-<channel>`, `slack-user-<team>-<user>` (kind `person`) in the admin's workspace, or `workflow-<slugged workflow_name>` for `WORKFLOW_PRINCIPAL = True`. A new channel principal gets full Slack access to its own channel. Other kinds and DM channel IDs return `400`; invalid IDs and existing principals return `422`. |
 | `GET` | `/api/v1/sandbox/admin/principals/lookup/:foreign_id` | Fetch one by foreign ID. |
 | `GET`/`POST` | `/api/v1/sandbox/admin/static_secrets[/:id]`, `/api/v1/sandbox/admin/pg_dsn_secrets[/:id]`, `/api/v1/sandbox/admin/gcp_id_token_secrets[/:id]` | Fetch a secret by OID or create one, as in the static, Postgres DSN, and GCP ID token secret APIs. Inline `control_plane` and OAuth `token_broker` sources return `403`. |
 | `PATCH`/`PUT` | `/api/v1/sandbox/admin/static_secrets/:id`, `/api/v1/sandbox/admin/pg_dsn_secrets/:id`, `/api/v1/sandbox/admin/gcp_id_token_secrets/:id` | Update an existing secret by OID. Omitted fields, including the source, keep their current values. Same source restrictions; secrets with a `token_broker` source return `403`. |
@@ -1204,14 +1204,16 @@ system-managed `infra` role.
 | `slack_channel_id` | optional | First-class Slack conversation identity. |
 | `slack_team_id` | optional | First-class Slack team or enterprise scope. |
 | `slack_email` | optional | First-class Slack email identity. |
-| `console_user_id` | optional | Database ID of the associated Console user. A `slack_dm` principal is linked automatically when an explicitly supplied `slack_email` matches a Console user's email. |
+| `console_user_id` | optional | Database ID of the associated Console user. A `person` principal not yet linked by a Console sign-in is linked automatically when an explicitly supplied `slack_email` matches a Console user's email. |
 | `labels`     | optional    | Extensible metadata. Identity is read from the first-class fields, not from labels with matching names. |
 | `slack_channel_permissions` | optional | Direct permissions owned by the principal. Full replacement when present on create or update. |
 | `effective_slack_channel_permissions` | response only | Direct permissions merged with permissions inherited from assigned roles. |
 
-Known kinds are `unknown`, `user`, `console_user`, `workflow`,
-`slack_channel`, `slack_dm`, `discord_channel`, `linear_issue`, `teams_user`,
-and `teams_conversation`. Use one of these values for the `kind` field.
+Known kinds are `unknown`, `user`, `person`, `workflow`, `slack_channel`,
+`discord_channel`, `linear_issue`, `teams_user`, and `teams_conversation`. Use
+one of these values for the `kind` field. `person` is a human, reached from
+Slack, Console, or both; the former `slack_dm` and `console_user` kinds are
+accepted and stored as `person`.
 
 ### Operations
 
@@ -1242,12 +1244,12 @@ Returns `201`:
 | ------ | ---- | ----- |
 | `GET`  | `/api/v1/principals` | List. Accepts exact-match label filters. |
 | `GET`  | `/api/v1/principals/:id` | Fetch one by OID. To fetch by `foreign_id`, use the lookup route below. |
-| `GET`  | `/api/v1/principals/lookup/:foreign_id` | Fetch by foreign id. A merged principal's former foreign id (an alias) returns the principal it was merged into, with that principal's own `foreign_id`. `404` if missing. |
+| `GET`  | `/api/v1/principals/lookup/:foreign_id` | Fetch by foreign id. Another identity of a person (such as the `slack-user-…` foreign id of someone whose principal Console created) returns that person's principal, with its own `foreign_id`. `404` if missing. |
 | `GET`  | `/api/v1/principals/:id/effective_config` | [Effective config](#effective-config) the principal resolves to. `:id` is an OID. |
 | `GET`  | `/api/v1/principals/lookup/:foreign_id/effective_config` | [Effective config](#effective-config) by foreign id. `404` if missing. |
 | `GET`  | `/api/v1/principals/:principal_id/grants` | [List the grants](#list-by-grantee) granted directly to the principal. |
 | `POST` | `/api/v1/principals/:id/slack_channel_permissions` | Idempotently create or update one direct Slack channel permission. Omitted flags default to enabled on create and remain unchanged on update. |
-| `PUT`/`PATCH` | `/api/v1/principals/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, first-class identity fields, `labels`, and direct `slack_channel_permissions` are mutable on an existing record. `foreign_id` applies only when creating. A former foreign id kept as an alias returns `409`; update the merged principal by its OID. |
+| `PUT`/`PATCH` | `/api/v1/principals/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, first-class identity fields, `labels`, and direct `slack_channel_permissions` are mutable on an existing record. `foreign_id` applies only when creating. Another identity of a person returns `409`; update that principal by its OID. |
 
 Identity values must be sent through the first-class fields. Labels with the
 same names are ordinary metadata and do not change or mirror identity fields.
@@ -1340,7 +1342,7 @@ Returns `201`:
 | `GET`    | `/api/v1/roles/lookup/:foreign_id` | Fetch by foreign id. `404` if missing. |
 | `GET`    | `/api/v1/roles/:role_id/grants` | [List the grants](#list-by-grantee) attached to the role. |
 | `POST`   | `/api/v1/roles/:id/slack_channel_permissions` | Idempotently create or update one role-owned Slack channel permission without replacing other rows. Omitted flags default to enabled on create and remain unchanged on update. |
-| `PUT`/`PATCH` | `/api/v1/roles/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, `labels`, and `slack_channel_permissions` are mutable on an existing record; `foreign_id` applies only when creating. A former foreign id kept as an alias returns `409`; update the merged principal by its OID. |
+| `PUT`/`PATCH` | `/api/v1/roles/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, `labels`, and `slack_channel_permissions` are mutable on an existing record; `foreign_id` applies only when creating. |
 | `DELETE` | `/api/v1/roles/:id` | Delete. Returns `204`. Cascades: the role's grants and its assignments are removed. |
 
 ### Role assignments

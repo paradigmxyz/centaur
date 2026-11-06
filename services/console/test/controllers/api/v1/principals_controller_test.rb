@@ -375,7 +375,7 @@ module Api
 
         assert_response :created
         principal = Principal.find_by!(foreign_id: "direct-slack-identity")
-        assert_equal "slack_dm", principal.kind
+        assert_equal "person", principal.kind
         assert_equal "U0123456789", principal.slack_user_id
         assert_equal "T0123456789", principal.slack_team_id
         assert_equal "ada@example.com", principal.slack_email
@@ -532,7 +532,7 @@ module Api
              params: {
                data: {
                  foreign_id: "matching-console-user-identity",
-                 kind: "console_user",
+                 kind: "person",
                  console_user_id: user.id,
                  labels: {
                    "kind" => "custom",
@@ -604,7 +604,7 @@ module Api
         assert_response :ok
 
         principal.reload
-        assert_equal "slack_dm", principal.kind
+        assert_equal "person", principal.kind
         assert_equal "U0123456789", principal.slack_user_id
         assert_nil principal.slack_channel_id
         assert_equal "T0123456789", principal.slack_team_id
@@ -1142,7 +1142,7 @@ module Api
         user = users(:acme_admin)
         Principal.create!(
           foreign_id: "console-user-admin",
-          kind: "console_user",
+          kind: "person",
           console_user_id: user.id,
           labels: {
             "kind" => "custom",
@@ -1246,9 +1246,9 @@ module Api
         assert_equal principal.foreign_id, data["foreign_id"]
       end
 
-      test "a merged principal's old foreign_id reads the merged principal and refuses writes" do
+      test "another identity of a principal reads that principal and refuses writes" do
         principal = principals(:acme_channel)
-        principal.foreign_id_aliases.create!(foreign_id: "slack-user-t0123456789-u0123456789")
+        principal.identities.create!(foreign_id: "slack-user-t0123456789-u0123456789")
 
         get "/api/v1/principals/lookup/slack-user-t0123456789-u0123456789", headers: auth_headers
         assert_response :ok

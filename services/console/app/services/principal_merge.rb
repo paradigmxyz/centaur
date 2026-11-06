@@ -1,7 +1,8 @@
-# Folds +source+ into +target+ so one person has one principal: everything
-# that references the source moves to the target, the source is deleted, and
-# its foreign_id (plus any aliases it held) becomes an alias of the target so
-# callers that derive or stored the old id keep reaching the same principal.
+# Folds +source+ into +target+ when the same person ended up with two
+# principals: everything that references the source moves to the target, the
+# source is deleted, and its foreign_id (plus any identities it held) becomes
+# an identity of the target so callers that derive or stored the old id keep
+# reaching the same principal.
 # Where both hold the same grant, role, client link, or Slack channel, the
 # target's row is kept; Slack channel flags combine so neither side loses
 # access it had.
@@ -21,7 +22,7 @@ class PrincipalMerge
     Principal.transaction do
       source.lock!
       target.lock!
-      alias_ids = source.foreign_id_aliases.pluck(:foreign_id) + [ source.foreign_id ].compact
+      identity_ids = source.identities.pluck(:foreign_id) + [ source.foreign_id ].compact
 
       move_grants
       move_unique_links(PrincipalRole, :role_id)
@@ -34,7 +35,7 @@ class PrincipalMerge
 
       labels = source.labels.to_h.merge(target.labels.to_h)
       source.reload.destroy!
-      alias_ids.each { |foreign_id| target.foreign_id_aliases.find_or_create_by!(foreign_id: foreign_id) }
+      identity_ids.each { |foreign_id| target.identities.find_or_create_by!(foreign_id: foreign_id) }
       target.update!(labels: labels)
       Principal.bump_sync_config_cache_versions(target.id)
       target

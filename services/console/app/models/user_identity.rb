@@ -19,9 +19,9 @@ class UserIdentity < ApplicationRecord
   # trigger is scoped to the fields that participate in matching, so the email
   # re-cache on every returning SSO login does not re-run reconciliation.
   after_commit :reconcile_owner_oauth_credentials, on: %i[create update], if: :slack_identity_changed?
-  # A user who already has a Console-user principal absorbs their Slack DM
-  # principal as soon as the identity proving they own it arrives.
-  after_commit :refresh_console_user_principal, on: %i[create update], if: :slack_identity_changed?
+  # The identity proving which Slack user this person is links their Console
+  # account to the person principal Slack already knows them by.
+  after_commit :link_person_principal, on: %i[create update], if: :slack_identity_changed?
 
   normalizes :email, with: ->(e) { e.to_s.strip.downcase.presence }
   normalizes :team_id, with: ->(id) { id.to_s.strip.presence }
@@ -58,12 +58,10 @@ class UserIdentity < ApplicationRecord
   end
 
   # Like reconciliation, this must never break sign-in.
-  def refresh_console_user_principal
-    return unless Principal.exists?(kind: "console_user", console_user_id: user_id)
-
+  def link_person_principal
     ConsoleUserPrincipalProvisioner.call(user)
   rescue StandardError => e
-    Rails.logger.warn("user_identity_principal_refresh_failed error=#{e.class}")
+    Rails.logger.warn("user_identity_person_principal_link_failed error=#{e.class}")
   end
 
   # Never let reconciliation abort the surrounding write: this hook runs inside

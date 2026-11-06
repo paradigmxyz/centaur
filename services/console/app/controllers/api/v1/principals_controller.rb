@@ -20,8 +20,8 @@ module Api
 
       # GET /api/v1/principals/lookup/:foreign_id
       #
-      # A merged principal's retired foreign_id resolves to the principal it
-      # was merged into.
+      # A person's other identities (a principal_identities foreign_id)
+      # resolve to that person's principal.
       def lookup
         render json: { data: record_payload(find_by_foreign_id!(Principal)) }
       end
@@ -42,13 +42,13 @@ module Api
 
       # PUT/PATCH upserts: an opaque id updates that record, any other identifier
       # is a foreign_id that is created when absent. foreign_id is immutable.
-      # An alias is refused rather than written through, so a caller deriving
-      # an old foreign_id can neither recreate it nor overwrite the identity of
-      # the principal it was merged into.
+      # Another identity of a person is refused rather than written through,
+      # so a caller deriving it can neither create a second principal for the
+      # person nor overwrite the fields of the one they have.
       def update
-        if (merged = PrincipalAlias.find_by(foreign_id: params[:id].to_s))
+        if (identity = PrincipalIdentity.find_by(foreign_id: params[:id].to_s))
           return render_error(status: :conflict,
-                              message: "#{params[:id]} was merged into principal #{merged.principal.oid}; " \
+                              message: "#{params[:id]} identifies principal #{identity.principal.oid}; " \
                                        "update that principal by its id")
         end
 

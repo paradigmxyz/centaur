@@ -1,7 +1,8 @@
-# A retired foreign_id that still names the principal it was merged into, so
-# callers that derive or stored the old id keep reaching the same principal.
-class PrincipalAlias < ApplicationRecord
-  oid_prefix "pral"
+# A foreign id, beyond the principal's own, that names the same person: the
+# Slack user or Console account they are also known by, or the foreign id of a
+# principal merged into theirs. Lookups by any of them reach the one principal.
+class PrincipalIdentity < ApplicationRecord
+  oid_prefix "prid"
 
   belongs_to :principal
 

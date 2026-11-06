@@ -28,6 +28,8 @@ class BackfillSlackDmPrincipalConsoleUsersTest < ActiveSupport::TestCase
       slack_email: member.email,
       console_user: admin
     )
+    # The kind this migration ran against, before person principals.
+    Principal.where(id: [ matching, unmatched, already_linked ]).update_all("kind = 'slack_dm'")
     previous_cache_version = matching.sync_config_cache_version
 
     BackfillSlackDmPrincipalConsoleUsers.new.up

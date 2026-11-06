@@ -99,7 +99,7 @@ class ScheduledTaskTest < ActiveSupport::TestCase
     task = ScheduledTask.create!(valid_attributes)
     principal = task.execution_principal
 
-    assert_equal "console_user", principal.kind
+    assert_equal "person", principal.kind
     assert_equal task.author, principal.console_user
     assert_equal(
       {

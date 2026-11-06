@@ -28,13 +28,12 @@ class PrincipalCredentialReconciliation
   end
 
   USER_KIND = "user"
-  # Minted by the MCP OAuth flow (Mcp::OauthController#principal_for_current_user)
-  # for a console user connecting an MCP client. These principals match
-  # credentials only through their console User record (credential ownership,
-  # primary email, or verified identity emails) -- never through mutable
-  # principal labels or provider-subject labels, which would widen the trust
-  # boundary beyond the authenticated user.
-  CONSOLE_USER_KIND = "console_user"
+  # Console persons (Principal#console_person?, provisioned or attached by
+  # ConsoleUserPrincipalProvisioner) match credentials only through their
+  # console User record (credential ownership, primary email, or verified
+  # identity emails) -- never through mutable principal labels or
+  # provider-subject labels, which would widen the trust boundary beyond the
+  # authenticated user.
   SLACK_PROVIDER = Oauth::Providers::Slack::KEY
   GOOGLE_PROVIDER = Oauth::Providers::Google::KEY
   GITHUB_PROVIDER = Oauth::Providers::Github::KEY
@@ -205,12 +204,12 @@ class PrincipalCredentialReconciliation
   end
 
   def user_principals
-    Principal.order(:id)
+    Principal.includes(:console_user, :identities).order(:id)
   end
 
   def user_principal?(principal)
     labels = principal.labels || {}
-    return true if [ USER_KIND, CONSOLE_USER_KIND ].include?(principal.kind)
+    return true if principal.kind == USER_KIND || console_user_principal?(principal)
     return true if principal.slack_user_id.present? || principal.slack_email.present?
 
     (EMAIL_LABELS + PROVIDER_SUBJECT_LABELS.values.flatten).any? do |key|
@@ -428,7 +427,8 @@ class PrincipalCredentialReconciliation
   end
 
   def console_user_principal?(principal)
-    principal.kind == CONSOLE_USER_KIND
+    @console_people ||= {}
+    @console_people.fetch(principal.id) { @console_people[principal.id] = principal.console_person? }
   end
 
   def principal_emails(principal)

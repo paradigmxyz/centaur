@@ -8,7 +8,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
 
   test "shared credentials never auto grant while personal credentials of the same provider still do" do
     user = users(:acme_admin)
-    principal = create_console_user_principal(user, foreign_id: "shared-test-admin")
+    principal = create_console_user_principal(user)
     app = oauth_apps(:acme_google).dup
     app.update!(slug: "shared-google", shared: true)
     shared = create_credential(app, "shared-account", user.email, created_by: user)
@@ -292,7 +292,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     github = create_credential(oauth_apps(:acme_github), "12345", "member@acme.example")
     secrets = [ slack, google, github ].map { |credential| wrap(credential) }
 
-    principal = create_console_user_principal(users(:member_user), foreign_id: "console-user-member-0")
+    principal = create_console_user_principal(users(:member_user))
 
     secrets.each do |secret|
       assert principal.grants.exists?(static_secret: secret),
@@ -306,7 +306,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     credential = create_credential(app, "U0123456789", "member@acme.example")
     secret = wrap(credential)
 
-    principal = create_console_user_principal(users(:member_user), foreign_id: "console-user-slack")
+    principal = create_console_user_principal(users(:member_user))
 
     assert principal.grants.exists?(static_secret: secret)
     assert_equal "U0123456789", principal.reload.slack_user_id
@@ -319,10 +319,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     credential.update!(labels: { "slack_team_id" => "T0123456789" })
     secret = wrap(credential)
 
-    principal = create_console_user_principal(
-      users(:member_user),
-      foreign_id: "console-user-malformed-slack-on-create"
-    )
+    principal = create_console_user_principal(users(:member_user))
 
     assert principal.grants.exists?(static_secret: secret)
     assert_nil principal.reload.slack_user_id
@@ -330,10 +327,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
   end
 
   test "wrapper creation grants but does not sync malformed Slack credential identity" do
-    principal = create_console_user_principal(
-      users(:member_user),
-      foreign_id: "console-user-malformed-slack-on-wrap"
-    )
+    principal = create_console_user_principal(users(:member_user))
     credential = create_credential(oauth_apps(:acme_slack), "U0123456789", "member@acme.example")
     credential.update!(labels: { "slack_team_id" => "TACME" })
 
@@ -346,10 +340,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
   end
 
   test "credential update grants but does not sync malformed Slack credential identity" do
-    principal = create_console_user_principal(
-      users(:member_user),
-      foreign_id: "console-user-malformed-slack-on-credential-update"
-    )
+    principal = create_console_user_principal(users(:member_user))
     credential = create_credential(oauth_apps(:acme_slack), "U12345", nil)
     credential.update!(labels: { "slack_team_id" => "TACME" })
     secret = wrap(credential)
@@ -366,7 +357,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     first.update!(labels: { "slack_team_id" => "T6123456789" })
     first_secret = wrap(first)
 
-    principal = create_console_user_principal(users(:member_user), foreign_id: "console-user-pinned-slack")
+    principal = create_console_user_principal(users(:member_user))
     assert principal.grants.exists?(static_secret: first_secret)
     assert_equal "U6123456789", principal.reload.slack_user_id
     assert_equal "T6123456789", principal.slack_team_id
@@ -387,7 +378,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     second.update!(labels: { "slack_team_id" => "T9123456789" })
     secrets = [ wrap(first), wrap(second) ]
 
-    principal = create_console_user_principal(users(:member_user), foreign_id: "console-user-ambiguous-slack")
+    principal = create_console_user_principal(users(:member_user))
 
     secrets.each do |secret|
       assert principal.grants.exists?(static_secret: secret)
@@ -437,8 +428,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
 
     principal = create_console_user_principal(
       users(:member_user),
-      extra_labels: { "google_subject" => "google-sub-carol" },
-      foreign_id: "console-user-spoofed-subject"
+      extra_labels: { "google_subject" => "google-sub-carol" }
     )
 
     refute principal.grants.exists?(static_secret: secret)
@@ -447,7 +437,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
   test "console user principal does not accumulate provider labels from matched credentials" do
     create_credential(oauth_apps(:acme_google), "google-sub-member", "member@acme.example")
 
-    principal = create_console_user_principal(users(:member_user), foreign_id: "console-user-labels")
+    principal = create_console_user_principal(users(:member_user))
 
     labels = principal.reload.labels
     assert_nil labels["google_subject"]
@@ -463,7 +453,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     credential = create_credential(oauth_apps(:acme_slack), "slack-sub-alt", "member.alt@acme.example")
     secret = wrap(credential)
 
-    principal = create_console_user_principal(user, foreign_id: "console-user-member")
+    principal = create_console_user_principal(user)
 
     assert principal.grants.exists?(static_secret: secret)
   end
@@ -478,14 +468,14 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     )
     secret = wrap(credential)
 
-    principal = create_console_user_principal(user, foreign_id: "console-user-owned-slack")
+    principal = create_console_user_principal(user)
 
     assert principal.grants.exists?(static_secret: secret)
   end
 
   test "credential callback grants an owned credential to an existing console user principal" do
     user = users(:member_user)
-    principal = create_console_user_principal(user, foreign_id: "console-user-existing-owner")
+    principal = create_console_user_principal(user)
     credential = create_credential(oauth_apps(:acme_github), "gh-owned-existing", nil, created_by: user)
 
     secret = wrap(credential)
@@ -502,10 +492,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     )
     secret = wrap(credential)
 
-    principal = create_console_user_principal(
-      users(:member_user),
-      foreign_id: "console-user-other-owner"
-    )
+    principal = create_console_user_principal(users(:member_user))
 
     refute principal.grants.exists?(static_secret: secret)
   end
@@ -519,7 +506,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     credential = create_credential(oauth_apps(:acme_slack), "slack-sub-victim", "victim@acme.example")
     secret = wrap(credential)
 
-    principal = create_console_user_principal(user, foreign_id: "console-user-member-2")
+    principal = create_console_user_principal(user)
 
     refute principal.grants.exists?(static_secret: secret)
   end
@@ -541,7 +528,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     user = users(:member_user)
     user.user_identities.create!(provider: "slack", subject: "U0123456789", team_id: "T0123456789")
     principal = create_slack_user_principal(
-      foreign_id: "slack-user-t0123456789-u0123456789",
+      foreign_id: "operator-slack-user-t0123456789-u0123456789",
       slack_user_id: "U0123456789",
       slack_team_id: "T0123456789"
     )
@@ -561,7 +548,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     secret = wrap(credential)
 
     principal = create_slack_user_principal(
-      foreign_id: "slack-user-t0223456789-u0223456789",
+      foreign_id: "operator-slack-user-t0223456789-u0223456789",
       slack_user_id: "U0223456789",
       slack_team_id: "T0223456789"
     )
@@ -576,7 +563,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
   test "grants owner credentials when the Slack SSO identity arrives last" do
     user = users(:member_user)
     principal = create_slack_user_principal(
-      foreign_id: "slack-user-t0323456789-u0323456789",
+      foreign_id: "operator-slack-user-t0323456789-u0323456789",
       slack_user_id: "U0323456789",
       slack_team_id: "T0323456789"
     )
@@ -595,7 +582,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     user.user_identities.create!(provider: "slack", subject: "U0423456789", team_id: "T0423456789")
     user.user_identities.create!(provider: "slack", subject: "U0523456789", team_id: "T0523456789")
     principal = create_slack_user_principal(
-      foreign_id: "slack-user-t0423456789-u0423456789",
+      foreign_id: "operator-slack-user-t0423456789-u0423456789",
       slack_user_id: "U0423456789",
       slack_team_id: "T0423456789"
     )
@@ -609,7 +596,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     user = users(:member_user)
     user.user_identities.create!(provider: "slack", subject: "U0623456789")
     principal = create_slack_user_principal(
-      foreign_id: "slack-user-u0623456789",
+      foreign_id: "operator-slack-user-u0623456789",
       slack_user_id: "U0623456789",
       slack_team_id: "T0623456789"
     )
@@ -623,7 +610,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     user = users(:member_user)
     user.user_identities.create!(provider: "slack", subject: "U0723456789", team_id: "T0723456789")
     principal = create_slack_user_principal(
-      foreign_id: "slack-user-t9923456789-u0723456789",
+      foreign_id: "operator-slack-user-t9923456789-u0723456789",
       slack_user_id: "U0723456789",
       slack_team_id: "T9923456789"
     )
@@ -652,7 +639,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     user = users(:member_user)
     user.user_identities.create!(provider: "slack", subject: "U0923456789", team_id: "T0923456789")
     principal = create_slack_user_principal(
-      foreign_id: "slack-user-t0923456789-u0923456789",
+      foreign_id: "operator-slack-user-t0923456789-u0923456789",
       slack_user_id: "U0923456789",
       slack_team_id: "T0923456789"
     )
@@ -668,7 +655,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     credential = create_credential(oauth_apps(:acme_github), "gh-82345", nil, created_by: user)
     secret = wrap(credential)
 
-    principal = create_console_user_principal(user, foreign_id: "console-user-owner-identity")
+    principal = create_console_user_principal(user)
 
     assert principal.grants.exists?(static_secret: secret)
   end
@@ -677,7 +664,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     user = users(:member_user)
     user.user_identities.create!(provider: "slack", subject: "U1123456780", team_id: "T1123456780")
     principal = create_slack_user_principal(
-      foreign_id: "slack-user-t1123456780-u9923456780",
+      foreign_id: "operator-slack-user-t1123456780-u9923456780",
       slack_user_id: "U9923456780",
       slack_team_id: "T1123456780"
     )
@@ -689,7 +676,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
 
   test "a credential without an owner does not match through the owner identity" do
     principal = create_slack_user_principal(
-      foreign_id: "slack-user-t1223456780-u1223456780",
+      foreign_id: "operator-slack-user-t1223456780-u1223456780",
       slack_user_id: "U1223456780",
       slack_team_id: "T1223456780"
     )
@@ -702,7 +689,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
   test "identity creation ignores credentials without an oauth app" do
     user = users(:member_user)
     principal = create_slack_user_principal(
-      foreign_id: "slack-user-t1423456780-u1423456780",
+      foreign_id: "operator-slack-user-t1423456780-u1423456780",
       slack_user_id: "U1423456780",
       slack_team_id: "T1423456780"
     )
@@ -728,7 +715,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
   test "identity creation for other providers does not run reconciliation" do
     user = users(:member_user)
     principal = create_slack_user_principal(
-      foreign_id: "slack-user-t1523456780-u1523456780",
+      foreign_id: "operator-slack-user-t1523456780-u1523456780",
       slack_user_id: "U1523456780",
       slack_team_id: "T1523456780"
     )
@@ -757,11 +744,12 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
   # Mirrors the principal shape minted by Mcp::OauthController#principal_for_current_user.
   # The label override simulates tampered cached identity, which matching must
   # ignore for console-user principals.
-  def create_console_user_principal(user, foreign_id:, extra_labels: {})
+  # The person principal ConsoleUserPrincipalProvisioner creates for +user+.
+  def create_console_user_principal(user, extra_labels: {})
     Principal.create!(
-      foreign_id: foreign_id,
+      foreign_id: Principal.console_user_foreign_id(user),
       name: user.name.presence || user.email,
-      kind: "console_user",
+      kind: "person",
       console_user_id: user.id,
       labels: {
         "managed-by" => "centaur"

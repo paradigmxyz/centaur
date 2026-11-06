@@ -61,14 +61,8 @@ class SlackDeliveryPolicyTest < ActiveSupport::TestCase
   test "refuses ambiguous persisted Slack identities" do
     user = users(:acme_admin)
     user.user_identities.create!(provider: "slack", subject: "U0123456789", team_id: "T0123456789")
-    Principal.create!(
-      foreign_id: "console-user-ambiguous-delivery",
-      kind: "console_user",
-      console_user: user,
-      slack_user_id: "U2222222222",
-      slack_team_id: "T0123456789",
-      created_by: user
-    )
+    # The user's person principal later synced another Slack user from a credential.
+    ConsoleUserPrincipalProvisioner.call(user).update!(slack_user_id: "U2222222222")
 
     policy = SlackDeliveryPolicy.new(user)
 

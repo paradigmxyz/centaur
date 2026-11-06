@@ -1,3 +1,4 @@
+require "digest"
 require "uri"
 
 class Principal < ApplicationRecord
@@ -16,7 +17,7 @@ class Principal < ApplicationRecord
   has_many :slack_channel_permissions, dependent: :destroy
   has_many :mcp_oauth_authorization_codes, dependent: :destroy
   has_many :mcp_oauth_refresh_tokens, dependent: :destroy
-  has_many :foreign_id_aliases, class_name: "PrincipalAlias", dependent: :delete_all
+  has_many :identities, class_name: "PrincipalIdentity", dependent: :delete_all
   belongs_to :created_by, class_name: "User"
   belongs_to :console_user, class_name: "User", optional: true
 
@@ -34,8 +35,15 @@ class Principal < ApplicationRecord
   TOOL_LABEL = "centaur-tool".freeze
   SANDBOX_REPO_CACHE_VALUES = %w[none public all].freeze
   UNKNOWN_KIND = "unknown".freeze
+  # A human, however they reach Centaur: from Slack before they ever sign in to
+  # Console, from Console, or both. Their other identities are PrincipalIdentity
+  # rows naming this one principal.
+  PERSON_KIND = "person".freeze
+  # The per-surface kinds a person principal had before there was one person
+  # kind. Callers that still send them (older api-rs, admin tools) get a person.
+  LEGACY_PERSON_KINDS = %w[slack_dm console_user].freeze
   KINDS = %w[
-    unknown user console_user workflow slack_channel slack_dm discord_channel linear_issue
+    unknown user person workflow slack_channel discord_channel linear_issue
     github_user teams_user teams_conversation
   ].freeze
   SLACK_USER_ID_FORMAT = /\A(?:[UW][A-Z0-9]{8,}|USLACK)\z/
@@ -55,7 +63,9 @@ class Principal < ApplicationRecord
                             allow_nil: true, if: :will_save_change_to_slack_team_id?
   validates :slack_email, format: { with: URI::MailTo::EMAIL_REGEXP, message: "is not a valid email address" },
                           allow_nil: true, if: :will_save_change_to_slack_email?
-  validate :foreign_id_is_not_an_alias, if: :will_save_change_to_foreign_id?
+  validate :foreign_id_is_not_an_identity, if: :will_save_change_to_foreign_id?
+
+  normalizes :kind, with: ->(kind) { LEGACY_PERSON_KINDS.include?(kind) ? PERSON_KIND : kind }
 
   # Stand-in for an inline secret value in redacted config: operator inspection
   # reports that a control_plane source carries a value without revealing it.
@@ -66,9 +76,9 @@ class Principal < ApplicationRecord
   # proxy resolves to.
   EMPTY_CONFIG = { "secrets" => [], "transforms" => [], "postgres" => [] }.freeze
 
-  # The principal +foreign_id+ names: its own, or the one it was merged into.
+  # The principal +foreign_id+ names: its own, or the person it identifies.
   def self.resolve_foreign_id(foreign_id)
-    find_by(foreign_id: foreign_id) || PrincipalAlias.find_by(foreign_id: foreign_id)&.principal
+    find_by(foreign_id: foreign_id) || PrincipalIdentity.find_by(foreign_id: foreign_id)&.principal
   end
 
   def self.resolve_foreign_id!(foreign_id)
@@ -76,9 +86,34 @@ class Principal < ApplicationRecord
       raise ActiveRecord::RecordNotFound.new("Couldn't find Principal with foreign_id=#{foreign_id}", name)
   end
 
-  # The foreign_id api-rs derives for a Slack user's DM principal.
+  # The foreign_id api-rs derives for a Slack user.
   def self.slack_user_foreign_id(slack_team_id, slack_user_id)
     "slack-user-#{slack_team_id.downcase}-#{slack_user_id.downcase}"
+  end
+
+  # The foreign_id that identifies a Console user's person principal.
+  def self.console_user_foreign_id(user)
+    normalized = user.email.to_s.downcase.strip
+    safe = normalized.gsub(/[^A-Za-z0-9\-._~]/, "-").gsub(/-+/, "-").first(48)
+    digest = Digest::SHA256.hexdigest(normalized).first(12)
+    "console-user-#{safe}-#{digest}"
+  end
+
+  def identified_by?(foreign_id)
+    return true if self.foreign_id == foreign_id
+    return identities.any? { |identity| identity.foreign_id == foreign_id } if identities.loaded?
+
+    identities.exists?(foreign_id: foreign_id)
+  end
+
+  # A person who is their linked Console user, as opposed to a Slack person
+  # merely linked to that user's account by Slack email. Console provisioned
+  # or attached this principal for the user, so it acts for them in MCP
+  # sessions and scheduled tasks too, and matches credentials only through
+  # that user.
+  def console_person?
+    kind == PERSON_KIND && console_user.present? &&
+      identified_by?(self.class.console_user_foreign_id(console_user))
   end
 
   # Every grant this principal resolves to: its own direct grants plus the
@@ -198,9 +233,11 @@ class Principal < ApplicationRecord
   # bridge to the corresponding Console account. This is called from the API
   # upsert boundary rather than a model callback so an omitted email never
   # activates a stale value already stored on the principal. A supplied email
-  # with no matching account clears any previous link.
+  # with no matching account clears any previous link. A Console person keeps
+  # the account Console linked it to.
   def link_console_user_by_slack_email
-    return unless kind == "slack_dm" && slack_email.present?
+    return unless kind == PERSON_KIND && slack_email.present?
+    return if console_person?
 
     self.console_user = User.find_by(email: slack_email.to_s.strip.downcase)
   end
@@ -296,8 +333,8 @@ class Principal < ApplicationRecord
 
   private
 
-  def foreign_id_is_not_an_alias
-    errors.add(:foreign_id, :taken) if foreign_id.present? && PrincipalAlias.exists?(foreign_id: foreign_id)
+  def foreign_id_is_not_an_identity
+    errors.add(:foreign_id, :taken) if foreign_id.present? && PrincipalIdentity.exists?(foreign_id: foreign_id)
   end
 
   def slack_channel_catalog_refreshable?

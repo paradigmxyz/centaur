@@ -5,16 +5,16 @@ class UserIdentityTest < ActiveSupport::TestCase
     { user: users(:globex_admin), provider: "google", subject: "sub-123" }.merge(overrides)
   end
 
-  test "a new Slack identity merges the user's Slack DM principal into their Console-user principal" do
+  test "a new Slack identity links the user's Console account to the person Slack knows them by" do
     user = users(:member_user)
-    principal = ConsoleUserPrincipalProvisioner.call(user)
-    dm = Principal.create!(foreign_id: "slack-user-t0123456789-u0123456789", kind: "slack_dm",
-                           created_by: users(:acme_admin))
+    person = Principal.create!(foreign_id: "slack-user-t0123456789-u0123456789", kind: "person",
+                               slack_user_id: "U0123456789", slack_team_id: "T0123456789",
+                               created_by: users(:acme_admin))
 
     user.user_identities.create!(provider: "slack", subject: "U0123456789", team_id: "T0123456789")
 
-    assert_not Principal.exists?(dm.id)
-    assert_equal principal, Principal.resolve_foreign_id("slack-user-t0123456789-u0123456789")
+    assert_equal user, person.reload.console_user
+    assert person.console_person?
   end
 
   test "is valid with user, provider, and subject" do
