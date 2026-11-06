@@ -2404,7 +2404,9 @@ mod tests {
     use time::{Duration as TimeDuration, OffsetDateTime};
     use uuid::Uuid;
 
-    use super::{IdleSandboxCandidateRow, PgSessionStore, SessionEventNotification};
+    use super::{
+        IdleSandboxCandidate, IdleSandboxCandidateRow, PgSessionStore, SessionEventNotification,
+    };
 
     async fn test_store() -> Option<PgSessionStore> {
         let Ok(url) = std::env::var("SESSION_RUNTIME_TEST_DATABASE_URL") else {
@@ -2975,6 +2977,117 @@ mod tests {
                 .iter()
                 .all(|candidate| candidate.thread_key != thread_key),
             "execution completion must remain the earliest idle deadline"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn idle_candidates_use_only_the_latest_execution() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key = ThreadKey::parse(format!("test:idle-latest-{}", Uuid::new_v4())).unwrap();
+        let sandbox_id = format!("sbx-idle-latest-{}", Uuid::new_v4());
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        store
+            .update_sandbox_id(&thread_key, Some(&sandbox_id))
+            .await
+            .expect("set sandbox id");
+        let mut execution_ids = Vec::new();
+        for _ in 0..3 {
+            let execution_id = store
+                .create_execution(&thread_key, None, json!({"idle_timeout_ms": 1000}))
+                .await
+                .expect("create execution")
+                .execution
+                .execution_id;
+            store
+                .complete_execution(&execution_id)
+                .await
+                .expect("complete execution");
+            execution_ids.push(execution_id);
+        }
+        let oldest_execution_id = &execution_ids[0];
+        sqlx::query(
+            r#"
+            update session_executions
+            set created_at = case
+                    when execution_id = $2 then now() - interval '1 hour'
+                    else now() - interval '30 minutes'
+                end,
+                completed_at = now() - interval '2 seconds',
+                updated_at = now()
+            where thread_key = $1
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .bind(oldest_execution_id)
+        .execute(store.pool())
+        .await
+        .expect("tie the two newest executions on created_at");
+        let latest_execution_id: String = sqlx::query_scalar(
+            r#"
+            select execution_id
+            from session_executions
+            where thread_key = $1 and execution_id <> $2
+            order by execution_id desc
+            limit 1
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .bind(oldest_execution_id)
+        .fetch_one(store.pool())
+        .await
+        .expect("load tie-break winner");
+        sqlx::query(
+            r#"
+            update session_executions
+            set metadata = jsonb_build_object('idle_timeout_ms', 864000000)
+            where thread_key = $1 and execution_id not in ($2, $3)
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .bind(oldest_execution_id)
+        .bind(&latest_execution_id)
+        .execute(store.pool())
+        .await
+        .expect("give the tie-break loser a long timeout");
+        sqlx::query(
+            r#"
+            update sessions
+            set sandbox_last_active_at = now() - interval '2 seconds'
+            where thread_key = $1
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .execute(store.pool())
+        .await
+        .expect("age sandbox activity");
+
+        let candidates = store
+            .list_idle_sandbox_candidates(Duration::from_secs(3600))
+            .await
+            .expect("list idle sandbox candidates")
+            .into_iter()
+            .filter(|candidate| candidate.thread_key == thread_key)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            candidates,
+            vec![IdleSandboxCandidate {
+                thread_key: thread_key.clone(),
+                sandbox_id,
+                execution_id: latest_execution_id,
+                idle_timeout: Duration::from_secs(1),
+            }]
         );
     }
 
