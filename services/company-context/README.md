@@ -210,11 +210,14 @@ documents, Calendar events, Granola notes, and custom documents.
     "sources": ["archive"],
     "metadata": { "author": "Ada" }
   },
-  "limit": 10
+  "mode": "hybrid",
+  "limit": 10,
+  "cursor": null
 }
 ```
 
-`filters`, each filter, and `limit` are optional; unknown fields are rejected.
+`mode`, `filters`, each filter, `limit`, and `cursor` are optional; unknown
+fields are rejected.
 Filters combine with AND:
 
 - `types`: the data types to search. Absent or empty searches every type.
@@ -241,8 +244,17 @@ Filters combine with AND:
 
 `channel_ids`, `file_ids`, `sources`, and `metadata` restrict the search to the types they apply to; a
 request whose types cannot satisfy every filter is rejected. `limit` defaults
-to 10 and is at most 50; there is no pagination, so narrow the filters instead.
-Keyword (BM25) and embedding similarity ranks, each taken across every
+to 10 and is at most 50.
+
+`mode` is `hybrid` (the default) or `keyword`. A `keyword` search returns every
+matching document containing all of the query's terms, without ranking or
+embedding similarity, ordered by `occurred_at` (documents without one last)
+and then `document_id`, both descending; its results have no `score`. When more
+results follow, the response's `next_cursor` is passed as `cursor`, with the
+same query, mode, and filters, to fetch the next page; the cursor is valid only
+in `keyword` mode.
+
+A `hybrid` search is not paged, so narrow its filters instead. Keyword (BM25) and embedding similarity ranks, each taken across every
 searched type, are combined with reciprocal rank fusion. A keyword match is
 ranked by its similarity too, and a document farther from the query than
 `COMPANY_CONTEXT_EMBEDDINGS_MAX_QUERY_DISTANCE` gets no similarity rank. If the
@@ -264,9 +276,12 @@ score, comparable only within one response.
       "score": 0.0325,
       "metadata": { "conversation_id": "C0123456789", "channel_name": "general" }
     }
-  ]
+  ],
+  "next_cursor": "2024-01-02T09:00:00Z|slack:C0123456789:2024-01-02:000000"
 }
 ```
+
+`next_cursor` is present only in a `keyword` response with more results.
 
 `text` is the full document chunk. `metadata` holds type-specific fields:
 conversation, channel, and message times for `slack_message`; file ID and file

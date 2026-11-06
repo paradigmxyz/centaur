@@ -35,7 +35,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use sqids::Sqids;
-use sqlx::{Acquire, PgPool, Postgres, Transaction, types::Json as SqlJson};
+use sqlx::{
+    Acquire, PgPool, Postgres, Transaction, postgres::PgArguments, query::QueryAs,
+    types::Json as SqlJson,
+};
 use tracing::{error, warn};
 
 use crate::{
@@ -111,8 +114,23 @@ pub fn router(state: QueryState) -> Router {
 pub struct QueryRequest {
     pub query: String,
     #[serde(default)]
+    pub mode: Mode,
+    #[serde(default)]
     pub filters: Filters,
     pub limit: Option<usize>,
+    /// The `next_cursor` of the previous keyword page.
+    pub cursor: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    /// Keyword and embedding similarity ranks, fused.
+    #[default]
+    Hybrid,
+    /// Every document containing all of the query's terms, newest first and
+    /// unranked, paged with a cursor.
+    Keyword,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -430,13 +448,18 @@ impl DataType {
 #[derive(Debug, Serialize)]
 pub struct QueryResponse {
     pub results: Vec<QueryResult>,
+    /// Continues a keyword search that has more results.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct QueryResult {
     #[serde(flatten)]
     pub document: Document,
-    pub score: f64,
+    /// The fused rank score; keyword results are unranked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -546,10 +569,10 @@ async fn handle_query(
     // Authenticate before looking at the body.
     let identity = authenticate(&state, &headers).await?;
     let Json(request) = request.map_err(|rejection| ApiError::BadRequest(rejection.body_text()))?;
-    let results = search(&state.pool, Some(&state.embeddings), &identity, &request)
+    let response = search(&state.pool, Some(&state.embeddings), &identity, &request)
         .await
         .map_err(internal("company_context_query_failed"))?;
-    Ok(Json(QueryResponse { results }))
+    Ok(Json(response))
 }
 
 async fn handle_document(
@@ -626,15 +649,48 @@ fn ids(values: &[String], name: &str) -> Result<Option<Vec<String>>> {
     Ok((!ids.is_empty()).then_some(ids))
 }
 
-/// Searches the requested data types visible to `identity`, fusing keyword and
-/// vector ranks, each taken across every type. Without embeddings, or when
-/// embedding the query fails, only keyword ranks are used.
+/// Where a keyword page ends: the last result's `occurred_at` and document ID.
+struct Cursor {
+    occurred_at: Option<DateTime<Utc>>,
+    document_id: String,
+}
+
+impl Cursor {
+    fn after(document: &Document) -> String {
+        let occurred_at = document
+            .occurred_at
+            .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+            .unwrap_or_default();
+        format!("{occurred_at}|{}", document.document_id)
+    }
+
+    fn parse(cursor: &str) -> Result<Self> {
+        let parsed = cursor
+            .split_once('|')
+            .and_then(|(occurred_at, document_id)| {
+                let occurred_at = match occurred_at {
+                    "" => None,
+                    at => Some(DateTime::parse_from_rfc3339(at).ok()?.to_utc()),
+                };
+                (!document_id.is_empty()).then(|| Self {
+                    occurred_at,
+                    document_id: document_id.to_owned(),
+                })
+            });
+        parsed.ok_or_else(|| invalid("cursor is invalid"))
+    }
+}
+
+/// Searches the requested data types visible to `identity`. Hybrid searches
+/// fuse keyword and vector ranks, each taken across every type; without
+/// embeddings, or when embedding the query fails, only keyword ranks are used.
+/// Keyword searches return matches newest first, unranked.
 pub async fn search(
     pool: &PgPool,
     embeddings: Option<&EmbeddingsClient>,
     identity: &PrincipalIdentity,
     request: &QueryRequest,
-) -> Result<Vec<QueryResult>> {
+) -> Result<QueryResponse> {
     let query = request.query.trim();
     if query.is_empty() {
         return Err(invalid("query must not be empty"));
@@ -648,6 +704,11 @@ pub async fn search(
     if !(1..=MAX_LIMIT).contains(&limit) {
         return Err(invalid(format!("limit must be between 1 and {MAX_LIMIT}")));
     }
+    let cursor = match (&request.cursor, request.mode) {
+        (None, _) => None,
+        (Some(cursor), Mode::Keyword) => Some(Cursor::parse(cursor)?),
+        (Some(_), Mode::Hybrid) => return Err(invalid("cursor requires keyword mode")),
+    };
     let filters = &request.filters;
     let params = FilterParams::new(filters)?;
     let types: Vec<DataType> = DataType::ALL
@@ -663,7 +724,13 @@ pub async fn search(
         .filter_map(|data_type| Some((data_type, data_type.subjects(identity)?)))
         .collect();
     if searches.is_empty() {
-        return Ok(Vec::new());
+        return Ok(QueryResponse {
+            results: Vec::new(),
+            next_cursor: None,
+        });
+    }
+    if request.mode == Mode::Keyword {
+        return keyword_search(pool, query, searches, limit, &params, cursor.as_ref()).await;
     }
 
     let vector = match embeddings {
@@ -816,7 +883,92 @@ pub async fn search(
     // A keyword match may also be a nearest neighbor.
     let mut seen = HashSet::new();
     semantic_hits.retain(|(_, hit)| seen.insert(hit.row.document_id.clone()));
-    Ok(fuse([keyword_hits, semantic_hits], limit))
+    Ok(QueryResponse {
+        results: fuse([keyword_hits, semantic_hits], limit),
+        next_cursor: None,
+    })
+}
+
+/// Returns the next `limit` documents matching every query term, ordered by
+/// `occurred_at` (missing last) and then document ID, both descending, from
+/// after `cursor`.
+async fn keyword_search(
+    pool: &PgPool,
+    query: &str,
+    searches: Vec<(DataType, Vec<String>)>,
+    limit: usize,
+    params: &FilterParams,
+    cursor: Option<&Cursor>,
+) -> Result<QueryResponse> {
+    let mut tx = read_only(pool).await?;
+    sqlx::query("SET LOCAL plan_cache_mode = force_custom_plan")
+        .execute(&mut *tx)
+        .await?;
+    let mut matches: Vec<(DataType, Row)> = Vec::new();
+    for (data_type, subjects) in searches {
+        let source = data_type.source();
+        // Document IDs compare bytewise, as Rust orders them when merging.
+        // Every type's `occurred_at` is its `starts_at`.
+        let sql = format!(
+            r#"
+            SELECT {columns}
+            FROM {documents} d
+            WHERE (d.title &&& $1::text OR d.body &&& $1::text)
+              AND {visible}
+              AND {filters}
+              AND ($10::text IS NULL OR CASE
+                  WHEN $11::timestamptz IS NULL
+                      THEN {at} IS NULL AND d.document_id COLLATE "C" < $10
+                  ELSE {at} < $11 OR {at} IS NULL
+                      OR ({at} = $11 AND d.document_id COLLATE "C" < $10)
+              END)
+            ORDER BY {at} DESC NULLS LAST, d.document_id COLLATE "C" DESC
+            LIMIT $3
+            "#,
+            columns = source.columns,
+            documents = source.documents,
+            visible = source.visible,
+            filters = source.filters(),
+            at = source.starts_at,
+        );
+        // One extra row shows whether another page follows.
+        let rows: Vec<Row> = bind_filters(
+            sqlx::query_as(&sql)
+                .bind(query)
+                .bind(&subjects)
+                .bind(limit as i64 + 1),
+            params,
+        )
+        .bind(cursor.map(|cursor| cursor.document_id.as_str()))
+        .bind(cursor.and_then(|cursor| cursor.occurred_at))
+        .fetch_all(&mut *tx)
+        .await
+        .with_context(|| format!("keyword search {data_type:?}"))?;
+        matches.extend(rows.into_iter().map(|row| (data_type, row)));
+    }
+    tx.commit().await?;
+
+    matches.sort_by(|(_, a), (_, b)| {
+        b.occurred_at
+            .cmp(&a.occurred_at)
+            .then_with(|| b.document_id.cmp(&a.document_id))
+    });
+    let more = matches.len() > limit;
+    matches.truncate(limit);
+    let results: Vec<QueryResult> = matches
+        .into_iter()
+        .map(|(data_type, row)| QueryResult {
+            document: row.into_document(data_type),
+            score: None,
+        })
+        .collect();
+    let next_cursor = more
+        .then(|| results.last().map(|result| Cursor::after(&result.document)))
+        .flatten();
+    Ok(QueryResponse {
+        results,
+        next_cursor,
+    })
 }
 
 /// Returns the document with `document_id` if it is visible to `identity`.
@@ -892,41 +1044,53 @@ async fn lane(
     limit: i64,
     params: &FilterParams,
 ) -> Result<Vec<Hit>> {
-    let mut query = sqlx::query_as(sql)
-        .bind(input)
-        .bind(subjects)
-        .bind(limit)
-        .bind(params.occurred_after)
-        .bind(params.occurred_before)
-        .bind(params.channel_ids.as_deref())
-        .bind(params.file_ids.as_deref())
-        .bind(params.sources.as_deref())
-        .bind(params.metadata.as_ref());
+    let mut query = bind_filters(
+        sqlx::query_as(sql).bind(input).bind(subjects).bind(limit),
+        params,
+    );
     if let Some(model) = model {
         query = query.bind(model);
     }
     Ok(query.fetch_all(&mut **tx).await?)
 }
 
+/// Binds the filters to `$4` through `$9`.
+fn bind_filters<'q, O>(
+    query: QueryAs<'q, Postgres, O, PgArguments>,
+    params: &'q FilterParams,
+) -> QueryAs<'q, Postgres, O, PgArguments> {
+    query
+        .bind(params.occurred_after)
+        .bind(params.occurred_before)
+        .bind(params.channel_ids.as_deref())
+        .bind(params.file_ids.as_deref())
+        .bind(params.sources.as_deref())
+        .bind(params.metadata.as_ref())
+}
+
 /// Reciprocal rank fusion of ranked lanes.
 fn fuse(lanes: impl IntoIterator<Item = Vec<(DataType, Hit)>>, limit: usize) -> Vec<QueryResult> {
-    let mut fused: HashMap<String, QueryResult> = HashMap::new();
+    let mut fused: HashMap<String, (Document, f64)> = HashMap::new();
     for lane in lanes {
         for (rank, (data_type, Hit { row, .. })) in lane.into_iter().enumerate() {
             let score = 1.0 / (RRF_K + rank as f64 + 1.0);
             fused
                 .entry(row.document_id.clone())
-                .and_modify(|result| result.score += score)
-                .or_insert_with(|| QueryResult {
-                    document: row.into_document(data_type),
-                    score,
-                });
+                .or_insert_with(|| (row.into_document(data_type), 0.0))
+                .1 += score;
         }
     }
-    let mut results: Vec<_> = fused.into_values().collect();
+    let mut results: Vec<_> = fused
+        .into_values()
+        .map(|(document, score)| QueryResult {
+            document,
+            score: Some(score),
+        })
+        .collect();
     results.sort_by(|a, b| {
         b.score
-            .total_cmp(&a.score)
+            .unwrap_or_default()
+            .total_cmp(&a.score.unwrap_or_default())
             .then_with(|| a.document.document_id.cmp(&b.document.document_id))
     });
     results.truncate(limit);
@@ -1191,6 +1355,7 @@ mod tests {
         let mut ids: Vec<_> = search(pool, embeddings, identity, &request(body))
             .await
             .unwrap()
+            .results
             .into_iter()
             .map(|result| result.document.document_id)
             .collect();
@@ -1545,6 +1710,7 @@ mod tests {
                 search(pool, Some(embeddings), &ada(), &request(body))
                     .await
                     .unwrap()
+                    .results
                     .into_iter()
                     .map(|result| result.document.document_id)
                     .collect::<Vec<_>>()
@@ -1612,6 +1778,119 @@ mod tests {
         );
 
         server.abort();
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    async fn keyword_search_pages_through_every_match_newest_first() {
+        let Ok(database_url) = env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
+            eprintln!("skipping: set COMPANY_CONTEXT_TEST_DATABASE_URL to a ParadeDB Postgres URL");
+            return;
+        };
+        let database = TestDatabase::create(&database_url, "query_keyword").await;
+        let pool = &database.pool;
+        seed(pool).await;
+        // A second C1 chunk starts at the same time as the first, and a file
+        // in C1 has no creation time.
+        pool.execute(
+            r#"
+            INSERT INTO company_context_data.slack_documents
+                (document_id, conversation_id, day, chunk_id, title, body, channel_name,
+                 conversation_kind, first_message_at, last_message_at, content_hash)
+            VALUES ('slack:C1:2024-01-02:000001', 'C1', '2024-01-02', '1', '#general',
+                    'falcon launch moved', 'general', 'public_channel',
+                    '2024-01-02T09:00Z', '2024-01-02T10:00Z', 'hash');
+            INSERT INTO company_context_system.slack_files (file_id, source_version, extraction_status)
+            VALUES ('SF3', 'v1', 'completed');
+            INSERT INTO company_context_data.slack_file_shares (file_id, conversation_id, message_ts)
+            VALUES ('SF3', 'C1', '1.0');
+            INSERT INTO company_context_data.slack_file_documents
+                (document_id, file_id, chunk_id, title, body, content_hash)
+            VALUES ('slack-file:SF3', 'SF3', '0', 'notes.txt', 'falcon launch notes', 'hash');
+            "#,
+        )
+        .await
+        .unwrap();
+        let keyword = |body: Value| async move {
+            let mut body = body;
+            body["mode"] = json!("keyword");
+            search(pool, None, &ada(), &request(body)).await.unwrap()
+        };
+        let slack = json!(["slack_message", "slack_file"]);
+
+        let mut pages = Vec::new();
+        let mut cursor = Value::Null;
+        loop {
+            let page = keyword(json!({
+                "query": "falcon launch",
+                "filters": { "types": slack },
+                "limit": 2,
+                "cursor": cursor,
+            }))
+            .await;
+            assert!(page.results.iter().all(|result| result.score.is_none()));
+            pages.push(
+                page.results
+                    .into_iter()
+                    .map(|result| result.document.document_id)
+                    .collect::<Vec<_>>(),
+            );
+            match page.next_cursor {
+                Some(next) => cursor = json!(next),
+                None => break,
+            }
+        }
+        assert_eq!(
+            pages,
+            [
+                vec!["slack:C3:2024-02-01:000000", "slack-file:SF2"],
+                vec!["slack:C1:2024-01-02:000001", "slack:C1:2024-01-02:000000"],
+                vec!["slack-file:SF1", "slack-file:SF3"],
+            ]
+        );
+
+        // Every term must match.
+        let matched = keyword(json!({
+            "query": "falcon friday",
+            "filters": { "types": slack },
+        }))
+        .await;
+        assert_eq!(matched.results.len(), 1);
+        assert_eq!(
+            matched.results[0].document.document_id,
+            "slack:C1:2024-01-02:000000"
+        );
+        assert_eq!(matched.next_cursor, None);
+
+        // Filters apply as in hybrid searches.
+        let filtered = keyword(json!({
+            "query": "falcon",
+            "filters": {
+                "types": ["slack_message"],
+                "channel_ids": ["C1", "C2"],
+                "occurred_before": "2024-01-02T09:30:00Z",
+            },
+        }))
+        .await;
+        assert_eq!(
+            filtered
+                .results
+                .iter()
+                .map(|result| result.document.document_id.as_str())
+                .collect::<Vec<_>>(),
+            ["slack:C1:2024-01-02:000001", "slack:C1:2024-01-02:000000"]
+        );
+
+        for invalid in [
+            json!({ "query": "falcon", "mode": "keyword", "cursor": "garbage" }),
+            json!({ "query": "falcon", "cursor": "|slack-file:SF3" }),
+        ] {
+            let error = search(pool, None, &ada(), &request(invalid.clone()))
+                .await
+                .unwrap_err();
+            assert!(error.is::<InvalidQuery>(), "{invalid}");
+        }
+
         database.drop().await;
     }
 
