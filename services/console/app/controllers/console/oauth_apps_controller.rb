@@ -85,10 +85,19 @@ module Console
       app.always_available = app_params[:always_available] == "1"
       app.role = app_params[:role_id].present? ? Role.find_by_oid!(app_params[:role_id]) : nil
       app.allowed_scopes = line_list(app_params[:allowed_scopes])
+      app.provider_config = provider_config_params(app.provider)
       app.labels = label_params
 
       secret = app_params[:client_secret]
       app.client_secret = secret if secret.present?
+    end
+
+    # Only the custom provider takes a config; blank fields are dropped so the
+    # model reports them as missing.
+    def provider_config_params(provider)
+      return {} unless provider == Oauth::Providers::Custom::KEY
+
+      app_params.fetch(:provider_config, ActionController::Parameters.new).permit(*Oauth::Providers::Custom::CONFIG_KEYS).to_h.transform_values(&:strip).compact_blank
     end
 
     def app_params

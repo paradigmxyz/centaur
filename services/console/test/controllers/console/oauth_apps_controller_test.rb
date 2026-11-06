@@ -74,6 +74,33 @@ module Console
       assert_equal @operator, app.created_by
     end
 
+    test "POST create stores the custom provider config and other providers drop it" do
+      config = {
+        authorization_endpoint: "https://auth.example.test/authorize", token_endpoint: "https://auth.example.test/token",
+        userinfo_endpoint: "https://auth.example.test/userinfo", resource: "https://api.example.test/mcp"
+      }
+      post console_oauth_app_forms_url, params: { oauth_app: {
+        slug: "custom-app", provider: "custom", client_id: "cid", client_secret: "shh",
+        allowed_scopes: "read", provider_config: config
+      } }
+      app = OauthApp.find_by!(slug: "custom-app")
+      assert_redirected_to console_oauth_app_path(app.oid)
+      assert_equal config.stringify_keys, app.provider_config
+
+      patch console_oauth_app_form_url(app.oid), params: { oauth_app: {
+        slug: app.slug, provider: "custom", client_id: "cid", allowed_scopes: "read",
+        provider_config: config.merge(token_endpoint: "")
+      } }
+      assert_response :unprocessable_entity
+      assert_equal "https://auth.example.test/token", app.reload.provider_config["token_endpoint"]
+
+      post console_oauth_app_forms_url, params: { oauth_app: {
+        slug: "google-app", provider: "google", client_id: "cid", client_secret: "shh",
+        allowed_scopes: "read", provider_config: config
+      } }
+      assert_empty OauthApp.find_by!(slug: "google-app").provider_config
+    end
+
     test "POST create with an invalid provider is rejected without writing" do
       assert_no_difference -> { OauthApp.count } do
         post console_oauth_app_forms_url, params: {

@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_11_06_210526) do
+ActiveRecord::Schema[8.1].define(version: 2026_11_06_212027) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -261,6 +261,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_06_210526) do
     t.string "slug", null: false
     t.datetime "updated_at", null: false
     t.bigint "role_id"
+    t.jsonb "provider_config", default: {}, null: false
     t.index ["created_by_id"], name: "index_oauth_apps_on_created_by_id"
     t.index ["labels"], name: "index_oauth_apps_on_labels", using: :gin
     t.index ["role_id"], name: "index_oauth_apps_on_role_id"

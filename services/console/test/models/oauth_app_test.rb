@@ -31,6 +31,20 @@ class OauthAppTest < ActiveSupport::TestCase
 
   # --- validations ----------------------------------------------------------
 
+  test "the custom provider requires https endpoints and only it takes a provider config" do
+    config = {
+      "authorization_endpoint" => "https://auth.example.test/authorize",
+      "token_endpoint" => "https://auth.example.test/token",
+      "userinfo_endpoint" => "https://auth.example.test/userinfo",
+      "resource" => "https://api.example.test/mcp"
+    }
+    assert build_app(provider: "custom", provider_config: config).valid?
+    refute build_app(provider: "custom").valid?
+    refute build_app(provider: "custom", provider_config: config.merge("token_endpoint" => "http://auth.example.test/token")).valid?
+    refute build_app(provider: "custom", provider_config: config.merge("extra" => "https://x.example.test")).valid?
+    refute build_app(provider_config: config).valid?
+  end
+
   test "valid with all required fields" do
     assert build_app.valid?
   end

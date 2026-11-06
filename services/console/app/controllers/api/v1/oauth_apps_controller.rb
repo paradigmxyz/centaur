@@ -81,7 +81,8 @@ module Api
 
       def assign_and_save!(app, attrs)
         base = attrs.permit(:slug, :description, :provider, :client_id, :client_secret,
-                            :enabled, :always_available, :shared, labels: {}, allowed_scopes: [])
+                            :enabled, :always_available, :shared, labels: {}, allowed_scopes: [],
+                            provider_config: {})
         # A PUT upsert by slug sets the slug before assignment; a blank body value
         # must not wipe it.
         base.delete(:slug) if base[:slug].blank? && app.slug.present?
@@ -108,6 +109,7 @@ module Api
           provider: app.provider,
           client_id: app.client_id,
           allowed_scopes: app.allowed_scopes,
+          provider_config: app.provider_config,
           enabled: app.enabled,
           always_available: app.always_available,
           shared: app.shared,

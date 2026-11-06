@@ -45,6 +45,21 @@ module Api
         assert_nil app.reload.role
       end
 
+      test "custom provider config round trips and is validated" do
+        config = {
+          "authorization_endpoint" => "https://auth.example.test/authorize", "token_endpoint" => "https://auth.example.test/token",
+          "userinfo_endpoint" => "https://auth.example.test/userinfo", "resource" => "https://api.example.test/mcp"
+        }
+        post api_v1_oauth_apps_url, params: valid_body(provider: "custom", provider_config: config.except("resource")).to_json,
+                                    headers: auth_headers
+        assert_response :unprocessable_entity
+
+        post api_v1_oauth_apps_url, params: valid_body(provider: "custom", provider_config: config).to_json, headers: auth_headers
+        assert_response :created
+        assert_equal config, json_body.dig("data", "provider_config")
+        assert_equal config, OauthApp.find_by!(slug: "api-google").provider_config
+      end
+
       test "rejects requests without an API key" do
         get api_v1_oauth_apps_url
         assert_response :unauthorized
