@@ -18,12 +18,10 @@ class UserIdentity < ApplicationRecord
   # over the owner's credentials so the grant still materializes. The update
   # trigger is scoped to the fields that participate in matching, so the email
   # re-cache on every returning SSO login does not re-run reconciliation.
-  after_commit :reconcile_owner_oauth_credentials,
-               on: %i[create update],
-               if: -> {
-                 slack? && (previously_new_record? || saved_change_to_subject? ||
-                   saved_change_to_team_id? || saved_change_to_user_id?)
-               }
+  after_commit :reconcile_owner_oauth_credentials, on: %i[create update], if: :slack_identity_changed?
+  # A user who already has a Console-user principal absorbs their Slack DM
+  # principal as soon as the identity proving they own it arrives.
+  after_commit :refresh_console_user_principal, on: %i[create update], if: :slack_identity_changed?
 
   normalizes :email, with: ->(e) { e.to_s.strip.downcase.presence }
   normalizes :team_id, with: ->(id) { id.to_s.strip.presence }
@@ -53,6 +51,20 @@ class UserIdentity < ApplicationRecord
   end
 
   private
+
+  def slack_identity_changed?
+    slack? && (previously_new_record? || saved_change_to_subject? ||
+      saved_change_to_team_id? || saved_change_to_user_id?)
+  end
+
+  # Like reconciliation, this must never break sign-in.
+  def refresh_console_user_principal
+    return unless Principal.exists?(kind: "console_user", console_user_id: user_id)
+
+    ConsoleUserPrincipalProvisioner.call(user)
+  rescue StandardError => e
+    Rails.logger.warn("user_identity_principal_refresh_failed error=#{e.class}")
+  end
 
   # Never let reconciliation abort the surrounding write: this hook runs inside
   # the SSO login's commit path, and a failure here must not break sign-in.

@@ -19,6 +19,9 @@ module Api
       end
 
       # GET /api/v1/principals/lookup/:foreign_id
+      #
+      # A merged principal's retired foreign_id resolves to the principal it
+      # was merged into.
       def lookup
         render json: { data: record_payload(find_by_foreign_id!(Principal)) }
       end
@@ -39,7 +42,16 @@ module Api
 
       # PUT/PATCH upserts: an opaque id updates that record, any other identifier
       # is a foreign_id that is created when absent. foreign_id is immutable.
+      # An alias is refused rather than written through, so a caller deriving
+      # an old foreign_id can neither recreate it nor overwrite the identity of
+      # the principal it was merged into.
       def update
+        if (merged = PrincipalAlias.find_by(foreign_id: params[:id].to_s))
+          return render_error(status: :conflict,
+                              message: "#{params[:id]} was merged into principal #{merged.principal.oid}; " \
+                                       "update that principal by its id")
+        end
+
         principal, was_new = upsert_with_retry
         render status: (was_new ? :created : :ok), json: { data: record_payload(principal) }
       rescue ActiveRecord::RecordInvalid => e
@@ -67,6 +79,10 @@ module Api
       end
 
       private
+
+      def find_by_foreign_id!(_model)
+        Principal.resolve_foreign_id!(params.require(:foreign_id))
+      end
 
       # Concurrent first turns upsert the same new foreign_id. The loser fails
       # the unique index or the uniqueness validation, so retry once, which

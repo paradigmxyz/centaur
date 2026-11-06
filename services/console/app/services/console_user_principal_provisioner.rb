@@ -19,12 +19,14 @@ class ConsoleUserPrincipalProvisioner
       principal.name = user.name.presence || user.email
       principal.kind = "console_user"
       principal.console_user = user
-      principal.assign_attributes(slack_identity_fields)
+      slack_user_id, slack_team_id = slack_identity
+      principal.assign_attributes(slack_user_id: slack_user_id, slack_team_id: slack_team_id) if slack_user_id
       principal.labels = principal.labels.merge("managed-by" => "centaur")
       # Runs once per console execute: skip the write (and its after_commit
       # hooks) when nothing changed.
       principal.save! if principal.changed?
       assign_user_mcp_role(principal) if newly_created
+      absorb_slack_principal(principal, slack_user_id, slack_team_id) if slack_user_id
       principal
     end
   rescue ActiveRecord::RecordNotUnique
@@ -42,13 +44,23 @@ class ConsoleUserPrincipalProvisioner
     "console-user-#{safe}-#{digest}"
   end
 
-  def slack_identity_fields
-    slack_user_id, slack_team_id = UserIdentity.unambiguous_slack_identity(
-      user.user_identities.slack.order(:id)
-    )
-    return {} unless slack_user_id
+  def slack_identity
+    UserIdentity.unambiguous_slack_identity(user.user_identities.slack.order(:id))
+  end
 
-    { "slack_user_id" => slack_user_id, "slack_team_id" => slack_team_id }
+  # The user's verified Slack identity makes the DM principal api-rs derives
+  # for it an alias of this principal, merging that principal in first when it
+  # exists, so the person has one principal from Slack and Console alike. A
+  # DM principal linked to a different Console user, or an alias already held
+  # by another principal, is conflicting evidence and is left alone.
+  def absorb_slack_principal(principal, slack_user_id, slack_team_id)
+    foreign_id = Principal.slack_user_foreign_id(slack_team_id, slack_user_id)
+    existing = Principal.resolve_foreign_id(foreign_id)
+    if existing.nil?
+      principal.foreign_id_aliases.create!(foreign_id: foreign_id)
+    elsif existing.foreign_id == foreign_id && existing.console_user_id.in?([ nil, user.id ])
+      PrincipalMerge.call(source: existing, target: principal)
+    end
   end
 
   def assign_user_mcp_role(principal)

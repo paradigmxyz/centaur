@@ -39,7 +39,7 @@ module Api
             when "slack_dm"
               id = data_params[:slack_user_id].to_s.strip.upcase
               team = current_proxy.principal.slack_team_id
-              Principal.new(kind: "slack_dm", foreign_id: "slack-user-#{team.downcase}-#{id.downcase}",
+              Principal.new(kind: "slack_dm", foreign_id: Principal.slack_user_foreign_id(team, id),
                             name: "Slack User #{id} (team #{team})", slack_user_id: id, slack_team_id: team)
             when "workflow"
               name = data_params[:workflow_name]

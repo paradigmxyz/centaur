@@ -1246,6 +1246,24 @@ module Api
         assert_equal principal.foreign_id, data["foreign_id"]
       end
 
+      test "a merged principal's old foreign_id reads the merged principal and refuses writes" do
+        principal = principals(:acme_channel)
+        principal.foreign_id_aliases.create!(foreign_id: "slack-user-t0123456789-u0123456789")
+
+        get "/api/v1/principals/lookup/slack-user-t0123456789-u0123456789", headers: auth_headers
+        assert_response :ok
+        assert_equal principal.oid, json_body.dig("data", "id")
+        assert_equal principal.foreign_id, json_body.dig("data", "foreign_id")
+
+        assert_no_difference -> { Principal.count } do
+          put "/api/v1/principals/slack-user-t0123456789-u0123456789",
+              params: { data: { name: "Slack DM @ada", kind: "slack_dm" } }.to_json, headers: auth_headers
+        end
+        assert_response :conflict
+        assert_includes json_body.dig("error", "message"), principal.oid
+        assert_equal "slack_channel", principal.reload.kind
+      end
+
       test "GET lookup preserves dots in a principal foreign_id" do
         principal = Principal.create!(
           foreign_id: "console-user-mslipper-paradigm.xyz-8704b344d443",

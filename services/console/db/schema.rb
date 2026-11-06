@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_11_04_232304) do
+ActiveRecord::Schema[8.1].define(version: 2026_11_06_172402) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -298,6 +298,15 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_04_232304) do
     t.index ["created_by_id"], name: "index_pg_dsn_secrets_on_created_by_id"
     t.index ["foreign_id"], name: "index_pg_dsn_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_pg_dsn_secrets_on_labels", using: :gin
+  end
+
+  create_table "principal_aliases", force: :cascade do |t|
+    t.bigint "principal_id", null: false
+    t.string "foreign_id", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["foreign_id"], name: "index_principal_aliases_on_foreign_id", unique: true
+    t.index ["principal_id"], name: "index_principal_aliases_on_principal_id"
   end
 
   create_table "principal_roles", force: :cascade do |t|
@@ -624,6 +633,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_04_232304) do
   add_foreign_key "oauth_apps", "users", column: "created_by_id"
   add_foreign_key "oauth_token_secrets", "users", column: "created_by_id"
   add_foreign_key "pg_dsn_secrets", "users", column: "created_by_id"
+  add_foreign_key "principal_aliases", "principals", on_delete: :cascade
   add_foreign_key "principal_roles", "principals"
   add_foreign_key "principal_roles", "roles"
   add_foreign_key "principal_sync_config_snapshots", "principals", on_delete: :cascade

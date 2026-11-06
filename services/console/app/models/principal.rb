@@ -16,6 +16,7 @@ class Principal < ApplicationRecord
   has_many :slack_channel_permissions, dependent: :destroy
   has_many :mcp_oauth_authorization_codes, dependent: :destroy
   has_many :mcp_oauth_refresh_tokens, dependent: :destroy
+  has_many :foreign_id_aliases, class_name: "PrincipalAlias", dependent: :delete_all
   belongs_to :created_by, class_name: "User"
   belongs_to :console_user, class_name: "User", optional: true
 
@@ -54,6 +55,7 @@ class Principal < ApplicationRecord
                             allow_nil: true, if: :will_save_change_to_slack_team_id?
   validates :slack_email, format: { with: URI::MailTo::EMAIL_REGEXP, message: "is not a valid email address" },
                           allow_nil: true, if: :will_save_change_to_slack_email?
+  validate :foreign_id_is_not_an_alias, if: :will_save_change_to_foreign_id?
 
   # Stand-in for an inline secret value in redacted config: operator inspection
   # reports that a control_plane source carries a value without revealing it.
@@ -63,6 +65,21 @@ class Principal < ApplicationRecord
   # The config of a principal with no effective grants; also what an unassigned
   # proxy resolves to.
   EMPTY_CONFIG = { "secrets" => [], "transforms" => [], "postgres" => [] }.freeze
+
+  # The principal +foreign_id+ names: its own, or the one it was merged into.
+  def self.resolve_foreign_id(foreign_id)
+    find_by(foreign_id: foreign_id) || PrincipalAlias.find_by(foreign_id: foreign_id)&.principal
+  end
+
+  def self.resolve_foreign_id!(foreign_id)
+    resolve_foreign_id(foreign_id) or
+      raise ActiveRecord::RecordNotFound.new("Couldn't find Principal with foreign_id=#{foreign_id}", name)
+  end
+
+  # The foreign_id api-rs derives for a Slack user's DM principal.
+  def self.slack_user_foreign_id(slack_team_id, slack_user_id)
+    "slack-user-#{slack_team_id.downcase}-#{slack_user_id.downcase}"
+  end
 
   # Every grant this principal resolves to: its own direct grants plus the
   # grants of every role it is assigned. Secrets reachable through more than one
@@ -278,6 +295,10 @@ class Principal < ApplicationRecord
   end
 
   private
+
+  def foreign_id_is_not_an_alias
+    errors.add(:foreign_id, :taken) if foreign_id.present? && PrincipalAlias.exists?(foreign_id: foreign_id)
+  end
 
   def slack_channel_catalog_refreshable?
     kind == "slack_channel" && slack_channel_id.present? && SlackChannelCatalogSync.configured?

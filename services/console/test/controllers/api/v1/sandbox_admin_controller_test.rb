@@ -182,6 +182,32 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
     assert_not_includes @channel.reload.roles, @role
   end
 
+  test "a merged Console-user principal acts as admin only on its own Slack DM thread" do
+    admin = users(:acme_admin)
+    dm_labels = { "centaur.slack_dm_channel_id" => "D0123456789", "centaur.slack_user_id" => "U0123456789" }
+    allowed = proxy_for(admin, kind: :console_user, slack_team_id: "T0123456789", labels: dm_labels)
+    refused = {
+      "MCP or scheduled session" => proxy_for(admin, kind: :console_user, slack_team_id: "T0123456789"),
+      "another user's DM" => proxy_for(admin, kind: :console_user, slack_team_id: "T0123456789",
+                                              labels: dm_labels.merge("centaur.slack_user_id" => "U0999999999"))
+    }
+
+    refused.each do |label, proxy|
+      with_token(proxy) do |headers|
+        post "/api/v1/sandbox/admin/principals/#{@channel.oid}/roles",
+             params: { data: { role_id: @role.oid } }, headers: headers, as: :json
+      end
+      assert_response :forbidden, label
+    end
+    assert_not_includes @channel.reload.roles, @role
+
+    with_token(allowed) do |headers|
+      post "/api/v1/sandbox/admin/principals/#{@channel.oid}/roles",
+           params: { data: { role_id: @role.oid } }, headers: headers, as: :json
+    end
+    assert_response :created
+  end
+
   test "an admin's DM loses access once the admin is disabled or demoted" do
     admin = users(:acme_admin)
     proxy = dm_proxy_for(admin)
@@ -458,8 +484,8 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
     proxy_for(user, kind: :slack_dm, slack_team_id: slack_team_id)
   end
 
-  def proxy_for(user, kind:, slack_team_id:, slack_user_id: "U0123456789", slack_channel_id: nil)
-    name = "#{kind}-#{user.id}-#{slack_team_id}"
+  def proxy_for(user, kind:, slack_team_id:, slack_user_id: "U0123456789", slack_channel_id: nil, labels: {})
+    name = [ kind, user.id, slack_team_id, *labels.values ].join("-")
     principal = Principal.create!(
       foreign_id: name.downcase,
       name: name,
@@ -470,7 +496,7 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
       console_user: user,
       created_by: users(:acme_admin)
     )
-    Proxy.create!(name: "proxy-#{name}".downcase, principal: principal,
+    Proxy.create!(name: "proxy-#{name}".downcase, principal: principal, labels: labels,
                   bearer_token_hash: Digest::SHA256.hexdigest(name))
   end
 

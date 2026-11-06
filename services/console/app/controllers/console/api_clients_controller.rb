@@ -132,7 +132,7 @@ module Console
 
     def find_principal(ref)
       return nil if ref.blank?
-      Principal.find_by_oid(ref) || Principal.find_by(foreign_id: ref)
+      Principal.find_by_oid(ref) || Principal.resolve_foreign_id(ref)
     end
 
     def principal_label(principal)
