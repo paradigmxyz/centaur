@@ -191,6 +191,20 @@ module Oauth
       assert start_flow.present?
     end
 
+    test "a role-restricted app runs its consent flow only for holders of the role" do
+      role = roles(:acme_admin_role)
+      @app.update!(role: role)
+      get oauth_start_url(slug: @app.slug)
+      assert_response :not_found
+      get oauth_callback_url(slug: @app.slug), params: { state: "invalid", code: "unused" }
+      assert_response :not_found
+
+      principal = Principal.create!(foreign_id: "console-member", name: @user.email, kind: "console_user",
+        console_user: @user, created_by: @user)
+      principal.roles << role
+      assert start_flow.present?
+    end
+
     test "shared account reconnect preserves grants and rejects a different subject" do
       @app = @app.dup
       @app.update!(slug: "shared-google", shared: true)

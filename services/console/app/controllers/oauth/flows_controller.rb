@@ -35,6 +35,7 @@ module Oauth
 
     before_action :set_app
     before_action -> { require_admin if @app.shared? }
+    before_action :require_app_access
 
     # GET /oauth/:slug/start?scopes=
     def start
@@ -121,6 +122,14 @@ module Oauth
       return render_result(:error, status: :not_found, message: "Unknown integration.") if @app.nil?
       @provider = @app.provider_strategy
       render_result(:error, status: :not_found, message: "Unknown integration.") if @provider.nil?
+    end
+
+    # A role-restricted app is reachable only by admins and holders of its role;
+    # everyone else gets the same answer as for a slug that does not exist.
+    def require_app_access
+      return if acting_admin? || @app.available_to?(current_user)
+
+      render_result(:error, status: :not_found, message: "Unknown integration.")
     end
 
     # Accepts space- or comma-separated scope lists; nil when none were given

@@ -8,6 +8,8 @@ class Role < ApplicationRecord
   has_many :principal_roles, dependent: :destroy
   has_many :principals, through: :principal_roles
   has_many :slack_channel_permissions, dependent: :destroy
+  # Deleting the role would make a restricted app visible to everyone.
+  has_many :oauth_apps, dependent: :restrict_with_error
   belongs_to :created_by, class_name: "User"
 
   include SlackChannelPermissionOwner

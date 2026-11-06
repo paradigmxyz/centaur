@@ -19,6 +19,17 @@ module Api
         refute_includes slugs, "shared-google"
       end
 
+      test "role-restricted apps are excluded" do
+        oauth_apps(:acme_google).update!(client_secret: "synthetic", role: roles(:acme_admin_role))
+        with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+          get "/api/v1/sandbox/oauth_apps", headers: auth_headers(token_for(@proxy))
+        end
+        assert_response :ok
+        slugs = json_body.fetch("data").map { |row| row.fetch("slug") }
+        refute_includes slugs, "google"
+        assert_includes slugs, "slack"
+      end
+
       test "returns enabled OAuth app start URLs for a valid sandbox token" do
         with_env(
           "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",

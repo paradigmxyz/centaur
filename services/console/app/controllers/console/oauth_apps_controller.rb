@@ -83,6 +83,7 @@ module Console
       app.enabled = app_params[:enabled] == "1"
       app.shared = app_params[:shared] == "1" if app.new_record?
       app.always_available = app_params[:always_available] == "1"
+      app.role = app_params[:role_id].present? ? Role.find_by_oid!(app_params[:role_id]) : nil
       app.allowed_scopes = line_list(app_params[:allowed_scopes])
       app.labels = label_params
 

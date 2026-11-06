@@ -21,6 +21,9 @@ class OauthApp < ApplicationRecord
   URL_SAFE_MESSAGE = "must contain only URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)"
 
   belongs_to :created_by, class_name: "User"
+  # When set, only admins and users whose principals hold this role see the app
+  # on the Integrations page or may run its consent flow.
+  belongs_to :role, optional: true
 
   # Deleting an app with minted credentials must fail: those credentials
   # delegate their client_id/secret here and would be left unable to refresh.
@@ -42,6 +45,18 @@ class OauthApp < ApplicationRecord
   validate :labels_is_a_hash
   validate :allowed_scopes_valid
   validate :shared_configuration_valid
+
+  # Apps a console user may see and connect: unrestricted apps plus apps
+  # restricted to a role held by one of the user's principals.
+  def self.available_to(user)
+    where(role_id: nil).or(where(role_id: user_role_ids(user)))
+  end
+
+  def self.user_role_ids(user)
+    PrincipalRole.joins(:principal).where(principals: { console_user_id: user.id }).select(:role_id)
+  end
+
+  def available_to?(user) = role_id.nil? || self.class.user_role_ids(user).where(role_id: role_id).exists?
 
   # The provider strategy backing this app, or nil if the provider column somehow
   # holds an unknown key (the inclusion validation normally prevents that).

@@ -19,6 +19,27 @@ class Console::IntegrationsControllerTest < ActionDispatch::IntegrationTest
     assert_select "form[action=?]", console_oauth_app_preset_path(provider: "mercator")
   end
 
+  test "a role-restricted app is listed only for admins and holders of its role" do
+    role = roles(:acme_admin_role)
+    oauth_apps(:acme_google).update!(client_secret: "synthetic", role: role)
+    member = users(:member_user)
+    post login_url, params: { email: member.email, password: "password123456" }
+    get console_integrations_url
+    assert_select "a[href*='/oauth/google/start']", count: 0
+    assert_select "a[href*='/oauth/slack/start']", count: 1
+
+    principal = Principal.create!(foreign_id: "console-member", name: member.email, kind: "console_user",
+      console_user: member, created_by: member)
+    principal.roles << role
+    get console_integrations_url
+    assert_select "a[href*='/oauth/google/start']", count: 1
+
+    delete logout_url
+    post login_url, params: { email: users(:acme_admin).email, password: "password123456" }
+    get console_integrations_url
+    assert_select "a[href*='/oauth/google/start']", count: 1
+  end
+
   test "redirects to login when not signed in" do
     get console_integrations_url
     assert_redirected_to login_path

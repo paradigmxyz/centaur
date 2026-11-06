@@ -206,6 +206,15 @@ module Api
         assert_response :no_content
       end
 
+      test "DELETE is blocked with 409 while an OAuth app is restricted to the role" do
+        role = roles(:acme_admin_role)
+        oauth_apps(:acme_google).update!(client_secret: "synthetic", role: role)
+        assert_no_difference -> { Role.count } do
+          delete api_v1_role_url(id: role.oid), headers: auth_headers
+        end
+        assert_response :conflict
+      end
+
       test "GET index lists all roles" do
         get api_v1_roles_url, params: {}.to_json, headers: auth_headers
         assert_response :ok

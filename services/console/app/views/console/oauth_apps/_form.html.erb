@@ -70,6 +70,14 @@
           <label class="form-label mb-0" for="oauth_app_always_available">Always available to the connecting user</label>
         </div>
         <p class="form-hint -mt-2">Used automatically on any conversation turn they start, channels included. Off: automatic use covers only their DMs.</p>
+        <div>
+          <label class="form-label" for="oauth_app_role_id">Restrict to role</label>
+          <%= select_tag "oauth_app[role_id]",
+                options_for_select(Role.order(:name).map { |role| [ role.name.presence || role.oid, role.oid ] }, app.role&.oid),
+                include_blank: "Everyone", id: "oauth_app_role_id", class: "form-input #{field_error_class(app, :role)}" %>
+          <%= field_error(app, :role) %>
+          <p class="form-hint">Only admins and users whose principals hold this role see the integration and can connect it.</p>
+        </div>
       </div>
     </section>
 

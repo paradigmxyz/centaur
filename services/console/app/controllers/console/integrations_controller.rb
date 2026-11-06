@@ -3,7 +3,8 @@
 # connect an integration without an operator sharing the link by hand.
 #
 # Deliberately not admin-gated (unlike ConsoleController): the whole point of
-# the well-known consent links is that regular team members click them. Only
+# the well-known consent links is that regular team members click them. A
+# role-restricted app is listed only for admins and holders of its role. Only
 # non-sensitive fields are shown -- slug, provider, description -- never the
 # client id/secret or minted credentials.
 class Console::IntegrationsController < ApplicationController
@@ -11,7 +12,7 @@ class Console::IntegrationsController < ApplicationController
 
   def index
     @oauth_apps = OauthApp.where(enabled: true).order(:slug)
-    @oauth_apps = @oauth_apps.where(shared: false) unless acting_admin?
+    @oauth_apps = @oauth_apps.where(shared: false).available_to(current_user) unless acting_admin?
     @presets = if acting_admin?
       configured = OauthApp.distinct.pluck(:provider)
       Oauth::Providers.registry.values.select do |provider|

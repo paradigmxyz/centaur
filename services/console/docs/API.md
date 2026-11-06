@@ -1010,6 +1010,7 @@ Google and Slack are supported providers in this release. The `provider` field i
 | `allowed_scopes`       | required    | Non-empty array of scope strings the start endpoint requests. A flow's optional `scopes` param must be a subset; omitting it requests all of these. |
 | `enabled`              | optional    | Defaults to `true`. A disabled app rejects new consent flows; existing credentials keep refreshing. |
 | `shared`               | optional    | Defaults to `false`. One admin-connected account with role-granted access. Create-only; changes return `422`. Incompatible with `always_available`. |
+| `role_id`              | optional    | Role OID, or `null` for no restriction (the default). A restricted app is listed on the Integrations page and accepts consent flows only for admins and users whose principals hold the role; it is never listed by `GET /api/v1/sandbox/oauth_apps`. A role with restricted apps cannot be deleted (`409`). |
 
 The `client_secret` is required and write-only: it is accepted on writes but never returned in any response.
 
@@ -1063,7 +1064,7 @@ Returns `201`. The `client_secret` is never echoed back:
 
 `GET /api/v1/sandbox/oauth_apps`
 
-Returns enabled non-shared OAuth apps and the console URLs a sandbox user can open to start consent. Authenticate with the same sandbox entitlement JWT as `GET /api/v1/sandbox/permissions`. The token signature, issuer, audience, and expiry are verified. Proxy and principal claims are not checked because these URLs are not sensitive.
+Returns enabled, non-shared, unrestricted OAuth apps and the console URLs a sandbox user can open to start consent. Authenticate with the same sandbox entitlement JWT as `GET /api/v1/sandbox/permissions`. The token signature, issuer, audience, and expiry are verified. Proxy and principal claims are not checked because these URLs are not sensitive.
 
 ```json
 {
@@ -1341,7 +1342,7 @@ Returns `201`:
 | `GET`    | `/api/v1/roles/:role_id/grants` | [List the grants](#list-by-grantee) attached to the role. |
 | `POST`   | `/api/v1/roles/:id/slack_channel_permissions` | Idempotently create or update one role-owned Slack channel permission without replacing other rows. Omitted flags default to enabled on create and remain unchanged on update. |
 | `PUT`/`PATCH` | `/api/v1/roles/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, `labels`, and `slack_channel_permissions` are mutable on an existing record; `foreign_id` applies only when creating. |
-| `DELETE` | `/api/v1/roles/:id` | Delete. Returns `204`. Cascades: the role's grants and its assignments are removed. |
+| `DELETE` | `/api/v1/roles/:id` | Delete. Returns `204`. Cascades: the role's grants and its assignments are removed. Returns `409` while an OAuth app is restricted to the role. |
 
 ### Role assignments
 

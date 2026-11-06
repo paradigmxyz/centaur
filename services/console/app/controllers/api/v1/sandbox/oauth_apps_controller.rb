@@ -7,7 +7,9 @@ module Api
         before_action :authenticate_sandbox_jwt!
 
         def index
-          apps = OauthApp.where(enabled: true, shared: false).order(:slug, :id)
+          # The caller's principal is not checked here, so role-restricted apps
+          # are never listed.
+          apps = OauthApp.where(enabled: true, shared: false, role_id: nil).order(:slug, :id)
           render json: { data: apps.map { |app| app_payload(app) } }
         end
 

@@ -88,6 +88,10 @@ module Api
         # client_secret is write-only: only assign when supplied, so a partial
         # update leaves the stored secret in place.
         base.delete(:client_secret) if base[:client_secret].blank?
+        # role_id is a role oid; null or blank lifts the restriction.
+        if attrs.key?(:role_id)
+          app.role = attrs[:role_id].present? ? Role.find_by_oid!(attrs[:role_id].to_s) : nil
+        end
 
         app.assign_attributes(base)
         app.save!
@@ -107,6 +111,7 @@ module Api
           enabled: app.enabled,
           always_available: app.always_available,
           shared: app.shared,
+          role_id: app.role&.oid,
           created_at: app.created_at,
           updated_at: app.updated_at
         }

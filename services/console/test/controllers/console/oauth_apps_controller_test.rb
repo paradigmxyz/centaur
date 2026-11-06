@@ -138,6 +138,24 @@ module Console
       refute app.reload.always_available?
     end
 
+    test "PATCH update sets and clears the role restriction" do
+      app = oauth_apps(:acme_google)
+      app.update!(client_secret: "original")
+      role = roles(:acme_admin_role)
+      base_params = {
+        slug: app.slug, provider: "google", client_id: app.client_id, enabled: "1",
+        allowed_scopes: Array(app.allowed_scopes).join("\n")
+      }
+
+      patch console_oauth_app_form_url(app.oid), params: { oauth_app: base_params.merge(role_id: role.oid) }
+      assert_redirected_to console_oauth_app_path(app.oid)
+      assert_equal role, app.reload.role
+
+      patch console_oauth_app_form_url(app.oid), params: { oauth_app: base_params.merge(role_id: "") }
+      assert_redirected_to console_oauth_app_path(app.oid)
+      assert_nil app.reload.role
+    end
+
     test "PATCH update with a blank client_secret keeps the stored value" do
       app = oauth_apps(:acme_google)
       app.update!(client_secret: "original-secret")

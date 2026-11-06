@@ -61,7 +61,8 @@
 ]) %>
 
 <%= def_section.call("Flow Config", [
-  [ "Allowed scopes", Array(@oauth_app.allowed_scopes).join("\n") ]
+  [ "Allowed scopes", Array(@oauth_app.allowed_scopes).join("\n") ],
+  [ "Restricted to role", @oauth_app.role&.name.presence || @oauth_app.role&.oid ]
 ]) %>
 
 <%= def_section.call("Consent Flow", [

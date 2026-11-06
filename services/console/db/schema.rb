@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_11_04_232304) do
+ActiveRecord::Schema[8.1].define(version: 2026_11_06_210526) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -260,8 +260,10 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_04_232304) do
     t.boolean "shared", default: false, null: false
     t.string "slug", null: false
     t.datetime "updated_at", null: false
+    t.bigint "role_id"
     t.index ["created_by_id"], name: "index_oauth_apps_on_created_by_id"
     t.index ["labels"], name: "index_oauth_apps_on_labels", using: :gin
+    t.index ["role_id"], name: "index_oauth_apps_on_role_id"
     t.index ["slug"], name: "index_oauth_apps_on_slug", unique: true
   end
 
@@ -621,6 +623,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_04_232304) do
   add_foreign_key "mcp_oauth_refresh_tokens", "mcp_oauth_clients"
   add_foreign_key "mcp_oauth_refresh_tokens", "principals"
   add_foreign_key "mcp_oauth_refresh_tokens", "users"
+  add_foreign_key "oauth_apps", "roles"
   add_foreign_key "oauth_apps", "users", column: "created_by_id"
   add_foreign_key "oauth_token_secrets", "users", column: "created_by_id"
   add_foreign_key "pg_dsn_secrets", "users", column: "created_by_id"

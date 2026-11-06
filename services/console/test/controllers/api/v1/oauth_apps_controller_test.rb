@@ -31,6 +31,20 @@ module Api
         refute app.always_available?
       end
 
+      test "role_id restricts an app and null lifts the restriction" do
+        role = roles(:acme_admin_role)
+        post api_v1_oauth_apps_url, params: valid_body(role_id: role.oid).to_json, headers: auth_headers
+        assert_response :created
+        assert_equal role.oid, json_body.dig("data", "role_id")
+        app = OauthApp.find_by!(slug: "api-google")
+        assert_equal role, app.role
+
+        patch api_v1_oauth_app_url(app.oid), params: { data: { role_id: nil } }.to_json, headers: auth_headers
+        assert_response :ok
+        assert_nil json_body.dig("data", "role_id")
+        assert_nil app.reload.role
+      end
+
       test "rejects requests without an API key" do
         get api_v1_oauth_apps_url
         assert_response :unauthorized
