@@ -279,6 +279,7 @@ Sandbox entrypoint and wrappers:
 | `CENTAUR_TELEMETRY_CAPTURE_TOOL_TRACES` | `sandbox.telemetry.captureToolTraces`; defaults to `false`. | Includes bounded shell commands and workspace-relative working directories on harness tool spans, independently of transcript capture. Tool names, executables, and status are exported either way. |
 | `DEPLOY_ENV`, `ENVIRONMENT`, `TRACEPARENT` | Deployment env or wrapper-generated. | Runtime environment and trace context. |
 | `CALL_TIMEOUT_SECONDS` | Sandbox env before running `call`. | Curl watchdog for API tool calls. |
+| `UV_COMPILE_BYTECODE` | `sandbox.extraEnv`; unset by default. | Set `1` to compile bytecode when `uvx` builds a tool's environment on that tool's first call in a sandbox. Later calls then import faster, because the image's `PYTHONDONTWRITEBYTECODE=1` otherwise has each call recompile the modules it imports. The first call takes longer, more so under a low CPU limit in `sandbox.resources`, so it pays off when a sandbox calls the same tool several times. It also applies to every other uv install in the sandbox, including the agent's own `uv run --with` and `uvx`. To turn it off, unset it or set `0`; an empty value makes every `uvx` call exit with an error. |
 | `SLACK_CHANNEL`, `SLACK_THREAD_TS` | Sandbox env. | File-upload helper target. |
 
 ## Workflows
