@@ -84,6 +84,29 @@ class ScheduledTaskJobsTest < ActiveJob::TestCase
     assert_equal Time.utc(2026, 8, 19, 12, 5), task.last_run_at
   end
 
+  test "scheduler still advances and other tasks run after a channel task's bot leaves" do
+    scheduled_for = Time.utc(2026, 8, 19, 12)
+    channel_task = ScheduledTask.create!(
+      name: "Channel digest",
+      prompt: "Summarize this channel.",
+      principal: principals(:acme_channel),
+      cron_expression: "0 * * * *"
+    )
+    other_task = create_task(delivery_channel: "U0123456789")
+    channel_task.update_columns(next_run_at: scheduled_for - 1.minute)
+    other_task.update_columns(next_run_at: scheduled_for)
+    slack_bot_channels(:general).update!(active: false)
+
+    ScheduledTaskSchedulerJob.perform_now(scheduled_for)
+
+    assert_enqueued_with(job: ScheduledTaskRunJob, args: [ channel_task.id, (scheduled_for - 1.minute).iso8601 ])
+    assert_enqueued_with(job: ScheduledTaskRunJob, args: [ other_task.id, scheduled_for.iso8601 ])
+    assert_equal Time.utc(2026, 8, 19, 13), channel_task.reload.next_run_at
+
+    channel_task.update!(enabled: false)
+    assert_nil channel_task.reload.next_run_at
+  end
+
   test "runner runs a channel task as the channel and delivers to it" do
     channel = principals(:acme_channel)
     task = ScheduledTask.create!(

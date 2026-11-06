@@ -95,7 +95,7 @@
 
 [Scheduled tasks]
 |Manage recurring work with `centaur-console tasks`, `task`, `create-task`, `update-task`, `delete-task`, or `run-task`. In MCP or direct-message (DM) sessions, tasks belong to the user and deliver to `dm` or an allowed Slack channel ID.
-|In a Slack channel thread, tasks belong to that channel: they run with the channel's permissions, always post to it, and anyone in the channel can manage them.
+|In a Slack channel thread, tasks belong to that channel: they run with the channel's permissions, always post to it (omit `--delivery-channel`), and anyone in the channel can manage them.
 |Schedules are optional five-field cron expressions in Pacific Time.
 |Encode recurrence only in the cron expression; strip cadence phrases like "Each Monday" from the prompt but keep time windows that affect the work.
 |After a mutation, report the task ID, schedule, destination, enabled state, and next run. Do not repeat a successful mutation.

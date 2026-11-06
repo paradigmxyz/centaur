@@ -1474,13 +1474,13 @@ Tasks run one agent prompt and deliver the result to Slack. A task may have a fi
 
 These endpoints use the sandbox entitlement JWT injected by `iron-proxy`. For most sandboxes, every operation requires an active Console user linked to the sandbox principal and is scoped to tasks owned by that user. A task owned by another user returns `404`.
 
-When the sandbox principal is a Slack channel, the endpoints manage that channel's tasks instead. Any Slack user requesting the current turn may list, create, update, delete, or run them; no Console account is required. A turn without a Slack requester, such as a scheduled run, receives `403`. Channel tasks run with the channel principal's permissions and always deliver to the channel, so `data.delivery_channel` is ignored.
+When the sandbox principal is a Slack channel, the endpoints manage that channel's tasks instead. Any Slack user from a workspace the bot is installed in who requests the current turn may list, create, update, delete, or run them; no Console account is required. A turn without such a requester, such as a scheduled run, receives `403`. Channel tasks run with the channel principal's permissions and always deliver to the channel; omit `data.delivery_channel` or pass the channel's ID, since any other value returns `422`.
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
 | `GET` | `/api/v1/sandbox/scheduled_tasks` | List the linked user's tasks. |
 | `GET` | `/api/v1/sandbox/scheduled_tasks/:id` | Read one owned task by `tsk_...` OID. |
-| `POST` | `/api/v1/sandbox/scheduled_tasks` | Create a task from `data.name`, `data.prompt`, `data.delivery_channel`, and optional `data.cron_expression` and `data.enabled`. |
+| `POST` | `/api/v1/sandbox/scheduled_tasks` | Create a task from `data.name`, `data.prompt`, and optional `data.delivery_channel` (default `dm`), `data.cron_expression`, and `data.enabled`. |
 | `PUT`/`PATCH` | `/api/v1/sandbox/scheduled_tasks/:id` | Update any supplied task fields. Set `data.cron_expression` to `null` or an empty string to make the task manual-only. |
 | `DELETE` | `/api/v1/sandbox/scheduled_tasks/:id` | Delete an owned task. Returns `204`. |
 | `POST` | `/api/v1/sandbox/scheduled_tasks/:id/run` | Queue an immediate run. Returns `202`; disabled tasks return `422`. |

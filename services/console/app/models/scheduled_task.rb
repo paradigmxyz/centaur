@@ -65,7 +65,9 @@ class ScheduledTask < ApplicationRecord
   validates :timezone, presence: true
   validate :cron_schedule_is_valid
   validate :owner_is_valid
-  validate :delivery_destination_is_available
+  # Runs re-check the destination (see #api_input), so a destination that
+  # later becomes unavailable never blocks disabling or scheduling the task.
+  validate :delivery_destination_is_available, if: :delivery_destination_changed?
 
   def self.cron_for(preset, custom_expression = nil, custom_days: [], custom_time: nil)
     return if preset.to_s == "manual"
@@ -216,10 +218,15 @@ class ScheduledTask < ApplicationRecord
 
   def delivery_destination_available?
     if principal
-      SlackBotChannel.active.exists?(channel_id: delivery_channel)
+      SlackBotChannel.active.for_team(principal.slack_team_id).exists?(channel_id: delivery_channel)
     else
       SlackDeliveryPolicy.new(author).allowed?(delivery_channel)
     end
+  end
+
+  def delivery_destination_changed?
+    new_record? || will_save_change_to_delivery_channel? ||
+      will_save_change_to_author_id? || will_save_change_to_principal_id?
   end
 
   def owner_is_valid

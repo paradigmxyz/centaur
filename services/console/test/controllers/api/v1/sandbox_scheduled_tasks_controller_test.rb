@@ -80,8 +80,7 @@ class Api::V1::SandboxScheduledTasksControllerTest < ActionDispatch::Integration
            params: {
              data: {
                name: "One-off briefing",
-               prompt: "Summarize the important updates.",
-               delivery_channel: "dm"
+               prompt: "Summarize the important updates."
              }
            },
            headers: headers,
@@ -89,6 +88,7 @@ class Api::V1::SandboxScheduledTasksControllerTest < ActionDispatch::Integration
     end
 
     assert_response :created
+    assert_equal "U0123456789", json_body.dig("data", "delivery_channel")
     assert_nil json_body.dig("data", "cron_expression")
     assert_nil json_body.dig("data", "next_run_at")
     assert_equal "Manual only", json_body.dig("data", "schedule_label")
@@ -229,7 +229,6 @@ class Api::V1::SandboxScheduledTasksControllerTest < ActionDispatch::Integration
              data: {
                name: "Channel digest",
                prompt: "Summarize this channel.",
-               delivery_channel: "dm",
                cron_expression: "0 9 * * 1"
              }
            },
@@ -267,6 +266,35 @@ class Api::V1::SandboxScheduledTasksControllerTest < ActionDispatch::Integration
     assert_not ScheduledTask.exists?(task.id)
   end
 
+  test "channel tasks refuse a different delivery destination" do
+    channel_proxy = proxies(:acme_proxy)
+    channel_proxy.update!(requester_principal: slack_user_principal("U0123456789"))
+
+    assert_no_difference("ScheduledTask.count") do
+      with_token(channel_proxy) do |headers|
+        post "/api/v1/sandbox/scheduled_tasks",
+             params: { data: { name: "DM me", prompt: "Summarize this channel.", delivery_channel: "dm" } },
+             headers: headers,
+             as: :json
+      end
+    end
+
+    assert_response :unprocessable_entity
+    assert_equal "tasks created in a Slack channel thread always deliver to that channel",
+                 json_body.dig("error", "message")
+  end
+
+  test "Slack users outside the bot's workspaces cannot manage channel tasks" do
+    channel_proxy = proxies(:acme_proxy)
+    channel_proxy.update!(requester_principal: slack_user_principal("U0123456789", team_id: "T0EXTERNAL1"))
+
+    with_token(channel_proxy) do |headers|
+      get "/api/v1/sandbox/scheduled_tasks", headers: headers
+    end
+
+    assert_response :forbidden
+  end
+
   test "channel session without a Slack requester cannot manage channel tasks" do
     with_token(proxies(:acme_proxy)) do |headers|
       post "/api/v1/sandbox/scheduled_tasks",
@@ -301,13 +329,13 @@ class Api::V1::SandboxScheduledTasksControllerTest < ActionDispatch::Integration
     )
   end
 
-  def slack_user_principal(slack_user_id)
+  def slack_user_principal(slack_user_id, team_id: "T0123456789")
     Principal.create!(
-      foreign_id: "slack-user-t0123456789-#{slack_user_id.downcase}",
+      foreign_id: "slack-user-#{team_id.downcase}-#{slack_user_id.downcase}",
       name: "Slack User #{slack_user_id}",
       kind: :slack_dm,
       slack_user_id: slack_user_id,
-      slack_team_id: "T0123456789",
+      slack_team_id: team_id,
       labels: {},
       created_by: @user
     )

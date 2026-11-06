@@ -117,10 +117,10 @@ def create_scheduled_task(
         "--cron",
         help="Optional five-field cron expression in Pacific Time",
     ),
-    delivery_channel: str = typer.Option(
-        "dm",
+    delivery_channel: str | None = typer.Option(
+        None,
         "--delivery-channel",
-        help="dm or a permitted Slack channel ID; ignored in a Slack channel thread",
+        help="dm (default) or a permitted Slack channel ID; omit in a Slack channel thread",
     ),
     enabled: bool = typer.Option(True, "--enabled/--disabled"),
     url: str | None = typer.Option(None, "--url", help="centaur-console base URL"),
@@ -156,7 +156,7 @@ def update_scheduled_task(
     delivery_channel: str | None = typer.Option(
         None,
         "--delivery-channel",
-        help="dm or a permitted Slack channel ID; ignored in a Slack channel thread",
+        help="dm or a permitted Slack channel ID; channel tasks keep their channel",
     ),
     enabled: bool | None = typer.Option(None, "--enabled/--disabled"),
     url: str | None = typer.Option(None, "--url", help="centaur-console base URL"),

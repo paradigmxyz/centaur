@@ -2,6 +2,15 @@ module Api
   module V1
     module Sandbox
       class ScheduledTasksController < Api::SandboxBaseController
+        class ChannelDeliveryMismatch < StandardError; end
+
+        rescue_from ChannelDeliveryMismatch do
+          render_error(
+            status: :unprocessable_entity,
+            message: "tasks created in a Slack channel thread always deliver to that channel"
+          )
+        end
+
         before_action :require_task_owner!
         before_action :disable_caching
         after_action :log_channel_task_request, if: :channel_principal
@@ -70,9 +79,13 @@ module Api
           principal if principal&.kind == "slack_channel"
         end
 
+        # Only a Slack user from a workspace the bot is installed in may act
+        # for a channel, never a Slack Connect guest.
         def channel_requester
           requester = current_proxy.requester_principal
-          requester if requester&.kind == "slack_dm" && requester.slack_user_id.present?
+          return unless requester&.kind == "slack_dm" && requester.slack_user_id.present?
+
+          requester if requester.slack_team_id.present? && SlackBotChannel.exists?(team_id: requester.slack_team_id)
         end
 
         def log_channel_task_request
@@ -106,13 +119,22 @@ module Api
             :cron_expression,
             :enabled
           )
-          # Channel tasks always deliver to their channel.
           if channel_principal
-            attributes.delete(:delivery_channel)
-          elsif attributes[:delivery_channel].to_s.strip.casecmp?("dm")
+            attributes[:delivery_channel] = channel_delivery(attributes[:delivery_channel])
+          elsif attributes[:delivery_channel].to_s.strip.casecmp?("dm") ||
+              (action_name == "create" && !attributes.key?(:delivery_channel))
             attributes[:delivery_channel] = SlackDeliveryPolicy.new(task_author).direct_message_user_id
           end
           attributes
+        end
+
+        # Channel tasks always deliver to their channel; refuse any other
+        # destination rather than silently redirecting the output.
+        def channel_delivery(requested)
+          channel_id = channel_principal.slack_channel_id
+          return channel_id if requested.blank? || requested.to_s.strip.casecmp?(channel_id)
+
+          raise ChannelDeliveryMismatch
         end
 
         def task_payload(task)
