@@ -84,10 +84,19 @@ module Console
       app.shared = app_params[:shared] == "1" if app.new_record?
       app.always_available = app_params[:always_available] == "1"
       app.allowed_scopes = line_list(app_params[:allowed_scopes])
+      app.provider_config = provider_config_params(app.provider)
       app.labels = label_params
 
       secret = app_params[:client_secret]
       app.client_secret = secret if secret.present?
+    end
+
+    # Only the custom provider takes a config; blank fields are dropped so the
+    # model reports them as missing.
+    def provider_config_params(provider)
+      return {} unless provider == Oauth::Providers::Custom::KEY
+
+      app_params.fetch(:provider_config, ActionController::Parameters.new).permit(*Oauth::Providers::Custom::CONFIG_KEYS).to_h.transform_values(&:strip).compact_blank
     end
 
     def app_params
