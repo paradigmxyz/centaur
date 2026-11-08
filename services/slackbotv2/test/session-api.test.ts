@@ -626,6 +626,45 @@ describe('Slack attachment serialization', () => {
   })
 })
 
+describe('forwardToSessionApi generative UI note', () => {
+  const cardNotes = (requests: RecordedRequest[]) =>
+    lineContent(executeLine(requests)).filter(part =>
+      textPartIncludes(part, '# Slack card (generative UI)')
+    )
+
+  test('adds the card note to Slack execute turns when the flag is on', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(
+      { ...options(fetchFn), generativeUi: { enabled: true, limits: { tables: 1, charts: 2 } } },
+      forwardInput(apiMessage('summarize the close'))
+    )
+    const notes = cardNotes(requests)
+    expect(notes).toHaveLength(1)
+    const text = String(notes[0]!.text)
+    expect(text).toContain('tagged json-render')
+    expect(text).toContain('- Table:')
+    expect(text).toContain('tables: 1, charts: 2')
+    // The note sits right before the user's own text.
+    const content = lineContent(executeLine(requests))
+    const noteIndex = content.findIndex(part => textPartIncludes(part, '# Slack card (generative UI)'))
+    expect(noteIndex).toBe(content.length - 2)
+    expect(textPartIncludes(content[content.length - 1]!, 'summarize the close')).toBe(true)
+  })
+
+  test('sends no note when the flag is off or the user asked for plain text only', async () => {
+    const off = fakeApi()
+    await forwardToSessionApi(options(off.fetchFn), forwardInput(apiMessage('summarize the close')))
+    expect(cardNotes(off.requests)).toHaveLength(0)
+
+    const plain = fakeApi()
+    await forwardToSessionApi(
+      { ...options(plain.fetchFn), generativeUi: { enabled: true } },
+      forwardInput(apiMessage('summarize the close in plain text only'))
+    )
+    expect(cardNotes(plain.requests)).toHaveLength(0)
+  })
+})
+
 describe('forwardToSessionApi overrides', () => {
   test('includes provider override on the execute input line', async () => {
     const { fetchFn, requests } = fakeApi()

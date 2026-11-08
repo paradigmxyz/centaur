@@ -44,6 +44,7 @@ import {
 import { CitationTextFilter, stripUnresolvedCitations } from './citation-text'
 import { observeSeconds, slackbotMetrics } from './metrics'
 import {
+  isPlainTextOnlyRequest,
   renderSlackDisplayText,
   slackMessagePromptText,
   slackRichTextMentionsUser
@@ -3729,15 +3730,6 @@ function slackSafeChatSdkChunk(chunk: ChatSDKStreamChunk): ChatSDKStreamChunk {
     ...safeChunk,
     ...(details ? { details: truncateSlackTaskField(details) } : {})
   }
-}
-
-function isPlainTextOnlyRequest(text: string): boolean {
-  const normalized = text.toLowerCase()
-  return (
-    /\bplain\s+text\s+only\b/.test(normalized)
-    || /\bno\s+interactive\s+blocks?\b/.test(normalized)
-    || /\bno\s+dashboards?\b/.test(normalized)
-  )
 }
 
 function truncateSlackTaskField(value: string): string {

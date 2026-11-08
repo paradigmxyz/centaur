@@ -3,7 +3,12 @@ import type { RustSessionStreamEvent } from '@centaur/harness-events'
 import { isRetryableCodexErrorNotification } from '@centaur/rendering'
 import type { Attachment, LinkPreview, Message } from 'chat'
 import { isHarnessEnabled } from './overrides'
-import { renderSlackDisplayText, slackMessagePromptText } from './slack-display-text'
+import { generativeUiTurnNote } from './generative-ui'
+import {
+  isPlainTextOnlyRequest,
+  renderSlackDisplayText,
+  slackMessagePromptText
+} from './slack-display-text'
 import type {
   ForwardSessionInput,
   JsonObject,
@@ -1748,10 +1753,25 @@ function toCodexInputLineWithStaged(
         requesterIdentity,
         contextMessages,
         contextPreamble,
-        proactiveContext
+        proactiveContext,
+        generativeUiTurnNoteFor(options, message)
       )
     }
   })
+}
+
+/**
+ * The generative UI note for this turn, when the deployment renders cards
+ * and the user did not opt out of rich output. Only Slack execute turns
+ * carry it, so the instruction never reaches another chat surface.
+ */
+function generativeUiTurnNoteFor(
+  options: SlackbotV2Options,
+  message: SlackbotV2ApiMessage
+): string | undefined {
+  if (options.generativeUi?.enabled !== true) return undefined
+  if (isPlainTextOnlyRequest(slackMessagePromptText(message))) return undefined
+  return generativeUiTurnNote(options.generativeUi.limits)
 }
 
 function stagedAttachmentInputLines(
@@ -1850,7 +1870,8 @@ function codexInputContent(
   requesterIdentity?: RequesterIdentity,
   contextMessages?: SlackbotV2ApiMessage[],
   contextPreamble?: string,
-  proactiveContext?: string
+  proactiveContext?: string,
+  generativeUiNote?: string
 ): JsonValue[] {
   const content: JsonValue[] = []
   const slackSessionContext = slackUploadSessionContext(message.threadId)
@@ -1882,6 +1903,9 @@ function codexInputContent(
   }
   if (proactiveContext?.trim()) {
     content.push({ type: 'text', text: proactiveContext })
+  }
+  if (generativeUiNote) {
+    content.push({ type: 'text', text: generativeUiNote })
   }
   const promptText = slackMessagePromptText(message)
   if (promptText.trim()) {

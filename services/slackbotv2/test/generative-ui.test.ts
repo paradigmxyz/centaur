@@ -249,6 +249,27 @@ describe('stripGenerativeUiBlocks', () => {
   })
 })
 
+describe('generativeUiTurnNote', () => {
+  test('carries the fenced-block contract, the catalog components and the structural rules', async () => {
+    const { generativeUiTurnNote, generativeUiComponentList } = await import('../src/generative-ui')
+    const note = generativeUiTurnNote()
+    for (const name of generativeUiCatalog.componentNames) {
+      expect(note).toContain(`- ${name}:`)
+    }
+    expect(note).not.toContain('- Button:')
+    expect(note).toContain('tagged json-render')
+    expect(note).toContain('"root"')
+    expect(note).toContain('tables: 1, charts: 2')
+    expect(note).toContain('plain text only')
+    expect(note).toContain('Field elements MUST be children of a Fields element')
+    expect(note).not.toContain('$bindState')
+    expect(generativeUiComponentList()).toStartWith('AVAILABLE COMPONENTS (11):')
+    expect(generativeUiTurnNote({ tables: 2 })).toContain('tables: 2.')
+    // It rides on every turn, so it has to stay compact.
+    expect(note.length).toBeLessThan(4_000)
+  })
+})
+
 describe('GENERATIVE_UI.md', () => {
   test('matches the generator output', async () => {
     const { renderGenerativeUiDoc } = await import('../src/generative-ui-doc')

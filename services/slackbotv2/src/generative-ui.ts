@@ -78,6 +78,52 @@ function limitsRule(limits: GenerativeUiLimits): string {
   return `Per-message limits (a spec beyond them is rejected and shown as code): ${described}.`
 }
 
+const COMPONENTS_HEADING = /^AVAILABLE COMPONENTS \(\d+\):$/m
+
+/**
+ * The component list of the generated catalog prompt: from its
+ * "AVAILABLE COMPONENTS" heading to the next blank line.
+ */
+export function generativeUiComponentList(): string {
+  const prompt = generativeUiCatalog.prompt()
+  const heading = COMPONENTS_HEADING.exec(prompt)
+  if (!heading) throw new Error('catalog prompt has no AVAILABLE COMPONENTS section')
+  // The heading is followed by one blank line, then one line per component.
+  const start = heading.index
+  const listStart = start + heading[0].length + 2
+  const end = prompt.indexOf('\n\n', listStart)
+  return prompt.slice(start, end === -1 ? undefined : end).trimEnd()
+}
+
+/**
+ * The note slackbotv2 prepends to a Slack user turn when the flag is on, so
+ * the agent learns that a card is available without any persona or system
+ * prompt change. Other ingresses never send it, so no other surface sees
+ * the instruction. Kept short because it rides on every execute turn: the
+ * component list and structural rules come from the catalog, the rest is the
+ * fenced-block contract.
+ */
+export function generativeUiTurnNote(limits: GenerativeUiLimits = DEFAULT_GENERATIVE_UI_LIMITS): string {
+  const rules = (generativeUiCatalog.schema.defaultRules ?? []).filter(
+    rule => !/\$state|\$bindState/.test(rule)
+  )
+  return [
+    '# Slack card (generative UI)',
+    '',
+    'This Slack surface can render one native card next to your markdown answer.',
+    'Use it only when the data has a shape a component serves better than prose: row data (Table), a trend or a share of a whole (Chart), or a few key figures (Fields). Plain answers, questions and code need no card.',
+    'Do not use a card when the user asked for plain text only, no interactive blocks or no dashboards.',
+    'To add a card, put ONE fenced code block tagged json-render anywhere in your final answer. Its body is a single JSON object: {"root": "<key>", "elements": {"<key>": {"type": "<Component>", "props": {...}, "children": ["<key>", ...]}, ...}}. The block is removed from the message and the card is posted right after your prose. Everything outside the fence stays markdown.',
+    `An invalid spec is shown as code instead of a card. ${limitsRule(limits)} Buttons that trigger actions are not available; use LinkButton with a URL.`,
+    '',
+    generativeUiComponentList(),
+    '',
+    'Rules:',
+    ...rules.map(rule => `- ${rule}`),
+    '---'
+  ].join('\n')
+}
+
 /**
  * Parses `SLACKBOTV2_GENERATIVE_UI_LIMITS`: a JSON object of positive integer
  * limits keyed by the `CardLimits` fields. Unset keeps the defaults; anything
