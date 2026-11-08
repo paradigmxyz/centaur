@@ -14,8 +14,9 @@ app = typer.Typer(
     name="edgar",
     help=(
         "SEC EDGAR: company lookup, filings, full-text search, filing documents, and XBRL "
-        f"financial data. No API key needed; set {USER_AGENT_ENV} to override the "
-        "User-Agent sent to SEC."
+        "financial data. For financial numbers prefer `facts`/`frame` (structured XBRL "
+        "JSON) over reading documents with `get`. No API key needed; set "
+        f"{USER_AGENT_ENV} to override the User-Agent sent to SEC."
     ),
     no_args_is_help=True,
 )
@@ -159,7 +160,7 @@ def get(
         None, "--output", "-o", help="Write the full text to this file instead of stdout."
     ),
 ) -> None:
-    """Fetch a filing document as text."""
+    """Fetch a filing document as text (narrative only; use `facts` for numbers)."""
     try:
         with _client() as client:
             if output:

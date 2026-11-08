@@ -4,6 +4,10 @@ EDGAR needs no API key, but SEC rejects requests that lack a descriptive
 User-Agent with contact details, and asks clients to stay at or below 10
 requests per second. See https://www.sec.gov/os/accessing-edgar-data.
 
+Everything except document bodies comes from SEC's JSON endpoints. Prefer the
+XBRL JSON (`facts`, `frame`) for financial numbers; fetch and strip filing
+HTML only when the narrative text is needed.
+
 Endpoints:
 - https://www.sec.gov/files/company_tickers.json (ticker -> CIK)
 - https://data.sec.gov/submissions/CIK##########.json (filing history)
@@ -17,11 +21,12 @@ from __future__ import annotations
 import os
 import re
 import time
+import warnings
 from datetime import date
-from html.parser import HTMLParser
 from typing import Any
 
 import httpx
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 
 DEFAULT_USER_AGENT = "Centaur EDGAR tool admin@example.com"
 USER_AGENT_ENV = "EDGAR_USER_AGENT"
@@ -64,67 +69,31 @@ def _archive_url(cik: int, accession: str, filename: str = "") -> str:
     return f"{ARCHIVES_URL}/{cik}/{folder}/{filename}"
 
 
-class _TextExtractor(HTMLParser):
-    """Convert filing HTML to readable text without extra dependencies."""
-
-    _SKIP = frozenset({"script", "style", "head", "ix:header"})
-    _BLOCK = frozenset(
-        {
-            "p",
-            "div",
-            "br",
-            "tr",
-            "li",
-            "table",
-            "h1",
-            "h2",
-            "h3",
-            "h4",
-            "h5",
-            "h6",
-            "title",
-        }
-    )
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self._parts: list[str] = []
-        self._skip_depth = 0
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in self._SKIP:
-            self._skip_depth += 1
-        elif tag in self._BLOCK:
-            self._parts.append("\n")
-        elif tag in {"td", "th"}:
-            self._parts.append(" | ")
-
-    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in self._BLOCK:
-            self._parts.append("\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in self._SKIP:
-            self._skip_depth = max(0, self._skip_depth - 1)
-        elif tag in self._BLOCK:
-            self._parts.append("\n")
-
-    def handle_data(self, data: str) -> None:
-        if not self._skip_depth:
-            self._parts.append(data)
-
-    def text(self) -> str:
-        raw = "".join(self._parts).replace("\xa0", " ")
-        lines = (re.sub(r"[ \t\r\f\v]+", " ", line).strip(" |") for line in raw.split("\n"))
-        return re.sub(r"\n{3,}", "\n\n", "\n".join(line.strip() for line in lines)).strip()
+_SKIP_TAGS = ["script", "style", "head", "ix:header"]
+_BLOCK_TAGS = ["p", "div", "br", "tr", "li", "table", "h1", "h2", "h3", "h4", "h5", "h6"]
 
 
 def html_to_text(html: str) -> str:
-    """Return readable text from an EDGAR HTML document."""
-    parser = _TextExtractor()
-    parser.feed(html)
-    parser.close()
-    return parser.text()
+    """Return readable text from an EDGAR HTML or inline-XBRL document."""
+    with warnings.catch_warnings():
+        # Inline XBRL filings are XHTML; the lenient HTML parser is what we want.
+        warnings.simplefilter("ignore", XMLParsedAsHTMLWarning)
+        soup = BeautifulSoup(html, "lxml")
+    for tag in soup.find_all(_SKIP_TAGS):
+        tag.decompose()
+    for row in soup.find_all("tr"):
+        cells = (cell.get_text(" ", strip=True) for cell in row.find_all(["td", "th"]))
+        line = " | ".join(cell for cell in cells if cell)
+        # Financial tables split "$", "%", and ")" into their own cells.
+        line = re.sub(r"\$ \| ", "$", line)
+        line = re.sub(r" \| (%|\))", r"\1", line)
+        row.replace_with(f"\n{line}\n")
+    for block in soup.find_all(_BLOCK_TAGS):
+        block.insert_before("\n")
+        block.insert_after("\n")
+    raw = soup.get_text().replace("\xa0", " ")
+    lines = (re.sub(r"[ \t\r\f\v]+", " ", line).strip(" |") for line in raw.split("\n"))
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(line.strip() for line in lines)).strip()
 
 
 class EdgarClient:

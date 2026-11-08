@@ -260,3 +260,11 @@ def test_normalize_accession():
     assert normalize_accession("0000320193-24-000123") == "0000320193-24-000123"
     with pytest.raises(ValueError):
         normalize_accession("123")
+
+
+def test_html_to_text_compacts_financial_table_rows():
+    html = (
+        "<table><tr><td>Total net sales</td><td>$</td><td>391,035</td><td></td>"
+        "<td>(3</td><td>)</td><td>%</td></tr></table>"
+    )
+    assert html_to_text(html) == "Total net sales | $391,035 | (3)%"
