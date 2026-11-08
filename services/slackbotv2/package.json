@@ -14,16 +14,19 @@
     "@centaur/rendering": "workspace:*",
     "@chat-adapter/slack": "4.44.0",
     "@chat-adapter/state-pg": "4.44.0",
+    "@json-render/chat": "0.22.0",
+    "@json-render/core": "0.22.0",
     "chat": "4.44.0",
     "hono": "^4.13.14",
-    "pg": "^8.23.1"
+    "pg": "^8.23.1",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@chat-adapter/state-memory": "4.44.0",
     "@slack/web-api": "^8.2.0",
-    "@types/pg": "^8.23.1",
     "@types/bun": "^1.4.4",
     "@types/node": "^26.6.5",
+    "@types/pg": "^8.23.1",
     "@typescript/native-preview": "^7.0.0-dev.20260707.2",
     "emulate": "^0.12.3",
     "typescript": "^7.0.2"

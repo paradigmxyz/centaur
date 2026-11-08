@@ -249,6 +249,11 @@ export const slackbotMetrics = {
     labelNames: ['mode', 'outcome'],
     name: 'slackbotv2_forward_messages_total'
   }),
+  generativeUiCards: counter({
+    help: 'json-render cards found in Slack final answers, by outcome (rendered, or why the block stayed as code).',
+    labelNames: ['outcome'],
+    name: 'slackbotv2_generative_ui_cards_total'
+  }),
   handoffRetries: counter({
     help: 'In-process Slack handoff retries after retryable session API failures.',
     labelNames: ['outcome'],

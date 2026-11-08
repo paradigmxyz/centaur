@@ -26,7 +26,7 @@ import {
   type SlackbotV2SessionMessage
 } from '../src/index'
 import { clearRequesterIdentityCacheForTests } from '../src/session-api'
-import { slackbotMetrics } from '../src/metrics'
+import { resetSlackbotMetricsForTests, slackbotMetrics } from '../src/metrics'
 import type { ProactivityRules } from '../src/proactivity-rules'
 import { createOpenAiMessageOverridesStrategy } from '../src/message-overrides-strategy'
 import { modelDisplayName } from '../src/response-context'
@@ -5376,6 +5376,227 @@ describe('proactive replies', () => {
     await reply('and after that?', threadTs)
     expect(calls).toHaveLength(3)
     expect(calls[2]!.message.text).toBe('and after that?')
+  })
+})
+
+describe('generative UI cards', () => {
+  const CARD_SPEC = {
+    root: 'card',
+    elements: {
+      card: { type: 'Card', props: { title: 'GENUI_CARD_TITLE' }, children: ['kpis', 'venues'] },
+      kpis: { type: 'Fields', props: {}, children: ['total'] },
+      total: { type: 'Field', props: { label: 'Total paid', value: 31150 }, children: [] },
+      venues: {
+        type: 'Table',
+        props: { headers: ['Venue', 'USD'], rows: [['Ethena', 12400], ['Maple', 9850]] },
+        children: []
+      }
+    }
+  }
+  const TWO_TABLES_SPEC = {
+    root: 'card',
+    elements: {
+      card: { type: 'Card', props: { title: 'GENUI_INVALID' }, children: ['t1', 't2'] },
+      t1: { type: 'Table', props: { headers: ['a'], rows: [['1']] }, children: [] },
+      t2: { type: 'Table', props: { headers: ['a'], rows: [['1']] }, children: [] }
+    }
+  }
+  const PROSE_BEFORE = 'GENUI_PROSE_BEFORE: all three venues paid on time.'
+  const PROSE_AFTER = 'GENUI_PROSE_AFTER: ledger updated.'
+
+  function answerWithBlock(spec: unknown): string {
+    return `${PROSE_BEFORE}\n\n\`\`\`json-render\n${JSON.stringify(spec, null, 2)}\n\`\`\`\n\n${PROSE_AFTER}`
+  }
+
+  async function runFinalAnswer(
+    prompt: string,
+    answer: string,
+    deltas: string[] = [answer],
+    options: { withTask?: boolean } = {}
+  ): Promise<{ logs: CapturedLog[]; parentTs: string }> {
+    codexApi.autoRespond = false
+    const parent = await postUserMessage('Context before a generative UI answer.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> ${prompt}`, { threadTs: parent.ts })
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+    const key = threadKey(parent.ts)
+    if (options.withTask) {
+      codexApi.emitOutputLine(key, JSON.stringify({
+        type: 'item.completed',
+        item: { id: 'cmd-genui', type: 'commandExecution', command: 'true', status: 'completed', aggregatedOutput: 'done' }
+      }))
+    }
+    codexApi.emitOutputLine(key, JSON.stringify({
+      type: 'item.started',
+      item: { id: 'answer-genui', type: 'agentMessage', text: '', phase: 'final_answer' }
+    }))
+    for (const delta of deltas) {
+      codexApi.emitOutputLine(key, JSON.stringify({
+        type: 'item.agentMessage.delta',
+        itemId: 'answer-genui',
+        delta
+      }))
+    }
+    codexApi.emitOutputLine(key, JSON.stringify({
+      type: 'item.completed',
+      item: { id: 'answer-genui', type: 'agentMessage', phase: 'final_answer', text: answer }
+    }))
+    codexApi.emitSessionEvent(key, 'session.execution_completed', {
+      execution_id: 'exe-genui',
+      status: 'completed',
+      result_text: answer
+    })
+    await mention.finished()
+    return { logs: capturedLogs, parentTs: parent.ts }
+  }
+
+  let capturedLogs: CapturedLog[] = []
+
+  async function threadMessages(threadTs: string): Promise<Array<Record<string, unknown>>> {
+    const response = await slack.conversations.replies({ channel: CHANNEL_ID, ts: threadTs, limit: 20 })
+    return (response.messages ?? []) as Array<Record<string, unknown>>
+  }
+
+  /** Messages posted as Block Kit cards: a header block plus Slack's native table block. */
+  function cardMessages(messages: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+    return messages.filter(message => {
+      if (!Array.isArray(message.blocks)) return false
+      const types = (message.blocks as Array<Record<string, unknown>>).map(block => block.type)
+      return types.includes('header') && (types.includes('data_table') || types.includes('table'))
+    })
+  }
+
+  function metricValue(outcome: string): number {
+    const pattern = new RegExp(
+      `^slackbotv2_generative_ui_cards_total\\{outcome="${outcome}"\\} (\\d+)$`,
+      'm'
+    )
+    const match = pattern.exec(slackbotMetrics.expose())
+    return match ? Number(match[1]) : 0
+  }
+
+  function streamedMarkdown(): string {
+    const transcripts = slackStreamTranscripts(slackApi.calls)
+    expect(transcripts).toHaveLength(1)
+    return transcripts[0]!.chunks
+      .filter(chunk => chunk.type === 'markdown_text')
+      .map(chunk => chunk.text)
+      .join('')
+  }
+
+  beforeEach(() => {
+    resetSlackbotMetricsForTests()
+    capturedLogs = []
+  })
+
+  it('streams the prose without the block and posts the card as a second message', async () => {
+    bot = createTestBot({ generativeUi: { enabled: true }, logger: captureLogger(capturedLogs) })
+    const answer = answerWithBlock(CARD_SPEC)
+    // Split so the fence and the JSON arrive across several deltas.
+    const cut = answer.indexOf('json-render') + 5
+    const { parentTs, logs } = await runFinalAnswer('summarize the close', answer, [
+      answer.slice(0, cut),
+      answer.slice(cut, cut + 40),
+      answer.slice(cut + 40)
+    ])
+
+    const markdown = streamedMarkdown()
+    expect(markdown).toContain(PROSE_BEFORE)
+    expect(markdown).toContain(PROSE_AFTER)
+    expect(markdown).not.toContain('json-render')
+    expect(markdown).not.toContain('GENUI_CARD_TITLE')
+
+    const cards = cardMessages(await threadMessages(parentTs))
+    expect(cards).toHaveLength(1)
+    const blocks = cards[0]!.blocks as Array<Record<string, unknown>>
+    expect(JSON.stringify(blocks)).toContain('GENUI_CARD_TITLE')
+    expect(JSON.stringify(blocks)).toContain('Ethena')
+    expect(slackApi.calls.filter(call => call.method === 'chat.postMessage')).toHaveLength(0)
+    expect(metricValue('rendered')).toBe(1)
+    expect(hasLog(logs, 'slackbotv2_generative_ui_card_posted')).toBe(true)
+    expect(hasLog(logs, 'slackbotv2_generative_ui_card_rejected')).toBe(false)
+  })
+
+  it('posts a rejected spec as a code block, logs the issues and counts the failure', async () => {
+    bot = createTestBot({ generativeUi: { enabled: true }, logger: captureLogger(capturedLogs) })
+    const { parentTs, logs } = await runFinalAnswer('two tables please', answerWithBlock(TWO_TABLES_SPEC))
+
+    const markdown = streamedMarkdown()
+    expect(markdown).toContain(PROSE_BEFORE)
+    expect(markdown).not.toContain('GENUI_INVALID')
+    expect(cardMessages(await threadMessages(parentTs))).toHaveLength(0)
+    const fallbackPosts = slackApi.calls.filter(call => call.method === 'chat.postMessage')
+    expect(fallbackPosts).toHaveLength(1)
+    const posted = stringField(fallbackPosts[0]!.body.markdown_text)
+    expect(posted).toStartWith('```json\n')
+    expect(posted).toContain('GENUI_INVALID')
+    expect(posted).toEndWith('\n```')
+    expect(metricValue('invalid_spec')).toBe(1)
+    expect(metricValue('rendered')).toBe(0)
+    const rejected = logData(logs, 'slackbotv2_generative_ui_card_rejected')
+    expect(rejected).toEqual(expect.objectContaining({
+      reason: 'invalid_spec',
+      issues: ['at most 1 Table per message']
+    }))
+    expect(logs.find(log => log.event === 'slackbotv2_generative_ui_card_rejected')?.level).toBe('warn')
+    expect(JSON.stringify(rejected)).not.toContain(PROSE_BEFORE)
+  })
+
+  it('renders the block as ordinary code when the flag is off', async () => {
+    bot = createTestBot({ logger: captureLogger(capturedLogs) })
+    const answer = answerWithBlock(CARD_SPEC)
+    const { parentTs, logs } = await runFinalAnswer('summarize the close', answer)
+
+    expect(streamedMarkdown()).toBe(answer)
+    expect(cardMessages(await threadMessages(parentTs))).toHaveLength(0)
+    expect(slackApi.calls.filter(call => call.method === 'chat.postMessage')).toHaveLength(0)
+    expect(metricValue('rendered')).toBe(0)
+    expect(logs.some(log => log.event.startsWith('slackbotv2_generative_ui'))).toBe(false)
+  })
+
+  it('renders no card when the user asked for plain text only', async () => {
+    bot = createTestBot({ generativeUi: { enabled: true }, logger: captureLogger(capturedLogs) })
+    const answer = answerWithBlock(CARD_SPEC)
+    const { parentTs } = await runFinalAnswer('reply in plain text only', answer)
+
+    const messages = await threadMessages(parentTs)
+    expect(cardMessages(messages)).toHaveLength(0)
+    const replies = messages.map(message => String(message.text ?? ''))
+    expect(replies.some(text => text.includes('json-render') && text.includes('GENUI_CARD_TITLE'))).toBe(true)
+    expect(metricValue('rendered')).toBe(0)
+  })
+
+  it('delivers the card from the durable fallback when the live stream breaks', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({
+      generativeUi: { enabled: true },
+      logger: captureLogger(capturedLogs),
+      state: sharedState
+    })
+    // Slack rejects every stop as too long, so the streamed message is
+    // replaced with the durable final answer and the card follows it.
+    slackApi.failStreamStopsLongerThan(10)
+    const answer = answerWithBlock(CARD_SPEC)
+    const { parentTs, logs } = await runFinalAnswer('summarize the close', answer)
+
+    expect(hasLog(logs, 'slackbotv2_render_fallback_complete')).toBe(true)
+    expect(slackApi.calls.filter(call => call.method === 'chat.postMessage')).toHaveLength(0)
+    const replacements = slackApi.calls.filter(call => call.method === 'chat.update')
+    expect(replacements).toHaveLength(1)
+    const posted = stringField(replacements[0]!.body.markdown_text)
+    expect(posted).toBe(`${PROSE_BEFORE}\n\n${PROSE_AFTER}`)
+    const texts = await threadTexts(parentTs)
+    expect(texts.some(text => text.includes(BROKEN_STREAM_TEXT))).toBe(false)
+    expect(texts.filter(text => text.includes('json-render'))).toHaveLength(0)
+    const cards = cardMessages(await threadMessages(parentTs))
+    expect(cards).toHaveLength(1)
+    expect(JSON.stringify(cards[0]!.blocks)).toContain('GENUI_CARD_TITLE')
+    expect(metricValue('rendered')).toBe(1)
+    const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${threadKey(parentTs)}`)
+    expect(threadState).toEqual(expect.objectContaining({ activeExecution: false, renderObligation: null }))
   })
 })
 

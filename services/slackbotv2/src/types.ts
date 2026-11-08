@@ -1,3 +1,4 @@
+import type { GenerativeUiOptions } from './generative-ui'
 import type { RustSessionStreamEvent } from '@centaur/harness-events'
 import type { CodexAppServerToChatStreamOptions } from '@centaur/rendering'
 import type { Attachment, Chat, Logger, StateAdapter } from 'chat'
@@ -155,6 +156,11 @@ export type SlackbotV2Options = {
   defaultHarnessType?: string
   enabledHarnesses?: readonly string[]
   fetch?: SlackbotV2Fetch
+  /**
+   * Render a json-render card from a fenced `json-render` block in the final
+   * answer (see generative-ui.ts). Off when unset: the block stays a code block.
+   */
+  generativeUi?: GenerativeUiOptions
   /**
    * Deployment-configured default model per harness wire value (claudecode |
    * codex | nanocodex | pi | omp), from the CLAUDE_MODEL / CODEX_MODEL /

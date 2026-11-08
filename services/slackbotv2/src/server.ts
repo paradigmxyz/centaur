@@ -9,6 +9,7 @@ import {
 } from './message-overrides-strategy'
 import { createOpenAiProactiveClassifier } from './proactive-classifier'
 import { loadProactivityRules } from './proactivity-rules'
+import { parseGenerativeUiLimits } from './generative-ui'
 
 const port = numberEnv('PORT', 3002)
 const apiUrl = stringEnv('CENTAUR_API_URL', 'http://127.0.0.1:8080')
@@ -68,6 +69,10 @@ const options: SlackbotV2Options = {
   responseServiceTierEnabled: booleanEnv('SLACKBOTV2_RESPONSE_SERVICE_TIER_ENABLED', false),
   defaultHarnessType,
   enabledHarnesses,
+  generativeUi: {
+    enabled: booleanEnv('SLACKBOTV2_GENERATIVE_UI_ENABLED', false),
+    limits: parseGenerativeUiLimits(optionalEnv('SLACKBOTV2_GENERATIVE_UI_LIMITS'))
+  },
   // Same env vars deployers use to override the sandbox harness model
   // (sandbox.extraEnv); the chart mirrors them here so displayed defaults
   // track the deployment instead of the baked harness config.
@@ -130,6 +135,8 @@ console.log(
     auto_join_created_channels_enabled: options.autoJoinCreatedChannels,
     message_overrides_strategy: messageOverridesStrategyMode,
     enabled_harnesses: enabledHarnesses,
+    generative_ui_enabled: options.generativeUi?.enabled === true,
+    generative_ui_limits: options.generativeUi?.limits,
     proactivity_classifier: options.proactivity ? proactivityClassifierBackend() : undefined,
     proactivity_debounce_ms: options.proactivity?.debounceMs,
     proactivity_default_rules: options.proactivity ? options.proactivity.rules?.default?.length ?? 0 : undefined,

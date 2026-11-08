@@ -126,6 +126,10 @@ spec:
               value: {{ .Values.slackbotv2.responseMetadataMode | quote }}
             - name: SLACKBOTV2_RESPONSE_SERVICE_TIER_ENABLED
               value: {{ .Values.slackbotv2.responseServiceTierEnabled | quote }}
+            - name: SLACKBOTV2_GENERATIVE_UI_ENABLED
+              value: {{ .Values.slackbotv2.generativeUi.enabled | quote }}
+            - name: SLACKBOTV2_GENERATIVE_UI_LIMITS
+              value: {{ .Values.slackbotv2.generativeUi.limits | toJson | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_STRATEGY
               value: {{ .Values.slackbotv2.messageOverridesStrategy.mode | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_MODEL

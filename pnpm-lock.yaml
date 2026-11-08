@@ -224,6 +224,12 @@ importers:
       '@chat-adapter/state-pg':
         specifier: 4.44.0
         version: 4.44.0(zod@4.6.7)
+      '@json-render/chat':
+        specifier: 0.22.0
+        version: 0.22.0(chat@4.44.0(zod@4.6.7))(zod@4.6.7)
+      '@json-render/core':
+        specifier: 0.22.0
+        version: 0.22.0(zod@4.6.7)
       chat:
         specifier: 4.44.0
         version: 4.44.0(zod@4.6.7)
@@ -233,6 +239,9 @@ importers:
       pg:
         specifier: ^8.23.1
         version: 8.23.1
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
     devDependencies:
       '@chat-adapter/state-memory':
         specifier: 4.44.0
@@ -408,6 +417,17 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
+
+  '@json-render/chat@0.22.0':
+    resolution: {integrity: sha512-5X88BgOWLyC1B2ko7kHFM3BO2LygsN+79wy6Gin6EIxYvT4v+6wp9gRcUMQZP3hLGhEbuIE4sawk5OsZzPkGTQ==}
+    peerDependencies:
+      chat: ^4.43.0
+      zod: ^4.0.0
+
+  '@json-render/core@0.22.0':
+    resolution: {integrity: sha512-BIfJ2V3bLYETetBu2KWoxxRPU5cSAf77dDTBgqaV54kEAfyHta1psPJgNk0fDcB3FCrnCZ5KO/X41VDkrNSYgw==}
+    peerDependencies:
+      zod: ^4.0.0
 
   '@linear/sdk@76.0.0':
     resolution: {integrity: sha512-Xt0x5Kl6qBoWhGFypb8ykyP+c5kT7scmRPs1uJidSPOaRgkMJ/4y41QpmZCWCBUMmZtf/O0VktgQio6rLXT94w==}
@@ -2181,6 +2201,16 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.6.0
+
+  '@json-render/chat@0.22.0(chat@4.44.0(zod@4.6.7))(zod@4.6.7)':
+    dependencies:
+      '@json-render/core': 0.22.0(zod@4.6.7)
+      chat: 4.44.0(zod@4.6.7)
+      zod: 4.6.7
+
+  '@json-render/core@0.22.0(zod@4.6.7)':
+    dependencies:
+      zod: 4.6.7
 
   '@linear/sdk@76.0.0(graphql@17.0.0)':
     dependencies:
