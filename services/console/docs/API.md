@@ -1005,7 +1005,7 @@ The `provider` field is validated against the [supported providers](#supported-p
 | `description`          | optional    | |
 | `labels`               | optional    | |
 | `provider`             | required    | The provider strategy. See [supported providers](#supported-providers). |
-| `provider_config`      | conditional | Required for `"custom"` and must be empty (`{}`) otherwise. An object with `authorization_endpoint`, `token_endpoint`, `userinfo_endpoint`, and `resource`, each an `https` URL. |
+| `provider_config`      | conditional | Required for `"custom"` and must be empty (`{}`) otherwise. An object with `authorization_endpoint`, `token_endpoint`, `resource`, and optionally `userinfo_endpoint`, each an `https` URL. |
 | `client_id`            | required    | OAuth client id. Not secret; returned in responses. |
 | `client_secret`        | required on create | OAuth client secret. Write-only and encrypted at rest; on update it is only changed when supplied. Never returned. |
 | `allowed_scopes`       | required    | Non-empty array of scope strings the start endpoint requests. A flow's optional `scopes` param must be a subset; omitting it requests all of these. |
@@ -1189,7 +1189,7 @@ A tampered, expired, or missing flow state or cookie renders an error page with 
 | Slack     | `slack`          |
 | Zoom      | `zoom`           |
 
-The `custom` provider connects an authorization server that needs no provider-specific code, such as a remote MCP server whose client was registered in advance. It runs the authorization-code flow with PKCE (`S256`), authenticates to the token endpoint with `client_secret_post`, and sends `resource` as the RFC 8707 resource indicator. The account identity is the `sub` (plus `email` and `name`, when present) returned by `userinfo_endpoint`. The minted token is injected only for requests to the host and path of `resource`, and refreshes keep the granted scopes.
+The `custom` provider connects an authorization server that needs no provider-specific code, such as a remote MCP server whose client was registered in advance. It runs the authorization-code flow with PKCE (`S256`), authenticates to the token endpoint with `client_secret_post`, and sends `resource` as the RFC 8707 resource indicator on the authorization, token, and refresh requests. The account identity is the `sub` (plus `email` and `name`, when present) returned by `userinfo_endpoint`. Without a `userinfo_endpoint`, the access token must be a JWT, and the identity comes from its claims. The minted token is injected only for requests to the host and path of `resource`, and refreshes keep the granted scopes.
 
 Slack OAuth apps may use token rotation or long-lived tokens. When token rotation is enabled, the callback stores the returned refresh token and the broker refresh loop keeps the access token fresh. When Slack returns a long-lived token without a refresh token or expiry, the credential is stored without scheduling broker refresh.
 Slack OAuth apps should use normal Slack API scopes such as `channels:history`, not Sign in with Slack scopes such as `openid`, `email`, or `profile`.

@@ -25,6 +25,8 @@ pub(crate) struct Credential {
     pub api_key: Option<String>,
     pub token_endpoint_headers: Vec<(String, String)>,
     pub scopes: Vec<String>,
+    /// The RFC 8707 resource indicator a custom OAuth app is bound to.
+    pub resource: Option<String>,
     pub timeout: Duration,
 }
 
@@ -245,6 +247,9 @@ fn oauth_form(
     if provider(credential.provider.as_deref())?.refresh_scopes && !credential.scopes.is_empty() {
         form.push(("scope", credential.scopes.join(" ")));
     }
+    if let Some(resource) = present(&credential.resource) {
+        form.push(("resource", resource.to_owned()));
+    }
     Ok(form)
 }
 
@@ -321,6 +326,7 @@ mod tests {
             api_key: None,
             token_endpoint_headers: vec![],
             scopes: vec!["a".into(), "b".into()],
+            resource: None,
             timeout: Duration::from_secs(30),
         }
     }

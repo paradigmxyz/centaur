@@ -39,6 +39,8 @@ class OauthAppTest < ActiveSupport::TestCase
       "resource" => "https://api.example.test/mcp"
     }
     assert build_app(provider: "custom", provider_config: config).valid?
+    assert build_app(provider: "custom", provider_config: config.except("userinfo_endpoint")).valid?
+    refute build_app(provider: "custom", provider_config: config.merge("userinfo_endpoint" => "http://auth.example.test/userinfo")).valid?
     refute build_app(provider: "custom").valid?
     refute build_app(provider: "custom", provider_config: config.merge("token_endpoint" => "http://auth.example.test/token")).valid?
     refute build_app(provider: "custom", provider_config: config.merge("extra" => "https://x.example.test")).valid?

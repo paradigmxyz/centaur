@@ -646,6 +646,7 @@ module Oauth
       stub_exchange(status: 200, body: { access_token: "custom-at", refresh_token: "custom-rt", expires_in: 1800, scope: "read write" }.to_json) do |request|
         assert_equal "https://auth.example.test/oauth/token", request[:url]
         assert_equal "custom-secret", request[:form]["client_secret"]
+        assert_equal "https://api.example.test/mcp", request[:form]["resource"]
         assert request[:form]["code_verifier"].present?
       end
       stub_identity(body: { sub: "User-42", email: "ada@example.com", name: "Ada" }.to_json) do |request|
@@ -663,6 +664,34 @@ module Oauth
       assert_equal "https://auth.example.test/oauth/token", cred.token_endpoint
       assert_equal "custom-rt", cred.refresh_token
       assert_equal [ { "host" => "api.example.test", "paths" => [ "/mcp" ] } ], cred.static_secret.rules.map(&:to_proxy_rule)
+    end
+
+    test "custom provider without a userinfo endpoint takes the identity from the access token claims" do
+      app = OauthApp.create!(
+        slug: "custom-jwt", provider: "custom", client_id: "custom-client", client_secret: "custom-secret",
+        allowed_scopes: %w[read], created_by: users(:acme_admin),
+        provider_config: {
+          "authorization_endpoint" => "https://auth.example.test/oauth/authorize",
+          "token_endpoint" => "https://auth.example.test/oauth/token",
+          "resource" => "https://api.example.test/mcp"
+        }
+      )
+      claims = Base64.urlsafe_encode64({ sub: "user-7", email: "ada@example.com" }.to_json, padding: false)
+      state = start_flow(slug: app.slug)
+      stub_exchange(status: 200, body: { access_token: "header.#{claims}.signature", refresh_token: "rt", expires_in: 1800 }.to_json)
+      get oauth_callback_url(slug: app.slug), params: { state: state, code: "auth-code" }
+      assert_redirected_to console_integrations_path
+
+      cred = app.broker_credentials.sole
+      assert_equal "user-7", cred.provider_subject
+      assert_equal "ada@example.com", cred.provider_email
+
+      state = start_flow(slug: app.slug)
+      stub_exchange(status: 200, body: { access_token: "opaque-token", refresh_token: "rt", expires_in: 1800 }.to_json)
+      assert_no_difference -> { BrokerCredential.count } do
+        get oauth_callback_url(slug: app.slug), params: { state: state, code: "auth-code" }
+      end
+      assert_response :unprocessable_entity
     end
 
     test "callback happy path supports Zoom OAuth app tokens" do

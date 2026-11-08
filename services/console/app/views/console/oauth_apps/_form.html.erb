@@ -50,7 +50,7 @@
       <p class="form-hint mb-4">Required for the custom provider only, and ignored by the others. Copy the values from the authorization server's metadata (<code>/.well-known/oauth-authorization-server</code>) and the protected resource's metadata (<code>/.well-known/oauth-protected-resource</code>).</p>
       <div class="grid gap-5 sm:grid-cols-2">
         <% { "authorization_endpoint" => "Authorization endpoint", "token_endpoint" => "Token endpoint",
-             "userinfo_endpoint" => "Userinfo endpoint", "resource" => "Resource URL" }.each do |key, label| %>
+             "userinfo_endpoint" => "Userinfo endpoint (optional)", "resource" => "Resource URL" }.each do |key, label| %>
           <div>
             <label class="form-label" for="oauth_app_provider_config_<%= key %>"><%= label %></label>
             <%= url_field_tag "oauth_app[provider_config][#{key}]", app.provider_config.is_a?(Hash) ? app.provider_config[key] : nil,
@@ -59,7 +59,7 @@
         <% end %>
       </div>
       <%= field_error(app, :provider_config) %>
-      <p class="form-hint">The token endpoint must accept <code>client_secret_post</code>. Identity comes from the userinfo <code>sub</code>, and the minted token is sent only to the resource URL's host and path.</p>
+      <p class="form-hint">The token endpoint must accept <code>client_secret_post</code>. Identity comes from the userinfo <code>sub</code>, or from the access token's claims when no userinfo endpoint is set. The minted token is sent only to the resource URL's host and path.</p>
     </section>
 
     <section class="form-section">
