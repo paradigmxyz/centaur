@@ -525,8 +525,8 @@ def v2_read(
 
 _SOURCE_HELP = "Custom document source, e.g. memory."
 _READERS_HELP = (
-    "Who can read the document; repeat for several: principal:<your ID> or role:<one of "
-    "your roles>. Defaults to you alone."
+    "Who can read the document; repeat for several: public, principal:<your ID>, or "
+    "role:<one of your roles>. Defaults to you alone."
 )
 
 
