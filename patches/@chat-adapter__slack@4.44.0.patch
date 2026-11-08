@@ -1,5 +1,5 @@
 diff --git a/dist/index.js b/dist/index.js
-index 877b358e7f72abdcd4bdae5cc23502f89fede900..530e92871b08af5c33fc267162830ec39f112a2c 100644
+index 15079461bef1214fb56d6db919d59f4fa547327e..09b537232ed910ea47b8a414e49d451e05c330b6 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -1,3 +1,368 @@
@@ -371,18 +371,7 @@ index 877b358e7f72abdcd4bdae5cc23502f89fede900..530e92871b08af5c33fc267162830ec3
  import {
    isSlackAuthUrl
  } from "./chunk-7WDLOIRP.js";
-@@ -2914,7 +3279,9 @@ var SlackAdapter = class _SlackAdapter {
-     }
-     const isDM = event.channel_type === "im";
-     const threadId = this.threadIdForMessageEvent(event);
--    const isMention = event.type === "app_mention";
-+    const botMentioned = Boolean(this._botUserId && typeof event.text === "string" &&
-+      (event.text.includes(`<@${this._botUserId}>`) || event.text.includes(`<@${this._botUserId}|`)));
-+    const isMention = event.type === "app_mention" || botMentioned && Boolean(event.bot_id || event.bot_profile || event.subtype === "bot_message");
-     const makeFactory = (id) => async () => {
-       const msg = await this.parseSlackMessage(event, id);
-       if (isMention) {
-@@ -3755,7 +4122,7 @@ var SlackAdapter = class _SlackAdapter {
+@@ -4310,7 +4675,7 @@ var SlackAdapter = class _SlackAdapter {
          userName,
          fullName,
          email,
@@ -391,7 +380,7 @@ index 877b358e7f72abdcd4bdae5cc23502f89fede900..530e92871b08af5c33fc267162830ec3
          isSystem: event.user === SLACK_SYSTEM_USER_ID,
          isMe
        },
-@@ -4769,7 +5136,7 @@ var SlackAdapter = class _SlackAdapter {
+@@ -5324,7 +5689,7 @@ var SlackAdapter = class _SlackAdapter {
      }
      this.logger.debug("Slack: starting stream", { channel, threadTs });
      const token = await this.getToken();
@@ -400,7 +389,7 @@ index 877b358e7f72abdcd4bdae5cc23502f89fede900..530e92871b08af5c33fc267162830ec3
        channel,
        thread_ts: threadTs,
        ...options?.recipientUserId && {
-@@ -4781,7 +5148,7 @@ var SlackAdapter = class _SlackAdapter {
+@@ -5336,7 +5701,7 @@ var SlackAdapter = class _SlackAdapter {
        ...options?.taskDisplayMode && {
          task_display_mode: options.taskDisplayMode
        }
@@ -409,15 +398,15 @@ index 877b358e7f72abdcd4bdae5cc23502f89fede900..530e92871b08af5c33fc267162830ec3
      const segment = {
        streamer: createStreamer(),
        startedAt: void 0,
-@@ -4790,6 +5157,7 @@ var SlackAdapter = class _SlackAdapter {
+@@ -5345,6 +5710,7 @@ var SlackAdapter = class _SlackAdapter {
        tableHeader: ""
      };
      let rotations = 0;
 +    let lastStoppedResult;
-     let lastAppended = "";
-     let lastFlushed = "";
-     const renderer = new StreamingMarkdownRenderer({
-@@ -4893,6 +5261,7 @@ var SlackAdapter = class _SlackAdapter {
+     const finalizedMessageIds = [];
+     const toStreamResult = (message) => message && {
+       ...message,
+@@ -5453,6 +5819,7 @@ var SlackAdapter = class _SlackAdapter {
        }
      };
      const disableStructuredChunks = (chunkType, error) => {
@@ -425,15 +414,15 @@ index 877b358e7f72abdcd4bdae5cc23502f89fede900..530e92871b08af5c33fc267162830ec3
        structuredChunksSupported = false;
        this.logger.warn(
          "Structured streaming chunk failed, falling back to text-only streaming. Ensure your Slack app manifest includes the agent/assistant feature and the assistant:write scope",
-@@ -4958,6 +5327,7 @@ var SlackAdapter = class _SlackAdapter {
-           // next segment, and chat.stopStream defaults to "active".
-           ...this.agentView ? { session_status: "processing" } : {}
-         });
+@@ -5538,6 +5905,7 @@ var SlackAdapter = class _SlackAdapter {
+           });
+           disableStructuredChunks("task_update", error);
+         }
 +        lastStoppedResult = result2;
          lastFlushed = sent;
          this.logger.debug("Slack: rotated stream segment", {
            channel,
-@@ -4965,7 +5335,7 @@ var SlackAdapter = class _SlackAdapter {
+@@ -5545,7 +5913,7 @@ var SlackAdapter = class _SlackAdapter {
            ageMs
          });
        } catch (error) {
@@ -442,7 +431,7 @@ index 877b358e7f72abdcd4bdae5cc23502f89fede900..530e92871b08af5c33fc267162830ec3
            throw error;
          }
          this.logger.warn(
-@@ -5006,7 +5376,7 @@ var SlackAdapter = class _SlackAdapter {
+@@ -5586,7 +5954,7 @@ var SlackAdapter = class _SlackAdapter {
        try {
          await sendDelta(delta, false);
        } catch (error) {
@@ -451,7 +440,7 @@ index 877b358e7f72abdcd4bdae5cc23502f89fede900..530e92871b08af5c33fc267162830ec3
            throw error;
          }
          switchToFallback(error);
-@@ -5035,6 +5405,8 @@ var SlackAdapter = class _SlackAdapter {
+@@ -5615,6 +5983,8 @@ var SlackAdapter = class _SlackAdapter {
          disableStructuredChunks(chunk.type, error);
        }
      };
@@ -460,7 +449,7 @@ index 877b358e7f72abdcd4bdae5cc23502f89fede900..530e92871b08af5c33fc267162830ec3
      for await (const chunk of textStream) {
        if (options?.signal?.aborted) {
          break;
-@@ -5051,6 +5423,7 @@ var SlackAdapter = class _SlackAdapter {
+@@ -5631,6 +6001,7 @@ var SlackAdapter = class _SlackAdapter {
      }
      renderer.finish();
      await flushCommitted(true);
@@ -468,7 +457,7 @@ index 877b358e7f72abdcd4bdae5cc23502f89fede900..530e92871b08af5c33fc267162830ec3
      if (fallback.mode === "fallback") {
        if (options?.stopBlocks || this.feedbackButtons) {
          this.logger.warn(
-@@ -5075,9 +5448,14 @@ var SlackAdapter = class _SlackAdapter {
+@@ -5655,9 +6026,14 @@ var SlackAdapter = class _SlackAdapter {
      };
      let result;
      try {
@@ -485,19 +474,19 @@ index 877b358e7f72abdcd4bdae5cc23502f89fede900..530e92871b08af5c33fc267162830ec3
          switchToFallback(error);
          await flushFallback(true);
          this.logger.debug("Slack: fallback stream complete", {
-@@ -5086,7 +5464,7 @@ var SlackAdapter = class _SlackAdapter {
+@@ -5666,7 +6042,7 @@ var SlackAdapter = class _SlackAdapter {
          await this.endTyping(threadId, options?.sessionStatus ?? "active");
-         return fallback.message;
+         return toStreamResult(fallback.message);
        }
 -      if (!isStreamExpired(error)) {
 +      if (!isStreamExpired(error) || slackAnswerLostAnnotation(error) === true) {
          throw error;
        }
        const unconfirmed = lastAppended.slice(lastFlushed.length);
-@@ -5128,7 +5506,18 @@ var SlackAdapter = class _SlackAdapter {
+@@ -5712,7 +6088,18 @@ var SlackAdapter = class _SlackAdapter {
        threadId,
        raw: result
-     };
+     });
 +    } catch (error) {
 +      let cleanupFailed = false;
 +      try {
@@ -513,7 +502,7 @@ index 877b358e7f72abdcd4bdae5cc23502f89fede900..530e92871b08af5c33fc267162830ec3
    /**
     * Open a direct message conversation with a user.
     * Returns a thread ID that can be used to post messages.
-@@ -5425,7 +5814,7 @@ var SlackAdapter = class _SlackAdapter {
+@@ -6029,7 +6416,7 @@ var SlackAdapter = class _SlackAdapter {
          userId: event.user || event.bot_profile?.user_id || event.bot_id || "unknown",
          userName,
          fullName,
