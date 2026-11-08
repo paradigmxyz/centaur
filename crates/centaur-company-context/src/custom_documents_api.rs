@@ -4,9 +4,8 @@
 //! Any principal can create a document in any source. The service names it
 //! by a UUIDv7 and records the principal as its writer; only the writer can
 //! reach it through these endpoints, and every other principal gets 404.
-//! Readers default to the writer and may name only the writer or its roles,
-//! never `public`, so a principal cannot publish to everyone's searches. Rows
-//! written directly to the table have no writer and cannot be reached here.
+//! Readers default to the writer and may name only `public`, the writer, or
+//! its roles. Rows written directly to the table have no writer and cannot be reached here.
 //! Documents are searched and read through `/query` and `/documents`.
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -392,8 +391,8 @@ fn writer(identity: &PrincipalIdentity) -> Result<String, ApiError> {
     principal_oid(identity).ok_or(ApiError::Internal)
 }
 
-/// The requested readers, which may name only the writer and its roles, or
-/// the writer alone by default.
+/// The requested readers, which may name only everyone, the writer, and its
+/// roles, or the writer alone by default.
 fn readers(
     identity: &PrincipalIdentity,
     writer: &str,
@@ -403,12 +402,9 @@ fn readers(
         return Ok(vec![format!("principal:{writer}")]);
     };
     let allowed = custom_readers(identity);
-    if let Some(reader) = requested
-        .iter()
-        .find(|reader| *reader == "public" || !allowed.contains(reader))
-    {
+    if let Some(reader) = requested.iter().find(|reader| !allowed.contains(reader)) {
         return Err(ApiError::Forbidden(format!(
-            "reader {reader:?} is neither you nor one of your roles"
+            "reader {reader:?} is neither public, you, nor one of your roles"
         )));
     }
     Ok(requested.to_vec())
@@ -583,6 +579,22 @@ mod tests {
         project().await.unwrap();
         assert_eq!(found(pool, &bob(), "helix").await, ["Ada prefers Helix"]);
         assert!(found(pool, &carol(), "helix").await.is_empty());
+
+        // A public document is readable by every principal.
+        let public = create(
+            pool,
+            &ada(),
+            "memory",
+            &request(json!({ "body": "Ada prefers Zed", "readers": ["public"] })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(public.readers, ["public"]);
+        project().await.unwrap();
+        assert_eq!(found(pool, &carol(), "zed").await, ["Ada prefers Zed"]);
+        delete(pool, &ada(), "memory", &public.external_id)
+            .await
+            .unwrap();
         for result in [
             delete(pool, &bob(), "memory", id).await,
             delete(pool, &ada(), "notes", id).await,
@@ -676,6 +688,7 @@ mod tests {
         for readers in [
             json!(["principal:prn_5CO4fITZ", "principal:ada"]),
             json!(["role:role_1Uc5uCJR", "role:eng"]),
+            json!(["public"]),
             json!([]),
         ] {
             assert_eq!(
@@ -687,7 +700,7 @@ mod tests {
                 readers
             );
         }
-        for reader in ["public", "principal:prn_xUC2fVYG", "role:sales", "user:ada"] {
+        for reader in ["principal:prn_xUC2fVYG", "role:sales", "user:ada"] {
             assert!(
                 matches!(
                     write(json!({ "body": "note", "readers": [reader] })).await,

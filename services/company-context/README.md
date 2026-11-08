@@ -323,8 +323,8 @@ one and returns it:
 ```
 
 `body` is required and must not be blank; the other fields are optional and unknown fields are
-rejected. `readers` defaults to the writer alone, and may name only the writer
-and its roles, by opaque or foreign ID, never `public`. The table's limits
+rejected. `readers` defaults to the writer alone, and may name only `public`,
+the writer, and its roles, by opaque or foreign ID. The table's limits
 apply. The service names each document by a UUIDv7, its `external_id`:
 
 ```json
