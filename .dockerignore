@@ -78,6 +78,7 @@ logs/
 *.md
 !centaur_sdk/README.md
 !services/sandbox/SYSTEM_PROMPT.md
+!services/sandbox/codex-base-instructions.md
 !.agents/skills/**
 
 # Environment (secrets)

@@ -1670,14 +1670,25 @@ async function syncThreadMessageToSession(
   if (messageOverrides.cleanedText !== undefined) {
     setMessageText(serializedMessage, messageOverrides.cleanedText)
   }
-  const overrides = messageOverrides.overrides
+  let overrides = messageOverrides.overrides
   const selectionError = overrides.selectionError
   if (selectionError) {
-    await withSlackApiTimeout(input.options, 'post model selection error', () =>
-      thread.post(selectionError))
-    finishSteeringReaction(input, trace)
-    await setAssistantStatus(thread, '', input.options, trace)
-    return
+    // A proactive reply was not addressed to the bot, so flag-like text in it
+    // is discussion, not a command: never answer it with a selection error.
+    if (input.proactive !== true) {
+      await withSlackApiTimeout(input.options, 'post model selection error', () =>
+        thread.post(selectionError))
+    }
+    if (shouldStartExecution && input.proactive !== true) {
+      // Reject the explicit command instead of running it on an unintended model.
+      finishSteeringReaction(input, trace)
+      await setAssistantStatus(thread, '', input.options, trace)
+      recordForward(input.mode, 'selection_rejected', traceStartedAtMs)
+      return
+    }
+    // Otherwise deliver the message (proactive turn or steer of an active run)
+    // without the invalid selection, so it is not lost from the session.
+    overrides = overrides.personaId ? { personaId: overrides.personaId } : {}
   }
   const requestedStickyOverrides = preservePinnedPersona(
     state,

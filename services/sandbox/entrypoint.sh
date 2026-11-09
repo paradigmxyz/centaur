@@ -302,7 +302,9 @@ if overlay_raw:
 
 path.write_text(text)
 PYEOF
-    configure-codex-models "$HOME_DIR/.codex/config.toml"
+    # Optional enrichment: never block sandbox startup on the model catalog.
+    configure-codex-models "$HOME_DIR/.codex/config.toml" \
+        || echo "configure-codex-models failed; using Codex's bundled model catalog" >&2
 else
     echo "missing Codex harness config: $HARNESS_CONFIG_DIR/codex/config.toml" >&2
     exit 1

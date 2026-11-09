@@ -51,9 +51,18 @@ def native_model(model_id: str, metadata: dict) -> dict:
 
 
 def custom_models(providers: dict) -> list[dict]:
+    if not isinstance(providers, dict):
+        raise TypeError("expected an object keyed by provider id")
     models = {}
-    for provider in providers.values():
-        for model_id, metadata in provider.get("models", {}).items():
+    for provider_id, provider in providers.items():
+        if not isinstance(provider, dict):
+            raise TypeError(f"provider {provider_id!r} must be an object")
+        catalog = provider.get("models", {})
+        if not isinstance(catalog, dict):
+            raise TypeError(f"models for provider {provider_id!r} must be an object")
+        for model_id, metadata in catalog.items():
+            if not isinstance(metadata, dict):
+                raise TypeError(f"metadata for model {model_id!r} must be an object")
             model = native_model(model_id, metadata)
             if model_id in models and models[model_id] != model:
                 raise ValueError(f"conflicting native metadata for model {model_id!r}")
@@ -100,10 +109,16 @@ def configure(
 
 def main() -> None:
     raw = os.environ.get("CODEX_CUSTOM_PROVIDERS", "").strip()
-    if raw:
+    if not raw:
+        return
+    # The catalog only enriches custom models; a bad catalog must not stop the
+    # sandbox. configure() writes config.toml last, so a failure leaves it intact.
+    try:
         configure(
             Path(sys.argv[1]), json.loads(raw), os.environ.get("CODEX_BIN", "codex")
         )
+    except Exception as exc:  # noqa: BLE001 - any failure falls back to Codex defaults
+        print(f"ignoring CODEX_CUSTOM_PROVIDERS model catalog: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

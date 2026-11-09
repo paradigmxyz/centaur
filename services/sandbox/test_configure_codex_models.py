@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import configure_codex_models
 from configure_codex_models import configure, custom_models
 
 
@@ -111,6 +112,36 @@ class ConfigureCodexModelsTests(unittest.TestCase):
         ]:
             with self.assertRaises(ValueError):
                 custom_models({"p": {"models": {"m": metadata}}})
+
+    def run_main(self, raw):
+        with (
+            patch.dict("os.environ", {"CODEX_CUSTOM_PROVIDERS": raw}),
+            patch.object(configure_codex_models.sys, "argv", ["x", str(self.config)]),
+            patch("configure_codex_models.sys.stderr"),
+        ):
+            configure_codex_models.main()
+
+    def test_main_falls_back_on_malformed_catalog(self):
+        for raw in [
+            "{",
+            "[]",
+            '{"p": "not-an-object"}',
+            '{"p": {"models": []}}',
+            '{"p": {"models": {"m": "x"}}}',
+            '{"p": {"models": {"m": {"contextWindow": -1}}}}',
+        ]:
+            self.run_main(raw)
+            self.assertEqual(self.config.read_text(), 'model = "existing"\n', raw)
+
+    @patch("configure_codex_models.subprocess.check_output")
+    def test_main_falls_back_on_bundled_collision_or_codex_failure(self, command):
+        raw = json.dumps(self.providers)
+        command.return_value = json.dumps({"models": [{"slug": "custom-model"}]})
+        self.run_main(raw)
+        self.assertEqual(self.config.read_text(), 'model = "existing"\n')
+        command.side_effect = FileNotFoundError("codex")
+        self.run_main(raw)
+        self.assertEqual(self.config.read_text(), 'model = "existing"\n')
 
 
 if __name__ == "__main__":
