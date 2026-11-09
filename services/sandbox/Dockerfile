@@ -94,6 +94,8 @@ RUN useradd -m -s /bin/bash -u 1001 agent \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/agent
 
 ARG CLAUDE_CODE_VERSION=2.1.312
+# Bumping CODEX_VERSION: refresh services/sandbox/codex-base-instructions.md
+# from openai/codex rust-v<version>/codex-rs/models-manager/prompt.md.
 ARG CODEX_VERSION=0.165.0
 ARG PI_CODING_AGENT_VERSION=1.4.0
 # Hermes Agent (NousResearch) — pinned by commit SHA per the dependency policy.
@@ -356,6 +358,10 @@ COPY --link --chmod=755 services/sandbox/centaur_tool_host.py /usr/local/bin/cen
 COPY --link --chmod=755 services/sandbox/compose_system_prompt.py /usr/local/bin/compose-system-prompt
 COPY --link --chmod=755 services/sandbox/repo_cache_sync.py /usr/local/bin/repo-cache-sync
 COPY --link --chmod=755 services/sandbox/repo_cache_watch.py /usr/local/bin/repo-cache-watch
+COPY --link --chmod=755 services/sandbox/configure_codex_models.py /usr/local/bin/configure-codex-models
+# Codex's generic base prompt (Apache-2.0, vendored from openai/codex
+# rust-v0.165.0 codex-rs/models-manager/prompt.md) for custom catalog models.
+COPY --link --chmod=644 services/sandbox/codex-base-instructions.md /etc/centaur/codex-base-instructions.md
 COPY --link --chmod=755 services/sandbox/entrypoint.sh /entrypoint.sh
 COPY --link --chown=1001:1001 --from=harness-server-build /home/agent/harness-server/bin/harness-server /home/agent/.local/bin/harness-server
 

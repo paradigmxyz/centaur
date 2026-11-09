@@ -23,6 +23,31 @@ struct CustomProviderConfig {
     base_url: String,
     api_key_env: String,
     default_model: Option<String>,
+    #[serde(default)]
+    models: BTreeMap<String, CustomProviderModel>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CustomProviderModel {
+    display_name: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    description: Option<String>,
+    context_window: Option<u64>,
+    input_modalities: Option<Vec<InputModality>>,
+    #[serde(default)]
+    reasoning_efforts: Vec<String>,
+    default_reasoning: Option<String>,
+    #[serde(default)]
+    reasoning_aliases: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum InputModality {
+    Text,
+    Image,
 }
 
 /// Build hostname-scoped bearer-token replacements for operator-configured
@@ -69,6 +94,69 @@ fn custom_provider_auth_fragment(
             provider,
             "apiKeyEnv must match [A-Z][A-Z0-9_]*",
         ));
+    }
+    for (model_id, model) in &config.models {
+        const NATIVE_REASONING_EFFORTS: &[&str] = &[
+            "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+        ];
+        if model
+            .reasoning_efforts
+            .iter()
+            .any(|effort| !NATIVE_REASONING_EFFORTS.contains(&effort.as_str()))
+        {
+            return Err(invalid_custom_provider(
+                provider,
+                "model reasoningEfforts must use native Codex effort names",
+            ));
+        }
+        if model.context_window == Some(0) {
+            return Err(invalid_custom_provider(
+                provider,
+                "model contextWindow must be positive",
+            ));
+        }
+        if model.input_modalities.as_ref().is_some_and(|modalities| {
+            !modalities.contains(&InputModality::Text)
+                || modalities
+                    .iter()
+                    .enumerate()
+                    .any(|(index, value)| modalities[..index].contains(value))
+        }) {
+            return Err(invalid_custom_provider(
+                provider,
+                "model inputModalities must include text without duplicates",
+            ));
+        }
+        if model_id.trim().is_empty()
+            || model.display_name.trim().is_empty()
+            || model.aliases.iter().any(|alias| alias.trim().is_empty())
+            || model
+                .description
+                .as_ref()
+                .is_some_and(|value| value.trim().is_empty())
+            || model
+                .reasoning_efforts
+                .iter()
+                .any(|effort| effort.trim().is_empty())
+        {
+            return Err(invalid_custom_provider(
+                provider,
+                "model metadata must not contain empty names or values",
+            ));
+        }
+        if model
+            .default_reasoning
+            .as_ref()
+            .is_some_and(|effort| !model.reasoning_efforts.contains(effort))
+            || model.reasoning_aliases.iter().any(|(alias, effort)| {
+                alias.trim().is_empty() || !model.reasoning_efforts.contains(effort)
+            })
+        {
+            return Err(invalid_custom_provider(
+                provider,
+                "model reasoning defaults and alias targets must be supported efforts",
+            ));
+        }
     }
     let host = https_dns_host(&config.base_url).ok_or_else(|| {
         invalid_custom_provider(

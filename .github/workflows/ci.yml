@@ -494,7 +494,10 @@ jobs:
         env:
           GIT_CONFIG_GLOBAL: /dev/null
           PYTHONPATH: ${{ github.workspace }}
-        run: python -m unittest discover -s services/sandbox -p 'test_*.py'
+        # tomli-w matches the version baked into the sandbox image.
+        run: >-
+          uv run --no-project --python 3.11 --with tomli-w==1.2.0
+          python -m unittest discover -s services/sandbox -p 'test_*.py'
 
   workflow-python-tests:
     name: Workflow Python tests

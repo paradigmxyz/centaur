@@ -8,6 +8,7 @@
  * out of the shared `@centaur/rendering` package used by Discord/Teams.
  */
 
+import { configuredModels, configuredModelReasoning, findConfiguredModel } from './model-catalog'
 import claudeSettings from '../../../harness/claude/settings.json'
 import codexConfig from '../../../harness/codex/config.toml'
 
@@ -215,11 +216,14 @@ export function effectiveReasoningForHarness(
 export function reasoningForModel(
   harnessType: string | null | undefined,
   model: string | null | undefined,
-  reasoning: string | null | undefined
+  reasoning: string | null | undefined,
+  provider?: string | null
 ): string | undefined {
   const harness = harnessType?.trim().toLowerCase()
   const selectedModel = model?.trim().toLowerCase()
   const effort = reasoning?.trim().toLowerCase()
+  const customModel = harness === 'codex' ? findConfiguredModel(model, provider) : undefined
+  if (customModel) return configuredModelReasoning(customModel, reasoning)
   if (harness === 'claudecode') {
     const supported =
       Object.entries(CLAUDE_REASONING_EFFORTS_BY_MODEL).find(
@@ -260,7 +264,9 @@ const GPT_CODENAMES = new Set(['sol', 'luna', 'terra', 'astra'])
  * "Opus 5.5", gpt-5.6-sol -> "Sol 5.6", gpt-5.2 -> "GPT 5.2". Unrecognized
  * models (provider-prefixed IDs, o-series) are uppercased.
  */
-export function modelDisplayName(model: string): string {
+export function modelDisplayName(model: string, provider?: string | null): string {
+  const configured = findConfiguredModel(model, provider)
+  if (configured) return configured.displayName
   const id = model.toLowerCase()
   const gpt = GPT_MODEL_ID.exec(id)
   if (gpt) {
@@ -302,6 +308,7 @@ export function personaFallbackNotice(
 export function buildSlackResponseContextBlock(params: {
   harnessType?: string | null
   metadataEnabled?: boolean
+  provider?: string | null
   model?: string | null
   notice?: string | null
   reasoning?: string | null
@@ -314,7 +321,9 @@ export function buildSlackResponseContextBlock(params: {
   if (notice) segments.push(`:warning: ${escapeSlackMrkdwn(notice)}`)
   if (includeMetadata) {
     const model = params.model?.trim()
-    if (model) segments.push(escapeSlackMrkdwn(modelDisplayName(model)))
+    if (model) segments.push(escapeSlackMrkdwn(modelDisplayName(model, params.provider)))
+    const provider = configuredModels().find(entry => entry.provider === params.provider)
+    if (provider) segments.push(escapeSlackMrkdwn(provider.providerName))
     const harness = harnessDisplayName(params.harnessType)
     if (harness) segments.push(escapeSlackMrkdwn(harness))
     const reasoning = reasoningDisplayName(params.reasoning)

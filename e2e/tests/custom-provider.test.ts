@@ -1,0 +1,80 @@
+import { expect, test } from 'bun:test'
+import { executionOutput, model, providerCredentials, slack, turnTimeoutMs } from '../lib'
+
+const credential = 'Bearer e2e-custom-provider-test-key'
+
+test('a custom model runs natively with scoped credentials, effective reasoning, tools, and history', async () => {
+  const first = model.says('Native custom provider answer.')
+  const thread = await slack.mention('--provider fixture -rsn medium Say hello.', first)
+  const initial = await thread.nextTurn()
+  expect(initial.reply).toBe(first.text)
+  expect(initial.execution.status).toBe('completed')
+  expect(initial.sandbox.harness).toBe('codex')
+  expect(initial.request?.host).toBe('custom-provider.test')
+  expect(initial.request?.credential).toBe(credential)
+  expect(initial.request?.model).toBe('fixture-reasoner')
+  expect(initial.request?.effort).toBe('high')
+  const events = await executionOutput(initial.execution.execution_id)
+  expect(events.find(event => event.method === 'thread/tokenUsage/updated')?.params.tokenUsage.modelContextWindow).toBe(62259)
+  expect(initial.context).toBe('Fixture Reasoner · Fixture Provider · Codex · High')
+
+  const followup = model.says('The native session continues.')
+  await thread.mention('Continue.', followup)
+  const continued = await thread.nextTurn()
+  expect(continued.reply).toBe(followup.text)
+  expect(continued.sandbox.id).toBe(initial.sandbox.id)
+  expect(continued.request?.assistantTurns).toContain(first.text)
+  expect(continued.request?.model).toBe('fixture-reasoner')
+  expect(continued.request?.effort).toBe('high')
+  expect(continued.request?.credential).toBe(credential)
+
+  const maximum = model.says('Maximum effort applied.')
+  await thread.mention('-rsn xhigh Solve this carefully.', maximum)
+  const maximal = await thread.nextTurn()
+  expect(maximal.reply).toBe(maximum.text)
+  expect(maximal.request?.effort).toBe('max')
+  expect(maximal.request?.credential).toBe(credential)
+
+  const marker = `native-tools-${Date.now()}`
+  const tool = model.runs(`curl -fsS https://custom-provider.test/_e2e/echo/${marker}`, 'Native tools completed.')
+  await thread.mention('--model fixture-fast Run the requested check.', tool)
+  const checked = await thread.nextTurn()
+  expect(checked.reply).toBe(tool.text)
+  expect(checked.execution.status).toBe('completed')
+  expect(checked.sandbox.id).toBe(initial.sandbox.id)
+  expect(checked.request?.model).toBe('fixture-fast')
+  expect(checked.request?.effort).toBe('low')
+  expect(await model.echoes(marker)).toHaveLength(1)
+  const requests = await model.requests(tool)
+  expect(requests.length).toBeGreaterThanOrEqual(2)
+  expect(requests.every(request => request.host === 'custom-provider.test' && request.credential === credential)).toBe(true)
+
+  const switched = model.says('Back on the original provider.')
+  await thread.mention('--provider openai --model gpt-6.1-terra Continue.', switched)
+  const back = await thread.nextTurn()
+  expect(back.reply).toBe(switched.text)
+  expect(back.sandbox.id).toBe(initial.sandbox.id)
+  expect(back.request?.host).toBe('api.openai.com')
+  expect(back.request?.credential).toBe(providerCredentials.openai)
+  expect(back.request?.assistantTurns).toContain(first.text)
+  expect(back.request?.assistantTurns).toContain(tool.text)
+}, 5 * turnTimeoutMs)
+
+
+test('a cancelled custom model turn accepts a native follow-up', async () => {
+  const slow = model.says('This answer should be cancelled.', { delayMs: 60_000 })
+  const thread = await slack.mention('--provider fixture Start a slow task.', slow)
+  await thread.inFlight()
+  await thread.interject('stop')
+  const cancelled = await thread.nextCancelledExecution()
+  expect(cancelled.status).toBe('cancelled')
+
+  const answer = model.says('Recovered after cancellation.')
+  await thread.mention('Start again.', answer)
+  const recovered = await thread.nextTurn()
+  expect(recovered.reply).toBe(answer.text)
+  expect(recovered.execution.status).toBe('completed')
+  expect(recovered.request?.model).toBe('fixture-reasoner')
+  expect(recovered.request?.host).toBe('custom-provider.test')
+  expect(recovered.request?.credential).toBe(credential)
+}, 2 * turnTimeoutMs)
