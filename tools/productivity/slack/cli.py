@@ -209,24 +209,28 @@ def _print_message_search_results(
 def search(
     query: str = typer.Argument(..., help="Text to search for (supports multiple terms)"),
     limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
-    full: bool = typer.Option(False, "--full", "-f", help="Output full indexed result metadata"),
+    full: bool = typer.Option(False, "--full", "-f", help="Print each result's full text"),
     channels: str = typer.Option(
-        None, "--channels", "-c", help="Comma-separated channel names or IDs to target"
+        None,
+        "--channels",
+        "-c",
+        help="Comma-separated channel IDs, or names of channels listed by `channels`",
     ),
-    from_user: str = typer.Option(None, "--from", help="Target messages by this username"),
     json_output: bool = typer.Option(True, "--json/--no-json", help="Output as JSON (default)"),
 ):
     """Search indexed Slack history through company context.
 
-    This command searches normalized, access-scoped Slack rows rather than
-    downloading channel history. Channel and author options are exact filters.
-    Use search-direct for native Slack modifiers when a linked user credential
-    is available.
+    This command searches the company-context index rather than downloading
+    channel history. Each result is a conversation chunk: a channel's messages
+    and thread replies for part of a day. Read one in full with
+    `company_context v2 read DOCUMENT_ID`. Replies to threads older than
+    about three days may not be indexed; use `thread` for a live thread. Use
+    search-direct for native Slack modifiers such as `from:` when a linked
+    user credential is available.
 
     Examples:
         slack search "deploy"
-        slack search "kubernetes error" --channels eng-infra,eng-ai
-        slack search "database migration" --from alice
+        slack search "kubernetes error" --channels eng-infra,C0123456789
     """
     channel_list = [channel.strip() for channel in channels.split(",")] if channels else None
 
@@ -236,7 +240,6 @@ def search(
         query=query,
         limit=limit,
         channels=channel_list,
-        from_user=from_user,
     )
     if result.get("status") == "error":
         stderr_console.print(f"[red]Error: {result.get('error', 'unknown error')}[/]")
@@ -246,12 +249,30 @@ def search(
         _print_json(result)
         return
 
-    _print_message_search_results(
-        query,
-        result.get("results") or [],
-        full=full,
-        json_output=False,
-    )
+    results = result.get("results") or []
+    if not results:
+        console.print("[yellow]No messages found.[/]")
+        return
+
+    if full:
+        for i, document in enumerate(results, 1):
+            console.print(f"\n[bold cyan]{document['title']}[/]")
+            console.print(document["text"])
+            console.print(f"[dim]{document['document_id']}[/]")
+            if i < len(results):
+                console.print("---")
+        return
+
+    table = Table(title=f"Slack: '{query}' ({len(results)} results)")
+    table.add_column("Channel", style="cyan", max_width=20)
+    table.add_column("Occurred", style="green", max_width=20)
+    table.add_column("Text", style="white", max_width=80)
+    for document in results:
+        text = document["text"][:80].replace("\n", " ")
+        if len(document["text"]) > 80:
+            text += "..."
+        table.add_row(f"#{document['channel']}", str(document["occurred_at"] or ""), text)
+    console.print(table)
 
 
 @app.command("search-direct")

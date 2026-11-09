@@ -1,5 +1,4 @@
 import base64
-import datetime as dt
 import email.message
 import io
 import json
@@ -7,7 +6,6 @@ from pathlib import Path
 
 import pytest
 import slack.client as slack_client
-from centaur_sdk import company_context_database_url
 from slack.client import IndexedSlackClient, SlackAuthError, SlackClient, SlackRateLimitError
 from slack_sdk.errors import SlackApiError
 
@@ -1201,78 +1199,123 @@ def test_search_files_direct_reports_auth_failure() -> None:
     assert excinfo.value.payload["slack_method"] == "files.list"
 
 
-def test_indexed_search_queries_scoped_slack_rows(monkeypatch) -> None:
-    class FakeConnection:
-        def __init__(self) -> None:
-            self.fetch_calls = []
-            self.closed = False
+def test_indexed_search_queries_company_context_api(monkeypatch) -> None:
+    requests = []
 
-        async def fetch(self, query, *args):
-            self.fetch_calls.append((query, args))
-            return [
+    class FakeResponse(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(request, timeout):
+        requests.append((request, timeout))
+        return FakeResponse(
+            json.dumps(
                 {
-                    "channel_id": "C123",
-                    "channel_name": "eng-infra",
-                    "message_ts": "1780000000.000001",
-                    "occurred_at": dt.datetime(2026, 9, 17, 12, 0, tzinfo=dt.UTC),
-                    "thread_ts": "1780000000.000000",
-                    "user_id": "U123",
-                    "bot_id": "",
-                    "text": "database migration completed",
-                    "permalink": "https://example.slack.com/archives/C123/p1780000000000001",
-                    "reply_count": 0,
-                    "author_name": "Alice",
-                    "score": 0.75,
+                    "results": [
+                        {
+                            "document_id": "slack:C123:2026-09-17:000000",
+                            "type": "slack_message",
+                            "title": "#eng-infra — 2026-09-17",
+                            "url": None,
+                            "text": "[12:00] Alice: database migration completed",
+                            "occurred_at": "2026-09-17T12:00:00Z",
+                            "metadata": {
+                                "channel_name": "eng-infra",
+                                "conversation_id": "C123",
+                                "first_message_at": "2026-09-17T12:00:00+00:00",
+                                "last_message_at": "2026-09-17T12:05:00+00:00",
+                            },
+                            "score": 0.75,
+                        }
+                    ]
                 }
-            ]
+            ).encode()
+        )
 
-        async def close(self):
-            self.closed = True
+    monkeypatch.setattr(slack_client.urllib.request, "urlopen", fake_urlopen)
+    resolved = []
 
-    fake = FakeConnection()
+    def resolve(name):
+        resolved.append(name)
+        return "C123"
 
-    async def fake_connect(*args, **kwargs):
-        return fake
-
-    monkeypatch.setattr(slack_client.asyncpg, "connect", fake_connect)
-
-    result = IndexedSlackClient("postgresql://example/centaur").search_messages(
+    result = IndexedSlackClient(
+        "http://company-context:8080/", resolve_channel_name=resolve
+    ).search_messages(
         " database migration ",
         limit=500,
-        channels=["#eng-infra", "<#C123|eng-infra>", "ENG-INFRA"],
-        from_user="@Alice",
+        channels=["#eng-infra", "<#C123|eng-infra>", "c456"],
     )
 
-    assert result["status"] == "ok"
-    assert result["query"] == "database migration"
-    assert result["results"] == [
-        {
-            "channel": "eng-infra",
-            "channel_id": "C123",
-            "user": "Alice",
-            "user_id": "U123",
-            "bot_id": "",
-            "text": "database migration completed",
-            "timestamp": "1780000000.000001",
-            "occurred_at": "2026-09-17T12:00:00+00:00",
-            "permalink": "https://example.slack.com/archives/C123/p1780000000000001",
-            "thread_ts": "1780000000.000000",
-            "reply_count": 0,
-            "score": 0.75,
-        }
-    ]
-    query, args = fake.fetch_calls[0]
-    assert "FROM company_context_slack_messages messages" in query
-    assert "LEFT JOIN company_context_slack_users users" in query
-    assert "websearch_to_tsquery('english', $1)" in query
-    assert args == ("database migration", ["eng-infra", "c123"], "alice", 50)
-    assert fake.closed is True
+    assert result == {
+        "status": "ok",
+        "query": "database migration",
+        "results": [
+            {
+                "channel": "eng-infra",
+                "channel_id": "C123",
+                "document_id": "slack:C123:2026-09-17:000000",
+                "title": "#eng-infra — 2026-09-17",
+                "text": "[12:00] Alice: database migration completed",
+                "occurred_at": "2026-09-17T12:00:00Z",
+                "first_message_at": "2026-09-17T12:00:00+00:00",
+                "last_message_at": "2026-09-17T12:05:00+00:00",
+                "score": 0.75,
+            }
+        ],
+    }
+    assert resolved == ["eng-infra"]
+    request, timeout = requests[0]
+    assert request.full_url == "http://company-context:8080/query"
+    assert request.get_method() == "POST"
+    assert timeout == 30
+    assert json.loads(request.data) == {
+        "query": "database migration",
+        "filters": {"types": ["slack_message"], "channel_ids": ["C123", "C456"]},
+        "limit": 50,
+    }
 
 
 def test_indexed_search_rejects_empty_query() -> None:
-    result = IndexedSlackClient("postgresql://example/centaur").search_messages("   ")
+    result = IndexedSlackClient("http://company-context:8080").search_messages("   ")
 
     assert result == {"status": "error", "error": "query cannot be empty"}
+
+
+def test_indexed_search_reports_unknown_channel() -> None:
+    result = IndexedSlackClient(
+        "http://company-context:8080", resolve_channel_name=lambda name: None
+    ).search_messages("deploy", channels=["missing"])
+
+    assert result == {
+        "status": "error",
+        "error": "Channel 'missing' not found; pass its channel ID instead",
+    }
+
+
+def test_indexed_search_requires_company_context_api(monkeypatch) -> None:
+    monkeypatch.delenv("COMPANY_CONTEXT_API_URL", raising=False)
+
+    result = IndexedSlackClient().search_messages("deploy")
+
+    assert result["status"] == "error"
+    assert "COMPANY_CONTEXT_API_URL is not configured" in result["error"]
+
+
+def test_indexed_search_reports_api_errors(monkeypatch) -> None:
+    def fake_urlopen(request, timeout):
+        raise slack_client.urllib.error.HTTPError(
+            request.full_url, 400, "Bad Request", {}, io.BytesIO(b'{"error": "bad filter"}')
+        )
+
+    monkeypatch.setattr(slack_client.urllib.request, "urlopen", fake_urlopen)
+
+    result = IndexedSlackClient("http://company-context:8080").search_messages("deploy")
+
+    assert result == {"status": "error", "error": "HTTP 400: bad filter"}
 
 
 def test_search_messages_direct_uses_native_filters_without_scanning_history() -> None:
@@ -1898,14 +1941,6 @@ def test_list_users_paginates_and_skips_deleted_by_default() -> None:
         {"limit": 10},
         {"limit": 9, "cursor": "cursor-2"},
     ]
-
-
-def test_indexed_search_uses_company_context_database(monkeypatch):
-    monkeypatch.setenv("CENTAUR_POSTGRES_DSN", "postgresql://u:p@proxy:5432")
-    monkeypatch.delenv("COMPANY_CONTEXT_POSTGRES_DATABASE", raising=False)
-
-    assert IndexedSlackClient().database_url == company_context_database_url()
-    assert IndexedSlackClient().database_url == "postgresql://u:p@proxy:5432/ai_v2"
 
 
 @pytest.mark.parametrize("emoji", ["pencil2", ":pencil2:", " :pencil2: "])

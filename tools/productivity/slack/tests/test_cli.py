@@ -684,8 +684,6 @@ def test_search_uses_indexed_slack_client(monkeypatch) -> None:
             "database migration",
             "--channels",
             "eng-infra,C1234567890",
-            "--from",
-            "alice",
             "--limit",
             "5",
         ],
@@ -698,7 +696,6 @@ def test_search_uses_indexed_slack_client(monkeypatch) -> None:
             "query": "database migration",
             "limit": 5,
             "channels": ["eng-infra", "C1234567890"],
-            "from_user": "alice",
         }
     ]
 
