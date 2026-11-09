@@ -74,13 +74,18 @@ import {
   withSlackApiTimeout
 } from './session-api'
 import {
+  buildProactiveMuteBlock,
   buildSlackResponseContextBlock,
   defaultModelForHarness,
   defaultServiceTierForHarness,
   effectiveReasoningForHarness,
   personaFallbackNotice,
+  PROACTIVE_MUTE_ACTION_ID,
+  PROACTIVE_MUTED_NOTICE,
+  proactiveMutedBlocks,
   reasoningForModel,
-  type SlackContextBlock
+  type SlackContextBlock,
+  type SlackStopBlock
 } from './response-context'
 import { configuredModels, findConfiguredModel } from './model-catalog'
 import { resolveChannelDefault } from './channel-defaults'
@@ -400,6 +405,10 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
 
   chat.onAction(async event => {
     const payload = slackBlockActionPayload(event)
+    if (payload.action_id === PROACTIVE_MUTE_ACTION_ID) {
+      await handleProactiveMuteAction(chat.thread(event.threadId), event, payload, options)
+      return
+    }
     const workflowAction = payload.action_id.startsWith(WORKFLOW_ACTION_PREFIX)
     // Workflow starts deduplicate durably using the Slack click identity.
     // A temporary ingress lease must never acknowledge a lost click.
@@ -820,8 +829,16 @@ async function handleSlackMessageHandoff(
     if (!input.proactive && await handleStopCommand(thread, message, input.options, input.trigger)) {
       return
     }
+    if (input.proactive && proactiveMuted((await thread.state) ?? {})) {
+      traceLog(input.options, 'slackbotv2_proactive_handoff_muted', trace, { trigger: input.trigger })
+      return
+    }
     if (input.options.proactivity && PROACTIVE_ELIGIBILITY_TRIGGERS.has(input.trigger)) {
-      await thread.setState({ proactiveEligible: true })
+      // Only a mention lifts a mute; the mute marker outranks a proactive
+      // handoff that races the click and sets eligibility again.
+      await thread.setState(input.proactive
+        ? { proactiveEligible: true }
+        : { proactiveEligible: true, proactiveMutedAt: null })
     }
     // Assistant status is thread-wide. A mentioned follow-up that steers an
     // active execution must not clear or replace the status owned by that run.
@@ -927,6 +944,74 @@ async function interruptThreadExecution(
     })
     throw error
   }
+}
+
+/**
+ * Silences proactive replies in the thread, as a stop does, until the next
+ * mention. Unlike a stop it leaves a running execution alone. The button is
+ * then swapped for a notice so the thread shows it is muted.
+ */
+async function handleProactiveMuteAction(
+  thread: Thread<SlackbotV2ThreadState>,
+  event: ActionEvent,
+  payload: SlackbotV2BlockActionPayload,
+  options: SlackbotV2Options
+): Promise<void> {
+  const fields = {
+    channel_id: payload.channel_id,
+    message_ts: payload.message_ts,
+    thread_ts: payload.thread_ts,
+    user_id: payload.user_id
+  }
+  await thread.setState({ proactiveEligible: false, proactiveMutedAt: Date.now() })
+  traceLog(options, 'slackbotv2_proactive_muted', undefined, fields)
+  if (!payload.channel_id || !payload.message_ts) return
+  const raw = isJsonObject(event.raw) ? event.raw : {}
+  const message = isJsonObject(raw.message) ? raw.message : {}
+  const blocks = Array.isArray(message.blocks) ? proactiveMutedBlocks(message.blocks) : undefined
+  const slack = {
+    apiUrl: options.slackApiUrl,
+    fetch: options.fetch as typeof globalThis.fetch | undefined,
+    token: options.botToken
+  }
+  try {
+    if (blocks) {
+      // Slack reports most failures as HTTP 200 with ok: false.
+      assertSlackOk('chat.update', await withSlackApiTimeout(options, 'mark proactive reply muted', () =>
+        callSlackApi('chat.update', {
+          channel: payload.channel_id,
+          ts: payload.message_ts,
+          text: stringValue(message.text) ?? PROACTIVE_MUTED_NOTICE,
+          blocks
+        }, slack)))
+      return
+    }
+  } catch (error) {
+    traceWarn(options, 'slackbotv2_proactive_mute_update_failed', undefined, {
+      ...fields,
+      error: errorMessage(error)
+    })
+  }
+  // Without an editable message, confirm to the clicker alone.
+  try {
+    assertSlackOk('chat.postEphemeral', await withSlackApiTimeout(options, 'post proactive mute feedback', () =>
+      callSlackApi('chat.postEphemeral', {
+        channel: payload.channel_id,
+        user: payload.user_id,
+        ...(payload.thread_ts ? { thread_ts: payload.thread_ts } : {}),
+        text: PROACTIVE_MUTED_NOTICE
+      }, slack)))
+  } catch (error) {
+    traceWarn(options, 'slackbotv2_proactive_mute_feedback_failed', undefined, {
+      ...fields,
+      error: errorMessage(error)
+    })
+  }
+}
+
+/** Whether the mute button silenced proactive replies in this thread. */
+function proactiveMuted(state: SlackbotV2ThreadState): boolean {
+  return state.proactiveMutedAt != null
 }
 
 /** Whether a stop was requested after this message was sent. */
@@ -1114,6 +1199,7 @@ function proactiveLayers(
   state: SlackbotV2ThreadState
 ): ProactiveLayer[] {
   const layers: ProactiveLayer[] = []
+  if (proactiveMuted(state)) return layers
   if (state.proactiveEligible === true) layers.push('mentioned')
   // A stop silences rule matches in its thread until the next mention.
   if (rules !== undefined && state.proactiveEligible !== false) layers.push('rules')
@@ -1648,6 +1734,17 @@ async function syncThreadMessageToSession(
     recordForward(input.mode, 'duplicate_skipped', traceStartedAtMs)
     return
   }
+  // A mute also catches proactive handoffs already past the classifier,
+  // including in-process retries.
+  if (input.proactive && proactiveMuted(state)) {
+    traceLog(input.options, 'slackbotv2_forward_proactive_muted', trace)
+    finishSteeringReaction(input, trace)
+    if (input.initialAssistantStatusVisible && state.activeExecution !== true) {
+      await setAssistantStatus(thread, '', input.options, trace)
+    }
+    recordForward(input.mode, 'muted', traceStartedAtMs)
+    return
+  }
   traceLog(input.options, 'slackbotv2_forward_started', trace, {
     active_execution: state.activeExecution === true,
     history_forwarded: state.historyForwarded === true
@@ -2127,7 +2224,9 @@ async function syncThreadMessageToSession(
     traceLog(input.options, 'slackbotv2_forward_active_execution_marked', trace)
     await forwardToSessionApi(input.options, forwardInput, {
       shouldExecute: async () => {
-        stoppedBeforeExecute = stopRequestedFor((await thread.state) ?? {}, message)
+        const latest = (await thread.state) ?? {}
+        stoppedBeforeExecute = stopRequestedFor(latest, message)
+          || (input.proactive === true && proactiveMuted(latest))
         return !stoppedBeforeExecute
       },
       onExecutionStarted: commitExecutionStarted,
@@ -2226,7 +2325,11 @@ async function syncThreadMessageToSession(
       assistantStatusVisible,
       input.steeringReactions,
       trace,
-      responseContextBlock
+      [
+        ...(responseContextBlock ? [responseContextBlock] : []),
+        // A proactive reply was not asked for, so it carries a way to opt out.
+        ...(input.proactive === true ? [buildProactiveMuteBlock()] : [])
+      ]
     )
     traceLog(input.options, 'slackbotv2_forward_complete', trace, {
       last_event_id: lastEventId
@@ -2313,7 +2416,7 @@ function scheduleExecutionRender(
   assistantStatusVisible: boolean,
   steeringReactions: SteeringReactionController,
   trace?: SlackbotV2Trace,
-  responseContextBlock?: SlackContextBlock
+  stopBlocks: SlackStopBlock[] = []
 ): void {
   const promise = (async () => {
     slackbotMetrics.activeLiveRenders.inc()
@@ -2329,7 +2432,7 @@ function scheduleExecutionRender(
           assistantStatusVisible,
           steeringReactions,
           trace,
-          responseContextBlock
+          stopBlocks
         )
         if (result === 'complete') return
         const delayMs = renderRetryDelayMs(attempt)
@@ -2374,7 +2477,7 @@ async function renderExecutionAttempt(
   assistantStatusVisible: boolean,
   steeringReactions: SteeringReactionController,
   trace?: SlackbotV2Trace,
-  responseContextBlock?: SlackContextBlock
+  stopBlocks: SlackStopBlock[] = []
 ): Promise<'complete' | 'retry'> {
   const renderStartedAtMs = nowMs()
   let outcome = 'failure'
@@ -2390,7 +2493,7 @@ async function renderExecutionAttempt(
       options,
       trace,
       assistantStatusVisible,
-      responseContextBlock,
+      stopBlocks,
       generativeUi
     )
     rendered = true
@@ -3371,7 +3474,7 @@ async function renderExecutionStream(
   options: SlackbotV2Options,
   trace?: SlackbotV2Trace,
   assistantStatusVisible = false,
-  responseContextBlock?: SlackContextBlock,
+  stopBlocks: SlackStopBlock[] = [],
   /**
    * Collects the json-render block stripped from the streamed markdown. The
    * caller delivers it once it knows how the render ended, so a divergence
@@ -3442,9 +3545,9 @@ async function renderExecutionStream(
       recipientTeamId: message.teamId,
       recipientUserId: await slackStreamRecipientUserId(message.author, options, options.logger ?? noopLogger),
       ...(taskDisplayMode === 'none' ? {} : { taskDisplayMode }),
-      // stopBlocks append optional response metadata to the finalized Slack
-      // message via chat.stopStream.
-      ...(responseContextBlock ? { stopBlocks: [responseContextBlock] } : {})
+      // stopBlocks append optional response metadata and the proactive mute
+      // button to the finalized Slack message via chat.stopStream.
+      ...(stopBlocks.length > 0 ? { stopBlocks } : {})
     }) ?? await thread.post(visibleStream)
     return { diverged: capture.diverged, messageId: sent?.id }
   } finally {

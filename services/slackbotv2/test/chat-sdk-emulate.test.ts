@@ -29,7 +29,7 @@ import { clearRequesterIdentityCacheForTests } from '../src/session-api'
 import { resetSlackbotMetricsForTests, slackbotMetrics } from '../src/metrics'
 import type { ProactivityRules } from '../src/proactivity-rules'
 import { createOpenAiMessageOverridesStrategy } from '../src/message-overrides-strategy'
-import { modelDisplayName } from '../src/response-context'
+import { buildProactiveMuteBlock, modelDisplayName } from '../src/response-context'
 import claudeSettings from '../../../harness/claude/settings.json'
 
 const BOT_TOKEN = 'xoxb-slackbotv2-emulate'
@@ -5492,6 +5492,154 @@ describe('proactive replies', () => {
     expect(codexApi.executes).toHaveLength(2)
     expect(sessionMessageTexts(codexApi.appends.flatMap(append => append.body.messages)))
       .toEqual(expect.arrayContaining(['is staging deployed?', 'and production?']))
+  })
+
+  const MUTE_ANSWER_BLOCK = { type: 'section', text: { type: 'mrkdwn', text: 'Executed request 2.' } }
+
+  // Clicks the mute button on a proactive reply, as Slack's interactivity
+  // delivery would, and waits for the handler to finish.
+  async function clickMute(threadTs: string, replyTs: string): Promise<void> {
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request('/api/webhooks/slack', signedSlackInteraction({
+      type: 'block_actions',
+      team: { id: TEAM_ID },
+      user: { id: USER_ID, username: 'tester', team_id: TEAM_ID },
+      channel: { id: CHANNEL_ID },
+      message: {
+        ts: replyTs,
+        thread_ts: threadTs,
+        text: 'Executed request 2.',
+        blocks: [MUTE_ANSWER_BLOCK, buildProactiveMuteBlock()]
+      },
+      actions: [{
+        action_id: 'slackbotv2.proactive.mute',
+        action_ts: '1700000009.000100',
+        block_id: 'slackbotv2.proactive.mute',
+        type: 'button'
+      }]
+    }), {}, waitUntilContext(waits))
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+  }
+
+  it('adds a mute button to proactive replies that silences the thread until a mention', async () => {
+    const updates: Record<string, unknown>[] = []
+    const calls = createProactiveBot(() => ({ respond: true }), {
+      fetch: async (input, init) => {
+        if (String(input).endsWith('/chat.update')) {
+          const body = Object.fromEntries(new URLSearchParams(String(init?.body)))
+          updates.push({ ...body, blocks: JSON.parse(body.blocks ?? '[]') })
+          return Response.json({ ok: true })
+        }
+        return globalThis.fetch(input, init)
+      }
+    })
+    const threadTs = await mentionThread('Proactive mute context.')
+    const muteBlocks = () => slackApi.calls
+      .filter(call => call.method === 'chat.stopStream')
+      .map(call => (Array.isArray(call.body.blocks) ? call.body.blocks : [])
+        .filter(block => (block as Record<string, unknown>).block_id === 'slackbotv2.proactive.mute'))
+    // The mentioned reply was asked for, so it has no mute button.
+    expect(muteBlocks().flat()).toHaveLength(0)
+
+    await reply('what about staging?', threadTs)
+    expect(codexApi.executes).toHaveLength(2)
+    const stops = muteBlocks()
+    expect(stops.at(-1)).toEqual([{
+      type: 'actions',
+      block_id: 'slackbotv2.proactive.mute',
+      elements: [{
+        type: 'button',
+        action_id: 'slackbotv2.proactive.mute',
+        accessibility_label: 'Stop replying proactively in this thread',
+        text: { type: 'plain_text', text: ':mute:', emoji: true }
+      }]
+    }])
+
+    const replyTs = slackApi.calls.filter(call => call.method === 'chat.stopStream').at(-1)!.streamTs!
+    await clickMute(threadTs, replyTs)
+
+    // The click stays in slackbotv2: no workflow event reaches the API.
+    expect(codexApi.workflowEvents).toHaveLength(0)
+    expect(updates).toHaveLength(1)
+    expect(updates[0]).toMatchObject({
+      channel: CHANNEL_ID,
+      ts: replyTs,
+      blocks: [MUTE_ANSWER_BLOCK, {
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text: expect.stringContaining('Proactive replies are off') }]
+      }]
+    })
+
+    await reply('are you still there?', threadTs)
+    expect(calls).toHaveLength(1)
+    expect(codexApi.executes).toHaveLength(2)
+
+    await reply(`<@${BOT_USER_ID}> one more`, threadTs)
+    await reply('and after that?', threadTs)
+    expect(calls).toHaveLength(2)
+    expect(calls[1]!.message.text).toBe('and after that?')
+  })
+
+  it('drops a proactive handoff already past the classifier when the thread is muted', async () => {
+    let holdAppends = false
+    let appendHeld = false
+    let release: (() => void) | undefined
+    const held = new Promise<void>(resolve => { release = resolve })
+    createProactiveBot(() => ({ respond: true }), {
+      fetch: async (input, init) => {
+        if (String(input).endsWith('/chat.update')) return Response.json({ ok: true })
+        if (holdAppends && String(input).endsWith('/messages')) {
+          appendHeld = true
+          await held
+        }
+        return globalThis.fetch(input, init)
+      }
+    })
+    const threadTs = await mentionThread('Proactive mute race context.')
+
+    holdAppends = true
+    const accepted = await sendMessage('what about staging?', { threadTs })
+    await waitFor(() => appendHeld)
+    await clickMute(threadTs, threadTs)
+    release?.()
+    await accepted.finished()
+    await waitFor(async () =>
+      (await bot.chat.getState().get<Record<string, unknown>>(`thread-state:${threadKey(threadTs)}`))
+        ?.activeExecution !== true
+    )
+
+    expect(codexApi.executes).toHaveLength(1)
+    const state = await bot.chat.getState().get<Record<string, unknown>>(`thread-state:${threadKey(threadTs)}`)
+    expect(state?.proactiveEligible).toBe(false)
+    expect(typeof state?.proactiveMutedAt).toBe('number')
+  })
+
+  it('confirms a mute ephemerally when Slack rejects the message update', async () => {
+    const ephemerals: Record<string, string>[] = []
+    createProactiveBot(() => ({ respond: true }), {
+      fetch: async (input, init) => {
+        if (String(input).endsWith('/chat.update')) {
+          return Response.json({ ok: false, error: 'invalid_blocks' })
+        }
+        if (String(input).endsWith('/chat.postEphemeral')) {
+          ephemerals.push(Object.fromEntries(new URLSearchParams(String(init?.body))))
+          return Response.json({ ok: true })
+        }
+        return globalThis.fetch(input, init)
+      }
+    })
+    const threadTs = await mentionThread('Proactive mute fallback context.')
+
+    await clickMute(threadTs, threadTs)
+
+    expect(ephemerals).toHaveLength(1)
+    expect(ephemerals[0]).toMatchObject({
+      channel: CHANNEL_ID,
+      user: USER_ID,
+      thread_ts: threadTs,
+      text: expect.stringContaining('Proactive replies are off')
+    })
   })
 
   it('ends proactive replies at a stop until the next mention', async () => {
