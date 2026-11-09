@@ -121,7 +121,7 @@ Rails.application.routes.draw do
   # admin-gated: any signed-in team member connects integrations from here.
   get "console/integrations", to: "console/integrations#index", as: :console_integrations
   namespace :console do
-    resource :ssh_connection, only: %i[show edit update destroy] do
+    resource :ssh_key, only: %i[show edit update destroy] do
       post :validate_key
     end
   end
@@ -206,6 +206,11 @@ Rails.application.routes.draw do
       resources :hmac_secrets, only: %i[index show create update destroy] do
         collection do
           get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
+        end
+      end
+      resources :ssh_key_secrets, only: %i[index show create update destroy] do
+        collection do
           get "lookup/:foreign_id", action: :lookup, as: :lookup
         end
       end

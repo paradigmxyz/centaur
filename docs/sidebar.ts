@@ -16,6 +16,7 @@ export const sidebar = [
     items: [
       { text: 'Slack ETL', link: '/operate/slack-etl' },
       { text: 'Expose Slackbot with Tailscale Funnel', link: '/operate/tailscale-funnel' },
+      { text: 'SSH access', link: '/operate/ssh' },
       { text: 'API Clients', link: '/operate/api-clients' },
     ],
   },

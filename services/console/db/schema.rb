@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_11_06_212027) do
+ActiveRecord::Schema[8.1].define(version: 2026_11_09_021725) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -151,6 +151,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_06_212027) do
     t.bigint "role_id"
     t.bigint "static_secret_id"
     t.datetime "updated_at", null: false
+    t.bigint "ssh_key_secret_id"
     t.index ["aws_auth_secret_id"], name: "index_grants_on_aws_auth_secret_id"
     t.index ["created_by_id"], name: "index_grants_on_created_by_id"
     t.index ["gcp_auth_secret_id"], name: "index_grants_on_gcp_auth_secret_id"
@@ -163,6 +164,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_06_212027) do
     t.index ["principal_id", "hmac_secret_id"], name: "index_grants_uniq_principal_hmac_secret", unique: true, where: "((principal_id IS NOT NULL) AND (hmac_secret_id IS NOT NULL))"
     t.index ["principal_id", "oauth_token_secret_id"], name: "index_grants_uniq_principal_oauth_token_secret", unique: true, where: "((principal_id IS NOT NULL) AND (oauth_token_secret_id IS NOT NULL))"
     t.index ["principal_id", "pg_dsn_secret_id"], name: "index_grants_uniq_principal_pg_dsn_secret", unique: true, where: "((principal_id IS NOT NULL) AND (pg_dsn_secret_id IS NOT NULL))"
+    t.index ["principal_id", "ssh_key_secret_id"], name: "index_grants_uniq_principal_ssh_key_secret", unique: true, where: "((principal_id IS NOT NULL) AND (ssh_key_secret_id IS NOT NULL))"
     t.index ["principal_id", "static_secret_id"], name: "index_grants_uniq_principal_static_secret", unique: true, where: "((principal_id IS NOT NULL) AND (static_secret_id IS NOT NULL))"
     t.index ["principal_id"], name: "index_grants_on_principal_id"
     t.index ["role_id", "aws_auth_secret_id"], name: "index_grants_uniq_role_aws_auth_secret", unique: true, where: "((role_id IS NOT NULL) AND (aws_auth_secret_id IS NOT NULL))"
@@ -170,8 +172,10 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_06_212027) do
     t.index ["role_id", "hmac_secret_id"], name: "index_grants_uniq_role_hmac_secret", unique: true, where: "((role_id IS NOT NULL) AND (hmac_secret_id IS NOT NULL))"
     t.index ["role_id", "oauth_token_secret_id"], name: "index_grants_uniq_role_oauth_token_secret", unique: true, where: "((role_id IS NOT NULL) AND (oauth_token_secret_id IS NOT NULL))"
     t.index ["role_id", "pg_dsn_secret_id"], name: "index_grants_uniq_role_pg_dsn_secret", unique: true, where: "((role_id IS NOT NULL) AND (pg_dsn_secret_id IS NOT NULL))"
+    t.index ["role_id", "ssh_key_secret_id"], name: "index_grants_uniq_role_ssh_key_secret", unique: true, where: "((role_id IS NOT NULL) AND (ssh_key_secret_id IS NOT NULL))"
     t.index ["role_id", "static_secret_id"], name: "index_grants_uniq_role_static_secret", unique: true, where: "((role_id IS NOT NULL) AND (static_secret_id IS NOT NULL))"
     t.index ["role_id"], name: "index_grants_on_role_id"
+    t.index ["ssh_key_secret_id"], name: "index_grants_on_ssh_key_secret_id"
     t.index ["static_secret_id"], name: "index_grants_on_static_secret_id"
   end
 
@@ -444,6 +448,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_06_212027) do
     t.string "source_type", null: false
     t.bigint "static_secret_id"
     t.datetime "updated_at", null: false
+    t.bigint "ssh_key_secret_id"
     t.index ["aws_auth_secret_id", "role", "role_kind"], name: "index_secret_sources_on_aws_owner_and_role", unique: true
     t.index ["aws_auth_secret_id"], name: "index_secret_sources_on_aws_auth_secret_id"
     t.index ["broker_credential_id"], name: "index_secret_sources_on_broker_credential_id"
@@ -455,6 +460,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_06_212027) do
     t.index ["oauth_token_secret_id"], name: "index_secret_sources_on_oauth_token_secret_id"
     t.index ["pg_dsn_secret_id"], name: "index_secret_sources_on_pg_dsn_secret_id", unique: true
     t.index ["source_type"], name: "index_secret_sources_on_source_type"
+    t.index ["ssh_key_secret_id"], name: "index_secret_sources_on_ssh_key_secret_id", unique: true
     t.index ["static_secret_id"], name: "index_secret_sources_on_static_secret_id", unique: true
     t.check_constraint "broker_credential_id IS NULL OR source_type::text = 'token_broker'::text", name: "secret_sources_broker_credential_requires_token_broker"
   end
@@ -532,20 +538,20 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_06_212027) do
     t.index ["oauth_app_slug"], name: "index_slack_dm_sync_cursors_on_oauth_app_slug", unique: true
   end
 
-  create_table "ssh_connections", force: :cascade do |t|
-    t.datetime "created_at", null: false
-    t.string "destination"
-    t.datetime "expires_at"
-    t.string "generation", null: false
-    t.text "host_key"
+  create_table "ssh_key_secrets", force: :cascade do |t|
+    t.string "foreign_id"
     t.string "name", null: false
-    t.text "private_key"
+    t.string "description"
+    t.jsonb "labels", default: {}, null: false
     t.text "public_key", null: false
-    t.datetime "revoked_at"
+    t.bigint "owner_id"
+    t.bigint "created_by_id", null: false
+    t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
-    t.bigint "user_id", null: false
-    t.string "username"
-    t.index ["user_id"], name: "index_ssh_connections_on_user_id", unique: true
+    t.index ["created_by_id"], name: "index_ssh_key_secrets_on_created_by_id"
+    t.index ["foreign_id"], name: "index_ssh_key_secrets_on_foreign_id", unique: true
+    t.index ["labels"], name: "index_ssh_key_secrets_on_labels", using: :gin
+    t.index ["owner_id"], name: "index_ssh_key_secrets_on_owner_id", unique: true
   end
 
   create_table "static_secrets", force: :cascade do |t|
@@ -632,6 +638,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_06_212027) do
   add_foreign_key "grants", "pg_dsn_secrets"
   add_foreign_key "grants", "principals"
   add_foreign_key "grants", "roles"
+  add_foreign_key "grants", "ssh_key_secrets"
   add_foreign_key "grants", "static_secrets"
   add_foreign_key "grants", "users", column: "created_by_id"
   add_foreign_key "hmac_secrets", "users", column: "created_by_id"
@@ -667,13 +674,15 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_06_212027) do
   add_foreign_key "secret_sources", "hmac_secrets"
   add_foreign_key "secret_sources", "oauth_token_secrets"
   add_foreign_key "secret_sources", "pg_dsn_secrets"
+  add_foreign_key "secret_sources", "ssh_key_secrets"
   add_foreign_key "secret_sources", "static_secrets"
   add_foreign_key "skill_editors", "skills", on_delete: :cascade
   add_foreign_key "skill_editors", "users", on_delete: :cascade
   add_foreign_key "skills", "users", on_delete: :cascade
   add_foreign_key "slack_channel_permissions", "principals"
   add_foreign_key "slack_channel_permissions", "roles"
-  add_foreign_key "ssh_connections", "users"
+  add_foreign_key "ssh_key_secrets", "users", column: "created_by_id"
+  add_foreign_key "ssh_key_secrets", "users", column: "owner_id"
   add_foreign_key "static_secrets", "broker_credentials"
   add_foreign_key "static_secrets", "users", column: "created_by_id"
   add_foreign_key "thread_shares", "users", column: "created_by_id"

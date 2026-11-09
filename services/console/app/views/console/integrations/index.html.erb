@@ -13,13 +13,11 @@
           <div class="text-[11px] uppercase tracking-wide text-zinc-500">Remote development</div>
         </div>
       </div>
-      <p class="text-xs text-zinc-500">Save one personal key for multiple allowed SSH destinations. Provide the environment URL in your request. Available in Console, DMs, and channel turns you initiate.</p>
+      <p class="text-xs text-zinc-500">Save one personal key for the SSH destinations your administrator allows. Used in Console and your DMs with the bot; channels need an admin grant.</p>
       <div class="mt-auto flex items-center justify-between gap-3 pt-1">
-        <%= link_to @ssh_connection&.configured? ? "Manage" : "Connect", @ssh_connection&.configured? ? console_ssh_connection_path : edit_console_ssh_connection_path, class: @ssh_connection&.configured? ? "btn-secondary" : "btn-primary" %>
-        <% if @ssh_connection&.configured? %>
+        <%= link_to @ssh_key ? "Manage" : "Connect", @ssh_key ? console_ssh_key_path : edit_console_ssh_key_path, class: @ssh_key ? "btn-secondary" : "btn-primary" %>
+        <% if @ssh_key %>
           <span class="text-xs text-emerald-300">Configured</span>
-        <% elsif @ssh_connection && !@ssh_connection.revoked? %>
-          <span class="text-xs text-amber-300">Expired</span>
         <% end %>
       </div>
     </div>

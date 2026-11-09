@@ -1,11 +1,16 @@
-//! Personal SSH keys authorized against deployment-owned target policy.
+//! SSH keys granted to the proxy's principal, released per connection for
+//! destinations the deployment allows.
 use axum::{Json, extract::State, http::HeaderMap};
+use centaur_console_db::{SecretValues, SshKey, ssh_keys};
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sqlx::Row;
 
 use crate::{ApiError, bearer_token, database::load_proxy, models::AppState};
+
+/// Longest lease a grant carries. Iron renews every five seconds, so revoking a
+/// grant or replacing a key ends active connections well within this window.
+const LEASE_SECONDS: i64 = 30;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -15,6 +20,10 @@ pub(crate) struct Request {
     destination: String,
 }
 
+/// Iron's SSH authorizer. The principal comes only from the proxy token's
+/// current assignment; the key is whichever SSH key that principal is granted,
+/// directly or through a role, exactly like any other secret. A channel or
+/// workflow can therefore use a key only if an admin granted it one.
 pub(crate) async fn authorize(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -24,40 +33,10 @@ pub(crate) async fn authorize(
     let proxy = load_proxy(&state.pool, token)
         .await?
         .ok_or_else(ApiError::unauthorized)?;
-    let assigned_principal = proxy.principal_id.ok_or_else(ApiError::unauthorized)?;
+    let principal_id = proxy.principal_id.ok_or_else(ApiError::unauthorized)?;
     let assigned_at = proxy
         .principal_assigned_at
         .ok_or_else(ApiError::unauthorized)?;
-    let principal_binding = format!("{}:{}", proxy.id, assigned_at.to_rfc3339());
-    // The ingress derives this binding from the verified actor on each execute,
-    // before the sandbox receives input. Never take a requester from the tool.
-    let (principal_id, binding) = match proxy.principal_field("kind").as_str() {
-        Some("console_user" | "slack_dm") => (assigned_principal, principal_binding),
-        Some("slack_channel") => {
-            let requester = proxy
-                .requester_principal_id
-                .ok_or_else(ApiError::unauthorized)?;
-            let assigned_at = proxy
-                .requester_principal_assigned_at
-                .ok_or_else(ApiError::unauthorized)?;
-            let personal: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM principals WHERE id = $1 AND kind = 'slack_dm' \
-                 AND NULLIF(slack_user_id, '') IS NOT NULL AND NULLIF(slack_team_id, '') IS NOT NULL)",
-            )
-            .bind(requester)
-            .fetch_one(&state.pool)
-            .await
-            .map_err(centaur_console_db::Error::Database)?;
-            if !personal {
-                return Err(ApiError::unauthorized());
-            }
-            (
-                requester,
-                format!("{principal_binding}:requester:{}", assigned_at.to_rfc3339()),
-            )
-        }
-        _ => return Err(ApiError::unauthorized()),
-    };
     if request.route != "ee"
         || request.public_key.len() > 8192
         || !request.public_key.starts_with("ssh-ed25519 ")
@@ -65,77 +44,43 @@ pub(crate) async fn authorize(
         return Err(ApiError::unauthorized());
     }
     let (destination, policy) = target_policy(&state.ssh_targets, &request.destination)?;
-    personal_grant(
-        &state,
+    let keys = ssh_keys(
+        &state.pool,
+        SecretValues::Live(&state.encryption),
         principal_id,
-        &binding,
-        destination,
-        &policy.username,
     )
-    .await
-}
-
-// Resolve ownership through Console's authenticated account or its verified
-// Slack SSO identity. Never match email, channel membership, or editable labels.
-async fn personal_grant(
-    state: &AppState,
-    principal_id: i64,
-    binding: &str,
-    destination: String,
-    username: &str,
-) -> Result<Json<Value>, ApiError> {
-    let row = sqlx::query(
-        "SELECT c.*, u.status AS owner_status FROM ssh_connections c \
-         JOIN users u ON u.id = c.user_id JOIN principals p ON p.id = $1 \
-         WHERE (p.kind = 'console_user' AND p.console_user_id = u.id) \
-            OR (p.kind = 'slack_dm' AND EXISTS ( \
-                SELECT 1 FROM user_identities i WHERE i.user_id = u.id AND i.provider = 'slack' \
-                AND i.subject = p.slack_user_id AND i.team_id = p.slack_team_id \
-                AND NULLIF(i.team_id, '') IS NOT NULL \
-                AND (SELECT COUNT(DISTINCT (s.subject, s.team_id)) FROM user_identities s \
-                     WHERE s.user_id = u.id AND s.provider = 'slack' \
-                     AND NULLIF(s.subject, '') IS NOT NULL AND NULLIF(s.team_id, '') IS NOT NULL) = 1))",
-    )
-    .bind(principal_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(centaur_console_db::Error::Database)?;
-    let row = row.ok_or_else(ApiError::unauthorized)?;
-    let expires_at = row
-        .get::<Option<chrono::NaiveDateTime>, _>("expires_at")
-        .map(|expiry| expiry.and_utc());
-    if row.get::<String, _>("owner_status") != "active"
-        || row
-            .get::<Option<chrono::NaiveDateTime>, _>("revoked_at")
-            .is_some()
-        || expires_at.is_some_and(|expiry| expiry <= Utc::now())
-    {
-        return Err(ApiError::unauthorized());
-    }
-    let encrypted: String = row
-        .get::<Option<String>, _>("private_key")
-        .ok_or_else(ApiError::unauthorized)?;
-    let private_key = state
-        .encryption
-        .decrypt(&encrypted)
-        .map_err(|_| ApiError::unauthorized())?;
-    if private_key.is_empty() {
-        return Err(ApiError::unauthorized());
-    }
-    let generation: String = row.get("generation");
-    let lease_expiry = Utc::now() + chrono::Duration::seconds(30);
+    .await?;
+    let key = strongest_key(&keys).ok_or_else(ApiError::unauthorized)?;
+    let lease_expiry = Utc::now() + chrono::Duration::seconds(LEASE_SECONDS);
     Ok(Json(json!({
-        "id": format!("ee:{generation}"),
+        "id": centaur_console_db::oid("sks", key.id),
         "principal": centaur_console_db::oid("prn", principal_id),
-        // Reassignment, including away and back, invalidates the previous lease.
-        "generation": format!("{generation}:{binding}"),
+        // Reassignment, including away and back, and key replacement both
+        // change the generation, which closes connections using the old one.
+        "generation": format!(
+            "{}:{}:{}:{}",
+            key.id,
+            key.version,
+            proxy.id,
+            assigned_at.to_rfc3339()
+        ),
         "destination": destination,
-        "username": username,
+        "username": policy.username,
         "host_key": "",
         "tls_identity": true,
-        "private_key": {"type": "control_plane", "value": private_key},
-        "expires_at": expires_at.map_or(lease_expiry, |expiry| expiry.min(lease_expiry)).to_rfc3339(),
+        "private_key": key.private_key,
+        "expires_at": lease_expiry.to_rfc3339(),
     })))
+}
+
+/// The key with the strictly highest grant priority. Equal top priorities are
+/// ambiguous and deny, rather than picking one by an incidental order.
+fn strongest_key(keys: &[SshKey]) -> Option<&SshKey> {
+    let first = keys.first()?;
+    match keys.get(1) {
+        Some(second) if second.priority == first.priority => None,
+        _ => Some(first),
+    }
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -209,6 +154,23 @@ fn target_policy<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn key(id: i64, priority: i32) -> SshKey {
+        SshKey {
+            id,
+            priority,
+            version: String::new(),
+            private_key: Value::Null,
+        }
+    }
+
+    #[test]
+    fn strongest_key_requires_a_unique_top_priority() {
+        assert!(strongest_key(&[]).is_none());
+        assert_eq!(strongest_key(&[key(1, 0)]).unwrap().id, 1);
+        assert_eq!(strongest_key(&[key(2, 100), key(1, 0)]).unwrap().id, 2);
+        assert!(strongest_key(&[key(2, 100), key(1, 100)]).is_none());
+    }
     #[test]
     fn dynamic_targets_are_restricted_by_deployment_policy() {
         let policies = target_policies(Some(

@@ -25,6 +25,15 @@ class UserIdentity < ApplicationRecord
                    saved_change_to_team_id? || saved_change_to_user_id?)
                }
 
+  # The same ordering gap applies to a personal SSH key saved before the Slack
+  # identity was linked.
+  after_commit :grant_owner_personal_ssh_key,
+               on: %i[create update],
+               if: -> {
+                 slack? && (previously_new_record? || saved_change_to_subject? ||
+                   saved_change_to_team_id? || saved_change_to_user_id?)
+               }
+
   normalizes :email, with: ->(e) { e.to_s.strip.downcase.presence }
   normalizes :team_id, with: ->(id) { id.to_s.strip.presence }
 
@@ -56,6 +65,12 @@ class UserIdentity < ApplicationRecord
 
   # Never let reconciliation abort the surrounding write: this hook runs inside
   # the SSO login's commit path, and a failure here must not break sign-in.
+  def grant_owner_personal_ssh_key
+    PersonalSshKeyGrants.new.apply_for_user(user)
+  rescue StandardError => e
+    Rails.logger.warn("user_identity_personal_ssh_key_grant_failed error=#{e.class}")
+  end
+
   def reconcile_owner_oauth_credentials
     reconciliation = PrincipalCredentialReconciliation.new
     BrokerCredential.joins(:oauth_app).where(created_by_id: user_id)
