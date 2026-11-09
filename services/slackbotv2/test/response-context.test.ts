@@ -100,7 +100,7 @@ describe('reasoningForModel', () => {
 
   test('forwards Claude Code effort levels and rejects Codex-only efforts', () => {
     for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
-      for (const model of ['claude-opus-5-5', 'claude-fable-5-1', 'claude-sonnet-5-5', 'claude-haiku-5-5']) {
+      for (const model of ['claude-opus-5-5', 'claude-fable-5-2', 'claude-fable-5-1', 'claude-sonnet-5-5', 'claude-haiku-5-5']) {
         expect(reasoningForModel('claudecode', model, effort)).toBe(effort)
       }
     }
@@ -215,6 +215,7 @@ describe('modelDisplayName', () => {
     expect(modelDisplayName('claude-opus-5-5')).toBe('Opus 5.5')
     expect(modelDisplayName('claude-fable-5')).toBe('Fable 5')
     expect(modelDisplayName('claude-fable-5-1')).toBe('Fable 5.1')
+    expect(modelDisplayName('claude-fable-5-2')).toBe('Fable 5.2')
     expect(modelDisplayName('claude-sonnet-5-5')).toBe('Sonnet 5.5')
     expect(modelDisplayName('claude-haiku-5-5')).toBe('Haiku 5.5')
     expect(modelDisplayName('gpt-6.1-sol')).toBe('Sol 6.1')
