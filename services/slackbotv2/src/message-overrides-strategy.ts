@@ -57,8 +57,9 @@ const REASONING_CHOICES: Choice[] = [
 // Descriptions carry the user-facing aliases. Each states exactly when it
 // applies so a bare family name ("sol") resolves to its default generation.
 const MODEL_CHOICES: Choice[] = [
-  { value: 'claude-fable-5', description: 'Only when the user says "fable 5" (not 5.1).' },
-  { value: 'claude-fable-5-1', description: 'Fable: plain "fable", "claude fable", or "fable 5.1".' },
+  { value: 'claude-fable-5', description: 'Only when the user says "fable 5" (not 5.1 or 5.2).' },
+  { value: 'claude-fable-5-1', description: 'Only when the user says "fable 5.1".' },
+  { value: 'claude-fable-5-2', description: 'Fable: plain "fable", "claude fable", or "fable 5.2".' },
   { value: 'claude-haiku-4-5', description: 'Only when the user says "haiku 4.5".' },
   { value: 'claude-haiku-5-5', description: 'Haiku: plain "haiku" or "haiku 5.5".' },
   { value: 'claude-opus-4-7', description: 'Only when the user says "opus 4.7".' },

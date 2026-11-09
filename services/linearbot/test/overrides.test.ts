@@ -78,7 +78,7 @@ describe("extractMessageOverrides", () => {
       "claude-haiku-5-5",
     );
     expect(extractMessageOverrides("--fable fix it").model).toBe(
-      "claude-fable-5-1",
+      "claude-fable-5-2",
     );
   });
 
@@ -132,7 +132,7 @@ describe("extractMessageOverrides", () => {
       "claude-sonnet-5-5",
     );
     expect(extractMessageOverrides("--model fable go").model).toBe(
-      "claude-fable-5-1",
+      "claude-fable-5-2",
     );
   });
 
@@ -142,14 +142,14 @@ describe("extractMessageOverrides", () => {
     ).toEqual({
       cleanedText: "what model are you",
       harnessType: "claudecode",
-      model: "claude-fable-5-1",
+      model: "claude-fable-5-2",
     });
     expect(
       extractMessageOverrides("@Centaur AI --claude --model=fable\r\nwhat model are you"),
     ).toEqual({
       cleanedText: "@Centaur AI what model are you",
       harnessType: "claudecode",
-      model: "claude-fable-5-1",
+      model: "claude-fable-5-2",
     });
   });
 
@@ -159,7 +159,7 @@ describe("extractMessageOverrides", () => {
     ).toEqual({
       cleanedText: "what model are you",
       harnessType: "claudecode",
-      model: "claude-fable-5-1",
+      model: "claude-fable-5-2",
     });
   });
 
