@@ -294,6 +294,62 @@ export type SlackContextBlock = {
   elements: Array<{ type: 'mrkdwn'; text: string }>
 }
 
+export type SlackActionsBlock = {
+  type: 'actions'
+  block_id: string
+  elements: Array<{
+    type: 'button'
+    action_id: string
+    accessibility_label: string
+    text: { type: 'plain_text'; text: string; emoji: true }
+  }>
+}
+
+/** Blocks appended to a finalized streamed reply via chat.stopStream. */
+export type SlackStopBlock = SlackContextBlock | SlackActionsBlock
+
+/** Action and block id of the mute button on proactive replies. */
+export const PROACTIVE_MUTE_ACTION_ID = 'slackbotv2.proactive.mute'
+
+export const PROACTIVE_MUTED_NOTICE =
+  ':mute: Proactive replies are off in this thread. Mention me to turn them back on.'
+
+/** A small mute button that stops proactive replies in the thread. */
+export function buildProactiveMuteBlock(): SlackActionsBlock {
+  return {
+    type: 'actions',
+    block_id: PROACTIVE_MUTE_ACTION_ID,
+    elements: [{
+      type: 'button',
+      action_id: PROACTIVE_MUTE_ACTION_ID,
+      accessibility_label: 'Stop replying proactively in this thread',
+      text: { type: 'plain_text', text: ':mute:', emoji: true }
+    }]
+  }
+}
+
+/**
+ * Replaces the mute button in a message's blocks with a muted notice. Returns
+ * undefined when the blocks carry no mute button.
+ */
+export function proactiveMutedBlocks(blocks: readonly unknown[]): unknown[] | undefined {
+  let replaced = false
+  const next = blocks.map(block => {
+    if (
+      block && typeof block === 'object'
+      && (block as { block_id?: unknown }).block_id === PROACTIVE_MUTE_ACTION_ID
+    ) {
+      replaced = true
+      return {
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text: PROACTIVE_MUTED_NOTICE }]
+      }
+    }
+    return block
+  })
+  return replaced ? next : undefined
+}
+
 export function personaFallbackNotice(
   unavailablePersonaId: string | undefined,
   personaId: string | null | undefined
