@@ -585,6 +585,10 @@ experimentalCompanyContext:
   slackHistoryDays: 90
   # Per-conversation overrides, e.g. {C0123456789: 3650}.
   slackChannelHistoryDays: {}
+  # Days of recent Slack history each sync rereads, at most 36500. Edits and
+  # new replies to threads started within them are picked up; replies to
+  # older threads are not.
+  slackThreadRefreshDays: 7
   # Rollout limits. An empty list syncs every user or conversation. Narrowing a
   # list removes indexed data that only the excluded users or conversations kept.
   syncLimits:
