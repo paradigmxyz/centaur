@@ -108,6 +108,11 @@
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MODEL" "value" $companyContextEmbeddingsModel)
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS" "value" $companyContextEmbeddingsDimensions)
 -}}
+{{- if .Values.experimentalCompanyContext.enabled -}}
+{{- /* Workflows that write custom documents (e.g. overlay ingest workflows) need the company-context API URL. */ -}}
+{{- $companyContextApiUrl := get .Values.sandbox.extraEnv "COMPANY_CONTEXT_API_URL" | default (printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "company-context")) .Values.experimentalCompanyContext.port) -}}
+{{- $apiRsEtlEnv = append $apiRsEtlEnv (dict "name" "COMPANY_CONTEXT_API_URL" "value" $companyContextApiUrl) -}}
+{{- end -}}
 {{- $apiRsEtlPassthroughNames := list -}}
 {{- range $env := $apiRsEtlEnv -}}
 {{- $apiRsEtlPassthroughNames = append $apiRsEtlPassthroughNames $env.name -}}
