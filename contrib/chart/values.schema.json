@@ -473,6 +473,7 @@
                 "enum": ["codex", "amp", "claudecode", "nanocodex", "hermes", "pi", "omp"]
               },
               "repoCache": { "type": "string", "enum": ["all", "public", "none"] },
+              "persona": { "type": "string", "minLength": 1 },
               "size": { "type": "integer", "minimum": 0 }
             }
           }
