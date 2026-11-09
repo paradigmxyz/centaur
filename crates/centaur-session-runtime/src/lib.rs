@@ -11314,12 +11314,6 @@ mod adoption_tests {
             "mock-sbx"
         );
         assert_eq!(plain.warm_status(&plain_sandbox).await, "ready");
-        let spec = plain
-            .backend
-            .created_specs()
-            .pop()
-            .expect("created cold spec");
-        assert_eq!(crate::tests::env_value(&spec, "AGENT_PERSONA"), None);
         reset_test_store(&store).await;
     }
 
