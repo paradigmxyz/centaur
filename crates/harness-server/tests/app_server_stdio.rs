@@ -2814,6 +2814,127 @@ fn wait_for_fake_codex_exit(log: &Path) {
 }
 
 #[test]
+fn fake_codex_blocks_mode_switches_provider_by_resuming_same_thread() {
+    let (mut bridge, fake_codex, log) = spawn_fake_codex_recovery("fake-provider-switch");
+    let script = std::fs::read_to_string(&fake_codex).unwrap().replace(
+        "      printf '{\"id\":%s,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}\\n' \"$id\"",
+        r#"      provider=$(printf '%s' "$line" | sed -n 's/.*"modelProvider":"\([^" ]*\)".*/\1/p')
+      printf '{"id":%s,"result":{"thread":{"id":"thread-1"},"modelProvider":"%s"}}\n' "$id" "$provider""#,
+    );
+    std::fs::write(&fake_codex, script).unwrap();
+    let user_line = |provider: &str, model: &str| {
+        json!({
+            "type": "user", "provider": provider, "model": model,
+            "message": {"role": "user", "content": [{"type": "text", "text": "continue"}]},
+        })
+    };
+    for (provider, model) in [
+        ("original", "original-model"),
+        ("other", "other-model"),
+        ("other", "other-model"),
+        ("openai", "default-model"),
+    ] {
+        assert_completed_turn(
+            &bridge.run_blocks_user_line(user_line(provider, model), Duration::from_secs(10)),
+        );
+    }
+    bridge.finish_successfully();
+    let requests = read_requests(&log);
+    assert_eq!(count_method(&requests, "initialize"), 3);
+    assert_eq!(count_method(&requests, "thread/start"), 1);
+    assert_eq!(count_method(&requests, "thread/resume"), 2);
+    assert_eq!(count_method(&requests, "turn/start"), 4);
+    let resume = requests
+        .iter()
+        .find(|request| request["method"] == "thread/resume")
+        .unwrap();
+    assert_eq!(resume["params"]["threadId"], "thread-1");
+    assert_eq!(resume["params"]["modelProvider"], "other");
+    assert_eq!(resume["params"]["model"], "other-model");
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
+fn fake_codex_blocks_mode_resolves_default_provider_for_a_new_model_without_provider() {
+    let (mut bridge, fake_codex, log) = spawn_fake_codex_recovery("fake-provider-default");
+    let script = std::fs::read_to_string(&fake_codex).unwrap().replace(
+        "      printf '{\"id\":%s,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}\\n' \"$id\"",
+        r#"      provider=$(printf '%s' "$line" | sed -n 's/.*"modelProvider":"\([^" ]*\)".*/\1/p')
+      printf '{"id":%s,"result":{"thread":{"id":"thread-1"},"modelProvider":"%s"}}\n' "$id" "$provider""#,
+    );
+    std::fs::write(&fake_codex, script).unwrap();
+    let user_line = |provider: Option<&str>, model: Option<&str>| {
+        let mut line = json!({
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "text", "text": "continue"}]},
+        });
+        if let Some(provider) = provider {
+            line["provider"] = json!(provider);
+        }
+        if let Some(model) = model {
+            line["model"] = json!(model);
+        }
+        line
+    };
+    for (provider, model) in [
+        (Some("private"), Some("private-model")),
+        // Same model, no provider: stays on the thread's provider.
+        (None, Some("private-model")),
+        (None, None),
+        // New model, no provider: the harness resolves its default route.
+        (None, Some("default-model")),
+        (None, Some("default-model")),
+    ] {
+        assert_completed_turn(
+            &bridge.run_blocks_user_line(user_line(provider, model), Duration::from_secs(10)),
+        );
+    }
+    bridge.finish_successfully();
+    let requests = read_requests(&log);
+    assert_eq!(count_method(&requests, "thread/start"), 1);
+    assert_eq!(count_method(&requests, "thread/resume"), 1);
+    assert_eq!(count_method(&requests, "turn/start"), 5);
+    let resume = requests
+        .iter()
+        .find(|request| request["method"] == "thread/resume")
+        .unwrap();
+    assert_eq!(resume["params"]["modelProvider"], "openai");
+    assert_eq!(resume["params"]["model"], "default-model");
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
+fn fake_codex_blocks_mode_does_not_send_turn_if_provider_resume_is_unconfirmed() {
+    let (mut bridge, fake_codex, log) = spawn_fake_codex_recovery("fake-provider-unconfirmed");
+    assert_completed_turn(&bridge.run_blocks_user_turn("first", Duration::from_secs(10)));
+    bridge.send(json!({
+        "type": "user", "provider": "other", "model": "other-model",
+        "message": {"role": "user", "content": [{"type": "text", "text": "must not run"}]},
+    }));
+    let value = bridge.read_json(Instant::now() + Duration::from_secs(10));
+    assert_eq!(value["method"], "error", "{value}");
+    assert!(
+        value["params"]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("did not switch"),
+        "{value}"
+    );
+    assert_eq!(value["params"]["willRetry"], false);
+    assert_eq!(count_method(&read_requests(&log), "turn/start"), 1);
+    assert_completed_turn(
+        &bridge.run_blocks_user_turn("continue original", Duration::from_secs(10)),
+    );
+    bridge.finish_successfully();
+    assert_eq!(count_method(&read_requests(&log), "thread/start"), 1);
+    assert_eq!(count_method(&read_requests(&log), "turn/start"), 2);
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
 fn fake_codex_blocks_mode_resumes_thread_after_app_server_exits_between_turns() {
     let (mut bridge, fake_codex, log) = spawn_fake_codex_recovery("fake-idle-exit-codex");
     for _ in 0..2 {

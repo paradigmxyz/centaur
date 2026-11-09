@@ -23,6 +23,7 @@ type Recorded = {
   at: string
   provider: 'openai' | 'anthropic'
   path: string
+  host?: string
   match?: string
   model?: string
   /** The credential header as it arrived, after iron-proxy's substitution. */
@@ -39,7 +40,7 @@ type Recorded = {
 }
 
 /** What the provider identifies a request by: its credential and, for ChatGPT, the workspace. */
-type Caller = { credential: string | null; account: string | null }
+type Caller = { credential: string | null; account: string | null; host: string | null }
 
 /** The one ChatGPT workspace the e2e subscription belongs to; e2e/stack.sh sets it. */
 const chatgptAccountId = process.env.CHATGPT_ACCOUNT_ID
@@ -80,7 +81,8 @@ Bun.serve<Caller & { path: string }>({
     const url = new URL(request.url)
     const caller = {
       credential: request.headers.get('authorization') ?? request.headers.get('x-api-key'),
-      account: request.headers.get('chatgpt-account-id')
+      account: request.headers.get('chatgpt-account-id'),
+      host: request.headers.get('host')
     }
     if (url.pathname.startsWith('/_e2e/echo/')) {
       const credential = request.headers.get('x-e2e-credential') ?? undefined
@@ -247,6 +249,7 @@ function record(
     path,
     match: reply?.match,
     model: body.model,
+    host: caller.host ?? undefined,
     credential: caller.credential ?? undefined,
     account: caller.account ?? undefined,
     conversation,

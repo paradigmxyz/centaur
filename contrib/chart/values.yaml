@@ -283,6 +283,17 @@ codex:
   #       apiKeyEnv: PRIVATE_RESPONSES_API_KEY
   #       # Optional; callers must pass --model when omitted.
   #       defaultModel: example-model
+  #       # Optional metadata for natural-language selection and display.
+  #       models:
+  #         example-model:
+  #           displayName: Example Model
+  #           aliases: [example]
+  #           description: General-purpose reasoning model
+  #           contextWindow: 1000000
+  #           inputModalities: [text]
+  #           reasoningEfforts: [low, high]
+  #           defaultReasoning: high
+  #           reasoningAliases: {max: high}
   customProviders: {}
 
 sandbox:
@@ -574,6 +585,10 @@ experimentalCompanyContext:
   slackHistoryDays: 90
   # Per-conversation overrides, e.g. {C0123456789: 3650}.
   slackChannelHistoryDays: {}
+  # Days of recent Slack history each sync rereads, at most 36500. Edits and
+  # new replies to threads started within them are picked up; replies to
+  # older threads are not.
+  slackThreadRefreshDays: 7
   # Rollout limits. An empty list syncs every user or conversation. Narrowing a
   # list removes indexed data that only the excluded users or conversations kept.
   syncLimits:

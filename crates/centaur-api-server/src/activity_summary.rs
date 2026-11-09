@@ -30,13 +30,19 @@ const PROGRESS_UPDATE_MAX_CHARS: usize = 500;
 const PROGRESS_UPDATE_PROMPT: &str = "\
 You write a short progress update that a software agent posts in a chat thread while it \
 is still working on a long request. Use only the supplied event facts. Write one or two \
-first-person sentences, at most 280 characters in total, as if you are the agent: say \
-what you have done or found so far and what you are doing now. Name specific things from \
-the facts (a service, PR, dataset, tool, or finding). Do not repeat the previous update; \
-if the facts add nothing new, output exactly SKIP. Do not promise a finish time. Do not \
-mention commands, paths, IDs, or flags. Never mention or tag a person, group, or \
-channel. Do not refer to \"the agent\". No markdown headings, no quotes, no event IDs, \
-and no speculation.";
+first-person sentences, at most 280 characters in total, as if you are the agent. The \
+reader asked for the work and cares about substance, not mechanics: say what you have \
+learned or found so far about their request and which part of the problem you are \
+working on now, naming concrete subjects (a service, PR, dataset, metric, partner, or \
+finding). Never name or describe the tools, CLIs, scripts, linters, commands, files, or \
+shell steps you used, and never narrate mechanics such as running, invoking, linting, \
+installing, reading output, changing directories, or checking help. Bad: \"I ran \
+prose-lint to check the extracted text.\" Good: \"About 360 requests since May are mostly \
+code review and debugging; I'm sorting the rest by team.\" Do not repeat the previous \
+update; if the facts add nothing new or only describe mechanics, output exactly SKIP. \
+Do not promise a finish time. Do not mention paths, IDs, or flags. Never mention or tag \
+a person, group, or channel. Do not refer to \"the agent\". No markdown headings, no \
+quotes, no event IDs, and no speculation.";
 
 const SYSTEM_PROMPT: &str = "\
 You write live status text for a software agent. Use only the supplied event facts. \
@@ -483,10 +489,10 @@ impl ExecutionActivity {
         {
             return None;
         }
-        if !self.facts.iter().any(ActivityFact::is_publishable) {
+        if !self.facts.iter().any(ActivityFact::is_substantive) {
             return None;
         }
-        let signature = self.signature();
+        let signature = self.progress_signature();
         if self.last_progress_signature.as_ref() == Some(&signature) {
             return None;
         }
@@ -501,8 +507,25 @@ impl ExecutionActivity {
         if let Some(update) = self.last_progress.as_deref() {
             lines.push(format!("Previous progress update: {update}"));
         }
-        lines.push(self.prompt());
+        if let Some(goal) = self.goal.as_deref() {
+            lines.push(format!("Session goal: {goal}"));
+        }
+        lines.push("Recent activity facts, oldest to newest:".to_owned());
+        for fact in self.facts.iter().filter(|fact| fact.is_substantive()) {
+            lines.push(format!("- {}: {}", fact.kind, fact.text));
+        }
         lines.join("\n")
+    }
+
+    /// Progress updates only track substantive facts, so tool churn alone
+    /// never triggers a new chat message.
+    fn progress_signature(&self) -> String {
+        self.facts
+            .iter()
+            .filter(|fact| fact.is_substantive())
+            .map(|fact| format!("{}={}", fact.kind, fact.text))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn push(&mut self, fact: ActivityFact) {
@@ -610,6 +633,13 @@ impl ActivityFact {
 
     fn is_publishable(&self) -> bool {
         self.signal == ActivitySignal::High
+    }
+
+    /// Facts that describe what the agent is learning or deciding, as opposed
+    /// to which tool, command, or file it touched. Chat progress updates use
+    /// only these so they report substance instead of mechanics.
+    fn is_substantive(&self) -> bool {
+        self.is_publishable() && matches!(self.kind, "commentary" | "plan" | "thinking")
     }
 }
 
@@ -847,6 +877,11 @@ fn tool_name(item: &Value) -> String {
 }
 
 fn command_tool_name(command: &str) -> Option<String> {
+    // `cd repo && tool ...` names the tool, not `cd`.
+    let command = command.split("&&").map(str::trim).find(|segment| {
+        let first = segment.split_whitespace().next().unwrap_or_default();
+        !matches!(first, "cd" | "pushd" | "export" | "source" | "." | "set")
+    })?;
     let first = command
         .split_whitespace()
         .next()?
@@ -938,6 +973,27 @@ fn is_shell_or_package_command(name: &str) -> bool {
             | "find"
             | "jq"
             | "curl"
+            | "cd"
+            | "pushd"
+            | "export"
+            | "source"
+            | "env"
+            | "echo"
+            | "printf"
+            | "head"
+            | "tail"
+            | "wc"
+            | "sort"
+            | "mkdir"
+            | "cp"
+            | "mv"
+            | "rm"
+            | "touch"
+            | "tee"
+            | "xargs"
+            | "timeout"
+            | "sleep"
+            | "which"
     )
 }
 
@@ -1439,21 +1495,31 @@ mod tests {
         let at = |secs| start + Duration::from_secs(secs);
         let mut state = activity(start);
         state.push(ActivityFact::high("tool", "using websearch"));
+        assert!(state.prepare_progress(at(120), PROGRESS).is_none());
+        state.push(ActivityFact::high(
+            "commentary",
+            "I'm searching for USDG yield sources.",
+        ));
 
         assert!(state.prepare_progress(at(119), PROGRESS).is_none());
         let (prompt, elapsed) = state.prepare_progress(at(120), PROGRESS).unwrap();
         assert_eq!(elapsed, Duration::from_secs(120));
         assert!(prompt.contains("Time spent so far: about 2 minutes"));
-        assert!(prompt.contains("- tool: using websearch"));
+        assert!(prompt.contains("- commentary: I'm searching for USDG yield sources."));
+        assert!(!prompt.contains("websearch"));
         state.last_progress = Some("I'm searching for USDG yield sources.".to_owned());
 
         assert!(state.prepare_progress(at(420), PROGRESS).is_none());
+        // Tool churn alone never warrants a new progress update.
+        state.push(ActivityFact::high("tool", "using prose-lint"));
+        assert!(state.prepare_progress(at(720), PROGRESS).is_none());
         state.push(ActivityFact::high(
             "commentary",
             "The vault routes yield via Morpho.",
         ));
         assert!(state.prepare_progress(at(400), PROGRESS).is_none());
         let (prompt, _) = state.prepare_progress(at(420), PROGRESS).unwrap();
+        assert!(!prompt.contains("prose-lint"));
         assert!(prompt.contains("Previous progress update: I'm searching for USDG yield sources."));
     }
 
@@ -1516,6 +1582,16 @@ mod tests {
             sanitize_progress_update("\"I found the vault contract; now tracing its yield.\""),
             Some("I found the vault contract; now tracing its yield.".to_owned())
         );
+    }
+
+    #[test]
+    fn command_tool_name_skips_directory_changes() {
+        assert_eq!(
+            command_tool_name("cd /work/repo && prose-lint draft.md").as_deref(),
+            Some("prose-lint")
+        );
+        assert_eq!(command_tool_name("cd /work/repo"), None);
+        assert_eq!(command_tool_name("head -n 5 out.txt"), None);
     }
 
     #[test]

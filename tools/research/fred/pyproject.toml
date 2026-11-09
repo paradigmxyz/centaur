@@ -1,0 +1,28 @@
+[project]
+name = "fred"
+description = "FRED (Federal Reserve Economic Data) series, observations, categories, releases, and tags"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27.0",
+    "typer>=0.12.0",
+]
+
+[project.scripts]
+fred = "centaur_tool_fred.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_fred"
+
+[tool.centaur]
+module = "client.py"
+secrets = [
+    {type = "http", name = "FRED_API_KEY", mode = "inject", inject_query_param = "api_key", hosts = ["api.stlouisfed.org"]},
+]

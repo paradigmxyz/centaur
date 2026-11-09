@@ -94,7 +94,8 @@ pub(crate) async fn lock_due_credential(
                 broker_credentials.max_refresh_interval_seconds, \
                 oauth_apps.id IS NOT NULL AS has_oauth_app, oauth_apps.provider, \
                 oauth_apps.client_id AS oauth_app_client_id, \
-                oauth_apps.client_secret AS oauth_app_client_secret \
+                oauth_apps.client_secret AS oauth_app_client_secret, \
+                oauth_apps.provider_config ->> 'resource' AS resource \
          FROM broker_credentials \
          LEFT JOIN oauth_apps ON oauth_apps.id = broker_credentials.oauth_app_id \
          WHERE broker_credentials.id = $2 AND {REFRESHABLE} \
@@ -138,6 +139,7 @@ pub(crate) async fn lock_due_credential(
             api_key: decrypt("api_key")?,
             token_endpoint_headers: headers(decrypt("token_endpoint_headers")?)?,
             scopes: row.try_get::<Json<Vec<String>>, _>("scopes")?.0,
+            resource: row.try_get("resource")?,
             timeout: Duration::from_secs(refresh_timeout_seconds.max(1) as u64)
                 .min(MAX_REQUEST_TIMEOUT),
         },

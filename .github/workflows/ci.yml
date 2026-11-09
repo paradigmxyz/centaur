@@ -308,7 +308,7 @@ jobs:
       - name: Install Console packages
         run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
 
-      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
+      - uses: ruby/setup-ruby@de492cf36cbab201753d720ce4f4e336cd688c94 # v1.336.0
         with:
           working-directory: services/console
           bundler-cache: true
@@ -356,7 +356,7 @@ jobs:
       - name: Install Console packages
         run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
 
-      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
+      - uses: ruby/setup-ruby@de492cf36cbab201753d720ce4f4e336cd688c94 # v1.336.0
         with:
           working-directory: services/console
           bundler-cache: true
@@ -488,13 +488,16 @@ jobs:
           python-version: "3.11"
 
       # Tool-host integration tests execute real CLIs through uvx.
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
 
       - name: Sandbox Python tests
         env:
           GIT_CONFIG_GLOBAL: /dev/null
           PYTHONPATH: ${{ github.workspace }}
-        run: python -m unittest discover -s services/sandbox -p 'test_*.py'
+        # tomli-w matches the version baked into the sandbox image.
+        run: >-
+          uv run --no-project --python 3.11 --with tomli-w==1.2.0
+          python -m unittest discover -s services/sandbox -p 'test_*.py'
 
   workflow-python-tests:
     name: Workflow Python tests
@@ -510,7 +513,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           prune-cache: true
@@ -542,7 +545,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           prune-cache: true
