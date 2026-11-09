@@ -54,7 +54,9 @@ disabled stops working.
 
 The proxy renews authorization every five seconds with leases of at most 30
 seconds. Revoking a grant, replacing or deleting the key, changing the policy, and
-reassigning the proxy all end access.
+reassigning the proxy all end access. Rotating a key inside an external secret
+store only affects new connections; revoke the grant or edit the key in Console to
+end existing sessions.
 
 The sandbox gets a disposable key; the real key stays in Console (or its external
 store) and is released only to the proxy. Remote commands inherit the remote
