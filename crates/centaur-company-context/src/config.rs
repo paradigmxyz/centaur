@@ -362,6 +362,15 @@ pub struct Config {
         value_parser = channel_history_days
     )]
     pub slack_channel_history_days: Vec<(String, usize)>,
+    /// Days of recent Slack history each sync rereads, so edits and new
+    /// replies to threads started within them are picked up.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_SLACK_THREAD_REFRESH_DAYS",
+        default_value = "7",
+        value_parser = history_days
+    )]
+    pub slack_thread_refresh_days: usize,
     /// Fraction of each Slack method's documented rate limit that ingestion
     /// may use. Other services calling Slack as the same app share the rest.
     #[arg(
@@ -588,6 +597,7 @@ mod tests {
         assert_eq!(config.scan_interval, Duration::from_secs(300));
         assert_eq!(config.slack_rate_limit_share, 0.3);
         assert_eq!(config.calendar_history_days, 90);
+        assert_eq!(config.slack_thread_refresh_days, 7);
         assert!(
             config.drive_enabled
                 && config.calendar_enabled
@@ -634,6 +644,8 @@ mod tests {
             "im, public_channel",
             "--slack-channel-history-days",
             "C1=3650, G2=365",
+            "--slack-thread-refresh-days",
+            "14",
         ]);
         let config = Config::try_parse_from(args).unwrap();
         assert_eq!(
@@ -646,6 +658,13 @@ mod tests {
             config.slack_channel_history_days,
             [("C1".to_owned(), 3650), ("G2".to_owned(), 365)]
         );
+        assert_eq!(config.slack_thread_refresh_days, 14);
+
+        for invalid in ["0", "36501"] {
+            let mut args = required_args();
+            args.extend(["--slack-thread-refresh-days", invalid]);
+            assert!(Config::try_parse_from(args).is_err(), "{invalid}");
+        }
 
         let mut args = required_args();
         args.extend(["--slack-conversation-types", "mpim"]);
