@@ -69,7 +69,7 @@ import {
   reasoningForModel,
   type SlackContextBlock
 } from './response-context'
-import { findConfiguredModel } from './model-catalog'
+import { configuredModels, findConfiguredModel } from './model-catalog'
 import { resolveChannelDefault } from './channel-defaults'
 import { proactiveThreadMessage } from './proactive-classifier'
 import { resolveProactivityRules, type ProactivityRule } from './proactivity-rules'
@@ -1721,15 +1721,12 @@ async function syncThreadMessageToSession(
       requested_harness_type: requestedStickyOverrides?.harnessType
     })
   }
-  // Codex pins its provider independently of the model. Explicitly reset it
-  // when a user selects the default route after using a configured provider.
-  if (state.provider && stickyOverridesUpdate &&
-    (stickyOverridesUpdate.harnessType ?? state.harnessType) === 'codex' &&
-    (stickyOverridesUpdate.provider === null ||
-      (!overrides.provider && stickyOverridesUpdate.model?.includes('/')))) {
-    stickyOverridesUpdate.provider = process.env.CODEX_MODEL_PROVIDER?.trim() ||
-      (stickyOverridesUpdate.model?.includes('/') || process.env.OPENROUTER_MODEL?.trim()
-        ? 'openrouter' : 'openai')
+  // Naming a model outside a catalogued provider's models leaves that provider
+  // (its own models arrive with their provider already set). Clear it rather
+  // than naming a replacement: the harness owns the default-provider rule.
+  if (stickyOverridesUpdate?.model && stickyOverridesUpdate.provider === undefined &&
+    state.provider && configuredModels().some(model => model.provider === state.provider)) {
+    stickyOverridesUpdate.provider = null
   }
   const effectiveOverrides = resolveStickyThreadOverrides(state, stickyOverridesUpdate)
   // The default response-metadata mode renders on the first assistant message

@@ -172,7 +172,9 @@ of `reasoningEfforts`. Supported effort names are `none`, `minimal`, `low`,
 Provider entries without `models` remain supported.
 Flags also accept aliases, such as `--model example`. Use
 `--model private_responses/example-model` to disambiguate a model hosted by
-multiple configured providers.
+multiple configured providers. In a thread on a provider with a `models`
+catalog, choosing a model outside that catalog without `--provider` returns the
+thread to the deployment's default provider route.
 
 Optional `contextWindow` and `inputModalities` describe the model's actual context
 budget and accepted inputs in the sandbox's Codex model catalog. Set a positive

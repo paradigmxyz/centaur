@@ -226,18 +226,21 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                 trace_context,
             }) => {
                 let traceparent = trace_context.effective_traceparent();
+                let requested_provider = provider
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|provider| !provider.is_empty());
+                // A new model without a provider takes that model's default
+                // route; this is the only place the default is resolved.
+                let model_changed = model
+                    .as_deref()
+                    .is_some_and(|model| thread_model.as_deref() != Some(model));
                 let model = model
                     .or_else(|| thread_model.clone())
                     .or_else(|| config.default_model());
-                let model_provider = if provider
-                    .as_deref()
-                    .is_none_or(|value| value.trim().is_empty())
-                {
-                    thread_provider
-                        .clone()
-                        .unwrap_or_else(|| config.model_provider_for(None, model.as_deref()))
-                } else {
-                    config.model_provider_for(provider.as_deref(), model.as_deref())
+                let model_provider = match (requested_provider, thread_provider.as_deref()) {
+                    (None, Some(pinned)) if !model_changed => pinned.to_owned(),
+                    _ => config.model_provider_for(requested_provider, model.as_deref()),
                 };
                 let mut telemetry = TurnTelemetry::new(
                     Some(&trace_context),
@@ -249,12 +252,9 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                 );
                 turn_active.store(true, Ordering::SeqCst);
                 let result = (|| -> Result<()> {
-                    let switching_provider = provider
+                    let switching_provider = thread_provider
                         .as_deref()
-                        .map(str::trim)
-                        .filter(|provider| !provider.is_empty())
-                        .zip(thread_provider.as_deref())
-                        .is_some_and(|(requested, pinned)| requested != pinned);
+                        .is_some_and(|pinned| pinned != model_provider);
                     if switching_provider {
                         // Codex 0.165 ignores resume overrides for a loaded thread.
                         // A fresh app-server resumes its persisted history with the new provider.

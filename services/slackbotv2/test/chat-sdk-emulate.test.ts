@@ -1034,7 +1034,8 @@ describe('slackbotv2', () => {
       await reset.finished()
       const resetLine = JSON.parse(codexApi.executes[3]!.body.input_lines.at(-1)!)
       expect(resetLine.model).toBe('gpt-6.1-sol')
-      expect(resetLine.provider).toBe(process.env.CODEX_MODEL_PROVIDER?.trim() || 'openai')
+      // Slack clears the provider; the harness resolves the default route.
+      expect(resetLine.provider).toBeUndefined()
       const invalid = await sendMessage(`<@${BOT_USER_ID}> --provider openrouter --model atlas use this`, { threadTs: parent.ts })
       await invalid.finished()
       expect(codexApi.executes).toHaveLength(4)
@@ -1047,37 +1048,35 @@ describe('slackbotv2', () => {
     }
   })
 
-  for (const configuredProvider of [undefined, 'configured-default']) {
-    it(`routes a model-only OpenRouter selection after a custom provider (${configuredProvider ?? 'inferred'})`, async () => {
-      const previousProvider = process.env.CODEX_MODEL_PROVIDER
-      const previousOpenRouter = process.env.OPENROUTER_MODEL
-      delete process.env.OPENROUTER_MODEL
-      if (configuredProvider) process.env.CODEX_MODEL_PROVIDER = configuredProvider
-      else delete process.env.CODEX_MODEL_PROVIDER
-      try {
-        const sharedState = createMemoryState()
-        await sharedState.connect()
-        bot = createTestBot({ state: sharedState })
-        const parent = await sendMessage(`<@${BOT_USER_ID}> --provider private --model private-model start here`)
-        await parent.finished()
-        const switched = await sendMessage(
-          `<@${BOT_USER_ID}> --model anthropic/claude-sonnet-5-5 continue`, { threadTs: parent.ts }
-        )
-        await switched.finished()
-        const line = JSON.parse(codexApi.executes[1]!.body.input_lines.at(-1)!)
-        expect(line.model).toBe('anthropic/claude-sonnet-5-5')
-        expect(line.provider).toBe(configuredProvider ?? 'openrouter')
-        expect(await sharedState.get(`thread-state:${threadKey(parent.ts)}`)).toMatchObject({
-          model: 'anthropic/claude-sonnet-5-5', provider: configuredProvider ?? 'openrouter'
-        })
-      } finally {
-        if (previousProvider === undefined) delete process.env.CODEX_MODEL_PROVIDER
-        else process.env.CODEX_MODEL_PROVIDER = previousProvider
-        if (previousOpenRouter === undefined) delete process.env.OPENROUTER_MODEL
-        else process.env.OPENROUTER_MODEL = previousOpenRouter
-      }
+  it('clears a catalogued provider for a model-only flag and keeps an uncatalogued one', async () => {
+    const previous = process.env.CODEX_CUSTOM_PROVIDERS
+    process.env.CODEX_CUSTOM_PROVIDERS = JSON.stringify({
+      private: { name: 'Private Inference', models: { 'atlas-full': { displayName: 'Atlas Full' } } },
+      plain: { name: 'Plain Inference' }
     })
-  }
+    try {
+      const sharedState = createMemoryState()
+      await sharedState.connect()
+      bot = createTestBot({ state: sharedState })
+      for (const [provider, model, expected] of [
+        ['private', 'atlas-full', undefined],
+        ['plain', 'plain-model', 'plain']
+      ] as const) {
+        const parent = await sendMessage(`<@${BOT_USER_ID}> --provider ${provider} --model ${model} start here`)
+        await parent.finished()
+        const switched = await sendMessage(`<@${BOT_USER_ID}> --model gpt-6.1-sol continue`, { threadTs: parent.ts })
+        await switched.finished()
+        const line = JSON.parse(codexApi.executes.at(-1)!.body.input_lines.at(-1)!)
+        expect(line.model).toBe('gpt-6.1-sol')
+        expect(line.provider).toBe(expected)
+        expect((await sharedState.get<Record<string, unknown>>(`thread-state:${threadKey(parent.ts)}`))?.provider)
+          .toBe(expected ?? null)
+      }
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_CUSTOM_PROVIDERS
+      else process.env.CODEX_CUSTOM_PROVIDERS = previous
+    }
+  })
 
   it('switches a pinned model using default Claude and versioned Codex names', async () => {
     const sharedState = createMemoryState()
