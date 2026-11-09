@@ -19,9 +19,8 @@ include `ssh` to expose this tool.
 
 ## Deployment
 
-Deploy Console's database migrations before proxy-sync. Use an Iron image that
-supports `--ssh`; custom builds can set the `IRON_PROXY_IMAGE` build argument.
-SSH is disabled by default. Configure api-rs with:
+Deploy Console's database migrations before proxy-sync. SSH needs iron-proxy
+0.56.0 or newer and is disabled by default. Configure api-rs with:
 
 - `KUBERNETES_IRON_PROXY_SSH_ENABLED=true`
 - `KUBERNETES_IRON_PROXY_SSH_WORKSPACE=/workspace`
