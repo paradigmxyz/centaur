@@ -2438,16 +2438,29 @@ impl SessionRuntime {
                 );
                 return Ok(execution);
             }
-            // Re-read now that this execution's row is committed: a sandbox
-            // release that ran before it was visible has detached the sandbox
-            // read above, and this turn must not reuse it.
-            let session = self.store.get_session(thread_key).await?;
-            correlation_sandbox_id = session.sandbox_id.clone();
+            // Own the execution's stdout before anything else can fail: every
+            // error from here until the input reaches a sandbox is recorded as
+            // this execution's failure, which requires that ownership. An
+            // unrecorded error would leave the row running with no sandbox
+            // until the orphan scan's grace expires.
             if let Err(error) = self.claim_stdout_owner(&execution.execution_id).await {
                 self.handle_stdout_claim_failure(thread_key, &execution.execution_id, &error)
                     .await;
                 return Err(error);
             }
+            // Re-read now that this execution's row is committed: a sandbox
+            // release that ran before it was visible has detached the sandbox
+            // read above, and this turn must not reuse it.
+            let session = match self.store.get_session(thread_key).await {
+                Ok(session) => session,
+                Err(error) => {
+                    let error = SessionRuntimeError::Store(error);
+                    self.record_execution_failure(thread_key, &execution.execution_id, &error)
+                        .await;
+                    return Err(error);
+                }
+            };
+            correlation_sandbox_id = session.sandbox_id.clone();
             // Until its input reaches a sandbox, this execution belongs to this
             // dispatch, not to a stdout pump left over from an earlier turn.
             let dispatching =
@@ -2492,7 +2505,8 @@ impl SessionRuntime {
                 .await
                 .insert(execution.execution_id.clone(), execution_trace_span.clone());
             record_session_execution_started(&harness_label);
-            self.store
+            if let Err(error) = self
+                .store
                 .append_event(
                     thread_key,
                     Some(&execution.execution_id),
@@ -2505,16 +2519,29 @@ impl SessionRuntime {
                         "max_duration_ms": max_duration_ms,
                     }),
                 )
-                .await?;
+                .await
+            {
+                let error = SessionRuntimeError::Store(error);
+                self.record_execution_failure(thread_key, &execution.execution_id, &error)
+                    .await;
+                return Err(error);
+            }
             let requester_principal_id = self
                 .resolve_requester_principal(thread_key, requester_metadata.as_ref())
                 .await;
             let desired_capabilities = match pre_resolved_sandbox_capabilities {
                 Some(capabilities) => capabilities,
-                None => {
-                    self.resolve_sandbox_capabilities(session.iron_control_principal.as_deref())
-                        .await?
-                }
+                None => match self
+                    .resolve_sandbox_capabilities(session.iron_control_principal.as_deref())
+                    .await
+                {
+                    Ok(capabilities) => capabilities,
+                    Err(error) => {
+                        self.record_execution_failure(thread_key, &execution.execution_id, &error)
+                            .await;
+                        return Err(error);
+                    }
+                },
             };
 
             let sandbox_id = match self
@@ -9654,6 +9681,40 @@ mod adoption_tests {
     #[derive(Clone, Copy)]
     struct AdmissionProbeRegistrar;
 
+    /// Fails every principal lookup, as when iron-control is unreachable.
+    #[derive(Clone, Copy)]
+    struct UnreachablePolicyRegistrar;
+
+    #[async_trait::async_trait]
+    impl SessionPrincipalRegistrar for UnreachablePolicyRegistrar {
+        async fn register_session(
+            &self,
+            _thread_key: &str,
+            _metadata: Option<&Value>,
+            _create_if_missing: bool,
+        ) -> Result<Principal, IronControlError> {
+            Ok(test_principal("prn_test"))
+        }
+
+        async fn register_requester(
+            &self,
+            _thread_key: &str,
+            _metadata: Option<&Value>,
+            _create_if_missing: bool,
+        ) -> Result<Option<Principal>, IronControlError> {
+            Ok(None)
+        }
+
+        async fn get_principal(&self, principal: &str) -> Result<Principal, IronControlError> {
+            Err(IronControlError::Status {
+                method: "GET".to_owned(),
+                path: format!("/api/v1/principals/{principal}"),
+                status: 503,
+                body: "unavailable".to_owned(),
+            })
+        }
+    }
+
     #[async_trait::async_trait]
     impl SessionPrincipalRegistrar for AdmissionProbeRegistrar {
         async fn register_session(
@@ -13286,6 +13347,72 @@ mod adoption_tests {
             .fail_execution_if_active(&execution_id, "test cleanup")
             .await
             .expect("terminalize execution");
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_error_before_a_sandbox_fails_the_execution_at_once() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:dispatch-error-{}", uuid::Uuid::new_v4())).unwrap();
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = SessionRuntime::new(
+            store.clone(),
+            SandboxRuntime::backend(backend.clone(), SandboxSpec::new("mock")),
+            UnreachablePolicyRegistrar,
+        );
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        store
+            .set_iron_control_principal(&thread_key, Some("prn_unreachable"))
+            .await
+            .expect("set principal");
+
+        // The driver claims the execution and then cannot resolve the
+        // principal's sandbox policy. The turn must fail with that error now,
+        // not stay running until the orphan scan fails it as a restart orphan.
+        let execution = runtime
+            .enqueue_session_execution(
+                &thread_key,
+                ExecuteSessionInput {
+                    idempotency_key: None,
+                    metadata: None,
+                    input_lines: vec![
+                        r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#
+                            .to_owned(),
+                    ],
+                    idle_timeout_ms: None,
+                    max_duration_ms: None,
+                },
+            )
+            .await
+            .expect("enqueue execution");
+        wait_for_event(&store, &thread_key, "session.execution_failed").await;
+        let failed = store
+            .latest_execution_for_thread(&thread_key)
+            .await
+            .expect("load execution")
+            .expect("execution exists");
+        assert_eq!(failed.execution_id, execution.execution_id);
+        assert_eq!(failed.status, ExecutionStatus::Failed);
+        let error = failed.error.expect("failure recorded");
+        assert!(error.contains("503"), "unexpected error: {error}");
+        assert_eq!(
+            backend.opens(),
+            0,
+            "no sandbox is opened for a failed dispatch"
+        );
         reset_test_store(&store).await;
     }
 }
