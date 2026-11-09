@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from workflows import console_workflow
 
 ACTION_STEPS = ["agent_result", "post_result"]
@@ -338,6 +340,58 @@ def test_handler_uses_a_generic_footer_for_an_in_flight_run_without_an_author():
             slack_args(0, blocks=scheduled_task_blocks("Daily summary", footer)),
         )
     ]
+
+
+@pytest.mark.parametrize(
+    "result_text",
+    [
+        "NO_UPDATE",
+        "`NO_UPDATE`",
+        "Latest message is 00:02 UTC; nothing in [03:00, 03:15).  NO_UPDATE",
+        "No message in the 01:45-02:00 UTC window.\n\n*NO_UPDATE*",
+    ],
+)
+def test_handler_skips_slack_delivery_when_the_agent_has_nothing_to_report(
+    result_text: str,
+):
+    context = FakeContext(result_text=result_text)
+
+    result = asyncio.run(
+        console_workflow.handler(
+            {
+                "prompt": "Report new fills; stay silent if there are none",
+                "principal": "principal-123",
+                "channel": "D0123456789",
+                "scheduled_task_id": "scheduled-task-123",
+                "slack_user_id": "U0123456789",
+            },
+            context,
+        )
+    )
+
+    assert context.step_calls == ["agent_result"]
+    assert context.slack_calls == []
+    assert result["delivery"] is None
+
+
+def test_handler_delivers_replies_that_only_mention_the_skip_token_mid_text():
+    context = FakeContext(result_text="NO_UPDATE last window, but 2 new fills now.")
+
+    result = asyncio.run(
+        console_workflow.handler(
+            {
+                "prompt": "Report new fills; stay silent if there are none",
+                "principal": "principal-123",
+                "channel": "D0123456789",
+                "scheduled_task_id": "scheduled-task-123",
+                "slack_user_id": "U0123456789",
+            },
+            context,
+        )
+    )
+
+    assert result["delivery"] is not None
+    assert len(context.slack_calls) == 1
 
 
 def test_handler_rejects_missing_required_input_before_starting_an_agent():

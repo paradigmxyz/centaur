@@ -54,6 +54,16 @@ module Broker
       http.verify
     end
 
+    test "extra params are sent without replacing the standard fields" do
+      client, http = client_with(status: 200, body: success_body) do |request|
+        assert_equal "https://api.example.test/mcp", request[:form]["resource"]
+        assert_equal "auth-code", request[:form]["code"]
+      end
+
+      client.exchange(**base_args, extra_params: { resource: "https://api.example.test/mcp", code: "other" })
+      http.verify
+    end
+
     test "missing expires_in yields nil" do
       client, http = client_with(status: 200, body: success_body(expires_in: nil))
       assert_nil client.exchange(**base_args).expires_in

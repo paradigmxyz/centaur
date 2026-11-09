@@ -15,6 +15,7 @@ pub struct EmbeddingsClient {
     api_key: String,
     model: String,
     dimensions: usize,
+    max_query_distance: f64,
 }
 
 #[derive(Serialize)]
@@ -52,6 +53,7 @@ impl EmbeddingsClient {
             api_key: config.openai_api_key.clone(),
             model: config.embeddings_model.clone(),
             dimensions: config.embeddings_dimensions,
+            max_query_distance: config.embeddings_max_query_distance,
         })
     }
 
@@ -61,6 +63,11 @@ impl EmbeddingsClient {
 
     pub fn dimensions(&self) -> usize {
         self.dimensions
+    }
+
+    /// The largest cosine distance at which a document matches a query.
+    pub fn max_query_distance(&self) -> f64 {
+        self.max_query_distance
     }
 
     pub async fn embed(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {

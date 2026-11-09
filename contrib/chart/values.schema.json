@@ -293,7 +293,8 @@
         "telemetry": {
           "type": "object",
           "properties": {
-            "captureTranscripts": { "type": "boolean" }
+            "captureTranscripts": { "type": "boolean" },
+            "captureToolTraces": { "type": "boolean" }
           }
         }
       }
@@ -460,6 +461,22 @@
           "enum": ["automatic", "preapproved"]
         },
         "sandboxRunningLimit": { "type": "integer", "minimum": 0 },
+        "sandboxWarmPools": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["harness", "repoCache", "size"],
+            "properties": {
+              "harness": {
+                "type": "string",
+                "enum": ["codex", "amp", "claudecode", "nanocodex", "hermes", "pi", "omp"]
+              },
+              "repoCache": { "type": "string", "enum": ["all", "public", "none"] },
+              "size": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
         "sessionEventsRetentionDays": { "type": "integer", "minimum": 0, "maximum": 3650 },
         "sessionEventsRetentionSweepIntervalSecs": { "type": "integer", "minimum": 1 },
         "sandboxOrphanSweepGraceSecs": { "type": "integer", "minimum": 1 },

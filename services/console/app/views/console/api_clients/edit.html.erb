@@ -1,0 +1,8 @@
+<% content_for :title, "Edit #{@api_client.name} · Centaur Console" %>
+
+<div class="mb-8">
+  <a href="<%= console_api_client_path(@api_client) %>" class="back-link">← back to API client</a>
+  <h1 class="mt-2 page-title">Edit <%= @api_client.name %></h1>
+</div>
+
+<%= render "form", api_client: @api_client %>

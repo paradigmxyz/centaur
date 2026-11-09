@@ -65,7 +65,7 @@ class ComposeSystemPromptTest(unittest.TestCase):
                 "persona base\n\n\n---\n\nhome overlay\n\n\n---\n\nrepo overlay\n",
             )
 
-    def test_appends_persona_after_deployment_overlays_and_restrictions_last(self) -> None:
+    def test_appends_persona_after_deployment_overlays(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             home = root / "home"
@@ -94,14 +94,12 @@ class ComposeSystemPromptTest(unittest.TestCase):
                 home_dir=home,
                 target_prompt=target,
                 repo_mount=repo_mount,
-                observability_enabled=False,
             )
 
             self.assertEqual(
                 target.read_text(),
                 "base\n\n\n---\n\nhome overlay\n\n\n---\n\nrepo overlay\n"
-                "\n\n---\n\nengineering persona\n\n\n---\n\n"
-                f"{compose_system_prompt.OBSERVABILITY_DISABLED_PROMPT}",
+                "\n\n---\n\nengineering persona\n",
             )
 
     def test_skips_mounted_copy_of_baked_root_prompt(self) -> None:

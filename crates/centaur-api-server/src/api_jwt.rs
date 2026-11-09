@@ -8,8 +8,10 @@ use serde_json::Value;
 
 use crate::ApiError;
 
-const DEFAULT_API_JWT_AUDIENCE: &str = "centaur-api";
-const DEFAULT_API_JWT_ISSUER: &str = "centaur-console";
+/// Audience of every JWT api-rs accepts.
+pub(crate) const API_JWT_AUDIENCE: &str = "centaur-api";
+/// Issuer of the JWTs Console and proxy-sync sign.
+pub(crate) const CONSOLE_JWT_ISSUER: &str = "centaur-console";
 const JWT_CLOCK_SKEW_SECONDS: i64 = 30;
 
 pub(crate) fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
@@ -57,11 +59,12 @@ where
     let secret = jwt_signing_secret().ok_or_else(|| {
         ApiError::Internal("CENTAUR_JWT_SIGNING_SECRET is not configured".to_owned())
     })?;
-    let audience = non_empty_env("CENTAUR_API_JWT_AUDIENCE")
-        .unwrap_or_else(|| DEFAULT_API_JWT_AUDIENCE.to_owned());
-    let issuer = non_empty_env("CENTAUR_API_JWT_ISSUER")
-        .unwrap_or_else(|| DEFAULT_API_JWT_ISSUER.to_owned());
-    verify_hs256_jwt(token, secret.as_bytes(), &audience, &issuer)
+    verify_hs256_jwt(
+        token,
+        secret.as_bytes(),
+        API_JWT_AUDIENCE,
+        CONSOLE_JWT_ISSUER,
+    )
 }
 
 pub(crate) fn verify_hs256_jwt<T>(
@@ -152,13 +155,6 @@ fn static_env(cell: &'static OnceLock<Option<String>>, name: &str) -> Option<Str
 pub(crate) fn jwt_signing_secret() -> Option<String> {
     static CELL: OnceLock<Option<String>> = OnceLock::new();
     static_env(&CELL, "CENTAUR_JWT_SIGNING_SECRET")
-}
-
-fn non_empty_env(name: &str) -> Option<String> {
-    env::var(name)
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
 }
 
 #[cfg(test)]

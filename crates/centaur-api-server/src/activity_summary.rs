@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -9,10 +10,39 @@ use centaur_session_sqlx::{PgSessionStore, SessionEventNotification, SessionStor
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use thiserror::Error;
-use tokio::time::sleep;
+use tokio::{
+    sync::{Semaphore, mpsc},
+    time::{MissedTickBehavior, interval, sleep},
+};
 use tracing::{debug, info, warn};
 
 pub(crate) const SESSION_ACTIVITY_SUMMARY_EVENT: &str = "session.activity_summary";
+pub(crate) const SESSION_PROGRESS_UPDATE_EVENT: &str = "session.progress_update";
+
+/// How often running executions are checked for a due progress update, so an
+/// update still lands while a long tool call produces no new events.
+const PROGRESS_UPDATE_TICK: Duration = Duration::from_secs(15);
+/// Progress model calls run off the event loop; this bounds how many run at once.
+const PROGRESS_UPDATE_CONCURRENCY: usize = 4;
+const PROGRESS_UPDATE_MAX_OUTPUT_TOKENS: u16 = 512;
+const PROGRESS_UPDATE_MAX_CHARS: usize = 500;
+
+const PROGRESS_UPDATE_PROMPT: &str = "\
+You write a short progress update that a software agent posts in a chat thread while it \
+is still working on a long request. Use only the supplied event facts. Write one or two \
+first-person sentences, at most 280 characters in total, as if you are the agent. The \
+reader asked for the work and cares about substance, not mechanics: say what you have \
+learned or found so far about their request and which part of the problem you are \
+working on now, naming concrete subjects (a service, PR, dataset, metric, partner, or \
+finding). Never name or describe the tools, CLIs, scripts, linters, commands, files, or \
+shell steps you used, and never narrate mechanics such as running, invoking, linting, \
+installing, reading output, changing directories, or checking help. Bad: \"I ran \
+prose-lint to check the extracted text.\" Good: \"About 360 requests since May are mostly \
+code review and debugging; I'm sorting the rest by team.\" Do not repeat the previous \
+update; if the facts add nothing new or only describe mechanics, output exactly SKIP. \
+Do not promise a finish time. Do not mention paths, IDs, or flags. Never mention or tag \
+a person, group, or channel. Do not refer to \"the agent\". No markdown headings, no \
+quotes, no event IDs, and no speculation.";
 
 const SYSTEM_PROMPT: &str = "\
 You write live status text for a software agent. Use only the supplied event facts. \
@@ -29,8 +59,8 @@ repeating the session goal word for word. Each status must say something new \
 compared to the previous status sentence; if you cannot, output exactly SKIP. If the \
 facts only show setup, help output, dependency installs, builds, command output, \
 logs, tests, or other mechanics, output exactly SKIP. Do not mention commands, \
-paths, IDs, or flags. Do not refer to \"the agent\". No markdown, no quotes, no \
-event IDs, and no speculation.";
+paths, IDs, or flags. Never mention or tag a person, group, or channel. Do not refer \
+to \"the agent\". No markdown, no quotes, no event IDs, and no speculation.";
 
 #[derive(Clone)]
 pub(crate) struct ActivitySummaryConfig {
@@ -43,6 +73,16 @@ pub(crate) struct ActivitySummaryConfig {
     /// `None` omits the parameter, for servers that reject an unknown field.
     pub(crate) reasoning_effort: Option<String>,
     pub(crate) timeout: Duration,
+    /// `None` disables chat progress updates for long-running executions.
+    pub(crate) progress: Option<ProgressUpdateConfig>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ProgressUpdateConfig {
+    /// Execution age before the first progress update.
+    pub(crate) after: Duration,
+    /// Minimum time between progress updates for one execution.
+    pub(crate) interval: Duration,
 }
 
 pub(crate) struct ActivitySummaryWorker {
@@ -69,31 +109,95 @@ impl ActivitySummaryWorker {
         info!(
             model = %self.config.model,
             min_interval_ms = self.config.min_interval.as_millis(),
+            progress_after_ms = self.config.progress.map(|progress| progress.after.as_millis()),
             "session activity summary worker started"
         );
+        // The listener runs in its own task so the progress tick below never
+        // cancels a notification read midway.
+        let (sender, mut notifications) = mpsc::channel(1024);
+        tokio::spawn(forward_session_events(self.store.clone(), sender));
+        let (progress_sender, mut progress_outcomes) = mpsc::unbounded_channel();
+        let progress_permits = Arc::new(Semaphore::new(PROGRESS_UPDATE_CONCURRENCY));
+        let mut progress_tick = interval(PROGRESS_UPDATE_TICK);
+        progress_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
-            let mut listener = match self.store.listen_session_events().await {
-                Ok(listener) => listener,
-                Err(error) => {
-                    warn!(%error, "failed to listen for session activity events");
-                    sleep(Duration::from_secs(5)).await;
-                    continue;
+            tokio::select! {
+                notification = notifications.recv() => {
+                    let Some(notification) = notification else {
+                        warn!("session activity event forwarder stopped; activity summary worker exiting");
+                        return;
+                    };
+                    if let Err(error) = self.process_notification(notification).await {
+                        warn!(%error, "failed to process session activity event");
+                    }
                 }
-            };
+                Some(outcome) = progress_outcomes.recv() => self.apply_progress_outcome(outcome),
+                _ = progress_tick.tick(), if self.config.progress.is_some() => {
+                    self.spawn_due_progress_updates(&progress_sender, &progress_permits);
+                }
+            }
+        }
+    }
 
-            loop {
-                match listener.recv().await {
-                    Ok(notification) => {
-                        if let Err(error) = self.process_notification(notification).await {
-                            warn!(%error, "failed to process session activity event");
-                        }
+    /// Starts a background update for each execution that is due, so model
+    /// latency never delays event processing or the live status summaries.
+    fn spawn_due_progress_updates(
+        &mut self,
+        outcomes: &mpsc::UnboundedSender<ProgressOutcome>,
+        permits: &Arc<Semaphore>,
+    ) {
+        let Some(progress) = self.config.progress else {
+            return;
+        };
+        let now = Instant::now();
+        for (execution_id, state) in &mut self.states {
+            let Some((prompt, elapsed)) = state.prepare_progress(now, progress) else {
+                continue;
+            };
+            let job = ProgressJob {
+                client: self.client.clone(),
+                elapsed,
+                execution_id: execution_id.clone(),
+                model: self.config.model.clone(),
+                prompt,
+                store: self.store.clone(),
+                thread_key: state.thread_key.clone(),
+                // Half the interval tolerates model latency between this
+                // worker's attempts while still collapsing a concurrent
+                // replica's update.
+                window: progress.interval / 2,
+            };
+            let outcomes = outcomes.clone();
+            let permits = Arc::clone(permits);
+            tokio::spawn(async move {
+                let Ok(_permit) = permits.acquire_owned().await else {
+                    return;
+                };
+                let execution_id = job.execution_id.clone();
+                match job.run().await {
+                    Ok(Some(outcome)) => {
+                        let _ = outcomes.send(outcome);
                     }
+                    Ok(None) => {}
                     Err(error) => {
-                        warn!(%error, "session activity event listener failed; reconnecting");
-                        sleep(Duration::from_secs(1)).await;
-                        break;
+                        warn!(%error, execution_id, "failed to publish session progress update");
                     }
                 }
+            });
+        }
+    }
+
+    fn apply_progress_outcome(&mut self, outcome: ProgressOutcome) {
+        match outcome {
+            ProgressOutcome::Published { execution_id, text } => {
+                if let Some(state) = self.states.get_mut(&execution_id) {
+                    state.last_progress = Some(text);
+                }
+            }
+            // Also drops state whose terminal notification was missed while
+            // the listener reconnected.
+            ProgressOutcome::Inactive { execution_id } => {
+                self.states.remove(&execution_id);
             }
         }
     }
@@ -149,7 +253,14 @@ impl ActivitySummaryWorker {
             let state = self
                 .states
                 .entry(execution_id.to_owned())
-                .or_insert_with(|| ExecutionActivity::new(self.config.max_facts, goal));
+                .or_insert_with(|| {
+                    ExecutionActivity::new(
+                        event.thread_key.clone(),
+                        self.config.max_facts,
+                        goal,
+                        now,
+                    )
+                });
             state.push(fact);
             state.prepare_publish(now, self.config.min_interval)
         };
@@ -158,7 +269,11 @@ impl ActivitySummaryWorker {
             return Ok(());
         };
 
-        let summary = match self.client.summarize(&prompt).await {
+        let summary = match self
+            .client
+            .respond(SYSTEM_PROMPT, &prompt, self.config.max_output_tokens)
+            .await
+        {
             Ok(summary) => summary,
             Err(error) => {
                 warn!(%error, "failed to generate session activity summary");
@@ -219,26 +334,198 @@ impl ActivitySummaryWorker {
     }
 }
 
+struct ProgressJob {
+    client: ActivitySummaryClient,
+    elapsed: Duration,
+    execution_id: String,
+    model: String,
+    prompt: String,
+    store: PgSessionStore,
+    thread_key: ThreadKey,
+    window: Duration,
+}
+
+#[derive(Debug)]
+enum ProgressOutcome {
+    Inactive { execution_id: String },
+    Published { execution_id: String, text: String },
+}
+
+impl ProgressJob {
+    async fn run(self) -> Result<Option<ProgressOutcome>, ActivitySummaryError> {
+        let active = self
+            .store
+            .active_execution_for_thread(&self.thread_key)
+            .await?;
+        if active.is_none_or(|execution| execution.execution_id != self.execution_id) {
+            return Ok(Some(ProgressOutcome::Inactive {
+                execution_id: self.execution_id,
+            }));
+        }
+        let text = self
+            .client
+            .respond(
+                PROGRESS_UPDATE_PROMPT,
+                &self.prompt,
+                PROGRESS_UPDATE_MAX_OUTPUT_TOKENS,
+            )
+            .await?;
+        let Some(text) = sanitize_progress_update(&text) else {
+            debug!(
+                execution_id = self.execution_id,
+                "discarded empty session progress update"
+            );
+            return Ok(None);
+        };
+        // The store re-checks under the thread event lock that the execution
+        // is still active, so an update never lands after its terminal event.
+        let appended = self
+            .store
+            .append_active_execution_event_unless_recent(
+                &self.thread_key,
+                &self.execution_id,
+                SESSION_PROGRESS_UPDATE_EVENT,
+                json!({
+                    // Lets renderers drop stale updates when they replay history.
+                    "created_at_ms": time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000,
+                    "elapsed_secs": self.elapsed.as_secs(),
+                    "execution_id": self.execution_id,
+                    "model": self.model,
+                    "text": text,
+                }),
+                self.window,
+            )
+            .await?;
+        Ok(appended.map(|_| ProgressOutcome::Published {
+            execution_id: self.execution_id,
+            text,
+        }))
+    }
+}
+
+async fn forward_session_events(
+    store: PgSessionStore,
+    sender: mpsc::Sender<SessionEventNotification>,
+) {
+    loop {
+        let mut listener = match store.listen_session_events().await {
+            Ok(listener) => listener,
+            Err(error) => {
+                warn!(%error, "failed to listen for session activity events");
+                sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
+        loop {
+            match listener.recv().await {
+                Ok(notification) => {
+                    if sender.send(notification).await.is_err() {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    warn!(%error, "session activity event listener failed; reconnecting");
+                    sleep(Duration::from_secs(1)).await;
+                    break;
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ExecutionActivity {
     facts: VecDeque<ActivityFact>,
     goal: Option<String>,
     last_attempt_at: Option<Instant>,
+    last_progress: Option<String>,
+    last_progress_attempt_at: Option<Instant>,
+    last_progress_signature: Option<String>,
     last_published_signature: Option<String>,
     last_summary: Option<String>,
     max_facts: usize,
+    started_at: Instant,
+    thread_key: ThreadKey,
 }
 
 impl ExecutionActivity {
-    fn new(max_facts: usize, goal: Option<String>) -> Self {
+    fn new(
+        thread_key: ThreadKey,
+        max_facts: usize,
+        goal: Option<String>,
+        started_at: Instant,
+    ) -> Self {
         Self {
             facts: VecDeque::with_capacity(max_facts),
             goal,
             last_attempt_at: None,
+            last_progress: None,
+            last_progress_attempt_at: None,
+            last_progress_signature: None,
             last_published_signature: None,
             last_summary: None,
             max_facts,
+            started_at,
+            thread_key,
         }
+    }
+
+    /// Returns the progress prompt and execution age once the execution has
+    /// run past `after`, at most once per `interval`, and only when new
+    /// activity arrived since the previous attempt.
+    fn prepare_progress(
+        &mut self,
+        now: Instant,
+        config: ProgressUpdateConfig,
+    ) -> Option<(String, Duration)> {
+        let elapsed = now.saturating_duration_since(self.started_at);
+        if elapsed < config.after {
+            return None;
+        }
+        if self
+            .last_progress_attempt_at
+            .is_some_and(|last| now.saturating_duration_since(last) < config.interval)
+        {
+            return None;
+        }
+        if !self.facts.iter().any(ActivityFact::is_substantive) {
+            return None;
+        }
+        let signature = self.progress_signature();
+        if self.last_progress_signature.as_ref() == Some(&signature) {
+            return None;
+        }
+        self.last_progress_attempt_at = Some(now);
+        self.last_progress_signature = Some(signature);
+        Some((self.progress_prompt(elapsed), elapsed))
+    }
+
+    fn progress_prompt(&self, elapsed: Duration) -> String {
+        let minutes = (elapsed.as_secs() / 60).max(1);
+        let mut lines = vec![format!("Time spent so far: about {minutes} minutes")];
+        if let Some(update) = self.last_progress.as_deref() {
+            lines.push(format!("Previous progress update: {update}"));
+        }
+        if let Some(goal) = self.goal.as_deref() {
+            lines.push(format!("Session goal: {goal}"));
+        }
+        lines.push("Recent activity facts, oldest to newest:".to_owned());
+        for fact in self.facts.iter().filter(|fact| fact.is_substantive()) {
+            lines.push(format!("- {}: {}", fact.kind, fact.text));
+        }
+        lines.join("\n")
+    }
+
+    /// Progress updates only track substantive facts, so tool churn alone
+    /// never triggers a new chat message.
+    fn progress_signature(&self) -> String {
+        self.facts
+            .iter()
+            .filter(|fact| fact.is_substantive())
+            .map(|fact| format!("{}={}", fact.kind, fact.text))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn push(&mut self, fact: ActivityFact) {
@@ -326,11 +613,13 @@ struct ActivityFact {
 }
 
 impl ActivityFact {
+    // Facts and the goal feed the model prompt, so mentions are stripped
+    // before the model can see and repeat them.
     fn high(kind: &'static str, text: impl Into<String>) -> Self {
         Self {
             kind,
             signal: ActivitySignal::High,
-            text: text.into(),
+            text: strip_mentions(&text.into()),
         }
     }
 
@@ -338,12 +627,19 @@ impl ActivityFact {
         Self {
             kind,
             signal: ActivitySignal::Low,
-            text: text.into(),
+            text: strip_mentions(&text.into()),
         }
     }
 
     fn is_publishable(&self) -> bool {
         self.signal == ActivitySignal::High
+    }
+
+    /// Facts that describe what the agent is learning or deciding, as opposed
+    /// to which tool, command, or file it touched. Chat progress updates use
+    /// only these so they report substance instead of mechanics.
+    fn is_substantive(&self) -> bool {
+        self.is_publishable() && matches!(self.kind, "commentary" | "plan" | "thinking")
     }
 }
 
@@ -366,7 +662,7 @@ fn message_part_text(part: &Value) -> Option<String> {
 }
 
 fn clean_goal_text(value: &str) -> Option<String> {
-    let text = one_line(value, 160);
+    let text = one_line(&strip_mentions(value), 160);
     let lower = text.to_ascii_lowercase();
     if lower.is_empty()
         || matches!(
@@ -581,6 +877,11 @@ fn tool_name(item: &Value) -> String {
 }
 
 fn command_tool_name(command: &str) -> Option<String> {
+    // `cd repo && tool ...` names the tool, not `cd`.
+    let command = command.split("&&").map(str::trim).find(|segment| {
+        let first = segment.split_whitespace().next().unwrap_or_default();
+        !matches!(first, "cd" | "pushd" | "export" | "source" | "." | "set")
+    })?;
     let first = command
         .split_whitespace()
         .next()?
@@ -672,6 +973,27 @@ fn is_shell_or_package_command(name: &str) -> bool {
             | "find"
             | "jq"
             | "curl"
+            | "cd"
+            | "pushd"
+            | "export"
+            | "source"
+            | "env"
+            | "echo"
+            | "printf"
+            | "head"
+            | "tail"
+            | "wc"
+            | "sort"
+            | "mkdir"
+            | "cp"
+            | "mv"
+            | "rm"
+            | "touch"
+            | "tee"
+            | "xargs"
+            | "timeout"
+            | "sleep"
+            | "which"
     )
 }
 
@@ -757,6 +1079,7 @@ fn one_line(value: &str, max_chars: usize) -> String {
 }
 
 fn sanitize_summary(summary: &str) -> Option<String> {
+    let summary = strip_mentions(summary);
     let summary = summary
         .trim()
         .trim_matches('"')
@@ -771,6 +1094,42 @@ fn sanitize_summary(summary: &str) -> Option<String> {
         return None;
     }
     (!summary.is_empty()).then_some(summary)
+}
+
+fn sanitize_progress_update(text: &str) -> Option<String> {
+    let text = strip_mentions(text);
+    let text = text.trim().trim_matches('"').trim();
+    if text.is_empty()
+        || text.eq_ignore_ascii_case("skip")
+        || text.chars().count() > PROGRESS_UPDATE_MAX_CHARS
+    {
+        return None;
+    }
+    Some(text.to_owned())
+}
+
+/// Removes chat mention syntax so status text can never notify anyone. Slack
+/// and Discord tokens such as `<@U123>`, `<!here>`, and `<#C123>` are dropped,
+/// and the `@` is removed from handles such as `@channel` or `@octocat`.
+/// An `@` inside a word, as in an email address, is kept.
+fn strip_mentions(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut previous: Option<char> = None;
+    while let Some(ch) = chars.next() {
+        if ch == '<' && matches!(chars.peek(), Some('@' | '!' | '#')) {
+            chars.by_ref().find(|&next| next == '>');
+            out.push(' ');
+            previous = Some(' ');
+            continue;
+        }
+        if ch == '@' && !previous.is_some_and(char::is_alphanumeric) {
+            continue;
+        }
+        out.push(ch);
+        previous = Some(ch);
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn is_generic_summary(summary: &str) -> bool {
@@ -856,7 +1215,6 @@ fn is_terminal_session_event(event_type: &str) -> bool {
 struct ActivitySummaryClient {
     api_key: String,
     client: reqwest::Client,
-    max_output_tokens: u16,
     model: String,
     reasoning_effort: Option<String>,
     responses_url: String,
@@ -872,7 +1230,6 @@ impl ActivitySummaryClient {
         Ok(Self {
             api_key: config.api_key.clone(),
             client,
-            max_output_tokens: config.max_output_tokens,
             model: config.model.clone(),
             reasoning_effort: config.reasoning_effort.clone(),
             responses_url,
@@ -884,12 +1241,12 @@ impl ActivitySummaryClient {
     /// `incomplete` response with no message. Sending an explicit effort avoids
     /// depending on the server's default; `None` omits it for servers that
     /// reject the field.
-    fn request_body(&self, prompt: &str) -> Value {
+    fn request_body(&self, instructions: &str, prompt: &str, max_output_tokens: u16) -> Value {
         let mut body = json!({
             "model": self.model.as_str(),
-            "instructions": SYSTEM_PROMPT,
+            "instructions": instructions,
             "input": prompt,
-            "max_output_tokens": self.max_output_tokens,
+            "max_output_tokens": max_output_tokens,
             "store": false,
         });
         if let Some(effort) = &self.reasoning_effort
@@ -900,12 +1257,17 @@ impl ActivitySummaryClient {
         body
     }
 
-    async fn summarize(&self, prompt: &str) -> Result<String, ActivitySummaryError> {
+    async fn respond(
+        &self,
+        instructions: &str,
+        prompt: &str,
+        max_output_tokens: u16,
+    ) -> Result<String, ActivitySummaryError> {
         let response = self
             .client
             .post(&self.responses_url)
             .bearer_auth(&self.api_key)
-            .json(&self.request_body(prompt))
+            .json(&self.request_body(instructions, prompt, max_output_tokens))
             .send()
             .await?;
         let status = response.status();
@@ -1113,9 +1475,128 @@ mod tests {
         assert!(!redacted.contains("sk-svc-secret"));
     }
 
+    fn activity(started_at: Instant) -> ExecutionActivity {
+        ExecutionActivity::new(
+            ThreadKey::parse("test:thread").unwrap(),
+            4,
+            Some("Investigate USDG vault yield".to_owned()),
+            started_at,
+        )
+    }
+
+    const PROGRESS: ProgressUpdateConfig = ProgressUpdateConfig {
+        after: Duration::from_secs(120),
+        interval: Duration::from_secs(300),
+    };
+
+    #[test]
+    fn progress_waits_for_threshold_then_new_activity_and_interval() {
+        let start = Instant::now();
+        let at = |secs| start + Duration::from_secs(secs);
+        let mut state = activity(start);
+        state.push(ActivityFact::high("tool", "using websearch"));
+        assert!(state.prepare_progress(at(120), PROGRESS).is_none());
+        state.push(ActivityFact::high(
+            "commentary",
+            "I'm searching for USDG yield sources.",
+        ));
+
+        assert!(state.prepare_progress(at(119), PROGRESS).is_none());
+        let (prompt, elapsed) = state.prepare_progress(at(120), PROGRESS).unwrap();
+        assert_eq!(elapsed, Duration::from_secs(120));
+        assert!(prompt.contains("Time spent so far: about 2 minutes"));
+        assert!(prompt.contains("- commentary: I'm searching for USDG yield sources."));
+        assert!(!prompt.contains("websearch"));
+        state.last_progress = Some("I'm searching for USDG yield sources.".to_owned());
+
+        assert!(state.prepare_progress(at(420), PROGRESS).is_none());
+        // Tool churn alone never warrants a new progress update.
+        state.push(ActivityFact::high("tool", "using prose-lint"));
+        assert!(state.prepare_progress(at(720), PROGRESS).is_none());
+        state.push(ActivityFact::high(
+            "commentary",
+            "The vault routes yield via Morpho.",
+        ));
+        assert!(state.prepare_progress(at(400), PROGRESS).is_none());
+        let (prompt, _) = state.prepare_progress(at(420), PROGRESS).unwrap();
+        assert!(!prompt.contains("prose-lint"));
+        assert!(prompt.contains("Previous progress update: I'm searching for USDG yield sources."));
+    }
+
+    #[test]
+    fn strips_mentions_from_status_text() {
+        assert_eq!(
+            strip_mentions("<!here> I asked <@U123|alice> in <#C456|ops> and @channel, cc @@bob"),
+            "I asked in and channel, cc bob"
+        );
+        assert_eq!(
+            strip_mentions("I emailed ops@example.com about <@&789> and <!subteam^S1>"),
+            "I emailed ops@example.com about and"
+        );
+        assert_eq!(
+            sanitize_summary("I'm pinging @here on the deploy"),
+            Some("I'm pinging here on the deploy".to_owned())
+        );
+        assert_eq!(
+            sanitize_progress_update("I found the bug; <!channel> @octocat should review."),
+            Some("I found the bug; octocat should review.".to_owned())
+        );
+    }
+
+    #[test]
+    fn progress_prompt_has_no_mentions() {
+        let mut state = ExecutionActivity::new(
+            ThreadKey::parse("test:thread").unwrap(),
+            4,
+            clean_goal_text("<@U123> audit billing with @alice"),
+            Instant::now(),
+        );
+        state.push(
+            activity_fact_from_output_event(&event(json!({
+                "method": "item/completed",
+                "params": {
+                    "item": {
+                        "id": "msg-1",
+                        "phase": "commentary",
+                        "text": "I'll ask <!here> and @bob about billing.",
+                        "type": "agentMessage"
+                    }
+                }
+            })))
+            .unwrap(),
+        );
+
+        let prompt = state.progress_prompt(Duration::from_secs(180));
+
+        assert!(prompt.contains("Session goal: audit billing with alice"));
+        assert!(prompt.contains("- commentary: I'll ask and bob about billing."));
+        assert!(!prompt.contains('@'));
+        assert!(!prompt.contains("<!"));
+    }
+
+    #[test]
+    fn sanitizes_progress_updates() {
+        assert_eq!(sanitize_progress_update(" SKIP "), None);
+        assert_eq!(sanitize_progress_update(&"a".repeat(501)), None);
+        assert_eq!(
+            sanitize_progress_update("\"I found the vault contract; now tracing its yield.\""),
+            Some("I found the vault contract; now tracing its yield.".to_owned())
+        );
+    }
+
+    #[test]
+    fn command_tool_name_skips_directory_changes() {
+        assert_eq!(
+            command_tool_name("cd /work/repo && prose-lint draft.md").as_deref(),
+            Some("prose-lint")
+        );
+        assert_eq!(command_tool_name("cd /work/repo"), None);
+        assert_eq!(command_tool_name("head -n 5 out.txt"), None);
+    }
+
     #[test]
     fn throttles_unchanged_activity() {
-        let mut state = ExecutionActivity::new(4, Some("Investigate USDG vault yield".to_owned()));
+        let mut state = activity(Instant::now());
         let now = Instant::now();
         state.push(ActivityFact::high("tool", "using websearch"));
         assert!(state.prepare_publish(now, Duration::from_secs(8)).is_some());
@@ -1129,7 +1610,7 @@ mod tests {
 
     #[test]
     fn skips_low_signal_only_activity() {
-        let mut state = ExecutionActivity::new(4, Some("Investigate USDG vault yield".to_owned()));
+        let mut state = activity(Instant::now());
         let now = Instant::now();
         state.push(ActivityFact::low("command", "checking tool help"));
 
@@ -1138,7 +1619,7 @@ mod tests {
 
     #[test]
     fn prompt_includes_session_goal() {
-        let mut state = ExecutionActivity::new(4, Some("Investigate USDG vault yield".to_owned()));
+        let mut state = activity(Instant::now());
         state.push(ActivityFact::high("tool", "using websearch"));
 
         let prompt = state.prompt();
@@ -1190,13 +1671,14 @@ mod tests {
             model: "gpt-5.4-nano".to_owned(),
             reasoning_effort: effort.map(str::to_owned),
             timeout: Duration::from_secs(5),
+            progress: None,
         })
         .expect("client")
     }
 
     #[test]
     fn summary_request_carries_the_reasoning_effort() {
-        let body = client_with_effort(Some("low")).request_body("prompt");
+        let body = client_with_effort(Some("low")).request_body(SYSTEM_PROMPT, "prompt", 128);
         assert_eq!(body["reasoning"]["effort"], "low");
         assert_eq!(body["max_output_tokens"], 128);
     }
@@ -1205,7 +1687,7 @@ mod tests {
     /// set to something it also does not understand.
     #[test]
     fn summary_request_omits_the_effort_when_unset() {
-        let body = client_with_effort(None).request_body("prompt");
+        let body = client_with_effort(None).request_body(SYSTEM_PROMPT, "prompt", 128);
         assert!(body.get("reasoning").is_none());
     }
 }

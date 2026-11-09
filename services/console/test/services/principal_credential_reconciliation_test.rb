@@ -554,6 +554,32 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     assert principal.grants.exists?(static_secret: secret)
   end
 
+  test "grants custom provider credentials to the Slack user principal by email or owner identity" do
+    app = OauthApp.create!(
+      slug: "custom-mcp", provider: "custom", client_id: "custom-client", client_secret: "custom-secret",
+      allowed_scopes: %w[read], created_by: users(:acme_admin),
+      provider_config: {
+        "authorization_endpoint" => "https://auth.example.test/authorize",
+        "token_endpoint" => "https://auth.example.test/token",
+        "resource" => "https://api.example.test/mcp"
+      }
+    )
+    by_email = Principal.create!(
+      foreign_id: "slack-custom-email-user", slack_email: "member.custom@example.com", created_by: users(:acme_admin)
+    )
+    email_secret = wrap(create_credential(app, "custom-user-1", "Member.Custom@Example.com"))
+    assert by_email.grants.exists?(static_secret: email_secret)
+
+    user = users(:member_user)
+    user.user_identities.create!(provider: "slack", subject: "U0CUSTOM01", team_id: "T0CUSTOM01")
+    by_owner = create_slack_user_principal(
+      foreign_id: "slack-user-t0custom01-u0custom01", slack_user_id: "U0CUSTOM01", slack_team_id: "T0CUSTOM01"
+    )
+    owner_secret = wrap(create_credential(app, "custom-user-2", nil, created_by: user))
+    assert by_owner.grants.exists?(static_secret: owner_secret)
+    refute by_owner.grants.exists?(static_secret: email_secret)
+  end
+
   test "grants an existing GitHub credential when the Slack user principal appears" do
     user = users(:member_user)
     user.user_identities.create!(provider: "slack", subject: "U0223456789", team_id: "T0223456789")

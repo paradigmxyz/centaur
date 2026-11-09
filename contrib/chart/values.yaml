@@ -369,11 +369,14 @@ sandbox:
   # model/thinking footer aligned with the policy the sandbox actually runs.
   extraEnv: {}
   telemetry:
-    # Include user prompts, assistant responses, and bounded shell commands on
-    # harness spans.
+    # Include user prompts and assistant responses on harness LLM spans.
     # Token usage, cost, status, session, and tool telemetry remain available
     # when this is disabled.
     captureTranscripts: false
+    # Include bounded shell commands and workspace-relative working directories
+    # on harness tool spans, independently of captureTranscripts. Tool names,
+    # executables, and status remain available when this is disabled.
+    captureToolTraces: false
   # New agent-k8s sandboxes get a ReadWriteOnce PVC at /home/agent/state. The
   # entrypoint keeps the session's workspace clone, uploads, branches, and native
   # Codex/Claude files there, so they survive idle pause and pod replacement, but
@@ -445,7 +448,7 @@ agentSandbox:
     name: agent-sandbox-system
   image:
     repository: registry.k8s.io/agent-sandbox/agent-sandbox-controller
-    tag: v0.4.6
+    tag: v1.0.9
     pullPolicy: IfNotPresent
   controller:
     extensions: false
@@ -512,6 +515,12 @@ tokenBroker:
 # Slack retention does not run while this is false.
 companyContextV1:
   enabled: true
+
+# API clients: machine callers, such as eval runners, that exchange a client
+# secret for a session API token at api-rs /oauth/token. Off hides them in the
+# Console, removes the token endpoint, and rejects their existing tokens.
+apiClients:
+  enabled: false
 
 # Standalone company-context ingestion service. It indexes Google Docs and PDFs
 # from Google Drive, Google Calendar events, and Granola meeting notes into its
@@ -638,7 +647,20 @@ apiRs:
   # Expose the experimental centaur MCP dispatcher (currently action=list).
   mcpV2Enabled: false
   sandboxReadyTimeoutSecs: 90
+  # Warm pool of default-harness sandboxes with full repo-cache access.
+  # Ignored when sandboxWarmPools is set.
   sandboxWarmPoolSize: 3
+  # Warm pools per harness and repo-cache access, so sessions that differ in
+  # either still get a ready sandbox. Observability is granted at claim time
+  # and does not split pools. Example:
+  # sandboxWarmPools:
+  #   - harness: codex
+  #     repoCache: all      # all | public | none
+  #     size: 3
+  #   - harness: claudecode
+  #     repoCache: public
+  #     size: 1
+  sandboxWarmPools: []
   sandboxWarmPoolReplenishIntervalSecs: 5
   # Best-effort admission gate: when nonzero, api-rs rejects sandbox creates
   # and resumes at or above this observed running count, excluding ready warm
@@ -711,8 +733,11 @@ apiRs:
       # migration, index rebuild, and re-embedding existing rows. pgvector will
       # not build an HNSW or IVFFlat index above 2000.
       dimensions: 1536
-  # Reaper: stop sandboxes older than the max lifetime, regardless of whether
-  # they are running or suspended. 0 disables the sweep. Interval must be >= 1.
+  # Reaper: stop sandboxes older than the max lifetime, whether running or
+  # suspended. Warm-pool sandboxes age from when a session claims them, and a
+  # sandbox with a queued or running turn waits for a later sweep unless that
+  # turn has itself run longer than the max lifetime. 0 disables the sweep.
+  # Interval must be >= 1.
   sandboxMaxLifetimeSecs: 259200 # 3 days
   sandboxReapIntervalSecs: 300
   # Delete session.output.line events older than this many days, once their
@@ -747,6 +772,13 @@ apiRs:
     # the whole budget reasoning and returns no message. Empty omits the
     # parameter, for a server that rejects it outright.
     reasoningEffort: low
+    # Post a model-written progress message to the chat thread once an
+    # execution has run afterSecs, then at most every intervalSecs while new
+    # activity arrives. Requires activitySummary.enabled.
+    progressUpdates:
+      enabled: false
+      afterSecs: 60
+      intervalSecs: 120
   metrics:
     # The Rust API always serves Prometheus text metrics at /metrics. This flag
     # only controls scrape annotations for Prometheus/VictoriaMetrics-style

@@ -14,7 +14,7 @@ use thiserror::Error;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
-use args::{Args, MigrateArgs};
+use args::{Args, InstallAgentSandboxCrdsArgs, MigrateArgs};
 
 #[tokio::main]
 async fn main() -> Result<(), ServerError> {
@@ -23,6 +23,11 @@ async fn main() -> Result<(), ServerError> {
 
     if let Some(args) = MigrateArgs::from_command_line() {
         let result = migrate(args).await;
+        telemetry.shutdown();
+        return result;
+    }
+    if let Some(args) = InstallAgentSandboxCrdsArgs::from_command_line() {
+        let result = install_agent_sandbox_crds(args).await;
         telemetry.shutdown();
         return result;
     }
@@ -35,7 +40,10 @@ async fn main() -> Result<(), ServerError> {
         "starting centaur api-rs server"
     );
 
-    let app_state = AppState::unready(api_auth);
+    let mut app_state = AppState::unready(api_auth);
+    if let Some(pool) = args.console_db() {
+        app_state = app_state.with_console_db(pool);
+    }
     let app = build_router_with_app_state(app_state.clone());
     warm_slack_public_channel_cache();
     let shutdown_state = app_state.clone();
@@ -79,6 +87,12 @@ async fn migrate(args: MigrateArgs) -> Result<(), ServerError> {
     let store = PgSessionStore::connect(&args.database_url).await?;
     store.run_migrations(args.text_search).await?;
     info!(text_search = %args.text_search, "database migrations applied");
+    Ok(())
+}
+
+async fn install_agent_sandbox_crds(args: InstallAgentSandboxCrdsArgs) -> Result<(), ServerError> {
+    let client = kube::Client::try_default().await?;
+    centaur_sandbox_agent_k8s::install_agent_sandbox_crds(&client, &args.stop_deployments).await?;
     Ok(())
 }
 
@@ -131,9 +145,9 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     if let Some(config) = sandbox_capacity_config {
         runtime = runtime.with_sandbox_capacity(config);
     }
-    if let Some(config) = args.warm_pool_config(&iron_control.warm_pool_bootstrap_principal) {
-        runtime = runtime.with_warm_pool(config);
-    }
+    let (warm_pools, warm_pool_config) =
+        args.warm_pools(&iron_control.warm_pool_bootstrap_principal)?;
+    runtime = runtime.with_warm_pools(warm_pools, warm_pool_config);
     runtime = runtime.with_sandbox_reaper(args.sandbox_reaper_config());
     runtime = runtime.with_sandbox_cleanup(args.sandbox_cleanup_config());
     if let Some(config) = args.session_event_retention_config() {
@@ -223,6 +237,8 @@ pub(crate) enum ServerError {
     Kube(#[from] kube::Error),
     #[error(transparent)]
     Sandbox(#[from] centaur_sandbox_core::SandboxError),
+    #[error(transparent)]
+    AgentSandboxCrds(#[from] centaur_sandbox_agent_k8s::CrdMigrationError),
     #[error(transparent)]
     IronProxy(#[from] centaur_iron_proxy::IronProxyConfigError),
     #[error(transparent)]

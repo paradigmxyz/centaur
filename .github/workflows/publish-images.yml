@@ -9,6 +9,7 @@ on:
       - .github/workflows/e2e.yml
       - services/**
       - crates/**
+      - contrib/chart/charts/agent-sandbox/crds/**
       - harness/**
       - centaur_sdk/**
       - packages/**

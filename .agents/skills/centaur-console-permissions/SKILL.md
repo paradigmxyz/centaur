@@ -1,6 +1,6 @@
 ---
 name: centaur-console-permissions
-description: "Change Centaur Console permissions with `centaur-console admin`. Use when a Console admin asks to create a principal for a Slack channel, user, or workflow, to create or edit a static, Postgres DSN, or GCP ID token secret (for example "make a pg dsn secret like X but with role Y"), or to add or remove a secret on a role, or to give or remove a Slack channel's or user's access to a tool, secret, role, Slack channel, repo cache, observability, sessions, or workflows, or to allow or remove a Slack Connect workspace. Examples include \"create a principal for #channel\", \"give #channel access to github\" and \"let this channel read #other-channel\". Includes hard guardrails against sharing personal (DM) credentials."
+description: "Change Centaur Console permissions with `centaur-console admin`. Use when a Console admin asks to create a principal for a Slack channel, user, or workflow, to create or edit a static, Postgres DSN, or GCP ID token secret (for example \"make a pg dsn secret like X but with role Y\"), or to add or remove a secret on a role, or to give or remove a Slack channel's or user's access to a tool, secret, role, Slack channel, repo cache, observability, sessions, or workflows, or to allow or remove a Slack Connect workspace. Examples include \"create a principal for #channel\", \"give #channel access to github\" and \"let this channel read #other-channel\". Includes hard guardrails against sharing personal (DM) credentials."
 ---
 
 # Centaur Console Permissions

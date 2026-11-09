@@ -14,9 +14,13 @@ class SystemPromptTest(unittest.TestCase):
         prompt = SYSTEM_PROMPT.read_text()
 
         self.assertIn("[Company-context retrieval]", prompt)
-        self.assertIn("use `company_context search` before source-specific tools", prompt)
-        self.assertIn("Use hybrid search by default", prompt)
-        self.assertIn("Use `--no-hybrid` for exact identifiers", prompt)
+        self.assertIn("use `company_context v2 search` before source-specific tools", prompt)
+        self.assertIn("`company_context v2 read <document_id>`", prompt)
+        self.assertIn(
+            "Fall back to the legacy `company_context search` only when v2 is disabled", prompt
+        )
+        self.assertIn("`COMPANY_CONTEXT_API_URL` is unset", prompt)
+        self.assertIn("use `--no-hybrid` for exact identifiers", prompt)
         self.assertIn("fewer than two of the top five results", prompt)
         self.assertIn("do not infer conclusions from titles alone", prompt)
         self.assertIn("Distinguish direct internal views from AI-generated research", prompt)
@@ -86,9 +90,9 @@ class SystemPromptTest(unittest.TestCase):
         self.assertIn(
             "`task`, `create-task`, `update-task`, `delete-task`, or `run-task`", prompt
         )
-        self.assertIn("Only create tasks from MCP or direct-message (DM) sessions", prompt)
+        self.assertIn("deliver to `dm` or an allowed Slack channel ID", prompt)
+        self.assertIn("In a Slack channel thread, tasks belong to that channel", prompt)
         self.assertIn("five-field cron expressions in Pacific Time", prompt)
-        self.assertIn("Deliver to `dm`", prompt)
         self.assertIn("Encode recurrence only in the cron expression", prompt)
         self.assertIn('strip cadence phrases like "Each Monday"', prompt)
         self.assertIn("keep time windows that affect the work", prompt)

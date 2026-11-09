@@ -3,7 +3,7 @@ name: centaur
 description: Helm chart for the trusted Centaur control plane
 type: application
 # Bumped by .github/workflows/chart-version.yml after chart changes merge.
-version: 0.1.199
+version: 0.1.206
 appVersion: "0.1.0"
 dependencies:
   - name: connect
@@ -12,6 +12,6 @@ dependencies:
     alias: onepasswordConnect
     condition: onepasswordConnect.connect.create
   - name: agent-sandbox
-    version: 0.1.0
+    version: 0.1.4
     alias: agentSandbox
     condition: agentSandbox.enabled

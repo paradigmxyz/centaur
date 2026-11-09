@@ -17,6 +17,10 @@ toolServer:
 repoCache:
   enabled: false
 
+# e2e/tests/api-clients.test.ts drives the session API as an API client.
+apiClients:
+  enabled: true
+
 # Both Slack clients talk to the fake Slack.
 apiRs:
   extraEnv:

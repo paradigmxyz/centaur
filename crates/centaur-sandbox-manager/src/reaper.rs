@@ -1,12 +1,15 @@
 //! Background garbage collection for leaked sandboxes.
 //!
-//! Sessions pause idle sandboxes (replicas to zero), but paused sandboxes and
+//! Sessions pause idle sandboxes (suspending them), but paused sandboxes and
 //! sandboxes whose sessions never go idle still need a restart-surviving
 //! backstop. The reaper sweeps the backend's observed sandboxes and stops any
 //! that exceed the configured max lifetime, releasing the sandbox, its proxy
 //! resources, and its node pod slots. That includes sandboxes whose agent
 //! exited (`Stopped`): sessions replace rather than reuse them, so nothing
-//! else ever releases their backend resources. Each sweep also deletes iron-proxy
+//! else ever releases their backend resources. A warm-pool sandbox's lifetime
+//! starts when a session claims it, not when the pool created it, and a
+//! sandbox whose session has a queued or running execution is left for a later
+//! sweep unless that execution has itself outlived the max lifetime. Each sweep also deletes iron-proxy
 //! resources whose sandbox no longer has a live Sandbox, the orphan class no
 //! observed-sandbox path can reach.
 
@@ -16,6 +19,7 @@ use std::{
 };
 
 use centaur_sandbox_core::{ObservedSandbox, SandboxResult, SandboxStatus};
+use centaur_session_sqlx::{PgSessionStore, SandboxReapState};
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{info, warn};
 
@@ -28,8 +32,8 @@ pub struct SandboxReaperConfig {
     /// Minimum age of an iron-proxy resource whose Sandbox no longer exists
     /// before the orphan sweep may delete it.
     pub orphan_sweep_grace: Duration,
-    /// Stop any sandbox older than this regardless of status. `None` disables
-    /// the max-lifetime sweep.
+    /// Stop any idle sandbox older than this, measured from its warm-pool
+    /// claim when it has one. `None` disables the max-lifetime sweep.
     pub max_lifetime: Option<Duration>,
 }
 
@@ -43,12 +47,21 @@ impl SandboxReaperConfig {
 
 pub struct SandboxReaper {
     manager: Arc<SandboxManager>,
+    store: PgSessionStore,
     config: SandboxReaperConfig,
 }
 
 impl SandboxReaper {
-    pub fn new(manager: Arc<SandboxManager>, config: SandboxReaperConfig) -> Self {
-        Self { manager, config }
+    pub fn new(
+        manager: Arc<SandboxManager>,
+        store: PgSessionStore,
+        config: SandboxReaperConfig,
+    ) -> Self {
+        Self {
+            manager,
+            store,
+            config,
+        }
     }
 
     pub fn spawn(self) {
@@ -75,9 +88,53 @@ impl SandboxReaper {
         let now = SystemTime::now();
         let mut reaped = 0;
         for observed in self.manager.list_observed().await? {
-            let Some(reason) = reap_reason(&observed, now, &self.config) else {
+            // Durable state can only defer a reap, so skip the lookup for
+            // sandboxes that are not expired by backend age alone.
+            if reap_reason(&observed, &SandboxReapState::default(), now, &self.config).is_none() {
+                continue;
+            }
+            let state = match self.store.sandbox_reap_state(observed.id.as_str()).await {
+                Ok(state) => state,
+                Err(error) => {
+                    warn!(
+                        sandbox_id = %observed.id.as_str(),
+                        %error,
+                        "failed to load sandbox reap state; skipping"
+                    );
+                    continue;
+                }
+            };
+            let Some(reason) = reap_reason(&observed, &state, now, &self.config) else {
+                if state.active_execution_since.is_some() {
+                    info!(
+                        sandbox_id = %observed.id.as_str(),
+                        "deferring reap of expired sandbox with an active execution"
+                    );
+                }
                 continue;
             };
+            // A sandbox read as unclaimed may be a ready warm sandbox that a
+            // session is claiming right now. Take it out of the pool first and
+            // leave it alone if the claim won; the replenisher finalizes the
+            // evicted row once the sandbox is gone.
+            if state.claimed_at.is_none() {
+                match self
+                    .store
+                    .evict_unclaimed_warm_sandbox(observed.id.as_str())
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(error) => {
+                        warn!(
+                            sandbox_id = %observed.id.as_str(),
+                            %error,
+                            "failed to evict warm sandbox before reaping; skipping"
+                        );
+                        continue;
+                    }
+                }
+            }
             match self.manager.stop(&observed.id).await {
                 Ok(()) => {
                     reaped += 1;
@@ -110,20 +167,28 @@ impl SandboxReaper {
 
 fn reap_reason(
     observed: &ObservedSandbox,
+    state: &SandboxReapState,
     now: SystemTime,
     config: &SandboxReaperConfig,
 ) -> Option<&'static str> {
-    if observed.status == SandboxStatus::Gone {
+    let max_lifetime = config.max_lifetime?;
+    let expired = |since: Option<SystemTime>| {
+        since.is_some_and(|since| {
+            now.duration_since(since)
+                .is_ok_and(|age| age >= max_lifetime)
+        })
+    };
+    if observed.status == SandboxStatus::Gone || !expired(state.claimed_at.or(observed.created_at))
+    {
         return None;
     }
-    if let (Some(max_lifetime), Some(created_at)) = (config.max_lifetime, observed.created_at)
-        && now
-            .duration_since(created_at)
-            .is_ok_and(|age| age >= max_lifetime)
-    {
-        return Some("max_lifetime");
+    match state.active_execution_since {
+        None => Some("max_lifetime"),
+        // An active turn defers the reap, but a turn that itself outlived the
+        // max lifetime is treated as stuck so the backstop still holds.
+        Some(since) if expired(Some(since)) => Some("active_execution_exceeded_max_lifetime"),
+        Some(_) => None,
     }
-    None
 }
 
 #[cfg(test)]
@@ -148,7 +213,12 @@ mod tests {
         let sandbox = observed(centaur_sandbox_core::SandboxStatus::Running)
             .with_created_at(Some(now - Duration::from_secs(100_000)));
 
-        let reason = reap_reason(&sandbox, now, &config(Some(Duration::from_secs(86_400))));
+        let reason = reap_reason(
+            &sandbox,
+            &SandboxReapState::default(),
+            now,
+            &config(Some(Duration::from_secs(86_400))),
+        );
 
         assert_eq!(reason, Some("max_lifetime"));
     }
@@ -160,7 +230,12 @@ mod tests {
             .with_created_at(Some(now - Duration::from_secs(100_000)))
             .with_suspended_since(Some(now - Duration::from_secs(60)));
 
-        let reason = reap_reason(&sandbox, now, &config(Some(Duration::from_secs(86_400))));
+        let reason = reap_reason(
+            &sandbox,
+            &SandboxReapState::default(),
+            now,
+            &config(Some(Duration::from_secs(86_400))),
+        );
 
         assert_eq!(reason, Some("max_lifetime"));
     }
@@ -171,7 +246,12 @@ mod tests {
         let sandbox = observed(centaur_sandbox_core::SandboxStatus::Running)
             .with_created_at(Some(now - Duration::from_secs(60)));
 
-        let reason = reap_reason(&sandbox, now, &config(Some(Duration::from_secs(86_400))));
+        let reason = reap_reason(
+            &sandbox,
+            &SandboxReapState::default(),
+            now,
+            &config(Some(Duration::from_secs(86_400))),
+        );
 
         assert_eq!(reason, None);
     }
@@ -182,7 +262,12 @@ mod tests {
         let sandbox = observed(centaur_sandbox_core::SandboxStatus::Stopped)
             .with_created_at(Some(now - Duration::from_secs(100_000)));
 
-        let reason = reap_reason(&sandbox, now, &config(Some(Duration::from_secs(86_400))));
+        let reason = reap_reason(
+            &sandbox,
+            &SandboxReapState::default(),
+            now,
+            &config(Some(Duration::from_secs(86_400))),
+        );
 
         assert_eq!(reason, Some("max_lifetime"));
     }
@@ -193,7 +278,12 @@ mod tests {
         let sandbox = observed(centaur_sandbox_core::SandboxStatus::Gone)
             .with_created_at(Some(now - Duration::from_secs(100_000)));
 
-        let reason = reap_reason(&sandbox, now, &config(Some(Duration::from_secs(86_400))));
+        let reason = reap_reason(
+            &sandbox,
+            &SandboxReapState::default(),
+            now,
+            &config(Some(Duration::from_secs(86_400))),
+        );
 
         assert_eq!(reason, None);
     }
@@ -206,7 +296,70 @@ mod tests {
             .with_suspended_since(Some(now - Duration::from_secs(100_000)));
         let config = config(None);
 
-        assert_eq!(reap_reason(&sandbox, now, &config), None);
+        assert_eq!(
+            reap_reason(&sandbox, &SandboxReapState::default(), now, &config),
+            None
+        );
+    }
+
+    #[test]
+    fn warm_sandbox_lifetime_starts_at_claim() {
+        let now = SystemTime::now();
+        let sandbox = observed(centaur_sandbox_core::SandboxStatus::Running)
+            .with_created_at(Some(now - Duration::from_secs(100_000)));
+        let state = SandboxReapState {
+            claimed_at: Some(now - Duration::from_secs(60)),
+            active_execution_since: None,
+        };
+
+        let reason = reap_reason(
+            &sandbox,
+            &state,
+            now,
+            &config(Some(Duration::from_secs(86_400))),
+        );
+
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn keeps_expired_sandbox_with_active_execution() {
+        let now = SystemTime::now();
+        let sandbox = observed(centaur_sandbox_core::SandboxStatus::Running)
+            .with_created_at(Some(now - Duration::from_secs(100_000)));
+        let state = SandboxReapState {
+            claimed_at: Some(now - Duration::from_secs(100_000)),
+            active_execution_since: Some(now - Duration::from_secs(3_600)),
+        };
+
+        let reason = reap_reason(
+            &sandbox,
+            &state,
+            now,
+            &config(Some(Duration::from_secs(86_400))),
+        );
+
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn reaps_sandbox_whose_active_execution_outlived_max_lifetime() {
+        let now = SystemTime::now();
+        let sandbox = observed(centaur_sandbox_core::SandboxStatus::Running)
+            .with_created_at(Some(now - Duration::from_secs(100_000)));
+        let state = SandboxReapState {
+            claimed_at: None,
+            active_execution_since: Some(now - Duration::from_secs(90_000)),
+        };
+
+        let reason = reap_reason(
+            &sandbox,
+            &state,
+            now,
+            &config(Some(Duration::from_secs(86_400))),
+        );
+
+        assert_eq!(reason, Some("active_execution_exceeded_max_lifetime"));
     }
 
     #[test]

@@ -139,6 +139,17 @@ Rails.application.routes.draw do
         post :demote
       end
     end
+    # Machine clients of the api-rs session API. Admin-only.
+    resources :api_clients do
+      member do
+        post :rotate_secret
+        post :disable
+        post :enable
+        post "principals", action: :attach_principal, as: :attach_principal
+        delete "principals/:link_id", action: :detach_principal, as: :detach_principal
+        post "principals/:link_id/default", action: :make_default_principal, as: :make_default_principal
+      end
+    end
     resource :system_settings, only: %i[edit update], path: "settings" do
       patch :slack_external_teams
     end

@@ -28,6 +28,39 @@ from centaur_sdk.tool_sdk import COMPANY_CONTEXT_DSN_ENV, company_context_databa
 # configure_structlog() pipeline, like the rest of the service's logs.
 logger = structlog.get_logger()
 
+_DOWNLOAD_CHUNK_BYTES = 64 * 1024
+
+
+def _download_path(output_dir: str | Path, filename: str, fallback: str) -> Path:
+    """Resolve a server-supplied filename to a path directly inside ``output_dir``."""
+    name = Path(filename).name
+    if name in ("", ".", ".."):
+        name = fallback
+    directory = Path(output_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / name
+
+
+def _stream_response_to_file(response: Any, path: Path) -> int:
+    """Stream an HTTP response body to ``path`` and return the byte count.
+
+    Writes to a sibling temp file and renames it into place, so a failed
+    download never leaves a truncated file at ``path``.
+    """
+    temp_path = path.with_name(f".{path.name}.part")
+    total = 0
+    try:
+        with temp_path.open("wb") as file:
+            while chunk := response.read(_DOWNLOAD_CHUNK_BYTES):
+                total += len(chunk)
+                file.write(chunk)
+        temp_path.replace(path)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+    return total
+
+
 # Cache for channel list to avoid repeated API calls
 
 
@@ -236,6 +269,7 @@ class SlackClient:
     _NUMERIC_TS_RE = re.compile(r"^\d+(?:\.\d+)?$")
     _CHANNEL_ID_RE = re.compile(r"^[CGD][A-Z0-9]+$")
     _FILE_ID_RE = re.compile(r"^F[A-Z0-9]+$")
+    _USER_ID_RE = re.compile(r"^[UW][A-Z0-9]{8,}$")
     _USER_ID_RE = re.compile(r"^[UW][A-Z0-9]+$")
     _AUTH_ERROR_CODES: ClassVar[frozenset[str]] = frozenset(
         {
@@ -522,19 +556,25 @@ class SlackClient:
             raise RuntimeError(f"Centaur API request failed on {path}: {exc.reason}") from exc
         return json.loads(raw) if raw else {}
 
-    def _centaur_api_get_bytes(
+    def _centaur_api_download(
         self,
         path: str,
         params: dict[str, Any],
-        max_bytes: int,
-    ) -> tuple[bytes, dict[str, str]]:
-        """GET bytes from a Centaur API endpoint."""
+        output_dir: str | Path,
+        default_filename: str,
+    ) -> tuple[Path, int, dict[str, str]]:
+        """Stream a Centaur API file download into ``output_dir``."""
         url = self._centaur_api_url_for(path, params)
         request = urllib.request.Request(url, headers=self._centaur_api_headers(), method="GET")
         try:
             with urllib.request.urlopen(request, timeout=self._api_timeout_seconds()) as response:
-                body = response.read(max_bytes + 1)
                 headers = {key.lower(): value for key, value in response.headers.items()}
+                filename = (
+                    self._content_disposition_filename(headers.get("content-disposition"))
+                    or default_filename
+                )
+                out_path = _download_path(output_dir, filename, default_filename)
+                size = _stream_response_to_file(response, out_path)
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
             detail = raw
@@ -546,9 +586,7 @@ class SlackClient:
             raise RuntimeError(f"Centaur API error {exc.code} on {path}: {detail}") from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Centaur API request failed on {path}: {exc.reason}") from exc
-        if len(body) > max_bytes:
-            raise ValueError(f"Slack file exceeds the {max_bytes}-byte download limit")
-        return body, headers
+        return out_path, size, headers
 
     def _message_permalink(self, channel_id: str, ts: str) -> str:
         """Build a generic fallback permalink from channel and timestamp."""
@@ -1074,7 +1112,9 @@ class SlackClient:
         principal's `slack.history_channels` claim.
         """
         normalized_channel_id = self._clean_channel_ref(channel_id).upper()
-        if len(normalized_channel_id) < 9 or not self._looks_like_channel_id(normalized_channel_id):
+        if len(normalized_channel_id) < 9 or not self._looks_like_channel_id(
+            normalized_channel_id
+        ):
             raise ValueError("channel_id must be a Slack conversation ID like C123456789")
 
         params: dict[str, Any] = {
@@ -1587,8 +1627,25 @@ class SlackClient:
         members = self.get_channel_members(channel)
         return [m["email"] for m in members if m.get("email")]
 
-    def get_user_email(self, user_id: str) -> str | None:
-        """Get a user's email address by their Slack user ID.
+    def get_user_email_proxy(self, user_id: str) -> str | None:
+        """Get a user's email address through the Centaur API server proxy.
+
+        Args:
+            user_id: Slack user ID (e.g., 'U123ABC')
+
+        Returns:
+            Email address or None if the profile has no email
+        """
+        normalized_user_id = str(user_id).strip().upper()
+        if not self._USER_ID_RE.fullmatch(normalized_user_id):
+            raise ValueError("user_id must be a Slack user ID like U123456789")
+        response = self._centaur_api_get_json(
+            f"/api/slack/users/{urllib.parse.quote(normalized_user_id, safe='')}/email", {}
+        )
+        return response.get("email")
+
+    def get_user_email_direct(self, user_id: str) -> str | None:
+        """Get a user's email address directly with the Slack SDK.
 
         Args:
             user_id: Slack user ID (e.g., 'U123ABC')
@@ -2066,30 +2123,30 @@ class SlackClient:
             content_type or "application/octet-stream",
         )
 
-    def download_file_proxy(self, file_id: str, channel_id: str) -> dict[str, Any]:
-        """Download a Slack file through the Centaur API server Slack proxy.
+    def download_file_proxy(
+        self, file_id: str, channel_id: str, output_dir: str | Path = "/tmp/downloads"
+    ) -> dict[str, Any]:
+        """Stream a Slack file through the Centaur API server Slack proxy to disk.
 
-        Returns base64-encoded file bytes plus filename, content type, and size.
+        Defaults to ``/tmp/downloads`` so MCP callers can fetch the result with
+        ``centaur_artifact_get``. Returns the written path plus filename,
+        content type, and size.
         """
         normalized_file_id = self._normalize_file_id(file_id)
         normalized_channel_id = self._normalize_explicit_channel_id(channel_id)
-        body, headers = self._centaur_api_get_bytes(
+        out_path, size, headers = self._centaur_api_download(
             f"/api/slack/files/{urllib.parse.quote(normalized_file_id, safe='')}/download",
             {"channel_id": normalized_channel_id},
-            self._MAX_DOWNLOAD_BYTES,
+            output_dir,
+            normalized_file_id,
         )
-        filename = (
-            self._content_disposition_filename(headers.get("content-disposition"))
-            or normalized_file_id
-        )
-        content_type = headers.get("content-type") or "application/octet-stream"
         return {
             "file_id": normalized_file_id,
             "channel_id": normalized_channel_id,
-            "filename": filename,
-            "content_type": content_type,
-            "size_bytes": len(body),
-            "content_base64": base64.b64encode(body).decode(),
+            "filename": out_path.name,
+            "content_type": headers.get("content-type") or "application/octet-stream",
+            "size_bytes": size,
+            "output_path": str(out_path.absolute()),
         }
 
     def file_info_proxy(self, file_id: str, channel_id: str) -> dict[str, Any]:
@@ -2240,12 +2297,10 @@ class SlackClient:
             )
         return dict(response.get("file") or {})
 
-    # Slack file downloads buffer the file in memory before writing it, so cap the
-    # size regardless of Slack's own (much larger) per-file limit.
-    _MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
-
-    def _fetch_slack_file(self, url: str) -> tuple[str, str, bytes]:
-        """Download a Slack file's bytes: returns ``(filename, mime_type, body)``.
+    def _fetch_slack_file(
+        self, url: str, output_dir: str | Path, filename: str | None = None
+    ) -> tuple[Path, int]:
+        """Stream a Slack file into ``output_dir``: returns ``(path, size_bytes)``.
 
         ``url`` must be an ``https://files.slack.com/`` URL. The token is sent
         only to that host, so it can never be aimed at a Slack API endpoint
@@ -2260,17 +2315,10 @@ class SlackClient:
             )
 
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        out_path = _download_path(output_dir, filename or Path(parsed.path).name, "slack-file")
         with urllib.request.urlopen(req) as response:
-            # Read one byte past the cap so an oversized file is rejected
-            # without buffering an unbounded response.
-            body = response.read(self._MAX_DOWNLOAD_BYTES + 1)
-            mime_type = response.headers.get_content_type()
-        if len(body) > self._MAX_DOWNLOAD_BYTES:
-            raise ValueError(
-                f"Slack file exceeds the {self._MAX_DOWNLOAD_BYTES}-byte download limit"
-            )
-
-        return Path(parsed.path).name or "slack-file", mime_type, body
+            size = _stream_response_to_file(response, out_path)
+        return out_path, size
 
     def search_files(
         self,
@@ -2607,8 +2655,12 @@ def get_channel_member_emails(*args, **kwargs):
     return _client().get_channel_member_emails(*args, **kwargs)
 
 
-def get_user_email(*args, **kwargs):
-    return _client().get_user_email(*args, **kwargs)
+def get_user_email_proxy(*args, **kwargs):
+    return _client().get_user_email_proxy(*args, **kwargs)
+
+
+def get_user_email_direct(*args, **kwargs):
+    return _client().get_user_email_direct(*args, **kwargs)
 
 
 def send_message(*args, **kwargs):

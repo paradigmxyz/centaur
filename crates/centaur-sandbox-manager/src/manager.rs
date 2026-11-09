@@ -216,6 +216,10 @@ impl SandboxManager {
             .await
     }
 
+    pub async fn enable_observability(&self, id: &SandboxId) -> SandboxResult<()> {
+        self.backend.enable_observability(id).await
+    }
+
     pub async fn ensure_iron_control_proxy_resources(
         &self,
         id: &SandboxId,

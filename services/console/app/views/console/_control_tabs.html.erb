@@ -6,6 +6,7 @@
   { label: "Apps", path: console_oauth_apps_path, match: "/console/oauth_apps" }
 ] %>
 <% control_tabs << { label: "Users", path: console_users_path, match: "/console/users" } if acting_admin? %>
+<% control_tabs << { label: "API Clients", path: console_api_clients_path, match: "/console/api_clients" } if acting_admin? && ApiClientsFeature.enabled? %>
 <% control_tabs << { label: "Settings", path: edit_console_system_settings_path, match: "/console/settings" } if acting_admin? %>
 
 <nav class="console-control-tabs" aria-label="Control sections">

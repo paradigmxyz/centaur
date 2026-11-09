@@ -162,8 +162,15 @@ module Oauth
         redirect_uri: oauth_callback_redirect_uri(@app.slug),
         code_verifier: code_verifier.to_s,
         require_refresh_token: provider_requires_refresh_token?,
-        client_auth_method: provider_token_endpoint_auth_method
+        client_auth_method: provider_token_endpoint_auth_method,
+        extra_params: provider_extra_token_params
       )
+    end
+
+    def provider_extra_token_params
+      return @provider.extra_token_params if @provider.respond_to?(:extra_token_params)
+
+      {}
     end
 
     def provider_token_endpoint_auth_method

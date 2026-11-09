@@ -18,6 +18,8 @@ kube = { workspace = true, features = ["derive", "jsonpatch", "ws"] }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread", "sync", "time"] }
 tracing.workspace = true
 uuid.workspace = true

@@ -19,6 +19,10 @@ pub struct CreateSessionRequest {
     /// with no conversational memory).
     #[serde(default)]
     pub on_harness_conflict: Option<OnHarnessConflict>,
+    /// API clients only: the principal (OID or foreign ID) a new session runs
+    /// as. It must be attached to the client; omitted, the client's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
