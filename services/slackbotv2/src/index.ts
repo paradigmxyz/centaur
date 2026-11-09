@@ -829,8 +829,16 @@ async function handleSlackMessageHandoff(
     if (!input.proactive && await handleStopCommand(thread, message, input.options, input.trigger)) {
       return
     }
+    if (input.proactive && proactiveMuted((await thread.state) ?? {})) {
+      traceLog(input.options, 'slackbotv2_proactive_handoff_muted', trace, { trigger: input.trigger })
+      return
+    }
     if (input.options.proactivity && PROACTIVE_ELIGIBILITY_TRIGGERS.has(input.trigger)) {
-      await thread.setState({ proactiveEligible: true })
+      // Only a mention lifts a mute; the mute marker outranks a proactive
+      // handoff that races the click and sets eligibility again.
+      await thread.setState(input.proactive
+        ? { proactiveEligible: true }
+        : { proactiveEligible: true, proactiveMutedAt: null })
     }
     // Assistant status is thread-wide. A mentioned follow-up that steers an
     // active execution must not clear or replace the status owned by that run.
@@ -955,7 +963,7 @@ async function handleProactiveMuteAction(
     thread_ts: payload.thread_ts,
     user_id: payload.user_id
   }
-  await thread.setState({ proactiveEligible: false })
+  await thread.setState({ proactiveEligible: false, proactiveMutedAt: Date.now() })
   traceLog(options, 'slackbotv2_proactive_muted', undefined, fields)
   if (!payload.channel_id || !payload.message_ts) return
   const raw = isJsonObject(event.raw) ? event.raw : {}
@@ -968,13 +976,14 @@ async function handleProactiveMuteAction(
   }
   try {
     if (blocks) {
-      await withSlackApiTimeout(options, 'mark proactive reply muted', () =>
+      // Slack reports most failures as HTTP 200 with ok: false.
+      assertSlackOk('chat.update', await withSlackApiTimeout(options, 'mark proactive reply muted', () =>
         callSlackApi('chat.update', {
           channel: payload.channel_id,
           ts: payload.message_ts,
           text: stringValue(message.text) ?? PROACTIVE_MUTED_NOTICE,
           blocks
-        }, slack))
+        }, slack)))
       return
     }
   } catch (error) {
@@ -985,19 +994,24 @@ async function handleProactiveMuteAction(
   }
   // Without an editable message, confirm to the clicker alone.
   try {
-    await withSlackApiTimeout(options, 'post proactive mute feedback', () =>
+    assertSlackOk('chat.postEphemeral', await withSlackApiTimeout(options, 'post proactive mute feedback', () =>
       callSlackApi('chat.postEphemeral', {
         channel: payload.channel_id,
         user: payload.user_id,
         ...(payload.thread_ts ? { thread_ts: payload.thread_ts } : {}),
         text: PROACTIVE_MUTED_NOTICE
-      }, slack))
+      }, slack)))
   } catch (error) {
     traceWarn(options, 'slackbotv2_proactive_mute_feedback_failed', undefined, {
       ...fields,
       error: errorMessage(error)
     })
   }
+}
+
+/** Whether the mute button silenced proactive replies in this thread. */
+function proactiveMuted(state: SlackbotV2ThreadState): boolean {
+  return state.proactiveMutedAt != null
 }
 
 /** Whether a stop was requested after this message was sent. */
@@ -1185,6 +1199,7 @@ function proactiveLayers(
   state: SlackbotV2ThreadState
 ): ProactiveLayer[] {
   const layers: ProactiveLayer[] = []
+  if (proactiveMuted(state)) return layers
   if (state.proactiveEligible === true) layers.push('mentioned')
   // A stop silences rule matches in its thread until the next mention.
   if (rules !== undefined && state.proactiveEligible !== false) layers.push('rules')
@@ -1719,6 +1734,17 @@ async function syncThreadMessageToSession(
     recordForward(input.mode, 'duplicate_skipped', traceStartedAtMs)
     return
   }
+  // A mute also catches proactive handoffs already past the classifier,
+  // including in-process retries.
+  if (input.proactive && proactiveMuted(state)) {
+    traceLog(input.options, 'slackbotv2_forward_proactive_muted', trace)
+    finishSteeringReaction(input, trace)
+    if (input.initialAssistantStatusVisible && state.activeExecution !== true) {
+      await setAssistantStatus(thread, '', input.options, trace)
+    }
+    recordForward(input.mode, 'muted', traceStartedAtMs)
+    return
+  }
   traceLog(input.options, 'slackbotv2_forward_started', trace, {
     active_execution: state.activeExecution === true,
     history_forwarded: state.historyForwarded === true
@@ -2198,7 +2224,9 @@ async function syncThreadMessageToSession(
     traceLog(input.options, 'slackbotv2_forward_active_execution_marked', trace)
     await forwardToSessionApi(input.options, forwardInput, {
       shouldExecute: async () => {
-        stoppedBeforeExecute = stopRequestedFor((await thread.state) ?? {}, message)
+        const latest = (await thread.state) ?? {}
+        stoppedBeforeExecute = stopRequestedFor(latest, message)
+          || (input.proactive === true && proactiveMuted(latest))
         return !stoppedBeforeExecute
       },
       onExecutionStarted: commitExecutionStarted,

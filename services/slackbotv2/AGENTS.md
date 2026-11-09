@@ -46,7 +46,9 @@ lifecycle, harness formatting, and durable execution state belong in `api-rs`.
   A reply to an execution a proactive message started carries a :mute: button;
   clicking it silences proactive replies in that thread like a stop does (until
   the next mention) without interrupting a running execution, and is handled in
-  slackbotv2 rather than dispatched as a workflow event.
+  slackbotv2 rather than dispatched as a workflow event. The mute also drops
+  proactive handoffs already past the classifier (including retries); only a
+  mention clears it.
 
 ## Validation
 

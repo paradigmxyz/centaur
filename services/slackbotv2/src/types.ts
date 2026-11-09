@@ -325,6 +325,12 @@ export type SlackbotV2ThreadState = {
    * false after a stop, which silences proactive replies until a mention.
    */
   proactiveEligible?: boolean
+  /**
+   * When someone pressed the mute button on a proactive reply. While set, no
+   * proactive message may start or steer a turn, even one accepted before the
+   * click; the next mention clears it. Null clears persisted state.
+   */
+  proactiveMutedAt?: number | null
   /** Proactivity rules whose context a turn in this thread already carried. */
   proactiveRulesSent?: string[]
   /**
