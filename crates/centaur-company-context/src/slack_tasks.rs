@@ -41,8 +41,9 @@ const USERS_PAGE_SIZE: &str = "200";
 /// Slack recommends at most 200 members per `conversations.members` page.
 const MEMBERS_PAGE_SIZE: &str = "200";
 /// Each history sync rereads at least this much recent history, so edits and
-/// new replies to threads started within it are picked up. Replies to older
-/// threads are not.
+/// new replies to threads started within it are picked up. Older threads
+/// replied to within it are resynced too, so a thread stays fresh while it is
+/// active; one idle for longer is picked up again only if history returns it.
 const THREAD_REFRESH_WINDOW: chrono::Duration = chrono::Duration::hours(72);
 /// A history sync that has not stored a page for this long no longer holds
 /// its conversation.
@@ -308,7 +309,7 @@ async fn discover(
 
 /// Records a conversation's members, then stores its history since its last
 /// sync, rereading at least the thread refresh window, and syncs each thread
-/// whose replies changed.
+/// whose replies changed or that was replied to within the window.
 async fn sync_conversation(
     state: &SlackTaskState,
     params: ConversationSyncParams,
@@ -405,30 +406,46 @@ async fn sync_conversation(
                 // Only parents carry latest_reply, so a thread is resynced
                 // only when it has a reply it did not have before.
                 if let Some(latest_reply) = message["latest_reply"].as_str() {
-                    state
-                        .threads
-                        .spawn(
-                            SLACK_THREAD_SYNC_TASK,
-                            ThreadSyncParams {
-                                credential_id: credential.id,
-                                team_id: params.team_id.clone(),
-                                conversation_id: conversation_id.to_owned(),
-                                thread_ts: ts.to_owned(),
-                            },
-                            SpawnOptions {
-                                idempotency_key: Some(format!(
-                                    "slack.thread.sync:{conversation_id}:{ts}:{latest_reply}"
-                                )),
-                                ..SpawnOptions::default()
-                            },
-                        )
-                        .await?;
+                    spawn_thread_sync(
+                        state,
+                        &params,
+                        credential.id,
+                        ts,
+                        format!("slack.thread.sync:{conversation_id}:{ts}:{latest_reply}"),
+                    )
+                    .await?;
                 }
             }
             cursor = page.response_metadata.next_cursor;
             if cursor.is_empty() {
                 break;
             }
+        }
+        // History no longer returns the parents of threads started before
+        // the window, so resync those replied to within the refresh window.
+        // Checkpoint them so a resumed run spawns the same threads.
+        let active: Vec<String> = match ctx.begin_step("slack.threads.active").await? {
+            handle if handle.done => handle.state.context("active threads checkpoint is empty")?,
+            handle => {
+                let active = active_threads(
+                    &state.pool,
+                    conversation_id,
+                    window.oldest,
+                    window.until - THREAD_REFRESH_WINDOW,
+                )
+                .await?;
+                ctx.complete_step(handle, active).await?
+            }
+        };
+        for ts in &active {
+            spawn_thread_sync(
+                state,
+                &params,
+                credential.id,
+                ts,
+                format!("slack.thread.refresh:{conversation_id}:{ts}:{task_id}"),
+            )
+            .await?;
         }
         finish_history(&state.pool, conversation_id, task_id, &window).await?;
         spawn_projection(&state.absurd, conversation_id, task_id).await?;
@@ -465,6 +482,61 @@ async fn sync_conversation(
             Err(error)
         }
     }
+}
+
+/// Queues a thread's sync onto the thread queue.
+async fn spawn_thread_sync(
+    state: &SlackTaskState,
+    params: &ConversationSyncParams,
+    credential_id: i64,
+    thread_ts: &str,
+    idempotency_key: String,
+) -> Result<()> {
+    state
+        .threads
+        .spawn(
+            SLACK_THREAD_SYNC_TASK,
+            ThreadSyncParams {
+                credential_id,
+                team_id: params.team_id.clone(),
+                conversation_id: params.conversation_id.clone(),
+                thread_ts: thread_ts.to_owned(),
+            },
+            SpawnOptions {
+                idempotency_key: Some(idempotency_key),
+                ..SpawnOptions::default()
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+/// Returns the parents of a conversation's threads that started before
+/// `started_before` and were last replied to at or after `replied_since`.
+/// Only parents carry `latest_reply_ts`, which each thread sync refreshes.
+async fn active_threads(
+    pool: &PgPool,
+    conversation_id: &str,
+    started_before: DateTime<Utc>,
+    replied_since: DateTime<Utc>,
+) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        r#"
+        SELECT message_ts
+        FROM company_context_system.slack_messages
+        WHERE conversation_id = $1
+          AND reply_count > 0
+          AND latest_reply_ts IS NOT NULL
+          AND occurred_at < $2
+          AND to_timestamp(latest_reply_ts::double precision) >= $3
+        ORDER BY message_ts
+        "#,
+    )
+    .bind(conversation_id)
+    .bind(started_before)
+    .bind(replied_since)
+    .fetch_all(pool)
+    .await?)
 }
 
 /// Stores every message of a thread, including its parent.
@@ -1544,6 +1616,35 @@ mod tests {
         assert_eq!(
             claim_history(pool, "C1", "task-c").await.unwrap(),
             Some((Some(at(1_000)), Some(at(6_000))))
+        );
+
+        // Threads started before a time are active while replied to since
+        // another; only parents carry latest_reply.
+        let threads = [
+            json!({ "ts": "1700000100.000000", "user": "U1", "text": "old, replied", "reply_count": 2, "latest_reply": "1700000900.000000" }),
+            json!({ "ts": "1700000200.000000", "user": "U1", "text": "old, idle", "reply_count": 1, "latest_reply": "1700000300.000000" }),
+            json!({ "ts": "1700000950.000000", "user": "U1", "text": "recent", "reply_count": 1, "latest_reply": "1700000990.000000" }),
+            json!({ "ts": "1700000900.000000", "user": "U2", "text": "reply", "thread_ts": "1700000100.000000" }),
+        ];
+        store_messages(pool, "C1", None, &threads).await.unwrap();
+        let at_ts = |seconds: i64| DateTime::from_timestamp(1_700_000_000 + seconds, 0).unwrap();
+        assert_eq!(
+            active_threads(pool, "C1", at_ts(940), at_ts(800))
+                .await
+                .unwrap(),
+            ["1700000100.000000"]
+        );
+        assert_eq!(
+            active_threads(pool, "C1", at_ts(940), at_ts(200))
+                .await
+                .unwrap(),
+            ["1700000100.000000", "1700000200.000000"]
+        );
+        assert!(
+            active_threads(pool, "C2", at_ts(940), at_ts(0))
+                .await
+                .unwrap()
+                .is_empty()
         );
 
         // Messages go with their conversation, and are not stored again.
