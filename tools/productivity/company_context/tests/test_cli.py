@@ -125,6 +125,39 @@ def test_v2_search_forwards_filters(monkeypatch):
     ]
 
 
+def test_v2_search_expands_plain_dates_and_slack_alias(monkeypatch):
+    calls = []
+
+    class FakeV2Client:
+        def search(self, **kwargs):
+            calls.append(kwargs)
+            return {"status": "ok", "results": []}
+
+    monkeypatch.setattr(cli, "CompanyContextV2Client", FakeV2Client)
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "v2",
+            "search",
+            "roadmap",
+            "--type",
+            "slack",
+            "--type",
+            "drive_doc",
+            "--after",
+            "2024-01-02",
+            "--before",
+            "2024-02-01T12:30:00+02:00",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls[0]["types"] == ["slack_message", "drive_doc"]
+    assert calls[0]["occurred_after"] == "2024-01-02T00:00:00Z"
+    assert calls[0]["occurred_before"] == "2024-02-01T12:30:00+02:00"
+
+
 def test_v2_search_json_output_parses_with_long_escaped_text(monkeypatch):
     text = "C:\\path\\" + "x" * 200 + "\nline two " * 20
 
