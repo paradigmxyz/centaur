@@ -59,13 +59,17 @@ class SshKeySecret < ApplicationRecord
 
   private
 
+  # Runs on every validation, not only when the source looks dirty: replacing
+  # a persisted record's has_one saves the new source immediately, so by
+  # validation time it is neither new nor changed. Deriving each time keeps the
+  # stored public key consistent with whatever inline key is actually stored.
   def derive_inline_public_key
     @private_key_error = nil
     source = key_source
-    return unless source&.source_type == "control_plane"
-    return unless source.new_record? || source.will_save_change_to_secret?
+    return unless source&.source_type == "control_plane" && !source.marked_for_destruction?
 
-    source.secret = SshKey.normalize(source.secret) if source.secret.present?
+    normalized = SshKey.normalize(source.secret) if source.secret.present?
+    source.secret = normalized if normalized && normalized != source.secret
     self.public_key = SshKey.public_key(source.secret.to_s)
   rescue SshKey::Invalid => error
     # SshKey messages never include the submitted key.

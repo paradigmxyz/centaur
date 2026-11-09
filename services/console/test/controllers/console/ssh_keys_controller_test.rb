@@ -41,6 +41,24 @@ class Console::SshKeysControllerTest < ActionDispatch::IntegrationTest
     assert_not console.grants.where.not(ssh_key_secret_id: nil).exists?
   end
 
+  test "saving again restores grants a failed enrollment never created" do
+    console = Principal.create!(foreign_id: "ssh-console-repair", kind: "console_user",
+                                console_user: users(:member_user), created_by: users(:acme_admin))
+    skipped = Object.new
+    def skipped.apply_for_user(_user) = 0
+    def skipped.apply_for_principal(_principal) = false
+    key = PersonalSshKeyGrants.stub(:new, skipped) do
+      patch console_ssh_key_url, params: { ssh_key: { name: "Mine", private_key: @private_key } }
+      users(:member_user).reload.personal_ssh_key
+    end
+    assert key
+    assert_not console.grants.exists?(ssh_key_secret: key), "enrollment was skipped"
+
+    patch console_ssh_key_url, params: { ssh_key: { name: "Mine", private_key: "" } }
+    assert_redirected_to console_ssh_key_path
+    assert console.grants.exists?(ssh_key_secret: key)
+  end
+
   test "live validation handles browser line endings without saving or echoing keys" do
     assert_no_difference "SshKeySecret.count" do
       post validate_key_console_ssh_key_url, params: { private_key: @private_key.gsub("\n", "\r\n") }, as: :json

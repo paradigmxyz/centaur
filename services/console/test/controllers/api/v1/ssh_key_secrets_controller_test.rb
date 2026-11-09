@@ -37,6 +37,42 @@ module Api
         assert_equal data["id"], json_body.dig("data", "id")
       end
 
+      test "replacing an inline key re-derives and validates its public key" do
+        first, = synthetic_ssh_key
+        replacement, replacement_public = SyntheticSshKey.generate
+        post api_v1_ssh_key_secrets_url, headers: auth_headers, params: {
+          data: { foreign_id: "rotating-key", name: "Rotating key",
+                  private_key: { source_type: "control_plane", secret: first } }
+        }.to_json
+        assert_response :created
+        id = json_body.dig("data", "id")
+
+        put api_v1_ssh_key_secret_url(id), headers: auth_headers, params: {
+          data: { name: "Rotating key", private_key: { source_type: "control_plane", secret: replacement } }
+        }.to_json
+        assert_response :ok
+        assert_equal replacement_public, json_body.dig("data", "public_key")
+        key = SshKeySecret.find_by_oid!(id)
+        assert_equal SshKey.normalize(replacement), key.key_source.secret
+
+        # A supplied public key cannot disagree with the stored private key.
+        put api_v1_ssh_key_secret_url(id), headers: auth_headers, params: {
+          data: { name: "Rotating key", public_key: synthetic_ssh_key.last,
+                  private_key: { source_type: "control_plane", secret: replacement } }
+        }.to_json
+        assert_response :ok
+        assert_equal replacement_public, key.reload.public_key
+
+        # An invalid replacement is rejected and leaves the previous key intact.
+        put api_v1_ssh_key_secret_url(id), headers: auth_headers, params: {
+          data: { name: "Rotating key", private_key: { source_type: "control_plane", secret: "not a key" } }
+        }.to_json
+        assert_response :unprocessable_entity
+        assert_not_includes response.body, "not a key"
+        assert_equal SshKey.normalize(replacement), key.reload.key_source.secret
+        assert_equal replacement_public, key.public_key
+      end
+
       test "an external source requires a public key" do
         put api_v1_ssh_key_secret_url("team-env-key"), headers: auth_headers, params: {
           data: { name: "Env key", private_key: { source_type: "env", config: { var: "TEAM_SSH_KEY" } } }

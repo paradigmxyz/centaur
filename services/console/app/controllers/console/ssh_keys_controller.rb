@@ -26,6 +26,9 @@ class Console::SshKeysController < ApplicationController
     @key.name = attributes[:name] if attributes.key?(:name)
     @key.private_key = attributes[:private_key] if attributes[:private_key].present?
     if @key.save
+      # Idempotent: saving again also repairs grants a failed earlier
+      # enrollment never created.
+      PersonalSshKeyGrants.new.apply_for_user(current_user)
       redirect_to console_ssh_key_path, notice: "SSH key saved. Register the public key in your environments."
     else
       render :edit, status: :unprocessable_entity
