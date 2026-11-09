@@ -1,53 +1,19 @@
 """CLI for Slack search and analysis."""
 
 import json
-import os
 import re
-import sys
 
 import typer
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
 
-class _PipeSafeStdout:
-    """Stdout wrapper that treats a reader closing the pipe early as success."""
-
-    def __init__(self, stream):
-        self._stream = stream
-
-    def write(self, text: str) -> int:
-        try:
-            return self._stream.write(text)
-        except BrokenPipeError:
-            self._discard()
-            return len(text)
-
-    def flush(self) -> None:
-        try:
-            self._stream.flush()
-        except BrokenPipeError:
-            self._discard()
-
-    def _discard(self) -> None:
-        # The reader (e.g. `head`) stopped early. Point stdout at devnull so later
-        # writes and the exit-time flush succeed instead of exiting non-zero.
-        os.dup2(os.open(os.devnull, os.O_WRONLY), self._stream.fileno())
-
-    def __getattr__(self, name: str):
-        return getattr(self._stream, name)
-
-
-class _PipeSafeTyper(typer.Typer):
-    def __call__(self, *args, **kwargs):
-        sys.stdout = _PipeSafeStdout(sys.stdout)
-        return super().__call__(*args, **kwargs)
-
-
-app = _PipeSafeTyper(
+app = PipeSafeTyper(
     name="slack",
     help=(
         "Slack CLI for AI agents with two access paths. Proxied commands omit the "
@@ -683,8 +649,8 @@ def sync_history(
     ),
 ):
     """Run an incremental channel-history sync suitable for ETL jobs."""
-    from pathlib import Path
     import sys
+    from pathlib import Path
 
     from .client import sync_channel_history
 
@@ -1622,6 +1588,7 @@ def channel_emails(
         slack channel-emails #general -o json
     """
     import json
+
     from .client import get_channel_member_emails
 
     try:
@@ -1652,6 +1619,7 @@ def user_info(
         slack user-info U123ABC -o json
     """
     import json
+
     from .client import get_user_profile
 
     try:

@@ -2,12 +2,15 @@
 
 from dotenv import load_dotenv
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
 import json
+
 import typer
 
-app = typer.Typer(
+app = PipeSafeTyper(
     name="token-terminal",
     help="Token Terminal — protocol revenue, fees, financial statements, and metrics",
 )

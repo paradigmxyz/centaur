@@ -6,11 +6,13 @@ import typer
 from dotenv import load_dotenv
 from rich.console import Console
 
+from centaur_sdk.cli import PipeSafeTyper
+
 from .client import AirtableClient
 
 load_dotenv()
 
-app = typer.Typer(name="airtable", help="Airtable API client")
+app = PipeSafeTyper(name="airtable", help="Airtable API client")
 
 
 @app.command("health")

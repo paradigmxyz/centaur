@@ -4,13 +4,15 @@ import json
 
 from dotenv import load_dotenv
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
 import typer  # noqa: E402
 from rich.console import Console  # noqa: E402
 from rich.table import Table  # noqa: E402
 
-app = typer.Typer(name="discord", help="Discord self-token CLI for AI agents")
+app = PipeSafeTyper(name="discord", help="Discord self-token CLI for AI agents")
 
 
 @app.command("health")

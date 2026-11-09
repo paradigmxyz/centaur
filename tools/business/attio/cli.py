@@ -8,11 +8,13 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
+from centaur_sdk.cli import PipeSafeTyper
+
 from .client import AttioClient
 
 load_dotenv()
 
-app = typer.Typer(name="attio", help="Attio CRM CLI for AI agents")
+app = PipeSafeTyper(name="attio", help="Attio CRM CLI for AI agents")
 
 
 @app.command("health")

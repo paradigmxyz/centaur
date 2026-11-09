@@ -10,10 +10,12 @@ from typing import Optional
 
 import typer
 
+from centaur_sdk.cli import PipeSafeTyper
+
 from .client import _client
 from .utils import dump_json, normalize_url
 
-app = typer.Typer(
+app = PipeSafeTyper(
     name="archiver", help="Reducto-first document extraction for investment materials."
 )
 

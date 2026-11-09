@@ -2,6 +2,8 @@
 
 from dotenv import load_dotenv
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
 import json
@@ -10,7 +12,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-app = typer.Typer(name="listennotes", help="Listen Notes CLI for podcast data")
+app = PipeSafeTyper(name="listennotes", help="Listen Notes CLI for podcast data")
 
 
 @app.command("health")

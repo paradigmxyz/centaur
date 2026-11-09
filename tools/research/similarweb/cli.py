@@ -7,7 +7,9 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-app = typer.Typer(name="similarweb", help="SimilarWeb CLI for web traffic and market intelligence")
+from centaur_sdk.cli import PipeSafeTyper
+
+app = PipeSafeTyper(name="similarweb", help="SimilarWeb CLI for web traffic and market intelligence")
 
 
 @app.command("health")

@@ -2,6 +2,8 @@
 
 from dotenv import load_dotenv
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
 import json
@@ -11,7 +13,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-app = typer.Typer(name="preqin", help="Preqin Operational API and Feeds API CLI")
+app = PipeSafeTyper(name="preqin", help="Preqin Operational API and Feeds API CLI")
 
 
 @app.command("health")

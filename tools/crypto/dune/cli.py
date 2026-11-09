@@ -9,6 +9,8 @@ from rich.console import Console
 from rich.status import Status
 from rich.table import Table
 
+from centaur_sdk.cli import PipeSafeTyper
+
 from .client import DuneClient
 from .client import _client as create_client
 
@@ -24,7 +26,7 @@ def _get_client() -> DuneClient:
     return _client
 
 
-app = typer.Typer(name="dune", help="Dune Analytics CLI for executing queries and fetching results")
+app = PipeSafeTyper(name="dune", help="Dune Analytics CLI for executing queries and fetching results")
 
 
 @app.command("health")
