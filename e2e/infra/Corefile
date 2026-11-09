@@ -18,6 +18,10 @@
       name exact api.anthropic.com model-server.centaur-e2e-model.svc.cluster.local
       answer name model-server.centaur-e2e-model.svc.cluster.local api.anthropic.com
     }
+    rewrite stop {
+      name exact custom-provider.test model-server.centaur-e2e-model.svc.cluster.local
+      answer name model-server.centaur-e2e-model.svc.cluster.local custom-provider.test
+    }
     kubernetes cluster.local in-addr.arpa ip6.arpa {
        pods insecure
        fallthrough in-addr.arpa ip6.arpa

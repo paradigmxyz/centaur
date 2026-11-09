@@ -13,8 +13,8 @@ use crate::{
 
 #[derive(Serialize)]
 struct ApiJwtClaims {
-    iss: String,
-    aud: String,
+    iss: &'static str,
+    aud: &'static str,
     iat: i64,
     exp: i64,
     sub: String,
@@ -82,8 +82,8 @@ pub(crate) async fn append_api_jwt(
     let principal_oid = oid("prn", principal_id);
     let iat = window_start(&principal_oid, now, 900);
     let claims = ApiJwtClaims {
-        iss: env_default("CENTAUR_API_JWT_ISSUER", "centaur-console"),
-        aud: env_default("CENTAUR_API_JWT_AUDIENCE", "centaur-api"),
+        iss: "centaur-console",
+        aud: "centaur-api",
         iat,
         exp: iat + 3600,
         sub: principal_oid,

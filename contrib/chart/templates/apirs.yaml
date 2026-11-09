@@ -108,6 +108,11 @@
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MODEL" "value" $companyContextEmbeddingsModel)
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS" "value" $companyContextEmbeddingsDimensions)
 -}}
+{{- if .Values.experimentalCompanyContext.enabled -}}
+{{- /* Workflows that write custom documents (e.g. overlay ingest workflows) need the company-context API URL. */ -}}
+{{- $companyContextApiUrl := get .Values.sandbox.extraEnv "COMPANY_CONTEXT_API_URL" | default (printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "company-context")) .Values.experimentalCompanyContext.port) -}}
+{{- $apiRsEtlEnv = append $apiRsEtlEnv (dict "name" "COMPANY_CONTEXT_API_URL" "value" $companyContextApiUrl) -}}
+{{- end -}}
 {{- $apiRsEtlPassthroughNames := list -}}
 {{- range $env := $apiRsEtlEnv -}}
 {{- $apiRsEtlPassthroughNames = append $apiRsEtlPassthroughNames $env.name -}}
@@ -270,6 +275,8 @@ spec:
             - name: CENTAUR_SESSION_PRINCIPAL_ADMISSION
               value: {{ .Values.apiRs.sessionPrincipalAdmission | quote }}
 {{- end }}
+            - name: CENTAUR_API_CLIENTS_ENABLED
+              value: {{ .Values.apiClients.enabled | quote }}
 {{- if not (hasKey .Values.apiRs.extraEnv "CENTAUR_MCP_V2_ENABLED") }}
             - name: CENTAUR_MCP_V2_ENABLED
               value: {{ .Values.apiRs.mcpV2Enabled | quote }}
@@ -335,6 +342,10 @@ spec:
               value: {{ .Values.apiRs.sandboxReadyTimeoutSecs | quote }}
             - name: SESSION_SANDBOX_WARM_POOL_SIZE
               value: {{ .Values.apiRs.sandboxWarmPoolSize | quote }}
+{{- with .Values.apiRs.sandboxWarmPools }}
+            - name: SESSION_SANDBOX_WARM_POOLS
+              value: {{ toJson . | quote }}
+{{- end }}
             - name: SESSION_SANDBOX_WARM_POOL_REPLENISH_INTERVAL_SECS
               value: {{ .Values.apiRs.sandboxWarmPoolReplenishIntervalSecs | quote }}
             - name: SESSION_SANDBOX_RUNNING_LIMIT
@@ -574,6 +585,9 @@ spec:
 {{- end }}
 {{- if not (hasKey .Values.sandbox.extraEnv "CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS") }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS" "value" (.Values.sandbox.telemetry.captureTranscripts | toString)) }}
+{{- end }}
+{{- if not (hasKey .Values.sandbox.extraEnv "CENTAUR_TELEMETRY_CAPTURE_TOOL_TRACES") }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_TELEMETRY_CAPTURE_TOOL_TRACES" "value" (.Values.sandbox.telemetry.captureToolTraces | toString)) }}
 {{- end }}
 {{- range $k, $v := .Values.sandbox.extraEnv }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" $k "value" ($v | toString)) }}

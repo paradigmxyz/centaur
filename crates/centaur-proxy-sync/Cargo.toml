@@ -11,7 +11,7 @@ centaur-console-db = { path = "../centaur-console-db" }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 crc32fast = "1"
 hex = "0.4"
-jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
+jsonwebtoken.workspace = true
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 serde = { version = "1", features = ["derive"] }

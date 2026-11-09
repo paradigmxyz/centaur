@@ -20,7 +20,8 @@ app = typer.Typer(
         "token. Use direct commands when a user token is available, including in Slack DM chat "
         "surfaces and MCP. Exception: inside a Slack DM, upload files with regular `upload`, not "
         "`upload-direct`. Choose the command flavor that matches the current surface and credential "
-        "context."
+        "context. For example, look up a user's email with `user-email` on channel surfaces and "
+        "`user-email-direct` in DMs."
     ),
 )
 
@@ -850,6 +851,39 @@ def channel_members_direct_cmd(
     _render_channel_members(channel, members, emails_only, json_output)
 
 
+@app.command("user-email-proxy")
+@app.command("user-email")
+def user_email_cmd(
+    user_id: str = typer.Argument(..., help="Slack user ID, e.g. U1234567890"),
+):
+    """Get a user's email through the Centaur API server Slack proxy.
+
+    Prints {"user_id": ..., "email": ...}; email is null when the profile has none.
+    """
+    from .client import get_user_email_proxy
+
+    try:
+        email = get_user_email_proxy(user_id)
+    except (RuntimeError, ValueError) as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+    _print_json({"user_id": user_id, "email": email})
+
+
+@app.command("user-email-direct")
+def user_email_direct_cmd(
+    user_id: str = typer.Argument(..., help="Slack user ID, e.g. U1234567890"),
+):
+    """Get a user's email directly with the Slack SDK.
+
+    Prints {"user_id": ..., "email": ...}; email is null when it is unavailable.
+    """
+    from .client import get_user_email_direct
+
+    _print_json({"user_id": user_id, "email": get_user_email_direct(user_id)})
+
+
 @app.command()
 def users(
     limit: int = typer.Option(100, "--limit", "-n", help="Max users"),
@@ -1433,17 +1467,11 @@ def files(
 
 
 def _download_direct_url(url: str, output: str, display_name: str | None = None) -> None:
-    from pathlib import Path
-
     from .client import _fetch_slack_file
 
-    output_dir = Path(output)
-    output_dir.mkdir(parents=True, exist_ok=True)
     try:
-        filename, _mime_type, body = _fetch_slack_file(url)
-        out_path = output_dir / (display_name or filename)
-        out_path.write_bytes(body)
-        console.print(f"[green]✓ Downloaded {out_path.name}[/] ({len(body)} bytes)")
+        out_path, size = _fetch_slack_file(url, output, display_name)
+        console.print(f"[green]✓ Downloaded {out_path.name}[/] ({size} bytes)")
         console.print(f"[dim]{out_path.absolute()}[/]")
     except Exception as e:
         console.print(f"[red]Error downloading Slack file: {e}[/]")
@@ -1526,31 +1554,22 @@ def download(
     ),
 ):
     """Download a Slack file through the Centaur API server Slack proxy."""
-    import base64
     import sys
-    from pathlib import Path
 
     from .client import download_file_proxy
 
     try:
-        result = download_file_proxy(file_id=file_id, channel_id=channel_id)
-    except (RuntimeError, ValueError) as e:
+        result = download_file_proxy(file_id=file_id, channel_id=channel_id, output_dir=output)
+    except (OSError, RuntimeError, ValueError) as e:
         console.print(f"[red]Error downloading Slack file: {e}[/]")
         raise typer.Exit(1) from e
 
-    output_dir = Path(output)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    out_path = output_dir / result["filename"]
-    out_path.write_bytes(base64.b64decode(result["content_base64"]))
-
     if json_output:
-        metadata = {key: value for key, value in result.items() if key != "content_base64"}
-        metadata["output_path"] = str(out_path.absolute())
-        print(json.dumps(metadata, indent=2, ensure_ascii=False), file=sys.stdout)
+        print(json.dumps(result, indent=2, ensure_ascii=False), file=sys.stdout)
         return
 
     console.print(f"[green]✓ Downloaded {result['filename']}[/] ({result['size_bytes']} bytes)")
-    console.print(f"[dim]{out_path.absolute()}[/]")
+    console.print(f"[dim]{result['output_path']}[/]")
 
 
 @app.command("channel-emails")

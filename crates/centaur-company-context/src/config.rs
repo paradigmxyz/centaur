@@ -226,20 +226,6 @@ pub struct Config {
         hide_env_values = true
     )]
     pub jwt_signing_secret: String,
-    #[arg(
-        long,
-        env = "CENTAUR_API_JWT_AUDIENCE",
-        default_value = "centaur-api",
-        value_parser = nonempty
-    )]
-    pub jwt_audience: String,
-    #[arg(
-        long,
-        env = "CENTAUR_API_JWT_ISSUER",
-        default_value = "centaur-console",
-        value_parser = nonempty
-    )]
-    pub jwt_issuer: String,
     #[arg(long, env = "BIND_ADDR", default_value = "0.0.0.0:8080")]
     pub bind_addr: SocketAddr,
     #[arg(
@@ -299,6 +285,15 @@ pub struct Config {
         value_parser = embeddings_dimensions
     )]
     pub embeddings_dimensions: usize,
+    /// The largest cosine distance from the query at which a document still
+    /// counts as a semantic match. Depends on the embeddings model.
+    #[arg(
+        long,
+        env = "COMPANY_CONTEXT_EMBEDDINGS_MAX_QUERY_DISTANCE",
+        default_value = "0.8",
+        value_parser = cosine_distance
+    )]
+    pub embeddings_max_query_distance: f64,
     #[arg(
         long = "scan-interval-seconds",
         env = "COMPANY_CONTEXT_SCAN_INTERVAL_SECONDS",
@@ -541,6 +536,17 @@ fn rate_limit_share(value: &str) -> Result<f64, String> {
     Ok(value)
 }
 
+fn cosine_distance(value: &str) -> Result<f64, String> {
+    let value = value
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| "value must be a number".to_owned())?;
+    if !(value > 0.0 && value <= 2.0) {
+        return Err("value must be greater than 0 and at most 2".to_owned());
+    }
+    Ok(value)
+}
+
 fn embeddings_dimensions(value: &str) -> Result<usize, String> {
     let value = positive_usize(value)?;
     if value != 1_536 {
@@ -658,5 +664,13 @@ mod tests {
         assert!(rate_limit_share("0").is_err());
         assert!(rate_limit_share("1.5").is_err());
         assert!(rate_limit_share("NaN").is_err());
+    }
+
+    #[test]
+    fn max_query_distance_is_a_cosine_distance() {
+        assert_eq!(cosine_distance("2"), Ok(2.0));
+        assert!(cosine_distance("0").is_err());
+        assert!(cosine_distance("2.5").is_err());
+        assert!(cosine_distance("NaN").is_err());
     }
 }

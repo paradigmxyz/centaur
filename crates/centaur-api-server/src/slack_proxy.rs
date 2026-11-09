@@ -77,6 +77,10 @@ pub(crate) fn slack_proxy_router() -> Router<AppState> {
             "/api/slack/channels/{channel_id}/threads/{thread_ts}/replies",
             get(get_slack_thread_replies),
         )
+        .route(
+            "/api/slack/users/{user_id}/email",
+            get(get_slack_user_email),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,6 +225,13 @@ struct SlackMessagesResponse {
     response_metadata: Option<SlackResponseMetadata>,
     #[serde(flatten)]
     extra: Map<String, Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct SlackUserEmailResponse {
+    ok: bool,
+    user_id: String,
+    email: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -684,6 +695,40 @@ async fn get_slack_thread_replies(
     .await?;
     let value = slack_thread_replies(client, config, &channel_id, &thread_ts, &query).await?;
     Ok(Json(value))
+}
+
+async fn get_slack_user_email(
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+) -> Result<Json<SlackUserEmailResponse>, ApiError> {
+    authorize_slack_file_proxy(&headers)?;
+    validate_slack_user_id(&user_id)?;
+
+    let email = slack_user_email(http_client(), slack_proxy_config()?, &user_id).await?;
+    Ok(Json(SlackUserEmailResponse {
+        ok: true,
+        user_id,
+        email,
+    }))
+}
+
+async fn slack_user_email(
+    client: &reqwest::Client,
+    config: &SlackFileProxyConfig,
+    user_id: &str,
+) -> Result<Option<String>, ApiError> {
+    let value = slack_api_post_form(
+        client,
+        config,
+        "users.info",
+        &[("user", user_id.to_owned())],
+    )
+    .await?;
+    Ok(value
+        .pointer("/user/profile/email")
+        .and_then(Value::as_str)
+        .filter(|email| !email.is_empty())
+        .map(str::to_owned))
 }
 
 fn upstream_body_is_unexpected_html(
@@ -1573,6 +1618,18 @@ fn validate_slack_channel_id(channel_id: &str) -> Result<(), ApiError> {
     Err(ApiError::BadRequest("invalid Slack channel ID".to_owned()))
 }
 
+fn validate_slack_user_id(user_id: &str) -> Result<(), ApiError> {
+    if user_id.len() >= 9
+        && matches!(user_id.as_bytes().first(), Some(b'U' | b'W'))
+        && user_id
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    {
+        return Ok(());
+    }
+    Err(ApiError::BadRequest("invalid Slack user ID".to_owned()))
+}
+
 fn validate_slack_file_id(file_id: &str) -> Result<(), ApiError> {
     if file_id.len() >= 9
         && file_id.starts_with('F')
@@ -2371,6 +2428,64 @@ mod tests {
             .unwrap_err(),
             ApiError::BadRequest(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn user_email_reads_users_info_profile() {
+        let app = axum::Router::new().route(
+            "/users.info",
+            axum::routing::post(
+                |axum::Form(form): axum::Form<HashMap<String, String>>| async move {
+                    let profile = match form["user"].as_str() {
+                        "U123456789" => json!({"email": "person@example.com"}),
+                        _ => json!({}),
+                    };
+                    axum::Json(json!({"ok": true, "user": {"profile": profile}}))
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = SlackFileProxyConfig {
+            api_url: format!("http://{address}"),
+            bot_token: "test-token".to_owned(),
+            max_upload_bytes: 1,
+        };
+
+        assert_eq!(
+            slack_user_email(http_client(), &config, "U123456789")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("person@example.com")
+        );
+        assert_eq!(
+            slack_user_email(http_client(), &config, "U987654321")
+                .await
+                .unwrap(),
+            None
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn validates_slack_user_id() {
+        validate_slack_user_id("U123456789").unwrap();
+        validate_slack_user_id("W123456789").unwrap();
+        for user_id in ["", "U123", "C123456789", "u123456789", "U12345678/"] {
+            assert!(matches!(
+                validate_slack_user_id(user_id).unwrap_err(),
+                ApiError::BadRequest(_)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn user_email_requires_jwt() {
+        let result = get_slack_user_email(HeaderMap::new(), Path("U123456789".to_owned())).await;
+
+        assert!(matches!(result, Err(ApiError::Unauthorized(_))));
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -100,6 +101,9 @@ def test_v2_search_forwards_filters(monkeypatch):
             '{"author": "Ada"}',
             "-n",
             "5",
+            "--keyword",
+            "--cursor",
+            "2024-01-02T09:00:00Z|slack:C1:2024-01-02:000000",
         ],
     )
 
@@ -115,8 +119,25 @@ def test_v2_search_forwards_filters(monkeypatch):
             "file_ids": None,
             "sources": ["archive"],
             "metadata": {"author": "Ada"},
+            "keyword": True,
+            "cursor": "2024-01-02T09:00:00Z|slack:C1:2024-01-02:000000",
         }
     ]
+
+
+def test_v2_search_json_output_parses_with_long_escaped_text(monkeypatch):
+    text = "C:\\path\\" + "x" * 200 + "\nline two " * 20
+
+    class FakeV2Client:
+        def search(self, **kwargs):
+            return {"status": "ok", "results": [{"document_id": "doc-1", "text": text}]}
+
+    monkeypatch.setattr(cli, "CompanyContextV2Client", FakeV2Client)
+
+    result = CliRunner().invoke(cli.app, ["v2", "search", "roadmap", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["results"][0]["text"] == text
 
 
 def test_v2_search_rejects_metadata_that_is_not_a_json_object(monkeypatch):

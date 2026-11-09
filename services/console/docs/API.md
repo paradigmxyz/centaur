@@ -995,7 +995,7 @@ An OAuth app registers an OAuth client (provider, client id, and client secret) 
 
 Only managing the app's configuration requires API key auth. The consent flow endpoints themselves are unauthenticated and live on iron-control's own domain (see [OAuth consent flow](#oauth-consent-flow)).
 
-Google and Slack are supported providers in this release. The `provider` field is validated against the supported set, so an unknown provider returns `422`.
+The `provider` field is validated against the [supported providers](#supported-providers), so an unknown provider returns `422`.
 
 ### Attributes
 
@@ -1004,7 +1004,8 @@ Google and Slack are supported providers in this release. The `provider` field i
 | `slug`                 | required    | The app's identity: globally-unique, URL-safe, and the name in the well-known consent links (`/oauth/<slug>/start`). Must not start with the opaque-id prefix. |
 | `description`          | optional    | |
 | `labels`               | optional    | |
-| `provider`             | required    | The provider strategy. Currently `"google"` or `"slack"`. |
+| `provider`             | required    | The provider strategy. See [supported providers](#supported-providers). |
+| `provider_config`      | conditional | Required for `"custom"` and must be empty (`{}`) otherwise. An object with `authorization_endpoint`, `token_endpoint`, `resource`, and optionally `userinfo_endpoint`, each an `https` URL. |
 | `client_id`            | required    | OAuth client id. Not secret; returned in responses. |
 | `client_secret`        | required on create | OAuth client secret. Write-only and encrypted at rest; on update it is only changed when supplied. Never returned. |
 | `allowed_scopes`       | required    | Non-empty array of scope strings the start endpoint requests. A flow's optional `scopes` param must be a subset; omitting it requests all of these. |
@@ -1175,10 +1176,20 @@ A tampered, expired, or missing flow state or cookie renders an error page with 
 
 ### Supported providers
 
-| Provider | `provider` value |
-| -------- | ---------------- |
-| Google   | `google`         |
-| Slack    | `slack`          |
+| Provider  | `provider` value |
+| --------- | ---------------- |
+| Attio     | `attio`          |
+| Custom    | `custom`         |
+| GitHub    | `github`         |
+| Google    | `google`         |
+| Granola   | `granola`        |
+| Linear    | `linear`         |
+| Mercator  | `mercator`       |
+| Microsoft | `microsoft`      |
+| Slack     | `slack`          |
+| Zoom      | `zoom`           |
+
+The `custom` provider connects an authorization server that needs no provider-specific code, such as a remote MCP server whose client was registered in advance. It runs the authorization-code flow with PKCE (`S256`), authenticates to the token endpoint with `client_secret_post`, and sends `resource` as the RFC 8707 resource indicator on the authorization, token, and refresh requests. The account identity is the `sub` (plus `email` and `name`, when present) returned by `userinfo_endpoint`. Without a `userinfo_endpoint`, the access token must be a JWT, and the identity comes from its claims. The minted token is injected only for requests to the host and path of `resource`, and refreshes keep the granted scopes.
 
 Slack OAuth apps may use token rotation or long-lived tokens. When token rotation is enabled, the callback stores the returned refresh token and the broker refresh loop keeps the access token fresh. When Slack returns a long-lived token without a refresh token or expiry, the credential is stored without scheduling broker refresh.
 Slack OAuth apps should use normal Slack API scopes such as `channels:history`, not Sign in with Slack scopes such as `openid`, `email`, or `profile`.
@@ -1472,13 +1483,15 @@ Returns `201`. The plaintext `token` is included **only** in this create respons
 
 Tasks run one agent prompt and deliver the result to Slack. A task may have a five-field cron schedule in Pacific Time; omitting `cron_expression` or sending `null` or an empty string makes it manual-only. Task IDs use the `tsk_` prefix. The `delivery_channel` can be a Slack channel ID available to the task author, or the special value `dm`, which resolves to the linked user's Slack direct message when the task is created or updated.
 
-These endpoints use the sandbox entitlement JWT injected by `iron-proxy`. Every operation requires an active Console user linked to the sandbox principal and is scoped to tasks owned by that user. A task owned by another user returns `404`.
+These endpoints use the sandbox entitlement JWT injected by `iron-proxy`. For most sandboxes, every operation requires an active Console user linked to the sandbox principal and is scoped to tasks owned by that user. A task owned by another user returns `404`.
+
+When the sandbox principal is a Slack channel, the endpoints manage that channel's tasks instead. Any Slack user from a workspace the bot is installed in who requests the current turn may list, create, update, delete, or run them; no Console account is required. A turn without such a requester, such as a scheduled run, receives `403`. Channel tasks run with the channel principal's permissions and always deliver to the channel; omit `data.delivery_channel` or pass the channel's ID, since any other value returns `422`.
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
 | `GET` | `/api/v1/sandbox/scheduled_tasks` | List the linked user's tasks. |
 | `GET` | `/api/v1/sandbox/scheduled_tasks/:id` | Read one owned task by `tsk_...` OID. |
-| `POST` | `/api/v1/sandbox/scheduled_tasks` | Create a task from `data.name`, `data.prompt`, `data.delivery_channel`, and optional `data.cron_expression` and `data.enabled`. |
+| `POST` | `/api/v1/sandbox/scheduled_tasks` | Create a task from `data.name`, `data.prompt`, and optional `data.delivery_channel` (default `dm`), `data.cron_expression`, and `data.enabled`. |
 | `PUT`/`PATCH` | `/api/v1/sandbox/scheduled_tasks/:id` | Update any supplied task fields. Set `data.cron_expression` to `null` or an empty string to make the task manual-only. |
 | `DELETE` | `/api/v1/sandbox/scheduled_tasks/:id` | Delete an owned task. Returns `204`. |
 | `POST` | `/api/v1/sandbox/scheduled_tasks/:id/run` | Queue an immediate run. Returns `202`; disabled tasks return `422`. |

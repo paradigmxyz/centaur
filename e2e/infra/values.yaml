@@ -17,6 +17,10 @@ toolServer:
 repoCache:
   enabled: false
 
+# e2e/tests/api-clients.test.ts drives the session API as an API client.
+apiClients:
+  enabled: true
+
 # Both Slack clients talk to the fake Slack.
 apiRs:
   extraEnv:
@@ -46,3 +50,30 @@ slackbotv2:
 networkPolicy:
   ingressSourceNamespaces:
     - centaur-e2e-slack
+
+
+codex:
+  customProviders:
+    fixture:
+      name: Fixture Provider
+      baseUrl: https://custom-provider.test/v1
+      apiKeyEnv: E2E_CUSTOM_API_KEY
+      defaultModel: fixture-reasoner
+      models:
+        fixture-reasoner:
+          displayName: Fixture Reasoner
+          contextWindow: 65536
+          inputModalities: [text]
+          aliases: [fixture]
+          reasoningEfforts: [low, high, max]
+          defaultReasoning: high
+          reasoningAliases:
+            medium: high
+            xhigh: max
+        fixture-fast:
+          displayName: Fixture Fast
+          contextWindow: 32768
+          inputModalities: [text]
+          aliases: [fixture-fast]
+          reasoningEfforts: [low, high]
+          defaultReasoning: low

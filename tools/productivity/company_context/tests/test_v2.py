@@ -124,6 +124,29 @@ def test_search_posts_filters_and_returns_results(api_url):
     ]
 
 
+def test_keyword_search_posts_mode_and_cursor(api_url):
+    CompanyContextV2Client(api_url).search(
+        "falcon",
+        channel_ids=["C1"],
+        occurred_before="2024-02-01T00:00:00Z",
+        keyword=True,
+        cursor="2024-01-02T09:00:00Z|slack:C1:2024-01-02:000000",
+    )
+
+    assert _FakeApi.requests == [
+        (
+            "POST",
+            "/query",
+            {
+                "query": "falcon",
+                "filters": {"occurred_before": "2024-02-01T00:00:00Z", "channel_ids": ["C1"]},
+                "mode": "keyword",
+                "cursor": "2024-01-02T09:00:00Z|slack:C1:2024-01-02:000000",
+            },
+        )
+    ]
+
+
 def test_search_reports_api_errors(api_url):
     result = CompanyContextV2Client(api_url).search(" ")
 

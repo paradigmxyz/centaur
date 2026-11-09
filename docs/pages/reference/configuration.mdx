@@ -78,6 +78,7 @@ for the operator workflow.
 | `console.oktaOauth.issuer` | Helm value. | Okta organization or custom authorization-server issuer used for OIDC discovery. |
 | `console.oktaOauth.tokenEndpointAuthMethod` | Helm value, default `client_secret_basic`. | Client authentication method configured on the Okta application: `client_secret_basic` or `client_secret_post`. |
 | `CENTAUR_CONSOLE_OKTA_CLIENT_ID`, `CENTAUR_CONSOLE_OKTA_CLIENT_SECRET` | `secretManager.existingSecretName` when Okta login is enabled. | Okta OIDC web application credentials. |
+| `apiClients.enabled`, `CENTAUR_API_CLIENTS_ENABLED`, `CENTAUR_CONSOLE_API_CLIENTS_ENABLED` | Helm value, default `false`. | Enables [API clients](/operate/api-clients): the Console's **API Clients** page and api-rs `/oauth/token`. Off, api-rs also rejects API client tokens. |
 | `apiRs.syncInfraSecrets`, `IRON_CONTROL_SYNC_INFRA_SECRETS` | Helm value, default `true`. | Upserts the shared `infra` role and its harness/platform secrets. Set false only when another process owns that shared Console state. |
 | `IRON_CONTROL_URL`, `IRON_CONTROL_API_KEY` | Chart-rendered for api-rs; operator shell for `centaur-perms`. | Connects the runtime or CLI to the Console. |
 
@@ -274,7 +275,8 @@ Sandbox entrypoint and wrappers:
 | `CENTAUR_PI_MODEL` | `sandbox.extraEnv`. | Pi harness default model (`provider/id`). The chart mirrors it into slackbotv2 so the Slack footer names the model. See [Using the Pi Harness](/extend/pi-harness). |
 | `CENTAUR_OMP_MODEL` | `sandbox.extraEnv`. | OMP harness default model (`provider/modelId`). The chart mirrors it into slackbotv2 so the Slack footer names the model. See [Using the OMP Harness](/extend/omp-harness). |
 | `CLAUDE_CODE_AUTH_MODE` | `sandbox.claudeCodeAuthMode`. | Claude Code auth flow: `api_key` (default, uses `ANTHROPIC_API_KEY`) or `access_token` (Claude.ai Pro or Max via the brokered OAuth login). The chart sets this on api-rs, which propagates it into sandboxes. See [Claude Auth Modes](/deploying-in-production#claude-auth-modes). |
-| `CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS` | `sandbox.telemetry.captureTranscripts`; defaults to `false`. | Includes user prompts and assistant responses on harness LLM spans, plus bounded shell commands and workspace-relative working directories on tool spans. Usage, cost, status, session association, and tool telemetry do not require transcript capture. |
+| `CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS` | `sandbox.telemetry.captureTranscripts`; defaults to `false`. | Includes user prompts and assistant responses on harness LLM spans. Usage, cost, status, session association, and tool telemetry do not require transcript capture. |
+| `CENTAUR_TELEMETRY_CAPTURE_TOOL_TRACES` | `sandbox.telemetry.captureToolTraces`; defaults to `false`. | Includes bounded shell commands and workspace-relative working directories on harness tool spans, independently of transcript capture. Tool names, executables, and status are exported either way. |
 | `DEPLOY_ENV`, `ENVIRONMENT`, `TRACEPARENT` | Deployment env or wrapper-generated. | Runtime environment and trace context. |
 | `CALL_TIMEOUT_SECONDS` | Sandbox env before running `call`. | Curl watchdog for API tool calls. |
 | `SLACK_CHANNEL`, `SLACK_THREAD_TS` | Sandbox env. | File-upload helper target. |

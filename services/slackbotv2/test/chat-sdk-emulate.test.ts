@@ -992,6 +992,129 @@ describe('slackbotv2', () => {
     ).toEqual(expect.objectContaining({ model: 'gpt-5.4' }))
   })
 
+  it('switches a sticky thread to a named configured model and forwards its default effort', async () => {
+    const previous = process.env.CODEX_CUSTOM_PROVIDERS
+    process.env.CODEX_CUSTOM_PROVIDERS = JSON.stringify({
+      private: { name: 'Private Inference', defaultModel: 'atlas-full', models: {
+        'atlas-full': { displayName: 'Atlas Full', aliases: ['atlas'],
+          reasoningEfforts: ['low', 'max'], defaultReasoning: 'max' }
+      } }
+    })
+    try {
+      const sharedState = createMemoryState()
+      await sharedState.connect()
+      bot = createTestBot({
+        state: sharedState,
+        responseMetadataMode: 'first',
+        messageOverridesStrategy: createOpenAiMessageOverridesStrategy({
+          apiKey: 'test-key', model: 'classifier',
+          fetch: (async (_url: RequestInfo | URL, init?: RequestInit) => Response.json({ answers: [
+            { name: 'selection_request', probability: 0.99, type: 'predicate' },
+            { name: 'model', choice: String(init?.body).includes('use Sol') ? 'gpt-6.1-sol' : 'private/atlas-full', type: 'choice' }
+          ] })) as unknown as typeof fetch
+        })
+      })
+      const parent = await sendMessage(`<@${BOT_USER_ID}> --codex --model gpt-6.1-sol start here`)
+      await parent.finished()
+      const switched = await sendMessage(`<@${BOT_USER_ID}> switch to Atlas for this`, { threadTs: parent.ts })
+      await switched.finished()
+      const followup = await sendMessage(`<@${BOT_USER_ID}> continue the work`, { threadTs: parent.ts })
+      await followup.finished()
+      for (const execution of codexApi.executes.slice(1)) {
+        const line = JSON.parse(execution.body.input_lines.at(-1)!)
+        expect(line.model).toBe('atlas-full')
+        expect(line.provider).toBe('private')
+        expect(line.reasoning).toBe('max')
+      }
+      expect(codexApi.executes).toHaveLength(3)
+      expect(await sharedState.get(`thread-state:${threadKey(parent.ts)}`)).toMatchObject({
+        model: 'atlas-full', provider: 'private', harnessType: 'codex'
+      })
+      const reset = await sendMessage(`<@${BOT_USER_ID}> use Sol again`, { threadTs: parent.ts })
+      await reset.finished()
+      const resetLine = JSON.parse(codexApi.executes[3]!.body.input_lines.at(-1)!)
+      expect(resetLine.model).toBe('gpt-6.1-sol')
+      // Slack clears the provider; the harness resolves the default route.
+      expect(resetLine.provider).toBeUndefined()
+      const invalid = await sendMessage(`<@${BOT_USER_ID}> --provider openrouter --model atlas use this`, { threadTs: parent.ts })
+      await invalid.finished()
+      expect(codexApi.executes).toHaveLength(4)
+      expect(await threadText(parent.ts)).toContain('incompatible')
+      const stopBlocks = slackApi.calls.filter(call => call.method === 'chat.stopStream')
+      expect(JSON.stringify(stopBlocks)).toContain('Atlas Full · Private Inference · Codex · Max')
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_CUSTOM_PROVIDERS
+      else process.env.CODEX_CUSTOM_PROVIDERS = previous
+    }
+  })
+
+  it('clears a catalogued provider for a model-only flag and keeps an uncatalogued one', async () => {
+    const previous = process.env.CODEX_CUSTOM_PROVIDERS
+    process.env.CODEX_CUSTOM_PROVIDERS = JSON.stringify({
+      private: { name: 'Private Inference', models: { 'atlas-full': { displayName: 'Atlas Full' } } },
+      plain: { name: 'Plain Inference' }
+    })
+    try {
+      const sharedState = createMemoryState()
+      await sharedState.connect()
+      bot = createTestBot({ state: sharedState })
+      for (const [provider, model, expected] of [
+        ['private', 'atlas-full', undefined],
+        ['plain', 'plain-model', 'plain']
+      ] as const) {
+        const parent = await sendMessage(`<@${BOT_USER_ID}> --provider ${provider} --model ${model} start here`)
+        await parent.finished()
+        const switched = await sendMessage(`<@${BOT_USER_ID}> --model gpt-6.1-sol continue`, { threadTs: parent.ts })
+        await switched.finished()
+        const line = JSON.parse(codexApi.executes.at(-1)!.body.input_lines.at(-1)!)
+        expect(line.model).toBe('gpt-6.1-sol')
+        expect(line.provider).toBe(expected)
+        expect((await sharedState.get<Record<string, unknown>>(`thread-state:${threadKey(parent.ts)}`))?.provider)
+          .toBe(expected ?? null)
+      }
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_CUSTOM_PROVIDERS
+      else process.env.CODEX_CUSTOM_PROVIDERS = previous
+    }
+  })
+
+  it('switches a pinned model using default Claude and versioned Codex names', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({
+      state: sharedState,
+      messageOverridesStrategy: createOpenAiMessageOverridesStrategy({
+        apiKey: 'test-key', model: 'classifier',
+        fetch: (async (_url: RequestInfo | URL, init?: RequestInit) => {
+          const request = JSON.parse(String(init?.body))
+          const text = String(request.input.at(-1).content)
+          const model = text.includes('use claude') ? 'claude-opus-5-5'
+            : text.includes('pro') ? 'gpt-5.4-pro' : 'gpt-5.5'
+          return Response.json({ answers: [
+            { name: 'selection_request', probability: 0.99, type: 'predicate' },
+            { name: 'model', choice: model, type: 'choice' }
+          ] })
+        }) as unknown as typeof fetch
+      })
+    })
+    const parent = await sendMessage(`<@${BOT_USER_ID}> --codex --model gpt-6.1-sol start here`)
+    await parent.finished()
+    for (const [text, harness, model] of [
+      ['use claude', 'claudecode', 'claude-opus-5-5'],
+      ['switch to codex 5.5', 'codex', 'gpt-5.5'],
+      ['switch to codex 5.4 pro', 'codex', 'gpt-5.4-pro']
+    ] as const) {
+      const followup = await sendMessage(`<@${BOT_USER_ID}> ${text}`, { threadTs: parent.ts })
+      await followup.finished()
+      expect(codexApi.creates.at(-1)!.body.harness_type).toBe(harness)
+      expect(JSON.parse(codexApi.executes.at(-1)!.body.input_lines.at(-1)!).model).toBe(model)
+      expect(await sharedState.get(`thread-state:${threadKey(parent.ts)}`)).toMatchObject({
+        harnessType: harness, model
+      })
+    }
+    expect(codexApi.executes).toHaveLength(4)
+  })
+
   it('keeps a top-level harness flag pinned when the LLM strategy guesses another harness', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
@@ -5015,6 +5138,28 @@ describe('proactive replies', () => {
     expect(sessionMessageTexts(codexApi.appends.flatMap(append => append.body.messages)))
       .toContain('what about staging?')
     expect(await threadText(threadTs)).toContain('Executed request 2.')
+  })
+
+  it('answers a proactive follow-up with flag-like text without a selection error', async () => {
+    const previous = process.env.CODEX_CUSTOM_PROVIDERS
+    process.env.CODEX_CUSTOM_PROVIDERS = JSON.stringify({
+      private: { name: 'Private Inference', models: { 'atlas-full': { displayName: 'Atlas Full', aliases: ['atlas'] } } }
+    })
+    try {
+      createProactiveBot(() => ({ respond: true }))
+      const threadTs = await mentionThread('Proactive selection context.')
+
+      await reply('does --claude --model atlas work here?', threadTs)
+
+      expect(await threadText(threadTs)).not.toContain('incompatible')
+      expect(codexApi.executes).toHaveLength(2)
+      expect(codexApi.creates.at(-1)!.body.harness_type).toBe('codex')
+      expect(sessionMessageTexts(codexApi.appends.flatMap(append => append.body.messages)).join('\n'))
+        .toContain('work here?')
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_CUSTOM_PROVIDERS
+      else process.env.CODEX_CUSTOM_PROVIDERS = previous
+    }
   })
 
   it('stays quiet when the classifier declines or fails', async () => {

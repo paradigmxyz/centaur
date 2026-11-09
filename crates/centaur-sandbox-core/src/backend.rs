@@ -83,6 +83,17 @@ pub trait SandboxBackend: Send + Sync {
         Ok(())
     }
 
+    /// Open the observability network path for a running sandbox that was
+    /// created without it, without restarting the workload. Warm sandboxes
+    /// boot without observability so one pool serves sessions with and
+    /// without it.
+    async fn enable_observability(&self, _id: &SandboxId) -> SandboxResult<()> {
+        Err(crate::SandboxError::Unsupported {
+            backend: self.name(),
+            operation: "enable_observability",
+        })
+    }
+
     /// Suspend the sandbox while preserving any backend-supported runtime state.
     async fn pause(&self, id: &SandboxId) -> SandboxResult<()>;
 

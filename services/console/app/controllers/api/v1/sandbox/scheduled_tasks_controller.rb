@@ -2,11 +2,21 @@ module Api
   module V1
     module Sandbox
       class ScheduledTasksController < Api::SandboxBaseController
-        before_action :require_linked_user!
+        class ChannelDeliveryMismatch < StandardError; end
+
+        rescue_from ChannelDeliveryMismatch do
+          render_error(
+            status: :unprocessable_entity,
+            message: "tasks created in a Slack channel thread always deliver to that channel"
+          )
+        end
+
+        before_action :require_task_owner!
         before_action :disable_caching
+        after_action :log_channel_task_request, if: :channel_principal
 
         def index
-          tasks = task_author.scheduled_tasks.order(:name, :id)
+          tasks = owned_tasks.order(:name, :id)
           render json: { data: tasks.map { |task| task_payload(task) } }
         end
 
@@ -15,7 +25,7 @@ module Api
         end
 
         def create
-          task = task_author.scheduled_tasks.create!(task_attributes)
+          task = owned_tasks.create!(task_attributes)
           render json: { data: task_payload(task) }, status: :created
         end
 
@@ -50,10 +60,44 @@ module Api
           response.headers["Cache-Control"] = "no-store"
         end
 
-        def require_linked_user!
+        # A Slack channel session manages that channel's tasks on behalf of
+        # whoever sent the current turn. A turn without a Slack requester, such
+        # as a scheduled run, cannot manage them.
+        def require_task_owner!
+          if channel_principal
+            return if channel_requester
+
+            return render_error(status: :forbidden, message: "channel tasks require a Slack user request")
+          end
           return if task_author
 
           render_error(status: :forbidden, message: "sandbox principal is not linked to an active Console user")
+        end
+
+        def channel_principal
+          principal = current_proxy&.principal
+          principal if principal&.kind == "slack_channel"
+        end
+
+        # Only a Slack user from a workspace the bot is installed in may act
+        # for a channel, never a Slack Connect guest.
+        def channel_requester
+          requester = current_proxy.requester_principal
+          return unless requester&.kind == "slack_dm" && requester.slack_user_id.present?
+
+          requester if requester.slack_team_id.present? && SlackBotChannel.exists?(team_id: requester.slack_team_id)
+        end
+
+        def log_channel_task_request
+          Rails.logger.info(
+            "sandbox_channel_scheduled_task_request principal=#{channel_principal.oid} " \
+            "requester=#{channel_requester&.oid} method=#{request.method} path=#{request.path} " \
+            "status=#{response.status}"
+          )
+        end
+
+        def owned_tasks
+          channel_principal ? channel_principal.scheduled_tasks : task_author.scheduled_tasks
         end
 
         def task_author
@@ -64,7 +108,7 @@ module Api
         end
 
         def owned_task
-          task_author.scheduled_tasks.find_by_oid!(params[:id])
+          owned_tasks.find_by_oid!(params[:id])
         end
 
         def task_attributes
@@ -75,10 +119,22 @@ module Api
             :cron_expression,
             :enabled
           )
-          if attributes[:delivery_channel].to_s.strip.casecmp?("dm")
+          if channel_principal
+            attributes[:delivery_channel] = channel_delivery(attributes[:delivery_channel])
+          elsif attributes[:delivery_channel].to_s.strip.casecmp?("dm") ||
+              (action_name == "create" && !attributes.key?(:delivery_channel))
             attributes[:delivery_channel] = SlackDeliveryPolicy.new(task_author).direct_message_user_id
           end
           attributes
+        end
+
+        # Channel tasks always deliver to their channel; refuse any other
+        # destination rather than silently redirecting the output.
+        def channel_delivery(requested)
+          channel_id = channel_principal.slack_channel_id
+          return channel_id if requested.blank? || requested.to_s.strip.casecmp?(channel_id)
+
+          raise ChannelDeliveryMismatch
         end
 
         def task_payload(task)

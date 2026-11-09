@@ -14,6 +14,7 @@ class Principal < ApplicationRecord
   has_many :principal_roles, dependent: :destroy
   has_many :roles, through: :principal_roles
   has_many :slack_channel_permissions, dependent: :destroy
+  has_many :scheduled_tasks, dependent: :delete_all
   has_many :mcp_oauth_authorization_codes, dependent: :destroy
   has_many :mcp_oauth_refresh_tokens, dependent: :destroy
   belongs_to :created_by, class_name: "User"

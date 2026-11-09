@@ -105,7 +105,6 @@ users or conversations still observed.
 Common optional settings:
 
 - `IRON_CONTROL_DATABASE_NAME`
-- `CENTAUR_API_JWT_AUDIENCE` (default `centaur-api`) and `CENTAUR_API_JWT_ISSUER` (default `centaur-console`): must match the Console's API JWT settings
 - `COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG` (default `google`)
 - `COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG` (default `granola`)
 - `COMPANY_CONTEXT_SLACK_OAUTH_APP_SLUG` (default `slack`)
@@ -138,6 +137,7 @@ Common optional settings:
 - `COMPANY_CONTEXT_WORKER_CONCURRENCY` (default `4`)
 - `COMPANY_CONTEXT_EMBEDDINGS_MODEL` (default `text-embedding-3-small`)
 - `COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS` (currently required to be `1536`)
+- `COMPANY_CONTEXT_EMBEDDINGS_MAX_QUERY_DISTANCE` (default `0.8`, greater than 0 and at most 2): the largest cosine distance from the query at which a document counts as a semantic match
 
 ## Backfilling newly supported Drive file types
 
@@ -210,11 +210,14 @@ documents, Calendar events, Granola notes, and custom documents.
     "sources": ["archive"],
     "metadata": { "author": "Ada" }
   },
-  "limit": 10
+  "mode": "hybrid",
+  "limit": 10,
+  "cursor": null
 }
 ```
 
-`filters`, each filter, and `limit` are optional; unknown fields are rejected.
+`mode`, `filters`, each filter, `limit`, and `cursor` are optional; unknown
+fields are rejected.
 Filters combine with AND:
 
 - `types`: the data types to search. Absent or empty searches every type.
@@ -241,9 +244,21 @@ Filters combine with AND:
 
 `channel_ids`, `file_ids`, `sources`, and `metadata` restrict the search to the types they apply to; a
 request whose types cannot satisfy every filter is rejected. `limit` defaults
-to 10 and is at most 50; there is no pagination, so narrow the filters instead.
-Keyword (BM25) and embedding similarity ranks are combined with reciprocal rank
-fusion; if the query cannot be embedded, keyword ranks alone are used.
+to 10 and is at most 50.
+
+`mode` is `hybrid` (the default) or `keyword`. A `keyword` search returns every
+matching document containing all of the query's terms, without ranking or
+embedding similarity, ordered by `occurred_at` (documents without one last)
+and then `document_id`, both descending; its results have no `score`. When more
+results follow, the response's `next_cursor` is passed as `cursor`, with the
+same query, mode, and filters, to fetch the next page; the cursor is valid only
+in `keyword` mode.
+
+A `hybrid` search is not paged, so narrow its filters instead. Keyword (BM25) and embedding similarity ranks, each taken across every
+searched type, are combined with reciprocal rank fusion. A keyword match is
+ranked by its similarity too, and a document farther from the query than
+`COMPANY_CONTEXT_EMBEDDINGS_MAX_QUERY_DISTANCE` gets no similarity rank. If the
+query cannot be embedded, keyword ranks alone are used.
 Calendar events have only a keyword rank, so they tend to rank below other
 types' documents that match both ways. A result's `score` is its fused rank
 score, comparable only within one response.
@@ -261,9 +276,12 @@ score, comparable only within one response.
       "score": 0.0325,
       "metadata": { "conversation_id": "C0123456789", "channel_name": "general" }
     }
-  ]
+  ],
+  "next_cursor": "2024-01-02T09:00:00Z|slack:C0123456789:2024-01-02:000000"
 }
 ```
+
+`next_cursor` is present only in a `keyword` response with more results.
 
 `text` is the full document chunk. `metadata` holds type-specific fields:
 conversation, channel, and message times for `slack_message`; file ID and file
@@ -305,8 +323,8 @@ one and returns it:
 ```
 
 `body` is required and must not be blank; the other fields are optional and unknown fields are
-rejected. `readers` defaults to the writer alone, and may name only the writer
-and its roles, by opaque or foreign ID, never `public`. The table's limits
+rejected. `readers` defaults to the writer alone, and may name only `public`,
+the writer, and its roles, by opaque or foreign ID. The table's limits
 apply. The service names each document by a UUIDv7, its `external_id`:
 
 ```json

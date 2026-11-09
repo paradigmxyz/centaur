@@ -283,6 +283,17 @@ codex:
   #       apiKeyEnv: PRIVATE_RESPONSES_API_KEY
   #       # Optional; callers must pass --model when omitted.
   #       defaultModel: example-model
+  #       # Optional metadata for natural-language selection and display.
+  #       models:
+  #         example-model:
+  #           displayName: Example Model
+  #           aliases: [example]
+  #           description: General-purpose reasoning model
+  #           contextWindow: 1000000
+  #           inputModalities: [text]
+  #           reasoningEfforts: [low, high]
+  #           defaultReasoning: high
+  #           reasoningAliases: {max: high}
   customProviders: {}
 
 sandbox:
@@ -358,11 +369,14 @@ sandbox:
   # model/thinking footer aligned with the policy the sandbox actually runs.
   extraEnv: {}
   telemetry:
-    # Include user prompts, assistant responses, and bounded shell commands on
-    # harness spans.
+    # Include user prompts and assistant responses on harness LLM spans.
     # Token usage, cost, status, session, and tool telemetry remain available
     # when this is disabled.
     captureTranscripts: false
+    # Include bounded shell commands and workspace-relative working directories
+    # on harness tool spans, independently of captureTranscripts. Tool names,
+    # executables, and status remain available when this is disabled.
+    captureToolTraces: false
   # New agent-k8s sandboxes get a ReadWriteOnce PVC at /home/agent/state. The
   # entrypoint keeps the session's workspace clone, uploads, branches, and native
   # Codex/Claude files there, so they survive idle pause and pod replacement, but
@@ -434,7 +448,7 @@ agentSandbox:
     name: agent-sandbox-system
   image:
     repository: registry.k8s.io/agent-sandbox/agent-sandbox-controller
-    tag: v0.4.6
+    tag: v1.0.9
     pullPolicy: IfNotPresent
   controller:
     extensions: false
@@ -501,6 +515,12 @@ tokenBroker:
 # Slack retention does not run while this is false.
 companyContextV1:
   enabled: true
+
+# API clients: machine callers, such as eval runners, that exchange a client
+# secret for a session API token at api-rs /oauth/token. Off hides them in the
+# Console, removes the token endpoint, and rejects their existing tokens.
+apiClients:
+  enabled: false
 
 # Standalone company-context ingestion service. It indexes Google Docs and PDFs
 # from Google Drive, Google Calendar events, and Granola meeting notes into its
@@ -627,7 +647,20 @@ apiRs:
   # Expose the experimental centaur MCP dispatcher (currently action=list).
   mcpV2Enabled: false
   sandboxReadyTimeoutSecs: 90
+  # Warm pool of default-harness sandboxes with full repo-cache access.
+  # Ignored when sandboxWarmPools is set.
   sandboxWarmPoolSize: 3
+  # Warm pools per harness and repo-cache access, so sessions that differ in
+  # either still get a ready sandbox. Observability is granted at claim time
+  # and does not split pools. Example:
+  # sandboxWarmPools:
+  #   - harness: codex
+  #     repoCache: all      # all | public | none
+  #     size: 3
+  #   - harness: claudecode
+  #     repoCache: public
+  #     size: 1
+  sandboxWarmPools: []
   sandboxWarmPoolReplenishIntervalSecs: 5
   # Best-effort admission gate: when nonzero, api-rs rejects sandbox creates
   # and resumes at or above this observed running count, excluding ready warm
