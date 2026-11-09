@@ -281,6 +281,36 @@ class BytecodeTest(BuilderTestCase):
         self.assertEqual(pyc(websearch, "shared_dep").stat().st_nlink, 2)
 
 
+class SandboxAgreementTest(BuilderTestCase):
+    def test_sandbox_copy_resolves_the_env_built_from_the_checkout(self) -> None:
+        checkout = self.checkout()
+        project = self.write_tool(checkout, "websearch")
+        (project / "cli.py").chmod(0o744)  # owner-only exec, as root owns the checkout
+        (project / "data").mkdir()
+        (project / "data" / "schema.json").write_text("{}")
+        (project / "README.md").symlink_to("cli.py")
+        (project / "pyproject.toml").write_text(
+            '[project]\nname = "websearch"\n\n[project.scripts]\nwebsearch = "cli:app"\n'
+        )
+        self.assertEqual(self.builder().sync_once(), 1)
+
+        # The sandbox side: tools-bootstrap's copy, then the shim index.
+        app_tools = self.root / "app" / "tools"
+        install_tool_shims._copy_published_tools(app_tools, checkout / "tools")
+        copied = app_tools / "research" / "websearch"
+        (copied / "cli.py").chmod(0o600)
+        os.utime(copied / "data" / "schema.json", (0, 0))
+        (copied / "__pycache__").mkdir()
+        (copied / "__pycache__" / "cli.cpython-312.pyc").write_bytes(b"stale")
+        scripts = install_tool_shims._discover_scripts([app_tools])
+
+        env_key = scripts["websearch"]["env_key"]
+        link = self.envs() / env_key
+        self.assertTrue(link.is_symlink(), "sandbox key has no published env")
+        marker = json.loads((link.resolve() / install_tool_shims.TOOL_ENV_MARKER_NAME).read_text())
+        self.assertEqual(marker["key"], env_key)
+
+
 class ParseTest(unittest.TestCase):
     def test_tool_sources(self) -> None:
         self.assertEqual(

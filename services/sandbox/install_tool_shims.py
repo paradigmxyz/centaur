@@ -57,9 +57,10 @@ def tool_env_ignored(name: str, *, is_dir: bool) -> bool:
 def tool_env_key(project_dir: Path, interpreter_tag: str | None = None) -> str:
     """Content key for a tool project: its source tree plus the interpreter.
 
-    The sandbox and the builder hash the same tree (the sandbox copy is a
-    verbatim copy of the repo-cache checkout), so equal keys mean the prebuilt
-    venv was installed from exactly this source with this interpreter.
+    Covers relative paths, file contents, and symlink targets, and nothing a
+    copy may change. The builder hashes the repo-cache checkout and the sandbox
+    hashes its copy, so equal keys mean the prebuilt venv was installed from
+    exactly this source with this interpreter.
     """
     digest = hashlib.sha256()
     digest.update(f"{TOOL_ENV_SCHEMA}\n{interpreter_tag or tool_env_interpreter_tag()}\n".encode())
@@ -79,9 +80,10 @@ def tool_env_key(project_dir: Path, interpreter_tag: str | None = None) -> str:
             elif child.is_file():
                 if tool_env_ignored(child.name, is_dir=False):
                     continue
-                executable = "x" if os.access(child, os.X_OK) else "-"
+                # Contents only: modes, owners, and mtimes differ between the
+                # repo-cache checkout and the sandbox copy, and don't change the env.
                 content = hashlib.sha256(child.read_bytes()).hexdigest()
-                digest.update(f"F\0{relative}\0{executable}\0{content}\n".encode())
+                digest.update(f"F\0{relative}\0{content}\n".encode())
 
     walk(project_dir, "")
     return digest.hexdigest()[:40]

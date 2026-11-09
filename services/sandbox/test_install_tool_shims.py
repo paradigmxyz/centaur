@@ -521,7 +521,7 @@ class ToolEnvKeyTest(unittest.TestCase):
 
             self.assertEqual(install_tool_shims.tool_env_key(copy), key)
 
-    def test_key_changes_with_content_mode_and_interpreter(self) -> None:
+    def test_key_changes_with_content_and_interpreter_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "websearch"
             _write_tool_project(project)
@@ -530,11 +530,15 @@ class ToolEnvKeyTest(unittest.TestCase):
             self.assertNotEqual(
                 install_tool_shims.tool_env_key(project, "cpython-3.13.0-x86_64"), key
             )
-            (project / "pkg" / "cli.py").chmod(0o755)
-            mode_key = install_tool_shims.tool_env_key(project)
-            self.assertNotEqual(mode_key, key)
+            # Modes and mtimes differ between checkout and copy; they don't count.
+            (project / "pkg" / "cli.py").chmod(0o744)
+            os.utime(project / "pkg" / "cli.py", (0, 0))
+            self.assertEqual(install_tool_shims.tool_env_key(project), key)
             (project / "pkg" / "cli.py").write_text("print('changed')\n")
-            self.assertNotEqual(install_tool_shims.tool_env_key(project), mode_key)
+            self.assertNotEqual(install_tool_shims.tool_env_key(project), key)
+            (project / "pkg" / "cli.py").write_text("print('hi')\n")
+            (project / "pkg" / "cli.py").rename(project / "pkg" / "main.py")
+            self.assertNotEqual(install_tool_shims.tool_env_key(project), key)
 
 
 def _publish_fake_env(env_root: Path, key: str, *, marker_key: str | None = None) -> Path:
