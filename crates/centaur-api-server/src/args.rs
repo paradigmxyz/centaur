@@ -847,8 +847,9 @@ struct SandboxArgs {
         default_value_t = 0
     )]
     warm_pool_size: usize,
-    /// Warm pools as a JSON list of `{"harness", "repoCache", "size"}`
-    /// objects, one per harness and repo-cache access. Replaces
+    /// Warm pools as a JSON list of `{"harness", "repoCache", "persona"?,
+    /// "size"}` objects, one per harness, repo-cache access, and persona. A
+    /// pool without `persona` serves only sessions without one. Replaces
     /// `SESSION_SANDBOX_WARM_POOL_SIZE` when set.
     #[arg(
         long = "session-sandbox-warm-pools",
@@ -1660,23 +1661,27 @@ impl SandboxArgs {
             return Ok(vec![WarmPoolTarget {
                 harness: self.default_harness.clone(),
                 repo_cache: SandboxRepoCacheAccess::All,
+                persona: None,
                 size: self.warm_pool_size,
             }]);
         };
         let targets: Vec<WarmPoolTarget> = serde_json::from_str(raw).map_err(|error| {
             ServerError::UnsupportedConfig(format!(
                 "SESSION_SANDBOX_WARM_POOLS must be a JSON list of \
-                 {{\"harness\", \"repoCache\", \"size\"}} objects: {error}"
+                 {{\"harness\", \"repoCache\", \"persona\"?, \"size\"}} objects: {error}"
             ))
         })?;
         for (index, target) in targets.iter().enumerate() {
             if targets[..index].iter().any(|earlier| {
-                earlier.harness == target.harness && earlier.repo_cache == target.repo_cache
+                earlier.harness == target.harness
+                    && earlier.repo_cache == target.repo_cache
+                    && earlier.persona == target.persona
             }) {
                 return Err(ServerError::UnsupportedConfig(format!(
-                    "SESSION_SANDBOX_WARM_POOLS lists harness {} with repoCache {} more than once",
+                    "SESSION_SANDBOX_WARM_POOLS lists harness {} with repoCache {} and persona {} more than once",
                     target.harness,
-                    target.repo_cache.as_str()
+                    target.repo_cache.as_str(),
+                    target.persona.as_deref().unwrap_or("(none)")
                 )));
             }
         }
@@ -3656,6 +3661,7 @@ mod tests {
             vec![WarmPoolTarget {
                 harness: HarnessType::ClaudeCode,
                 repo_cache: SandboxRepoCacheAccess::All,
+                persona: None,
                 size: 3,
             }],
             "the legacy size configures one default-harness pool"
@@ -3671,14 +3677,40 @@ mod tests {
                 WarmPoolTarget {
                     harness: HarnessType::Codex,
                     repo_cache: SandboxRepoCacheAccess::All,
+                    persona: None,
                     size: 2,
                 },
                 WarmPoolTarget {
                     harness: HarnessType::Codex,
                     repo_cache: SandboxRepoCacheAccess::Public,
+                    persona: None,
                     size: 1,
                 },
             ]
+        );
+        assert_eq!(
+            parse(&[
+                "--session-sandbox-warm-pools",
+                r#"[{"harness":"codex","repoCache":"all","size":2},
+                    {"harness":"codex","repoCache":"all","persona":"eng","size":1}]"#,
+            ])
+            .unwrap()[1],
+            WarmPoolTarget {
+                harness: HarnessType::Codex,
+                repo_cache: SandboxRepoCacheAccess::All,
+                persona: Some("eng".to_owned()),
+                size: 1,
+            },
+            "a persona splits a pool from its harness and repo-cache pool"
+        );
+        assert!(
+            parse(&[
+                "--session-sandbox-warm-pools",
+                r#"[{"harness":"codex","repoCache":"all","persona":"eng","size":2},
+                    {"harness":"codex","repoCache":"all","persona":"eng","size":1}]"#,
+            ])
+            .is_err(),
+            "duplicate persona pools are rejected"
         );
         assert!(
             parse(&[

@@ -654,13 +654,21 @@ apiRs:
   # Warm pool of default-harness sandboxes with full repo-cache access.
   # Ignored when sandboxWarmPools is set.
   sandboxWarmPoolSize: 3
-  # Warm pools per harness and repo-cache access, so sessions that differ in
-  # either still get a ready sandbox. Observability is granted at claim time
-  # and does not split pools. Example:
+  # Warm pools per harness, repo-cache access, and optional persona, so
+  # sessions that differ in any of them still get a ready sandbox. A pool
+  # without a persona serves only sessions without one, so with a default
+  # persona configured, add a pool for it. A persona pool must name a
+  # deployed persona allowed for its repoCache and, if the persona pins a
+  # harness, use that harness. Observability is granted at claim time and
+  # does not split pools. Example:
   # sandboxWarmPools:
   #   - harness: codex
   #     repoCache: all      # all | public | none
   #     size: 3
+  #   - harness: codex
+  #     repoCache: all
+  #     persona: eng
+  #     size: 2
   #   - harness: claudecode
   #     repoCache: public
   #     size: 1
