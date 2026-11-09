@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use centaur_session_core::{MessageRole, SessionEvent, ThreadKey, ThreadKeyError};
+use centaur_session_core::{MessageRole, SessionEvent, SessionMessage, ThreadKey, ThreadKeyError};
 use centaur_session_runtime::SESSION_OUTPUT_LINE_EVENT;
 use centaur_session_sqlx::{PgSessionStore, SessionEventNotification, SessionStoreError};
 use reqwest::StatusCode;
@@ -29,23 +29,29 @@ const PROGRESS_UPDATE_MAX_CHARS: usize = 500;
 
 const PROGRESS_UPDATE_PROMPT: &str = "\
 You write a short progress update that a software agent posts in a chat thread while it \
-is still working on a long request. Use only the supplied event facts. Write one or two \
-first-person sentences, at most 280 characters in total, as if you are the agent. The \
-reader asked for the work and cares about substance, not mechanics: say what you have \
-learned or found so far about their request and which part of the problem you are \
-working on now, naming concrete subjects (a service, PR, dataset, metric, partner, or \
-finding). Never name or describe the tools, CLIs, scripts, linters, commands, files, or \
-shell steps you used, and never narrate mechanics such as running, invoking, linting, \
-installing, reading output, changing directories, or checking help. Bad: \"I ran \
-prose-lint to check the extracted text.\" Good: \"About 360 requests since May are mostly \
-code review and debugging; I'm sorting the rest by team.\" Do not repeat the previous \
-update; if the facts add nothing new or only describe mechanics, output exactly SKIP. \
-Do not promise a finish time. Do not mention paths, IDs, or flags. Never mention or tag \
-a person, group, or channel. Do not refer to \"the agent\". No markdown headings, no \
-quotes, no event IDs, and no speculation.";
+is still working on a long request. Write in the language of the user request, or of \
+the session goal when there is no user request, even when the facts are in another \
+language. Use only the supplied event facts. Sound like a colleague giving a quick \
+update in chat: usually one first-person sentence, two only when needed, at most 200 \
+characters in total, as if you are the agent. Say only what changed since the previous \
+update: the newest finding or decision and what you are doing next. Do not recap \
+earlier steps or retell the work so far. The reader asked for the work and cares about \
+substance, not mechanics, so name concrete subjects (a service, PR, dataset, metric, \
+partner, or finding). Never name or describe the tools, CLIs, scripts, linters, \
+commands, files, or shell steps you used, and never narrate mechanics such as running, \
+invoking, linting, installing, reading output, changing directories, or checking help. \
+Bad: \"I ran prose-lint to check the extracted text.\" Bad: \"I checked the open \
+order, then rehearsed it, and I'm continuing to validate it.\" Good: \"Most of the \
+360 requests since May are code review, so I'm sorting the rest by team.\" If the \
+facts add nothing new since the previous update or only describe mechanics, output \
+exactly SKIP. Do not promise a finish time. Do not mention paths, IDs, or flags. Never \
+mention or tag a person, group, or channel. Do not refer to \"the agent\". No markdown \
+headings, no quotes, no event IDs, and no speculation.";
 
 const SYSTEM_PROMPT: &str = "\
-You write live status text for a software agent. Use only the supplied event facts. \
+You write live status text for a software agent. Write in the language of the user \
+request, or of the session goal when there is no user request, even when the facts are \
+in another language. Use only the supplied event facts. \
 Write one first-person present-tense sentence of at most 40 characters, including \
 spaces, as if you are the agent. The hard limit is 45 characters: anything longer is \
 thrown away, so when in doubt cut words and use the shortest name for things. \
@@ -243,10 +249,10 @@ impl ActivitySummaryWorker {
         let Some(fact) = activity_fact_from_output_event(&event) else {
             return Ok(());
         };
-        let goal = if self.states.contains_key(execution_id) {
-            None
+        let context = if self.states.contains_key(execution_id) {
+            ActivityContext::default()
         } else {
-            self.activity_goal_context(&event.thread_key).await?
+            self.activity_context(&event.thread_key).await?
         };
         let now = Instant::now();
         let publish = {
@@ -257,7 +263,7 @@ impl ActivitySummaryWorker {
                     ExecutionActivity::new(
                         event.thread_key.clone(),
                         self.config.max_facts,
-                        goal,
+                        context,
                         now,
                     )
                 });
@@ -315,22 +321,45 @@ impl ActivitySummaryWorker {
         Ok(())
     }
 
-    async fn activity_goal_context(
+    async fn activity_context(
         &self,
         thread_key: &ThreadKey,
-    ) -> Result<Option<String>, ActivitySummaryError> {
-        if let Some(title) = self.store.get_session_title(thread_key).await?
-            && let Some(title) = clean_goal_text(&title)
-        {
-            return Ok(Some(title));
-        }
-
+    ) -> Result<ActivityContext, ActivitySummaryError> {
+        let title = self.store.get_session_title(thread_key).await?;
         let messages = self.store.list_messages(thread_key).await?;
-        let goal = messages
+        Ok(ActivityContext::from_thread(title.as_deref(), &messages))
+    }
+}
+
+#[derive(Debug, Default)]
+struct ActivityContext {
+    /// The session title, or the thread's first user message without one.
+    goal: Option<String>,
+    /// The latest user message, which this execution answers. Its language
+    /// sets the language of the status and progress text.
+    request: Option<String>,
+}
+
+impl ActivityContext {
+    fn from_thread(title: Option<&str>, messages: &[SessionMessage]) -> Self {
+        let user_texts = messages
             .iter()
-            .find(|message| message.role == MessageRole::User)
-            .and_then(|message| message_parts_text(&message.parts));
-        Ok(goal.and_then(|goal| clean_goal_text(&goal)))
+            .filter(|message| message.role == MessageRole::User)
+            .map(|message| message_parts_text(&message.parts))
+            .collect::<Vec<_>>();
+        let goal = title.and_then(clean_goal_text).or_else(|| {
+            user_texts
+                .first()
+                .and_then(Option::as_deref)
+                .and_then(clean_goal_text)
+        });
+        // Bare acknowledgements such as "ok" carry no language, so the latest
+        // real request wins.
+        let request = user_texts
+            .iter()
+            .rev()
+            .find_map(|text| text.as_deref().and_then(clean_goal_text));
+        Self { goal, request }
     }
 }
 
@@ -445,6 +474,7 @@ struct ExecutionActivity {
     last_published_signature: Option<String>,
     last_summary: Option<String>,
     max_facts: usize,
+    request: Option<String>,
     started_at: Instant,
     thread_key: ThreadKey,
 }
@@ -453,12 +483,12 @@ impl ExecutionActivity {
     fn new(
         thread_key: ThreadKey,
         max_facts: usize,
-        goal: Option<String>,
+        context: ActivityContext,
         started_at: Instant,
     ) -> Self {
         Self {
             facts: VecDeque::with_capacity(max_facts),
-            goal,
+            goal: context.goal,
             last_attempt_at: None,
             last_progress: None,
             last_progress_attempt_at: None,
@@ -466,6 +496,7 @@ impl ExecutionActivity {
             last_published_signature: None,
             last_summary: None,
             max_facts,
+            request: context.request,
             started_at,
             thread_key,
         }
@@ -509,6 +540,9 @@ impl ExecutionActivity {
         }
         if let Some(goal) = self.goal.as_deref() {
             lines.push(format!("Session goal: {goal}"));
+        }
+        if let Some(request) = self.request.as_deref() {
+            lines.push(format!("User request: {request}"));
         }
         lines.push("Recent activity facts, oldest to newest:".to_owned());
         for fact in self.facts.iter().filter(|fact| fact.is_substantive()) {
@@ -577,6 +611,9 @@ impl ExecutionActivity {
         }
         if let Some(goal) = self.goal.as_deref() {
             lines.push(format!("Session goal: {goal}"));
+        }
+        if let Some(request) = self.request.as_deref() {
+            lines.push(format!("User request: {request}"));
         }
         lines.push("Recent activity facts, oldest to newest:".to_owned());
         for fact in self.facts.iter().filter(|fact| fact.is_publishable()) {
@@ -1479,9 +1516,24 @@ mod tests {
         ExecutionActivity::new(
             ThreadKey::parse("test:thread").unwrap(),
             4,
-            Some("Investigate USDG vault yield".to_owned()),
+            ActivityContext {
+                goal: Some("Investigate USDG vault yield".to_owned()),
+                request: None,
+            },
             started_at,
         )
+    }
+
+    fn message(role: MessageRole, text: &str) -> SessionMessage {
+        SessionMessage {
+            message_id: "msg".to_owned(),
+            client_message_id: None,
+            thread_key: ThreadKey::parse("test:thread").unwrap(),
+            role,
+            parts: vec![json!({"type": "text", "text": text})],
+            metadata: json!({}),
+            created_at: OffsetDateTime::now_utc(),
+        }
     }
 
     const PROGRESS: ProgressUpdateConfig = ProgressUpdateConfig {
@@ -1548,7 +1600,10 @@ mod tests {
         let mut state = ExecutionActivity::new(
             ThreadKey::parse("test:thread").unwrap(),
             4,
-            clean_goal_text("<@U123> audit billing with @alice"),
+            ActivityContext {
+                goal: clean_goal_text("<@U123> audit billing with @alice"),
+                request: clean_goal_text("<!here> revisa la factura de @alice"),
+            },
             Instant::now(),
         );
         state.push(
@@ -1569,9 +1624,71 @@ mod tests {
         let prompt = state.progress_prompt(Duration::from_secs(180));
 
         assert!(prompt.contains("Session goal: audit billing with alice"));
+        assert!(prompt.contains("User request: revisa la factura de alice"));
         assert!(prompt.contains("- commentary: I'll ask and bob about billing."));
         assert!(!prompt.contains('@'));
         assert!(!prompt.contains("<!"));
+    }
+
+    #[test]
+    fn context_takes_the_request_from_the_latest_user_message() {
+        let messages = [
+            message(MessageRole::User, "enter order attached on ICG"),
+            message(MessageRole::Assistant, "Done, the order is in."),
+            message(MessageRole::User, "buscame posibles prospects en Belgica"),
+            message(MessageRole::User, "ok"),
+        ];
+
+        let titled = ActivityContext::from_thread(Some("ICG order entry"), &messages);
+        assert_eq!(titled.goal.as_deref(), Some("ICG order entry"));
+        assert_eq!(
+            titled.request.as_deref(),
+            Some("buscame posibles prospects en Belgica")
+        );
+
+        let untitled = ActivityContext::from_thread(None, &messages);
+        assert_eq!(
+            untitled.goal.as_deref(),
+            Some("enter order attached on ICG")
+        );
+
+        let mut state = ExecutionActivity::new(
+            ThreadKey::parse("test:thread").unwrap(),
+            4,
+            untitled,
+            Instant::now(),
+        );
+        state.push(ActivityFact::high(
+            "commentary",
+            "I found three Belgian distributors.",
+        ));
+        let progress = state.progress_prompt(Duration::from_secs(180));
+        assert!(progress.contains("User request: buscame posibles prospects en Belgica"));
+        assert!(
+            state
+                .prompt()
+                .contains("User request: buscame posibles prospects en Belgica")
+        );
+    }
+
+    #[test]
+    fn context_without_user_messages_has_no_request() {
+        let context = ActivityContext::from_thread(
+            Some("Investigate USDG vault yield"),
+            &[message(MessageRole::Assistant, "I'm on it.")],
+        );
+        assert_eq!(context.request, None);
+
+        let mut state = activity(Instant::now());
+        state.push(ActivityFact::high(
+            "commentary",
+            "The vault routes yield via Morpho.",
+        ));
+        assert!(
+            !state
+                .progress_prompt(Duration::from_secs(180))
+                .contains("User request:")
+        );
     }
 
     #[test]
