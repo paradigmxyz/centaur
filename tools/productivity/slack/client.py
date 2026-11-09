@@ -1,5 +1,6 @@
 """Slack API client for bot-token Slack tool operations."""
 
+import asyncio
 import base64
 import binascii
 import json
@@ -16,11 +17,12 @@ from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import urlparse
 
+import asyncpg
 import structlog
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from centaur_sdk.tool_sdk import secret
+from centaur_sdk.tool_sdk import COMPANY_CONTEXT_DSN_ENV, company_context_database_url, secret
 
 # structlog so these lines render as JSON through the tool-server's
 # configure_structlog() pipeline, like the rest of the service's logs.
@@ -105,7 +107,146 @@ class SlackRateLimitError(RuntimeError):
 
 
 class IndexedSlackClient:
-    """Search Slack history indexed by the company-context service's API.
+    """Search RLS-scoped Slack messages stored by the v1 Slack sync."""
+
+    _DEFAULT_LIMIT = 20
+    _MAX_LIMIT = 50
+
+    def __init__(self, database_url: str | None = None):
+        value = company_context_database_url(database_url)
+        if not value:
+            raise RuntimeError(f"{COMPANY_CONTEXT_DSN_ENV} is not configured")
+        self.database_url = value
+
+    async def _search_messages(
+        self,
+        *,
+        query: str,
+        limit: int,
+        channels: list[str] | None,
+        from_user: str | None,
+    ) -> dict[str, Any]:
+        conn = await asyncpg.connect(self.database_url)
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    messages.channel_id,
+                    channels.channel_name,
+                    messages.message_ts,
+                    messages.occurred_at,
+                    messages.thread_ts,
+                    messages.user_id,
+                    messages.bot_id,
+                    messages.text,
+                    messages.permalink,
+                    messages.reply_count,
+                    COALESCE(
+                        NULLIF(users.display_name, ''),
+                        NULLIF(users.real_name, ''),
+                        NULLIF(users.user_name, ''),
+                        NULLIF(messages.user_id, ''),
+                        messages.bot_id
+                    ) AS author_name,
+                    ts_rank_cd(
+                        to_tsvector('english', COALESCE(messages.text, '')),
+                        websearch_to_tsquery('english', $1)
+                    ) AS score
+                FROM company_context_slack_messages messages
+                JOIN slack_sync_channels channels
+                  ON channels.channel_id = messages.channel_id
+                LEFT JOIN company_context_slack_users users
+                  ON users.user_id = messages.user_id
+                WHERE to_tsvector('english', COALESCE(messages.text, ''))
+                      @@ websearch_to_tsquery('english', $1)
+                  AND (
+                      $2::text[] IS NULL
+                      OR LOWER(messages.channel_id) = ANY($2::text[])
+                      OR LOWER(channels.channel_name) = ANY($2::text[])
+                  )
+                  AND (
+                      $3::text IS NULL
+                      OR LOWER(messages.user_id) = $3
+                      OR LOWER(users.user_name) = $3
+                      OR LOWER(users.real_name) = $3
+                      OR LOWER(users.display_name) = $3
+                  )
+                ORDER BY score DESC, messages.occurred_at DESC NULLS LAST
+                LIMIT $4
+                """,
+                query,
+                channels,
+                from_user,
+                limit,
+            )
+            return {
+                "status": "ok",
+                "query": query,
+                "results": [
+                    {
+                        "channel": str(row.get("channel_name") or ""),
+                        "channel_id": str(row.get("channel_id") or ""),
+                        "user": str(row.get("author_name") or ""),
+                        "user_id": str(row.get("user_id") or ""),
+                        "bot_id": str(row.get("bot_id") or ""),
+                        "text": str(row.get("text") or ""),
+                        "timestamp": str(row.get("message_ts") or ""),
+                        "occurred_at": self._isoformat(row.get("occurred_at")),
+                        "permalink": str(row.get("permalink") or ""),
+                        "thread_ts": str(row.get("thread_ts") or "") or None,
+                        "reply_count": int(row.get("reply_count") or 0),
+                        "score": float(row.get("score") or 0.0),
+                    }
+                    for row in rows
+                ],
+            }
+        finally:
+            await conn.close()
+
+    @staticmethod
+    def _isoformat(value: Any) -> str | None:
+        if value is None:
+            return None
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+        return str(value)
+
+    def search_messages(
+        self,
+        query: str,
+        limit: int = _DEFAULT_LIMIT,
+        channels: list[str] | None = None,
+        from_user: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_query = query.strip()
+        if not normalized_query:
+            return {"status": "error", "error": "query cannot be empty"}
+
+        normalized_channels = []
+        for channel in channels or []:
+            normalized = str(channel).strip()
+            if normalized.startswith("<#") and normalized.endswith(">"):
+                normalized = normalized[2:-1].split("|", 1)[0]
+            normalized = normalized.lstrip("#").strip().lower()
+            if normalized and normalized not in normalized_channels:
+                normalized_channels.append(normalized)
+
+        normalized_from_user = from_user.strip().lstrip("@").lower() if from_user else None
+        try:
+            return asyncio.run(
+                self._search_messages(
+                    query=normalized_query,
+                    limit=max(1, min(int(limit), self._MAX_LIMIT)),
+                    channels=normalized_channels or None,
+                    from_user=normalized_from_user or None,
+                )
+            )
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
+
+class CompanyContextSlackClient:
+    """Search Slack history indexed by the company-context service's (v2) API.
 
     In sandboxes, iron-proxy injects the principal's API JWT into requests to
     the service, which limits results to conversations that principal can see.
@@ -177,10 +318,16 @@ class IndexedSlackClient:
         query: str,
         limit: int = _DEFAULT_LIMIT,
         channels: list[str] | None = None,
+        from_user: str | None = None,
     ) -> dict[str, Any]:
         normalized_query = query.strip()
         if not normalized_query:
             return {"status": "error", "error": "query cannot be empty"}
+        if from_user:
+            return {
+                "status": "error",
+                "error": "company context v2 cannot filter by author; use search-direct with from:",
+            }
         try:
             filters: dict[str, Any] = {"types": ["slack_message"]}
             channel_ids = self._channel_ids(channels or [])
@@ -220,6 +367,17 @@ def _resolve_channel_name_proxy(name: str) -> str | None:
         if channel["name"].lower() == name:
             return channel["id"]
     return None
+
+
+COMPANY_CONTEXT_V2_ENABLED_ENV = "COMPANY_CONTEXT_V2_ENABLED"
+
+
+def indexed_slack_client() -> "IndexedSlackClient | CompanyContextSlackClient":
+    """Return the company-context v2 client when v2 is enabled, else the v1 client."""
+    enabled = os.getenv(COMPANY_CONTEXT_V2_ENABLED_ENV, "")  # noqa: TID251 - non-secret
+    if enabled.strip().lower() in {"1", "true", "yes", "on"}:
+        return CompanyContextSlackClient()
+    return IndexedSlackClient()
 
 
 class SlackClient:

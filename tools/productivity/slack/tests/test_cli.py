@@ -653,7 +653,7 @@ def test_help_explains_channel_and_dm_access_paths() -> None:
     assert "search-direct" in result.output
 
 
-def test_search_uses_indexed_slack_client(monkeypatch) -> None:
+def test_search_uses_selected_indexed_slack_client(monkeypatch) -> None:
     calls = []
 
     class FakeIndexedSlackClient:
@@ -674,7 +674,7 @@ def test_search_uses_indexed_slack_client(monkeypatch) -> None:
     monkeypatch.setitem(
         sys.modules,
         "slack.client",
-        types.SimpleNamespace(IndexedSlackClient=FakeIndexedSlackClient),
+        types.SimpleNamespace(indexed_slack_client=FakeIndexedSlackClient),
     )
 
     result = CliRunner().invoke(
@@ -684,6 +684,8 @@ def test_search_uses_indexed_slack_client(monkeypatch) -> None:
             "database migration",
             "--channels",
             "eng-infra,C1234567890",
+            "--from",
+            "alice",
             "--limit",
             "5",
         ],
@@ -696,6 +698,7 @@ def test_search_uses_indexed_slack_client(monkeypatch) -> None:
             "query": "database migration",
             "limit": 5,
             "channels": ["eng-infra", "C1234567890"],
+            "from_user": "alice",
         }
     ]
 

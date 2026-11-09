@@ -107,6 +107,7 @@
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MAX_INPUT_CHARS" "value" (dig "companyContextEmbeddings" "maxInputChars" 8192 $apiRsEtl))
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MODEL" "value" $companyContextEmbeddingsModel)
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS" "value" $companyContextEmbeddingsDimensions)
+  (dict "name" "COMPANY_CONTEXT_V2_ENABLED" "value" .Values.experimentalCompanyContext.enabled)
 -}}
 {{- if .Values.experimentalCompanyContext.enabled -}}
 {{- /* Workflows that write custom documents (e.g. overlay ingest workflows) need the company-context API URL. */ -}}
@@ -575,6 +576,10 @@ spec:
 {{- end }}
 {{- if not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS") }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS" "value" ($companyContextEmbeddingsDimensions | toString)) }}
+{{- end }}
+{{- if not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_V2_ENABLED") }}
+{{- /* Tools such as `slack search` read v2 when this is true and v1 otherwise. */}}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "COMPANY_CONTEXT_V2_ENABLED" "value" (.Values.experimentalCompanyContext.enabled | toString)) }}
 {{- end }}
 {{- if and .Values.experimentalCompanyContext.enabled (not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_API_URL")) }}
 {{- /* The company_context tool's v2 commands call this query API through the proxy. */}}

@@ -211,22 +211,24 @@ def search(
     limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
     full: bool = typer.Option(False, "--full", "-f", help="Print each result's full text"),
     channels: str = typer.Option(
-        None,
-        "--channels",
-        "-c",
-        help="Comma-separated channel IDs, or names of channels listed by `channels`",
+        None, "--channels", "-c", help="Comma-separated channel names or IDs to target"
+    ),
+    from_user: str = typer.Option(
+        None, "--from", help="Target messages by this username (company context v1 only)"
     ),
     json_output: bool = typer.Option(True, "--json/--no-json", help="Output as JSON (default)"),
 ):
     """Search indexed Slack history through company context.
 
     This command searches the company-context index rather than downloading
-    channel history. Each result is a conversation chunk: a channel's messages
-    and thread replies for part of a day. Read one in full with
-    `company_context v2 read DOCUMENT_ID`. Replies to threads older than
-    about three days may not be indexed; use `thread` for a live thread. Use
-    search-direct for native Slack modifiers such as `from:` when a linked
-    user credential is available.
+    channel history. When COMPANY_CONTEXT_V2_ENABLED is true it searches v2,
+    where each result is a conversation chunk (a channel's messages and thread
+    replies for part of a day) that `company_context v2 read DOCUMENT_ID`
+    reads in full. v2 filters channels by ID, resolving names only for
+    channels listed by `channels`, and cannot filter by author. Replies to
+    threads older than about three days may not be indexed; use `thread` for
+    a live thread. Otherwise it searches v1 message rows. Use search-direct
+    for native Slack modifiers when a linked user credential is available.
 
     Examples:
         slack search "deploy"
@@ -234,12 +236,13 @@ def search(
     """
     channel_list = [channel.strip() for channel in channels.split(",")] if channels else None
 
-    from .client import IndexedSlackClient
+    from .client import indexed_slack_client
 
-    result = IndexedSlackClient().search_messages(
+    result = indexed_slack_client().search_messages(
         query=query,
         limit=limit,
         channels=channel_list,
+        from_user=from_user,
     )
     if result.get("status") == "error":
         stderr_console.print(f"[red]Error: {result.get('error', 'unknown error')}[/]")
@@ -250,8 +253,8 @@ def search(
         return
 
     results = result.get("results") or []
-    if not results:
-        console.print("[yellow]No messages found.[/]")
+    if not results or "document_id" not in results[0]:
+        _print_message_search_results(query, results, full=full, json_output=False)
         return
 
     if full:
