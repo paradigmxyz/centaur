@@ -5,9 +5,11 @@ When `SLACKBOTV2_GENERATIVE_UI_ENABLED` is on, slackbotv2 turns one fenced
 `json-render` block in a final answer into a native Slack card (Block Kit)
 built with [json-render](https://github.com/vercel-labs/json-render) on the
 Chat SDK card model. With the flag on, slackbotv2 also tells the agent about
-the card on every Slack turn it executes, by adding the note below to the
-user turn next to the Slack session context. No persona or system prompt
-change is needed, and other chat surfaces never see the note.
+the card by adding the note below to the first Slack turn it executes in a
+thread, next to the Slack session context. Later turns rely on the session's
+context; the note is sent again only after a harness restart or when its
+content (catalog or limits) changes. No persona or system prompt change is
+needed, and other chat surfaces never see the note.
 
 ## Contract
 
@@ -26,12 +28,13 @@ change is needed, and other chat surfaces never see the note.
 - When the user asks for "plain text only", "no interactive blocks" or "no
   dashboards", no card is rendered even if a block is present.
 
-## Note sent to the agent on each Slack turn
+## Note sent to the agent on the first Slack turn of a thread
 
 Built from the catalog slackbotv2 validates with (`@json-render/chat` standard
 components without `Button`): the component list and structural rules come
-from the catalog, the rest is the fenced-block contract. Skipped when the
-user asked for plain text only.
+from the catalog, the rest is the fenced-block contract. Skipped on a turn
+where the user asked for plain text only (the next turn that allows cards
+carries it).
 
 ```text
 # Slack card (generative UI)

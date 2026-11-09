@@ -14,6 +14,7 @@
  * dead control. `LinkButton` stays.
  */
 
+import { createHash } from 'node:crypto'
 import { compileSpecStream, defineCatalog, type Spec } from '@json-render/core'
 import {
   CardSpecError,
@@ -96,14 +97,28 @@ export function generativeUiComponentList(): string {
 }
 
 /**
- * The note slackbotv2 prepends to a Slack user turn when the flag is on, so
- * the agent learns that a card is available without any persona or system
- * prompt change. Other ingresses never send it, so no other surface sees
- * the instruction. Kept short because it rides on every execute turn: the
- * component list and structural rules come from the catalog, the rest is the
- * fenced-block contract.
+ * The note slackbotv2 adds to the first Slack execute turn of a thread when
+ * the flag is on, so the agent learns that a card is available without any
+ * persona or system prompt change. Later turns rely on the session's context
+ * (see `generativeUiNoteSent` in the thread state). Other ingresses never
+ * send it, so no other surface sees the instruction. The component list and
+ * structural rules come from the catalog, the rest is the fenced-block
+ * contract.
  */
 export function generativeUiTurnNote(limits: GenerativeUiLimits = DEFAULT_GENERATIVE_UI_LIMITS): string {
+  const key = JSON.stringify(limits)
+  let note = turnNotes.get(key)
+  if (note === undefined) {
+    note = buildGenerativeUiTurnNote(limits)
+    turnNotes.set(key, note)
+  }
+  return note
+}
+
+// Limits are fixed per deployment, so this holds one entry in practice.
+const turnNotes = new Map<string, string>()
+
+function buildGenerativeUiTurnNote(limits: GenerativeUiLimits): string {
   const rules = (generativeUiCatalog.schema.defaultRules ?? []).filter(
     rule => !/\$state|\$bindState/.test(rule)
   )
@@ -122,6 +137,14 @@ export function generativeUiTurnNote(limits: GenerativeUiLimits = DEFAULT_GENERA
     ...rules.map(rule => `- ${rule}`),
     '---'
   ].join('\n')
+}
+
+/**
+ * Short stable id for a turn note, stored in thread state so the note is sent
+ * once per thread and again only when its content (catalog or limits) changes.
+ */
+export function generativeUiNoteFingerprint(note: string): string {
+  return createHash('sha256').update(note).digest('hex').slice(0, 16)
 }
 
 /**

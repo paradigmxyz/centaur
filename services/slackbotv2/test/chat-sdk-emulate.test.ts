@@ -5452,6 +5452,44 @@ describe('generative UI cards', () => {
     return { logs: capturedLogs, parentTs: parent.ts }
   }
 
+  /**
+   * Streams `draft` as the live answer, then seals the answer item with
+   * `finalAnswer`. When the final text does not extend the draft the live
+   * stream is frozen and the render reconciles it with the durable answer.
+   */
+  async function runDivergingAnswer(
+    prompt: string,
+    draft: string,
+    finalAnswer: string
+  ): Promise<{ logs: CapturedLog[]; parentTs: string }> {
+    codexApi.autoRespond = false
+    const parent = await postUserMessage('Context before a diverging generative UI answer.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> ${prompt}`, { threadTs: parent.ts })
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+    const key = threadKey(parent.ts)
+    codexApi.emitOutputLines(
+      key,
+      sampleCodexNotifications(draft).map(notification => JSON.stringify(notification))
+    )
+    codexApi.emitOutputLine(key, JSON.stringify({
+      method: 'item/completed',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: { type: 'agentMessage', id: 'answer-1', text: finalAnswer, phase: 'final_answer', memoryCitation: null }
+      }
+    }))
+    codexApi.emitSessionEvent(key, 'session.execution_completed', {
+      execution_id: 'exe-genui-divergence',
+      status: 'completed',
+      result_text: finalAnswer
+    })
+    await mention.finished()
+    return { logs: capturedLogs, parentTs: parent.ts }
+  }
+
   let capturedLogs: CapturedLog[] = []
 
   async function threadMessages(threadTs: string): Promise<Array<Record<string, unknown>>> {
@@ -5597,6 +5635,98 @@ describe('generative UI cards', () => {
     expect(metricValue('rendered')).toBe(1)
     const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${threadKey(parentTs)}`)
     expect(threadState).toEqual(expect.objectContaining({ activeExecution: false, renderObligation: null }))
+  })
+
+  it('posts the card once when a diverged live stream is reconciled', async () => {
+    bot = createTestBot({ generativeUi: { enabled: true }, logger: captureLogger(capturedLogs) })
+    const draft = answerWithBlock(CARD_SPEC)
+    // The sealed answer no longer extends the streamed draft, so the live
+    // stream (block included) is frozen and replaced by the durable answer.
+    const finalAnswer = `GENUI_CORRECTED. ${draft}`
+    const { parentTs, logs } = await runDivergingAnswer('summarize the close', draft, finalAnswer)
+
+    expect(hasLog(logs, 'codex_renderer_stream_divergence_suppressed')).toBe(true)
+    expect(hasLog(logs, 'slackbotv2_render_fallback_complete')).toBe(true)
+    const replacement = slackApi.calls.find(call => call.method === 'chat.update')
+    expect(stringField(replacement?.body.markdown_text)).toStartWith('GENUI_CORRECTED.')
+    expect(stringField(replacement?.body.markdown_text)).not.toContain('json-render')
+    expect(cardMessages(await threadMessages(parentTs))).toHaveLength(1)
+    expect(metricValue('rendered')).toBe(1)
+  })
+
+  it('keeps a card-only answer as code when Slack rejects the card in the fallback', async () => {
+    bot = createTestBot({ generativeUi: { enabled: true }, logger: captureLogger(capturedLogs) })
+    const block = `\`\`\`json-render\n${JSON.stringify(CARD_SPEC)}\n\`\`\``
+    // A diverging draft sends the card-only answer through the fallback, whose
+    // card edit Slack then rejects.
+    slackApi.failNextBlocksMessage()
+    const { parentTs, logs } = await runDivergingAnswer('summarize the close', 'GENUI_DRAFT prose', block)
+
+    expect(hasLog(logs, 'slackbotv2_render_fallback_complete')).toBe(true)
+    expect(cardMessages(await threadMessages(parentTs))).toHaveLength(0)
+    const updates = slackApi.calls.filter(call => call.method === 'chat.update')
+    // The rejected card edit, then the edit with the block as code.
+    expect(updates).toHaveLength(2)
+    const posted = stringField(updates[1]!.body.markdown_text)
+    expect(posted).toStartWith('```json\n')
+    expect(posted).toContain('GENUI_CARD_TITLE')
+    const texts = await threadTexts(parentTs)
+    expect(texts.some(text => text.includes('GENUI_DRAFT'))).toBe(false)
+    expect(metricValue('post_failed')).toBe(1)
+    expect(metricValue('rendered')).toBe(0)
+  })
+
+  describe('agent note', () => {
+    const NOTE_HEADING = '# Slack card (generative UI)'
+    const executeText = (index: number) => JSON.stringify(
+      JSON.parse(codexApi.executes[index]!.body.input_lines.at(-1)!).message.content
+    )
+
+    async function mentionInThread(text: string, threadTs: string): Promise<void> {
+      const delivery = await sendMessage(`<@${BOT_USER_ID}> ${text}`, { threadTs })
+      expect(delivery.response.status).toBe(200)
+      await delivery.finished()
+      await waitFor(async () =>
+        (await bot.chat.getState().get<Record<string, unknown>>(`thread-state:${threadKey(threadTs)}`))
+          ?.activeExecution !== true
+      )
+    }
+
+    it('sends the note on the first execute turn of a thread only', async () => {
+      bot = createTestBot({ generativeUi: { enabled: true } })
+      const parent = await postUserMessage('Context before generative UI turns.')
+
+      await mentionInThread('summarize the close', parent.ts)
+      await mentionInThread('and last quarter?', parent.ts)
+
+      expect(codexApi.executes).toHaveLength(2)
+      expect(executeText(0)).toContain(NOTE_HEADING)
+      expect(executeText(1)).not.toContain(NOTE_HEADING)
+    })
+
+    it('waits for a turn that allows cards and resends after a harness restart', async () => {
+      bot = createTestBot({ generativeUi: { enabled: true } })
+      const parent = await postUserMessage('Context before generative UI turns.')
+
+      await mentionInThread('summarize the close in plain text only', parent.ts)
+      await mentionInThread('now as a table', parent.ts)
+      codexApi.queueCreateResponse({ harness_switched: true, harness_type: 'claudecode' })
+      await mentionInThread('again on claude --claude', parent.ts)
+
+      expect(codexApi.executes).toHaveLength(3)
+      expect(executeText(0)).not.toContain(NOTE_HEADING)
+      expect(executeText(1)).toContain(NOTE_HEADING)
+      expect(executeText(2)).toContain(NOTE_HEADING)
+    })
+
+    it('sends no note with the flag off', async () => {
+      bot = createTestBot()
+      const parent = await postUserMessage('Context before plain turns.')
+
+      await mentionInThread('summarize the close', parent.ts)
+
+      expect(executeText(0)).not.toContain(NOTE_HEADING)
+    })
   })
 })
 
@@ -6488,6 +6618,8 @@ type PatchedSlackApi = {
   failStreamAppendsAfter(count: number, error: string): void
   failStreamStopsLongerThan(maxChars: number): void
   failNextStreamStop(): void
+  /** Rejects the next chat.postMessage/chat.update that carries Block Kit blocks. */
+  failNextBlocksMessage(): void
   fileInfoRequestCount(fileId: string): number
   holdAssistantStatus(): () => void
   reset(): void
@@ -6559,6 +6691,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
   let releaseAssistantStatusGate: (() => void) | null = null
   let maxStreamStopChars: number | null = null
   const stopFailure = { remaining: 0 }
+  const blocksFailure = { remaining: 0 }
   const appendFailure: { error: string; remaining: number } = { error: '', remaining: -1 }
   const streams = new Map<string, StreamRecord>()
   const releaseCurrentAssistantStatusGate = () => {
@@ -6585,6 +6718,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       fileInfoRequests,
       maxStreamStopChars,
       stopFailure,
+      blocksFailure,
       port,
       reactionResponses,
       streams,
@@ -6623,6 +6757,9 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
     failNextStreamStop() {
       stopFailure.remaining = 1
     },
+    failNextBlocksMessage() {
+      blocksFailure.remaining = 1
+    },
     failStreamStopsLongerThan(maxChars: number) {
       maxStreamStopChars = maxChars
     },
@@ -6643,6 +6780,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       botInfoRequests.clear()
       maxStreamStopChars = null
       stopFailure.remaining = 0
+      blocksFailure.remaining = 0
       appendFailure.remaining = -1
       appendFailure.error = ''
       conversationsJoinResponses.length = 0
@@ -6695,6 +6833,7 @@ async function handlePatchedSlackRequest(
     fileInfoRequests: Map<string, number>
     maxStreamStopChars: number | null
     stopFailure: { remaining: number }
+    blocksFailure: { remaining: number }
     port: number
     reactionResponses: QueuedSlackApiResponse[]
     streams: Map<string, StreamRecord>
@@ -6857,6 +6996,15 @@ async function handlePatchedSlackRequest(
   }
   if (path === '/api/chat.postMessage' || path === '/api/chat.update') {
     const body = await requestBody(request.clone())
+    if (input.blocksFailure.remaining > 0 && body.blocks !== undefined && body.markdown_text === undefined) {
+      input.blocksFailure.remaining -= 1
+      input.calls.push({
+        method: path === '/api/chat.postMessage' ? 'chat.postMessage' : 'chat.update',
+        body
+      })
+      await sendWebResponse(res, Response.json({ ok: false, error: 'invalid_blocks' }))
+      return
+    }
     if (typeof body.markdown_text === 'string') {
       input.calls.push({
         method: path === '/api/chat.postMessage' ? 'chat.postMessage' : 'chat.update',

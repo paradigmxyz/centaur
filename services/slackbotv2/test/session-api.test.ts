@@ -13,6 +13,7 @@ import {
   serializeAttachment,
   serializeMessage
 } from '../src/session-api'
+import { generativeUiTurnNote } from '../src/generative-ui'
 import { renderSlackDisplayText } from '../src/slack-display-text'
 import type {
   ForwardSessionInput,
@@ -632,11 +633,13 @@ describe('forwardToSessionApi generative UI note', () => {
       textPartIncludes(part, '# Slack card (generative UI)')
     )
 
-  test('adds the card note to Slack execute turns when the flag is on', async () => {
+  test('puts the note right before the user text when the turn carries one', async () => {
     const { fetchFn, requests } = fakeApi()
     await forwardToSessionApi(
       { ...options(fetchFn), generativeUi: { enabled: true, limits: { tables: 1, charts: 2 } } },
-      forwardInput(apiMessage('summarize the close'))
+      forwardInput(apiMessage('summarize the close'), {
+        generativeUiNote: generativeUiTurnNote({ tables: 1, charts: 2 })
+      })
     )
     const notes = cardNotes(requests)
     expect(notes).toHaveLength(1)
@@ -644,24 +647,19 @@ describe('forwardToSessionApi generative UI note', () => {
     expect(text).toContain('tagged json-render')
     expect(text).toContain('- Table:')
     expect(text).toContain('tables: 1, charts: 2')
-    // The note sits right before the user's own text.
     const content = lineContent(executeLine(requests))
     const noteIndex = content.findIndex(part => textPartIncludes(part, '# Slack card (generative UI)'))
     expect(noteIndex).toBe(content.length - 2)
     expect(textPartIncludes(content[content.length - 1]!, 'summarize the close')).toBe(true)
   })
 
-  test('sends no note when the flag is off or the user asked for plain text only', async () => {
-    const off = fakeApi()
-    await forwardToSessionApi(options(off.fetchFn), forwardInput(apiMessage('summarize the close')))
-    expect(cardNotes(off.requests)).toHaveLength(0)
-
-    const plain = fakeApi()
+  test('sends no note when the turn does not carry one, even with the flag on', async () => {
+    const { fetchFn, requests } = fakeApi()
     await forwardToSessionApi(
-      { ...options(plain.fetchFn), generativeUi: { enabled: true } },
-      forwardInput(apiMessage('summarize the close in plain text only'))
+      { ...options(fetchFn), generativeUi: { enabled: true } },
+      forwardInput(apiMessage('summarize the close'))
     )
-    expect(cardNotes(plain.requests)).toHaveLength(0)
+    expect(cardNotes(requests)).toHaveLength(0)
   })
 })
 

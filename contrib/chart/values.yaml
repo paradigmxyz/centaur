@@ -844,9 +844,10 @@ slackbotv2:
   # message in the thread. A rejected spec stays in the answer as a code block.
   # Disabled renders every answer exactly as before, block included. Only
   # LinkButton is available: card buttons that trigger actions are not routed.
-  # slackbotv2 tells the agent about the card on every Slack turn it executes
-  # (see services/slackbotv2/GENERATIVE_UI.md); no persona change is needed
-  # and other chat surfaces never see the note.
+  # slackbotv2 tells the agent about the card on the first Slack turn it
+  # executes in a thread, and again after a harness restart (see
+  # services/slackbotv2/GENERATIVE_UI.md); no persona change is needed and
+  # other chat surfaces never see the note.
   generativeUi:
     enabled: false
     # Per-message limits toCard enforces instead of letting Slack degrade the

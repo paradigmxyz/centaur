@@ -3,12 +3,7 @@ import type { RustSessionStreamEvent } from '@centaur/harness-events'
 import { isRetryableCodexErrorNotification } from '@centaur/rendering'
 import type { Attachment, LinkPreview, Message } from 'chat'
 import { isHarnessEnabled } from './overrides'
-import { generativeUiTurnNote } from './generative-ui'
-import {
-  isPlainTextOnlyRequest,
-  renderSlackDisplayText,
-  slackMessagePromptText
-} from './slack-display-text'
+import { renderSlackDisplayText, slackMessagePromptText } from './slack-display-text'
 import type {
   ForwardSessionInput,
   JsonObject,
@@ -555,7 +550,8 @@ export async function forwardToSessionApi(
       input.provider,
       input.metadataModel,
       input.metadataHarnessType,
-      input.proactiveContext
+      input.proactiveContext,
+      input.generativeUiNote
     ),
     sessionApiTimeoutMs(options),
     'execute session'
@@ -1401,7 +1397,8 @@ async function executeSession(
   provider?: string,
   metadataModel?: string,
   metadataHarnessType?: string,
-  proactiveContext?: string
+  proactiveContext?: string,
+  generativeUiNote?: string
 ): Promise<SlackbotV2ExecuteSessionResponse> {
   const fetchFn = options.fetch ?? fetch
   const requesterIdentity = await resolveRequesterIdentity(options, message)
@@ -1434,7 +1431,8 @@ async function executeSession(
       contextPreamble,
       reasoning,
       provider,
-      proactiveContext
+      proactiveContext,
+      generativeUiNote
     ),
     idle_timeout_ms: idleTimeoutMs,
     ...(options.maxDurationMs === undefined ? {} : { max_duration_ms: options.maxDurationMs })
@@ -1665,7 +1663,8 @@ function toCodexInputLines(
   contextPreamble?: string,
   reasoning?: string,
   provider?: string,
-  proactiveContext?: string
+  proactiveContext?: string,
+  generativeUiNote?: string
 ): string[] {
   const staged = new Map<SlackbotV2ApiAttachment, string>()
   const lines: string[] = []
@@ -1682,7 +1681,8 @@ function toCodexInputLines(
       contextPreamble,
       reasoning,
       provider,
-      proactiveContext
+      proactiveContext,
+      generativeUiNote
     )
     if (
       inlineLine.length <= MAX_CODEX_INPUT_LINE_CHARS
@@ -1706,7 +1706,8 @@ function toCodexInputLines(
       contextPreamble,
       reasoning,
       provider,
-      proactiveContext
+      proactiveContext,
+      generativeUiNote
     )
   )
   return lines
@@ -1736,7 +1737,8 @@ function toCodexInputLineWithStaged(
   contextPreamble?: string,
   reasoning?: string,
   provider?: string,
-  proactiveContext?: string
+  proactiveContext?: string,
+  generativeUiNote?: string
 ): string {
   return JSON.stringify({
     type: 'user',
@@ -1754,24 +1756,10 @@ function toCodexInputLineWithStaged(
         contextMessages,
         contextPreamble,
         proactiveContext,
-        generativeUiTurnNoteFor(options, message)
+        generativeUiNote
       )
     }
   })
-}
-
-/**
- * The generative UI note for this turn, when the deployment renders cards
- * and the user did not opt out of rich output. Only Slack execute turns
- * carry it, so the instruction never reaches another chat surface.
- */
-function generativeUiTurnNoteFor(
-  options: SlackbotV2Options,
-  message: SlackbotV2ApiMessage
-): string | undefined {
-  if (options.generativeUi?.enabled !== true) return undefined
-  if (isPlainTextOnlyRequest(slackMessagePromptText(message))) return undefined
-  return generativeUiTurnNote(options.generativeUi.limits)
 }
 
 function stagedAttachmentInputLines(

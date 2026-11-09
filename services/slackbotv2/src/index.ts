@@ -36,7 +36,9 @@ import {
   buildGenerativeUiCard,
   extractGenerativeUiBlocks,
   generativeUiBlockAsCode,
+  generativeUiNoteFingerprint,
   GenerativeUiSpecError,
+  generativeUiTurnNote,
   stripGenerativeUiBlocks,
   type GenerativeUiCapture,
   type GenerativeUiFailureReason
@@ -1880,6 +1882,17 @@ async function syncThreadMessageToSession(
     && !(state.proactiveRulesSent ?? []).includes(input.proactiveRule.name)
       ? input.proactiveRule
       : undefined
+  // The generative UI note likewise rides only on the first execute turn of
+  // the thread (or the first after the note changed); later turns have it in
+  // the session's context, so it is not resent on every message.
+  const pendingGenerativeUiNote = shouldStartExecution
+    ? generativeUiNoteForTurn(input.options, serializedMessage)
+    : undefined
+  let generativeUiNote =
+    pendingGenerativeUiNote
+    && state.generativeUiNoteSent !== generativeUiNoteFingerprint(pendingGenerativeUiNote)
+      ? pendingGenerativeUiNote
+      : undefined
   const forwardInput: ForwardSessionInput = {
     afterEventId: lastEventId,
     executeContextMessages:
@@ -1894,6 +1907,7 @@ async function syncThreadMessageToSession(
     metadataModel: shouldStartExecution ? effectiveModel : undefined,
     personaId: shouldStartExecution ? resolvedPersonaId : undefined,
     proactiveContext: proactiveRule && proactiveRuleContext(proactiveRule),
+    generativeUiNote,
     provider: shouldStartExecution ? resolvedProvider : undefined,
     reasoning: resolvedReasoning,
     onEventId: eventId => {
@@ -1929,7 +1943,11 @@ async function syncThreadMessageToSession(
     forwardInput.contextPreamble = harnessRestartPreamble(history, serializedMessage.id)
     // The restart preamble replays Slack messages only, so rule contexts the
     // old harness saw are gone: forget them and resend the current one.
-    await thread.setState({ proactiveRulesSent: [] })
+    await thread.setState({ generativeUiNoteSent: null, proactiveRulesSent: [] })
+    if (pendingGenerativeUiNote) {
+      generativeUiNote = pendingGenerativeUiNote
+      forwardInput.generativeUiNote = generativeUiNote
+    }
     if (shouldStartExecution && input.proactiveRule) {
       proactiveRule = input.proactiveRule
       forwardInput.proactiveContext = proactiveRuleContext(proactiveRule)
@@ -2002,6 +2020,9 @@ async function syncThreadMessageToSession(
       activeExecution: true,
       executedMessageIds: Array.from(latestExecutedMessageIds).slice(-1000),
       lastEventId,
+      ...(generativeUiNote
+        ? { generativeUiNoteSent: generativeUiNoteFingerprint(generativeUiNote) }
+        : {}),
       ...(proactiveRule
         ? {
             proactiveRulesSent: Array.from(
@@ -2324,6 +2345,7 @@ async function renderExecutionAttempt(
   let rendered = false
   let retry = false
   let fallbackLastEventId = 0
+  const generativeUi = newGenerativeUiCapture(options)
   try {
     const streamResult = await renderExecutionStream(
       thread,
@@ -2332,7 +2354,8 @@ async function renderExecutionAttempt(
       options,
       trace,
       assistantStatusVisible,
-      responseContextBlock
+      responseContextBlock,
+      generativeUi
     )
     rendered = true
     outcome = 'complete'
@@ -2361,6 +2384,9 @@ async function renderExecutionAttempt(
         fallbackLastEventId = reconciled.lastEventId
       }
     }
+    // A reconcile re-renders the durable final answer, card included, so the
+    // block captured from the live stream is delivered only without one.
+    if (!divergenceReconciled) await deliverGenerativeUiCard(thread, generativeUi, options, trace)
     traceLog(options, 'slackbotv2_render_complete', trace, {
       answer_diverged: streamResult.diverged,
       divergence_reconciled: divergenceReconciled
@@ -2390,9 +2416,11 @@ async function renderExecutionAttempt(
     if (answerLost === false) {
       // The Slack stream broke only after the final answer became visible
       // (for example a progress-card stop failed). Reposting would duplicate
-      // the answer, so record the failure and finish.
+      // the answer, so record the failure and finish. The json-render block
+      // was already stripped from the visible answer, so deliver its card.
       rendered = true
       outcome = 'answer_visible'
+      await deliverGenerativeUiCard(thread, generativeUi, options, trace)
       traceLog(
         options,
         'slackbotv2_render_failed_answer_visible',
@@ -2423,6 +2451,7 @@ async function renderExecutionAttempt(
       // failed stream message id, do not post a separate duplicate fallback.
       rendered = true
       outcome = 'size_limit_no_replacement'
+      await deliverGenerativeUiCard(thread, generativeUi, options, trace)
       traceLog(
         options,
         'slackbotv2_render_failed_size_limit_no_replacement',
@@ -2643,28 +2672,52 @@ async function renderFallbackFinalAnswer(
         trace
       )
     }
-    const fallbackMarkdown = truncateSlackText(
-      markdownText,
-      SLACK_FALLBACK_MARKDOWN_MAX_CHARS,
-      'Slack final answer'
-    )
     let cardMessageId: string | undefined
-    if (card && !markdownText.trim()) {
+    let cardOnlyPosted = false
+    if (card && cardBlock !== undefined && !markdownText.trim()) {
       // The answer was only a card: it takes the place of the markdown post.
-      const sent = replacement
-        ? await thread.adapter.editMessage(thread.id, replacement.replaceMessageId, card)
-        : await thread.post(card)
-      cardMessageId = sent?.id
-      slackbotMetrics.generativeUiCards.inc({ outcome: 'rendered' })
+      // A Slack rejection or timeout falls back to the block as code below,
+      // so the answer is never lost.
+      const onlyCard = card
+      try {
+        const sent = await withSlackApiTimeout(options, 'post generative ui card', () =>
+          replacement
+            ? thread.adapter.editMessage(thread.id, replacement.replaceMessageId, onlyCard)
+            : thread.post(onlyCard)
+        )
+        cardMessageId = sent?.id
+        cardOnlyPosted = true
+        slackbotMetrics.generativeUiCards.inc({ outcome: 'rendered' })
+        traceLog(options, 'slackbotv2_generative_ui_card_posted', trace, {
+          elements: onlyCard.children.length,
+          message_id: sent?.id
+        })
+      } catch (error) {
+        recordGenerativeUiRejection(
+          { reason: 'post_failed', issues: [errorMessage(error)] },
+          cardBlock,
+          options,
+          trace
+        )
+        markdownText = generativeUiBlockAsCode(cardBlock)
+      }
       card = undefined
-    } else if (replacement) {
-      await thread.adapter.editMessage(
-        thread.id,
-        replacement.replaceMessageId,
-        { markdown: fallbackMarkdown }
+    }
+    if (!cardOnlyPosted) {
+      const fallbackMarkdown = truncateSlackText(
+        markdownText,
+        SLACK_FALLBACK_MARKDOWN_MAX_CHARS,
+        'Slack final answer'
       )
-    } else {
-      await thread.post({ markdown: fallbackMarkdown })
+      if (replacement) {
+        await thread.adapter.editMessage(
+          thread.id,
+          replacement.replaceMessageId,
+          { markdown: fallbackMarkdown }
+        )
+      } else {
+        await thread.post({ markdown: fallbackMarkdown })
+      }
     }
     if (card && cardBlock !== undefined) {
       cardMessageId = await postGenerativeUiCard(thread, card, cardBlock, options, trace)
@@ -2998,6 +3051,7 @@ async function recoverRenderObligation(
   }
 
   let rendered = false
+  const generativeUi = newGenerativeUiCapture(options)
   try {
     await thread.setState({
       activeExecution: true,
@@ -3008,7 +3062,8 @@ async function recoverRenderObligation(
       streamOpenedSession(input, openedStream),
       obligation.message,
       options,
-      trace
+      trace,
+      generativeUi
     )
     rendered = true
     renderOutcome = 'complete'
@@ -3034,6 +3089,8 @@ async function recoverRenderObligation(
         lastEventId = Math.max(lastEventId, reconciled.lastEventId)
       }
     }
+    // Same as the live path: a reconcile already delivered the card.
+    if (!divergenceReconciled) await deliverGenerativeUiCard(thread, generativeUi, options, trace)
     traceLog(options, 'slackbotv2_render_recovery_complete', trace, {
       answer_diverged: streamResult.diverged,
       divergence_reconciled: divergenceReconciled
@@ -3045,6 +3102,7 @@ async function recoverRenderObligation(
       // visible; reposting would duplicate it.
       rendered = true
       renderOutcome = 'answer_visible'
+      await deliverGenerativeUiCard(thread, generativeUi, options, trace)
       traceLog(options, 'slackbotv2_render_recovery_failed_answer_visible', trace, {
         error: errorMessage(error)
       })
@@ -3068,6 +3126,7 @@ async function recoverRenderObligation(
         // failed stream message id, do not post a separate duplicate fallback.
         rendered = true
         renderOutcome = 'size_limit_no_replacement'
+        await deliverGenerativeUiCard(thread, generativeUi, options, trace)
         traceLog(
           options,
           'slackbotv2_render_recovery_failed_size_limit_no_replacement',
@@ -3276,7 +3335,13 @@ async function renderExecutionStream(
   options: SlackbotV2Options,
   trace?: SlackbotV2Trace,
   assistantStatusVisible = false,
-  responseContextBlock?: SlackContextBlock
+  responseContextBlock?: SlackContextBlock,
+  /**
+   * Collects the json-render block stripped from the streamed markdown. The
+   * caller delivers it once it knows how the render ended, so a divergence
+   * reconcile or a failed stream neither duplicates nor drops the card.
+   */
+  generativeUi?: GenerativeUiCapture
 ): Promise<{ diverged: boolean; messageId?: string }> {
   const promptText = slackMessagePromptText(message)
   if (isPlainTextOnlyRequest(promptText)) {
@@ -3302,7 +3367,6 @@ async function renderExecutionStream(
   })
   const capture = { diverged: false }
   const answerStream: AnswerStreamProgress = { started: false }
-  const generativeUi = newGenerativeUiCapture(options)
   let visibleStream: FirstChunkStream | null = null
   try {
     const taskDisplayMode = slackStreamTaskDisplayMode(options)
@@ -3330,11 +3394,9 @@ async function renderExecutionStream(
         )
       )
     )
-    if (!visibleStream) {
-      // An answer that was only a json-render block leaves nothing to stream.
-      await deliverGenerativeUiCard(thread, generativeUi, options, trace)
-      return { diverged: false }
-    }
+    // An answer that was only a json-render block leaves nothing to stream;
+    // the caller still delivers the captured card.
+    if (!visibleStream) return { diverged: false }
     // Stream via the adapter (as renderRecoveredExecutionStream does) so the
     // posted message id is available for divergence reconciliation. For Slack
     // this matches thread.post(StreamingPlan): updateIntervalMs is a no-op
@@ -3348,7 +3410,6 @@ async function renderExecutionStream(
       // message via chat.stopStream.
       ...(responseContextBlock ? { stopBlocks: [responseContextBlock] } : {})
     }) ?? await thread.post(visibleStream)
-    await deliverGenerativeUiCard(thread, generativeUi, options, trace)
     return { diverged: capture.diverged, messageId: sent?.id }
   } finally {
     // Stop the conflation pump and SSE even if the adapter abandoned the
@@ -3363,7 +3424,9 @@ async function renderRecoveredExecutionStream(
   stream: AsyncIterable<SlackbotV2RendererSource>,
   message: SlackbotV2ApiMessage,
   options: SlackbotV2Options,
-  trace?: SlackbotV2Trace
+  trace?: SlackbotV2Trace,
+  /** See renderExecutionStream: the caller delivers the captured card. */
+  generativeUi?: GenerativeUiCapture
 ): Promise<{ diverged: boolean; messageId?: string }> {
   const promptText = slackMessagePromptText(message)
   if (isPlainTextOnlyRequest(promptText)) {
@@ -3379,7 +3442,6 @@ async function renderRecoveredExecutionStream(
   })
   const capture = { diverged: false }
   const answerStream: AnswerStreamProgress = { started: false }
-  const generativeUi = newGenerativeUiCapture(options)
   let visibleStream: FirstChunkStream | null = null
   try {
     const taskDisplayMode = slackStreamTaskDisplayMode(options)
@@ -3407,10 +3469,7 @@ async function renderRecoveredExecutionStream(
         )
       )
     )
-    if (!visibleStream) {
-      await deliverGenerativeUiCard(thread, generativeUi, options, trace)
-      return { diverged: false }
-    }
+    if (!visibleStream) return { diverged: false }
     const sent = await thread.adapter.stream!(
       thread.id,
       visibleStream,
@@ -3420,7 +3479,6 @@ async function renderRecoveredExecutionStream(
         ...(taskDisplayMode === 'none' ? {} : { taskDisplayMode })
       }
     ) ?? await thread.post(visibleStream)
-    await deliverGenerativeUiCard(thread, generativeUi, options, trace)
     return { diverged: capture.diverged, messageId: sent?.id }
   } finally {
     // Stop the conflation pump and SSE even if the adapter abandoned the
@@ -3432,6 +3490,20 @@ async function renderRecoveredExecutionStream(
 
 function generativeUiEnabled(options: SlackbotV2Options): boolean {
   return options.generativeUi?.enabled === true
+}
+
+/**
+ * The generative UI note for an execute turn, when the deployment renders
+ * cards and the user did not opt out of rich output. Only Slack execute turns
+ * carry it, so the instruction never reaches another chat surface.
+ */
+function generativeUiNoteForTurn(
+  options: SlackbotV2Options,
+  message: SlackbotV2ApiMessage
+): string | undefined {
+  if (!generativeUiEnabled(options)) return undefined
+  if (isPlainTextOnlyRequest(slackMessagePromptText(message))) return undefined
+  return generativeUiTurnNote(options.generativeUi?.limits)
 }
 
 /** A capture for the json-render blocks of one answer, or undefined when the flag is off. */
@@ -3467,13 +3539,15 @@ async function deliverGenerativeUiCard(
   trace?: SlackbotV2Trace
 ): Promise<void> {
   if (!capture || capture.blocks.length === 0) return
-  const block = capture.blocks[0]!
-  if (capture.blocks.length > 1) {
+  // Take the blocks so a second call for the same render posts nothing.
+  const blocks = capture.blocks.splice(0)
+  const block = blocks[0]!
+  if (blocks.length > 1) {
     // Only the first block left the stream; the others rendered as code.
     await postRejectedGenerativeUiBlock(
       thread,
       block,
-      { reason: 'multiple_blocks', issues: [`${capture.blocks.length} json-render blocks in one answer`] },
+      { reason: 'multiple_blocks', issues: [`${blocks.length} json-render blocks in one answer`] },
       options,
       trace
     )

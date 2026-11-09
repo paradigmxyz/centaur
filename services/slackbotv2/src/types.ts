@@ -327,6 +327,13 @@ export type SlackbotV2ThreadState = {
   proactiveEligible?: boolean
   /** Proactivity rules whose context a turn in this thread already carried. */
   proactiveRulesSent?: string[]
+  /**
+   * Fingerprint of the generative UI note a turn in this thread already
+   * carried. The note rides only on the first execute turn (and again after
+   * a harness restart or a note change); later turns have it in context.
+   * Null clears persisted state.
+   */
+  generativeUiNoteSent?: string | null
   /** Last thread-level model provider selected by Slack flags. Null clears persisted state. */
   provider?: string | null
   renderObligation?: SlackbotV2RenderObligation | null
@@ -371,6 +378,12 @@ export type ForwardSessionInput = {
    * rule's match starts the turn, to say why and how to respond.
    */
   proactiveContext?: string
+  /**
+   * Added before the execute message's text. Set on the first Slack execute
+   * turn of a thread (and after a harness restart) when generative UI cards
+   * are enabled, to tell the agent how to attach one.
+   */
+  generativeUiNote?: string
   executionId?: string
   executeMessage?: SlackbotV2ApiMessage
   /** Effective harness selected by sticky thread flags or channel defaults. */
