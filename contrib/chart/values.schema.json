@@ -357,7 +357,18 @@
             "failureThreshold": { "type": "integer" }
           }
         },
-        "resources": { "type": "object" }
+        "resources": { "type": "object" },
+        "toolEnvs": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "syncIntervalSeconds": { "type": "integer", "minimum": 1 },
+            "maxAgeSeconds": { "type": "integer", "minimum": 0 },
+            "retentionSeconds": { "type": "integer", "minimum": 1 },
+            "allowlist": { "type": "array", "items": { "type": "string" } },
+            "resources": { "type": "object" }
+          }
+        }
       }
     },
     "agentSandbox": {

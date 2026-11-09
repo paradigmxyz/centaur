@@ -44,6 +44,10 @@ const GITHUB_TOKEN_DIR: &str = "/tools-github-token";
 const GITHUB_TOKEN_FILE: &str = "token";
 const GITHUB_TOKEN_FILE_PATH: &str = "/tools-github-token/token";
 const REPO_CACHE_VOLUME: &str = "tools-repo-cache";
+/// Directory, under each repo-cache visibility tree, where repo-cache's
+/// tool-env-builder publishes prebuilt tool venvs (see
+/// `services/sandbox/tool_env_builder.py`).
+const TOOL_ENVS_DIR: &str = ".centaur-tool-envs";
 const PUBLIC_VISIBILITY: &str = "public";
 const PRIVATE_VISIBILITY: &str = "private";
 
@@ -180,6 +184,21 @@ impl ToolsConfig {
         })
     }
 
+    /// `CENTAUR_TOOL_ENV_DIRS` for the agent: where prebuilt tool venvs appear
+    /// inside the read-only repo-cache mount. A public-scoped mount already
+    /// is the `public/` tree; a full mount holds both visibility trees. The
+    /// shim falls back to `uvx` when none of these hold a matching env.
+    fn tool_env_dirs(&self) -> Option<String> {
+        let root = self.repo_cache_path.as_ref()?.trim_end_matches('/');
+        Some(if self.repo_cache_sub_path.is_some() {
+            format!("{root}/{TOOL_ENVS_DIR}")
+        } else {
+            format!(
+                "{root}/{PRIVATE_VISIBILITY}/{TOOL_ENVS_DIR}:{root}/{PUBLIC_VISIBILITY}/{TOOL_ENVS_DIR}"
+            )
+        })
+    }
+
     fn repo_cache_volume_mount(&self) -> Option<Value> {
         let repo_cache_path = self.repo_cache_path.as_ref()?;
         let mut mount = json!({
@@ -234,6 +253,9 @@ pub(crate) fn agent_env(tools: Option<&ToolsConfig>) -> Vec<(String, String)> {
             "CENTAUR_TOOLS_AUTO_RELOAD".to_owned(),
             tools.auto_reload.to_string(),
         ));
+        if let Some(dirs) = tools.tool_env_dirs() {
+            env.push(("CENTAUR_TOOL_ENV_DIRS".to_owned(), dirs));
+        }
     }
     if tools
         .and_then(|tools| tools.github_token.as_ref())
@@ -522,6 +544,29 @@ mod tests {
 
         assert!(env.contains(&("TOOL_DIRS".to_owned(), "/app/tools".to_owned())));
         assert!(env.contains(&("CENTAUR_TOOLS_AUTO_RELOAD".to_owned(), "false".to_owned())));
+        // No repo-cache mount => no prebuilt env dirs to look in.
+        assert!(!env.iter().any(|(name, _)| name == "CENTAUR_TOOL_ENV_DIRS"));
+    }
+
+    #[test]
+    fn agent_env_points_tool_env_dirs_into_repo_cache_mount() {
+        let mut tools = ToolsConfig::new("paradigmxyz/centaur", "centaur-agent:test");
+        tools.repo_cache_path = Some("/var/lib/centaur/repos/".to_owned());
+        tools.visibility = "public".to_owned();
+
+        let env = agent_env(Some(&tools));
+        assert!(env.contains(&(
+            "CENTAUR_TOOL_ENV_DIRS".to_owned(),
+            "/var/lib/centaur/repos/private/.centaur-tool-envs:/var/lib/centaur/repos/public/.centaur-tool-envs"
+                .to_owned(),
+        )));
+
+        let public = tools.scoped_for_repo_cache_access(&RepoCacheAccess::Public);
+        let env = agent_env(Some(&public));
+        assert!(env.contains(&(
+            "CENTAUR_TOOL_ENV_DIRS".to_owned(),
+            "/var/lib/centaur/repos/.centaur-tool-envs".to_owned(),
+        )));
     }
 
     #[test]

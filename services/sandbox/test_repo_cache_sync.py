@@ -72,6 +72,39 @@ class RepoCacheSyncTest(unittest.TestCase):
             self.assertEqual(lines[2], "repository_visibilities=acme/centaur=public")
             self.assertRegex(lines[3], r"^synced_at=\d{4}-\d{2}-\d{2}T")
 
+    def test_prepare_tool_env_dirs_only_when_owner_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            options = dict(
+                cache_dir=root / "cache",
+                repositories=[],
+                repository_refs={},
+                repository_visibilities={},
+                sync_interval_seconds=30,
+                github_token_file=root / "missing-token",
+            )
+
+            repo_cache_sync.RepoCacheSync(**options).prepare_tool_env_dirs()
+            self.assertFalse((root / "cache").exists())
+
+            owner = (os.getuid(), os.getgid())
+            repo_cache_sync.RepoCacheSync(
+                **options, tool_env_owner=owner
+            ).prepare_tool_env_dirs()
+            for path in [
+                root / "cache" / "private" / ".centaur-tool-envs",
+                root / "cache" / "public" / ".centaur-tool-envs",
+                root / "cache" / ".centaur-tool-env-cache",
+            ]:
+                self.assertTrue(path.is_dir(), path)
+                self.assertEqual((path.stat().st_uid, path.stat().st_gid), owner)
+
+    def test_owner_parses_uid_and_optional_gid(self) -> None:
+        self.assertEqual(repo_cache_sync._owner("1001:1002"), (1001, 1002))
+        self.assertEqual(repo_cache_sync._owner("1001"), (1001, 1001))
+        self.assertIsNone(repo_cache_sync._owner(""))
+        self.assertIsNone(repo_cache_sync._owner("agent"))
+
     def test_check_ready_validates_fingerprint_and_repos(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

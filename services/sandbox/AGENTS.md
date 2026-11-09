@@ -24,6 +24,10 @@ from repository `AGENTS.md` files, which guide contributors editing this repo.
 - Tool discovery comes from ordered `TOOL_DIRS` entries and each tool's
   `[project.scripts]`. Keep `centaur-tools` catalog, direct CLI execution, and
   workflow compatibility behavior aligned.
+- Prebuilt tool envs are an optimization with a `uvx` fallback, never a
+  requirement. `install_tool_shims.tool_env_key` is the one definition of an
+  env's identity; `tool_env_builder.py` imports it, so change both sides
+  together and bump `TOOL_ENV_SCHEMA` when the key or layout changes.
 - Repo-cache readiness must describe the exact repositories, refs, visibility,
   and completed sync. Never report ready for stale or partial content.
 - `crates/harness-server/` owns app-server protocol normalization and is built

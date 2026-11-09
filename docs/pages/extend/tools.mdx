@@ -22,6 +22,14 @@ Later tool directories can shadow earlier tools with the same name, so an
 overlay can replace a base tool intentionally. Sources without a tools
 directory are skipped.
 
+With the repo cache enabled, repo-cache also prebuilds a virtualenv for each
+tool (`repoCache.toolEnvs`), so calling a tool does not download or install its
+dependencies in the sandbox. Environments are keyed by a hash of the tool's
+source directory, so a tool change gets a new environment on the next scan,
+which takes about a minute plus build time. Until then, and for any tool
+without a matching environment, the shim runs the tool through
+`uvx --from <tool dir>` as before.
+
 See the [Tool Directory](/reference/tool-directory) for the integrations that
 ship with Centaur.
 

@@ -438,6 +438,32 @@ repoCache:
   tolerations: []
   affinity: {}
   resources: {}
+  # Prebuilt tool environments. A `tool-envs` sidecar (agent UID, no GitHub
+  # token) builds a bytecode-compiled venv for each tool in the overlay tool
+  # sources and publishes it in the cache. Sandboxes run a venv whose source
+  # hash matches their tool copy and fall back to `uvx` otherwise, so the
+  # first call of a tool skips the dependency download and install. Needs
+  # egress to the Python package index on repoCache.egressPorts, and roughly
+  # 1-2 GiB of cache storage per visibility for the default tool set.
+  toolEnvs:
+    enabled: true
+    # Seconds between scans of the tool sources for new or changed tools.
+    syncIntervalSeconds: 60
+    # Rebuild an unchanged tool's env after this many seconds so unpinned
+    # dependencies pick up new releases, as uvx would. 0 disables refreshes.
+    maxAgeSeconds: 86400
+    # Keep envs for tool versions no longer in any source this long, for
+    # sandboxes still running an older tool tree.
+    retentionSeconds: 604800
+    # Tool package names to prebuild; empty prebuilds every tool.
+    allowlist: []
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
 
 # Installs the upstream agent-sandbox controller + CRDs (subchart). Required by
 # apiRs, which runs every sandbox through it.

@@ -490,6 +490,205 @@ class RefreshInstallTest(unittest.TestCase):
             self.assertFalse((bin_dir / "gone").exists())
             index = json.loads((bin_dir / ".centaur-tools.json").read_text())
             self.assertEqual([tool["name"] for tool in index], ["websearch"])
+            self.assertEqual(
+                index[0]["env_key"], install_tool_shims.tool_env_key(package_dir)
+            )
+
+
+def _write_tool_project(project_dir: Path) -> None:
+    (project_dir / "pkg").mkdir(parents=True)
+    (project_dir / "pyproject.toml").write_text('[project]\nname = "websearch"\n')
+    (project_dir / "pkg" / "cli.py").write_text("print('hi')\n")
+
+
+class ToolEnvKeyTest(unittest.TestCase):
+    def test_key_matches_verbatim_copy_and_ignores_bytecode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "checkout" / "websearch"
+            _write_tool_project(source)
+            (source / "link.txt").symlink_to("pkg/cli.py")
+            key = install_tool_shims.tool_env_key(source)
+
+            copy = root / "app" / "websearch"
+            import shutil
+
+            shutil.copytree(source, copy, symlinks=True)
+            (copy / "pkg" / "__pycache__").mkdir()
+            (copy / "pkg" / "__pycache__" / "cli.cpython-312.pyc").write_bytes(b"x")
+            (copy / "stray.pyc").write_bytes(b"x")
+            (copy / "websearch.egg-info").mkdir()
+
+            self.assertEqual(install_tool_shims.tool_env_key(copy), key)
+
+    def test_key_changes_with_content_mode_and_interpreter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "websearch"
+            _write_tool_project(project)
+            key = install_tool_shims.tool_env_key(project)
+
+            self.assertNotEqual(
+                install_tool_shims.tool_env_key(project, "cpython-3.13.0-x86_64"), key
+            )
+            (project / "pkg" / "cli.py").chmod(0o755)
+            mode_key = install_tool_shims.tool_env_key(project)
+            self.assertNotEqual(mode_key, key)
+            (project / "pkg" / "cli.py").write_text("print('changed')\n")
+            self.assertNotEqual(install_tool_shims.tool_env_key(project), mode_key)
+
+
+def _publish_fake_env(env_root: Path, key: str, *, marker_key: str | None = None) -> Path:
+    """Lay out a prebuilt env the way tool-env-builder publishes one."""
+    build = env_root / "builds" / f"{key}-1"
+    venv_bin = build / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(sys.executable)
+    (build / install_tool_shims.TOOL_ENV_MARKER_NAME).write_text(
+        json.dumps({"schema": install_tool_shims.TOOL_ENV_SCHEMA, "key": marker_key or key})
+    )
+    (env_root / key).symlink_to(f"builds/{key}-1")
+    return build / "venv"
+
+
+class PrebuiltEnvCatalogTest(unittest.TestCase):
+    def _catalog(self, root: Path, project_dir: Path, key: str) -> Path:
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        index_path = bin_dir / ".centaur-tools.json"
+        index_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "name": "websearch",
+                        "project_dir": str(project_dir),
+                        "package": "websearch",
+                        "entrypoint": "websearch.cli:app",
+                        "client_module": "client.py",
+                        "env_key": key,
+                    }
+                ]
+            )
+        )
+        install_tool_shims._write_catalog(bin_dir / "centaur-tools", index_path, "/opt/centaur")
+        return bin_dir / "centaur-tools"
+
+    def _env(self, root: Path, env_dirs: str) -> dict[str, str]:
+        fake_bin = root / "fake-bin"
+        fake_bin.mkdir(exist_ok=True)
+        fake_uvx = fake_bin / "uvx"
+        fake_uvx.write_text(
+            "#!/bin/sh\nprintf 'uvx %s\\n' \"$*\" > \"$RUN_LOG\"\n"
+        )
+        fake_uvx.chmod(0o755)
+        env = os.environ.copy()
+        env.pop("PYTHONPATH", None)
+        env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+        env["RUN_LOG"] = str(root / "run.log")
+        env["CENTAUR_TOOL_ENV_DIRS"] = env_dirs
+        env["CENTAUR_TOOL_ANALYTICS_LOG_PATH"] = str(root / "analytics.log")
+        return env
+
+    def test_run_uses_matching_prebuilt_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_root = root / "cache" / "private" / ".centaur-tool-envs"
+            env_root.mkdir(parents=True)
+            venv = _publish_fake_env(env_root, "k1")
+            script = venv / "bin" / "websearch"
+            script.write_text(
+                "#!/bin/sh\n"
+                "printf 'prebuilt %s %s %s\\n' \"$*\" \"$VIRTUAL_ENV\" \"$PYTHONPATH\" > \"$RUN_LOG\"\n"
+            )
+            script.chmod(0o755)
+            catalog = self._catalog(root, root / "tools" / "websearch", "k1")
+            env = self._env(root, f"{root / 'missing'}:{env_root}")
+
+            result = subprocess.run(
+                [str(catalog), "run", "websearch", "--help"],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                (root / "run.log").read_text(),
+                f"prebuilt --help {venv.resolve()} /opt/centaur\n",
+            )
+            events = [
+                json.loads(line) for line in (root / "analytics.log").read_text().splitlines()
+            ]
+            self.assertEqual([event["tool_env"] for event in events], ["prebuilt", "prebuilt"])
+
+    def test_run_falls_back_to_uvx_without_matching_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_root = root / "envs"
+            env_root.mkdir()
+            # Marker for a different key, and an env missing the tool script.
+            _publish_fake_env(env_root, "stale", marker_key="other")
+            _publish_fake_env(env_root, "noscript")
+            project_dir = root / "tools" / "websearch"
+
+            for key in ["absent", "stale", "noscript"]:
+                with self.subTest(key=key):
+                    (root / "analytics.log").unlink(missing_ok=True)
+                    catalog_root = root / key
+                    catalog_root.mkdir()
+                    catalog = self._catalog(catalog_root, project_dir, key)
+                    result = subprocess.run(
+                        [str(catalog), "run", "websearch", "--help"],
+                        env=self._env(root, str(env_root)),
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(
+                        (root / "run.log").read_text(),
+                        f"uvx --from {project_dir} websearch --help\n",
+                    )
+                    events = [
+                        json.loads(line)
+                        for line in (root / "analytics.log").read_text().splitlines()
+                    ]
+                    self.assertEqual(events[-1]["tool_env"], "uvx")
+
+    def test_call_uses_prebuilt_python(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_dir = root / "tools" / "pinger"
+            project_dir.mkdir(parents=True)
+            (project_dir / "client.py").write_text(
+                "import os, sys\n"
+                "class Client:\n"
+                "    def ping(self):\n"
+                "        return [os.environ['VIRTUAL_ENV'], sys.executable]\n"
+                "def _client():\n"
+                "    return Client()\n"
+            )
+            env_root = root / "envs"
+            env_root.mkdir()
+            venv = _publish_fake_env(env_root, "k1")
+            catalog = self._catalog(root, project_dir, "k1")
+            env = self._env(root, str(env_root))
+            env["CENTAUR_TOOL_ANALYTICS_LOG_PATH"] = "off"
+
+            result = subprocess.run(
+                [str(catalog), "call", "websearch", "ping", "{}"],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            virtual_env, executable = json.loads(result.stdout)
+            self.assertEqual(virtual_env, str(venv.resolve()))
+            self.assertEqual(executable, str(venv.resolve() / "bin" / "python"))
+            self.assertFalse((root / "run.log").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

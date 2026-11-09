@@ -25,6 +25,7 @@ Use these as the main extension points:
 | `slackbot.extraEnv` | Slackbot HTTP, Slack, feedback, and cross-org behavior. |
 | `sandbox.extraEnv` | Extra variables copied into every sandbox pod through `KUBERNETES_SANDBOX_EXTRA_ENV`. |
 | `overlays.sources` | Ordered repo-cache-backed overlay repos for tools, workflows, and skills; subdirs default to `tools`, `workflows`, and `.agents/skills`. |
+| `repoCache.toolEnvs.*` | Prebuilt tool environments. A `tool-envs` sidecar in the repo-cache pod builds a bytecode-compiled venv for each tool in the overlay tool sources so a tool's first call in a sandbox skips the dependency download and install. Sets the scan interval, the dependency refresh age, retention, an optional tool allowlist, and sidecar resources. Set `enabled: false` to run every tool through `uvx`. |
 | `overlay.systemPrompt` | Small inline prompt overlay escape hatch. |
 
 Tool credentials are not listed here. Tool plugins declare their own secrets in
@@ -281,6 +282,7 @@ Sandbox entrypoint and wrappers:
 | `CENTAUR_TELEMETRY_CAPTURE_TOOL_TRACES` | `sandbox.telemetry.captureToolTraces`; defaults to `false`. | Includes bounded shell commands and workspace-relative working directories on harness tool spans, independently of transcript capture. Tool names, executables, and status are exported either way. |
 | `DEPLOY_ENV`, `ENVIRONMENT`, `TRACEPARENT` | Deployment env or wrapper-generated. | Runtime environment and trace context. |
 | `CALL_TIMEOUT_SECONDS` | Sandbox env before running `call`. | Curl watchdog for API tool calls. |
+| `CENTAUR_TOOL_ENV_DIRS` | Set by api-rs when sandboxes mount the repo cache. | Read-only directories holding prebuilt tool venvs. A tool runs from a venv whose source hash matches its copy in `TOOL_DIRS` and through `uvx` otherwise; `tool_call_completed` events record which in `tool_env` (`prebuilt` or `uvx`). |
 | `SLACK_CHANNEL`, `SLACK_THREAD_TS` | Sandbox env. | File-upload helper target. |
 
 ## Workflows

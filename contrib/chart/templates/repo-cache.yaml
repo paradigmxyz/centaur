@@ -52,6 +52,15 @@
 {{- $repoCacheRepositoryRefRepos = append $repoCacheRepositoryRefRepos $repo -}}
 {{- end }}
 {{- end }}
+{{- $toolEnvSources := list -}}
+{{- range $source := $overlaySources }}
+{{- $repo := get $source "repo" | default "" -}}
+{{- $toolsSubdir := get $source "toolsSubdir" | default "" -}}
+{{- if and $repo $toolsSubdir }}
+{{- $toolEnvSources = append $toolEnvSources (printf "%s=%s" $repo $toolsSubdir) -}}
+{{- end }}
+{{- end }}
+{{- $toolEnvsEnabled := and .Values.repoCache.toolEnvs.enabled (gt (len $toolEnvSources) 0) -}}
 {{- $repoCacheRepositoryVisibilityEntries := list -}}
 {{- range $repo := $repoCacheRepositories }}
 {{- $repoCacheRepositoryVisibilityEntries = append $repoCacheRepositoryVisibilityEntries (printf "%s=%s" $repo (get $repoCacheRepositoryVisibilities $repo | default "private")) -}}
@@ -121,6 +130,11 @@ spec:
               value: {{ .Values.repoCache.syncIntervalSeconds | quote }}
             - name: GIT_TERMINAL_PROMPT
               value: "0"
+{{- if $toolEnvsEnabled }}
+            # Hands the tool-envs sidecar (agent UID) its writable dirs.
+            - name: TOOL_ENV_OWNER
+              value: "1001:1001"
+{{- end }}
           readinessProbe:
             exec:
               command:
@@ -148,6 +162,46 @@ spec:
             - name: github-token
               mountPath: /github-token
               readOnly: true
+{{- end }}
+{{- if $toolEnvsEnabled }}
+        # Prebuilds a bytecode-compiled venv per tool so sandboxes skip uvx's
+        # first-call download/install. Runs as the agent user without the GitHub
+        # token: installing runs package build backends from PyPI.
+        - name: tool-envs
+          image: {{ printf "%s:%s" $repoCacheImageRepository $repoCacheImageTag | quote }}
+          imagePullPolicy: {{ $repoCacheImagePullPolicy }}
+          command:
+            - /usr/local/bin/tool-env-builder
+          env:
+            - name: REPO_CACHE_DIR
+              value: /cache
+            - name: TOOL_ENV_SOURCES
+              value: {{ join " " $toolEnvSources | quote }}
+            - name: TOOL_ENV_SYNC_INTERVAL_SECONDS
+              value: {{ .Values.repoCache.toolEnvs.syncIntervalSeconds | quote }}
+            - name: TOOL_ENV_MAX_AGE_SECONDS
+              value: {{ .Values.repoCache.toolEnvs.maxAgeSeconds | quote }}
+            - name: TOOL_ENV_RETENTION_SECONDS
+              value: {{ .Values.repoCache.toolEnvs.retentionSeconds | quote }}
+{{- with .Values.repoCache.toolEnvs.allowlist }}
+            - name: TOOL_ALLOWLIST
+              value: {{ join "," . | quote }}
+{{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsGroup: 1001
+            runAsNonRoot: true
+            runAsUser: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+{{ toYaml .Values.repoCache.toolEnvs.resources | nindent 12 }}
+          volumeMounts:
+            - name: repo-cache
+              mountPath: /cache
 {{- end }}
       volumes:
         - name: repo-cache

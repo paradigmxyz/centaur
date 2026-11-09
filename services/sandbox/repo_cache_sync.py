@@ -16,6 +16,10 @@ import time
 REPOSITORY_VISIBILITIES = {"private", "public"}
 PUBLIC_REPOSITORY_VISIBILITY = "public"
 PRIVATE_REPOSITORY_VISIBILITY = "private"
+# Dirs the non-root tool-env-builder sidecar writes. Kept in sync with
+# tool_env_builder.py; sandboxes see them through the read-only cache mount.
+TOOL_ENVS_DIR_NAME = ".centaur-tool-envs"
+TOOL_ENV_UV_CACHE_DIR_NAME = ".centaur-tool-env-cache"
 
 
 def _split_words(value: str) -> list[str]:
@@ -67,6 +71,14 @@ def _relative_symlink_target(source: Path, link: Path) -> str:
     return os.path.relpath(source, start=link.parent)
 
 
+def _owner(value: str) -> tuple[int, int] | None:
+    uid, _, gid = value.strip().partition(":")
+    try:
+        return int(uid), int(gid or uid)
+    except ValueError:
+        return None
+
+
 class RepoCacheSync:
     def __init__(
         self,
@@ -77,6 +89,7 @@ class RepoCacheSync:
         repository_visibilities: dict[str, str],
         sync_interval_seconds: float,
         github_token_file: Path,
+        tool_env_owner: tuple[int, int] | None = None,
     ) -> None:
         self.cache_dir = cache_dir
         self.repositories = repositories
@@ -84,6 +97,7 @@ class RepoCacheSync:
         self.repository_visibilities = repository_visibilities
         self.sync_interval_seconds = sync_interval_seconds
         self.github_token_file = github_token_file
+        self.tool_env_owner = tool_env_owner
         self.git_env: dict[str, str] | None = None
         self.ready_file = self.cache_dir / ".repo-cache-ready"
 
@@ -159,7 +173,31 @@ class RepoCacheSync:
             github_token_file=Path(
                 os.environ.get("GITHUB_TOKEN_FILE", "/github-token/token")
             ),
+            tool_env_owner=_owner(os.environ.get("TOOL_ENV_OWNER", "")),
         )
+
+    def prepare_tool_env_dirs(self) -> None:
+        """Hand the tool-env-builder sidecar its writable dirs.
+
+        The uv cache sits at the cache root, outside both visibility trees, so
+        public-only sandboxes (which mount only ``public/``) never see wheels
+        built from private tool sources.
+        """
+        if self.tool_env_owner is None:
+            return
+        uid, gid = self.tool_env_owner
+        for path in [
+            self.cache_dir / PRIVATE_REPOSITORY_VISIBILITY / TOOL_ENVS_DIR_NAME,
+            self.cache_dir / PUBLIC_REPOSITORY_VISIBILITY / TOOL_ENVS_DIR_NAME,
+            self.cache_dir / TOOL_ENV_UV_CACHE_DIR_NAME,
+        ]:
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+                stat = path.stat()
+                if (stat.st_uid, stat.st_gid) != (uid, gid):
+                    os.chown(path, uid, gid)
+            except OSError as exc:
+                print(f"Failed to prepare {path}: {exc}", file=sys.stderr, flush=True)
 
     def _git_env(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -397,6 +435,7 @@ class RepoCacheSync:
         return 0
 
     def sync_once(self) -> bool:
+        self.prepare_tool_env_dirs()
         sync_ok = True
         for repo in self.repositories:
             try:
