@@ -63,6 +63,12 @@ pub const SESSION_OUTPUT_LINE_EVENT: &str = "session.output.line";
 pub const SESSION_FIRST_TOKEN_EVENT: &str = "session.first_token";
 
 const EVENT_STREAM_SAFETY_POLL_INTERVAL: Duration = Duration::from_secs(30);
+/// How long an event stream rides out a database outage before failing.
+/// Clients render a stream error as a failed turn, so a lost DNS lookup or
+/// dropped connection must not end a stream whose turn is still running.
+const EVENT_STREAM_STORE_RETRY_WINDOW: Duration = Duration::from_secs(30);
+const EVENT_STREAM_STORE_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(250);
+const EVENT_STREAM_STORE_RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
 const STEERING_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const STEERING_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
 const SESSION_PIPE_MAX_REATTACH_ATTEMPTS: u32 = 3;
@@ -755,9 +761,60 @@ struct EventStreamState {
     pending: VecDeque<SessionEvent>,
     listener: SessionEventListener,
     safety_tick: Interval,
+    /// When the current run of transient store failures began, and how many
+    /// retries it has had. Cleared by the next successful poll.
+    store_outage: Option<(Instant, u32)>,
     done: bool,
     emitted_count: u64,
     span: Span,
+}
+
+impl EventStreamState {
+    /// Waits out a transient store failure and returns true so the caller
+    /// re-polls, which also catches up on notifications missed while the
+    /// listener was disconnected. Returns false, without waiting, when the
+    /// error is not transient or the outage has outlasted the retry window.
+    async fn wait_out_store_error(&mut self, error: &SessionStoreError) -> bool {
+        let now = Instant::now();
+        let (since, attempts) = self.store_outage.unwrap_or((now, 0));
+        let Some(delay) =
+            event_stream_store_retry_delay(error.is_transient(), since, attempts, now)
+        else {
+            return false;
+        };
+        warn!(
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "session_events_stream_store_retry",
+            thread_key = %self.thread_key,
+            after_event_id = self.after_event_id,
+            attempt = attempts + 1,
+            delay_ms = duration_millis_u64(delay),
+            %error,
+            "session event stream lost the database; retrying"
+        );
+        self.store_outage = Some((since, attempts + 1));
+        sleep(delay).await;
+        true
+    }
+}
+
+/// The wait before an event stream's next retry of a store failure, or None
+/// to fail the stream: the error is not transient, or retrying would carry
+/// the outage that began at `since` past the retry window.
+fn event_stream_store_retry_delay(
+    transient: bool,
+    since: Instant,
+    attempts: u32,
+    now: Instant,
+) -> Option<Duration> {
+    if !transient {
+        return None;
+    }
+    let delay = EVENT_STREAM_STORE_RETRY_INITIAL_DELAY
+        .saturating_mul(2_u32.saturating_pow(attempts))
+        .min(EVENT_STREAM_STORE_RETRY_MAX_DELAY);
+    (now.saturating_duration_since(since) + delay <= EVENT_STREAM_STORE_RETRY_WINDOW)
+        .then_some(delay)
 }
 
 struct SandboxReadyObservation<'a> {
@@ -2380,10 +2437,18 @@ impl SessionRuntime {
             // Re-read now that this execution's row is committed: a sandbox
             // release that ran before it was visible has detached the sandbox
             // read above, and this turn must not reuse it.
-            let session = self.store.get_session(thread_key).await?;
+            let session = match self.store.get_session(thread_key).await {
+                Ok(session) => session,
+                Err(error) => {
+                    let error = SessionRuntimeError::Store(error);
+                    self.release_undelivered_execution(thread_key, &execution.execution_id, &error)
+                        .await;
+                    return Err(error);
+                }
+            };
             correlation_sandbox_id = session.sandbox_id.clone();
             if let Err(error) = self.claim_stdout_owner(&execution.execution_id).await {
-                self.handle_stdout_claim_failure(thread_key, &execution.execution_id, &error)
+                self.release_undelivered_execution(thread_key, &execution.execution_id, &error)
                     .await;
                 return Err(error);
             }
@@ -2422,7 +2487,7 @@ impl SessionRuntime {
                     .await
             {
                 let error = SessionRuntimeError::Store(error);
-                self.record_execution_failure(thread_key, &execution.execution_id, &error)
+                self.release_undelivered_execution(thread_key, &execution.execution_id, &error)
                     .await;
                 return Err(error);
             }
@@ -2430,8 +2495,8 @@ impl SessionRuntime {
                 .lock()
                 .await
                 .insert(execution.execution_id.clone(), execution_trace_span.clone());
-            record_session_execution_started(&harness_label);
-            self.store
+            if let Err(error) = self
+                .store
                 .append_event(
                     thread_key,
                     Some(&execution.execution_id),
@@ -2444,16 +2509,34 @@ impl SessionRuntime {
                         "max_duration_ms": max_duration_ms,
                     }),
                 )
-                .await?;
+                .await
+            {
+                let error = SessionRuntimeError::Store(error);
+                self.release_undelivered_execution(thread_key, &execution.execution_id, &error)
+                    .await;
+                return Err(error);
+            }
+            record_session_execution_started(&harness_label);
             let requester_principal_id = self
                 .resolve_requester_principal(thread_key, requester_metadata.as_ref())
                 .await;
             let desired_capabilities = match pre_resolved_sandbox_capabilities {
                 Some(capabilities) => capabilities,
-                None => {
-                    self.resolve_sandbox_capabilities(session.iron_control_principal.as_deref())
-                        .await?
-                }
+                None => match self
+                    .resolve_sandbox_capabilities(session.iron_control_principal.as_deref())
+                    .await
+                {
+                    Ok(capabilities) => capabilities,
+                    Err(error) => {
+                        self.release_undelivered_execution(
+                            thread_key,
+                            &execution.execution_id,
+                            &error,
+                        )
+                        .await;
+                        return Err(error);
+                    }
+                },
             };
 
             let sandbox_id = match self
@@ -2731,25 +2814,43 @@ impl SessionRuntime {
         .await;
     }
 
-    async fn handle_stdout_claim_failure(
+    /// Ends a claimed execution whose input has not reached a sandbox. When
+    /// the control plane is shutting down or the database was briefly
+    /// unreachable, the execution goes back to the durable queue and the
+    /// orphan-adoption scan replays its persisted request; otherwise it fails
+    /// with `error`. A requeue that cannot be written falls back to recording
+    /// the failure, and failing that the scan fails the row once its
+    /// pre-sandbox grace expires.
+    async fn release_undelivered_execution(
         &self,
         thread_key: &ThreadKey,
         execution_id: &str,
         error: &SessionRuntimeError,
     ) {
-        if matches!(error, SessionRuntimeError::ShuttingDown) {
+        let reason = match error {
+            SessionRuntimeError::ShuttingDown => Some("control_plane_shutdown"),
+            SessionRuntimeError::Store(store_error) if store_error.is_transient() => {
+                Some("transient_store_error")
+            }
+            _ => None,
+        };
+        if let Some(reason) = reason {
             match self
                 .store
-                .requeue_execution_if_running_without_stdout_owner(execution_id)
+                .requeue_undelivered_execution(execution_id, &self.stdout_owner_id)
                 .await
             {
                 Ok(Some(_)) => {
+                    if let Some(span) = self.execution_spans.lock().await.remove(execution_id) {
+                        finish_execution_trace_span(&span, "requeued");
+                    }
                     info!(
                         component = COMPONENT_SESSION_RUNTIME,
                         event = "session_execution_requeued",
                         thread_key = %thread_key,
                         execution_id,
-                        reason = "control_plane_shutdown",
+                        reason,
+                        %error,
                         "returned undelivered execution to the durable queue"
                     );
                     return;
@@ -4607,6 +4708,7 @@ fn session_event_stream(
                 tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
                 tick
             },
+            store_outage: None,
             done: false,
             emitted_count: 0,
             span,
@@ -4644,7 +4746,7 @@ fn session_event_stream(
                         );
                         return None;
                     }
-                    match state
+                    let polled = state
                         .store
                         .list_events_after(
                             &state.thread_key,
@@ -4652,8 +4754,11 @@ fn session_event_stream(
                             state.execution_id.as_deref(),
                             100,
                         )
-                        .await
-                    {
+                        .await;
+                    if polled.is_ok() {
+                        state.store_outage = None;
+                    }
+                    match polled {
                         Ok(events) if events.is_empty() => loop {
                             tokio::select! {
                                 notification = state.listener.recv() => {
@@ -4666,6 +4771,9 @@ fn session_event_stream(
                                         }
                                         Ok(_) => {}
                                         Err(error) => {
+                                            if state.wait_out_store_error(&error).await {
+                                                break;
+                                            }
                                             state.done = true;
                                             return Some((Err(SessionRuntimeError::Store(error)), state));
                                         }
@@ -4676,6 +4784,9 @@ fn session_event_stream(
                         }
                         Ok(events) => state.pending = events.into(),
                         Err(error) => {
+                            if state.wait_out_store_error(&error).await {
+                                continue;
+                            }
                             state.done = true;
                             return Some((Err(SessionRuntimeError::Store(error)), state));
                         }
@@ -8772,6 +8883,25 @@ mod tests {
         assert_eq!(
             existing_sandbox_action(&SandboxStatus::Unknown("rollout missing".to_owned())),
             ExistingSandboxAction::Replace
+        );
+    }
+
+    #[test]
+    fn event_stream_retries_transient_store_errors_within_its_window() {
+        let since = Instant::now();
+        assert_eq!(event_stream_store_retry_delay(false, since, 0, since), None);
+        let delays = (0..5)
+            .map(|attempts| event_stream_store_retry_delay(true, since, attempts, since))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            delays,
+            [250, 500, 1000, 2000, 2000].map(|ms| Some(Duration::from_millis(ms)))
+        );
+        let late = since + EVENT_STREAM_STORE_RETRY_WINDOW - Duration::from_millis(100);
+        assert_eq!(event_stream_store_retry_delay(true, since, 1, late), None);
+        assert_eq!(
+            event_stream_store_retry_delay(true, since, 40, since),
+            Some(EVENT_STREAM_STORE_RETRY_MAX_DELAY)
         );
     }
 
@@ -12946,7 +13076,7 @@ mod adoption_tests {
             "unexpected error: {error}"
         );
         runtime
-            .handle_stdout_claim_failure(&thread_key, &execution_id, &error)
+            .release_undelivered_execution(&thread_key, &execution_id, &error)
             .await;
         let execution = store
             .latest_execution_for_thread(&thread_key)
@@ -12960,6 +13090,107 @@ mod adoption_tests {
             .fail_execution_if_active(&execution_id, "test cleanup")
             .await
             .expect("terminalize execution");
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn undelivered_execution_requeues_only_on_transient_store_errors() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with(&store, backend);
+        let unreachable = || {
+            SessionRuntimeError::Store(SessionStoreError::Sqlx(sqlx::Error::Io(
+                std::io::Error::other("failed to lookup address information"),
+            )))
+        };
+
+        // A dispatch that loses the database after claiming the execution and
+        // its stdout returns it to the queue for the adoption scan to replay.
+        let thread_key =
+            ThreadKey::parse(format!("test:undelivered-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, None, true).await;
+        runtime
+            .claim_stdout_owner(&execution_id)
+            .await
+            .expect("claim stdout");
+        runtime
+            .release_undelivered_execution(&thread_key, &execution_id, &unreachable())
+            .await;
+        let execution = store
+            .latest_execution_for_thread(&thread_key)
+            .await
+            .expect("load execution")
+            .expect("execution exists");
+        assert_eq!(execution.status, ExecutionStatus::Queued);
+        assert!(execution.started_at.is_none());
+        assert!(
+            store
+                .claim_stdout_owner(
+                    &execution_id,
+                    "another-control-plane",
+                    Duration::from_secs(60)
+                )
+                .await
+                .expect("claim as a peer"),
+            "the requeue must release this control plane's stdout lease"
+        );
+        store
+            .fail_execution_if_active(&execution_id, "test cleanup")
+            .await
+            .expect("terminalize execution");
+
+        // Stdout another control plane owns is not taken back to the queue.
+        let thread_key =
+            ThreadKey::parse(format!("test:undelivered-peer-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, None, true).await;
+        store
+            .claim_stdout_owner(
+                &execution_id,
+                "another-control-plane",
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("claim as a peer");
+        runtime
+            .release_undelivered_execution(&thread_key, &execution_id, &unreachable())
+            .await;
+        let execution = store
+            .latest_execution_for_thread(&thread_key)
+            .await
+            .expect("load execution")
+            .expect("execution exists");
+        assert_eq!(execution.status, ExecutionStatus::Running);
+        store
+            .fail_execution_if_active(&execution_id, "test cleanup")
+            .await
+            .expect("terminalize execution");
+
+        // Any other error fails the turn with that error, now, instead of
+        // leaving it running until the adoption scan's grace expires.
+        let thread_key =
+            ThreadKey::parse(format!("test:undelivered-fail-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, None, true).await;
+        runtime
+            .claim_stdout_owner(&execution_id)
+            .await
+            .expect("claim stdout");
+        runtime
+            .release_undelivered_execution(
+                &thread_key,
+                &execution_id,
+                &SessionRuntimeError::BadRequest("principal has no policy".to_owned()),
+            )
+            .await;
+        let execution = store
+            .latest_execution_for_thread(&thread_key)
+            .await
+            .expect("load execution")
+            .expect("execution exists");
+        assert_eq!(execution.status, ExecutionStatus::Failed);
+        assert_eq!(execution.error.as_deref(), Some("principal has no policy"));
         reset_test_store(&store).await;
     }
 }

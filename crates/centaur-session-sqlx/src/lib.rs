@@ -665,23 +665,32 @@ impl PgSessionStore {
         })
     }
 
-    pub async fn requeue_execution_if_running_without_stdout_owner(
+    /// Returns a running execution whose input never reached a sandbox to the
+    /// durable queue, releasing `owner_id`'s stdout lease. An execution whose
+    /// stdout another control plane owns is left alone.
+    pub async fn requeue_undelivered_execution(
         &self,
         execution_id: &str,
+        owner_id: &str,
     ) -> Result<Option<SessionExecution>, SessionStoreError> {
         let row = sqlx::query_as::<_, SessionExecutionRow>(
             r#"
             update session_executions
-            set status = $2, started_at = null, updated_at = now()
+            set status = $2,
+                started_at = null,
+                stdout_owner_id = null,
+                stdout_owner_lease_expires_at = null,
+                updated_at = now()
             where execution_id = $1
               and status = $3
-              and stdout_owner_id is null
+              and (stdout_owner_id is null or stdout_owner_id = $4)
             returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
             "#,
         )
         .bind(execution_id)
         .bind(ExecutionStatus::Queued.as_ref())
         .bind(ExecutionStatus::Running.as_ref())
+        .bind(owner_id)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -2081,6 +2090,30 @@ pub enum SessionStoreError {
     Bm25IndexesPresent { indexes: Vec<String> },
 }
 
+impl SessionStoreError {
+    /// Whether the database was briefly unreachable rather than the operation
+    /// being wrong: a failed DNS lookup or dropped connection, an exhausted
+    /// pool, or a server refusing connections while it restarts. Retrying the
+    /// same operation later can succeed.
+    pub fn is_transient(&self) -> bool {
+        let Self::Sqlx(error) = self else {
+            return false;
+        };
+        match error {
+            sqlx::Error::Io(_)
+            | sqlx::Error::Tls(_)
+            | sqlx::Error::PoolTimedOut
+            | sqlx::Error::WorkerCrashed => true,
+            sqlx::Error::Database(error) => error.code().is_some_and(|code| {
+                // Class 08 is connection exceptions; 57P01-57P03 are admin,
+                // crash, and startup shutdowns; 53300 is too many connections.
+                code.starts_with("08") || matches!(&*code, "57P01" | "57P02" | "57P03" | "53300")
+            }),
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, FromRow)]
 struct SessionRow {
     thread_key: String,
@@ -2405,7 +2438,24 @@ mod tests {
     use time::{Duration as TimeDuration, OffsetDateTime};
     use uuid::Uuid;
 
-    use super::{IdleSandboxCandidateRow, PgSessionStore, SessionEventNotification};
+    use super::{
+        IdleSandboxCandidateRow, PgSessionStore, SessionEventNotification, SessionStoreError,
+    };
+
+    #[test]
+    fn only_connectivity_failures_are_transient() {
+        let dns = std::io::Error::other("failed to lookup address information");
+        assert!(SessionStoreError::Sqlx(sqlx::Error::Io(dns)).is_transient());
+        assert!(SessionStoreError::Sqlx(sqlx::Error::PoolTimedOut).is_transient());
+        assert!(!SessionStoreError::Sqlx(sqlx::Error::PoolClosed).is_transient());
+        assert!(!SessionStoreError::Sqlx(sqlx::Error::RowNotFound).is_transient());
+        assert!(
+            !SessionStoreError::NotFound {
+                thread_key: "slack:C1:1".to_owned()
+            }
+            .is_transient()
+        );
+    }
 
     async fn test_store() -> Option<PgSessionStore> {
         let Ok(url) = std::env::var("SESSION_RUNTIME_TEST_DATABASE_URL") else {
