@@ -54,6 +54,7 @@ const MODELS: &[(&str, &str)] = &[
     ("openai", "gpt-6-luna"),
     ("openai", "gpt-6-sol"),
     ("openai", "gpt-6.1-sol"),
+    ("openai", "gpt-6.1-terra"),
 ];
 const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
@@ -380,13 +381,13 @@ mod tests {
             "claude-sonnet-5",
             "openai/gpt-5.5",
             "openai/gpt-6.1-sol",
+            "gpt-6.1-terra",
         ] {
             assert_eq!(check_model(model), Ok(()), "{model}");
         }
         for model in [
             "anthropic/sonnet-5",
             "openai/claude-sonnet-5",
-            "gpt-6.1-terra", // Not in Pi 1.4.0's bundled catalog yet.
             "openai/o3",
             "openai/gpt-5.5:high",
         ] {
