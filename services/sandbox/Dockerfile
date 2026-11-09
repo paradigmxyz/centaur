@@ -343,6 +343,9 @@ RUN rm -f /etc/sudoers.d/agent
 RUN install -d -m 0755 /etc/centaur /opt/centaur \
     && install -d -o 1001 -g 1001 -m 0700 /tmp/downloads
 COPY --link centaur_sdk/ /opt/centaur/centaur_sdk/
+# Tool runs write bytecode (see install_tool_shims.py tool_env), but the SDK is
+# root-owned, so compile it here rather than on every tool call.
+RUN python3 -m compileall -q /opt/centaur/centaur_sdk
 COPY --link --chmod=0755 services/sandbox/git-hooks/ /opt/centaur/git-hooks/
 COPY --link --chown=1001:1001 tools/ /opt/centaur/tools/
 COPY --link --chmod=644 services/sandbox/codex-auth.json /etc/centaur/codex-auth.default.json

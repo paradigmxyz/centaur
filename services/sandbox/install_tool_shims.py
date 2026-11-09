@@ -589,6 +589,12 @@ def tool_env():
             env["PYTHONPATH"] = f"{{PYTHONPATH_VALUE}}:{{env['PYTHONPATH']}}"
         else:
             env["PYTHONPATH"] = PYTHONPATH_VALUE
+    # The image sets PYTHONDONTWRITEBYTECODE=1, which would make every tool
+    # call recompile every module it imports. Tool runs write bytecode next
+    # to the sources instead: uv envs and tool trees are writable, the stdlib
+    # ships its own .pyc, and the image precompiles the root-owned SDK. A
+    # PYTHONPYCACHEPREFIX would redirect reads too and lose the stdlib's.
+    env.pop("PYTHONDONTWRITEBYTECODE", None)
     return env
 
 
