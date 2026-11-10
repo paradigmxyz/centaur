@@ -1,3 +1,4 @@
+import io
 import json
 import subprocess
 import sys
@@ -5,8 +6,72 @@ import types
 from pathlib import Path
 
 import pytest
+import slack.cli as slack_cli
 from slack.cli import _channel_arg_is_id, app
 from typer.testing import CliRunner
+
+
+@pytest.mark.parametrize(
+    ("on_channel", "access_path"),
+    [(True, "centaur_api_proxy"), (False, "bot_token")],
+)
+def test_health_uses_proxy_on_slack_channel_surfaces(monkeypatch, on_channel, access_path) -> None:
+    calls = []
+
+    class FakeClient:
+        def list_channels_proxy(self, limit):
+            calls.append("centaur_api_proxy")
+            return [{"id": "C1234567890"}]
+
+        def list_bot_channels(self, limit):
+            calls.append("bot_token")
+            return [{"id": "C1234567890"}]
+
+    monkeypatch.setattr(slack_cli, "_on_slack_channel_surface", lambda: on_channel)
+    monkeypatch.setitem(sys.modules, "slack.client", types.SimpleNamespace(_client=FakeClient))
+    result = CliRunner().invoke(app, ["health"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)["ok"] is True
+    assert calls == [access_path]
+
+
+class _FakePermissionsResponse(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"data": {"principal": {"foreign_id": "slack-channel-c1234567890"}}}, True),
+        ({"data": {"principal": {"foreign_id": "slack-user-u1234567890"}}}, False),
+        ({"data": {}}, False),
+    ],
+)
+def test_on_slack_channel_surface_reads_sandbox_principal(monkeypatch, payload, expected) -> None:
+    import urllib.request
+
+    monkeypatch.setenv("CENTAUR_CONSOLE_URL", "centaur-console:3000")
+    requested = []
+
+    def fake_urlopen(request, timeout):
+        requested.append(request.full_url)
+        return _FakePermissionsResponse(json.dumps(payload).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    assert slack_cli._on_slack_channel_surface() is expected
+    assert requested == ["http://centaur-console:3000/api/v1/sandbox/permissions"]
+
+
+def test_on_slack_channel_surface_is_false_without_console(monkeypatch) -> None:
+    monkeypatch.delenv("CENTAUR_CONSOLE_URL", raising=False)
+
+    assert slack_cli._on_slack_channel_surface() is False
 
 
 @pytest.mark.parametrize("added", [True, False])

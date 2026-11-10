@@ -29,6 +29,33 @@ app = PipeSafeTyper(
 )
 
 
+def _on_slack_channel_surface() -> bool:
+    """Return whether this sandbox runs as a Slack channel principal.
+
+    Channel sessions get no Slack token from iron-proxy, while DM sessions run
+    as the user's principal and get their token. Warm sandboxes have no thread
+    key, so ask centaur-console which principal this sandbox belongs to.
+    """
+    import os
+    import urllib.request
+
+    base_url = os.getenv("CENTAUR_CONSOLE_URL", "").strip().rstrip("/")  # noqa: TID251
+    if not base_url:
+        return False
+    if not base_url.startswith(("http://", "https://")):
+        base_url = f"http://{base_url}"
+    request = urllib.request.Request(
+        f"{base_url}/api/v1/sandbox/permissions", headers={"Accept": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            data = json.loads(response.read()).get("data") or {}
+    except Exception:
+        return False
+    foreign_id = str((data.get("principal") or {}).get("foreign_id") or "")
+    return foreign_id.startswith("slack-channel-")
+
+
 @app.command("health")
 def health():
     """Assert slack connectivity and auth with a safe read-only check."""
@@ -36,7 +63,12 @@ def health():
 
     client = _client()
     try:
-        details = client.list_bot_channels(limit=1)
+        # Channel sessions reach Slack only through the Centaur API proxy.
+        if _on_slack_channel_surface():
+            channels = client.list_channels_proxy(limit=1)
+            details = {"access_path": "centaur_api_proxy", "channels": channels}
+        else:
+            details = client.list_bot_channels(limit=1)
         payload = {"ok": True, "tool": "slack", "error": None, "details": details}
     except Exception as exc:
         payload = {"ok": False, "tool": "slack", "error": str(exc), "details": {}}
