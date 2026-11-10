@@ -24,8 +24,20 @@ Deploy Console's database migrations before proxy-sync. SSH needs iron-proxy
 
 - `KUBERNETES_IRON_PROXY_SSH_ENABLED=true`
 - `KUBERNETES_IRON_PROXY_SSH_WORKSPACE=/workspace`
-- A persistent secret `CENTAUR_SSH_SEED` of at least 32 bytes. Changing it requires
-  replacing retained sandboxes and proxies because it derives their identities.
+- A persistent secret `CENTAUR_SSH_SEED` of at least 32 bytes. api-rs refuses to
+  start with SSH enabled and no valid seed. Changing it requires replacing
+  retained sandboxes and proxies because it derives their identities.
+
+For example, through Helm:
+
+```yaml
+apiRs:
+  extraEnv:
+    KUBERNETES_IRON_PROXY_SSH_ENABLED: "true"
+    CENTAUR_SSH_SEED:
+      valueFrom:
+        secretKeyRef: { name: <ssh-seed-secret>, key: seed }
+```
 
 Set the allowed destinations in Helm:
 

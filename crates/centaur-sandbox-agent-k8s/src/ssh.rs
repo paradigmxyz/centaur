@@ -7,6 +7,42 @@ use ssh_key::{
     private::{Ed25519Keypair, KeypairData},
 };
 
+/// Shortest accepted identity seed, in bytes.
+const MIN_SEED_BYTES: usize = 32;
+
+/// Deployment SSH settings for paired proxies. Present only when SSH is on.
+#[derive(Clone)]
+pub struct SshProxyConfig {
+    seed: String,
+    workspace: String,
+}
+
+impl SshProxyConfig {
+    /// `seed` derives every sandbox's disposable keys, so it must stay stable
+    /// for retained sandboxes; `workspace` is where remote commands run.
+    pub fn new(seed: impl Into<String>, workspace: impl Into<String>) -> Result<Self, String> {
+        let seed = seed.into();
+        if seed.len() < MIN_SEED_BYTES {
+            return Err(format!(
+                "SSH seed must contain at least {MIN_SEED_BYTES} bytes"
+            ));
+        }
+        Ok(Self {
+            seed,
+            workspace: workspace.into(),
+        })
+    }
+}
+
+impl std::fmt::Debug for SshProxyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SshProxyConfig")
+            .field("seed", &"[redacted]")
+            .field("workspace", &self.workspace)
+            .finish()
+    }
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct Identity {
     client_private: String,
@@ -23,24 +59,20 @@ impl std::fmt::Debug for Identity {
 }
 
 impl Identity {
-    pub(crate) fn derive(scope: &str, workspace: &str) -> SandboxResult<Self> {
-        let seed = std::env::var("CENTAUR_SSH_SEED")
-            .or_else(|_| std::env::var("CENTAUR_EE_SSH_SEED"))
-            .map_err(|_| {
-                SandboxError::InvalidSpec("SSH enabled without CENTAUR_SSH_SEED".into())
-            })?;
-        Self::from_seed(&seed, scope, workspace)
+    pub(crate) fn derive(config: &SshProxyConfig, scope: &str) -> SandboxResult<Self> {
+        Self::from_seed(&config.seed, scope, &config.workspace)
     }
     fn from_seed(seed: &str, scope: &str, workspace: &str) -> SandboxResult<Self> {
-        if seed.len() < 32 {
-            return Err(SandboxError::InvalidSpec(
-                "SSH seed must contain at least 32 bytes".into(),
-            ));
+        if seed.len() < MIN_SEED_BYTES {
+            return Err(SandboxError::InvalidSpec(format!(
+                "SSH seed must contain at least {MIN_SEED_BYTES} bytes"
+            )));
         }
         let pair = |purpose: &str| -> SandboxResult<(String, String)> {
             let mut hash = Sha256::new();
-            // Keep the derivation tag stable for retained sandbox identities.
-            for value in ["centaur-ee-ssh-v1", seed, scope, purpose] {
+            // Changing the tag changes every derived identity; keep it stable
+            // once sandboxes exist.
+            for value in ["centaur-ssh-v1", seed, scope, purpose] {
                 hash.update((value.len() as u64).to_be_bytes());
                 hash.update(value.as_bytes());
             }
@@ -74,12 +106,10 @@ impl Identity {
     pub(crate) fn sandbox(&self, host: &str) -> Value {
         json!({"host":host,"port":2222,"private_key":self.client_private,"host_key":self.host_public,"workspace":self.workspace})
     }
-    pub(crate) fn proxy(&self, control_url: &str, deny_cidrs: &[String]) -> Value {
-        let mut config = json!({"listen":"0.0.0.0:2222","host_key":{"type":"control_plane","value":self.host_private},"client_public_key":self.client_public,"authorize_url":format!("{}/api/v1/proxy/ssh/authorize",control_url.trim_end_matches('/')),"token_env":"IRON_PROXY_TOKEN"});
-        if !deny_cidrs.is_empty() {
-            config["upstream_deny_cidrs"] = json!(deny_cidrs);
-        }
-        config
+    /// The listener's `IRON_SSH_CONFIG_JSON`. Upstream dials honor the proxy's
+    /// own `IRON_PROXY_UPSTREAM_DENY_CIDRS`, so no deny list is repeated here.
+    pub(crate) fn proxy(&self, control_url: &str) -> Value {
+        json!({"listen":"0.0.0.0:2222","host_key":{"type":"control_plane","value":self.host_private},"client_public_key":self.client_public,"authorize_url":format!("{}/api/v1/proxy/ssh/authorize",control_url.trim_end_matches('/')),"token_env":"IRON_PROXY_TOKEN"})
     }
 }
 
@@ -100,5 +130,9 @@ mod tests {
         assert!(!client.contains(seed));
         assert!(!format!("{a:?}").contains(&a.client_private));
         assert!(Identity::from_seed("short", "a", "/").is_err());
+        assert!(SshProxyConfig::new("short", "/workspace").is_err());
+        let config = SshProxyConfig::new(seed, "/workspace").unwrap();
+        assert_eq!(Identity::derive(&config, "sandbox-a").unwrap(), a);
+        assert!(!format!("{config:?}").contains(seed));
     }
 }

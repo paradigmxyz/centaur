@@ -15,13 +15,13 @@ from urllib.parse import urlsplit
 @contextlib.contextmanager
 def connection(destination):
     """Materialize only the disposable client key and pinned proxy identity."""
-    config = json.loads(os.environ.get("CENTAUR_SSH") or os.environ["CENTAUR_EE_SSH"])
+    config = json.loads(os.environ["CENTAUR_SSH"])
     parsed = urlsplit(destination)
     if (len(destination.encode()) > 2048 or parsed.scheme != "wss" or not parsed.hostname
             or parsed.port not in (None, 443) or parsed.username is not None
             or parsed.password is not None or parsed.query or parsed.fragment):
         raise ValueError("invalid WSS SSH destination")
-    # Preserve the route encoding understood by existing Iron deployments.
+    # Iron's SSH listener reads the destination from the "ee:" username route.
     route = "ee:" + base64.urlsafe_b64encode(destination.encode()).decode().rstrip("=")
     with tempfile.TemporaryDirectory(prefix="centaur-ssh-") as directory:
         root = Path(directory)

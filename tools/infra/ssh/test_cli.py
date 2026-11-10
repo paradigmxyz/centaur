@@ -14,7 +14,7 @@ spec.loader.exec_module(cli)
 class ClientTests(unittest.TestCase):
     def test_destination_uses_disposable_key_and_proxy_host_pin(self):
         import base64
-        config = {"host":"proxy","port":2222,"route":"ee","workspace":"/workspace","private_key":"disposable","host_key":"ssh-ed25519 fixture"}
+        config = {"host":"proxy","port":2222,"workspace":"/workspace","private_key":"disposable","host_key":"ssh-ed25519 fixture"}
         target="wss://one.dev.example.com/events/events"
         with patch.dict(os.environ,{"CENTAUR_SSH":json.dumps(config)}):
             with cli.connection(target) as (_, command):
@@ -27,7 +27,7 @@ class ClientTests(unittest.TestCase):
                     with cli.connection(invalid):
                         self.fail("invalid URL accepted")
     def test_disposable_key_is_private_and_removed(self):
-        config = {"host": "proxy", "port": 2222, "route": "ee", "workspace": "/workspace", "private_key": "disposable", "host_key": "ssh-ed25519 fixture"}
+        config = {"host": "proxy", "port": 2222, "workspace": "/workspace", "private_key": "disposable", "host_key": "ssh-ed25519 fixture"}
         with patch.dict(os.environ, {"CENTAUR_SSH": json.dumps(config)}):
             with cli.connection("wss://dev.example.com/events/events") as (_, command):
                 key = Path(command[command.index("-i") + 1])

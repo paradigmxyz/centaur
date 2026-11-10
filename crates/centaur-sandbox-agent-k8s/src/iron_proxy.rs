@@ -103,6 +103,8 @@ pub struct IronProxyConfig {
     pub env_from_secret_names: Vec<String>,
     pub extra_env: BTreeMap<String, String>,
     pub upstream_deny_cidrs: Vec<String>,
+    /// SSH listener settings for paired proxies; `None` leaves SSH off.
+    pub ssh: Option<crate::ssh::SshProxyConfig>,
     /// Address ranges of an external core database (for example RDS or Cloud
     /// SQL). Proxies may reach them on `database_port`; the public-upstream rule
     /// excludes private ranges, where managed databases usually live.
@@ -144,6 +146,7 @@ impl IronProxyConfig {
             env_from_secret_names: Vec::new(),
             extra_env: BTreeMap::new(),
             upstream_deny_cidrs: Vec::new(),
+            ssh: None,
             database_cidrs: Vec::new(),
             database_pod_labels: BTreeMap::new(),
             database_namespace: None,
@@ -372,20 +375,8 @@ impl AgentSandboxBackend {
             .config
             .iron_proxy
             .as_ref()
-            .filter(|c| {
-                c.extra_env
-                    .get("IRON_SSH_ENABLED")
-                    .is_some_and(|v| v == "1")
-            })
-            .map(|c| {
-                crate::ssh::Identity::derive(
-                    &iron_proxy_service_name(id),
-                    c.extra_env
-                        .get("IRON_SSH_WORKSPACE")
-                        .map(String::as_str)
-                        .unwrap_or("/workspace"),
-                )
-            })
+            .and_then(|c| c.ssh.as_ref())
+            .map(|ssh| crate::ssh::Identity::derive(ssh, &iron_proxy_service_name(id)))
             .transpose()?;
         Ok(ResolvedIronProxy {
             ssh,
@@ -1777,8 +1768,7 @@ fn iron_proxy_env_vars(
             "IRON_SSH_CONFIG_JSON".into(),
             env_var(
                 "IRON_SSH_CONFIG_JSON",
-                &ssh.proxy(&sync.control_url, &iron_proxy.upstream_deny_cidrs)
-                    .to_string(),
+                &ssh.proxy(&sync.control_url).to_string(),
             ),
         );
     }
@@ -2570,9 +2560,9 @@ mod tests {
         );
         let identity = target.ssh.as_ref().unwrap();
         let sandbox = identity.sandbox(&target.proxy_host);
-        let proxy = identity.proxy("http://sync", &["10.0.0.0/8".into()]);
+        let proxy = identity.proxy("http://sync");
         assert_ne!(sandbox["private_key"], proxy["host_key"]["value"]);
-        assert_eq!(proxy["upstream_deny_cidrs"][0], "10.0.0.0/8");
+        assert!(proxy.get("upstream_deny_cidrs").is_none());
         assert!(sandbox.get("host_key").is_some());
         assert!(!sandbox.to_string().contains("control_plane"));
     }

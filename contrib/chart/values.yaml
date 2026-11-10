@@ -446,7 +446,7 @@ agentSandbox:
 # for POST /api/v1/proxy/sync while all operator/admin traffic continues to use
 # Console. The service reads Console's database directly.
 proxySync:
-  # Deployment-owned WSS destinations for reusable personal SSH keys.
+  # Deployment-owned WSS destinations that granted SSH keys may reach.
   # Example: [{host: "*.dev.example.com", path: /events/events, username: dev}]
   # Empty denies dynamic targets. Exact paths and TLS verification are mandatory.
   sshTargets: []
