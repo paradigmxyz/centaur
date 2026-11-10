@@ -1139,6 +1139,15 @@ fn normalize_model_name(model: &str) -> String {
 }
 
 fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
+    if model.contains("fable-5-2") || model.contains("mythos-5-2") {
+        return Some(TokenPricing {
+            input_per_mtok: 8.0,
+            cache_creation_per_mtok: 10.0,
+            cache_read_per_mtok: 0.2,
+            output_per_mtok: 40.0,
+            source: "centaur_estimate:anthropic:fable-mythos-5-2:5m-cache-write",
+        });
+    }
     if model.contains("fable-5-1") || model.contains("mythos-5-1") {
         return Some(TokenPricing {
             input_per_mtok: 10.0,
@@ -2039,6 +2048,12 @@ mod tests {
                 4.225,
                 2.5,
                 "centaur_estimate:anthropic:opus-4.5-plus:5m-cache-write",
+            ),
+            (
+                "claude-fable-5-2",
+                6.64,
+                4.0,
+                "centaur_estimate:anthropic:fable-mythos-5-2:5m-cache-write",
             ),
             (
                 "claude-fable-5-1",

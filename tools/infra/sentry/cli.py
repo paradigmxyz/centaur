@@ -7,9 +7,11 @@ from typing import Any
 import typer
 from dotenv import load_dotenv
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
-app = typer.Typer(
+app = PipeSafeTyper(
     name="sentry",
     help="Sentry issues — list/search issues, issue details, events, stacktraces, and tag values (read-only)",
     no_args_is_help=True,

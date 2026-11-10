@@ -363,31 +363,45 @@ pub struct SandboxRuntime {
     spec_factory: SandboxSpecFactory,
     /// Optional out-of-band transport supplied by runtimes that can read artifacts.
     artifact_reader: Option<SandboxArtifactReader>,
-    /// Builds the base spec a warm sandbox for a harness boots from. Warm
-    /// pools apply their repo-cache access on top of it.
+    /// Builds the base spec a warm sandbox for a harness and optional persona
+    /// boots from. Warm pools apply their repo-cache access on top of it.
     warm_spec_factory: Option<WarmHarnessSpecFactory>,
     /// The deployment's default harness (`SESSION_SANDBOX_HARNESS`).
     default_harness: Option<HarnessType>,
 }
 
-type WarmHarnessSpecFactory = Arc<dyn Fn(&HarnessType) -> SandboxSpec + Send + Sync>;
+type WarmHarnessSpecFactory =
+    Arc<dyn Fn(&HarnessType, Option<&PersonaContext>) -> SandboxSpec + Send + Sync>;
 
 /// One configured warm pool: how many sandboxes to keep booted for sessions
-/// on `harness` with `repo_cache` access. Observability is not part of the
-/// pool: warm sandboxes boot without it and claims grant it when needed.
+/// on `harness` with `repo_cache` access and, when set, `persona`. A pool
+/// without a persona serves only sessions without one. Observability is not
+/// part of the pool: warm sandboxes boot without it and claims grant it when
+/// needed.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WarmPoolTarget {
     pub harness: HarnessType,
     pub repo_cache: SessionRepoCacheAccess,
+    #[serde(default)]
+    pub persona: Option<String>,
     pub size: usize,
 }
 
 #[derive(Clone)]
 struct WarmPools {
     manager: Arc<WarmPoolManager>,
-    /// Workload key of each configured pool, by harness and repo-cache access.
-    keys: Vec<(HarnessType, SessionRepoCacheAccess, String)>,
+    /// Workload key of each configured pool, by harness, repo-cache access,
+    /// and persona.
+    keys: Vec<WarmPoolKey>,
+}
+
+#[derive(Clone)]
+struct WarmPoolKey {
+    harness: HarnessType,
+    repo_cache: SessionRepoCacheAccess,
+    persona: Option<String>,
+    workload_key: String,
 }
 
 impl WarmPools {
@@ -395,13 +409,16 @@ impl WarmPools {
         &self,
         harness: &HarnessType,
         repo_cache: &SessionRepoCacheAccess,
+        persona: Option<&str>,
     ) -> Option<&str> {
         self.keys
             .iter()
-            .find(|(pool_harness, pool_repo_cache, _)| {
-                pool_harness == harness && pool_repo_cache == repo_cache
+            .find(|key| {
+                &key.harness == harness
+                    && &key.repo_cache == repo_cache
+                    && key.persona.as_deref() == persona
             })
-            .map(|(_, _, workload_key)| workload_key.as_str())
+            .map(|key| key.workload_key.as_str())
     }
 }
 
@@ -1453,19 +1470,57 @@ impl SessionRuntime {
         Ok(principal.id)
     }
 
-    pub fn with_warm_pools(mut self, targets: Vec<WarmPoolTarget>, config: WarmPoolConfig) -> Self {
-        self.warm_pools = self.build_warm_pools(targets, config);
+    /// Configure warm pools. Persona pools resolve against the persona
+    /// registry, so call this after `with_personas`; a pool naming a persona
+    /// that is missing, not allowed for its repo-cache access, or pinned to
+    /// another harness is rejected.
+    pub fn with_warm_pools(
+        mut self,
+        targets: Vec<WarmPoolTarget>,
+        config: WarmPoolConfig,
+    ) -> Result<Self, SessionRuntimeError> {
+        self.warm_pools = self.build_warm_pools(targets, config)?;
         if let Some(pools) = &self.warm_pools {
             pools.manager.clone().spawn_replenisher();
         }
-        self
+        Ok(self)
+    }
+
+    fn warm_pool_persona(
+        &self,
+        target: &WarmPoolTarget,
+    ) -> Result<Option<PersonaContext>, SessionRuntimeError> {
+        let Some(persona_id) = target.persona.as_deref() else {
+            return Ok(None);
+        };
+        let invalid = |reason: String| {
+            SessionRuntimeError::BadRequest(format!(
+                "warm pool for harness {} with repoCache {} and persona {persona_id:?}: {reason}",
+                target.harness,
+                target.repo_cache.as_str()
+            ))
+        };
+        let Some(registry) = self.personas.as_deref() else {
+            return Err(invalid("no persona registry is configured".to_owned()));
+        };
+        let context = registry
+            .context_for_access(persona_id, false, &target.repo_cache)
+            .map_err(invalid)?;
+        if let Some(pinned) = registry.harness_for(persona_id)
+            && pinned != &target.harness
+        {
+            return Err(invalid(format!(
+                "the persona pins harness {pinned}, so no session could claim it"
+            )));
+        }
+        Ok(Some(context))
     }
 
     fn build_warm_pools(
         &self,
         targets: Vec<WarmPoolTarget>,
         config: WarmPoolConfig,
-    ) -> Option<WarmPools> {
+    ) -> Result<Option<WarmPools>, SessionRuntimeError> {
         // Built even with no pools, so ready sandboxes of pools that were
         // removed still get evicted.
         let targets: Vec<_> = targets
@@ -1478,15 +1533,21 @@ impl SessionRuntime {
                     "session sandbox warm pool requested for runtime without a warm sandbox spec"
                 );
             }
-            return None;
+            return Ok(None);
         };
 
         let mut pools = Vec::with_capacity(targets.len());
         let mut keys = Vec::with_capacity(targets.len());
         for target in targets {
-            let spec = warm_pool_spec(&spec_factory, &target);
+            let persona = self.warm_pool_persona(&target)?;
+            let spec = warm_pool_spec(&spec_factory, &target, persona.as_ref());
             let workload_key = sandbox_spec_key(&spec);
-            keys.push((target.harness, target.repo_cache, workload_key.clone()));
+            keys.push(WarmPoolKey {
+                harness: target.harness,
+                repo_cache: target.repo_cache,
+                persona: target.persona,
+                workload_key: workload_key.clone(),
+            });
             pools.push(WarmPool {
                 workload_key,
                 spec_factory: Arc::new(move || spec.clone()),
@@ -1499,7 +1560,7 @@ impl SessionRuntime {
             pools,
             config,
         ));
-        Some(WarmPools { manager, keys })
+        Ok(Some(WarmPools { manager, keys }))
     }
 
     pub fn with_sandbox_capacity(mut self, config: SandboxCapacityConfig) -> Self {
@@ -2377,16 +2438,29 @@ impl SessionRuntime {
                 );
                 return Ok(execution);
             }
-            // Re-read now that this execution's row is committed: a sandbox
-            // release that ran before it was visible has detached the sandbox
-            // read above, and this turn must not reuse it.
-            let session = self.store.get_session(thread_key).await?;
-            correlation_sandbox_id = session.sandbox_id.clone();
+            // Own the execution's stdout before anything else can fail: every
+            // error from here until the input reaches a sandbox is recorded as
+            // this execution's failure, which requires that ownership. An
+            // unrecorded error would leave the row running with no sandbox
+            // until the orphan scan's grace expires.
             if let Err(error) = self.claim_stdout_owner(&execution.execution_id).await {
                 self.handle_stdout_claim_failure(thread_key, &execution.execution_id, &error)
                     .await;
                 return Err(error);
             }
+            // Re-read now that this execution's row is committed: a sandbox
+            // release that ran before it was visible has detached the sandbox
+            // read above, and this turn must not reuse it.
+            let session = match self.store.get_session(thread_key).await {
+                Ok(session) => session,
+                Err(error) => {
+                    let error = SessionRuntimeError::Store(error);
+                    self.record_execution_failure(thread_key, &execution.execution_id, &error)
+                        .await;
+                    return Err(error);
+                }
+            };
+            correlation_sandbox_id = session.sandbox_id.clone();
             // Until its input reaches a sandbox, this execution belongs to this
             // dispatch, not to a stdout pump left over from an earlier turn.
             let dispatching =
@@ -2431,7 +2505,8 @@ impl SessionRuntime {
                 .await
                 .insert(execution.execution_id.clone(), execution_trace_span.clone());
             record_session_execution_started(&harness_label);
-            self.store
+            if let Err(error) = self
+                .store
                 .append_event(
                     thread_key,
                     Some(&execution.execution_id),
@@ -2444,16 +2519,29 @@ impl SessionRuntime {
                         "max_duration_ms": max_duration_ms,
                     }),
                 )
-                .await?;
+                .await
+            {
+                let error = SessionRuntimeError::Store(error);
+                self.record_execution_failure(thread_key, &execution.execution_id, &error)
+                    .await;
+                return Err(error);
+            }
             let requester_principal_id = self
                 .resolve_requester_principal(thread_key, requester_metadata.as_ref())
                 .await;
             let desired_capabilities = match pre_resolved_sandbox_capabilities {
                 Some(capabilities) => capabilities,
-                None => {
-                    self.resolve_sandbox_capabilities(session.iron_control_principal.as_deref())
-                        .await?
-                }
+                None => match self
+                    .resolve_sandbox_capabilities(session.iron_control_principal.as_deref())
+                    .await
+                {
+                    Ok(capabilities) => capabilities,
+                    Err(error) => {
+                        self.record_execution_failure(thread_key, &execution.execution_id, &error)
+                            .await;
+                        return Err(error);
+                    }
+                },
             };
 
             let sandbox_id = match self
@@ -3290,21 +3378,29 @@ impl SessionRuntime {
                 }
             }
 
-            // Warm sandboxes are pre-booted per harness and repo-cache
-            // access; any other session needs a cold sandbox.
+            // Warm sandboxes are pre-booted per harness, repo-cache access,
+            // and persona; any other session needs a cold sandbox.
             let warm_pool = self
                 .warm_pools
                 .as_ref()
                 .filter(|pools| boot_mode.uses_warm_pool() && !pools.keys.is_empty())
                 .and_then(|pools| {
-                    if persona_context.is_some() {
-                        record_sandbox_warm_pool_claim("persona_specific");
-                        return None;
-                    }
-                    let workload_key =
-                        pools.workload_key(harness_type, &desired_capabilities.repo_cache);
+                    let persona = persona_context
+                        .as_ref()
+                        .map(|persona| persona.persona_id.as_str());
+                    let workload_key = pools.workload_key(
+                        harness_type,
+                        &desired_capabilities.repo_cache,
+                        persona,
+                    );
                     if workload_key.is_none() {
-                        record_sandbox_warm_pool_claim("no_matching_pool");
+                        // Persona sessions without a pool for their persona
+                        // keep their own result so the gap is visible.
+                        record_sandbox_warm_pool_claim(if persona.is_some() {
+                            "persona_specific"
+                        } else {
+                            "no_matching_pool"
+                        });
                     }
                     Some((&pools.manager, workload_key?))
                 });
@@ -4411,7 +4507,8 @@ impl SandboxRuntime {
                   _execution_id: &str,
                   _harness: &HarnessType,
                   _persona: Option<&PersonaContext>| { spec.clone() };
-        let warm_spec_factory = move |_harness: &HarnessType| warm_spec.clone();
+        let warm_spec_factory =
+            move |_harness: &HarnessType, _persona: Option<&PersonaContext>| warm_spec.clone();
         Self::backend_with_warm_spec_factory(backend, spec_factory, warm_spec_factory)
     }
 
@@ -4426,7 +4523,7 @@ impl SandboxRuntime {
             move |thread_key, _execution_id, harness, persona| {
                 workload.spec(thread_key, harness, persona)
             },
-            move |harness| warm_workload.warm_spec(harness),
+            move |harness, persona| warm_workload.warm_spec(harness, persona),
         );
         runtime.default_harness = default_harness;
         runtime
@@ -4458,7 +4555,7 @@ impl SandboxRuntime {
             + Send
             + Sync
             + 'static,
-        W: Fn(&HarnessType) -> SandboxSpec + Send + Sync + 'static,
+        W: Fn(&HarnessType, Option<&PersonaContext>) -> SandboxSpec + Send + Sync + 'static,
     {
         Self {
             manager: Arc::new(SandboxManager::new(backend)),
@@ -4516,8 +4613,8 @@ impl SandboxWorkloadMode {
         self.spec_for(Some(thread_key), harness, persona)
     }
 
-    fn warm_spec(&self, harness: &HarnessType) -> SandboxSpec {
-        self.spec_for(None, harness, None)
+    fn warm_spec(&self, harness: &HarnessType, persona: Option<&PersonaContext>) -> SandboxSpec {
+        self.spec_for(None, harness, persona)
     }
 
     fn spec_for(
@@ -4565,8 +4662,12 @@ fn harness_server_subcommand(harness: &HarnessType) -> &'static str {
 
 /// The spec a warm pool boots. Observability is always off so the pool can
 /// serve sessions with and without it; claims grant it when needed.
-fn warm_pool_spec(spec_factory: &WarmHarnessSpecFactory, target: &WarmPoolTarget) -> SandboxSpec {
-    let mut spec = spec_factory(&target.harness);
+fn warm_pool_spec(
+    spec_factory: &WarmHarnessSpecFactory,
+    target: &WarmPoolTarget,
+    persona: Option<&PersonaContext>,
+) -> SandboxSpec {
+    let mut spec = spec_factory(&target.harness, persona);
     apply_sandbox_capabilities(
         &mut spec,
         &SessionSandboxCapabilities {
@@ -8958,7 +9059,7 @@ mod tests {
         let spec = workload.spec(&thread_key, &HarnessType::Codex, None);
         assert_eq!(spec.resources, Some(resources.clone()));
         assert_eq!(
-            workload.warm_spec(&HarnessType::Codex).resources,
+            workload.warm_spec(&HarnessType::Codex, None).resources,
             Some(resources)
         );
 
@@ -8998,10 +9099,18 @@ mod tests {
             Some("abc123")
         );
         assert_eq!(
-            env_value(&workload.warm_spec(&HarnessType::Codex), "AGENT_PERSONA"),
+            env_value(
+                &workload.warm_spec(&HarnessType::Codex, None),
+                "AGENT_PERSONA"
+            ),
             None
         );
-        assert!(workload.warm_spec(&HarnessType::Codex).files.is_empty());
+        assert!(
+            workload
+                .warm_spec(&HarnessType::Codex, None)
+                .files
+                .is_empty()
+        );
     }
 
     #[test]
@@ -9014,7 +9123,7 @@ mod tests {
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
 
         let claimed_spec = workload.spec(&thread_key, &HarnessType::ClaudeCode, None);
-        let warm_spec = workload.warm_spec(&HarnessType::Codex);
+        let warm_spec = workload.warm_spec(&HarnessType::Codex, None);
 
         assert_eq!(
             env_value(&claimed_spec, "CENTAUR_THREAD_KEY"),
@@ -9077,7 +9186,7 @@ mod tests {
         );
 
         assert_eq!(
-            workload.warm_spec(&HarnessType::ClaudeCode).args,
+            workload.warm_spec(&HarnessType::ClaudeCode, None).args,
             vec!["harness-server", "claude-code"],
             "a warm pool boots its own harness, not the workload default"
         );
@@ -9524,7 +9633,7 @@ mod tests {
         }
     }
 
-    fn env_value<'a>(spec: &'a SandboxSpec, name: &str) -> Option<&'a str> {
+    pub(super) fn env_value<'a>(spec: &'a SandboxSpec, name: &str) -> Option<&'a str> {
         spec.env
             .iter()
             .find(|env| env.name == name)
@@ -9571,6 +9680,40 @@ mod adoption_tests {
 
     #[derive(Clone, Copy)]
     struct AdmissionProbeRegistrar;
+
+    /// Fails every principal lookup, as when iron-control is unreachable.
+    #[derive(Clone, Copy)]
+    struct UnreachablePolicyRegistrar;
+
+    #[async_trait::async_trait]
+    impl SessionPrincipalRegistrar for UnreachablePolicyRegistrar {
+        async fn register_session(
+            &self,
+            _thread_key: &str,
+            _metadata: Option<&Value>,
+            _create_if_missing: bool,
+        ) -> Result<Principal, IronControlError> {
+            Ok(test_principal("prn_test"))
+        }
+
+        async fn register_requester(
+            &self,
+            _thread_key: &str,
+            _metadata: Option<&Value>,
+            _create_if_missing: bool,
+        ) -> Result<Option<Principal>, IronControlError> {
+            Ok(None)
+        }
+
+        async fn get_principal(&self, principal: &str) -> Result<Principal, IronControlError> {
+            Err(IronControlError::Status {
+                method: "GET".to_owned(),
+                path: format!("/api/v1/principals/{principal}"),
+                status: 503,
+                body: "unavailable".to_owned(),
+            })
+        }
+    }
 
     #[async_trait::async_trait]
     impl SessionPrincipalRegistrar for AdmissionProbeRegistrar {
@@ -10884,7 +11027,8 @@ mod adoption_tests {
     }
 
     /// A codex session with an execution, served by a runtime with one codex
-    /// warm pool (built without the replenisher) per listed repo-cache access.
+    /// warm pool (built without the replenisher) per listed repo-cache access
+    /// and optional persona. The runtime's registry has an `eng` persona.
     struct WarmPoolCase {
         store: PgSessionStore,
         thread_key: ThreadKey,
@@ -10893,8 +11037,37 @@ mod adoption_tests {
         runtime: SessionRuntime,
     }
 
+    fn warm_pool_case_personas() -> PersonaRegistry {
+        PersonaRegistry::new(
+            [PersonaDefinition {
+                id: "eng".to_owned(),
+                source_root: "/repo/tools".to_owned(),
+                source_path: "/repo/tools/personas/eng".to_owned(),
+                source_ref: Some("abc123".to_owned()),
+                prompt_hash: "sha256:eng".to_owned(),
+                prompt: "eng persona prompt".to_owned(),
+                models: BTreeMap::new(),
+                harness: None,
+            }],
+            None,
+            vec!["/repo/tools".to_owned()],
+        )
+        .unwrap()
+    }
+
     impl WarmPoolCase {
         async fn new(store: &PgSessionStore, repo_cache_pools: &[SessionRepoCacheAccess]) -> Self {
+            let pools: Vec<_> = repo_cache_pools
+                .iter()
+                .map(|repo_cache| (repo_cache.clone(), None))
+                .collect();
+            Self::with_pools(store, &pools).await
+        }
+
+        async fn with_pools(
+            store: &PgSessionStore,
+            pools: &[(SessionRepoCacheAccess, Option<&str>)],
+        ) -> Self {
             let thread_key =
                 ThreadKey::parse(format!("test:warm-{}", uuid::Uuid::new_v4())).unwrap();
             store
@@ -10928,29 +11101,36 @@ mod adoption_tests {
                             SANDBOX_REPOS_MOUNT_PATH,
                         ))
                     },
-                    move |harness| {
-                        SandboxSpec::new("mock")
-                            .env("WARM_POOL_TEST_MARKER", marker.as_str())
-                            .env("WARM_POOL_TEST_HARNESS", harness.to_string())
+                    move |harness, persona| {
+                        apply_persona_spec(
+                            SandboxSpec::new("mock")
+                                .env("WARM_POOL_TEST_MARKER", marker.as_str())
+                                .env("WARM_POOL_TEST_HARNESS", harness.to_string()),
+                            persona,
+                        )
                     },
                 ),
                 TestSessionPrincipalRegistrar,
-            );
-            runtime.warm_pools = runtime.build_warm_pools(
-                repo_cache_pools
-                    .iter()
-                    .map(|repo_cache| WarmPoolTarget {
-                        harness: HarnessType::Codex,
-                        repo_cache: repo_cache.clone(),
-                        size: 1,
-                    })
-                    .collect(),
-                WarmPoolConfig {
-                    replenish_interval: Duration::from_secs(60),
-                    bootstrap_iron_control_principal: "prn_test_bootstrap".to_owned(),
-                    max_running_sandboxes: None,
-                },
-            );
+            )
+            .with_personas(warm_pool_case_personas());
+            runtime.warm_pools = runtime
+                .build_warm_pools(
+                    pools
+                        .iter()
+                        .map(|(repo_cache, persona)| WarmPoolTarget {
+                            harness: HarnessType::Codex,
+                            repo_cache: repo_cache.clone(),
+                            persona: persona.map(str::to_owned),
+                            size: 1,
+                        })
+                        .collect(),
+                    WarmPoolConfig {
+                        replenish_interval: Duration::from_secs(60),
+                        bootstrap_iron_control_principal: "prn_test_bootstrap".to_owned(),
+                        max_running_sandboxes: None,
+                    },
+                )
+                .expect("build warm pools");
             Self {
                 store: store.clone(),
                 thread_key,
@@ -10960,20 +11140,30 @@ mod adoption_tests {
             }
         }
 
-        fn pool_key(&self, repo_cache: &SessionRepoCacheAccess) -> String {
+        fn pool_key(&self, repo_cache: &SessionRepoCacheAccess, persona: Option<&str>) -> String {
             self.runtime
                 .warm_pools
                 .as_ref()
-                .and_then(|pools| pools.workload_key(&HarnessType::Codex, repo_cache))
+                .and_then(|pools| pools.workload_key(&HarnessType::Codex, repo_cache, persona))
                 .expect("configured warm pool")
                 .to_owned()
         }
 
         /// Insert a ready warm sandbox into the pool for `repo_cache`.
         async fn insert_ready(&self, repo_cache: &SessionRepoCacheAccess) -> String {
+            self.insert_ready_for(repo_cache, None).await
+        }
+
+        /// Insert a ready warm sandbox into the pool for `repo_cache` and
+        /// `persona`.
+        async fn insert_ready_for(
+            &self,
+            repo_cache: &SessionRepoCacheAccess,
+            persona: Option<&str>,
+        ) -> String {
             let sandbox_id = format!("warm-sbx-{}", uuid::Uuid::new_v4());
             self.store
-                .insert_ready_warm_sandbox(&sandbox_id, &self.pool_key(repo_cache))
+                .insert_ready_warm_sandbox(&sandbox_id, &self.pool_key(repo_cache, persona))
                 .await
                 .expect("insert warm sandbox");
             sandbox_id
@@ -10988,12 +11178,20 @@ mod adoption_tests {
         }
 
         async fn ensure(&self, desired: &SessionSandboxCapabilities) -> String {
+            self.ensure_with_persona(desired, None).await
+        }
+
+        async fn ensure_with_persona(
+            &self,
+            desired: &SessionSandboxCapabilities,
+            persona_id: Option<&str>,
+        ) -> String {
             let session = self.store.get_session(&self.thread_key).await.unwrap();
             self.runtime
                 .ensure_session_sandbox(EnsureSessionSandboxRequest {
                     thread_key: &self.thread_key,
                     harness_type: &HarnessType::Codex,
-                    persona_id: None,
+                    persona_id,
                     existing_sandbox_id: session.sandbox_id.as_deref(),
                     existing_sandbox_capabilities: session.sandbox_capabilities.as_ref(),
                     iron_control_principal: None,
@@ -11118,6 +11316,193 @@ mod adoption_tests {
         reset_test_store(&store).await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persona_session_claims_its_persona_pool() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let case = WarmPoolCase::with_pools(
+            &store,
+            &[
+                (SessionRepoCacheAccess::All, None),
+                (SessionRepoCacheAccess::All, Some("eng")),
+            ],
+        )
+        .await;
+        assert_ne!(
+            case.pool_key(&SessionRepoCacheAccess::All, None),
+            case.pool_key(&SessionRepoCacheAccess::All, Some("eng")),
+            "persona pools boot a distinct spec"
+        );
+        let plain_sandbox = case.insert_ready(&SessionRepoCacheAccess::All).await;
+        let eng_sandbox = case
+            .insert_ready_for(&SessionRepoCacheAccess::All, Some("eng"))
+            .await;
+
+        assert_eq!(
+            case.ensure_with_persona(&default_capabilities(), Some("eng"))
+                .await,
+            eng_sandbox
+        );
+
+        assert!(case.backend.created_specs().is_empty());
+        assert_eq!(case.warm_status(&plain_sandbox).await, "ready");
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persona_and_plain_sessions_do_not_share_pools() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let case =
+            WarmPoolCase::with_pools(&store, &[(SessionRepoCacheAccess::All, Some("eng"))]).await;
+        let eng_sandbox = case
+            .insert_ready_for(&SessionRepoCacheAccess::All, Some("eng"))
+            .await;
+
+        assert_eq!(case.ensure(&default_capabilities()).await, "mock-sbx");
+        assert_eq!(case.warm_status(&eng_sandbox).await, "ready");
+
+        let plain = WarmPoolCase::new(&store, &[SessionRepoCacheAccess::All]).await;
+        let plain_sandbox = plain.insert_ready(&SessionRepoCacheAccess::All).await;
+        assert_eq!(
+            plain
+                .ensure_with_persona(&default_capabilities(), Some("eng"))
+                .await,
+            "mock-sbx"
+        );
+        assert_eq!(plain.warm_status(&plain_sandbox).await, "ready");
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persona_warm_pools_reject_unusable_personas() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with_personas(&store, backend.clone());
+        let build = |runtime: &SessionRuntime,
+                     harness: HarnessType,
+                     repo_cache: SessionRepoCacheAccess,
+                     persona: &str| {
+            runtime
+                .build_warm_pools(
+                    vec![WarmPoolTarget {
+                        harness,
+                        repo_cache,
+                        persona: Some(persona.to_owned()),
+                        size: 1,
+                    }],
+                    WarmPoolConfig {
+                        replenish_interval: Duration::from_secs(60),
+                        bootstrap_iron_control_principal: "prn_test_bootstrap".to_owned(),
+                        max_running_sandboxes: None,
+                    },
+                )
+                .map(|pools| pools.is_some())
+        };
+
+        assert!(matches!(
+            build(
+                &runtime,
+                HarnessType::Codex,
+                SessionRepoCacheAccess::All,
+                "eng"
+            ),
+            Ok(true)
+        ));
+        assert!(
+            build(
+                &runtime,
+                HarnessType::Codex,
+                SessionRepoCacheAccess::All,
+                "missing"
+            )
+            .is_err(),
+            "unknown personas are rejected"
+        );
+        assert!(
+            build(
+                &runtime,
+                HarnessType::Codex,
+                SessionRepoCacheAccess::All,
+                "pinned"
+            )
+            .is_err(),
+            "a pool on a harness the persona does not run is rejected"
+        );
+        assert!(matches!(
+            build(
+                &runtime,
+                HarnessType::ClaudeCode,
+                SessionRepoCacheAccess::All,
+                "pinned"
+            ),
+            Ok(true)
+        ));
+        assert!(
+            build(
+                &runtime,
+                HarnessType::Codex,
+                SessionRepoCacheAccess::Public,
+                "eng"
+            )
+            .is_err(),
+            "personas outside public source roots cannot back public pools"
+        );
+        let without_registry = runtime_with(&store, backend);
+        assert!(
+            build(
+                &without_registry,
+                HarnessType::Codex,
+                SessionRepoCacheAccess::All,
+                "eng"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn persona_warm_pool_spec_carries_the_persona() {
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let workload = SandboxWorkloadMode::codex_app_server(
+            "centaur-agent:latest",
+            Vec::new(),
+            HarnessType::Codex,
+        );
+        let runtime = SandboxRuntime::backend_with_workload(backend, workload);
+        let persona = warm_pool_case_personas()
+            .context_for_access("eng", false, &SessionRepoCacheAccess::All)
+            .unwrap();
+        let spec = warm_pool_spec(
+            &runtime.warm_spec_factory.expect("warm spec factory"),
+            &WarmPoolTarget {
+                harness: HarnessType::Codex,
+                repo_cache: SessionRepoCacheAccess::All,
+                persona: Some("eng".to_owned()),
+                size: 1,
+            },
+            Some(&persona),
+        );
+
+        assert_eq!(crate::tests::env_value(&spec, "AGENT_PERSONA"), Some("eng"));
+        assert_eq!(
+            crate::tests::env_value(&spec, "CENTAUR_PERSONA_PROMPT_HASH"),
+            Some("sha256:eng")
+        );
+        assert_eq!(crate::tests::env_value(&spec, "CENTAUR_THREAD_KEY"), None);
+        assert!(
+            spec.files
+                .iter()
+                .any(|file| file.target_path.ends_with("/AGENTS_PERSONA.md"))
+        );
+    }
+
     #[test]
     fn warm_pool_specs_boot_without_observability() {
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
@@ -11132,8 +11517,10 @@ mod adoption_tests {
             &WarmPoolTarget {
                 harness: HarnessType::ClaudeCode,
                 repo_cache: SessionRepoCacheAccess::Public,
+                persona: None,
                 size: 1,
             },
+            None,
         );
 
         assert_eq!(spec.args, vec!["harness-server", "claude-code"]);
@@ -12960,6 +13347,72 @@ mod adoption_tests {
             .fail_execution_if_active(&execution_id, "test cleanup")
             .await
             .expect("terminalize execution");
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_error_before_a_sandbox_fails_the_execution_at_once() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:dispatch-error-{}", uuid::Uuid::new_v4())).unwrap();
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = SessionRuntime::new(
+            store.clone(),
+            SandboxRuntime::backend(backend.clone(), SandboxSpec::new("mock")),
+            UnreachablePolicyRegistrar,
+        );
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        store
+            .set_iron_control_principal(&thread_key, Some("prn_unreachable"))
+            .await
+            .expect("set principal");
+
+        // The driver claims the execution and then cannot resolve the
+        // principal's sandbox policy. The turn must fail with that error now,
+        // not stay running until the orphan scan fails it as a restart orphan.
+        let execution = runtime
+            .enqueue_session_execution(
+                &thread_key,
+                ExecuteSessionInput {
+                    idempotency_key: None,
+                    metadata: None,
+                    input_lines: vec![
+                        r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#
+                            .to_owned(),
+                    ],
+                    idle_timeout_ms: None,
+                    max_duration_ms: None,
+                },
+            )
+            .await
+            .expect("enqueue execution");
+        wait_for_event(&store, &thread_key, "session.execution_failed").await;
+        let failed = store
+            .latest_execution_for_thread(&thread_key)
+            .await
+            .expect("load execution")
+            .expect("execution exists");
+        assert_eq!(failed.execution_id, execution.execution_id);
+        assert_eq!(failed.status, ExecutionStatus::Failed);
+        let error = failed.error.expect("failure recorded");
+        assert!(error.contains("503"), "unexpected error: {error}");
+        assert_eq!(
+            backend.opens(),
+            0,
+            "no sandbox is opened for a failed dispatch"
+        );
         reset_test_store(&store).await;
     }
 }

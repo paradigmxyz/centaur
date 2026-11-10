@@ -2,6 +2,8 @@
 
 from dotenv import load_dotenv
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
 import json
@@ -13,7 +15,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-app = typer.Typer(name="ashby", help="Ashby ATS CLI for AI agents")
+app = PipeSafeTyper(name="ashby", help="Ashby ATS CLI for AI agents")
 
 
 @app.command("health")

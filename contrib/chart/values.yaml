@@ -585,6 +585,10 @@ experimentalCompanyContext:
   slackHistoryDays: 90
   # Per-conversation overrides, e.g. {C0123456789: 3650}.
   slackChannelHistoryDays: {}
+  # Days of recent Slack history each sync rereads, at most 36500. Edits and
+  # new replies to threads started within them are picked up; replies to
+  # older threads are not.
+  slackThreadRefreshDays: 7
   # Rollout limits. An empty list syncs every user or conversation. Narrowing a
   # list removes indexed data that only the excluded users or conversations kept.
   syncLimits:
@@ -650,13 +654,21 @@ apiRs:
   # Warm pool of default-harness sandboxes with full repo-cache access.
   # Ignored when sandboxWarmPools is set.
   sandboxWarmPoolSize: 3
-  # Warm pools per harness and repo-cache access, so sessions that differ in
-  # either still get a ready sandbox. Observability is granted at claim time
-  # and does not split pools. Example:
+  # Warm pools per harness, repo-cache access, and optional persona, so
+  # sessions that differ in any of them still get a ready sandbox. A pool
+  # without a persona serves only sessions without one, so with a default
+  # persona configured, add a pool for it. A persona pool must name a
+  # deployed persona allowed for its repoCache and, if the persona pins a
+  # harness, use that harness. Observability is granted at claim time and
+  # does not split pools. Example:
   # sandboxWarmPools:
   #   - harness: codex
   #     repoCache: all      # all | public | none
   #     size: 3
+  #   - harness: codex
+  #     repoCache: all
+  #     persona: eng
+  #     size: 2
   #   - harness: claudecode
   #     repoCache: public
   #     size: 1
@@ -848,6 +860,26 @@ slackbotv2:
   # Include the Codex service tier when a response metadata footer is rendered.
   # This does not cause the footer to appear on additional responses.
   responseServiceTierEnabled: false
+  # Generative UI cards built with json-render on the Chat SDK card model.
+  # When enabled, a final answer may carry one fenced ```json-render block
+  # (a flat spec or the JSONL patches the catalog prompt describes); slackbotv2
+  # removes it from the streamed markdown and posts the card as a second
+  # message in the thread. A rejected spec stays in the answer as a code block.
+  # Disabled renders every answer exactly as before, block included. Only
+  # LinkButton is available: card buttons that trigger actions are not routed.
+  # slackbotv2 tells the agent about the card on the first Slack turn it
+  # executes in a thread, and again after a harness restart (see
+  # services/slackbotv2/GENERATIVE_UI.md); no persona change is needed and
+  # other chat surfaces never see the note.
+  generativeUi:
+    enabled: false
+    # Per-message limits toCard enforces instead of letting Slack degrade the
+    # content (a second table would otherwise become a code block). Keys are
+    # the @json-render/chat CardLimits fields: tables, charts, fields,
+    # tableRows, tableColumns, chartLabel, chartTitle, chartSeries, chartPoints.
+    limits:
+      tables: 1
+      charts: 2
   # Public/local MCP endpoint shown in MCP SSO setup messages. The default
   # assumes users connect through `kubectl port-forward ... 3000:8080`.
   mcpPublicUrl: "http://localhost:3000"

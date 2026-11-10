@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  buildProactiveMuteBlock,
   buildSlackResponseContextBlock,
   defaultModelForHarness,
   defaultReasoningForHarness,
@@ -8,6 +9,8 @@ import {
   harnessDisplayName,
   modelDisplayName,
   personaFallbackNotice,
+  PROACTIVE_MUTED_NOTICE,
+  proactiveMutedBlocks,
   reasoningForModel
 } from '../src/response-context'
 import claudeSettings from '../../../harness/claude/settings.json'
@@ -100,7 +103,7 @@ describe('reasoningForModel', () => {
 
   test('forwards Claude Code effort levels and rejects Codex-only efforts', () => {
     for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
-      for (const model of ['claude-opus-5-5', 'claude-fable-5-1', 'claude-sonnet-5-5', 'claude-haiku-5-5']) {
+      for (const model of ['claude-opus-5-5', 'claude-fable-5-2', 'claude-fable-5-1', 'claude-sonnet-5-5', 'claude-haiku-5-5']) {
         expect(reasoningForModel('claudecode', model, effort)).toBe(effort)
       }
     }
@@ -215,6 +218,7 @@ describe('modelDisplayName', () => {
     expect(modelDisplayName('claude-opus-5-5')).toBe('Opus 5.5')
     expect(modelDisplayName('claude-fable-5')).toBe('Fable 5')
     expect(modelDisplayName('claude-fable-5-1')).toBe('Fable 5.1')
+    expect(modelDisplayName('claude-fable-5-2')).toBe('Fable 5.2')
     expect(modelDisplayName('claude-sonnet-5-5')).toBe('Sonnet 5.5')
     expect(modelDisplayName('claude-haiku-5-5')).toBe('Haiku 5.5')
     expect(modelDisplayName('gpt-6.1-sol')).toBe('Sol 6.1')
@@ -332,4 +336,15 @@ test('personaFallbackNotice describes the resolved fallback', () => {
     `Persona "honk" isn't available. Continuing without a persona.`
   )
   expect(personaFallbackNotice(undefined, 'eng')).toBeUndefined()
+})
+
+test('proactiveMutedBlocks swaps the mute button for a notice', () => {
+  const answer = { type: 'section', text: { type: 'mrkdwn', text: 'Answer' } }
+  const footer = { type: 'context', elements: [{ type: 'mrkdwn', text: 'GPT-5' }] }
+  expect(proactiveMutedBlocks([answer, footer, buildProactiveMuteBlock()])).toEqual([
+    answer,
+    footer,
+    { type: 'context', elements: [{ type: 'mrkdwn', text: PROACTIVE_MUTED_NOTICE }] }
+  ])
+  expect(proactiveMutedBlocks([answer, footer])).toBeUndefined()
 })

@@ -1797,6 +1797,7 @@ fn secret_file_projection(secret_name: &str, key: &str, path: &str) -> VolumePro
                 key: key.to_owned(),
                 path: path.to_owned(),
                 mode: None,
+                user: None,
             }]),
             ..Default::default()
         }),

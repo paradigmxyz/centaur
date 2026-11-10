@@ -2,6 +2,8 @@
 
 from dotenv import load_dotenv
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
 import json
@@ -12,7 +14,7 @@ from rich.table import Table
 
 from .client import CoinDeskClient
 
-app = typer.Typer(name="coindesk", help="CoinDesk CLI for crypto news")
+app = PipeSafeTyper(name="coindesk", help="CoinDesk CLI for crypto news")
 
 
 @app.command("health")

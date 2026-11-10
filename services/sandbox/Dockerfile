@@ -97,7 +97,7 @@ ARG CLAUDE_CODE_VERSION=2.1.312
 # Bumping CODEX_VERSION: refresh services/sandbox/codex-base-instructions.md
 # from openai/codex rust-v<version>/codex-rs/models-manager/prompt.md.
 ARG CODEX_VERSION=0.165.0
-ARG PI_CODING_AGENT_VERSION=1.4.0
+ARG PI_CODING_AGENT_VERSION=1.5.0
 # Hermes Agent (NousResearch) — pinned by commit SHA per the dependency policy.
 ARG HERMES_AGENT_REF=e5e2fb8b2dbe1cae85aa5ad6ce45aef376016e43
 ARG NUSHELL_VERSION=0.116.1
@@ -343,6 +343,9 @@ RUN rm -f /etc/sudoers.d/agent
 RUN install -d -m 0755 /etc/centaur /opt/centaur \
     && install -d -o 1001 -g 1001 -m 0700 /tmp/downloads
 COPY --link centaur_sdk/ /opt/centaur/centaur_sdk/
+# Tool runs write bytecode (see install_tool_shims.py tool_env), but the SDK is
+# root-owned, so compile it here rather than on every tool call.
+RUN python3 -m compileall -q /opt/centaur/centaur_sdk
 COPY --link --chmod=0755 services/sandbox/git-hooks/ /opt/centaur/git-hooks/
 COPY --link --chown=1001:1001 tools/ /opt/centaur/tools/
 COPY --link --chmod=644 services/sandbox/codex-auth.json /etc/centaur/codex-auth.default.json

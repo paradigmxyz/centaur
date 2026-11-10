@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import sys
 import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS_DIR = ROOT / "tools"
+PLAIN_TYPER_APP = re.compile(r"^app = typer\.Typer\(", re.MULTILINE)
 
 
 def _is_ignored(path: Path) -> bool:
@@ -60,6 +62,11 @@ def validate() -> list[str]:
             errors.append(f"{cli_file.relative_to(ROOT)}: missing owning pyproject.toml")
             continue
         cli_projects.setdefault(pyproject, []).append(cli_file)
+        if PLAIN_TYPER_APP.search(cli_file.read_text()):
+            errors.append(
+                f"{cli_file.relative_to(ROOT)}: define `app` with "
+                "centaur_sdk.cli.PipeSafeTyper, not typer.Typer"
+            )
 
     for pyproject, cli_files in sorted(cli_projects.items()):
         try:

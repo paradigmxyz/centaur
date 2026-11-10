@@ -2,8 +2,11 @@
 
 from dotenv import load_dotenv
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
+import json
 import queue
 import shutil
 import signal
@@ -14,14 +17,13 @@ import time
 from pathlib import Path
 from typing import Optional
 
-import json
 import typer
 from rich.console import Console
 from rich.panel import Panel
 
 from .client import DEFAULT_MODEL, END_PHRASE, IS_MACOS, TranscriberClient
 
-app = typer.Typer(help="Local-first voice transcription with live streaming")
+app = PipeSafeTyper(help="Local-first voice transcription with live streaming")
 
 
 @app.command("health")

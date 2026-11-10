@@ -154,6 +154,7 @@ async fn main() -> Result<()> {
                 .iter()
                 .map(|(id, days)| (id.clone(), chrono::Duration::days(*days as i64)))
                 .collect(),
+            thread_refresh: chrono::Duration::days(config.slack_thread_refresh_days as i64),
             bot_token: config.slack_bot_token.clone(),
         },
     )?;

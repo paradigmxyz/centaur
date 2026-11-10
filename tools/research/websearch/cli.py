@@ -10,11 +10,13 @@ from typing import Annotated
 import typer
 from dotenv import load_dotenv
 
+from centaur_sdk.cli import PipeSafeTyper
+
 from .client import _client
 
 load_dotenv()
 
-app = typer.Typer(name="websearch", help="Web search via Parallel, Exa, or Tako")
+app = PipeSafeTyper(name="websearch", help="Web search via Parallel, Exa, or Tako")
 
 
 def _write(text: str) -> None:

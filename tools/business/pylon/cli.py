@@ -5,13 +5,15 @@ import sys
 
 from dotenv import load_dotenv
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-app = typer.Typer(name="pylon", help="Pylon CLI for AI agents")
+app = PipeSafeTyper(name="pylon", help="Pylon CLI for AI agents")
 
 
 @app.command("health")

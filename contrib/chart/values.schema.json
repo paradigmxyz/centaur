@@ -473,6 +473,7 @@
                 "enum": ["codex", "amp", "claudecode", "nanocodex", "hermes", "pi", "omp"]
               },
               "repoCache": { "type": "string", "enum": ["all", "public", "none"] },
+              "persona": { "type": "string", "minLength": 1 },
               "size": { "type": "integer", "minimum": 0 }
             }
           }
@@ -595,6 +596,28 @@
           "enum": ["first", "always", "never"]
         },
         "responseServiceTierEnabled": { "type": "boolean" },
+        "generativeUi": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "limits": {
+              "type": "object",
+              "properties": {
+                "tables": { "type": "integer", "minimum": 1 },
+                "charts": { "type": "integer", "minimum": 1 },
+                "fields": { "type": "integer", "minimum": 1 },
+                "tableRows": { "type": "integer", "minimum": 1 },
+                "tableColumns": { "type": "integer", "minimum": 1 },
+                "chartLabel": { "type": "integer", "minimum": 1 },
+                "chartTitle": { "type": "integer", "minimum": 1 },
+                "chartSeries": { "type": "integer", "minimum": 1 },
+                "chartPoints": { "type": "integer", "minimum": 1 }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
         "proactivity": {
           "type": "object",
           "properties": {

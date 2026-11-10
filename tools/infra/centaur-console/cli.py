@@ -8,9 +8,11 @@ import typer
 from dotenv import load_dotenv
 from rich.console import Console
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
-app = typer.Typer(
+app = PipeSafeTyper(
     name="centaur-console",
     help="Inspect Console permissions and manage the current user's or channel's scheduled tasks",
 )

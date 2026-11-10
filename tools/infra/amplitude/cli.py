@@ -6,7 +6,9 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-app = typer.Typer(name="amplitude", help="Amplitude product analytics (Dashboard REST + Taxonomy)")
+from centaur_sdk.cli import PipeSafeTyper
+
+app = PipeSafeTyper(name="amplitude", help="Amplitude product analytics (Dashboard REST + Taxonomy)")
 
 
 @app.command("health")

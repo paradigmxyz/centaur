@@ -77,7 +77,7 @@ const PROVIDER_FLAGS: Record<string, ProviderMapping> = {
 // Claude model aliases, usable both as bare flags (--opus) and as --model
 // values (--model opus). Bare-flag form also implies the claude-code harness.
 const CLAUDE_MODEL_ALIASES: Record<string, string> = {
-  fable: 'claude-fable-5-1',
+  fable: 'claude-fable-5-2',
   haiku: 'claude-haiku-5-5',
   opus: 'claude-opus-5-5',
   sonnet: 'claude-sonnet-5-5'
@@ -107,6 +107,7 @@ const STRATEGY_REASONING_EFFORTS = new Set([
 const STRATEGY_MODEL_HARNESSES: Record<string, string> = {
   'claude-fable-5': 'claudecode',
   'claude-fable-5-1': 'claudecode',
+  'claude-fable-5-2': 'claudecode',
   'claude-haiku-4-5': 'claudecode',
   'claude-haiku-5-5': 'claudecode',
   'claude-opus-4-7': 'claudecode',

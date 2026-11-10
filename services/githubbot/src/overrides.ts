@@ -38,7 +38,7 @@ const HARNESS_FLAGS: Record<string, string> = {
 // Claude model aliases, usable both as bare flags (--opus) and as --model
 // values (--model opus). Bare-flag form also implies the claude-code harness.
 const CLAUDE_MODEL_ALIASES: Record<string, string> = {
-  fable: "claude-fable-5-1",
+  fable: "claude-fable-5-2",
   haiku: "claude-haiku-5-5",
   opus: "claude-opus-5-5",
   sonnet: "claude-sonnet-5-5",

@@ -75,6 +75,19 @@ export function renderSlackDisplayText(input: { raw: unknown; text: string }): S
   }
 }
 
+/**
+ * The user opted out of rich output for this turn: no structured Slack blocks
+ * and no generative UI card, in the render and in the note sent to the agent.
+ */
+export function isPlainTextOnlyRequest(text: string): boolean {
+  const normalized = text.toLowerCase()
+  return (
+    /\bplain\s+text\s+only\b/.test(normalized)
+    || /\bno\s+interactive\s+blocks?\b/.test(normalized)
+    || /\bno\s+dashboards?\b/.test(normalized)
+  )
+}
+
 export function slackMessagePromptText(message: {
   displayText?: string
   displayTextSource?: SlackDisplayTextSource

@@ -40,10 +40,6 @@ const MESSAGES_PAGE_SIZE: &str = "200";
 const USERS_PAGE_SIZE: &str = "200";
 /// Slack recommends at most 200 members per `conversations.members` page.
 const MEMBERS_PAGE_SIZE: &str = "200";
-/// Each history sync rereads at least this much recent history, so edits and
-/// new replies to threads started within it are picked up. Replies to older
-/// threads are not.
-const THREAD_REFRESH_WINDOW: chrono::Duration = chrono::Duration::hours(72);
 /// A history sync that has not stored a page for this long no longer holds
 /// its conversation.
 const HISTORY_SYNC_LEASE: &str = "1 hour";
@@ -63,6 +59,9 @@ pub struct SlackTaskState {
     pub history: chrono::Duration,
     /// Per-conversation overrides of `history`.
     pub channel_history: HashMap<String, chrono::Duration>,
+    /// Recent history each sync rereads, so edits and new replies to threads
+    /// started within it are picked up. Replies to older threads are not.
+    pub thread_refresh: chrono::Duration,
     /// The app's bot token, which lists workspace users.
     pub bot_token: String,
 }
@@ -328,6 +327,7 @@ async fn sync_conversation(
                         synced_until,
                         Utc::now(),
                         state.history(conversation_id),
+                        state.thread_refresh,
                     )
                 });
             ctx.complete_step(handle, window).await?
@@ -646,10 +646,11 @@ fn history_window(
     synced_until: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
     history: chrono::Duration,
+    thread_refresh: chrono::Duration,
 ) -> HistoryWindow {
     let start = (now - history).max(DateTime::UNIX_EPOCH);
     let oldest = match (synced_from, synced_until) {
-        (Some(from), Some(until)) if from <= start => until.min(now - THREAD_REFRESH_WINDOW),
+        (Some(from), Some(until)) if from <= start => until.min(now - thread_refresh),
         _ => start,
     };
     HistoryWindow { oldest, until: now }
@@ -1366,7 +1367,9 @@ mod tests {
     fn history_window_backfills_unsynced_history_then_rereads_recent_history() {
         let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
         let days = chrono::Duration::days;
-        let window = |from, until, history| history_window(from, until, now, history).oldest;
+        let refresh = days(7);
+        let window =
+            |from, until, history| history_window(from, until, now, history, refresh).oldest;
 
         // A conversation never synced reads its whole history.
         assert_eq!(window(None, None, days(90)), now - days(90));
@@ -1374,7 +1377,12 @@ mod tests {
         let recent = Some(now - chrono::Duration::hours(1));
         assert_eq!(
             window(Some(now - days(90)), recent, days(90)),
-            now - THREAD_REFRESH_WINDOW
+            now - refresh
+        );
+        // The thread refresh window is configurable.
+        assert_eq!(
+            history_window(Some(now - days(90)), recent, now, days(90), days(14)).oldest,
+            now - days(14)
         );
         // An older sync is read from so no messages are skipped.
         let stale = Some(now - days(10));
@@ -1389,7 +1397,10 @@ mod tests {
         );
         // History never starts before the Unix epoch.
         assert_eq!(window(None, None, days(36_500)), DateTime::UNIX_EPOCH);
-        assert_eq!(history_window(None, None, now, days(90)).until, now);
+        assert_eq!(
+            history_window(None, None, now, days(90), refresh).until,
+            now
+        );
     }
 
     fn user(id: &str, real_name: &str) -> User {

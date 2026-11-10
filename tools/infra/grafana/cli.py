@@ -1,15 +1,19 @@
 """CLI for Grafana API."""
 
 import json
+import sys
+from pathlib import Path
 
 import typer
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
-app = typer.Typer(name="grafana", help="Grafana CLI for dashboards, metrics, logs, and alerts")
+app = PipeSafeTyper(name="grafana", help="Grafana CLI for dashboards, metrics, logs, and alerts")
 console = Console()
 
 
@@ -79,6 +83,65 @@ def get_dashboard(
         console.print(f"  Panels ({len(panels)}):")
         for p in panels:
             console.print(f"    - {p.get('title', '(untitled)')} [{p.get('type', '')}]")
+
+
+@app.command("save")
+def save_dashboard(
+    file: str = typer.Argument(
+        ...,
+        help="Dashboard JSON file ('-' for stdin). Accepts `grafana get <uid> --json` output or a bare dashboard model.",
+    ),
+    folder_uid: str = typer.Option(
+        None, "--folder-uid", "-f", help="Target folder UID (default: keep current)"
+    ),
+    message: str = typer.Option(None, "--message", "-m", help="Version-history message"),
+    overwrite: bool = typer.Option(
+        False, "--overwrite", help="Save even if the dashboard changed since it was fetched"
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """Create or update a dashboard from JSON.
+
+    Typical edit flow: `grafana get <uid> --json > d.json`, edit d.json,
+    then `grafana save d.json -m "what changed"`. Remove dashboard.uid and
+    dashboard.id to create a new dashboard instead.
+    """
+    raw = sys.stdin.read() if file == "-" else Path(file).read_text()
+    try:
+        dashboard = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        console.print(f"[red]Invalid JSON:[/] {exc}")
+        raise typer.Exit(1) from exc
+
+    client = get_client()
+    result = client.save_dashboard(
+        dashboard, folder_uid=folder_uid, message=message, overwrite=overwrite
+    )
+
+    if json_output:
+        print(json.dumps(result, indent=2))
+        return
+
+    console.print(f"[green]Saved[/] {result.get('uid', '')} (version {result.get('version', '')})")
+    if result.get("url"):
+        console.print(f"  URL: {result['url']}")
+
+
+@app.command("delete")
+def delete_dashboard(
+    uid: str = typer.Argument(..., help="Dashboard UID"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Confirm deletion"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """Delete a dashboard by UID (requires --yes)."""
+    if not yes:
+        console.print("[red]Refusing to delete without --yes[/]")
+        raise typer.Exit(1)
+    result = get_client().delete_dashboard(uid)
+    if json_output:
+        print(json.dumps(result, indent=2))
+        return
+    console.print(f"[green]Deleted[/] {uid}: {result.get('message', '')}")
 
 
 @app.command("datasources")

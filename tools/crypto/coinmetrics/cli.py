@@ -2,6 +2,8 @@
 
 from dotenv import load_dotenv
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
 import json
@@ -10,7 +12,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-app = typer.Typer(name="coinmetrics", help="Coin Metrics CLI for crypto market and on-chain data")
+app = PipeSafeTyper(name="coinmetrics", help="Coin Metrics CLI for crypto market and on-chain data")
 
 
 @app.command("health")

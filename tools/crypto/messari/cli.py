@@ -7,11 +7,13 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
+from centaur_sdk.cli import PipeSafeTyper
+
 from .client import MessariClient
 
 load_dotenv()
 
-app = typer.Typer(name="messari", help="Messari CLI for crypto asset data and analytics")
+app = PipeSafeTyper(name="messari", help="Messari CLI for crypto asset data and analytics")
 
 
 @app.command("health")

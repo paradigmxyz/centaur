@@ -4,13 +4,15 @@ import json
 
 from dotenv import load_dotenv
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-app = typer.Typer(name="standard-metrics", help="Standard Metrics CLI for portfolio company data")
+app = PipeSafeTyper(name="standard-metrics", help="Standard Metrics CLI for portfolio company data")
 
 
 @app.command("health")

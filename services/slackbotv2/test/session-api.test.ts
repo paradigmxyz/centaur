@@ -13,6 +13,7 @@ import {
   serializeAttachment,
   serializeMessage
 } from '../src/session-api'
+import { generativeUiTurnNote } from '../src/generative-ui'
 import { renderSlackDisplayText } from '../src/slack-display-text'
 import type {
   ForwardSessionInput,
@@ -623,6 +624,42 @@ describe('Slack attachment serialization', () => {
 
     expect(Date.now() - startedAt).toBeLessThan(500)
     expect(attachment.fetchError).toBe('fetch Slack attachment timed out after 25ms')
+  })
+})
+
+describe('forwardToSessionApi generative UI note', () => {
+  const cardNotes = (requests: RecordedRequest[]) =>
+    lineContent(executeLine(requests)).filter(part =>
+      textPartIncludes(part, '# Slack card (generative UI)')
+    )
+
+  test('puts the note right before the user text when the turn carries one', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(
+      { ...options(fetchFn), generativeUi: { enabled: true, limits: { tables: 1, charts: 2 } } },
+      forwardInput(apiMessage('summarize the close'), {
+        generativeUiNote: generativeUiTurnNote({ tables: 1, charts: 2 })
+      })
+    )
+    const notes = cardNotes(requests)
+    expect(notes).toHaveLength(1)
+    const text = String(notes[0]!.text)
+    expect(text).toContain('tagged json-render')
+    expect(text).toContain('- Table:')
+    expect(text).toContain('tables: 1, charts: 2')
+    const content = lineContent(executeLine(requests))
+    const noteIndex = content.findIndex(part => textPartIncludes(part, '# Slack card (generative UI)'))
+    expect(noteIndex).toBe(content.length - 2)
+    expect(textPartIncludes(content[content.length - 1]!, 'summarize the close')).toBe(true)
+  })
+
+  test('sends no note when the turn does not carry one, even with the flag on', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(
+      { ...options(fetchFn), generativeUi: { enabled: true } },
+      forwardInput(apiMessage('summarize the close'))
+    )
+    expect(cardNotes(requests)).toHaveLength(0)
   })
 })
 

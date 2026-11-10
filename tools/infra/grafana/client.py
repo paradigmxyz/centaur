@@ -56,7 +56,7 @@ def _normalize_thread_key_input(value: str) -> str:
 class GrafanaClient:
     """Client for the Grafana HTTP API.
 
-    Supports dashboard search, VictoriaMetrics/VictoriaLogs datasource proxy queries,
+    Supports dashboard search/create/update/delete, VictoriaMetrics/VictoriaLogs datasource proxy queries,
     alert rules, and annotations. Authenticates via service-account token
     (GRAFANA_API_KEY) or basic auth (GRAFANA_USER / GRAFANA_PASSWORD).
     """
@@ -168,7 +168,49 @@ class GrafanaClient:
 
     def get_dashboard(self, uid: str) -> dict:
         """Get a dashboard by UID. Returns full dashboard JSON + meta."""
-        return self._request("GET", f"/api/dashboards/uid/{uid}")
+        return self._request("GET", f"/api/dashboards/uid/{quote(uid, safe='')}")
+
+    def save_dashboard(
+        self,
+        dashboard: dict,
+        folder_uid: str | None = None,
+        message: str | None = None,
+        overwrite: bool = False,
+    ) -> dict:
+        """Create or update a dashboard.
+
+        Accepts either the bare dashboard model or the ``{"dashboard": ..., "meta": ...}``
+        envelope returned by :meth:`get_dashboard`, so a fetched dashboard can be
+        edited and saved back directly. The dashboard's ``version`` is sent as-is,
+        so Grafana rejects the save (412) if someone changed it in the meantime,
+        unless ``overwrite`` is set. Omit ``uid``/``id`` to create a new dashboard.
+
+        Args:
+            dashboard: Dashboard model, or a get_dashboard() envelope.
+            folder_uid: Target folder UID. Defaults to the envelope's meta.folderUid.
+            message: Version-history commit message.
+            overwrite: Overwrite regardless of version/title conflicts.
+        """
+        if not isinstance(dashboard, dict):
+            raise ValueError("dashboard must be a JSON object")
+        meta: dict = {}
+        if isinstance(dashboard.get("dashboard"), dict):
+            meta = dashboard.get("meta") or {}
+            dashboard = dashboard["dashboard"]
+        if not dashboard.get("title"):
+            raise ValueError("dashboard.title is required")
+
+        payload: dict[str, Any] = {"dashboard": dashboard, "overwrite": overwrite}
+        folder = folder_uid if folder_uid is not None else meta.get("folderUid")
+        if folder:
+            payload["folderUid"] = folder
+        if message:
+            payload["message"] = message
+        return self._request("POST", "/api/dashboards/db", json_data=payload)
+
+    def delete_dashboard(self, uid: str) -> dict:
+        """Delete a dashboard by UID."""
+        return self._request("DELETE", f"/api/dashboards/uid/{quote(uid, safe='')}")
 
     # -- Datasources ---------------------------------------------------------
 

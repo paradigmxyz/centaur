@@ -4,11 +4,14 @@ import json
 import sys
 from datetime import datetime
 
+import httpx
 import typer
 from rich.console import Console
 from rich.table import Table
 
-app = typer.Typer(name="notion", help="Notion CLI for AI agents")
+from centaur_sdk.cli import PipeSafeTyper
+
+app = PipeSafeTyper(name="notion", help="Notion CLI for AI agents")
 
 
 @app.command("health")
@@ -66,14 +69,10 @@ def format_date(iso_str: str | None) -> str:
 
 def extract_id(url_or_id: str) -> str:
     """Extract Notion ID from URL or return as-is."""
-    if "notion.so" in url_or_id or "notion.site" in url_or_id:
-        parts = url_or_id.rstrip("/").split("/")
-        last = parts[-1]
-        if "-" in last:
-            last = last.split("-")[-1]
-        if "?" in last:
-            last = last.split("?")[0]
-        return last
+    if any(host in url_or_id for host in ("notion.so", "notion.site", "notion.com")):
+        path = url_or_id.split("?")[0].split("#")[0]
+        last = path.rstrip("/").split("/")[-1]
+        return last.split("-")[-1]
     return url_or_id.replace("-", "")
 
 
@@ -418,6 +417,54 @@ def create_page(
 
     result = client.create_page(parent, properties, children=children if children else None)
     console.print(f"[green]Created:[/] [bold]{client.extract_title(result)}[/]")
+    console.print(f"ID: {result.get('id')}")
+    console.print(f"URL: {result.get('url')}")
+
+
+@app.command("update-page")
+def update_page(
+    page_id: str = typer.Argument(..., help="Page ID or URL"),
+    properties_json: str = typer.Option(
+        ..., "--properties", help="JSON object of property values, keyed by property name"
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Output the updated page as JSON"),
+):
+    """Set properties on a page, such as the fields of a database row.
+
+    Values use Notion's page property format; `notion page PAGE_ID --json` shows
+    each property's type and current value. Unnamed properties are left unchanged.
+    Clear a value with null (select, date, url, number) or [] (multi_select,
+    people, relation, rich_text).
+
+    Examples:
+        notion update-page PAGE_ID --properties '{"Priority": {"select": {"name": "P0"}}}'
+        notion update-page PAGE_ID --properties '{"Status": {"status": {"name": "Done"}}}'
+        notion update-page PAGE_ID --properties '{"Due": {"date": {"start": "2026-01-31"}}}'
+        notion update-page PAGE_ID --properties '{"Tags": {"multi_select": [{"name": "api"}]}}'
+        notion update-page PAGE_ID --properties '{"Owner": {"people": [{"id": "USER_ID"}]}}'
+        notion update-page PAGE_ID --properties '{"Done": {"checkbox": true}, "Due": {"date": null}}'
+    """
+    try:
+        properties = json.loads(properties_json)
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"invalid JSON: {exc}", param_hint="--properties") from None
+    if not isinstance(properties, dict) or not properties:
+        raise typer.BadParameter(
+            "expected a non-empty JSON object keyed by property name", param_hint="--properties"
+        )
+
+    client = get_client()
+    try:
+        result = client.update_page(extract_id(page_id), properties=properties)
+    except httpx.HTTPStatusError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
+
+    if json_output:
+        print(json.dumps(result, indent=2, default=str), file=sys.stdout)
+        raise typer.Exit()
+
+    console.print(f"[green]Updated:[/] [bold]{client.extract_title(result)}[/]")
     console.print(f"ID: {result.get('id')}")
     console.print(f"URL: {result.get('url')}")
 

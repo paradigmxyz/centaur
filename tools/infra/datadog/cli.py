@@ -5,9 +5,11 @@ import json
 import typer
 from dotenv import load_dotenv
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
-app = typer.Typer(
+app = PipeSafeTyper(
     name="datadog",
     help="Datadog CLI — logs, metrics, monitors, hosts, and dashboards (read-only)",
     no_args_is_help=True,

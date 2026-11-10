@@ -283,6 +283,9 @@ dump_logs() {
     | grep -E '"level":"(WARN|ERROR)"' | tail -50 || true
   kubectl -n "$MODEL_NAMESPACE" logs deploy/model-server --tail=100 || true
   kubectl -n "$SLACK_NAMESPACE" logs deploy/fake-slack --tail=-1 | grep -v '_delivered"' | tail -100 || true
+  # In-cluster lookups (Postgres, the fakes, the model server) all go through
+  # CoreDNS; its errors plugin logs failed upstream and plugin lookups.
+  kubectl -n kube-system logs -l k8s-app=kube-dns --prefix --tail=100 || true
 
   mkdir -p "$LOG_DIR"
   local component
@@ -292,6 +295,7 @@ dump_logs() {
   done
   kubectl -n "$SLACK_NAMESPACE" logs deploy/fake-slack --tail=-1 > "$LOG_DIR/fake-slack.log" 2>&1 || true
   kubectl -n "$MODEL_NAMESPACE" logs deploy/model-server --tail=-1 > "$LOG_DIR/model-server.log" 2>&1 || true
+  kubectl -n kube-system logs -l k8s-app=kube-dns --prefix --tail=-1 > "$LOG_DIR/coredns.log" 2>&1 || true
   echo "full logs: $LOG_DIR"
 }
 

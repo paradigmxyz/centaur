@@ -9,10 +9,11 @@ from rich.console import Console
 from rich.table import Table
 
 from .client import DEFAULT_MODEL, MODELS
+from centaur_sdk.cli import PipeSafeTyper
 
 load_dotenv()
 
-app = typer.Typer(name="nano-banana", help="Nano Banana CLI for Google Gemini image generation")
+app = PipeSafeTyper(name="nano-banana", help="Nano Banana CLI for Google Gemini image generation")
 
 
 @app.command("health")
