@@ -14,6 +14,12 @@ secrets:
 # Sandboxes run the tools baked into the image; nothing is cloned from GitHub.
 toolServer:
   enabled: false
+# Install only the baked-in tool CLIs a scenario runs: remote-ssh, for
+# e2e/tests/ssh.test.ts.
+sandbox:
+  extraEnv:
+    TOOLS_PATH: /opt/centaur/tools
+    TOOL_ALLOWLIST: ssh
 repoCache:
   enabled: false
 
@@ -28,11 +34,19 @@ apiRs:
     # Workflows the tests write or remove take effect within a second or two.
     WORKFLOW_RECONCILE_INTERVAL_SECS: "1"
     WORKFLOW_REAP_REMOVED_AFTER_TICKS: "1"
+    # Paired iron-proxies get an SSH listener; e2e/stack.sh puts
+    # CENTAUR_SSH_SEED in centaur-infra-env. e2e/tests/ssh.test.ts uses it.
+    KUBERNETES_IRON_PROXY_SSH_ENABLED: "true"
   sandboxWarmPoolSize: 0
   workflowHostSandbox: false
 
 proxySync:
   replicaCount: 1
+  # The SSH gateway e2e/stack.sh deploys (e2e/infra/ssh-gateway.yaml).
+  sshTargets:
+    - host: "*.ssh-gateway.test"
+      path: /events/events
+      username: dev
 
 # The test runner calls the console API through its NodePort (test-access.yaml).
 console:

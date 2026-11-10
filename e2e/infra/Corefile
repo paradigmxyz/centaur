@@ -1,5 +1,6 @@
 # kind's default CoreDNS config, plus rewrites that send the model providers'
-# hostnames to the e2e model server. Applied by e2e/stack.sh.
+# hostnames to the e2e model server and the remote development environment's
+# hostname to the e2e SSH gateway. Applied by e2e/stack.sh.
 .:53 {
     errors
     health {
@@ -21,6 +22,10 @@
     rewrite stop {
       name exact custom-provider.test model-server.centaur-e2e-model.svc.cluster.local
       answer name model-server.centaur-e2e-model.svc.cluster.local custom-provider.test
+    }
+    rewrite stop {
+      name exact workspace.ssh-gateway.test ssh-gateway.centaur-e2e-ssh.svc.cluster.local
+      answer name ssh-gateway.centaur-e2e-ssh.svc.cluster.local workspace.ssh-gateway.test
     }
     kubernetes cluster.local in-addr.arpa ip6.arpa {
        pods insecure
