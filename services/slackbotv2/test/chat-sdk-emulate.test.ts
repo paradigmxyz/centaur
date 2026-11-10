@@ -5552,7 +5552,7 @@ describe('proactive replies', () => {
         type: 'button',
         action_id: 'slackbotv2.proactive.mute',
         accessibility_label: 'Stop replying proactively in this thread',
-        text: { type: 'plain_text', text: ':mute:', emoji: true }
+        text: { type: 'plain_text', text: ':mute: Mute', emoji: true }
       }]
     }])
 
@@ -5566,8 +5566,9 @@ describe('proactive replies', () => {
       channel: CHANNEL_ID,
       ts: replyTs,
       blocks: [MUTE_ANSWER_BLOCK, {
-        type: 'context',
-        elements: [{ type: 'mrkdwn', text: expect.stringContaining('Proactive replies are off') }]
+        type: 'actions',
+        block_id: 'slackbotv2.proactive.mute',
+        elements: [{ text: { type: 'plain_text', text: ':mute: Muted', emoji: true } }]
       }]
     })
 
