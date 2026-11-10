@@ -1,0 +1,103 @@
+# A remote development environment for e2e/tests/ssh.test.ts: wstunnel serves
+# WSS on 8443 and forwards each tunnel to OpenSSH on the pod's loopback. CoreDNS
+# (e2e/infra/Corefile) resolves workspace.ssh-gateway.test to this Service, and
+# its certificate is signed by the release's iron-proxy CA, which iron-proxy
+# pods trust. e2e/stack.sh builds the image and creates the TLS and key Secrets.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ssh-gateway
+  namespace: centaur-e2e-ssh
+  labels:
+    app: ssh-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ssh-gateway
+  template:
+    metadata:
+      labels:
+        app: ssh-gateway
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: wstunnel
+          image: centaur-e2e-ssh-gateway:latest
+          imagePullPolicy: Never
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          command:
+            - wstunnel
+            - server
+            - wss://[::]:8443
+            - --tls-certificate=/tls/tls.crt
+            - --tls-private-key=/tls/tls.key
+            - --restrict-to=127.0.0.1:22
+          ports:
+            - containerPort: 8443
+              name: wss
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+        - name: sshd
+          image: centaur-e2e-ssh-gateway:latest
+          imagePullPolicy: Never
+          command: ["/usr/sbin/sshd", "-D", "-e"]
+          readinessProbe:
+            exec:
+              command: ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/22"]
+            periodSeconds: 2
+          volumeMounts:
+            - name: authorized-keys
+              mountPath: /etc/ssh/authorized_keys
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: ssh-gateway-tls
+        - name: authorized-keys
+          secret:
+            secretName: ssh-gateway-key
+            items:
+              - key: authorized_keys
+                path: dev
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ssh-gateway
+  namespace: centaur-e2e-ssh
+  labels:
+    app: ssh-gateway
+spec:
+  selector:
+    app: ssh-gateway
+  ports:
+    - name: wss
+      port: 443
+      targetPort: wss
+---
+# Per-sandbox iron-proxies may only dial public addresses. Like the model
+# server's policy, this admits the one in-cluster SSH gateway.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: e2e-iron-proxy-to-ssh-gateway
+  namespace: centaur
+spec:
+  podSelector:
+    matchLabels:
+      centaur.ai/iron-proxy: "true"
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: centaur-e2e-ssh
+      ports:
+        - protocol: TCP
+          port: 8443
