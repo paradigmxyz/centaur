@@ -80,6 +80,7 @@ GEM
     ast (2.4.3)
     base64 (0.3.0)
     bcrypt (3.1.22)
+    bcrypt_pbkdf (1.1.2)
     bigdecimal (4.1.3)
     bindex (0.8.1)
     bootsnap (1.26.1)
@@ -107,6 +108,7 @@ GEM
       irb (~> 1.10)
       reline (>= 0.3.8)
     drb (2.2.3)
+    ed25519 (1.4.0)
     erb (6.0.7)
     erubi (1.13.1)
     et-orbi (1.4.2)
@@ -183,6 +185,8 @@ GEM
       timeout
     net-smtp (0.5.1)
       net-protocol
+    net-ssh (7.3.10)
+      logger
     nio4r (2.7.5)
     nokogiri (1.19.6-aarch64-linux-gnu)
       racc (~> 1.4)
@@ -396,11 +400,13 @@ PLATFORMS
 
 DEPENDENCIES
   bcrypt (~> 3.1.7)
+  bcrypt_pbkdf (~> 1.1)
   bootsnap
   brakeman
   bundler-audit
   capybara
   debug
+  ed25519 (~> 1.4)
   fugit (~> 1.14)
   image_processing (~> 2.2)
   importmap-rails
@@ -409,6 +415,7 @@ DEPENDENCIES
   jwt (~> 3.3)
   lograge
   minitest-mock (~> 5.27)
+  net-ssh (~> 7.3)
   nokogiri (~> 1.19)
   pg (~> 1.7)
   propshaft
