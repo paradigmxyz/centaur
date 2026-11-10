@@ -79,6 +79,8 @@ class SshKeySecret < ApplicationRecord
   def private_key_present_and_valid
     if key_source.nil? || key_source.marked_for_destruction?
       errors.add(:private_key, "can't be blank")
+    elsif key_source.source_type == "token_broker"
+      errors.add(:private_key, "can't come from a token broker")
     elsif @private_key_error
       errors.add(:private_key, @private_key_error)
     end

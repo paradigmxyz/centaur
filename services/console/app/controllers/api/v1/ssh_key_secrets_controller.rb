@@ -52,7 +52,15 @@ module Api
         source_attrs = if attrs.key?(:private_key) && attrs[:private_key].present?
           attrs.require(:private_key).permit(:source_type, :secret, config: {})
         end
-        key_source = source_attrs ? SecretSource.new(source_attrs.to_h) : nil
+        source_attrs = source_attrs&.to_h
+        if source_attrs&.dig("source_type") == "control_plane"
+          # An inline key's public key is derived, and its value is stored
+          # normalized. Compare the replacement in that same form so replaying
+          # an identical document is a no-op that keeps live connections.
+          base.delete(:public_key)
+          source_attrs["secret"] = SshKey.normalize(source_attrs["secret"]) if source_attrs["secret"].present?
+        end
+        key_source = source_attrs ? SecretSource.new(source_attrs) : nil
 
         # Build the whole graph and save once so the key validations see the
         # source. Assigning the has_one replaces any prior source; a PUT is a

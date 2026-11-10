@@ -73,6 +73,33 @@ module Api
         assert_equal replacement_public, key.public_key
       end
 
+      test "replaying an identical inline key document keeps the stored source" do
+        private_key, = synthetic_ssh_key
+        body = { data: { name: "Stable key", private_key: { source_type: "control_plane", secret: private_key.strip } } }.to_json
+        put api_v1_ssh_key_secret_url("stable-key"), headers: auth_headers, params: body
+        assert_response :created
+        key = SshKeySecret.find_by!(foreign_id: "stable-key")
+        source_id = key.key_source.id
+        updated_at = key.updated_at
+
+        travel 1.minute do
+          put api_v1_ssh_key_secret_url("stable-key"), headers: auth_headers, params: body
+        end
+        assert_response :ok
+        key.reload
+        assert_equal source_id, key.key_source.id
+        assert_equal updated_at, key.updated_at
+      end
+
+      test "an SSH key cannot come from a token broker" do
+        post api_v1_ssh_key_secrets_url, headers: auth_headers, params: {
+          data: { name: "Broker key", public_key: synthetic_ssh_key.last,
+                  private_key: { source_type: "token_broker",
+                                 config: { credential_id: broker_credentials(:acme_managed_gmail).oid } } }
+        }.to_json
+        assert_response :unprocessable_entity
+      end
+
       test "an external source requires a public key" do
         put api_v1_ssh_key_secret_url("team-env-key"), headers: auth_headers, params: {
           data: { name: "Env key", private_key: { source_type: "env", config: { var: "TEAM_SSH_KEY" } } }
