@@ -178,6 +178,7 @@ class ConsoleController < ApplicationController
     when StaticSecret then [ source_segment(record.source) ].compact
     when PgDsnSecret  then [ source_segment(record.dsn_source) ].compact
     when GcpIdTokenSecret then [ source_segment(record.keyfile_source) ].compact
+    when SshKeySecret then [ source_segment(record.key_source) ].compact
     when GcpAuthSecret
       if record.keyfile_source
         [ source_segment(record.keyfile_source) ].compact

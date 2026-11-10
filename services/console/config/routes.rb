@@ -120,6 +120,11 @@ Rails.application.routes.draw do
   # User-facing list of enabled OAuth apps and their consent start links. Not
   # admin-gated: any signed-in team member connects integrations from here.
   get "console/integrations", to: "console/integrations#index", as: :console_integrations
+  namespace :console do
+    resource :ssh_key, only: %i[show edit update destroy] do
+      post :validate_key
+    end
+  end
   # Create/edit forms for OAuth apps. Declared before the show route so
   # /console/oauth_apps/new wins over the generic `:id` match. Named
   # `*_oauth_app_form*` so the form helpers don't collide with the read
@@ -201,6 +206,11 @@ Rails.application.routes.draw do
       resources :hmac_secrets, only: %i[index show create update destroy] do
         collection do
           get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
+        end
+      end
+      resources :ssh_key_secrets, only: %i[index show create update destroy] do
+        collection do
           get "lookup/:foreign_id", action: :lookup, as: :lookup
         end
       end

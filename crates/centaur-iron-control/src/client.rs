@@ -575,6 +575,7 @@ fn grant_body(grantee: &Grantee, secret: &GrantSecret) -> Value {
         GrantSecret::PgDsn(id) => ("pg_dsn_secret_id", id),
         GrantSecret::Hmac(id) => ("hmac_secret_id", id),
         GrantSecret::AwsAuth(id) => ("aws_auth_secret_id", id),
+        GrantSecret::SshKey(id) => ("ssh_key_secret_id", id),
     };
     map.insert(key.to_owned(), json!(id));
     Value::Object(map)
@@ -661,6 +662,13 @@ mod tests {
                 &GrantSecret::OAuthToken("ots_slack".to_owned()),
             ),
             json!({ "role_id": "role_infra", "oauth_token_secret_id": "ots_slack" })
+        );
+        assert_eq!(
+            grant_body(
+                &Grantee::Role("role_dev".to_owned()),
+                &GrantSecret::SshKey("sks_team".to_owned()),
+            ),
+            json!({ "role_id": "role_dev", "ssh_key_secret_id": "sks_team" })
         );
     }
 

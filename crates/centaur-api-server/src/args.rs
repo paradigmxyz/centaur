@@ -26,8 +26,8 @@ use centaur_iron_proxy::{
 };
 use centaur_sandbox_agent_k8s::{
     AgentSandboxBackend, AgentSandboxConfig, DeploymentRef, GitHubTokenRef, IronControlSettings,
-    IronProxyConfig, OtlpEgressTarget, SecurityContext, StateVolumeConfig, Toleration, ToolSource,
-    ToolsConfig,
+    IronProxyConfig, OtlpEgressTarget, SecurityContext, SshProxyConfig, StateVolumeConfig,
+    Toleration, ToolSource, ToolsConfig,
 };
 use centaur_sandbox_core::{Mount, MountKind, ResourceRequirements, SandboxSpec};
 use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
@@ -2069,6 +2069,26 @@ fn repository_visibility(value: Option<&str>) -> String {
 #[derive(Debug, ClapArgs)]
 struct IronProxyArgs {
     #[arg(
+        long = "kubernetes-iron-proxy-ssh-enabled",
+        env = "KUBERNETES_IRON_PROXY_SSH_ENABLED",
+        default_value_t = false
+    )]
+    ssh_enabled: bool,
+    #[arg(
+        long = "kubernetes-iron-proxy-ssh-workspace",
+        env = "KUBERNETES_IRON_PROXY_SSH_WORKSPACE",
+        default_value = "/workspace"
+    )]
+    ssh_workspace: String,
+    /// Stable secret every sandbox's disposable SSH keys are derived from.
+    /// Required when SSH is enabled; at least 32 bytes.
+    #[arg(
+        long = "kubernetes-iron-proxy-ssh-seed",
+        env = "CENTAUR_SSH_SEED",
+        hide_env_values = true
+    )]
+    ssh_seed: Option<String>,
+    #[arg(
         long = "kubernetes-iron-proxy-image",
         env = "KUBERNETES_IRON_PROXY_IMAGE",
         default_value = "centaur-iron-proxy:latest"
@@ -2162,6 +2182,21 @@ struct IronProxyArgs {
 }
 
 impl IronProxyArgs {
+    /// Fails at startup, not at the first sandbox, when SSH is misconfigured.
+    fn ssh_config(&self) -> Result<Option<SshProxyConfig>, ServerError> {
+        if !self.ssh_enabled {
+            return Ok(None);
+        }
+        let seed = self.ssh_seed.as_deref().ok_or_else(|| {
+            ServerError::UnsupportedConfig(
+                "KUBERNETES_IRON_PROXY_SSH_ENABLED requires CENTAUR_SSH_SEED".to_owned(),
+            )
+        })?;
+        SshProxyConfig::new(seed, self.ssh_workspace.clone())
+            .map(Some)
+            .map_err(ServerError::UnsupportedConfig)
+    }
+
     fn to_config(&self) -> Result<IronProxyConfig, ServerError> {
         let (ca_cert_secret_name, ca_key_secret_name) = self.ca.secrets()?;
 
@@ -2194,6 +2229,8 @@ impl IronProxyArgs {
         config.database_namespace =
             non_empty(self.database_namespace.as_deref()).map(ToOwned::to_owned);
         config.database_port = self.database_port;
+        config.ssh = self.ssh_config()?;
+
         self.source.apply_to_config(&mut config);
         config.fragments = harness_fragments;
         config.env_from_secret_names = self.env_from_secret_names();
@@ -3975,6 +4012,55 @@ mod tests {
             ])
         );
         assert_eq!(config.database_namespace.as_deref(), Some("databases"));
+    }
+
+    #[test]
+    fn iron_proxy_ssh_requires_a_valid_seed_at_startup() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec![
+                "centaur-api-server",
+                "--database-url",
+                "postgres://postgres:postgres@localhost/centaur",
+                "--kubernetes-firewall-ca-secret-name",
+                "centaur-firewall-ca",
+                "--kubernetes-firewall-ca-key-secret-name",
+                "centaur-firewall-ca-key",
+            ];
+            argv.extend_from_slice(extra);
+            Args::try_parse_from(argv).unwrap()
+        };
+
+        let off = parse(&[]).sandbox.iron_proxy.to_config().unwrap();
+        assert!(off.ssh.is_none());
+        assert!(
+            !off.extra_env
+                .keys()
+                .any(|name| name.starts_with("IRON_SSH"))
+        );
+
+        for extra in [
+            &["--kubernetes-iron-proxy-ssh-enabled"][..],
+            &[
+                "--kubernetes-iron-proxy-ssh-enabled",
+                "--kubernetes-iron-proxy-ssh-seed",
+                "too-short",
+            ][..],
+        ] {
+            assert!(parse(extra).sandbox.iron_proxy.to_config().is_err());
+        }
+
+        let on = parse(&[
+            "--kubernetes-iron-proxy-ssh-enabled",
+            "--kubernetes-iron-proxy-ssh-seed",
+            "test-only-seed-with-at-least-32-bytes",
+        ])
+        .sandbox
+        .iron_proxy
+        .to_config()
+        .unwrap();
+        let ssh = on.ssh.expect("SSH enabled");
+        assert!(!format!("{ssh:?}").contains("test-only-seed"));
+        assert!(!on.extra_env.keys().any(|name| name.starts_with("IRON_SSH")));
     }
 
     #[test]

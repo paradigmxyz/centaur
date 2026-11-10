@@ -787,6 +787,53 @@ Returns `201`. Response shape (note that `credentials` echoes each source as `{ 
 | `PUT`/`PATCH` | `/api/v1/hmac_secrets/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`; same body as create. |
 | `DELETE` | `/api/v1/hmac_secrets/:id` | Delete. Returns `204`; `404` if missing. Cascades: the secret's sources, rules, and any grants that reference it are removed. The granted roles and principals are not deleted. |
 
+## SSH key secrets
+
+An SSH key secret is a private key that `iron-proxy` presents to a deployment-allowed SSH gateway on a sandbox's behalf. It is granted like any other secret, but it is never part of [proxy sync](#proxy-sync): proxy-sync's `POST /api/v1/proxy/ssh/authorize` releases the strongest granted key for the proxy's assigned principal, one connection at a time, only for a destination allowed by the deployment's SSH target policy. Two keys granted at the same top priority are ambiguous and deny access.
+
+The private key is one [secret source](#secret-sources). A `control_plane` key must be an unencrypted Ed25519, RSA, or ECDSA private key; its public key is derived on save. Other source types resolve on the proxy host, so `public_key` is required for them.
+
+A personal key (`personal: true`) belongs to a Console user, who manages it from **Integrations → SSH key**. Saving it grants it to that user's `console_user` principal and to the `slack_dm` principal of their single verified Slack identity. It reaches any other principal or role only through an explicit grant. The API can read and delete personal keys but cannot update them (`403`).
+
+### Attributes
+
+| Field                   | In requests | Notes |
+| ----------------------- | ----------- | ----- |
+| `foreign_id`            | optional    | Globally unique. Immutable. |
+| `name`                  | required    | At most 100 characters. |
+| `description`           | optional    | |
+| `labels`                | optional    | Object; defaults to `{}`. |
+| `private_key`           | required    | [Secret source](#secret-sources). Echoed as `{ source_type, config }`, never its value. |
+| `public_key`            | conditional | OpenSSH public key. Derived for `control_plane` sources; required otherwise. |
+| `personal`              | read-only   | Whether a Console user owns the key. |
+
+### Create
+
+`POST /api/v1/ssh_key_secrets`
+
+```json
+{
+  "data": {
+    "foreign_id": "team-dev-ssh",
+    "name": "Team development key",
+    "public_key": "ssh-ed25519 AAAA...",
+    "private_key": { "source_type": "env", "config": { "var": "TEAM_DEV_SSH_KEY" } }
+  }
+}
+```
+
+Returns `201` with the document, then grant it with [`POST /api/v1/grants`](#grants) and `ssh_key_secret_id`.
+
+### Other operations
+
+| Method | Path | Notes |
+| ------ | ---- | ----- |
+| `GET`  | `/api/v1/ssh_key_secrets` | List. `labels[k]=v` and pagination are optional. |
+| `GET`  | `/api/v1/ssh_key_secrets/:id` | Fetch one. |
+| `GET`  | `/api/v1/ssh_key_secrets/lookup/:foreign_id` | Fetch by foreign id. `404` if missing. |
+| `PUT`/`PATCH` | `/api/v1/ssh_key_secrets/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`; same body as create. `403` for a personal key. |
+| `DELETE` | `/api/v1/ssh_key_secrets/:id` | Delete. Returns `204`. Cascades to the key's source and every grant of it; active connections close at the next authorization check. |
+
 ## Broker credentials
 
 A broker credential is an OAuth credential whose token lifecycle iron-control manages itself. iron-control runs the refresh loop, mints fresh access tokens before they expire, and delivers the current access token to `iron-proxy` inline through [proxy sync](#proxy-sync) wherever a [`token_broker` secret source](#secret-sources) references the credential by its `id`.
@@ -1378,7 +1425,7 @@ A grant attaches exactly one secret to a **grantee** — either a principal or a
 
 ### Create
 
-`POST /api/v1/grants` — supply exactly one grantee (`principal_id` **or** `role_id`) plus exactly one of `static_secret_id`, `gcp_auth_secret_id`, `aws_auth_secret_id`, `oauth_token_secret_id`, `pg_dsn_secret_id`, or `hmac_secret_id`:
+`POST /api/v1/grants` — supply exactly one grantee (`principal_id` **or** `role_id`) plus exactly one of `static_secret_id`, `gcp_auth_secret_id`, `aws_auth_secret_id`, `oauth_token_secret_id`, `pg_dsn_secret_id`, `hmac_secret_id`, or `ssh_key_secret_id`:
 
 ```json
 { "data": { "principal_id": "prn_...", "static_secret_id": "ssr_..." } }
@@ -1404,7 +1451,7 @@ Returns `201`. The response includes the one grantee key and the one secret-type
 }
 ```
 
-Referencing a missing grantee or secret returns `404`. Supplying no grantee returns `422` with `"must reference one of principal_id, role_id"`; supplying no secret returns `422` with `"must reference one of static_secret_id, gcp_auth_secret_id, aws_auth_secret_id, oauth_token_secret_id, pg_dsn_secret_id, hmac_secret_id"`.
+Referencing a missing grantee or secret returns `404`. Supplying no grantee returns `422` with `"must reference one of principal_id, role_id"`; supplying no secret returns `422` with `"must reference one of static_secret_id, gcp_auth_secret_id, aws_auth_secret_id, oauth_token_secret_id, pg_dsn_secret_id, hmac_secret_id, ssh_key_secret_id"`.
 
 ### List by grantee
 

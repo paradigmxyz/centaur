@@ -19,7 +19,8 @@ module SecretKinds
     "aws_auth" => { model: AwsAuthSecret, label: "AWS Auth", includes: :sources, form: false },
     "oauth_token" => { model: OauthTokenSecret, label: "OAuth Token", includes: :sources, form: false },
     "pg_dsn" => { model: PgDsnSecret, label: "Postgres DSN", includes: :dsn_source, form: true },
-    "hmac" => { model: HmacSecret, label: "HMAC", includes: :sources, form: false }
+    "hmac" => { model: HmacSecret, label: "HMAC", includes: :sources, form: false },
+    "ssh_key" => { model: SshKeySecret, label: "SSH key", includes: :key_source, form: false }
   }.freeze
 
   # The config key that carries a source's human-meaningful reference, per

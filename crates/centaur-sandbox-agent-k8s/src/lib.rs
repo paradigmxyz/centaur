@@ -31,11 +31,13 @@ pub use crd_migration::{CrdMigrationError, DeploymentRef, install_agent_sandbox_
 pub use generated::agents_x_k8s_io as crd;
 pub use iron_proxy::IronProxyConfig;
 pub use k8s_openapi::api::core::v1::{SecurityContext, Toleration};
+pub use ssh::SshProxyConfig;
 pub use tools::{GitHubTokenRef, ToolSource, ToolsConfig};
 
 mod crd_migration;
 pub mod generated;
 mod iron_proxy;
+mod ssh;
 mod tools;
 
 const BACKEND_NAME: &str = "agent-sandbox-k8s";

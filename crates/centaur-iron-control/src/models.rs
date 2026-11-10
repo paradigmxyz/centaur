@@ -560,6 +560,7 @@ pub const SECRET_TYPES: &[(&str, &str, &str)] = &[
     ("pg_dsn", "pg_dsn_secrets", "pgs_"),
     ("hmac", "hmac_secrets", "hms_"),
     ("aws_auth", "aws_auth_secrets", "aas_"),
+    ("ssh_key", "ssh_key_secrets", "sks_"),
 ];
 
 // ---------------------------------------------------------------------------
@@ -583,6 +584,7 @@ pub enum GrantSecret {
     PgDsn(String),
     Hmac(String),
     AwsAuth(String),
+    SshKey(String),
 }
 
 impl GrantSecret {
@@ -595,7 +597,8 @@ impl GrantSecret {
             | Self::OAuthToken(id)
             | Self::PgDsn(id)
             | Self::Hmac(id)
-            | Self::AwsAuth(id) => id,
+            | Self::AwsAuth(id)
+            | Self::SshKey(id) => id,
         }
     }
 
@@ -614,6 +617,7 @@ impl GrantSecret {
             "pg_dsn" => Self::PgDsn(id),
             "hmac" => Self::Hmac(id),
             "aws_auth" => Self::AwsAuth(id),
+            "ssh_key" => Self::SshKey(id),
             _ => return None,
         })
     }
@@ -643,6 +647,8 @@ pub struct Grant {
     pub hmac_secret_id: Option<String>,
     #[serde(default)]
     pub aws_auth_secret_id: Option<String>,
+    #[serde(default)]
+    pub ssh_key_secret_id: Option<String>,
 }
 
 impl Grant {
@@ -656,6 +662,7 @@ impl Grant {
             .or(self.pg_dsn_secret_id.as_deref())
             .or(self.hmac_secret_id.as_deref())
             .or(self.aws_auth_secret_id.as_deref())
+            .or(self.ssh_key_secret_id.as_deref())
     }
 
     /// The granted secret's ``(type label, REST collection, OID)``, whichever
@@ -676,6 +683,8 @@ impl Grant {
             Some(("hmac", "hmac_secrets", id))
         } else if let Some(id) = &self.aws_auth_secret_id {
             Some(("aws_auth", "aws_auth_secrets", id))
+        } else if let Some(id) = &self.ssh_key_secret_id {
+            Some(("ssh_key", "ssh_key_secrets", id))
         } else {
             None
         }
@@ -713,7 +722,26 @@ pub struct Proxy {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_gcp_id_token_header;
+    use super::{Grant, GrantSecret, normalize_gcp_id_token_header};
+
+    #[test]
+    fn ssh_key_grants_resolve_their_secret() {
+        assert_eq!(
+            GrantSecret::from_oid("sks_team"),
+            Some(GrantSecret::SshKey("sks_team".to_owned()))
+        );
+        let grant: Grant = serde_json::from_value(serde_json::json!({
+            "id": "grant_1",
+            "role_id": "role_dev",
+            "ssh_key_secret_id": "sks_team",
+        }))
+        .unwrap();
+        assert_eq!(grant.secret_id(), Some("sks_team"));
+        assert_eq!(
+            grant.secret_target(),
+            Some(("ssh_key", "ssh_key_secrets", "sks_team"))
+        );
+    }
 
     #[test]
     fn normalizes_supported_gcp_id_token_headers() {

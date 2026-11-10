@@ -5,13 +5,13 @@ FROM ubuntu:24.04 AS toolchain
 ENV PYTHONDONTWRITEBYTECODE=1
 
 # Bump this pin to refresh the trust store even when the base image is cached.
-ARG CA_CERTIFICATES_VERSION=20260816ubuntu0.24.04.1
+ARG CA_CERTIFICATES_VERSION=20260816ubuntu0.24.04.2
 
 # ── System packages (cached unless base image or package pins change) ─────────
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-    git curl wget ca-certificates=${CA_CERTIFICATES_VERSION} gnupg lsb-release sudo \
+    openssh-client git curl wget ca-certificates=${CA_CERTIFICATES_VERSION} gnupg lsb-release sudo \
     build-essential pkg-config cmake ninja-build \
     ffmpeg ghostscript dvisvgm file \
     libssl-dev libclang-dev protobuf-compiler \

@@ -122,7 +122,10 @@ pub async fn build_config(
     Ok(config)
 }
 
-fn source_value(source: &SecretSource, values: SecretValues<'_>) -> Result<Option<Value>> {
+pub(crate) fn source_value(
+    source: &SecretSource,
+    values: SecretValues<'_>,
+) -> Result<Option<Value>> {
     if source.source_type == "token_broker" {
         // A credential that has not minted an access token yet delivers nothing.
         let Some(raw) = source.broker_access_token.as_deref() else {
