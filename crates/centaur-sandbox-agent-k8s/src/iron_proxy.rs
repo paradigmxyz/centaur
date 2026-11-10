@@ -775,7 +775,7 @@ impl AgentSandboxBackend {
             tracing::warn!(
                 sandbox_id = id.as_str(),
                 principal_id,
-                "iron-proxy resources are missing or not running; recreating before assignment"
+                "iron-proxy resources are missing, not running or outdated; recreating before assignment"
             );
             proxy_id = Some(
                 self.recreate_iron_proxy_resources_for_principal(
@@ -853,7 +853,7 @@ impl AgentSandboxBackend {
         tracing::warn!(
             sandbox_id = id.as_str(),
             principal_id,
-            "iron-proxy resources are missing or not running; recreating before reuse"
+            "iron-proxy resources are missing, not running or outdated; recreating before reuse"
         );
         self.recreate_iron_proxy_resources_for_principal(
             id,
@@ -1168,7 +1168,16 @@ impl AgentSandboxBackend {
             .list(&params)
             .await
             .map_err(|err| map_kube_error("list iron-proxy pods", err))?;
-        if !pods.items.iter().any(pod_running) {
+        let current = |pod: &Pod| {
+            self.config.iron_proxy.as_ref().is_none_or(|iron_proxy| {
+                iron_proxy_pod_current(pod, iron_proxy, &self.config.iron_control.control_url)
+            })
+        };
+        if !pods
+            .items
+            .iter()
+            .any(|pod| pod_running(pod) && current(pod))
+        {
             return Ok(false);
         }
         match self.services().get(&iron_proxy_service_name(id)).await {
@@ -1426,6 +1435,28 @@ async fn wait_for_proxy_ack(
         }
         sleep(poll_interval).await;
     }
+}
+
+/// Whether a proxy pod runs this api-rs's proxy image and sync endpoint. A
+/// sandbox keeps its proxy across api-rs upgrades, and a proxy from an older
+/// release can keep polling a sync endpoint that is gone (managed sync moved
+/// from Console to proxy-sync in #1813). It stays Ready on its last config
+/// while the credentials that sync delivers expire, so it must be rebuilt.
+fn iron_proxy_pod_current(pod: &Pod, iron_proxy: &IronProxyConfig, control_url: &str) -> bool {
+    let Some(container) = pod.spec.as_ref().and_then(|spec| {
+        spec.containers
+            .iter()
+            .find(|container| container.name == "iron-proxy")
+    }) else {
+        return false;
+    };
+    let sync_url = container
+        .env
+        .iter()
+        .flatten()
+        .find(|env| env.name == "IRON_CONTROL_PLANE_URL")
+        .and_then(|env| env.value.as_deref());
+    container.image.as_deref() == Some(iron_proxy.image.as_str()) && sync_url == Some(control_url)
 }
 
 /// The management endpoint advertised by a running proxy pod: pod IP plus the
@@ -3365,6 +3396,76 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn built_proxy_pod_is_current_for_its_own_config() {
+        let id = SandboxId::new("asbx-test");
+        let iron_proxy = IronProxyConfig::new("proxy:new", "ca-cert", "ca-key");
+        let sync = ProxySyncEnv {
+            proxy_id: "iprx_test".to_owned(),
+            control_url: "http://proxy-sync:8080".to_owned(),
+            token: "proxy-token".to_owned(),
+        };
+
+        let pod = build_iron_proxy_pod(&id, &iron_proxy, &resolved(), &sync, no_scheduling());
+
+        assert!(iron_proxy_pod_current(
+            &pod,
+            &iron_proxy,
+            "http://proxy-sync:8080"
+        ));
+    }
+
+    #[test]
+    fn proxy_pod_from_another_release_is_outdated() {
+        let iron_proxy = IronProxyConfig::new("proxy:new", "ca-cert", "ca-key");
+        let control_url = "http://proxy-sync:8080";
+        let pod = |image: &str, env: Vec<K8sEnvVar>| {
+            let mut pod = running_proxy_pod("10.1.2.3", env);
+            pod.spec.as_mut().unwrap().containers[0].image = Some(image.to_owned());
+            pod
+        };
+
+        assert!(iron_proxy_pod_current(
+            &pod(
+                "proxy:new",
+                vec![env_var("IRON_CONTROL_PLANE_URL", control_url)]
+            ),
+            &iron_proxy,
+            control_url
+        ));
+        // An older image.
+        assert!(!iron_proxy_pod_current(
+            &pod(
+                "proxy:old",
+                vec![env_var("IRON_CONTROL_PLANE_URL", control_url)]
+            ),
+            &iron_proxy,
+            control_url
+        ));
+        // Same image tag, but still syncing from Console (before #1813).
+        assert!(!iron_proxy_pod_current(
+            &pod(
+                "proxy:new",
+                vec![env_var("IRON_CONTROL_PLANE_URL", "http://console:3000")]
+            ),
+            &iron_proxy,
+            control_url
+        ));
+        // No sync endpoint at all.
+        assert!(!iron_proxy_pod_current(
+            &pod("proxy:new", vec![]),
+            &iron_proxy,
+            control_url
+        ));
+        // No iron-proxy container.
+        let mut pod = pod(
+            "proxy:new",
+            vec![env_var("IRON_CONTROL_PLANE_URL", control_url)],
+        );
+        pod.spec.as_mut().unwrap().containers[0].name = "other".to_owned();
+        assert!(!iron_proxy_pod_current(&pod, &iron_proxy, control_url));
     }
 
     #[test]
