@@ -544,17 +544,7 @@
         },
         "extraEnv": {
           "type": "object",
-          "additionalProperties": {
-            "oneOf": [
-              { "type": "string" },
-              {
-                "type": "object",
-                "required": ["valueFrom"],
-                "additionalProperties": false,
-                "properties": { "valueFrom": { "type": "object", "minProperties": 1 } }
-              }
-            ]
-          }
+          "additionalProperties": { "type": "string" }
         }
       }
     },
