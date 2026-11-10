@@ -7,9 +7,10 @@ FROM rust:1-bookworm AS builder
 # needs cmake + a C toolchain. No DATABASE_URL is required at build time:
 # centaur-session-sqlx only uses sqlx::migrate! (compile-time file embedding),
 # not the query-checking macros.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,id=api-rs-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=api-rs-apt-lib,target=/var/lib/apt,sharing=locked \
+    printf '%s\n' "Acquire::Retries \"5\";" "Acquire::http::Timeout \"30\";" "Acquire::https::Timeout \"30\";" > /etc/apt/apt.conf.d/80-network-retries \
+    && apt-get update && apt-get install -y --no-install-recommends \
         cmake perl build-essential pkg-config
 ARG SCCACHE_VERSION=0.19.0
 ARG TARGETARCH
@@ -47,9 +48,10 @@ RUN --mount=type=cache,id=api-rs-cargo-registry-${TARGETARCH},target=/usr/local/
     sccache --show-stats
 
 FROM debian:bookworm-slim
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git python3 python3-pip
+RUN --mount=type=cache,id=api-rs-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=api-rs-apt-lib,target=/var/lib/apt,sharing=locked \
+    printf '%s\n' "Acquire::Retries \"5\";" "Acquire::http::Timeout \"30\";" "Acquire::https::Timeout \"30\";" > /etc/apt/apt.conf.d/80-network-retries \
+    && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git python3 python3-pip
 COPY --from=builder /usr/local/bin/centaur-api-server /usr/local/bin/centaur-api-server
 WORKDIR /app
 COPY centaur_sdk/ /app/centaur_sdk/
