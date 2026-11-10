@@ -39,6 +39,18 @@ class NotionClient:
     ) -> dict[str, Any]:
         """Execute an HTTP request."""
         resp = self._http.request(method, path, json=json, params=params)
+        if resp.is_error:
+            # Notion's error body names the offending property or value.
+            try:
+                message = resp.json().get("message")
+            except (ValueError, AttributeError):
+                message = None
+            if message:
+                raise httpx.HTTPStatusError(
+                    f"Notion API error {resp.status_code}: {message}",
+                    request=resp.request,
+                    response=resp,
+                )
         resp.raise_for_status()
         return resp.json()
 
