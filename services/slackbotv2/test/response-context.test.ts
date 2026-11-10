@@ -9,7 +9,6 @@ import {
   harnessDisplayName,
   modelDisplayName,
   personaFallbackNotice,
-  PROACTIVE_MUTED_NOTICE,
   proactiveMutedBlocks,
   reasoningForModel
 } from '../src/response-context'
@@ -338,13 +337,21 @@ test('personaFallbackNotice describes the resolved fallback', () => {
   expect(personaFallbackNotice(undefined, 'eng')).toBeUndefined()
 })
 
-test('proactiveMutedBlocks swaps the mute button for a notice', () => {
+test('proactiveMutedBlocks relabels the mute button as muted', () => {
   const answer = { type: 'section', text: { type: 'mrkdwn', text: 'Answer' } }
   const footer = { type: 'context', elements: [{ type: 'mrkdwn', text: 'GPT-5' }] }
-  expect(proactiveMutedBlocks([answer, footer, buildProactiveMuteBlock()])).toEqual([
+  const mute = buildProactiveMuteBlock()
+  expect(proactiveMutedBlocks([answer, footer, mute])).toEqual([
     answer,
     footer,
-    { type: 'context', elements: [{ type: 'mrkdwn', text: PROACTIVE_MUTED_NOTICE }] }
+    {
+      ...mute,
+      elements: [{
+        ...mute.elements[0],
+        accessibility_label: 'Proactive replies are muted in this thread',
+        text: { type: 'plain_text', text: ':mute: Muted', emoji: true }
+      }]
+    }
   ])
   expect(proactiveMutedBlocks([answer, footer])).toBeUndefined()
 })

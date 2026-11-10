@@ -323,29 +323,40 @@ export function buildProactiveMuteBlock(): SlackActionsBlock {
       type: 'button',
       action_id: PROACTIVE_MUTE_ACTION_ID,
       accessibility_label: 'Stop replying proactively in this thread',
-      text: { type: 'plain_text', text: ':mute:', emoji: true }
+      text: { type: 'plain_text', text: ':mute: Mute', emoji: true }
     }]
   }
 }
 
 /**
- * Replaces the mute button in a message's blocks with a muted notice. Returns
- * undefined when the blocks carry no mute button.
+ * Relabels the mute button in a message's blocks as "Muted", leaving the rest
+ * of the message unchanged. Returns undefined when the blocks carry no mute
+ * button. A repeat click is harmless: muting is idempotent.
  */
 export function proactiveMutedBlocks(blocks: readonly unknown[]): unknown[] | undefined {
   let replaced = false
   const next = blocks.map(block => {
     if (
-      block && typeof block === 'object'
-      && (block as { block_id?: unknown }).block_id === PROACTIVE_MUTE_ACTION_ID
-    ) {
-      replaced = true
-      return {
-        type: 'context',
-        elements: [{ type: 'mrkdwn', text: PROACTIVE_MUTED_NOTICE }]
-      }
+      !block || typeof block !== 'object'
+      || (block as { block_id?: unknown }).block_id !== PROACTIVE_MUTE_ACTION_ID
+    ) return block
+    const elements = (block as { elements?: unknown }).elements
+    if (!Array.isArray(elements)) return block
+    return {
+      ...block,
+      elements: elements.map(element => {
+        if (
+          !element || typeof element !== 'object'
+          || (element as { action_id?: unknown }).action_id !== PROACTIVE_MUTE_ACTION_ID
+        ) return element
+        replaced = true
+        return {
+          ...element,
+          accessibility_label: 'Proactive replies are muted in this thread',
+          text: { type: 'plain_text', text: ':mute: Muted', emoji: true }
+        }
+      })
     }
-    return block
   })
   return replaced ? next : undefined
 }
