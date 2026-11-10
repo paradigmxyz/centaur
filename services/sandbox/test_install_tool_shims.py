@@ -366,6 +366,53 @@ class GeneratedShimTest(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("usage: centaur-tools", result.stderr)
 
+    def test_tool_runs_write_bytecode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            fake_bin = root / "fake-bin"
+            bin_dir.mkdir()
+            fake_bin.mkdir()
+            index_path = bin_dir / ".centaur-tools.json"
+            index_path.write_text(
+                json.dumps([{"name": "websearch", "project_dir": str(root / "websearch")}])
+            )
+            install_tool_shims._write_catalog(bin_dir / "centaur-tools", index_path, "")
+            env_log = root / "env.json"
+            fake_uvx = fake_bin / "uvx"
+            fake_uvx.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os\n"
+                "keys = ['PYTHONDONTWRITEBYTECODE', 'PYTHONPYCACHEPREFIX']\n"
+                "with open(os.environ['ENV_LOG'], 'w') as f:\n"
+                "    json.dump({k: os.environ.get(k) for k in keys}, f)\n"
+            )
+            fake_uvx.chmod(0o755)
+            env = os.environ.copy()
+            env.pop("PYTHONPYCACHEPREFIX", None)
+            env.update(
+                {
+                    "PATH": f"{fake_bin}{os.pathsep}{env.get('PATH', '')}",
+                    "ENV_LOG": str(env_log),
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "CENTAUR_TOOL_ANALYTICS_LOG_PATH": "off",
+                }
+            )
+
+            result = subprocess.run(
+                [str(bin_dir / "centaur-tools"), "run", "websearch"],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                json.loads(env_log.read_text()),
+                {"PYTHONDONTWRITEBYTECODE": None, "PYTHONPYCACHEPREFIX": None},
+            )
+
     def test_call_runner_loads_hyphenated_tool_as_normalized_package(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
