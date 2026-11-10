@@ -9,9 +9,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from centaur_sdk.cli import PipeSafeTyper
-
-app = PipeSafeTyper(name="notion", help="Notion CLI for AI agents")
+app = typer.Typer(name="notion", help="Notion CLI for AI agents")
 
 
 @app.command("health")

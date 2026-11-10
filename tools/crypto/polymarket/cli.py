@@ -6,9 +6,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from centaur_sdk.cli import PipeSafeTyper
-
-app = PipeSafeTyper(name="polymarket", help="Polymarket CLI for prediction market data")
+app = typer.Typer(name="polymarket", help="Polymarket CLI for prediction market data")
 
 
 @app.command("health")

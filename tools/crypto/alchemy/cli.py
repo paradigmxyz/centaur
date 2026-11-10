@@ -7,8 +7,6 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from centaur_sdk.cli import PipeSafeTyper
-
 from .client import (
     SUPPORTED_CHAINS,
     AlchemyClient,
@@ -16,7 +14,7 @@ from .client import (
     format_wei,
 )
 
-app = PipeSafeTyper(
+app = typer.Typer(
     name="alchemy",
     help="Alchemy CLI for blockchain data, token balances, transfers, and prices",
 )

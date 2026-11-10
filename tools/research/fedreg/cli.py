@@ -2,8 +2,6 @@
 
 from dotenv import load_dotenv
 
-from centaur_sdk.cli import PipeSafeTyper
-
 load_dotenv()
 
 import json
@@ -12,7 +10,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-app = PipeSafeTyper(name="fedreg", help="Federal Register CLI for regulatory data")
+app = typer.Typer(name="fedreg", help="Federal Register CLI for regulatory data")
 
 
 @app.command("health")

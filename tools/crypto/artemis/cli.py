@@ -9,13 +9,11 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
-from centaur_sdk.cli import PipeSafeTyper
-
 from .client import METRICS, _client
 
 load_dotenv()
 
-app = PipeSafeTyper(name="artemis", help="Artemis crypto market data.")
+app = typer.Typer(name="artemis", help="Artemis crypto market data.")
 console = Console()
 ERROR_EXIT_CODE = 1
 TABLE_HEADERS = ("Symbol", "Price (USD)", "24h change (fraction)")

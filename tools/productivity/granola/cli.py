@@ -10,11 +10,9 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 
-from centaur_sdk.cli import PipeSafeTyper
-
 load_dotenv()
 
-app = PipeSafeTyper(name="granola", help="Query Granola meeting notes and transcripts")
+app = typer.Typer(name="granola", help="Query Granola meeting notes and transcripts")
 
 
 @app.command("health")
