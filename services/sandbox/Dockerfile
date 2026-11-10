@@ -8,9 +8,10 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ARG CA_CERTIFICATES_VERSION=20260816ubuntu0.24.04.2
 
 # ── System packages (cached unless base image or package pins change) ─────────
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,id=sandbox-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=sandbox-apt-lib,target=/var/lib/apt,sharing=locked \
+    printf '%s\n' "Acquire::Retries \"5\";" "Acquire::http::Timeout \"30\";" "Acquire::https::Timeout \"30\";" > /etc/apt/apt.conf.d/80-network-retries \
+    && apt-get update && apt-get install -y --no-install-recommends \
     openssh-client git curl wget ca-certificates=${CA_CERTIFICATES_VERSION} gnupg lsb-release sudo \
     build-essential pkg-config cmake ninja-build \
     ffmpeg ghostscript dvisvgm file \
@@ -27,8 +28,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && rm -rf /usr/share/doc /usr/share/man /usr/share/info
 
 # reth's default JIT build uses revmc, which depends on llvm-sys 221.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+RUN --mount=type=cache,id=sandbox-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=sandbox-apt-lib,target=/var/lib/apt,sharing=locked \
     curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
       | gpg --dearmor -o /usr/share/keyrings/llvm-snapshot.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" \
@@ -68,8 +69,8 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 
 # ── GitHub CLI + Node.js 24 (LTS) + Docker CLI + Google Cloud CLI (cached) ──
 ARG NODE_VERSION=24.22.2
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+RUN --mount=type=cache,id=sandbox-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=sandbox-apt-lib,target=/var/lib/apt,sharing=locked \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
@@ -188,8 +189,8 @@ ENV HERMES_PYTHON=/opt/hermes/bin/python3
 
 # ── agent-browser system deps (must run as root before USER agent) ───────────
 # Chrome for Testing doesn't provide Linux ARM64 builds; fall back to system chromium
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+RUN --mount=type=cache,id=sandbox-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=sandbox-apt-lib,target=/var/lib/apt,sharing=locked \
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
       apt-get update && apt-get install -y --no-install-recommends \
         libxcb-shm0 libx11-xcb1 libx11-6 libxcb1 libxext6 libxrandr2 \

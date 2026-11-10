@@ -34,9 +34,10 @@ RUN --mount=type=cache,id=proxy-sync-cargo-registry-${TARGETARCH},target=/usr/lo
     sccache --show-stats
 
 FROM debian:bookworm-slim
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+RUN --mount=type=cache,id=proxy-sync-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=proxy-sync-apt-lib,target=/var/lib/apt,sharing=locked \
+    printf '%s\n' "Acquire::Retries \"5\";" "Acquire::http::Timeout \"30\";" "Acquire::https::Timeout \"30\";" > /etc/apt/apt.conf.d/80-network-retries \
+    && apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/bin/centaur-proxy-sync /usr/local/bin/centaur-proxy-sync
 USER 65532:65532

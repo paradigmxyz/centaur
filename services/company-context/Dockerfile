@@ -35,9 +35,10 @@ RUN --mount=type=cache,id=company-context-cargo-registry-${TARGETARCH},target=/u
 FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS pandoc
 ARG PANDOC_VERSION=3.13
 ARG TARGETARCH
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends ca-certificates curl
+RUN --mount=type=cache,id=company-context-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=company-context-apt-lib,target=/var/lib/apt,sharing=locked \
+    printf '%s\n' "Acquire::Retries \"5\";" "Acquire::http::Timeout \"30\";" "Acquire::https::Timeout \"30\";" > /etc/apt/apt.conf.d/80-network-retries \
+    && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl
 RUN case "$TARGETARCH" in \
       amd64) checksum=38aa33b325a2bc96a4c39409631212db55702f564250bcdbead180b3bf646389 ;; \
       arm64) checksum=21e1d4ba09bd0b334590d204580fd4f6629b21be4ab6a32b26cc98982e9e0c68 ;; \
@@ -52,9 +53,10 @@ RUN case "$TARGETARCH" in \
     rm "/tmp/${archive}"
 
 FROM debian:bookworm-slim
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends ca-certificates poppler-utils \
+RUN --mount=type=cache,id=company-context-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=company-context-apt-lib,target=/var/lib/apt,sharing=locked \
+    printf '%s\n' "Acquire::Retries \"5\";" "Acquire::http::Timeout \"30\";" "Acquire::https::Timeout \"30\";" > /etc/apt/apt.conf.d/80-network-retries \
+    && apt-get update && apt-get install -y --no-install-recommends ca-certificates poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=pandoc /usr/local/bin/pandoc /usr/local/bin/pandoc
 COPY --from=builder /usr/local/bin/centaur-company-context /usr/local/bin/centaur-company-context
