@@ -10,11 +10,9 @@ from typing import Any
 import httpx
 import typer
 
-from centaur_sdk.cli import PipeSafeTyper
-
 from .client import DEFAULT_SEARCH_LIMIT, _client
 
-app = PipeSafeTyper(
+app = typer.Typer(
     name="mercator",
     help="Find, quote, and pay for external API calls through Mercator.",
     epilog=(

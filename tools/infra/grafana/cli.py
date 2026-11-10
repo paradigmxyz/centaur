@@ -9,11 +9,9 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
-from centaur_sdk.cli import PipeSafeTyper
-
 load_dotenv()
 
-app = PipeSafeTyper(name="grafana", help="Grafana CLI for dashboards, metrics, logs, and alerts")
+app = typer.Typer(name="grafana", help="Grafana CLI for dashboards, metrics, logs, and alerts")
 console = Console()
 
 

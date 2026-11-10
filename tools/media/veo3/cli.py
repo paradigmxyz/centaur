@@ -5,11 +5,10 @@ import typer
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
-from centaur_sdk.cli import PipeSafeTyper
 
 load_dotenv()
 
-app = PipeSafeTyper(name="veo3", help="Veo 3 CLI for Google's video generation model")
+app = typer.Typer(name="veo3", help="Veo 3 CLI for Google's video generation model")
 
 
 @app.command("health")

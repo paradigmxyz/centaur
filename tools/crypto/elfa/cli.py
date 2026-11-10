@@ -5,13 +5,11 @@ import json
 import typer
 from dotenv import load_dotenv
 
-from centaur_sdk.cli import PipeSafeTyper
-
 from .client import DEFAULT_TIME_WINDOW, _client
 
 load_dotenv()
 
-app = PipeSafeTyper(name="elfa", help="Elfa AI event summaries with source links.")
+app = typer.Typer(name="elfa", help="Elfa AI event summaries with source links.")
 
 
 @app.callback()

@@ -7,11 +7,9 @@ from typing import Annotated, Any
 
 import typer
 
-from centaur_sdk.cli import PipeSafeTyper
-
 from .client import LumaClient
 
-app = PipeSafeTyper(name="luma", help="Manage Luma calendars, events, guests, and webhooks")
+app = typer.Typer(name="luma", help="Manage Luma calendars, events, guests, and webhooks")
 
 
 def _print(value: object) -> None:

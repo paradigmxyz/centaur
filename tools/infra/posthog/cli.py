@@ -6,9 +6,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from centaur_sdk.cli import PipeSafeTyper
-
-app = PipeSafeTyper(name="posthog", help="PostHog CLI for product analytics and HogQL queries")
+app = typer.Typer(name="posthog", help="PostHog CLI for product analytics and HogQL queries")
 
 
 @app.command("health")

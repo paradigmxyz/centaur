@@ -10,11 +10,9 @@ from typing import Annotated
 import typer
 from dotenv import load_dotenv
 
-from centaur_sdk.cli import PipeSafeTyper
-
 load_dotenv()
 
-app = PipeSafeTyper(
+app = typer.Typer(
     name="centaur-skills",
     help="Discover repository and Console skills, and manage Console skills",
     no_args_is_help=True,

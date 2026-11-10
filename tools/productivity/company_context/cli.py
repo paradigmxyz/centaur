@@ -11,14 +11,12 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
-from centaur_sdk.cli import PipeSafeTyper
-
 from .client import CompanyContextClient
 from .v2 import CompanyContextV2Client
 
 load_dotenv()
 
-app = PipeSafeTyper(
+app = typer.Typer(
     name="company_context",
     help=(
         "Search or run scoped SQL over company history, Slack DMs, Google Docs, and "

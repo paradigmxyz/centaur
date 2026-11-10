@@ -10,9 +10,7 @@ from typing import Annotated, Any
 
 import typer
 
-from centaur_sdk.cli import PipeSafeTyper
-
-app = PipeSafeTyper(
+app = typer.Typer(
     name="chart",
     help="Render declarative Vega-Lite JSON specifications to PNG or SVG.",
     epilog=(

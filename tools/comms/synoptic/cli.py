@@ -2,8 +2,6 @@
 
 from dotenv import load_dotenv
 
-from centaur_sdk.cli import PipeSafeTyper
-
 load_dotenv()
 
 import json  # noqa: E402
@@ -15,7 +13,7 @@ from rich.table import Table  # noqa: E402
 
 from .client import _client  # noqa: E402
 
-app = PipeSafeTyper(name="synoptic", help="Synoptic Twitter API CLI")
+app = typer.Typer(name="synoptic", help="Synoptic Twitter API CLI")
 
 
 @app.command("health")

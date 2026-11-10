@@ -7,9 +7,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from centaur_sdk.cli import PipeSafeTyper
-
-app = PipeSafeTyper(name="kalshi", help="Kalshi prediction market CLI for market data and analytics")
+app = typer.Typer(name="kalshi", help="Kalshi prediction market CLI for market data and analytics")
 
 
 @app.command("health")

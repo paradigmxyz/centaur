@@ -2,8 +2,6 @@
 
 from dotenv import load_dotenv
 
-from centaur_sdk.cli import PipeSafeTyper
-
 load_dotenv()
 
 import json
@@ -14,7 +12,7 @@ from rich.console import Console
 
 from .client import _client
 
-app = PipeSafeTyper(
+app = typer.Typer(
     name="opentable", help="Search OpenTable for available reservations (search only, cannot book)"
 )
 

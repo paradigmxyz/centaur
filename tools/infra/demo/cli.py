@@ -2,15 +2,12 @@
 
 from dotenv import load_dotenv
 
-from centaur_sdk.cli import PipeSafeTyper
-
 load_dotenv()
 
 import json
-
 import typer
 
-app = PipeSafeTyper(name="demo", help="Demo tool for testing CD hot-reload")
+app = typer.Typer(name="demo", help="Demo tool for testing CD hot-reload")
 
 
 @app.callback()

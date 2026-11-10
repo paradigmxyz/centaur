@@ -10,11 +10,9 @@ from typing import Any
 import httpx
 import typer
 
-from centaur_sdk.cli import PipeSafeTyper
-
 from .client import FredClient, _client
 
-app = PipeSafeTyper(
+app = typer.Typer(
     name="fred",
     help="FRED (Federal Reserve Economic Data): search series, fetch observations, "
     "and browse categories, releases, sources, and tags.",
