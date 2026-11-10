@@ -5,13 +5,15 @@ from datetime import date, datetime, timedelta
 
 from dotenv import load_dotenv
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-app = typer.Typer(name="sensortower", help="SensorTower CLI for mobile app analytics")
+app = PipeSafeTyper(name="sensortower", help="SensorTower CLI for mobile app analytics")
 
 
 @app.command("health")

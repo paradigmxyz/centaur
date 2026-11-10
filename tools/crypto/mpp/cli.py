@@ -6,9 +6,11 @@ from collections.abc import Callable
 import typer
 from dotenv import load_dotenv
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
-app = typer.Typer(
+app = PipeSafeTyper(
     name="mpp",
     help="Market data and live service discovery via MPP (Machine Payments Protocol).",
 )

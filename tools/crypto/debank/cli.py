@@ -6,7 +6,9 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-app = typer.Typer(name="debank", help="DeBank CLI for DeFi wallet data and protocol positions")
+from centaur_sdk.cli import PipeSafeTyper
+
+app = PipeSafeTyper(name="debank", help="DeBank CLI for DeFi wallet data and protocol positions")
 
 
 @app.command("health")

@@ -8,7 +8,9 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-app = typer.Typer(
+from centaur_sdk.cli import PipeSafeTyper
+
+app = PipeSafeTyper(
     name="gsuite", help="GSuite CLI for AI agents - Gmail, Calendar, Directory, Drive"
 )
 
@@ -710,9 +712,11 @@ def drive_upload(
         gsuite drive upload data.csv -c general -r U123ABC --sheets
     """
     import base64
-    import subprocess
     import json
-    from .client import drive_upload as upload, drive_setup_channel_permissions
+    import subprocess
+
+    from .client import drive_setup_channel_permissions
+    from .client import drive_upload as upload
 
     def get_channel_member_emails_via_cli(channel_name: str) -> list[str]:
         """Get channel member emails via slack CLI subprocess."""
@@ -1237,7 +1241,7 @@ def drive_export(
         gsuite drive export "1abc123" -f txt -o doc.txt  # Export as text file
         gsuite drive export "1abc123" -f csv             # Export Sheet as CSV
     """
-    from .client import _drive_export_bytes, drive_get, docs_get_text
+    from .client import _drive_export_bytes, docs_get_text, drive_get
 
     try:
         file_info = drive_get(file_id)
@@ -1549,7 +1553,7 @@ def docs_append_cmd(
     Examples:
         gsuite docs append "1abc123" "New paragraph at the end."
     """
-    from .client import docs_get, docs_batch_update
+    from .client import docs_batch_update, docs_get
 
     try:
         document_id = extract_doc_id(doc_id)
@@ -1731,6 +1735,7 @@ def sheets_read_cmd(
         gsuite sheets read "1Abc..." --json
     """
     import json
+
     from .client import sheets_read
 
     try:
@@ -1816,6 +1821,7 @@ def sheets_update_cmd(
         gsuite sheets update "1Abc..." "A1:C2" '[["A","B","C"],["1","2","3"]]'
     """
     import json
+
     from .client import sheets_update
 
     try:
@@ -1929,8 +1935,8 @@ _analytics_property: str | None = None
 
 def _setup_analytics_property():
     """Set up analytics property from site or property ID."""
-    from .client import set_analytics_property, get_credentials
     from .analytics_properties import get_property_id_for_site
+    from .client import get_credentials, set_analytics_property
 
     if _analytics_site:
         # First try static lookup
@@ -2023,6 +2029,7 @@ def analytics_summary(
         gsuite analytics -s paradigm.xyz summary --start 7daysAgo
     """
     import json
+
     from .client import analytics_get_summary
 
     _setup_analytics_property()
@@ -2078,6 +2085,7 @@ def analytics_sources(
         gsuite analytics -s paradigm.xyz sources --start 7daysAgo -n 10
     """
     import json
+
     from .client import analytics_get_traffic_by_source
 
     _setup_analytics_property()
@@ -2124,6 +2132,7 @@ def analytics_channels(
 ):
     """Get traffic by default channel grouping."""
     import json
+
     from .client import analytics_get_traffic_by_channel
 
     _setup_analytics_property()
@@ -2168,6 +2177,7 @@ def analytics_pages(
 ):
     """Get top pages by views."""
     import json
+
     from .client import analytics_get_top_pages
 
     _setup_analytics_property()
@@ -2213,6 +2223,7 @@ def analytics_devices(
 ):
     """Get traffic by device category."""
     import json
+
     from .client import analytics_get_traffic_by_device
 
     _setup_analytics_property()
@@ -2256,6 +2267,7 @@ def analytics_countries(
 ):
     """Get traffic by country."""
     import json
+
     from .client import analytics_get_traffic_by_country
 
     _setup_analytics_property()
@@ -2297,6 +2309,7 @@ def analytics_daily(
 ):
     """Get daily active users over time."""
     import json
+
     from .client import analytics_get_daily_users
 
     _setup_analytics_property()
@@ -2338,6 +2351,7 @@ def analytics_realtime(
 ):
     """Get realtime active users (last 30 minutes)."""
     import json
+
     from .client import analytics_run_realtime_report
 
     _setup_analytics_property()
@@ -2397,6 +2411,7 @@ def analytics_query(
         averageSessionDuration, engagementRate, engagedSessions
     """
     import json
+
     from .client import analytics_run_report
 
     _setup_analytics_property()

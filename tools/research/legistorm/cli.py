@@ -7,7 +7,9 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-app = typer.Typer(name="legistorm", help="LegiStorm CLI for congressional data")
+from centaur_sdk.cli import PipeSafeTyper
+
+app = PipeSafeTyper(name="legistorm", help="LegiStorm CLI for congressional data")
 
 
 @app.command("health")

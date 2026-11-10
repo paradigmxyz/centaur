@@ -12,9 +12,11 @@ import json
 import typer
 from dotenv import load_dotenv
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
-app = typer.Typer(
+app = PipeSafeTyper(
     name="cloudwatch",
     help="AWS CloudWatch CLI — Logs Insights, log events, metrics, and alarms (read-only)",
     no_args_is_help=True,

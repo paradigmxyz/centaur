@@ -7,11 +7,13 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
+from centaur_sdk.cli import PipeSafeTyper
+
 from .client import DefiLlamaClient, _looks_like_perps
 
 load_dotenv()
 
-app = typer.Typer(
+app = PipeSafeTyper(
     name="defillama",
     help=(
         "DefiLlama CLI for stablecoin and DeFi analytics. Prefer typed commands "

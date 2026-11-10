@@ -8,9 +8,12 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
-app = typer.Typer(
+
+app = PipeSafeTyper(
     name="slack",
     help=(
         "Slack CLI for AI agents with two access paths. Proxied commands omit the "
@@ -377,6 +380,7 @@ def channel_direct(
         console.print(f"[green]{msg['user']}[/]{thread_info}: {text}")
 
 
+@app.command("history")
 @app.command("channel")
 def channel(
     channel_id: str = typer.Argument(..., help="Slack channel ID, e.g. C1234567890"),
@@ -645,8 +649,8 @@ def sync_history(
     ),
 ):
     """Run an incremental channel-history sync suitable for ETL jobs."""
-    from pathlib import Path
     import sys
+    from pathlib import Path
 
     from .client import sync_channel_history
 
@@ -1584,6 +1588,7 @@ def channel_emails(
         slack channel-emails #general -o json
     """
     import json
+
     from .client import get_channel_member_emails
 
     try:
@@ -1614,6 +1619,7 @@ def user_info(
         slack user-info U123ABC -o json
     """
     import json
+
     from .client import get_user_profile
 
     try:

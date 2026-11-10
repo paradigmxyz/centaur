@@ -6,7 +6,9 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-app = typer.Typer(
+from centaur_sdk.cli import PipeSafeTyper
+
+app = PipeSafeTyper(
     name="crunchbase", help="Crunchbase Enterprise API CLI for company and funding data"
 )
 

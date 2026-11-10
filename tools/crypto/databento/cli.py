@@ -6,9 +6,11 @@ import typer
 from dotenv import load_dotenv
 from rich.console import Console
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
-app = typer.Typer(name="databento", help="Databento Historical API — stock market OHLCV data")
+app = PipeSafeTyper(name="databento", help="Databento Historical API — stock market OHLCV data")
 
 
 @app.command("health")

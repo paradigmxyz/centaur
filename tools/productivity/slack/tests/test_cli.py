@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -849,3 +850,34 @@ def test_unreact_is_discoverable() -> None:
     result = CliRunner().invoke(app, ["unreact", "--help"])
     assert result.exit_code == 0
     assert "reactions:write" in result.output
+
+
+def test_history_is_alias_for_channel(monkeypatch) -> None:
+    calls = []
+
+    def fake_get_channel_history_proxy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"ok": True, "channel_id": "C1234567890", "messages": [], "has_more": False}
+
+    fake_client = types.SimpleNamespace(get_channel_history_proxy=fake_get_channel_history_proxy)
+    monkeypatch.setitem(sys.modules, "slack.client", fake_client)
+
+    result = CliRunner().invoke(app, ["history", "C1234567890", "--limit", "5"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)["channel_id"] == "C1234567890"
+    assert calls[0][0] == ("C1234567890",)
+    assert calls[0][1]["limit"] == 5
+
+
+def test_cli_exits_zero_when_reader_closes_pipe_early() -> None:
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "from slack.cli import app; app()", "--help"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    proc.stdout.close()
+    stderr = proc.stderr.read()
+    proc.stderr.close()
+
+    assert proc.wait(timeout=60) == 0, stderr.decode()

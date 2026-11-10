@@ -5,13 +5,15 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from centaur_sdk.cli import PipeSafeTyper
+
 load_dotenv()
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-app = typer.Typer(name="harmonic", help="Harmonic.AI API CLI for startup discovery and enrichment")
+app = PipeSafeTyper(name="harmonic", help="Harmonic.AI API CLI for startup discovery and enrichment")
 
 
 @app.command("health")
