@@ -324,6 +324,84 @@ module Api
         assert Grant.exists?(direct.id)
       end
 
+      # -- 422 compatibility ---------------------------------------------------------
+      # Nested validation errors keep the keys earlier versions returned, and
+      # add path keys ("rules[1].cidr", "keyfile.config") alongside them.
+
+      test "static nested errors keep the first invalid record's keys and add every path" do
+        post api_v1_static_secrets_path, params: { data: {
+          name: "compat", inject_config: { header: "A" },
+          rules: [ { host: "ok.example.com" }, { cidr: "not-a-cidr" }, { host: "h", cidr: "10.0.0.0/8" } ]
+        } }, headers: csrf_headers, as: :json
+        assert_response :unprocessable_entity
+        details = json_body.dig("error", "details")
+        assert_equal details["rules[1].cidr"], details["cidr"]
+        assert details["rules[1].cidr"].present?
+        assert_equal [ "host and cidr are mutually exclusive" ], details["rules[2].base"]
+        assert_not details.key?("rules[0].host")
+      end
+
+      test "static parent errors still take precedence over nested errors" do
+        post api_v1_static_secrets_path, params: { data: {
+          name: "compat", rules: [ { host: "h", cidr: "10.0.0.0/8" } ]
+        } }, headers: csrf_headers, as: :json
+        assert_response :unprocessable_entity
+        details = json_body.dig("error", "details")
+        assert details["base"].present?
+        assert_not details.keys.any? { |key| key.start_with?("rules[") }
+      end
+
+      test "gcp create with an invalid rule keeps rules is invalid and the parent's own errors" do
+        post api_v1_gcp_auth_secrets_path, params: { data: {
+          foreign_id: "compat-gcp", scopes: [], keyfile: { source_type: "env", config: { var: "K" } },
+          rules: [ { host: "h", cidr: "10.0.0.0/8" } ]
+        } }, headers: csrf_headers, as: :json
+        assert_response :unprocessable_entity
+        details = json_body.dig("error", "details")
+        assert_equal [ "is invalid" ], details["rules"]
+        assert details["scopes"].present?
+        assert_equal [ "host and cidr are mutually exclusive" ], details["rules[0].base"]
+        assert_not GcpAuthSecret.exists?(foreign_id: "compat-gcp")
+      end
+
+      test "gcp_id_token create with an invalid rule keeps rules is invalid" do
+        post api_v1_gcp_id_token_secrets_path, params: { data: {
+          foreign_id: "compat-id", audience: "https://a.example.com",
+          keyfile: { source_type: "env", config: { var: "K" } }, rules: [ { host: "h", cidr: "10.0.0.0/8" } ]
+        } }, headers: csrf_headers, as: :json
+        assert_response :unprocessable_entity
+        assert_equal({ "rules" => [ "is invalid" ], "rules[0].base" => [ "host and cidr are mutually exclusive" ] },
+                     json_body.dig("error", "details"))
+      end
+
+      test "an invalid keyfile or DSN source is a 422 instead of being dropped or failing mid-write" do
+        message = [ "is missing required key \"var\" for source_type \"env\"" ]
+        assert_no_difference [ "GcpAuthSecret.count", "SecretSource.count" ] do
+          post api_v1_gcp_auth_secrets_path, params: { data: {
+            foreign_id: "compat-key", scopes: [ "x" ], keyfile: { source_type: "env", config: {} }
+          } }, headers: csrf_headers, as: :json
+        end
+        assert_response :unprocessable_entity
+        assert_equal({ "keyfile_source" => [ "is invalid" ], "keyfile.config" => message }, json_body.dig("error", "details"))
+
+        secret = pg_dsn_secrets(:acme_reporting_pg)
+        patch api_v1_pg_dsn_secret_path(secret.oid), params: { data: {
+          foreign_id: secret.foreign_id, database: "reporting", dsn: { source_type: "env", config: {} }
+        } }, headers: csrf_headers, as: :json
+        assert_response :unprocessable_entity
+        assert_equal({ "dsn_source" => [ "is invalid" ], "dsn.config" => message }, json_body.dig("error", "details"))
+
+        id_token = gcp_id_token_secrets(:acme_cloud_run)
+        patch api_v1_gcp_id_token_secret_path(id_token.oid), params: { data: {
+          foreign_id: id_token.foreign_id, audience: id_token.audience, rules: [ { host: "a" }, { host: "h", cidr: "10.0.0.0/8" } ],
+          keyfile: { source_type: "env", config: { var: "K" } }
+        } }, headers: csrf_headers, as: :json
+        assert_response :unprocessable_entity
+        assert_equal({ "rules" => [ "is invalid" ], "rules[1].base" => [ "host and cidr are mutually exclusive" ] },
+                     json_body.dig("error", "details"))
+        assert_equal "CLOUD_RUN_SA_KEYFILE", id_token.reload.keyfile_source.config["var"]
+      end
+
       # -- static forms ------------------------------------------------------------
 
       test "creating a static secret stores its source, rules, and labels" do
@@ -397,7 +475,9 @@ module Api
           } }, headers: csrf_headers, as: :json
         end
         assert_response :unprocessable_entity
-        assert json_body.dig("error", "details").keys.any? { |key| key.start_with?("rules[0].") }
+        # The rule's own keys (as before) plus the additive path key.
+        assert_equal({ "base" => [ "host and cidr are mutually exclusive" ],
+                       "rules[0].base" => [ "host and cidr are mutually exclusive" ] }, json_body.dig("error", "details"))
       end
 
       test "an invalid nested source is rejected without writing and reported under source" do
@@ -408,7 +488,8 @@ module Api
           } }, headers: csrf_headers, as: :json
         end
         assert_response :unprocessable_entity
-        assert json_body.dig("error", "details").keys.any? { |key| key.start_with?("source.") }
+        message = [ "is missing required key \"var\" for source_type \"env\"" ]
+        assert_equal({ "config" => message, "source.config" => message }, json_body.dig("error", "details"))
       end
 
       test "editing a static secret changes attributes and replaces rules" do
@@ -454,7 +535,8 @@ module Api
           source: { source_type: "control_plane", config: {} }
         } }, headers: csrf_headers, as: :json
         assert_response :unprocessable_entity
-        assert json_body.dig("error", "details").key?("source.secret")
+        message = [ "can't be blank for source_type \"control_plane\"" ]
+        assert_equal({ "secret" => message, "source.secret" => message }, json_body.dig("error", "details"))
       end
 
       test "PUT keeps replacing the whole document and still requires an inline value" do

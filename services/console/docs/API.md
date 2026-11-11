@@ -215,7 +215,17 @@ The `secret` field is encrypted at rest, is write-only, and is never returned in
 
 For the static, PG DSN, GCP auth, and GCP ID token secret resources, a `PATCH` whose `control_plane` source omits `secret` (or sends it blank) keeps the value already stored, provided the stored source is also `control_plane`. Clients can therefore save other edits without ever reading the plaintext back. `PUT` keeps its full-replace contract and still requires `secret`, as does a write that switches a source to `control_plane`.
 
-On those same resources, validation errors of the nested source and rules are reported under path-style `details` keys: `source.config`, `dsn.secret`, `keyfile.source_type`, `rules[0].cidr` (0-based rule index), and so on.
+On those same resources, an invalid nested source or rule is a `422` (it is never dropped silently or left half-written). `details` keeps the keys these responses have always used, and also adds a path-style key for every nested error: `source.config`, `dsn.secret`, `keyfile.source_type`, `rules[0].cidr` (0-based rule index), and so on.
+
+- Static secrets: when the secret itself is valid, `details` carries the first invalid nested record's own keys, checking the source first and then the rules in order. For example, `{ "cidr": [...], "rules[1].cidr": [...] }`. Errors on the secret itself take precedence and come back alone, as before.
+- PG DSN, GCP auth, and GCP ID token secrets: an invalid rule adds `"rules": ["is invalid"]`, and an invalid source adds `"dsn_source"` or `"keyfile_source"`: `["is invalid"]`. A create also reports the secret's own validation errors.
+
+```json
+{ "error": { "message": "validation failed", "details": {
+  "rules": ["is invalid"],
+  "rules[0].base": ["host and cidr are mutually exclusive"]
+} } }
+```
 
 `token_broker` is also resolved by iron-control rather than by the proxy. `credential_id` names a [broker credential](#broker-credentials), and at sync time iron-control substitutes that credential's current access token, delivered inline exactly like a `control_plane` value. The reference never reaches the proxy. If the credential has no current token (it is still bootstrapping, or it is dead), the owning secret is omitted from the proxy's config until the credential recovers.
 

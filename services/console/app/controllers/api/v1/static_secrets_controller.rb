@@ -76,7 +76,6 @@ module Api
         # A PATCH that omits an inline source's `secret` keeps the stored value.
         source = build_secret_source(attrs, :source, ref.source)
         rules = build_rules(attrs)
-        validate_nested_secret_records!(ref, sources: { source: source }, rules: rules)
 
         # Resolve profile defaults before the replacement guard so a repeated
         # write compares the effective persisted document, not the abbreviated
@@ -97,16 +96,15 @@ module Api
             ref.save!
 
             ref.source&.destroy!
-            if source
-              source.static_secret = ref
-              source.save!
-            end
-
             ref.rules.destroy_all
-            rules.each do |rule|
-              rule.static_secret = ref
-              rule.save!
-            end
+            source&.static_secret = ref
+            rules.each { |rule| rule.static_secret = ref }
+            # Invalid nested records are reported (and rolled back) after the
+            # parent saved, keeping the error keys of the per-record save!.
+            validate_nested_secret_records!(ref, sources: { source: source }, rules: rules, legacy: :flat)
+
+            source&.save!
+            rules.each(&:save!)
 
             ref.reload
           end

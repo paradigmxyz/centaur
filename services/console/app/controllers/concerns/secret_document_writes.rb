@@ -5,10 +5,11 @@
 #   On PATCH, an inline (control_plane) source that omits `secret` keeps the
 #   stored value, so clients never need to read plaintext back to save other
 #   edits. PUT keeps its full-replace contract and still requires `secret`.
-# - #validate_nested_secret_records! validates the nested source and rules
-#   before they are assigned and reports their errors under path-style detail
-#   keys ("source.config", "rules[0].cidr"). Without it, an invalid has_one
-#   source is silently dropped on create and fails mid-write on update.
+# - #validate_nested_secret_records! turns invalid nested sources and rules
+#   into a 422 (render_validation_error) instead of a silent drop or a
+#   mid-write exception. The 422 `details` keep the keys earlier versions
+#   returned (see below) and add path-style keys for every nested error
+#   ("source.config", "keyfile.secret", "rules[0].cidr").
 module SecretDocumentWrites
   extend ActiveSupport::Concern
 
@@ -25,27 +26,60 @@ module SecretDocumentWrites
     SecretSource.new(source_attrs)
   end
 
-  # Validates the nested source(s) (keyed by payload name) and rules before
-  # anything is assigned to +record+, and raises ActiveRecord::RecordInvalid
-  # (for render_validation_error) carrying their errors on +record+. Assigning
-  # an invalid has_one/has_many to a persisted record would otherwise fail
-  # mid-write instead of returning a 422.
-  def validate_nested_secret_records!(record, sources: {}, rules: [])
-    errors = []
-    sources.each do |name, source|
-      next if source.nil? || source.valid?
+  # Validates the nested source(s) (keyed by payload name, e.g. { keyfile: src })
+  # and rules, and raises ActiveRecord::RecordInvalid carrying their errors on
+  # +record+ when any is invalid.
+  #
+  # prepare: (association mode) assigns the document to a new +record+ in
+  # memory so its own validations run as they did on create.
+  #
+  # legacy: selects the pre-existing (compatibility) keys added alongside the
+  # path keys:
+  # - :flat (static secrets, called after the parent saved): the first invalid
+  #   nested record's own attribute keys, in save order (source, then rules),
+  #   exactly as the nested save! used to report them ({ "cidr" => [...] }).
+  # - :association (pg_dsn, gcp_auth, gcp_id_token, called before assignment):
+  #   the parent's own validation errors plus "rules" => ["is invalid"] (the
+  #   has_many autosave error), and "<association>" => ["is invalid"] for an
+  #   invalid source (e.g. "keyfile_source"), which was silently dropped before.
+  def validate_nested_secret_records!(record, legacy:, sources: {}, rules: [], source_associations: {}, prepare: nil)
+    invalid_sources = sources.select { |_name, source| source && !source.valid? }
+    invalid_rules = Array(rules).each_with_index.reject { |rule, _index| rule.valid? }
+    return if invalid_sources.empty? && invalid_rules.empty?
 
-      source.errors.each { |error| errors << [ :"#{name}.#{error.attribute}", error.message ] }
+    case legacy
+    when :flat
+      first = invalid_sources.values.first || invalid_rules.first&.first
+      first.errors.each { |error| record.errors.add(error.attribute, error.message) }
+    when :association
+      parent_errors_for(record, prepare).each { |attribute, message| record.errors.add(attribute, message) }
+      invalid_sources.each_key do |name|
+        record.errors.add(source_associations.fetch(name, name), "is invalid")
+      end
+      record.errors.add(:rules, "is invalid") if invalid_rules.any?
     end
-    Array(rules).each_with_index do |rule, index|
-      next if rule.valid?
 
-      rule.errors.each { |error| errors << [ :"rules[#{index}].#{error.attribute}", error.message ] }
+    invalid_sources.each do |name, source|
+      source.errors.each { |error| record.errors.add(:"#{name}.#{error.attribute}", error.message) }
     end
-    return if errors.empty?
-
-    errors.each { |attribute, message| record.errors.add(attribute, message) }
+    invalid_rules.each do |rule, index|
+      rule.errors.each { |error| record.errors.add(:"rules[#{index}].#{error.attribute}", error.message) }
+    end
     raise ActiveRecord::RecordInvalid, record
+  end
+
+  # The parent's own validation errors, as a create used to report them next
+  # to "rules is invalid". Only for a new record, after +prepare+ assigns the
+  # document in memory (nothing is saved). Updates used to fail mid-write, so
+  # there is no earlier shape to keep.
+  def parent_errors_for(record, prepare)
+    return [] if record.persisted?
+
+    prepare&.call
+    record.valid?
+    record.errors.reject { |error| %i[rules keyfile_source dsn_source].include?(error.attribute) }
+          .map { |error| [ error.attribute, error.message ] }
+          .tap { record.errors.clear }
   end
 
   def retain_inline_secret?(source_attrs, existing)

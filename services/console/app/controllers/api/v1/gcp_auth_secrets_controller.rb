@@ -58,7 +58,15 @@ module Api
         # A PATCH that omits an inline keyfile's `secret` keeps the stored value.
         keyfile_source = build_secret_source(attrs, :keyfile, ref.keyfile_source)
         rules_attrs = build_rules(attrs)
-        validate_nested_secret_records!(ref, sources: { keyfile: keyfile_source }, rules: rules_attrs)
+        validate_nested_secret_records!(
+          ref, sources: { keyfile: keyfile_source }, rules: rules_attrs,
+          source_associations: { keyfile: :keyfile_source }, legacy: :association,
+          prepare: lambda {
+            ref.assign_attributes(base)
+            ref.keyfile_source = keyfile_source
+            ref.rules = rules_attrs
+          }
+        )
 
         GcpAuthSecret.transaction do
           with_sync_config_replacement_guard(ref, base, keyfile_source: keyfile_source, rules: rules_attrs) do
