@@ -81,6 +81,13 @@ describe("apps list", () => {
     expect(screen.getByText("0 OAuth apps driving the public consent flow.")).toBeInTheDocument();
   });
 
+  it("reports a failed list request instead of the empty state", async () => {
+    mockApi({ "GET /api/v1/oauth_apps": apiResponse(500, { error: { message: "boom" } }) });
+    renderRoute(<OauthAppsListPage />, { path: "/console/oauth_apps" });
+    expect(await screen.findByText("boom")).toBeInTheDocument();
+    expect(screen.queryByText("No apps.")).not.toBeInTheDocument();
+  });
+
   it("sends operators to their landing page", async () => {
     const api = mockApi({});
     renderRoute(<OauthAppsListPage />, { path: "/console/oauth_apps", me: operatorMe() });
@@ -127,6 +134,19 @@ describe("app detail", () => {
     expect(screen.getByText("The client secret is never shown. Credentials minted by this app inherit its client id and secret.")).toBeInTheDocument();
     // A personal app has no provider panel to fetch.
     expect(screen.queryByRole("region", { name: "Mercator wallet" })).not.toBeInTheDocument();
+  });
+
+  it("reports failed credential and provider-detail requests instead of empty states", async () => {
+    mockApi({
+      "GET /api/v1/oauth_apps/oap_mercator": { data: { ...app, id: "oap_mercator", slug: "mercator", provider: "mercator", shared: true } },
+      "GET /api/v1/oauth_apps/oap_mercator/credentials": apiResponse(500, { error: { message: "boom" } }),
+      "GET /api/v1/oauth_apps/oap_mercator/provider_details": apiResponse(503, { error: { message: "unavailable" } }),
+    });
+    renderRoute(<OauthAppDetailPage />, { path: "/console/oauth_apps/:id", url: "/console/oauth_apps/oap_mercator" });
+
+    expect(await screen.findByText("Could not load minted credentials: boom")).toBeInTheDocument();
+    expect(await screen.findByText("Could not load provider details: unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("No credentials minted yet.")).not.toBeInTheDocument();
   });
 
   it("shows custom provider config, an unset secret, and the empty credentials state", async () => {
@@ -265,7 +285,8 @@ describe("app form", () => {
       }),
     });
     renderRoute(<OauthAppNewPage />, { path: "/console/oauth_apps/new" });
-    await user.click(await screen.findByRole("button", { name: "Create app" }));
+    await user.type(await screen.findByLabelText("Slug *"), "dup");
+    await user.click(screen.getByRole("button", { name: "Create app" }));
 
     expect(await screen.findByText("2 errors prevented this app from saving:")).toBeInTheDocument();
     expect(screen.getByText("Allowed scopes can't be blank")).toBeInTheDocument();
@@ -302,6 +323,29 @@ describe("app form", () => {
     expect(body.data).not.toHaveProperty("shared");
     expect(body.data.enabled).toBe(false);
     expect(body.data.labels).toEqual({ team: "comms" });
+  });
+
+  it("blocks saving an edit with a cleared slug", async () => {
+    const user = userEvent.setup();
+    const api = mockApi({
+      "GET /api/v1/oauth_providers": { data: providers },
+      "GET /api/v1/oauth_apps/oap_google": { data: app },
+      "PATCH /api/v1/oauth_apps/oap_google": { data: app },
+    });
+    renderRoute(<OauthAppEditPage />, {
+      path: "/console/oauth_apps/:id/edit",
+      url: "/console/oauth_apps/oap_google/edit",
+      routes: [{ path: "/console/oauth_apps/:id", element: <p>detail page</p> }],
+    });
+    const slug = await screen.findByLabelText("Slug *");
+    await user.clear(slug);
+    await user.type(slug, "   ");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(await screen.findByText("can't be blank")).toBeInTheDocument();
+    expect(slug).toHaveAttribute("aria-invalid", "true");
+    expect(screen.queryByText("detail page")).not.toBeInTheDocument();
+    expect(api.calls("PATCH /api/v1/oauth_apps/oap_google")).toHaveLength(0);
   });
 
   it("only sends a trimmed provider config for the custom provider", () => {
@@ -409,6 +453,13 @@ describe("integrations", () => {
     expect(within(shared).getByText("Shared with your agents.")).toBeInTheDocument();
     expect(within(shared).queryByText("Hidden for shared apps")).not.toBeInTheDocument();
     expect(within(shared).getByText("no")).toBeInTheDocument(); // two-letter fallback for unknown providers
+  });
+
+  it("reports a failed request", async () => {
+    mockApi({ "GET /api/v1/integrations": apiResponse(500, { error: { message: "boom" } }) });
+    renderRoute(<IntegrationsPage />, { path: "/console/integrations" });
+    expect(await screen.findByText("boom")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "SSH key" })).not.toBeInTheDocument();
   });
 
   it("links a configured SSH key to its page", async () => {

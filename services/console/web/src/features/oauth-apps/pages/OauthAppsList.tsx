@@ -82,7 +82,9 @@ function OauthAppsList() {
           </Button>
         }
       />
-      {list.error && <ErrorAlert>{errorMessage(list.error)}</ErrorAlert>}
+      {list.error && !list.data ? (
+        <ErrorAlert>{errorMessage(list.error)}</ErrorAlert>
+      ) : (
       <DataTable
         caption="OAuth apps"
         columns={columns}
@@ -96,6 +98,7 @@ function OauthAppsList() {
             : undefined
         }
       />
+      )}
     </>
   );
 }

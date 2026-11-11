@@ -1,8 +1,10 @@
 // The OAuth app create/edit form (legacy console/oauth_apps/_form). The
 // client secret is write-only: never prefilled, and a blank value on edit is
 // omitted so the stored secret is kept. `shared` is create-only.
+import { zodResolver } from "@hookform/resolvers/zod";
 import { FormProvider, useForm, type FieldError } from "react-hook-form";
 import { Link } from "react-router";
+import { z } from "zod";
 
 import { CheckboxField, FormSection, SelectField, TextareaField, TextField } from "@/components/form/fields";
 import { applyApiErrors } from "@/components/form/form-errors";
@@ -22,19 +24,24 @@ const CONFIG_LABELS: Record<string, string> = {
   resource: "Resource URL",
 };
 
-export interface OauthAppFormValues {
-  slug: string;
-  description: string;
-  provider: string;
-  client_id: string;
-  client_secret: string;
-  provider_config: Record<string, string>;
-  allowed_scopes: string;
-  enabled: boolean;
-  shared: boolean;
-  always_available: boolean;
-  labels: KeyValueRow[];
-}
+// Only the slug is checked client-side: the API ignores a blank slug on update
+// (keeping the stored one), so clearing it would otherwise "succeed" silently.
+// Everything else is validated by the model and mapped back from the 422.
+const schema = z.object({
+  slug: z.string().trim().min(1, "can't be blank"),
+  description: z.string(),
+  provider: z.string(),
+  client_id: z.string(),
+  client_secret: z.string(),
+  provider_config: z.record(z.string(), z.string().optional()),
+  allowed_scopes: z.string(),
+  enabled: z.boolean(),
+  shared: z.boolean(),
+  always_available: z.boolean(),
+  labels: z.array(z.object({ key: z.string(), value: z.string() })),
+});
+
+export type OauthAppFormValues = z.infer<typeof schema> & { labels: KeyValueRow[] };
 
 const FIELDS = [
   "slug",
@@ -118,7 +125,10 @@ interface OauthAppFormProps {
 
 export function OauthAppForm({ app, providers, submitLabel, cancelTo, onSubmit }: OauthAppFormProps) {
   const isNew = !app;
-  const form = useForm<OauthAppFormValues>({ defaultValues: initialValues(app, providers[0]?.key ?? "") });
+  const form = useForm<OauthAppFormValues>({
+    resolver: zodResolver(schema),
+    defaultValues: initialValues(app, providers[0]?.key ?? ""),
+  });
   const customKeys = providers.find((p) => p.key === CUSTOM_PROVIDER)?.config_keys ?? Object.keys(CONFIG_LABELS);
   // provider_config errors are set on the whole map (one model attribute).
   const configError = (form.formState.errors.provider_config as FieldError | undefined)?.message;

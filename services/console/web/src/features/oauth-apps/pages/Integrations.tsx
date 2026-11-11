@@ -33,7 +33,7 @@ function Integrations() {
   return (
     <>
       <PageHeader title="Integrations" subtitle="Connect your accounts so Centaur can act on your behalf." />
-      {query.error && <ErrorAlert>{errorMessage(query.error)}</ErrorAlert>}
+      {query.error && !query.data && <ErrorAlert>{errorMessage(query.error)}</ErrorAlert>}
       {query.isLoading && <p className="text-sm text-subtle-foreground">Loading…</p>}
       {query.data && (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">

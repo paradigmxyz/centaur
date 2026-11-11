@@ -1,9 +1,11 @@
+import { ErrorAlert } from "@/components/alerts";
 import { AppLink } from "@/components/app-link";
 import { credentialStatusTone, StatusBadge } from "@/components/badges";
 import { DataTable, type Column } from "@/components/data-table";
 import { EmptyState } from "@/components/empty-state";
 import { SectionHeading } from "@/components/page-header";
 import { usePageParam } from "@/components/pagination";
+import { errorMessage } from "@/lib/api";
 
 import { useMintedCredentials, type MintedCredential } from "../api";
 
@@ -49,7 +51,9 @@ export function MintedCredentialsSection({ appId }: { appId: string }) {
   return (
     <section className="mb-8">
       <SectionHeading className="mb-3">Minted Credentials</SectionHeading>
-      {list.data && list.data.meta.total === 0 ? (
+      {list.error && !list.data ? (
+        <ErrorAlert>Could not load minted credentials: {errorMessage(list.error)}</ErrorAlert>
+      ) : list.data && list.data.meta.total === 0 ? (
         <EmptyState>No credentials minted yet.</EmptyState>
       ) : (
         <DataTable
