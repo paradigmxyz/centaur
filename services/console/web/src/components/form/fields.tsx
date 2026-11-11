@@ -27,7 +27,7 @@ export function fieldId(name: string) {
   return `field-${name.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
-/** Uppercase label + control + hint + inline error (legacy form-label/form-hint/field-error). */
+/** Label + control + hint + inline error (legacy form-label/form-hint/field-error). */
 export function FieldShell({
   id,
   label,
@@ -45,16 +45,16 @@ export function FieldShell({
 }) {
   return (
     <div className={className}>
-      <Label htmlFor={id} className="mb-1 block text-xs font-semibold tracking-wider text-foreground uppercase">
+      <Label htmlFor={id} className="mb-2 block">
         {label}
       </Label>
       {children}
       {error && (
-        <p id={`${id}-error`} className="mt-1 text-xs text-red-400 light:text-red-700">
+        <p id={`${id}-error`} className="mt-1.5 text-xs text-destructive">
           {error}
         </p>
       )}
-      {hint && <p className="mt-1 text-xs text-muted-foreground">{hint}</p>}
+      {hint && <p className="mt-1.5 text-xs text-muted-foreground">{hint}</p>}
     </div>
   );
 }
@@ -166,7 +166,7 @@ export function CheckboxField<T extends FieldValues>({
     <div className={cn("flex items-start gap-3", className)}>
       <Checkbox
         id={id}
-        className="mt-1"
+        className="mt-0.5"
         checked={Boolean(field.value)}
         onCheckedChange={(checked) => field.onChange(checked === true)}
         onBlur={field.onBlur}
@@ -174,11 +174,11 @@ export function CheckboxField<T extends FieldValues>({
         aria-describedby={hint ? `${id}-hint` : undefined}
       />
       <div>
-        <label htmlFor={id} className="block cursor-pointer text-sm font-medium text-heading">
+        <label htmlFor={id} className="block cursor-pointer text-sm leading-5 font-medium">
           {label}
         </label>
         {hint && (
-          <span id={`${id}-hint`} className="block text-xs text-muted-foreground">
+          <span id={`${id}-hint`} className="mt-0.5 block text-xs text-muted-foreground">
             {hint}
           </span>
         )}
@@ -200,9 +200,9 @@ export function FormSection({
   className?: string;
 }) {
   return (
-    <section className={cn("rounded-sm border border-border bg-card p-5", className)}>
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <h2 className="text-xs font-semibold tracking-wider text-foreground uppercase">{title}</h2>
+    <section className={cn("rounded-xl border bg-card p-5 shadow-xs", className)}>
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <h2 className="text-sm font-semibold">{title}</h2>
         {actions}
       </div>
       {children}

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { cn } from "@/lib/utils";
 import { formatAbsolute, formatCompact, formatRelative } from "@/lib/format";
 
 interface LocalTimeProps {
@@ -22,7 +23,7 @@ export function LocalTime({ value, format = "absolute", className }: LocalTimePr
     return () => clearInterval(timer);
   }, [format]);
 
-  if (!value) return <span className="text-subtle-foreground">—</span>;
+  if (!value) return <span className="text-muted-foreground">—</span>;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return <span className={className}>{value}</span>;
 
@@ -30,7 +31,7 @@ export function LocalTime({ value, format = "absolute", className }: LocalTimePr
   const text =
     format === "compact" ? formatCompact(date, now) : format === "relative" ? formatRelative(date, now) : absolute;
   return (
-    <time dateTime={date.toISOString()} title={absolute} className={className}>
+    <time dateTime={date.toISOString()} title={absolute} className={cn("tabular-nums", className)}>
       {text}
     </time>
   );

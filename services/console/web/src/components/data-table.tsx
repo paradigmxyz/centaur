@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 
 import { Pagination } from "@/components/pagination";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { PageMeta } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -22,10 +24,25 @@ interface DataTableProps<Row> {
   loading?: boolean;
   /** Pagination footer (server meta + unit noun). */
   pagination?: { meta: PageMeta; unit: string; onPageChange: (page: number) => void };
-  /** Fixed layout with colgroup widths from column classNames. */
+  /**
+   * Fixed layout with colgroup widths from column classNames. Fixed tables keep
+   * a minimum width and scroll horizontally inside the panel on narrow screens
+   * instead of squeezing their columns.
+   */
   fixed?: boolean;
+  /**
+   * Minimum table width class. Defaults to `min-w-[44rem]` for fixed tables and
+   * `min-w-[40rem]` for tables with four or more columns, so narrow screens
+   * scroll the table instead of squeezing it.
+   */
+  minWidth?: string;
   className?: string;
   caption?: string;
+}
+
+function defaultMinWidth(fixed: boolean | undefined, columnCount: number) {
+  if (fixed) return "min-w-[44rem]";
+  return columnCount >= 4 ? "min-w-[40rem]" : undefined;
 }
 
 /** The console table panel: header row, hover rows, empty state, pager. */
@@ -37,50 +54,72 @@ export function DataTable<Row>({
   loading,
   pagination,
   fixed,
+  minWidth,
   className,
   caption,
 }: DataTableProps<Row>) {
   return (
-    <div className={cn("overflow-hidden rounded-sm border border-border bg-card", className)}>
-      <div className="relative overflow-x-auto">
-        <table className={cn("min-w-full text-sm", fixed && "w-full table-fixed")}>
-          {caption && <caption className="sr-only">{caption}</caption>}
-          <thead className="border-b border-border bg-table-head text-left text-xs tracking-wider text-muted-foreground uppercase">
-            <tr>
-              {columns.map((column) => (
-                <th key={column.id} scope="col" className={cn("px-5 py-2.5 font-medium", column.className, column.headerClassName)}>
-                  {column.header}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border/70">
-            {loading && !rows ? (
-              <tr>
-                <td colSpan={columns.length} className="px-5 py-10 text-center text-subtle-foreground">
+    <div className={cn("overflow-hidden rounded-xl border bg-card shadow-xs", className)}>
+      <Table className={cn("min-w-full", fixed && "table-fixed", minWidth ?? defaultMinWidth(fixed, columns.length))}>
+        {caption && <TableCaption className="sr-only">{caption}</TableCaption>}
+        <TableHeader className="bg-muted/40">
+          <TableRow className="hover:bg-transparent">
+            {columns.map((column) => (
+              <TableHead
+                key={column.id}
+                scope="col"
+                className={cn(
+                  "h-10 px-4 text-xs font-medium first:pl-5 last:pr-5",
+                  column.className,
+                  "font-sans text-xs font-medium text-muted-foreground",
+                  column.headerClassName,
+                )}
+              >
+                {column.header}
+              </TableHead>
+            ))}
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {loading && !rows ? (
+            <>
+              <TableRow className="hover:bg-transparent">
+                <TableCell colSpan={columns.length} className="sr-only">
                   Loading…
-                </td>
-              </tr>
-            ) : rows && rows.length > 0 ? (
-              rows.map((row) => (
-                <tr key={rowKey(row)} className="transition-colors hover:bg-primary/[0.06]">
+                </TableCell>
+              </TableRow>
+              {[0, 1, 2].map((index) => (
+                <TableRow key={index} aria-hidden="true" className="hover:bg-transparent">
                   {columns.map((column) => (
-                    <td key={column.id} className={cn("min-w-0 px-5 py-2", column.className)}>
-                      {column.cell(row)}
-                    </td>
+                    <TableCell key={column.id} className="px-4 py-3 first:pl-5 last:pr-5">
+                      <Skeleton className="h-4 w-full max-w-32" />
+                    </TableCell>
                   ))}
-                </tr>
-              ))
-            ) : (
-              <tr>
-                <td colSpan={columns.length} className="px-5 py-10 text-center text-subtle-foreground">
-                  {empty}
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+                </TableRow>
+              ))}
+            </>
+          ) : rows && rows.length > 0 ? (
+            rows.map((row) => (
+              <TableRow key={rowKey(row)}>
+                {columns.map((column) => (
+                  <TableCell
+                    key={column.id}
+                    className={cn("min-w-0 px-4 py-2.5 whitespace-normal first:pl-5 last:pr-5", column.className)}
+                  >
+                    {column.cell(row)}
+                  </TableCell>
+                ))}
+              </TableRow>
+            ))
+          ) : (
+            <TableRow className="hover:bg-transparent">
+              <TableCell colSpan={columns.length} className="px-5 py-12 text-center whitespace-normal text-muted-foreground">
+                {empty}
+              </TableCell>
+            </TableRow>
+          )}
+        </TableBody>
+      </Table>
       {pagination && <Pagination {...pagination} />}
     </div>
   );

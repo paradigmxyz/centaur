@@ -199,7 +199,7 @@ export function SlackChannelPicker({
         id={listId}
         role="listbox"
         hidden={!visible}
-        className="absolute z-20 mt-1 max-h-72 w-full overflow-y-auto rounded-sm border border-input bg-popover shadow-lg"
+        className="absolute z-20 mt-1 max-h-72 w-full overflow-y-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
       >
         {options.map((option, index) => (
           <button
@@ -212,11 +212,11 @@ export function SlackChannelPicker({
             onPointerDown={(event) => event.preventDefault()}
             onClick={() => select(option)}
             className={cn(
-              "block min-h-11 w-full px-3 py-2 text-left transition-colors hover:bg-primary/[0.08] focus:outline-none",
-              index === active && "bg-primary/[0.08]",
+              "block min-h-11 w-full cursor-pointer rounded-sm px-2.5 py-2 text-left transition-colors hover:bg-accent focus:outline-none",
+              index === active && "bg-accent",
             )}
           >
-            <div className="text-sm text-heading">{option.label}</div>
+            <div className="text-sm">{option.label}</div>
             <div className="mt-0.5 text-xs text-muted-foreground">{option.description}</div>
           </button>
         ))}
@@ -224,7 +224,7 @@ export function SlackChannelPicker({
       <div
         role="status"
         aria-live="polite"
-        className={cn("mt-1 min-h-5 text-xs", status.error ? "text-red-300" : "text-muted-foreground")}
+        className={cn("mt-1.5 min-h-5 text-xs", status.error ? "text-destructive" : "text-muted-foreground")}
       >
         {status.message}
       </div>

@@ -26,16 +26,16 @@ export function PageHeader({ title, subtitle, actions, icon: Icon, documentTitle
     >
       <div className="flex min-w-0 items-start gap-3">
         {Icon && (
-          <span className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-sm bg-muted text-muted-foreground">
+          <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-lg border bg-muted/50 text-muted-foreground">
             <Icon className="size-4" aria-hidden="true" />
           </span>
         )}
         <div className="min-w-0">
-          <h1 className="text-2xl font-bold text-heading">{title}</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-balance break-words">{title}</h1>
           {subtitle && <div className="mt-1 text-sm text-muted-foreground">{subtitle}</div>}
         </div>
       </div>
-      {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
+      {actions && <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>}
     </header>
   );
 }
@@ -47,10 +47,10 @@ export function useDocumentTitle(title: string | undefined) {
   }, [title]);
 }
 
-/** Section heading used inside pages ("ROLES", "DIRECT GRANTS", ...). */
+/** Section heading used inside pages ("Roles", "Direct grants", ...). */
 export function SectionHeading({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <h2 className={cn("mb-1 text-xs font-semibold tracking-wider text-muted-foreground uppercase", className)}>
+    <h2 className={cn("mb-1 text-base font-semibold tracking-tight", className)}>
       {children}
     </h2>
   );

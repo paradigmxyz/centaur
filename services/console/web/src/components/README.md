@@ -1,19 +1,33 @@
 # Shared console components
 
 Owned by the foundation. Slices use these as-is; ask the coordinator before
-changing one. `ui/` holds shadcn/ui primitives (restyled for the console
-palette); regenerate or add primitives with
-`pnpm dlx shadcn@latest add <name>` from `services/console/web`, then fix the
-`cn` import to `@/lib/utils` if the CLI rewrites it.
+changing one. `ui/` holds stock shadcn/ui primitives (new-york style); the
+console look comes entirely from the theme variables in `src/index.css`.
+Regenerate or add primitives with `pnpm dlx shadcn@latest add <name>` from
+`services/console/web`, then fix the `cn` import to `@/lib/utils` if the CLI
+rewrites it and drop any `cn`/`next-themes` dependency it adds (the Toaster
+reads the console theme from `@/lib/theme`).
+
+Theme and type: dark is the default (`<html class="dark"
+data-console-theme="dark">`, set before first paint and by `@/lib/theme`).
+Use only the shadcn tokens (`background`, `foreground`, `card`, `popover`,
+`primary`, `secondary`, `muted`, `accent`, `destructive`, `border`, `input`,
+`ring`, `sidebar-*`, `chart-*`) plus `success`, `warning`, and `info`, with
+opacity modifiers for soft tints (`bg-primary/10`). UI text is Geist; use
+`font-mono` (Geist Mono) only for IDs, keys, dates, code, and values. Labels,
+headings, and table headers are sentence case, never `uppercase`. Interactive
+elements are shadcn primitives (Button, Input, Select, Checkbox, RadioGroup,
+Switch, Table, Badge, Card, Dialog/AlertDialog, DropdownMenu, Sheet via the
+Sidebar, Tooltip, Skeleton, Sonner) and keep the stock focus ring.
 
 | Component | File | Use |
 |---|---|---|
 | `AppLink` | `app-link.tsx` | Link to any console path. Client-side for SPA routes, full page load for Rails protocol routes (`/oauth/:slug/start`, `/auth/:provider/start`). Use it for cross-slice links. |
-| `PageHeader`, `SectionHeading`, `useDocumentTitle` | `page-header.tsx` | Page title/subtitle/actions (legacy `_page_header`); sets `<title>` to "X · Centaur Console". Section headings are the small uppercase labels. |
+| `PageHeader`, `SectionHeading`, `useDocumentTitle` | `page-header.tsx` | Page title/subtitle/actions (legacy `_page_header`); sets `<title>` to "X · Centaur Console". `SectionHeading` is the in-page section title. |
 | `BackLink` | `back-link.tsx` | "← back to …" link. |
 | `ControlTabs` | `control-tabs.tsx` | The Control tab strip. Render at the top of Control index pages; tabs come from feature `controlTabs`. |
 | `RequireAccess` | `require-access.tsx` | Page guard: `allowed={(me) => me.nav.x}`. Silently sends others to their landing page (legacy `require_admin`). The API still enforces access. |
-| `DataTable`, `Column` | `data-table.tsx` | Table panel with header, hover rows, loading and empty rows, and an optional `Pagination` footer from API `meta`. |
+| `DataTable`, `Column` | `data-table.tsx` | Table panel (shadcn `Table`) with header, hover rows, skeleton loading rows, an empty row, and an optional `Pagination` footer from API `meta`. Tables with `fixed` layout or four or more columns keep a minimum width and scroll horizontally on narrow screens; override with `minWidth`. |
 | `Pagination`, `usePageParam` | `pagination.tsx` | "N units · page X of Y" with Previous/Next. `usePageParam("roles_page")` keeps several paginators on one page independent in the URL. |
 | `SearchBox` | `search-box.tsx` | `?q=` search form with Search/Clear; resets `page`. |
 | `EmptyState` | `empty-state.tsx` | Dashed empty box. |
@@ -22,7 +36,7 @@ palette); regenerate or add primitives with
 | `CopyButton` | `copy-button.tsx` | Copy a value to the clipboard with feedback. |
 | `LocalTime` | `local-time.tsx` | Timestamp in the viewer's zone: `absolute` (MM/DD/YYYY HH:MM:SS), `relative`, or `compact` ("4d"); re-renders every 30s; `—` for null. |
 | `ResourceBadge`, `LabelChip(s)`, `RolePill`, `StatusBadge` (+ `credentialStatusTone`, `workflowStatusTone`, `userStatusTone`) | `badges.tsx` | Badges and status pills. |
-| `TextField`, `TextareaField`, `SelectField`, `CheckboxField`, `FormSection`, `FieldShell` | `form/fields.tsx` | react-hook-form field patterns (uppercase label, hint, inline error). Validate with zod via `zodResolver`. |
+| `TextField`, `TextareaField`, `SelectField`, `CheckboxField`, `FormSection`, `FieldShell` | `form/fields.tsx` | react-hook-form field patterns (label, hint, inline error). Validate with zod via `zodResolver`. |
 | `KeyValueRowsField`, `recordToRows`, `rowsToRecord` | `form/key-value-rows.tsx` | Repeatable key/value rows (labels, headers). Requires `FormProvider`. Blank keys are dropped. |
 | `applyApiErrors`, `FormErrorSummary` | `form/form-errors.tsx` | Map a 422 `details` hash onto fields; "X could not be saved." summary. |
 | `SecretField`, `omitBlankSecrets` | `form/secret-field.tsx` | Write-only secret input: never prefilled; with `hasStoredValue` it reads "•••••••• (unchanged)" and a blank value is omitted from the request so the stored value is kept. |

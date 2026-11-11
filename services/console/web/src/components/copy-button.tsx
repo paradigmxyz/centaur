@@ -24,7 +24,7 @@ export function CopyButton({ value, label = "Copy", className }: CopyButtonProps
       type="button"
       variant="secondary"
       size="xs"
-      className={cn("gap-1", className)}
+      className={cn("gap-1 font-sans", className)}
       aria-label={copied ? "Copied" : label}
       onClick={async () => {
         await navigator.clipboard.writeText(value);

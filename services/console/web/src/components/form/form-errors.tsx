@@ -29,7 +29,7 @@ export function applyApiErrors<T extends FieldValues>(
 }
 
 /** "<Thing> could not be saved." summary box with every server message. */
-export function FormErrorSummary({ error, subject }: { error: unknown; subject: string }) {
+export function FormErrorSummary({ error, subject, className = "max-w-4xl" }: { error: unknown; subject: string; className?: string }) {
   if (!error) return null;
   const messages =
     error instanceof ApiError && error.status === 422 && Object.keys(error.fieldErrors).length > 0
@@ -38,7 +38,7 @@ export function FormErrorSummary({ error, subject }: { error: unknown; subject: 
         )
       : [errorMessage(error)];
   return (
-    <ErrorAlert>
+    <ErrorAlert className={className}>
       <p className="font-semibold">{subject} could not be saved.</p>
       <ul className="mt-1 list-disc pl-5">
         {messages.map((message) => (

@@ -1,5 +1,6 @@
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { Navigate, Outlet, useLocation } from "react-router";
+import { Menu } from "lucide-react";
+import { Suspense, useEffect, useMemo, useRef } from "react";
+import { Link, Navigate, Outlet, useLocation } from "react-router";
 import { toast } from "sonner";
 
 import { features } from "@/app/registry";
@@ -8,15 +9,33 @@ import { ShellContext } from "@/app/shell-context";
 import { AccountMenu } from "@/app/shell/AccountMenu";
 import { DescopeBanner } from "@/app/shell/DescopeBanner";
 import { visibleControlTabs, visibleNav } from "@/app/shell/nav";
-import { Sidebar } from "@/app/shell/Sidebar";
+import { ConsoleSidebar } from "@/app/shell/Sidebar";
 import { isSpaPath } from "@/app/spa-paths";
-import { useMediaQuery } from "@/lib/use-media-query";
+import { Button } from "@/components/ui/button";
+import { SidebarInset, SidebarProvider, useSidebar } from "@/components/ui/sidebar";
+import { Skeleton } from "@/components/ui/skeleton";
 import lockup from "@/assets/centaur-lockup-white.svg";
-import { Menu } from "lucide-react";
-import { Link } from "react-router";
 
 function ShellLoading() {
-  return <div className="grid h-full place-items-center text-sm text-muted-foreground">Loading…</div>;
+  return (
+    <div role="status" className="grid min-h-svh place-items-center text-sm text-muted-foreground">
+      Loading…
+    </div>
+  );
+}
+
+/** Placeholder while a lazy page loads: a header and a table-shaped block. */
+function PageLoading() {
+  return (
+    <div role="status" className="space-y-6">
+      <span className="sr-only">Loading…</span>
+      <div className="space-y-2" aria-hidden="true">
+        <Skeleton className="h-8 w-48" />
+        <Skeleton className="h-4 w-72" />
+      </div>
+      <Skeleton className="h-64 w-full rounded-xl" aria-hidden="true" />
+    </div>
+  );
 }
 
 export function AppShell() {
@@ -27,11 +46,12 @@ export function AppShell() {
   );
 }
 
+// The desktop sidebar is always expanded; only the mobile drawer opens and closes.
+const keepOpen = () => {};
+
 function ShellFrame() {
   const me = useSession();
   const location = useLocation();
-  const mobile = useMediaQuery("(max-width: 768px)");
-  const [navOpen, setNavOpen] = useState(false);
 
   const nav = useMemo(() => visibleNav(features, me), [me]);
   const controlTabs = useMemo(() => visibleControlTabs(features, me), [me]);
@@ -39,71 +59,64 @@ function ShellFrame() {
 
   useFlashToasts(me.flash);
 
-  // Close the drawer after every navigation (adjusting state during render)
-  // and on Escape.
-  const [lastPath, setLastPath] = useState(location.pathname);
-  if (lastPath !== location.pathname) {
-    setLastPath(location.pathname);
-    setNavOpen(false);
-  }
-  useEffect(() => {
-    if (!navOpen) return;
-    const onKey = (event: KeyboardEvent) => event.key === "Escape" && setNavOpen(false);
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [navOpen]);
-
   // An account awaiting approval may only see the holding page; send it there
   // instead of rendering pages whose API calls would all be refused.
   if (me.user.status === "pending") return <Navigate to="/pending" replace />;
 
   return (
     <ShellContext.Provider value={shell}>
-      <div className="flex h-full flex-col overflow-hidden bg-background">
-        {me.descoped && <DescopeBanner />}
-        <div className="flex min-h-0 flex-1 overflow-hidden" data-nav-open={navOpen || undefined}>
-          <Sidebar
-            nav={nav}
-            pathname={location.pathname}
-            mobile={mobile}
-            open={navOpen}
-            footer={<AccountMenu me={me} />}
-          />
-          {mobile && (
-            <div
-              aria-hidden="true"
-              onClick={() => setNavOpen(false)}
-              className={`fixed inset-0 z-40 bg-black/55 transition-opacity duration-200 ${
-                navOpen ? "opacity-100" : "pointer-events-none opacity-0"
-              }`}
-            />
-          )}
-          <main className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
-            {mobile && (
-              <div className="sticky top-0 z-30 flex h-13 flex-none items-center gap-3 border-b border-sidebar-border bg-sidebar/90 px-3 backdrop-blur">
-                <button
-                  type="button"
-                  aria-label="Open navigation"
-                  aria-expanded={navOpen}
-                  onClick={() => setNavOpen((open) => !open)}
-                  className="grid size-9 cursor-pointer place-items-center rounded-[0.625rem] text-foreground hover:bg-sidebar-accent"
-                >
-                  <Menu className="size-5" />
-                </button>
-                <Link to="/" aria-label="Centaur Console" className="flex min-w-0 items-center">
-                  <img src={lockup} alt="Centaur" width={497} height={127} className="glow logo-themed h-[1.4rem] w-auto" />
-                </Link>
-              </div>
-            )}
-            <div className="mx-auto w-full max-w-[80rem] px-4 pt-4 pb-6 md:px-8 md:pt-[1.35rem] md:pb-10">
-              <Suspense fallback={<p className="text-sm text-muted-foreground">Loading…</p>}>
-                <Outlet />
-              </Suspense>
-            </div>
-          </main>
-        </div>
-      </div>
+      <SidebarProvider open onOpenChange={keepOpen}>
+        <ConsoleSidebar nav={nav} pathname={location.pathname} footer={<AccountMenu me={me} />} />
+        <CloseDrawerOnNavigate pathname={location.pathname} />
+        <SidebarInset className="min-w-0">
+          {me.descoped && <DescopeBanner />}
+          <MobileTopBar />
+          <div className="mx-auto w-full max-w-[80rem] px-4 pt-5 pb-10 md:px-8 md:pt-8">
+            <Suspense fallback={<PageLoading />}>
+              <Outlet />
+            </Suspense>
+          </div>
+        </SidebarInset>
+      </SidebarProvider>
     </ShellContext.Provider>
+  );
+}
+
+/** Closes the mobile navigation drawer after every navigation. */
+function CloseDrawerOnNavigate({ pathname }: { pathname: string }) {
+  const { setOpenMobile } = useSidebar();
+  const last = useRef(pathname);
+  useEffect(() => {
+    if (last.current === pathname) return;
+    last.current = pathname;
+    setOpenMobile(false);
+  }, [pathname, setOpenMobile]);
+  return null;
+}
+
+function MobileTopBar() {
+  const { isMobile, openMobile, setOpenMobile } = useSidebar();
+  if (!isMobile) return null;
+  return (
+    <div className="sticky top-0 z-30 flex h-14 flex-none items-center gap-2 border-b bg-background/85 px-3 backdrop-blur">
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        aria-label="Open navigation"
+        aria-expanded={openMobile}
+        onClick={() => setOpenMobile(!openMobile)}
+      >
+        <Menu className="size-5" />
+      </Button>
+      <Link
+        to="/"
+        aria-label="Centaur Console"
+        className="flex min-w-0 items-center rounded-md p-1 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+      >
+        <img src={lockup} alt="Centaur" width={497} height={127} className="logo-themed h-5 w-auto" />
+      </Link>
+    </div>
   );
 }
 

@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
 
+import { Button } from "@/components/ui/button";
 import { api, errorMessage } from "@/lib/api";
 import { sharedKeys } from "@/lib/query-keys";
 
@@ -22,17 +23,19 @@ export function DescopeBanner() {
   return (
     <div
       role="status"
-      className="flex flex-none items-center justify-center gap-4 bg-warning-banner px-4 py-2 text-xs font-bold text-warning-banner-foreground"
+      className="flex flex-none flex-wrap items-center justify-center gap-x-4 gap-y-2 border-b border-warning/30 bg-warning/10 px-4 py-2 text-sm font-medium text-warning"
     >
       <span>Admin permissions paused — viewing the console as an operator</span>
-      <button
+      <Button
         type="button"
+        size="xs"
+        variant="outline"
         disabled={restore.isPending}
         onClick={() => restore.mutate()}
-        className="cursor-pointer rounded-sm border border-warning-banner-foreground bg-warning-banner-foreground px-2.5 py-0.5 font-bold text-amber-400 transition-opacity hover:opacity-85"
+        className="border-warning/40 bg-transparent text-warning hover:bg-warning/15 hover:text-warning dark:bg-transparent"
       >
         Restore admin
-      </button>
+      </Button>
     </div>
   );
 }

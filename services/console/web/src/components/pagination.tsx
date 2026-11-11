@@ -36,11 +36,11 @@ interface PaginationProps {
 export function Pagination({ meta, unit, onPageChange }: PaginationProps) {
   const totalPages = Math.max(meta.total_pages, 1);
   return (
-    <div className="flex items-center justify-between gap-4 border-t border-border px-5 py-3 text-xs text-muted-foreground">
+    <div className="flex items-center justify-between gap-4 border-t px-5 py-3 text-xs text-muted-foreground">
       <div>
         {pluralize(meta.total, unit)}
         {totalPages > 1 && (
-          <span className="text-subtle-foreground">
+          <span>
             {" "}
             · page {meta.page} of {totalPages.toLocaleString("en-US")}
           </span>
@@ -49,16 +49,16 @@ export function Pagination({ meta, unit, onPageChange }: PaginationProps) {
       {totalPages > 1 && (
         <div className="flex items-center gap-2">
           <Button
-            variant="secondary"
-            size="xs"
+            variant="outline"
+            size="sm"
             disabled={meta.page <= 1}
             onClick={() => onPageChange(meta.page - 1)}
           >
             Previous
           </Button>
           <Button
-            variant="secondary"
-            size="xs"
+            variant="outline"
+            size="sm"
             disabled={meta.page >= totalPages}
             onClick={() => onPageChange(meta.page + 1)}
           >

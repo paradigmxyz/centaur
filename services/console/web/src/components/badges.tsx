@@ -1,28 +1,31 @@
 import type { ReactNode } from "react";
 
+import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
 /** Green resource badge (kind labels, "STATIC", "SLACK_DM"). */
 export function ResourceBadge({ children, className, title }: { children: ReactNode; className?: string; title?: string }) {
   return (
-    <span
+    <Badge
+      variant="outline"
       title={title}
       className={cn(
-        "inline-block max-w-full truncate rounded-sm bg-primary/10 px-2 py-0.5 align-bottom text-xs font-medium text-centaur-300 ring-1 ring-primary/25 light:text-primary",
+        "max-w-full justify-start rounded-md border-primary/25 bg-primary/10 font-mono text-[11px] text-primary",
+        "[&>span]:truncate",
         className,
       )}
     >
-      {children}
-    </span>
+      <span>{children}</span>
+    </Badge>
   );
 }
 
 /** key=value label chip. */
 export function LabelChip({ name, value }: { name: string; value: unknown }) {
   return (
-    <span className="rounded-sm bg-primary/10 px-1.5 py-0.5 text-xs text-centaur-300/90 ring-1 ring-primary/20 light:text-primary">
+    <Badge variant="outline" className="rounded-md bg-muted/50 font-mono text-[11px] font-normal text-muted-foreground">
       {name}={String(value)}
-    </span>
+    </Badge>
   );
 }
 
@@ -38,25 +41,35 @@ export function LabelChips({ labels }: { labels: Record<string, unknown> | null 
   );
 }
 
-/** Sky-blue pill for role names. */
+/** Blue pill for role names. */
 export function RolePill({ children, title }: { children: ReactNode; title?: string }) {
   return (
-    <span
+    <Badge
+      variant="outline"
       title={title}
-      className="inline-flex max-w-full truncate rounded-full bg-role-soft px-2 py-0.5 text-xs font-medium text-role ring-1 ring-sky-500/25"
+      className="max-w-full justify-start border-info/25 bg-info/10 text-info [&>span]:truncate"
     >
-      {children}
-    </span>
+      <span>{children}</span>
+    </Badge>
   );
 }
 
 const STATUS_TONES = {
-  success: "bg-emerald-500/10 text-emerald-300 ring-emerald-500/25 light:text-emerald-700",
-  danger: "bg-red-500/10 text-red-300 ring-red-500/25 light:text-red-700",
-  warning: "bg-amber-500/10 text-amber-300 ring-amber-500/25 light:text-amber-700",
-  info: "bg-sky-500/10 text-sky-300 ring-sky-500/25 light:text-sky-700",
-  neutral: "bg-muted text-zinc-400 ring-border light:text-zinc-600",
-  brand: "bg-primary/10 text-centaur-300 ring-primary/30 light:text-primary",
+  success: "border-success/25 bg-success/10 text-success",
+  danger: "border-destructive/25 bg-destructive/10 text-destructive",
+  warning: "border-warning/25 bg-warning/10 text-warning",
+  info: "border-info/25 bg-info/10 text-info",
+  neutral: "border-border bg-muted text-muted-foreground",
+  brand: "border-primary/25 bg-primary/10 text-primary",
+} as const;
+
+const STATUS_DOTS = {
+  success: "bg-success",
+  danger: "bg-destructive",
+  warning: "bg-warning",
+  info: "bg-info",
+  neutral: "bg-muted-foreground",
+  brand: "bg-primary",
 } as const;
 
 export type StatusTone = keyof typeof STATUS_TONES;
@@ -64,12 +77,10 @@ export type StatusTone = keyof typeof STATUS_TONES;
 /** Status pill. Map domain statuses to tones with the helpers below. */
 export function StatusBadge({ tone, children, title }: { tone: StatusTone; children: ReactNode; title?: string }) {
   return (
-    <span
-      title={title}
-      className={cn("inline-flex items-center rounded-sm px-2 py-0.5 text-[11px] font-medium ring-1", STATUS_TONES[tone])}
-    >
+    <Badge variant="outline" title={title} className={cn("gap-1.5 text-[11px]", STATUS_TONES[tone])}>
+      <span aria-hidden="true" className={cn("size-1.5 rounded-full", STATUS_DOTS[tone])} />
       {children}
-    </span>
+    </Badge>
   );
 }
 

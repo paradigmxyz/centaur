@@ -1,5 +1,6 @@
 import { useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
@@ -102,7 +103,7 @@ export function UserTypeahead({
           <ul
             id={listId}
             role="listbox"
-            className="absolute z-20 mt-1 max-h-60 w-full overflow-y-auto rounded-sm border border-input bg-popover shadow-lg"
+            className="absolute z-20 mt-1 max-h-60 w-full overflow-y-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
           >
             {visible.map((option, index) => (
               <li key={option.id}>
@@ -115,7 +116,7 @@ export function UserTypeahead({
                   onPointerDown={(event) => event.preventDefault()}
                   onClick={() => add(option)}
                   className={cn(
-                    "block w-full px-3 py-2 text-left text-sm text-foreground hover:bg-accent",
+                    "block w-full cursor-pointer rounded-sm px-2.5 py-1.5 text-left text-sm hover:bg-accent",
                     index === active && "bg-accent",
                   )}
                 >
@@ -131,11 +132,13 @@ export function UserTypeahead({
       ) : (
         <div className="space-y-2">
           {value.map((id) => (
-            <div key={id} className="flex items-center justify-between gap-3 rounded-sm border border-border bg-muted px-3 py-2">
-              <span className="min-w-0 truncate text-sm text-foreground">{byId.get(id)?.label ?? id}</span>
-              <button
+            <div key={id} className="flex items-center justify-between gap-3 rounded-lg border bg-muted/40 py-1.5 pr-1.5 pl-3">
+              <span className="min-w-0 truncate text-sm">{byId.get(id)?.label ?? id}</span>
+              <Button
                 type="button"
-                className="shrink-0 cursor-pointer text-xs text-muted-foreground transition-colors hover:text-red-400"
+                variant="ghost"
+                size="xs"
+                className="shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                 onClick={() => {
                   onChange(value.filter((other) => other !== id));
                   inputRef.current?.focus();
@@ -143,7 +146,7 @@ export function UserTypeahead({
                 }}
               >
                 Remove
-              </button>
+              </Button>
             </div>
           ))}
         </div>

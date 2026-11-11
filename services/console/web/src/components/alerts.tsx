@@ -1,33 +1,32 @@
+import { CircleAlert, TriangleAlert } from "lucide-react";
 import type { ReactNode } from "react";
 
+import { Alert } from "@/components/ui/alert";
 import { cn } from "@/lib/utils";
 
-/** Red error box (legacy .alert-error). */
+// The icon sits in the left gutter so `className` can lay out the children
+// directly (e.g. a message with a Retry button on the right).
+const gutter = "block pl-10 [&>svg]:absolute [&>svg]:top-3.5 [&>svg]:left-4 [&>svg]:size-4";
+
+/** Red error box. */
 export function ErrorAlert({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <div
-      role="alert"
-      className={cn(
-        "mb-6 rounded-sm border border-red-500/40 bg-red-500/[0.08] px-4 py-3 text-sm text-red-300 light:text-red-700",
-        className,
-      )}
+    <Alert
+      variant="destructive"
+      className={cn(gutter, "mb-6 border-destructive/30 bg-destructive/10 text-destructive", className)}
     >
+      <CircleAlert aria-hidden="true" />
       {children}
-    </div>
+    </Alert>
   );
 }
 
 /** Amber warning box (catalog loading, configuration hints). */
 export function WarningAlert({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <div
-      role="status"
-      className={cn(
-        "rounded-sm border border-amber-500/30 bg-amber-500/[0.08] px-3 py-2 text-sm text-amber-200 light:border-amber-700 light:bg-amber-500 light:font-semibold light:text-amber-950",
-        className,
-      )}
-    >
+    <Alert role="status" className={cn(gutter, "border-warning/30 bg-warning/10 text-warning", className)}>
+      <TriangleAlert aria-hidden="true" />
       {children}
-    </div>
+    </Alert>
   );
 }

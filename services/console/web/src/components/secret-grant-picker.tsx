@@ -55,7 +55,7 @@ export function SecretGrantPicker({
       <PopoverTrigger asChild>
         <Button
           type="button"
-          variant="secondary"
+          variant="outline"
           role="combobox"
           aria-expanded={open}
           aria-label="Secret to grant"
@@ -70,7 +70,7 @@ export function SecretGrantPicker({
           <CommandInput placeholder="Search secrets" value={query} onValueChange={setQuery} />
           <CommandList>
             {secrets.isError ? (
-              <p role="alert" className="px-3 py-4 text-sm text-red-300 light:text-red-700">
+              <p role="alert" className="px-3 py-4 text-sm text-destructive">
                 Could not load secrets: {errorMessage(secrets.error)}
               </p>
             ) : (

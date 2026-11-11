@@ -7,7 +7,7 @@ export function EmptyState({ children, className }: { children: ReactNode; class
   return (
     <div
       className={cn(
-        "rounded-sm border border-dashed border-border bg-muted/40 px-5 py-6 text-sm text-subtle-foreground",
+        "rounded-xl border border-dashed bg-muted/20 px-5 py-8 text-sm text-muted-foreground",
         className,
       )}
     >

@@ -38,8 +38,8 @@ export function SearchBox({ placeholder, label, param = "q" }: SearchBoxProps) {
   };
 
   return (
-    <form role="search" onSubmit={onSubmit} className="mb-3 flex flex-wrap items-center gap-2">
-      <div className="relative w-full max-w-md">
+    <form role="search" onSubmit={onSubmit} className="mb-4 flex items-center gap-2">
+      <div className="relative min-w-0 flex-1 sm:max-w-md">
         <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-muted-foreground">
           <Search className="size-4" aria-hidden="true" />
         </span>
@@ -52,17 +52,13 @@ export function SearchBox({ placeholder, label, param = "q" }: SearchBoxProps) {
           className="pl-9"
         />
       </div>
-      <Button type="submit" variant="secondary">
+      <Button type="submit" variant="outline">
         Search
       </Button>
       {current && (
-        <button
-          type="button"
-          onClick={() => apply("")}
-          className="cursor-pointer px-2 py-2 text-sm text-muted-foreground hover:text-centaur-300"
-        >
+        <Button type="button" variant="ghost" onClick={() => apply("")} className="text-muted-foreground">
           Clear
-        </button>
+        </Button>
       )}
     </form>
   );

@@ -7,7 +7,12 @@ import { EmptyState } from "@/components/empty-state";
 import { SectionHeading } from "@/components/page-header";
 import { SlackChannelPicker, type SlackChannelLoader } from "@/components/slack-channel-picker";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+
+const headClass = "h-10 px-5 text-xs font-medium text-muted-foreground";
 
 /** One permission row as the API serializes it (slack_channel_permissions_payload). */
 export interface SlackChannelPermissionRow {
@@ -120,92 +125,96 @@ export function SlackChannelPermissionsEditor({
 
   return (
     <section className="mb-8">
-      <div className="mb-4">
+      <div className="mb-3">
         <SectionHeading>Slack Channel Permissions</SectionHeading>
       </div>
-      <div className="rounded-sm border border-border bg-card">
-        {catalogError && <WarningAlert className="m-4">{catalogError}</WarningAlert>}
-        {draft.length > 0 ? (
-          <div className="relative overflow-x-auto">
-            <table className="min-w-full text-sm">
-              <thead className="border-b border-border bg-table-head text-left text-xs tracking-wider text-muted-foreground uppercase">
-                <tr>
-                  <th scope="col" className="px-5 py-3 font-medium">
-                    Channel
-                  </th>
-                  {SLACK_PERMISSION_FLAGS.map((flag) => (
-                    <th key={flag.attribute} scope="col" className="px-5 py-3 font-medium">
-                      {flag.label}
-                    </th>
-                  ))}
-                  <th scope="col" className="px-5 py-3 font-medium">
-                    Delete
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border/70">
-                {draft.map((row) => {
-                  const apiManaged = managesDms && isDirectMessage(row.channel_id);
-                  const name = channelNames[row.channel_id];
-                  return (
-                    <tr key={row.channel_id}>
-                      <td className="min-w-80 px-5 py-3">
-                        <div className="text-sm text-heading">
-                          {apiManaged ? `DM ${directMessageOwnerName || row.channel_id}` : channelLabel(row.channel_id)}
-                        </div>
-                        {(apiManaged || name) && <div className="mt-1 text-xs text-muted-foreground">{row.channel_id}</div>}
-                      </td>
-                      {SLACK_PERMISSION_FLAGS.map((flag) => (
-                        <td key={flag.attribute} className="px-5 py-3">
-                          <Checkbox
-                            aria-label={`${flag.label} for ${row.channel_id}`}
-                            checked={row[flag.attribute]}
-                            disabled={apiManaged}
-                            onCheckedChange={(checked) => setFlag(row.channel_id, flag.attribute, checked === true)}
-                          />
-                        </td>
-                      ))}
-                      <td className="px-5 py-3">
-                        {apiManaged ? (
-                          <span className="text-xs text-muted-foreground">API-managed</span>
-                        ) : (
-                          <ConfirmDialog
-                            title={`Delete ${channelLabel(row.channel_id)}?`}
-                            description="The owner loses these Slack permissions for this channel."
-                            confirmLabel="Delete"
-                            onConfirm={() => onDelete(row.channel_id)}
-                            trigger={
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon-sm"
-                                title={`Delete ${row.channel_id}`}
-                                aria-label={`Delete ${row.channel_id}`}
-                                className="text-muted-foreground hover:bg-red-500/10 hover:text-red-300"
-                              >
-                                <Trash2 />
-                              </Button>
-                            }
-                          />
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+      <Card className="gap-0 overflow-hidden py-0">
+        {catalogError && (
+          <div className="p-4 pb-0">
+            <WarningAlert>{catalogError}</WarningAlert>
           </div>
+        )}
+        {draft.length > 0 ? (
+          <Table>
+            <TableHeader className="bg-muted/40">
+              <TableRow className="hover:bg-transparent">
+                <TableHead scope="col" className={headClass}>
+                  Channel
+                </TableHead>
+                {SLACK_PERMISSION_FLAGS.map((flag) => (
+                  <TableHead key={flag.attribute} scope="col" className={headClass}>
+                    {flag.label}
+                  </TableHead>
+                ))}
+                <TableHead scope="col" className={headClass}>
+                  Delete
+                </TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {draft.map((row) => {
+                const apiManaged = managesDms && isDirectMessage(row.channel_id);
+                const name = channelNames[row.channel_id];
+                return (
+                  <TableRow key={row.channel_id}>
+                    <TableCell className="min-w-64 px-5 py-3">
+                      <div className="text-sm font-medium">
+                        {apiManaged ? `DM ${directMessageOwnerName || row.channel_id}` : channelLabel(row.channel_id)}
+                      </div>
+                      {(apiManaged || name) && (
+                        <div className="mt-0.5 font-mono text-xs text-muted-foreground">{row.channel_id}</div>
+                      )}
+                    </TableCell>
+                    {SLACK_PERMISSION_FLAGS.map((flag) => (
+                      <TableCell key={flag.attribute} className="px-5 py-3">
+                        <Checkbox
+                          aria-label={`${flag.label} for ${row.channel_id}`}
+                          checked={row[flag.attribute]}
+                          disabled={apiManaged}
+                          onCheckedChange={(checked) => setFlag(row.channel_id, flag.attribute, checked === true)}
+                        />
+                      </TableCell>
+                    ))}
+                    <TableCell className="px-5 py-3">
+                      {apiManaged ? (
+                        <span className="text-xs text-muted-foreground">API-managed</span>
+                      ) : (
+                        <ConfirmDialog
+                          title={`Delete ${channelLabel(row.channel_id)}?`}
+                          description="The owner loses these Slack permissions for this channel."
+                          confirmLabel="Delete"
+                          onConfirm={() => onDelete(row.channel_id)}
+                          trigger={
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-sm"
+                              title={`Delete ${row.channel_id}`}
+                              aria-label={`Delete ${row.channel_id}`}
+                              className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                            >
+                              <Trash2 />
+                            </Button>
+                          }
+                        />
+                      )}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
         ) : (
           <div className="p-4">
-            <EmptyState>No Slack channels selected.</EmptyState>
+            <EmptyState className="py-6">No Slack channels selected.</EmptyState>
           </div>
         )}
 
-        <div className="grid gap-4 border-t border-border p-5 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto]">
+        <div className="grid gap-4 border-t p-5 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto] lg:items-end">
           <div>
-            <label className="mb-1 block text-xs font-semibold tracking-wider text-foreground uppercase" htmlFor="slack-channel-add">
+            <Label className="mb-2 block" htmlFor="slack-channel-add">
               Add Channel
-            </label>
+            </Label>
             <SlackChannelPicker
               key={pickerKey}
               id="slack-channel-add"
@@ -215,19 +224,21 @@ export function SlackChannelPermissionsEditor({
               onValidityChange={setPickerValid}
             />
           </div>
-          {SLACK_PERMISSION_FLAGS.map((flag) => (
-            <label key={flag.attribute} className="flex items-start gap-3 pt-6">
-              <Checkbox
-                checked={newFlags[flag.attribute]}
-                aria-label={`${flag.label} for new channel`}
-                onCheckedChange={(checked) => setNewFlags((flags) => ({ ...flags, [flag.attribute]: checked === true }))}
-              />
-              <span className="text-sm font-medium text-heading">{flag.label}</span>
-            </label>
-          ))}
+          <div className="flex flex-wrap gap-x-5 gap-y-3 lg:contents">
+            {SLACK_PERMISSION_FLAGS.map((flag) => (
+              <label key={flag.attribute} className="flex h-9 cursor-pointer items-center gap-2 lg:mb-6">
+                <Checkbox
+                  checked={newFlags[flag.attribute]}
+                  aria-label={`${flag.label} for new channel`}
+                  onCheckedChange={(checked) => setNewFlags((flags) => ({ ...flags, [flag.attribute]: checked === true }))}
+                />
+                <span className="text-sm font-medium">{flag.label}</span>
+              </label>
+            ))}
+          </div>
         </div>
         {error && (
-          <p role="alert" className="px-5 pb-3 text-sm text-red-300 light:text-red-700">
+          <p role="alert" className="px-5 pb-3 text-sm text-destructive">
             {error}
           </p>
         )}
@@ -236,48 +247,48 @@ export function SlackChannelPermissionsEditor({
             Save Slack channel permissions
           </Button>
         </div>
-      </div>
+      </Card>
 
       {inherited.length > 0 && (
         <>
           <div className="mt-6 mb-3">
-            <h3 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">Inherited From Roles</h3>
+            <h3 className="text-sm font-semibold">Inherited From Roles</h3>
           </div>
-          <div className="relative overflow-x-auto rounded-sm border border-border bg-card">
-            <table className="min-w-full text-sm">
-              <thead className="border-b border-border bg-table-head text-left text-xs tracking-wider text-muted-foreground uppercase">
-                <tr>
-                  <th scope="col" className="px-5 py-3 font-medium">
+          <Card className="gap-0 overflow-hidden py-0">
+            <Table>
+              <TableHeader className="bg-muted/40">
+                <TableRow className="hover:bg-transparent">
+                  <TableHead scope="col" className={headClass}>
                     Channel
-                  </th>
+                  </TableHead>
                   {SLACK_PERMISSION_FLAGS.map((flag) => (
-                    <th key={flag.attribute} scope="col" className="px-5 py-3 font-medium">
+                    <TableHead key={flag.attribute} scope="col" className={headClass}>
                       {flag.label}
-                    </th>
+                    </TableHead>
                   ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border/70">
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {inherited.map((row) => (
-                  <tr key={row.channel_id}>
-                    <td className="px-5 py-3">
-                      <div className="text-sm text-heading">{channelLabel(row.channel_id)}</div>
-                      <div className="mt-1 text-xs text-muted-foreground">{row.channel_id}</div>
-                    </td>
+                  <TableRow key={row.channel_id}>
+                    <TableCell className="px-5 py-3">
+                      <div className="text-sm font-medium">{channelLabel(row.channel_id)}</div>
+                      <div className="mt-0.5 font-mono text-xs text-muted-foreground">{row.channel_id}</div>
+                    </TableCell>
                     {SLACK_PERMISSION_FLAGS.map((flag) => (
-                      <td key={flag.attribute} className="px-5 py-3">
+                      <TableCell key={flag.attribute} className="px-5 py-3">
                         <Checkbox
                           checked={row[flag.attribute]}
                           disabled
                           aria-label={`${flag.label} for ${row.channel_id} (inherited)`}
                         />
-                      </td>
+                      </TableCell>
                     ))}
-                  </tr>
+                  </TableRow>
                 ))}
-              </tbody>
-            </table>
-          </div>
+              </TableBody>
+            </Table>
+          </Card>
         </>
       )}
     </section>
