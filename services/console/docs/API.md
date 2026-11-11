@@ -1897,6 +1897,74 @@ The admin API also exposes `GET /api/v1/scheduled_tasks/:id` for scheduled workf
 
 Responses include the task's optional cron expression, fixed timezone, human-readable schedule, enabled state, next run time, and latest run metadata. The `centaur-console` CLI exposes the same operations through `tasks`, `task`, `create-task`, `update-task`, `delete-task`, and `run-task`. Omit `--cron` when creating a manual-only task, or pass `update-task --cron ""` to remove an existing recurring schedule.
 
+### Console scheduled tasks
+
+The console Scheduled Tasks pages use these endpoints. Any active Console user
+may call them with the session cookie or a bearer API key. Each one is scoped
+to tasks the caller authored. Any other user's task returns `404` for every
+caller, admins included. Tasks owned by a Slack channel are managed from Slack
+and are never returned here. Responses set `Cache-Control: no-store`.
+
+| Method | Path | Notes |
+| ------ | ---- | ----- |
+| `GET` | `/api/v1/scheduled_tasks` | The caller's tasks, ordered by name. |
+| `GET` | `/api/v1/scheduled_tasks/new` | Defaults for a new task: daily at 9:00 PT, enabled, and delivery to the caller's Slack DM when one is linked. |
+| `GET` | `/api/v1/scheduled_tasks/:id?view=console` | One task in the console shape below. Without `view=console`, this is the admin execution-state lookup described above. |
+| `POST` | `/api/v1/scheduled_tasks` | Create a task authored by the caller. Returns `201`. |
+| `PUT`/`PATCH` | `/api/v1/scheduled_tasks/:id` | Update the fields that are sent and keep the rest. |
+| `DELETE` | `/api/v1/scheduled_tasks/:id` | Returns `204`. |
+| `POST` | `/api/v1/scheduled_tasks/:id/run` | Queue an immediate run. Returns `202` with the task and `queued: true`. A disabled task returns `422` with `details.reason=task_disabled` and the message `Enable the task before running it.` |
+| `GET` | `/api/v1/scheduled_tasks/slack_channel_options` | Delivery channel search (`q`, at most 20). Returns public channels and the private channels that both the caller and the bot are in. When editing, `?task_id=` must be one of the caller's tasks; any other task returns `404`. The response shape matches `GET /api/v1/slack_channels`. `meta.catalog_error` can also report `Slack channel memberships are loading.` |
+
+Write bodies take `data` with these fields:
+
+| Field | Notes |
+|---|---|
+| `name`, `prompt`, `enabled` | Same validation as the sandbox endpoints. |
+| `schedule_preset` | `manual`, `daily`, `weekdays`, `mondays`, `fridays` (all at 9:00 PT), `custom`, or `cron` (uses `cron_expression` verbatim). If omitted, the stored schedule is kept. |
+| `custom_days`, `custom_time` | For `custom`: weekday values `"1"`..`"6"` and `"0"` (Sunday), plus `"HH:MM"`. A custom schedule without days or a time returns `422` on `cron_expression`. |
+| `delivery_mode` | `dm` delivers to the author's linked Slack DM and ignores `delivery_channel`. `channel` uses `delivery_channel`. The server checks the destination against the author's Slack permissions and returns `422` on `delivery_channel` when it is not allowed. |
+
+```json
+{
+  "data": {
+    "id": "tsk_...", "name": "Daily support summary", "prompt": "...",
+    "author_id": "usr_...", "principal_id": null,
+    "delivery_channel": "C0123456789", "delivery_mode": "channel", "delivery_name": "#support",
+    "direct_message_user_id": "U0123456789",
+    "cron_expression": "0 9 * * *", "timezone": "America/Los_Angeles",
+    "schedule_preset": "daily", "schedule_label": "Daily at 9:00 PT",
+    "custom_days": ["0", "1", "2", "3", "4", "5", "6"], "custom_time": "09:00",
+    "enabled": true, "next_run_at": "...", "last_enqueued_at": null,
+    "last_run_id": null, "last_run_at": null, "last_error": null,
+    "created_at": "...", "updated_at": "..."
+  }
+}
+```
+
+`delivery_name` is the channel's catalog name, or "Direct message to you" for a
+DM. `direct_message_user_id` is the caller's linked Slack user ID, or `null`
+when the caller has none.
+
+## Workflows
+
+The admin-only workflow dashboard reads the api-rs workflow read-only views.
+Schedules and run details come from the workflows API and are best-effort.
+`:id` is the workflow key: the workflow name, or the task name for older runs.
+It may contain dots. If the workflow views are missing or unreadable, the
+endpoints return `503` with `details.reason=workflow_database_unavailable`.
+Responses set `Cache-Control: no-store`. Pages hold 50 rows, and `meta` is
+`{ page, limit, total, total_pages }`.
+
+| Method | Path | Notes |
+| ------ | ---- | ----- |
+| `GET` | `/api/v1/workflows` | The latest run of each workflow (`?page=`): `workflow_key`, `label`, `task_name`, `status`, `queue_name`, `queue_label`, `attempts`, `max_attempts`, `started_at`, `created_at`, `finished_at`, and `queues[]` (`queue_name`, `queue_label`, `status`, `last_activity_at`, `run_count`). No run or task IDs. |
+| `GET` | `/api/v1/workflows/:id` | The latest run's fields, plus `harness_type`, `engine_label`, `duration_label`, `run_count`, `status_counts[]` (`status`, `count`, in tab order), `queues[]`, `schedule` (`label`, `summary`, `timezone`, `enabled`, `source_path`, `source_url`; `null` when unknown), and `debug[]` (`label`, `value`, `run_id`: Input, Result, Failure, Last failure). Returns `404` when the workflow has no runs. |
+| `GET` | `/api/v1/workflows/:id/runs` | Runs, filtered by `?status=` and `?queue=`, plus `run_id` and `task_id`. |
+| `POST` | `/api/v1/workflows/:id/runs` | Force-start a run with the first registered schedule's input. Returns `201` `{ run_id, created: true }`. If a run with the same idempotency key is already queued, returns `200` with `created: false`. A workflows API error returns `502` with `details.reason=workflow_api_error`. |
+
+Debug values can include run input and results, so they are admin-only.
+
 ## Skills
 
 Skills are mutable `SKILL.md` documents authored by signed-in users in Console. There is no revision or draft resource: updating a public skill changes the document returned to agents immediately. Skill IDs use the `skl_` prefix.

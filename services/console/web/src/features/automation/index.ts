@@ -1,15 +1,21 @@
-// Automation slice (scheduled tasks and workflows).
-//
-// Stub until this slice moves to the SPA. Nav entries and Control tabs below
-// point at the legacy Rails pages; once the slice registers SPA routes for the
-// same paths, the shell links to them client-side automatically.
+// Automation slice: scheduled tasks (any active user, own tasks) and the
+// admin workflow dashboard.
 import { Clock, Workflow } from "lucide-react";
 
 import type { FeatureModule } from "@/app/types";
 
+const page = (load: () => Promise<{ default: React.ComponentType }>) => () =>
+  load().then((m) => ({ Component: m.default }));
+
 const automation: FeatureModule = {
   id: "automation",
-  routes: [],
+  routes: [
+    { path: "/console/scheduled_tasks", lazy: page(() => import("./pages/ScheduledTasksList")) },
+    { path: "/console/scheduled_tasks/new", lazy: page(() => import("./pages/ScheduledTaskNew")) },
+    { path: "/console/scheduled_tasks/:id/edit", lazy: page(() => import("./pages/ScheduledTaskEdit")) },
+    { path: "/console/workflows", lazy: page(() => import("./pages/WorkflowsList")) },
+    { path: "/console/workflows/:id", lazy: page(() => import("./pages/WorkflowDetail")) },
+  ],
   nav: [
     {
       id: "scheduled_tasks",

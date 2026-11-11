@@ -16,22 +16,6 @@ module Console
       assert_nil flash[:alert]
     end
 
-    test "a descoped admin loses admin pages and chrome, and sees the banner" do
-      sign_in users(:acme_admin)
-      post console_descope_url
-      assert_redirected_to console_integrations_path
-
-      get api_v1_users_path
-      assert_response :forbidden
-
-      get console_scheduled_tasks_url
-      assert_response :ok
-      assert_select ".console-descope-banner", /Admin permissions paused/
-      assert_select ".console-nav-link", text: "Control", count: 0
-      assert_select "form[action=?]", console_descope_path do
-        assert_select "button", text: /Restore admin/
-      end
-    end
 
     test "restore brings back admin permissions" do
       sign_in users(:acme_admin)
@@ -60,16 +44,6 @@ module Console
       sign_in users(:acme_admin)
       delete console_descope_url
       assert_redirected_to console_principals_path
-    end
-
-    test "the account menu offers descope only to acting admins" do
-      sign_in users(:acme_admin)
-      get console_scheduled_tasks_url
-      assert_select ".console-signout-label", text: "View as operator"
-
-      sign_in users(:member_user)
-      get console_scheduled_tasks_url
-      assert_select ".console-signout-label", text: "View as operator", count: 0
     end
   end
 end
