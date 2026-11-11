@@ -2,7 +2,7 @@ module Console
   class SlackChannelOptionsController < ApplicationController
     MAX_RESULTS = 20
 
-    before_action :require_admin, unless: :scheduled_task_request?
+    before_action :require_admin
 
     def index
       response.headers["Cache-Control"] = "no-store"
@@ -17,13 +17,7 @@ module Console
 
     private
 
-    def scheduled_task_request?
-      params[:owner_type] == "scheduled_task" && params[:id].blank?
-    end
-
     def channel_scope
-      return scheduled_task_delivery_policy.allowed_channels if params[:owner_type] == "scheduled_task"
-
       owner = find_owner
       SlackBotChannel.active
                      .excluding_channel_ids(owner.slack_channel_permissions.pluck(:channel_id))
@@ -39,12 +33,8 @@ module Console
 
     def catalog_error
       return "SLACK_BOT_TOKEN is not configured." unless SlackChannelCatalogSync.configured?
-      return "Slack channel catalog is loading. Enter a channel ID or reload shortly." if SlackBotChannel.none?
-      return unless params[:owner_type] == "scheduled_task"
-      return if scheduled_task_delivery_policy.slack_team_id.blank?
 
-      team_channels = SlackBotChannel.active.for_team(scheduled_task_delivery_policy.slack_team_id).where(private: true)
-      "Slack channel memberships are loading." if team_channels.where(membership_refreshed_at: nil).exists?
+      "Slack channel catalog is loading. Enter a channel ID or reload shortly." if SlackBotChannel.none?
     end
 
     def find_owner
@@ -52,10 +42,6 @@ module Console
       when "role" then Role.find_by_oid!(params[:id])
       else raise ActiveRecord::RecordNotFound
       end
-    end
-
-    def scheduled_task_delivery_policy
-      @scheduled_task_delivery_policy ||= SlackDeliveryPolicy.new(current_user)
     end
   end
 end
