@@ -1,6 +1,8 @@
 module Api
   module V1
     class GcpAuthSecretsController < Api::BaseController
+      include SecretDocumentWrites
+
       def index
         records, meta = paginated_label_search(GcpAuthSecret.all)
         render json: { data: records.map { |r| record_payload(r) }, meta: meta }
@@ -53,12 +55,10 @@ module Api
         base = permit_document(ref, attrs, :name, :description, :subject,
                                labels: {}, credentials_provider: {}, scopes: [])
 
-        keyfile_attrs = if attrs.key?(:keyfile) && attrs[:keyfile].present?
-          attrs.require(:keyfile).permit(:source_type, :secret, config: {})
-        end
-
-        keyfile_source = keyfile_attrs ? SecretSource.new(keyfile_attrs.to_h) : nil
+        # A PATCH that omits an inline keyfile's `secret` keeps the stored value.
+        keyfile_source = build_secret_source(attrs, :keyfile, ref.keyfile_source)
         rules_attrs = build_rules(attrs)
+        validate_nested_secret_records!(ref, sources: { keyfile: keyfile_source }, rules: rules_attrs)
 
         GcpAuthSecret.transaction do
           with_sync_config_replacement_guard(ref, base, keyfile_source: keyfile_source, rules: rules_attrs) do

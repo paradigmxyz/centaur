@@ -1,6 +1,8 @@
 module Api
   module V1
     class StaticSecretsController < Api::BaseController
+      include SecretDocumentWrites
+
       def index
         records, meta = paginated_label_search(StaticSecret.all)
         render json: { data: records.map { |r| record_payload(r) }, meta: meta }
@@ -71,12 +73,10 @@ module Api
         # an explicitly supplied kind still replaces the existing value.
         ss_attrs[:kind] = ref.kind if ref.persisted? && !attrs.key?(:kind)
 
-        source_attrs = if attrs.key?(:source) && attrs[:source].present?
-          attrs.require(:source).permit(:source_type, :secret, config: {})
-        end
-
-        source = source_attrs ? SecretSource.new(source_attrs.to_h) : nil
+        # A PATCH that omits an inline source's `secret` keeps the stored value.
+        source = build_secret_source(attrs, :source, ref.source)
         rules = build_rules(attrs)
+        validate_nested_secret_records!(ref, sources: { source: source }, rules: rules)
 
         # Resolve profile defaults before the replacement guard so a repeated
         # write compares the effective persisted document, not the abbreviated

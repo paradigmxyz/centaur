@@ -115,12 +115,13 @@ class Console::SshKeysControllerTest < ActionDispatch::IntegrationTest
     delete logout_url
     post login_url, params: { email: users(:acme_admin).email, password: "password123456" }
 
-    get console_secrets_url(type: "ssh_key")
+    get api_v1_secrets_path(kind: "ssh_key")
     assert_response :ok
-    assert_select "td", text: /Member key/
+    assert_includes response.parsed_body["data"].map { |s| s["name"] }, "Member key"
 
-    get console_secret_url("ssh_key", key.oid)
+    get api_v1_secret_detail_path("ssh_key", key.oid)
     assert_response :ok
+    assert_equal false, response.parsed_body.dig("data", "editable")
     assert_no_match(/BEGIN OPENSSH PRIVATE KEY/, response.body)
 
     principal = principals(:acme_channel)
