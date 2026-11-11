@@ -86,6 +86,8 @@ const FIELDS = [
   "api_key",
 ] as const;
 
+const SECRET_FIELDS = ["client_secret", "refresh_token", "username", "password", "preqin_username", "api_key"] as const;
+
 function defaultValues(credential?: BrokerCredential): CredentialFormValues {
   return {
     foreign_id: credential?.foreign_id ?? "",
@@ -169,8 +171,18 @@ export function CredentialForm({ credential, submitLabel, error, onSubmit }: Cre
     } catch (caught) {
       // The Preqin panel's username field reports the shared `username` error.
       applyApiErrors(form.setError, caught, FIELDS, values.grant === "preqin" ? { username: "preqin_username" } : {});
+    } finally {
+      clearSecretFields();
     }
   });
+
+  // Write-only plaintext never outlives a submit, whether it succeeded or not:
+  // the inputs are blanked (a stored header keeps its name and reverts to
+  // "(unchanged)"; a new header's value must be re-entered).
+  const clearSecretFields = () => {
+    for (const name of SECRET_FIELDS) form.setValue(name, "");
+    form.getValues("headers").forEach((_, index) => form.setValue(`headers.${index}.value`, ""));
+  };
 
   return (
     <>

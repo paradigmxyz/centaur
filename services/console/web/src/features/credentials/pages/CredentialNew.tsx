@@ -6,7 +6,7 @@ import { BackLink } from "@/components/back-link";
 import { useDocumentTitle } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
 
-import { useCreateCredential } from "../api";
+import { useCreateCredential, useSecretMutation } from "../api";
 import { CredentialForm } from "../sections/CredentialForm";
 
 export default function CredentialNewPage() {
@@ -19,7 +19,7 @@ export default function CredentialNewPage() {
 
 function CredentialNew() {
   const navigate = useNavigate();
-  const create = useCreateCredential();
+  const { submit, error } = useSecretMutation(useCreateCredential());
   useDocumentTitle("New credential");
 
   return (
@@ -33,9 +33,9 @@ function CredentialNew() {
       </div>
       <CredentialForm
         submitLabel="Create credential"
-        error={create.error}
+        error={error}
         onSubmit={async (payload) => {
-          const body = await create.mutateAsync(payload);
+          const body = await submit(payload);
           toast.success("Credential created.");
           navigate(`/console/credentials/${body.data.id}`);
         }}

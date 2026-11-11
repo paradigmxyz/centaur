@@ -8,7 +8,7 @@ import { useDocumentTitle } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
 import { errorMessage } from "@/lib/api";
 
-import { credentialTitle, useCredential, useUpdateCredential } from "../api";
+import { credentialTitle, useCredential, useSecretMutation, useUpdateCredential } from "../api";
 import { CredentialForm } from "../sections/CredentialForm";
 
 export default function CredentialEditPage() {
@@ -22,7 +22,7 @@ export default function CredentialEditPage() {
 function CredentialEdit() {
   const { id = "" } = useParams();
   const { data: credential, error: refetchError } = useCredential(id);
-  const update = useUpdateCredential(id);
+  const { submit, error } = useSecretMutation(useUpdateCredential(id));
   const navigate = useNavigate();
   const title = credentialTitle(credential);
   useDocumentTitle(`Edit ${title}`);
@@ -44,9 +44,9 @@ function CredentialEdit() {
       <CredentialForm
         credential={credential}
         submitLabel="Save changes"
-        error={update.error}
+        error={error}
         onSubmit={async (payload) => {
-          await update.mutateAsync(payload);
+          await submit(payload);
           toast.success("Credential updated.");
           navigate(`/console/credentials/${credential.id}`);
         }}

@@ -1,3 +1,4 @@
+import type { QueryClient } from "@tanstack/react-query";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { toast } from "sonner";
@@ -77,6 +78,14 @@ const minted: BrokerCredential = {
   provider_email: "person@example.com",
   external_user_key: "user-9",
 };
+
+/** Everything TanStack still holds: mutation variables and every cached query. */
+function cachedText(queryClient: QueryClient) {
+  return JSON.stringify([
+    queryClient.getMutationCache().getAll().map((mutation) => mutation.state),
+    queryClient.getQueryCache().getAll().map((query) => [query.queryKey, query.state.data]),
+  ]);
+}
 
 describe("credentials list", () => {
   it("lists credentials with combined id, provenance, status, and dead reason", async () => {
@@ -262,7 +271,7 @@ describe("credential detail", () => {
 describe("new credential", () => {
   it("creates a credential with scopes, headers, labels, and a seed", async () => {
     const api = mockApi({ "POST /api/v1/broker_credentials": { data: { ...credential, id: "bcr_new" } } });
-    const { router } = renderRoute(<CredentialNewPage />, {
+    const { router, queryClient, unmount } = renderRoute(<CredentialNewPage />, {
       path: "/console/credentials/new",
       routes: [{ path: "/console/credentials/:id", element: <p>detail page</p> }],
     });
@@ -287,6 +296,10 @@ describe("new credential", () => {
 
     expect(await screen.findByText("detail page")).toBeInTheDocument();
     expect(router.state.location.pathname).toBe("/console/credentials/bcr_new");
+    // The plaintext left with the request: nothing in the mutation or query cache.
+    unmount();
+    for (const plaintext of ["shhh", "seed-token", "Basic abc"]) expect(cachedText(queryClient)).not.toContain(plaintext);
+    expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
     expect(toast.success).toHaveBeenCalledWith("Credential created.");
     expect(api.calls("POST /api/v1/broker_credentials")[0]?.body).toEqual({
       data: {
@@ -346,12 +359,26 @@ describe("new credential", () => {
         },
       }),
     });
-    renderRoute(<CredentialNewPage />, { path: "/console/credentials/new" });
+    const { queryClient, unmount } = renderRoute(<CredentialNewPage />, { path: "/console/credentials/new" });
+    await userEvent.type(screen.getByLabelText("Client secret"), "rejected-secret");
+    await userEvent.click(screen.getByRole("button", { name: "Add header" }));
+    await userEvent.type(screen.getByLabelText("Header 1 name"), "Authorization");
+    await userEvent.type(screen.getByLabelText("Header 1 value"), "Basic rejected-header");
+    await userEvent.type(screen.getByRole("textbox", { name: "Refresh Token" }), "rejected-seed");
     await userEvent.click(screen.getByRole("button", { name: "Create credential" }));
 
     expect(await screen.findByText("Credential could not be saved.")).toBeInTheDocument();
     expect(screen.getByText("Token endpoint can't be blank")).toBeInTheDocument();
     expect(screen.getAllByText("can't be blank").length).toBeGreaterThanOrEqual(2);
+    // A failed submit still drops the plaintext from the inputs and the caches.
+    expect(screen.getByLabelText("Client secret")).toHaveValue("");
+    expect(screen.getByLabelText("Header 1 value")).toHaveValue("");
+    expect(screen.getByRole("textbox", { name: "Refresh Token" })).toHaveValue("");
+    const plaintexts = ["rejected-secret", "Basic rejected-header", "rejected-seed"];
+    for (const plaintext of plaintexts) expect(cachedText(queryClient)).not.toContain(plaintext);
+    unmount();
+    for (const plaintext of plaintexts) expect(cachedText(queryClient)).not.toContain(plaintext);
+    expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
   });
 });
 
@@ -391,6 +418,30 @@ describe("edit credential", () => {
     for (const key of ["foreign_id", "client_secret", "refresh_token", "username", "password", "api_key"]) {
       expect(body.data).not.toHaveProperty(key);
     }
+  });
+
+  it("does not keep a rotated secret in the mutation or query cache", async () => {
+    const api = mockApi({
+      "GET /api/v1/broker_credentials/bcr_gmail": { data: credential },
+      "PATCH /api/v1/broker_credentials/bcr_gmail": { data: credential },
+    });
+    const { queryClient, unmount } = renderRoute(<CredentialEditPage />, {
+      path: "/console/credentials/:id/edit",
+      url: "/console/credentials/bcr_gmail/edit",
+      routes: [{ path: "/console/credentials/:id", element: <p>detail page</p> }],
+    });
+    await userEvent.type(await screen.findByLabelText("Client secret"), "rotated-secret");
+    await userEvent.type(screen.getByLabelText("Header 1 value"), "Basic rotated-header");
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText("detail page")).toBeInTheDocument();
+    expect(api.calls("PATCH /api/v1/broker_credentials/bcr_gmail")[0]?.body).toMatchObject({
+      data: { client_secret: "rotated-secret", token_endpoint_headers: { Authorization: "Basic rotated-header" } },
+    });
+    unmount();
+    for (const plaintext of ["rotated-secret", "Basic rotated-header"]) {
+      expect(cachedText(queryClient)).not.toContain(plaintext);
+    }
+    expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
   });
 
   it("marks the refresh token and client secret unchanged only when one is stored", async () => {
