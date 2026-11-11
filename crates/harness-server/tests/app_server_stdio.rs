@@ -676,11 +676,54 @@ fn blocks_mode_runs_first_turn_prompt_hooks_once_before_the_harness_starts() {
     assert_completed_turn(&second);
     assert_eq!(
         std::fs::read_to_string(&runs).expect("composer runs"),
-        "--target-prompt AGENTS.md --first-turn-prompt-hooks --report-json\n"
+        "--target-prompt AGENTS.md --first-turn-prompt-hooks --hooks-timeout-seconds 10 --report-json\n"
     );
     for path in [&prompt, &runs, &composer] {
         let _ = std::fs::remove_file(path);
     }
+}
+
+#[test]
+fn blocks_mode_stops_a_composer_that_runs_past_the_hooks_time_limit() {
+    // A composer that ignores its time limit must not hold the first turn:
+    // harness-server stops it shortly after the limit and the turn still runs.
+    let composer = temp_path("fake-stuck-compose-system-prompt.sh");
+    std::fs::write(&composer, "#!/bin/sh\nexec sleep 30\n").expect("write fake composer");
+    let mut permissions = std::fs::metadata(&composer)
+        .expect("composer metadata")
+        .permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    std::fs::set_permissions(&composer, permissions).expect("chmod fake composer");
+    let fake_claude = concat!(
+        "printf '%s\\n' ",
+        "'{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}' ",
+        "'{\"type\":\"assistant\",\"is_partial\":false,\"message\":{\"id\":\"msg_1\",\"content\":[{\"type\":\"text\",\"text\":\"ran\"}]}}' ",
+        "'{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ran\"}'"
+    );
+    let composer_path = composer.to_string_lossy().into_owned();
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
+        Harness::ClaudeCode,
+        Some(fake_claude.to_string()),
+        None,
+        &[
+            ("CENTAUR_OVERLAY_REPO_DIRS", "/overlays/acme/overlay"),
+            ("CENTAUR_COMPOSE_SYSTEM_PROMPT_BIN", &composer_path),
+            ("CENTAUR_FIRST_TURN_PROMPT_HOOKS_TIMEOUT_SECONDS", "0.2"),
+        ],
+    );
+    let started = Instant::now();
+    let turn = bridge.run_blocks_user_turn("first", Duration::from_secs(10));
+    let elapsed = started.elapsed();
+    bridge.finish_successfully();
+    let _ = std::fs::remove_file(&composer);
+
+    assert_completed_turn(&turn);
+    assert_eq!(turn.text_from_deltas, "ran");
+    assert!(
+        elapsed < Duration::from_secs(6),
+        "first turn waited {elapsed:?} for a stuck composer"
+    );
 }
 
 #[test]
@@ -1688,6 +1731,7 @@ impl BridgeProcess {
             "CENTAUR_CLAUDE_APP_BRIDGE_COMMAND",
             "CENTAUR_AMP_APP_BRIDGE_COMMAND",
             "CENTAUR_COMPOSE_SYSTEM_PROMPT_BIN",
+            "CENTAUR_FIRST_TURN_PROMPT_HOOKS_TIMEOUT_SECONDS",
             "CENTAUR_OVERLAY_REPO_DIRS",
             "CODEX_MODEL",
             "CODEX_MODEL_PROVIDER",

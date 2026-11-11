@@ -81,9 +81,6 @@ const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
 const PUBLIC_REPO_CACHE_SUBPATH: &str = "public";
 const CENTAUR_SKILL_DIRS_ENV: &str = "CENTAUR_SKILL_DIRS";
 const CENTAUR_PUBLIC_SKILL_DIRS_ENV: &str = "CENTAUR_PUBLIC_SKILL_DIRS";
-/// Overlay repo roots whose sandbox hooks may run, in overlay order.
-const CENTAUR_OVERLAY_REPO_DIRS_ENV: &str = "CENTAUR_OVERLAY_REPO_DIRS";
-const CENTAUR_PUBLIC_OVERLAY_REPO_DIRS_ENV: &str = "CENTAUR_PUBLIC_OVERLAY_REPO_DIRS";
 const SANDBOX_REPO_CACHE_LABEL: &str = "centaur.sandbox_repo_cache";
 /// Tools that need the observability capability. Each user turn tells the
 /// agent whether they work; the sandbox network policy enforces it.
@@ -6294,21 +6291,16 @@ fn apply_sandbox_capabilities(spec: &mut SandboxSpec, capabilities: &SessionSand
             spec.mounts
                 .retain(|mount| mount.target_path != SANDBOX_REPOS_MOUNT_PATH);
             remove_spec_env(spec, CENTAUR_SKILL_DIRS_ENV);
-            remove_spec_env(spec, CENTAUR_OVERLAY_REPO_DIRS_ENV);
         }
         SessionRepoCacheAccess::Public => {
             scope_repo_cache_mounts_to_public(spec);
-            scope_dirs_env_to_public(spec, CENTAUR_SKILL_DIRS_ENV, CENTAUR_PUBLIC_SKILL_DIRS_ENV);
-            scope_dirs_env_to_public(
-                spec,
-                CENTAUR_OVERLAY_REPO_DIRS_ENV,
-                CENTAUR_PUBLIC_OVERLAY_REPO_DIRS_ENV,
-            );
+            scope_skill_dirs_to_public(spec);
         }
-        SessionRepoCacheAccess::All => {}
+        SessionRepoCacheAccess::All => {
+            remove_spec_env(spec, CENTAUR_PUBLIC_SKILL_DIRS_ENV);
+        }
     }
     remove_spec_env(spec, CENTAUR_PUBLIC_SKILL_DIRS_ENV);
-    remove_spec_env(spec, CENTAUR_PUBLIC_OVERLAY_REPO_DIRS_ENV);
 }
 
 fn tool_host_tool_filter_from_spec(
@@ -6352,17 +6344,16 @@ fn scope_repo_cache_mounts_to_public(spec: &mut SandboxSpec) {
     }
 }
 
-/// Replace a path-list env with its public-only counterpart, or drop it.
-fn scope_dirs_env_to_public(spec: &mut SandboxSpec, name: &str, public_name: &str) {
-    let public_dirs = spec
+fn scope_skill_dirs_to_public(spec: &mut SandboxSpec) {
+    let public_skill_dirs = spec
         .env
         .iter()
-        .find(|env| env.name == public_name)
+        .find(|env| env.name == CENTAUR_PUBLIC_SKILL_DIRS_ENV)
         .map(|env| env.value.trim().to_owned())
         .filter(|value| !value.is_empty());
-    match public_dirs {
-        Some(public_dirs) => upsert_spec_env(spec, name, public_dirs),
-        None => remove_spec_env(spec, name),
+    match public_skill_dirs {
+        Some(public_skill_dirs) => upsert_spec_env(spec, CENTAUR_SKILL_DIRS_ENV, public_skill_dirs),
+        None => remove_spec_env(spec, CENTAUR_SKILL_DIRS_ENV),
     }
 }
 
@@ -7917,72 +7908,6 @@ mod tests {
     }
 
     #[test]
-    fn public_repo_cache_scopes_overlay_repo_dirs_to_public_dirs() {
-        let mut spec = SandboxSpec::new("mock")
-            .env(
-                CENTAUR_OVERLAY_REPO_DIRS_ENV,
-                "/home/agent/github/acme/private:/home/agent/github/acme/public",
-            )
-            .env(
-                CENTAUR_PUBLIC_OVERLAY_REPO_DIRS_ENV,
-                "/home/agent/github/acme/public",
-            );
-        let capabilities = SessionSandboxCapabilities {
-            repo_cache: SessionRepoCacheAccess::Public,
-            observability_enabled: true,
-        };
-
-        apply_sandbox_capabilities(&mut spec, &capabilities);
-
-        assert_eq!(
-            env_value(&spec, CENTAUR_OVERLAY_REPO_DIRS_ENV),
-            Some("/home/agent/github/acme/public")
-        );
-        assert_eq!(env_value(&spec, CENTAUR_PUBLIC_OVERLAY_REPO_DIRS_ENV), None);
-    }
-
-    #[test]
-    fn public_repo_cache_without_public_overlays_drops_overlay_repo_dirs() {
-        let mut spec = SandboxSpec::new("mock").env(
-            CENTAUR_OVERLAY_REPO_DIRS_ENV,
-            "/home/agent/github/acme/private",
-        );
-        let capabilities = SessionSandboxCapabilities {
-            repo_cache: SessionRepoCacheAccess::Public,
-            observability_enabled: true,
-        };
-
-        apply_sandbox_capabilities(&mut spec, &capabilities);
-
-        assert_eq!(env_value(&spec, CENTAUR_OVERLAY_REPO_DIRS_ENV), None);
-    }
-
-    #[test]
-    fn full_repo_cache_keeps_all_overlay_repo_dirs() {
-        let mut spec = SandboxSpec::new("mock")
-            .env(
-                CENTAUR_OVERLAY_REPO_DIRS_ENV,
-                "/home/agent/github/acme/private:/home/agent/github/acme/public",
-            )
-            .env(
-                CENTAUR_PUBLIC_OVERLAY_REPO_DIRS_ENV,
-                "/home/agent/github/acme/public",
-            );
-        let capabilities = SessionSandboxCapabilities {
-            repo_cache: SessionRepoCacheAccess::All,
-            observability_enabled: true,
-        };
-
-        apply_sandbox_capabilities(&mut spec, &capabilities);
-
-        assert_eq!(
-            env_value(&spec, CENTAUR_OVERLAY_REPO_DIRS_ENV),
-            Some("/home/agent/github/acme/private:/home/agent/github/acme/public")
-        );
-        assert_eq!(env_value(&spec, CENTAUR_PUBLIC_OVERLAY_REPO_DIRS_ENV), None);
-    }
-
-    #[test]
     fn disabled_repo_cache_removes_repo_mount() {
         let mut spec = SandboxSpec::new("mock")
             .mount(Mount::new(
@@ -7992,10 +7917,6 @@ mod tests {
                 SANDBOX_REPOS_MOUNT_PATH,
             ))
             .mount(Mount::new(MountKind::EmptyDir, "/workspace"))
-            .env(
-                CENTAUR_OVERLAY_REPO_DIRS_ENV,
-                "/home/agent/github/acme/private",
-            )
             .env(
                 CENTAUR_SKILL_DIRS_ENV,
                 "/home/agent/github/acme/private/.agents/skills",
@@ -8016,7 +7937,6 @@ mod tests {
         assert_eq!(spec.mounts[0].target_path, "/workspace");
         assert_eq!(env_value(&spec, CENTAUR_SKILL_DIRS_ENV), None);
         assert_eq!(env_value(&spec, CENTAUR_PUBLIC_SKILL_DIRS_ENV), None);
-        assert_eq!(env_value(&spec, CENTAUR_OVERLAY_REPO_DIRS_ENV), None);
     }
 
     #[test]

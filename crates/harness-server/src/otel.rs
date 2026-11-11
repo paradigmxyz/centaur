@@ -500,8 +500,8 @@ fn trace_attributes(trace: &TraceContext) -> Vec<KeyValue> {
 pub(crate) struct PromptHookRun {
     pub(crate) repo: String,
     pub(crate) hook: String,
-    /// `ok`, `empty`, `failed`, `timeout`, `oversized`, `start_failed`, or
-    /// `outside_repo`; only `ok` contributes prompt text.
+    /// `ok`, `empty`, `failed`, `timeout`, `skipped`, `oversized`,
+    /// `start_failed`, or `outside_repo`; only `ok` contributes prompt text.
     pub(crate) status: String,
     pub(crate) started_at: SystemTime,
     pub(crate) ended_at: SystemTime,
@@ -514,8 +514,9 @@ pub(crate) struct PromptHookRun {
 pub(crate) struct PromptHooksRun {
     pub(crate) started_at: SystemTime,
     pub(crate) ended_at: SystemTime,
-    /// `composed`, `failed` (composer exited non-zero or its report was
-    /// unreadable), or `not_run` (composer could not start).
+    /// `composed`, `report_unreadable` (prompt composed, hook timing lost),
+    /// `failed` (composer exited non-zero), `timeout` (composer stopped at the
+    /// hooks time limit), or `not_run` (composer could not start).
     pub(crate) outcome: &'static str,
     pub(crate) hooks: Vec<PromptHookRun>,
 }

@@ -22,8 +22,9 @@ PERSONA_PROMPT = Path("AGENTS_PERSONA.md")
 OVERLAY_HOOKS_DIR = Path("services/sandbox/hooks")
 OVERLAY_REPO_DIRS_ENV = "CENTAUR_OVERLAY_REPO_DIRS"
 FIRST_TURN_PROMPT_HOOK = "first-turn-prompt.sh"
-HOOK_TIMEOUT_ENV = "CENTAUR_FIRST_TURN_PROMPT_HOOK_TIMEOUT_SECONDS"
-DEFAULT_HOOK_TIMEOUT_SECONDS = 10.0
+# One time limit covers every hook in a pass; harness-server passes it with
+# --hooks-timeout-seconds and enforces it on this process too.
+DEFAULT_HOOKS_TIMEOUT_SECONDS = 10.0
 HOOK_MAX_BYTES_ENV = "CENTAUR_FIRST_TURN_PROMPT_HOOK_MAX_BYTES"
 DEFAULT_HOOK_MAX_BYTES = 64 * 1024
 
@@ -104,14 +105,34 @@ class HookResult:
         }
 
 
+# The hook currently running, so a SIGTERM from harness-server can kill it.
+_active_hook: subprocess.Popen[bytes] | None = None
+
+
+def _kill_hook_group(process: subprocess.Popen[bytes]) -> None:
+    # The group may already be empty when only an escaped child is left.
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _terminate(signum: int, _frame: object) -> None:
+    if _active_hook is not None:
+        _kill_hook_group(_active_hook)
+    raise SystemExit(128 + signum)
+
+
 def _run_prompt_hook(
     hook: Path, repo_dir: Path, timeout: float, max_bytes: int
 ) -> HookResult:
     """Run a prompt hook with bash from its repo root; stdout is the fragment.
 
-    A failing, slow, or oversized hook is reported and skipped so it cannot
-    block the turn. The hook's stderr passes through to the sandbox log.
+    `timeout` is what is left of the pass's shared time limit. A failing, slow,
+    or oversized hook is reported and skipped so it cannot block the turn. The
+    hook's stderr passes through to the sandbox log.
     """
+    global _active_hook
     started_at = time.time()
 
     def result(status: str, **fields: object) -> HookResult:
@@ -133,22 +154,21 @@ def _run_prompt_hook(
     except OSError as error:
         _warn(f"hook {hook} failed to start: {error}")
         return result("start_failed")
+    _active_hook = process
     try:
         stdout, _ = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         # Kill the hook's whole process group so children cannot outlive it.
-        # The group may already be empty when only an escaped child is left.
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        _kill_hook_group(process)
         # Do not wait for stdout EOF: a child that left the group (setsid) can
         # hold the pipe open indefinitely. Close our end and reap the hook.
         if process.stdout is not None:
             process.stdout.close()
         process.wait()
-        _warn(f"hook {hook} timed out after {timeout:g}s")
+        _warn(f"hook {hook} stopped at the hooks time limit")
         return result("timeout")
+    finally:
+        _active_hook = None
     fields: dict[str, object] = {
         "output_bytes": len(stdout),
         "exit_code": process.returncode,
@@ -168,13 +188,23 @@ def _run_prompt_hook(
     return hook_result
 
 
-def _run_first_turn_prompt_hooks() -> list[HookResult]:
-    timeout = _positive_env_number(HOOK_TIMEOUT_ENV, DEFAULT_HOOK_TIMEOUT_SECONDS)
+def _run_first_turn_prompt_hooks(timeout: float) -> list[HookResult]:
+    """Run every hook in overlay order under one shared time limit.
+
+    Hooks left when the limit runs out are reported as `skipped`.
+    """
     max_bytes = int(_positive_env_number(HOOK_MAX_BYTES_ENV, DEFAULT_HOOK_MAX_BYTES))
-    return [
-        _run_prompt_hook(hook, repo_dir, timeout, max_bytes)
-        for repo_dir, hook in _overlay_hooks(FIRST_TURN_PROMPT_HOOK)
-    ]
+    deadline = time.monotonic() + timeout
+    results: list[HookResult] = []
+    for repo_dir, hook in _overlay_hooks(FIRST_TURN_PROMPT_HOOK):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            now = time.time()
+            _warn(f"skipping hook {hook}: hooks time limit reached")
+            results.append(HookResult(repo_dir, hook, "skipped", now, now))
+            continue
+        results.append(_run_prompt_hook(hook, repo_dir, remaining, max_bytes))
+    return results
 
 
 def compose_system_prompt(
@@ -183,6 +213,7 @@ def compose_system_prompt(
     target_prompt: Path,
     repo_mount: Path,
     first_turn_prompt_hooks: bool = False,
+    hooks_timeout: float = DEFAULT_HOOKS_TIMEOUT_SECONDS,
 ) -> list[HookResult]:
     base_prompt = home_dir / "AGENTS_BASE.md"
     baked_prompt = home_dir / "AGENTS.md"
@@ -206,7 +237,9 @@ def compose_system_prompt(
         if _append_file_fragment(fragments, prompt_path):
             appended.add(resolved)
 
-    hook_results = _run_first_turn_prompt_hooks() if first_turn_prompt_hooks else []
+    hook_results = (
+        _run_first_turn_prompt_hooks(hooks_timeout) if first_turn_prompt_hooks else []
+    )
     fragments.extend(r.output for r in hook_results if r.output is not None)
 
     persona_prompt_path = home_dir / PERSONA_PROMPT
@@ -229,11 +262,20 @@ def main() -> int:
         help="also append the output of overlay first-turn-prompt.sh hooks",
     )
     parser.add_argument(
+        "--hooks-timeout-seconds",
+        type=float,
+        default=DEFAULT_HOOKS_TIMEOUT_SECONDS,
+        help="one time limit shared by every hook in the pass",
+    )
+    parser.add_argument(
         "--report-json",
         action="store_true",
         help="print a JSON report of each hook run to stdout",
     )
     args = parser.parse_args()
+    if args.hooks_timeout_seconds <= 0:
+        parser.error("--hooks-timeout-seconds must be positive")
+    signal.signal(signal.SIGTERM, _terminate)
 
     home_dir = Path(args.home_dir)
     hook_results = compose_system_prompt(
@@ -241,6 +283,7 @@ def main() -> int:
         target_prompt=Path(args.target_prompt),
         repo_mount=Path(args.repo_mount) if args.repo_mount else home_dir / "github",
         first_turn_prompt_hooks=args.first_turn_prompt_hooks,
+        hooks_timeout=args.hooks_timeout_seconds,
     )
     if args.report_json:
         json.dump({"hooks": [r.report() for r in hook_results]}, sys.stdout)

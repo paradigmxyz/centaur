@@ -17,16 +17,11 @@
 {{- $skillDirs := list -}}
 {{- $publicSkillDirs := list -}}
 {{- $overlayRepoDirs := list -}}
-{{- $publicOverlayRepoDirs := list -}}
 {{- range $source := $overlaySources -}}
 {{- $repo := get $source "repo" | default "" -}}
 {{- $visibility := get $source "visibility" | default "private" -}}
 {{- if $repo -}}
-{{- $overlayRepoDir := printf "/home/agent/github/%s" $repo -}}
-{{- $overlayRepoDirs = append $overlayRepoDirs $overlayRepoDir -}}
-{{- if eq $visibility "public" -}}
-{{- $publicOverlayRepoDirs = append $publicOverlayRepoDirs $overlayRepoDir -}}
-{{- end -}}
+{{- $overlayRepoDirs = append $overlayRepoDirs (printf "/home/agent/github/%s" $repo) -}}
 {{- with (get $source "toolsSubdir") -}}
 {{- $toolSource := dict "repo" $repo "subdir" . "visibility" $visibility -}}
 {{- with (get $source "ref") }}{{- $_ := set $toolSource "ref" . -}}{{- end -}}
@@ -574,12 +569,9 @@ spec:
 {{- if and .Values.repoCache.enabled (gt (len $publicSkillDirs) 0) }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_PUBLIC_SKILL_DIRS" "value" (join ":" $publicSkillDirs)) }}
 {{- end }}
-{{- /* Only configured overlay repos may run sandbox hooks; api-rs scopes these to the session's repo-cache access. */}}
+{{- /* Only configured overlay repos may run sandbox hooks. Public-only sessions mount only public repos, so private overlays' hooks are absent there. */}}
 {{- if and .Values.repoCache.enabled (gt (len $overlayRepoDirs) 0) }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_OVERLAY_REPO_DIRS" "value" (join ":" $overlayRepoDirs)) }}
-{{- end }}
-{{- if and .Values.repoCache.enabled (gt (len $publicOverlayRepoDirs) 0) }}
-{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_PUBLIC_OVERLAY_REPO_DIRS" "value" (join ":" $publicOverlayRepoDirs)) }}
 {{- end }}
 {{- if not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_EMBEDDINGS_ENABLED") }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_ENABLED" "value" ($companyContextEmbeddingsEnabled | toString)) }}

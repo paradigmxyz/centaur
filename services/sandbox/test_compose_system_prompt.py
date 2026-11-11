@@ -162,6 +162,7 @@ class FirstTurnPromptHookTest(unittest.TestCase):
         overlay_dirs: list[str] | None = None,
         env: dict[str, str] | None = None,
         first_turn_prompt_hooks: bool = True,
+        hooks_timeout: float = 10.0,
     ) -> str:
         home = root / "home"
         workspace = root / "workspace"
@@ -197,6 +198,7 @@ class FirstTurnPromptHookTest(unittest.TestCase):
                 target_prompt=target,
                 repo_mount=repo_mount,
                 first_turn_prompt_hooks=first_turn_prompt_hooks,
+                hooks_timeout=hooks_timeout,
             )
         return target.read_text()
 
@@ -288,7 +290,7 @@ class FirstTurnPromptHookTest(unittest.TestCase):
             prompt = self._compose(
                 Path(tmp),
                 {"acme/slow": "echo late\nsleep 30 & wait\n"},
-                env={compose_system_prompt.HOOK_TIMEOUT_ENV: "0.2"},
+                hooks_timeout=0.2,
             )
 
             self.assertEqual(prompt, "base\n\n\n---\n\npersona\n")
@@ -307,7 +309,7 @@ class FirstTurnPromptHookTest(unittest.TestCase):
                     ),
                     "acme/exited": "setsid sleep 30 &\nexit 0\n",
                 },
-                env={compose_system_prompt.HOOK_TIMEOUT_ENV: "0.3"},
+                hooks_timeout=0.3,
             )
             elapsed = time.monotonic() - started
             escaped = int(pid_file.read_text())
@@ -315,6 +317,86 @@ class FirstTurnPromptHookTest(unittest.TestCase):
 
             self.assertLess(elapsed, 5)
             self.assertEqual(prompt, "base\n\n\n---\n\npersona\n")
+
+    def test_one_time_limit_covers_every_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            started = time.monotonic()
+            prompt = self._compose(
+                Path(tmp),
+                {
+                    "acme/a": "sleep 0.4\necho a\n",
+                    "acme/b": "sleep 0.4\necho b\n",
+                    "acme/c": "echo c\n",
+                },
+                overlay_dirs=["acme/a", "acme/b", "acme/c"],
+                hooks_timeout=0.6,
+            )
+            elapsed = time.monotonic() - started
+
+            # a fits; b runs out the shared limit; nothing is left for c.
+            self.assertEqual(prompt, "base\n\n\n---\n\na\n\n\n---\n\npersona\n")
+            self.assertLess(elapsed, 2)
+
+    def test_skips_listed_overlays_that_are_not_mounted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            # A public-only session mounts only public repos, so a private
+            # overlay listed in the env has no hook on disk.
+            prompt = self._compose(
+                Path(tmp),
+                {"acme/public": "echo public\n"},
+                overlay_dirs=["acme/private", "acme/public"],
+            )
+
+            self.assertEqual(prompt, "base\n\n\n---\n\npublic\n\n\n---\n\npersona\n")
+
+    def test_sigterm_kills_the_running_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            hook_dir = home / "github" / "acme" / "slow" / "services/sandbox/hooks"
+            hook_dir.mkdir(parents=True)
+            (home / "AGENTS.md").write_text("base\n")
+            pid_file = root / "hook.pid"
+            (hook_dir / "first-turn-prompt.sh").write_text(
+                f"echo $$ > {pid_file}\nsleep 30\n"
+            )
+            env = {
+                **os.environ,
+                compose_system_prompt.OVERLAY_REPO_DIRS_ENV: str(
+                    home / "github" / "acme" / "slow"
+                ),
+            }
+            composer = subprocess.Popen(
+                [
+                    sys.executable,
+                    compose_system_prompt.__file__,
+                    "--home-dir",
+                    str(home),
+                    "--target-prompt",
+                    str(workspace / "AGENTS.md"),
+                    "--first-turn-prompt-hooks",
+                ],
+                env=env,
+                stderr=subprocess.DEVNULL,
+            )
+            deadline = time.monotonic() + 5
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            hook_pid = int(pid_file.read_text())
+
+            composer.send_signal(signal.SIGTERM)
+            self.assertEqual(composer.wait(timeout=5), 128 + signal.SIGTERM)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(hook_pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(hook_pid, 0)
 
     def test_reports_each_hook_run_as_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
