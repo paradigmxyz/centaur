@@ -147,90 +147,146 @@ class ComposeSystemPromptTest(unittest.TestCase):
                 "base\n\n\n---\n\noverlay\n",
             )
 
-    def _compose_with_overlays(
-        self, root: Path, overlays: dict[str, dict[str, str]]
+
+class FirstTurnPromptHookTest(unittest.TestCase):
+    def _compose(
+        self,
+        root: Path,
+        hooks: dict[str, str],
+        *,
+        overlay_dirs: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        first_turn_prompt_hooks: bool = True,
     ) -> str:
         home = root / "home"
         workspace = root / "workspace"
         home.mkdir()
         workspace.mkdir()
         (home / "AGENTS.md").write_text("base\n")
+        (home / "AGENTS_PERSONA.md").write_text("persona\n")
         repo_mount = home / "github"
-        for repo, files in overlays.items():
-            sandbox_dir = repo_mount / repo / "services" / "sandbox"
-            sandbox_dir.mkdir(parents=True)
-            for name, text in files.items():
-                path = sandbox_dir / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(text)
+        for repo, script in hooks.items():
+            hook = (
+                repo_mount
+                / repo
+                / "services"
+                / "sandbox"
+                / "hooks"
+                / "first-turn-prompt.sh"
+            )
+            hook.parent.mkdir(parents=True)
+            hook.write_text(script)
+        if overlay_dirs is None:
+            overlay_dirs = list(hooks)
+        hook_env = {
+            compose_system_prompt.OVERLAY_REPO_DIRS_ENV: ":".join(
+                str(repo_mount / repo) for repo in overlay_dirs
+            ),
+            **(env or {}),
+        }
 
         target = workspace / "AGENTS.md"
-        compose_system_prompt.compose_system_prompt(
-            home_dir=home,
-            target_prompt=target,
-            repo_mount=repo_mount,
-        )
+        with mock.patch.dict(os.environ, hook_env), mock.patch("sys.stderr"):
+            compose_system_prompt.compose_system_prompt(
+                home_dir=home,
+                target_prompt=target,
+                repo_mount=repo_mount,
+                first_turn_prompt_hooks=first_turn_prompt_hooks,
+            )
         return target.read_text()
 
-    def test_appends_hook_output_after_its_repo_prompt(self) -> None:
+    def test_appends_hook_output_in_overlay_order_before_persona(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            prompt = self._compose_with_overlays(
+            prompt = self._compose(
                 Path(tmp),
                 {
-                    "acme/first": {
-                        "SYSTEM_PROMPT.md": "first overlay\n",
-                        "hooks/system-prompt.sh": 'echo "hook in $(basename "$PWD")"\n',
-                    },
-                    "acme/second": {"SYSTEM_PROMPT.md": "second overlay\n"},
+                    "acme/second": 'echo "from $(basename "$PWD")"\n',
+                    "acme/first": "echo from first\n",
                 },
+                overlay_dirs=["acme/first", "acme/second"],
             )
 
             self.assertEqual(
                 prompt,
-                "base\n\n\n---\n\nfirst overlay\n\n\n---\n\nhook in first\n"
-                "\n\n---\n\nsecond overlay\n",
+                "base\n\n\n---\n\nfrom first\n\n\n---\n\nfrom second\n"
+                "\n\n---\n\npersona\n",
             )
 
-    def test_hook_without_static_prompt_is_appended(self) -> None:
+    def test_does_not_run_hooks_without_the_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            prompt = self._compose_with_overlays(
+            prompt = self._compose(
                 Path(tmp),
-                {"acme/overlay": {"hooks/system-prompt.sh": "printf 'generated\\n'\n"}},
+                {"acme/overlay": "echo hooked\n"},
+                first_turn_prompt_hooks=False,
             )
 
-            self.assertEqual(prompt, "base\n\n\n---\n\ngenerated\n")
+            self.assertEqual(prompt, "base\n\n\n---\n\npersona\n")
 
-    def test_skips_failing_and_empty_hooks(self) -> None:
+    def test_ignores_hooks_in_repos_that_are_not_overlays(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch("sys.stderr"):
-                prompt = self._compose_with_overlays(
-                    Path(tmp),
-                    {
-                        "acme/empty": {"hooks/system-prompt.sh": "echo '   '\n"},
-                        "acme/failing": {
-                            "SYSTEM_PROMPT.md": "failing overlay\n",
-                            "hooks/system-prompt.sh": "echo partial\nexit 3\n",
-                        },
-                    },
+            prompt = self._compose(
+                Path(tmp),
+                {"acme/overlay": "echo overlay\n", "acme/other": "echo other\n"},
+                overlay_dirs=["acme/overlay"],
+            )
+
+            self.assertEqual(prompt, "base\n\n\n---\n\noverlay\n\n\n---\n\npersona\n")
+
+    def test_skips_hook_that_resolves_outside_its_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outside = root / "outside.sh"
+            outside.write_text("echo escaped\n")
+            home = root / "home"
+            hook_dir = (
+                home / "github" / "acme" / "overlay" / "services" / "sandbox" / "hooks"
+            )
+            hook_dir.mkdir(parents=True)
+            (hook_dir / "first-turn-prompt.sh").symlink_to(outside)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (home / "AGENTS.md").write_text("base\n")
+            target = workspace / "AGENTS.md"
+            env = {
+                compose_system_prompt.OVERLAY_REPO_DIRS_ENV: str(
+                    home / "github" / "acme" / "overlay"
+                )
+            }
+            with mock.patch.dict(os.environ, env), mock.patch("sys.stderr"):
+                compose_system_prompt.compose_system_prompt(
+                    home_dir=home,
+                    target_prompt=target,
+                    repo_mount=home / "github",
+                    first_turn_prompt_hooks=True,
                 )
 
-            self.assertEqual(prompt, "base\n\n\n---\n\nfailing overlay\n")
+            self.assertEqual(target.read_text(), "base\n")
 
-    def test_skips_hook_that_times_out(self) -> None:
+    def test_skips_failing_empty_and_oversized_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            with (
-                mock.patch.dict(
-                    os.environ,
-                    {compose_system_prompt.HOOK_TIMEOUT_ENV: "0.2"},
-                ),
-                mock.patch("sys.stderr"),
-            ):
-                prompt = self._compose_with_overlays(
-                    Path(tmp),
-                    {"acme/slow": {"hooks/system-prompt.sh": "echo late\nsleep 30 & wait\n"}},
-                )
+            prompt = self._compose(
+                Path(tmp),
+                {
+                    "acme/empty": "echo '   '\n",
+                    "acme/failing": "echo partial\nexit 3\n",
+                    "acme/large": "head -c 100 /dev/zero | tr '\\0' x\n",
+                    "acme/ok": "echo ok\n",
+                },
+                overlay_dirs=["acme/empty", "acme/failing", "acme/large", "acme/ok"],
+                env={compose_system_prompt.HOOK_MAX_BYTES_ENV: "50"},
+            )
 
-            self.assertEqual(prompt, "base\n")
+            self.assertEqual(prompt, "base\n\n\n---\n\nok\n\n\n---\n\npersona\n")
+
+    def test_skips_hook_that_times_out_and_kills_its_children(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt = self._compose(
+                Path(tmp),
+                {"acme/slow": "echo late\nsleep 30 & wait\n"},
+                env={compose_system_prompt.HOOK_TIMEOUT_ENV: "0.2"},
+            )
+
+            self.assertEqual(prompt, "base\n\n\n---\n\npersona\n")
 
 
 if __name__ == "__main__":

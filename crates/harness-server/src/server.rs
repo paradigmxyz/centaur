@@ -137,6 +137,7 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                 reasoning,
                 trace_context,
             }) => {
+                crate::first_turn::run_first_turn_prompt_hooks();
                 if let Some(model) = model {
                     state.model = model;
                 }

@@ -36,7 +36,7 @@ centaur-overlay/
     └── sandbox/
         ├── SYSTEM_PROMPT.md
         └── hooks/
-            └── system-prompt.sh
+            └── first-turn-prompt.sh
 ```
 
 Only include the directories your deployment needs.
@@ -151,15 +151,13 @@ delivery path.
 ## Sandbox hooks
 
 An overlay can ship named bash scripts in `services/sandbox/hooks/`. The
-sandbox calls each one at a fixed point, with `bash`, from the repo root:
+sandbox calls each one at a fixed point, with `bash`, from the repo root. Only
+repos listed in `overlays.sources` run hooks, and a session with public-only
+repo-cache access runs only public overlays' hooks.
 
 | Hook | When | Effect |
 | --- | --- | --- |
-| `system-prompt.sh` | Sandbox startup, after tool CLIs are installed | Standard output is appended right after that repo's `SYSTEM_PROMPT.md`; persona prompts still come last. Empty output is ignored. |
-
-A hook that exits non-zero or runs longer than
-`CENTAUR_SYSTEM_PROMPT_HOOK_TIMEOUT_SECONDS` (default 30) is logged and
-skipped, so it cannot block startup:
+| `first-turn-prompt.sh` | Once per sandbox, before the first turn starts the harness | Standard output is appended to the system prompt after every `SYSTEM_PROMPT.md` and before the persona prompt, in overlay order. Empty output is ignored. |
 
 ```bash
 #!/usr/bin/env bash
@@ -167,9 +165,16 @@ set -euo pipefail
 my-tool describe-for-agents
 ```
 
-Startup hooks run when the sandbox boots, which for warm sandboxes is before
-any session claims them. They have no session context and no brokered
-credentials, so keep them to static or locally derived output.
+By the first turn, the sandbox is bound to its session, so a hook runs with the
+same brokered credentials as the agent. Its output becomes system prompt text:
+do not print content fetched from users or third parties, which would be
+prompt injection at system level.
+
+The hook delays the first reply, so keep it fast. A hook that exits non-zero,
+runs longer than `CENTAUR_FIRST_TURN_PROMPT_HOOK_TIMEOUT_SECONDS` (default 10),
+or prints more than `CENTAUR_FIRST_TURN_PROMPT_HOOK_MAX_BYTES` (default 65536)
+is logged and skipped, so it never fails the turn. Its standard error goes to
+the sandbox log. A hook path that resolves outside its repo is ignored.
 
 ## Verify the overlay
 

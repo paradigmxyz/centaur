@@ -6,17 +6,28 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
 SEPARATOR = "\n\n---\n\n"
 OVERLAY_PROMPT = Path("services/sandbox/SYSTEM_PROMPT.md")
-# Overlay hooks are named bash scripts under this repo-relative directory.
-OVERLAY_HOOKS_DIR = Path("services/sandbox/hooks")
-SYSTEM_PROMPT_HOOK = "system-prompt.sh"
-HOOK_TIMEOUT_ENV = "CENTAUR_SYSTEM_PROMPT_HOOK_TIMEOUT_SECONDS"
-DEFAULT_HOOK_TIMEOUT_SECONDS = 30.0
 PERSONA_PROMPT = Path("AGENTS_PERSONA.md")
+
+# Overlay hooks are named bash scripts under this repo-relative directory. Only
+# repos listed in OVERLAY_REPO_DIRS_ENV (configured overlay sources, scoped to
+# the session's repo-cache access) may run them.
+OVERLAY_HOOKS_DIR = Path("services/sandbox/hooks")
+OVERLAY_REPO_DIRS_ENV = "CENTAUR_OVERLAY_REPO_DIRS"
+FIRST_TURN_PROMPT_HOOK = "first-turn-prompt.sh"
+HOOK_TIMEOUT_ENV = "CENTAUR_FIRST_TURN_PROMPT_HOOK_TIMEOUT_SECONDS"
+DEFAULT_HOOK_TIMEOUT_SECONDS = 10.0
+HOOK_MAX_BYTES_ENV = "CENTAUR_FIRST_TURN_PROMPT_HOOK_MAX_BYTES"
+DEFAULT_HOOK_MAX_BYTES = 64 * 1024
+
+
+def _warn(message: str) -> None:
+    print(f"warning: {message}", file=sys.stderr)
 
 
 def _append_file_fragment(fragments: list[str], source: Path) -> bool:
@@ -26,38 +37,72 @@ def _append_file_fragment(fragments: list[str], source: Path) -> bool:
     return True
 
 
-def _hook_timeout_seconds() -> float:
-    raw = os.environ.get(HOOK_TIMEOUT_ENV, "").strip()
+def _mounted_overlay_prompts(repo_mount: Path, baked_prompt: Path) -> list[Path]:
+    if not repo_mount.is_dir():
+        return []
+    prompts = sorted(repo_mount.glob(f"*/*/{OVERLAY_PROMPT}"))
+    if not baked_prompt.is_file():
+        return prompts
+
+    root_text = baked_prompt.read_text()
+    return [prompt for prompt in prompts if prompt.read_text() != root_text]
+
+
+def _positive_env_number(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
     if not raw:
-        return DEFAULT_HOOK_TIMEOUT_SECONDS
+        return default
     try:
-        timeout = float(raw)
+        value = float(raw)
     except ValueError:
-        print(f"warning: ignoring invalid {HOOK_TIMEOUT_ENV}={raw!r}", file=sys.stderr)
-        return DEFAULT_HOOK_TIMEOUT_SECONDS
-    return timeout if timeout > 0 else DEFAULT_HOOK_TIMEOUT_SECONDS
+        _warn(f"ignoring invalid {name}={raw!r}")
+        return default
+    if value <= 0:
+        _warn(f"ignoring non-positive {name}={raw!r}")
+        return default
+    return value
 
 
-def _run_prompt_hook(hook: Path, repo_dir: Path, timeout: float) -> str | None:
-    """Run an overlay prompt hook; its stdout is a prompt fragment.
+def _overlay_repo_dirs() -> list[Path]:
+    raw = os.environ.get(OVERLAY_REPO_DIRS_ENV, "")
+    return [Path(entry) for entry in raw.split(":") if entry.strip()]
 
-    A failing or slow hook is reported and skipped so it cannot block startup.
-    The hook's stderr passes through to the sandbox log.
+
+def _overlay_hooks(name: str) -> list[tuple[Path, Path]]:
+    """Return (repo_dir, hook) pairs for a named hook, in overlay order."""
+    hooks: list[tuple[Path, Path]] = []
+    for repo_dir in _overlay_repo_dirs():
+        hook = repo_dir / OVERLAY_HOOKS_DIR / name
+        if not hook.is_file():
+            continue
+        # A hook must live inside its overlay repo, not behind a symlink to an
+        # arbitrary (possibly agent-writable) path.
+        if not hook.resolve().is_relative_to(repo_dir.resolve()):
+            _warn(f"skipping hook {hook}: resolves outside {repo_dir}")
+            continue
+        hooks.append((repo_dir, hook))
+    return hooks
+
+
+def _run_prompt_hook(
+    hook: Path, repo_dir: Path, timeout: float, max_bytes: int
+) -> str | None:
+    """Run a prompt hook with bash from its repo root; stdout is the fragment.
+
+    A failing, slow, or oversized hook is reported and skipped so it cannot
+    block the turn. The hook's stderr passes through to the sandbox log.
     """
+    started = time.monotonic()
     try:
         process = subprocess.Popen(
             ["bash", str(hook)],
             cwd=repo_dir,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            text=True,
             start_new_session=True,
         )
     except OSError as error:
-        print(
-            f"warning: system prompt hook {hook} failed to start: {error}",
-            file=sys.stderr,
-        )
+        _warn(f"hook {hook} failed to start: {error}")
         return None
     try:
         stdout, _ = process.communicate(timeout=timeout)
@@ -65,45 +110,31 @@ def _run_prompt_hook(hook: Path, repo_dir: Path, timeout: float) -> str | None:
         # Kill the hook's whole process group so children cannot outlive it.
         os.killpg(process.pid, signal.SIGKILL)
         process.communicate()
-        print(
-            f"warning: system prompt hook {hook} timed out after {timeout:g}s",
-            file=sys.stderr,
-        )
+        _warn(f"hook {hook} timed out after {timeout:g}s")
         return None
+    elapsed = time.monotonic() - started
     if process.returncode != 0:
-        status = process.returncode
-        print(
-            f"warning: system prompt hook {hook} exited with status {status}",
-            file=sys.stderr,
-        )
+        _warn(f"hook {hook} exited with status {process.returncode}")
         return None
-    return stdout if stdout.strip() else None
+    if len(stdout) > max_bytes:
+        _warn(f"hook {hook} printed {len(stdout)} bytes, over the {max_bytes} limit")
+        return None
+    print(
+        f"hook {hook}: {len(stdout)} bytes in {elapsed:.2f}s",
+        file=sys.stderr,
+    )
+    output = stdout.decode("utf-8", errors="replace")
+    return output if output.strip() else None
 
 
-def _mounted_overlay_fragments(
-    repo_mount: Path, baked_prompt: Path
-) -> list[tuple[Path, str]]:
-    """Return (source, text) fragments from mounted repos in repo order.
-
-    Each repo contributes its static SYSTEM_PROMPT.md, then the stdout of its
-    hooks/system-prompt.sh.
-    """
-    if not repo_mount.is_dir():
-        return []
-    root_text = baked_prompt.read_text() if baked_prompt.is_file() else None
-    timeout = _hook_timeout_seconds()
-    fragments: list[tuple[Path, str]] = []
-    for repo_dir in sorted(path for path in repo_mount.glob("*/*") if path.is_dir()):
-        prompt = repo_dir / OVERLAY_PROMPT
-        if prompt.is_file():
-            text = prompt.read_text()
-            if text != root_text:
-                fragments.append((prompt, text))
-        hook = repo_dir / OVERLAY_HOOKS_DIR / SYSTEM_PROMPT_HOOK
-        if hook.is_file():
-            output = _run_prompt_hook(hook, repo_dir, timeout)
-            if output is not None:
-                fragments.append((hook, output))
+def _first_turn_prompt_fragments() -> list[str]:
+    timeout = _positive_env_number(HOOK_TIMEOUT_ENV, DEFAULT_HOOK_TIMEOUT_SECONDS)
+    max_bytes = int(_positive_env_number(HOOK_MAX_BYTES_ENV, DEFAULT_HOOK_MAX_BYTES))
+    fragments: list[str] = []
+    for repo_dir, hook in _overlay_hooks(FIRST_TURN_PROMPT_HOOK):
+        output = _run_prompt_hook(hook, repo_dir, timeout, max_bytes)
+        if output is not None:
+            fragments.append(output)
     return fragments
 
 
@@ -112,6 +143,7 @@ def compose_system_prompt(
     home_dir: Path,
     target_prompt: Path,
     repo_mount: Path,
+    first_turn_prompt_hooks: bool = False,
 ) -> None:
     base_prompt = home_dir / "AGENTS_BASE.md"
     baked_prompt = home_dir / "AGENTS.md"
@@ -126,12 +158,17 @@ def compose_system_prompt(
     if _append_file_fragment(fragments, home_overlay):
         appended.add(home_overlay.resolve())
 
-    for source, text in _mounted_overlay_fragments(repo_mount, baked_prompt):
-        resolved = source.resolve()
+    for prompt_path in _mounted_overlay_prompts(repo_mount, baked_prompt):
+        if not prompt_path.is_file():
+            continue
+        resolved = prompt_path.resolve()
         if resolved in appended:
             continue
-        fragments.append(text)
-        appended.add(resolved)
+        if _append_file_fragment(fragments, prompt_path):
+            appended.add(resolved)
+
+    if first_turn_prompt_hooks:
+        fragments.extend(_first_turn_prompt_fragments())
 
     persona_prompt_path = home_dir / PERSONA_PROMPT
     if persona_prompt_path.is_file():
@@ -146,6 +183,11 @@ def main() -> int:
     parser.add_argument("--home-dir", default=os.path.expanduser("~"))
     parser.add_argument("--repo-mount")
     parser.add_argument("--target-prompt", required=True)
+    parser.add_argument(
+        "--first-turn-prompt-hooks",
+        action="store_true",
+        help="also append the output of overlay first-turn-prompt.sh hooks",
+    )
     args = parser.parse_args()
 
     home_dir = Path(args.home_dir)
@@ -153,6 +195,7 @@ def main() -> int:
         home_dir=home_dir,
         target_prompt=Path(args.target_prompt),
         repo_mount=Path(args.repo_mount) if args.repo_mount else home_dir / "github",
+        first_turn_prompt_hooks=args.first_turn_prompt_hooks,
     )
     return 0
 

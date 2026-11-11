@@ -625,6 +625,65 @@ fn fake_claude_blocks_mode_accepts_user_blocks_by_default() {
 }
 
 #[test]
+fn blocks_mode_runs_first_turn_prompt_hooks_once_before_the_harness_starts() {
+    // The fake composer stands in for `compose-system-prompt`: it records each
+    // run, writes the prompt the harness reads, and prints to stdout, which must
+    // never reach the protocol channel.
+    let prompt = temp_path("first-turn-prompt.md");
+    let runs = temp_path("first-turn-prompt-runs.log");
+    let composer = temp_path("fake-compose-system-prompt.sh");
+    std::fs::write(
+        &composer,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> {runs}\nprintf hooked > {prompt}\necho not-json\n",
+            runs = shell_quote(&runs),
+            prompt = shell_quote(&prompt),
+        ),
+    )
+    .expect("write fake composer");
+    let mut permissions = std::fs::metadata(&composer)
+        .expect("composer metadata")
+        .permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    std::fs::set_permissions(&composer, permissions).expect("chmod fake composer");
+    let fake_claude = format!(
+        concat!(
+            "text=$(cat {prompt}); ",
+            "printf '%s\\n' ",
+            "'{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}}' ",
+            "\"{{\\\"type\\\":\\\"assistant\\\",\\\"is_partial\\\":false,\\\"message\\\":{{\\\"id\\\":\\\"msg_1\\\",\\\"content\\\":[{{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"$text\\\"}}]}}}}\" ",
+            "\"{{\\\"type\\\":\\\"result\\\",\\\"subtype\\\":\\\"success\\\",\\\"result\\\":\\\"$text\\\"}}\""
+        ),
+        prompt = shell_quote(&prompt),
+    );
+    let composer_path = composer.to_string_lossy().into_owned();
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
+        Harness::ClaudeCode,
+        Some(fake_claude),
+        None,
+        &[
+            ("CENTAUR_OVERLAY_REPO_DIRS", "/overlays/acme/overlay"),
+            ("CENTAUR_COMPOSE_SYSTEM_PROMPT_BIN", &composer_path),
+        ],
+    );
+    let first = bridge.run_blocks_user_turn("first", Duration::from_secs(10));
+    let second = bridge.run_blocks_user_turn("second", Duration::from_secs(10));
+    bridge.finish_successfully();
+
+    assert_completed_turn(&first);
+    assert_eq!(first.text_from_deltas, "hooked");
+    assert_completed_turn(&second);
+    assert_eq!(
+        std::fs::read_to_string(&runs).expect("composer runs"),
+        "--target-prompt AGENTS.md --first-turn-prompt-hooks\n"
+    );
+    for path in [&prompt, &runs, &composer] {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[test]
 fn fake_claude_blocks_mode_applies_reasoning_effort_per_turn() {
     // Claude Code outlives each turn, so the blocks `reasoning` field reaches it
     // in-band as an `apply_flag_settings` control request ahead of the user
@@ -1628,6 +1687,8 @@ impl BridgeProcess {
         for env_key in [
             "CENTAUR_CLAUDE_APP_BRIDGE_COMMAND",
             "CENTAUR_AMP_APP_BRIDGE_COMMAND",
+            "CENTAUR_COMPOSE_SYSTEM_PROMPT_BIN",
+            "CENTAUR_OVERLAY_REPO_DIRS",
             "CODEX_MODEL",
             "CODEX_MODEL_PROVIDER",
             "FAKE_CODEX_TURN_DELAY",

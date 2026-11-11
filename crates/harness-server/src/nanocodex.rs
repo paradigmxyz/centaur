@@ -64,6 +64,7 @@ async fn run() -> Result<()> {
                 thinking,
             } => {
                 if agent.is_none() {
+                    crate::first_turn::run_first_turn_prompt_hooks();
                     let (new_agent, new_events) = build_agent(
                         &auth,
                         &cwd,

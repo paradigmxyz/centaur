@@ -95,6 +95,7 @@ pub fn run_hermes_blocks_server() -> Result<()> {
                 trace_context: _,
             }) => {
                 turn += 1;
+                crate::first_turn::run_first_turn_prompt_hooks();
                 let result = ensure_child(&mut hermes, model).and_then(|child| {
                     run_hermes_turn(
                         child,
