@@ -5,6 +5,9 @@
 #   On PATCH, an inline (control_plane) source that omits `secret` keeps the
 #   stored value, so clients never need to read plaintext back to save other
 #   edits. PUT keeps its full-replace contract and still requires `secret`.
+#   Callers take #lock_secret_document! inside their write transaction before
+#   building the source, so the retained value is the one stored when the
+#   lock was granted and a concurrent rotation is never overwritten.
 # - #validate_nested_secret_records! turns invalid nested sources and rules
 #   into a 422 (render_validation_error) instead of a silent drop or a
 #   mid-write exception. The 422 `details` keep the keys earlier versions
@@ -14,6 +17,13 @@ module SecretDocumentWrites
   extend ActiveSupport::Concern
 
   private
+
+  # Row-locks (SELECT ... FOR UPDATE) and reloads a persisted document. Call
+  # inside the write transaction before reading any stored value that the
+  # write retains, so the read happens after a concurrent write commits.
+  def lock_secret_document!(record)
+    record.lock! if record.persisted?
+  end
 
   # +existing+ is the record's current source (nil on create).
   def build_secret_source(attrs, key, existing)

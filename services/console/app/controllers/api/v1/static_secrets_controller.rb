@@ -64,6 +64,15 @@ module Api
       end
 
       def assign_and_save!(ref, attrs)
+        StaticSecret.transaction do
+          # Lock (and reload) first so the retained inline value and kind are
+          # read after any concurrent write to this secret commits.
+          lock_secret_document!(ref)
+          write_document!(ref, attrs)
+        end
+      end
+
+      def write_document!(ref, attrs)
         ss_attrs = permit_document(
           ref, attrs, :name, :description, :kind,
           labels: {}, inject_config: {}, replace_config: {}
@@ -89,25 +98,23 @@ module Api
           replace_config: candidate.replace_config
         )
 
-        StaticSecret.transaction do
-          with_sync_config_replacement_guard(ref, ss_attrs, source: source, rules: rules) do
-            ref.assign_attributes(ss_attrs)
-            ref.kind_rules_for_validation = rules
-            ref.save!
+        with_sync_config_replacement_guard(ref, ss_attrs, source: source, rules: rules) do
+          ref.assign_attributes(ss_attrs)
+          ref.kind_rules_for_validation = rules
+          ref.save!
 
-            ref.source&.destroy!
-            ref.rules.destroy_all
-            source&.static_secret = ref
-            rules.each { |rule| rule.static_secret = ref }
-            # Invalid nested records are reported (and rolled back) after the
-            # parent saved, keeping the error keys of the per-record save!.
-            validate_nested_secret_records!(ref, sources: { source: source }, rules: rules, legacy: :flat)
+          ref.source&.destroy!
+          ref.rules.destroy_all
+          source&.static_secret = ref
+          rules.each { |rule| rule.static_secret = ref }
+          # Invalid nested records are reported (and rolled back) after the
+          # parent saved, keeping the error keys of the per-record save!.
+          validate_nested_secret_records!(ref, sources: { source: source }, rules: rules, legacy: :flat)
 
-            source&.save!
-            rules.each(&:save!)
+          source&.save!
+          rules.each(&:save!)
 
-            ref.reload
-          end
+          ref.reload
         end
       end
 

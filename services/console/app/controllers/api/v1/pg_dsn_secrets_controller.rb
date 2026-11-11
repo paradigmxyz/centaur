@@ -49,25 +49,28 @@ module Api
       private
 
       def assign_and_save!(ref, attrs)
-        base = permit_document(
-          ref, attrs, :name, :description, :database, :role,
-          labels: {}, settings: [ :name, :value, { value_from: {} } ]
-        )
-        # settings is normalized to the array of { "name", "value" } or
-        # { "name", "value_from" } hashes the model stores and serializes.
-        base[:settings] = Array(base[:settings]).map { |s| s.to_h.slice("name", "value", "value_from") }
-
-        # A PATCH that omits an inline DSN's `secret` keeps the stored value.
-        dsn_source = build_secret_source(attrs, :dsn, ref.dsn_source)
-        validate_nested_secret_records!(
-          ref, sources: { dsn: dsn_source }, source_associations: { dsn: :dsn_source }, legacy: :association,
-          prepare: -> { ref.assign_attributes(base); ref.dsn_source = dsn_source }
-        )
-
-        # Build the whole graph in memory and save once so the cross-record
-        # validation (dsn_source_present) sees the source. Assigning the has_one
-        # replaces (and destroys) any prior source; a PUT is a full replace.
         PgDsnSecret.transaction do
+          # Lock (and reload) first so a retained inline DSN is read after any
+          # concurrent rotation of this secret commits.
+          lock_secret_document!(ref)
+          base = permit_document(
+            ref, attrs, :name, :description, :database, :role,
+            labels: {}, settings: [ :name, :value, { value_from: {} } ]
+          )
+          # settings is normalized to the array of { "name", "value" } or
+          # { "name", "value_from" } hashes the model stores and serializes.
+          base[:settings] = Array(base[:settings]).map { |s| s.to_h.slice("name", "value", "value_from") }
+
+          # A PATCH that omits an inline DSN's `secret` keeps the stored value.
+          dsn_source = build_secret_source(attrs, :dsn, ref.dsn_source)
+          validate_nested_secret_records!(
+            ref, sources: { dsn: dsn_source }, source_associations: { dsn: :dsn_source }, legacy: :association,
+            prepare: -> { ref.assign_attributes(base); ref.dsn_source = dsn_source }
+          )
+
+          # Build the whole graph in memory and save once so the cross-record
+          # validation (dsn_source_present) sees the source. Assigning the has_one
+          # replaces (and destroys) any prior source; a PUT is a full replace.
           with_sync_config_replacement_guard(ref, base, dsn_source: dsn_source) do
             ref.assign_attributes(base)
             ref.dsn_source = dsn_source
