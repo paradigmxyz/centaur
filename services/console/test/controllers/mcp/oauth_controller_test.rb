@@ -243,6 +243,9 @@ module Mcp
       get "/mcp/oauth/authorize", params: authorize_params(client)
 
       assert_select "script", count: 0
+      # A no-referrer policy makes browsers send "Origin: null" on the consent
+      # post, which Rails' origin check rejects.
+      assert_select "meta[name=referrer]", count: 0
       assert_select "link[rel=stylesheet]", count: 1 do |links|
         href = links.first["href"]
         assert_match %r{\A/oauth-page/oauth\.css\?v=\h{12}\z}, href
