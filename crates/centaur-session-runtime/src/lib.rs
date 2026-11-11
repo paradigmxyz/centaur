@@ -2504,7 +2504,7 @@ impl SessionRuntime {
                 .lock()
                 .await
                 .insert(execution.execution_id.clone(), execution_trace_span.clone());
-            record_session_execution_started(&harness_label);
+            record_session_execution_started(&harness_label, thread_key.as_str());
             if let Err(error) = self
                 .store
                 .append_event(
@@ -5536,7 +5536,7 @@ async fn record_first_token_observation(
             "failed to append first-token marker"
         );
     }
-    record_session_first_token_latency(&harness_label, latency);
+    record_session_first_token_latency(&harness_label, thread_key.as_str(), latency);
     output_state.mark_first_token_recorded(&execution.execution_id);
     info!(
         component = COMPONENT_SESSION_RUNTIME,
@@ -6419,9 +6419,14 @@ async fn record_finished_execution_metric(
             "unknown".to_owned()
         }
     };
-    record_session_execution_finished(&harness_label, status, execution_duration(execution));
+    record_session_execution_finished(
+        &harness_label,
+        thread_key.as_str(),
+        status,
+        execution_duration(execution),
+    );
     if let Some(failure_class) = failure_class {
-        record_session_failure(&harness_label, failure_class);
+        record_session_failure(&harness_label, thread_key.as_str(), failure_class);
     }
 }
 

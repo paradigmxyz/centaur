@@ -189,8 +189,8 @@ Initial metric set:
 | `http_server_requests_total` | `method`, `route`, `status` |
 | `http_server_request_duration_seconds` | `method`, `route`, `status_class` |
 | `http_server_requests_in_flight` | none |
-| `centaur_session_executions_total` | `harness`, `status` |
-| `centaur_session_execution_duration_seconds` | `harness`, `status` |
+| `centaur_session_executions_total` | `harness`, `source`, `status` |
+| `centaur_session_execution_duration_seconds` | `harness`, `source`, `status` |
 | `centaur_sandbox_operations_total` | `backend`, `operation`, `status` |
 | `centaur_sandbox_warm_pool_claims_total` | `result` |
 

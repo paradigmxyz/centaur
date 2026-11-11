@@ -273,10 +273,11 @@ pub fn record_api_authentication(caller_class: &'static str, outcome: &'static s
     .increment(1);
 }
 
-pub fn record_session_execution_started(harness: &str) {
+pub fn record_session_execution_started(harness: &str, thread_key: &str) {
     metrics::counter!(
         SESSION_EXECUTIONS_TOTAL,
         "harness" => normalize_label(harness),
+        "source" => session_source_label(thread_key),
         "status" => "started",
     )
     .increment(1);
@@ -284,12 +285,15 @@ pub fn record_session_execution_started(harness: &str) {
 
 pub fn record_session_execution_finished(
     harness: &str,
+    thread_key: &str,
     status: &'static str,
     duration: Option<Duration>,
 ) {
+    let source = session_source_label(thread_key);
     metrics::counter!(
         SESSION_EXECUTIONS_TOTAL,
         "harness" => normalize_label(harness),
+        "source" => source,
         "status" => status,
     )
     .increment(1);
@@ -297,27 +301,49 @@ pub fn record_session_execution_finished(
         metrics::histogram!(
             SESSION_EXECUTION_DURATION_SECONDS,
             "harness" => normalize_label(harness),
+            "source" => source,
             "status" => status,
         )
         .record(duration.as_secs_f64());
     }
 }
 
-pub fn record_session_first_token_latency(harness: &str, duration: Duration) {
+pub fn record_session_first_token_latency(harness: &str, thread_key: &str, duration: Duration) {
     metrics::histogram!(
         SESSION_FIRST_TOKEN_LATENCY_SECONDS,
         "harness" => normalize_label(harness),
+        "source" => session_source_label(thread_key),
     )
     .record(duration.as_secs_f64());
 }
 
-pub fn record_session_failure(harness: &str, failure_class: &str) {
+pub fn record_session_failure(harness: &str, thread_key: &str, failure_class: &str) {
     metrics::counter!(
         SESSION_FAILURES_TOTAL,
         "failure_class" => normalize_label(failure_class),
         "harness" => normalize_label(harness),
+        "source" => session_source_label(thread_key),
     )
     .increment(1);
+}
+
+/// Bounded `source` label for session metrics, derived from the thread key
+/// prefix so dashboards can separate chat turns from MCP and workflow traffic.
+pub fn session_source_label(thread_key: &str) -> &'static str {
+    let prefix = thread_key
+        .split_once(':')
+        .map_or(thread_key, |(prefix, _)| prefix);
+    match prefix {
+        "slack" | "slack-file" => "slack",
+        "discord" => "discord",
+        "linear" => "linear",
+        "github" | "github-review" | "github-manage" | "github-issue" => "github",
+        "mcp" => "mcp",
+        "wf" | "cron" => "workflow",
+        "api" => "api",
+        "console" => "console",
+        _ => "other",
+    }
 }
 
 pub fn record_sandbox_operation(backend: &str, operation: &'static str, status: &'static str) {
@@ -567,21 +593,21 @@ fn describe_metrics() {
     );
     metrics::describe_counter!(
         SESSION_EXECUTIONS_TOTAL,
-        "Session execution lifecycle events by harness and status."
+        "Session execution lifecycle events by harness, source, and status."
     );
     metrics::describe_histogram!(
         SESSION_EXECUTION_DURATION_SECONDS,
         metrics::Unit::Seconds,
-        "Session execution runtime in seconds by harness and terminal status."
+        "Session execution runtime in seconds by harness, source, and terminal status."
     );
     metrics::describe_histogram!(
         SESSION_FIRST_TOKEN_LATENCY_SECONDS,
         metrics::Unit::Seconds,
-        "Latency from session execution start to first answer token by harness."
+        "Latency from session execution start to first answer token by harness and source."
     );
     metrics::describe_counter!(
         SESSION_FAILURES_TOTAL,
-        "Session execution failures by harness and low-cardinality failure class."
+        "Session execution failures by harness, source, and low-cardinality failure class."
     );
     metrics::describe_counter!(
         SANDBOX_OPERATIONS_TOTAL,
@@ -918,12 +944,28 @@ mod tests {
     }
 
     #[test]
+    fn session_source_label_buckets_thread_key_prefixes() {
+        assert_eq!(session_source_label("slack:D1:1.2"), "slack");
+        assert_eq!(session_source_label("mcp:prn_abc"), "mcp");
+        assert_eq!(session_source_label("wf:01abc:agent:example"), "workflow");
+        assert_eq!(session_source_label("github-review:o/r:1"), "github");
+        assert_eq!(session_source_label("api:xyz"), "api");
+        assert_eq!(session_source_label("something-new:1"), "other");
+        assert_eq!(session_source_label(""), "other");
+    }
+
+    #[test]
     fn prometheus_metrics_render_domain_metrics() {
         prometheus_handle().unwrap();
-        record_session_execution_started("codex");
-        record_session_execution_finished("codex", "completed", Some(Duration::from_secs(2)));
-        record_session_first_token_latency("codex", Duration::from_millis(750));
-        record_session_failure("codex", "timeout");
+        record_session_execution_started("codex", "slack:C1:1.2");
+        record_session_execution_finished(
+            "codex",
+            "slack:C1:1.2",
+            "completed",
+            Some(Duration::from_secs(2)),
+        );
+        record_session_first_token_latency("codex", "slack:C1:1.2", Duration::from_millis(750));
+        record_session_failure("codex", "slack:C1:1.2", "timeout");
         record_sandbox_operation("local", "create", "success");
         record_sandbox_startup_duration("local", "success", Duration::from_secs(4));
         record_sandbox_warm_pool_claim("hit");
@@ -931,24 +973,20 @@ mod tests {
 
         let metrics = render_metrics().unwrap();
 
-        assert!(
-            metrics
-                .contains(r#"centaur_session_executions_total{harness="codex",status="started"}"#)
-        );
-        assert!(
-            metrics.contains(
-                r#"centaur_session_executions_total{harness="codex",status="completed"}"#
-            )
-        );
         assert!(metrics.contains(
-            r#"centaur_session_execution_duration_seconds_count{harness="codex",status="completed"}"#
+            r#"centaur_session_executions_total{harness="codex",source="slack",status="started"}"#
         ));
-        assert!(
-            metrics
-                .contains(r#"centaur_session_first_token_latency_seconds_count{harness="codex"}"#)
-        );
         assert!(metrics.contains(
-            r#"centaur_session_failures_total{failure_class="timeout",harness="codex"}"#
+            r#"centaur_session_executions_total{harness="codex",source="slack",status="completed"}"#
+        ));
+        assert!(metrics.contains(
+            r#"centaur_session_execution_duration_seconds_count{harness="codex",source="slack",status="completed"}"#
+        ));
+        assert!(metrics.contains(
+            r#"centaur_session_first_token_latency_seconds_count{harness="codex",source="slack"}"#
+        ));
+        assert!(metrics.contains(
+            r#"centaur_session_failures_total{failure_class="timeout",harness="codex",source="slack"}"#
         ));
         assert!(metrics.contains(
             r#"centaur_sandbox_operations_total{backend="local",operation="create",status="success"}"#
