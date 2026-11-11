@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -291,6 +293,28 @@ class FirstTurnPromptHookTest(unittest.TestCase):
 
             self.assertEqual(prompt, "base\n\n\n---\n\npersona\n")
 
+
+    def test_timeout_does_not_wait_for_children_that_left_the_group(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pid_file = root / "escaped.pid"
+            started = time.monotonic()
+            prompt = self._compose(
+                root,
+                {
+                    "acme/escape": (
+                        f"setsid sleep 30 & echo $! > {pid_file}\nsleep 30\n"
+                    ),
+                    "acme/exited": "setsid sleep 30 &\nexit 0\n",
+                },
+                env={compose_system_prompt.HOOK_TIMEOUT_ENV: "0.3"},
+            )
+            elapsed = time.monotonic() - started
+            escaped = int(pid_file.read_text())
+            os.kill(escaped, signal.SIGKILL)
+
+            self.assertLess(elapsed, 5)
+            self.assertEqual(prompt, "base\n\n\n---\n\npersona\n")
 
     def test_reports_each_hook_run_as_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

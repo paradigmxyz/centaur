@@ -137,8 +137,16 @@ def _run_prompt_hook(
         stdout, _ = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         # Kill the hook's whole process group so children cannot outlive it.
-        os.killpg(process.pid, signal.SIGKILL)
-        process.communicate()
+        # The group may already be empty when only an escaped child is left.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        # Do not wait for stdout EOF: a child that left the group (setsid) can
+        # hold the pipe open indefinitely. Close our end and reap the hook.
+        if process.stdout is not None:
+            process.stdout.close()
+        process.wait()
         _warn(f"hook {hook} timed out after {timeout:g}s")
         return result("timeout")
     fields: dict[str, object] = {
