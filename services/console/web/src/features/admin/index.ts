@@ -1,13 +1,21 @@
-// Admin slice (users, API clients, system settings).
-//
-// Stub until this slice moves to the SPA. Nav entries and Control tabs below
-// point at the legacy Rails pages; once the slice registers SPA routes for the
-// same paths, the shell links to them client-side automatically.
+// Admin slice: Users, API Clients, and Settings (Control tabs, acting admins
+// only). Descope ("view as operator") lives in the shell's account menu and
+// banner.
+import { redirect } from "react-router";
+
 import type { FeatureModule } from "@/app/types";
 
 const admin: FeatureModule = {
   id: "admin",
-  routes: [],
+  routes: [
+    { path: "/console/users", lazy: () => import("./pages/UsersPage").then((m) => ({ Component: m.default })) },
+    { path: "/console/api_clients", lazy: () => import("./pages/ApiClientsList").then((m) => ({ Component: m.default })) },
+    { path: "/console/api_clients/new", lazy: () => import("./pages/ApiClientNew").then((m) => ({ Component: m.default })) },
+    { path: "/console/api_clients/:id", lazy: () => import("./pages/ApiClientDetail").then((m) => ({ Component: m.default })) },
+    { path: "/console/api_clients/:id/edit", lazy: () => import("./pages/ApiClientEdit").then((m) => ({ Component: m.default })) },
+    { path: "/console/settings", loader: () => redirect("/console/settings/edit") },
+    { path: "/console/settings/edit", lazy: () => import("./pages/SystemSettingsPage").then((m) => ({ Component: m.default })) },
+  ],
   controlTabs: [
     { id: "users", label: "Users", to: "/console/users", order: 60, visible: (me) => me.nav.users },
     {
