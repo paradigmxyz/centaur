@@ -1,0 +1,40 @@
+import { useNavigate } from "react-router";
+import { toast } from "sonner";
+
+import { PageHeader } from "@/components/page-header";
+import { RequireAccess } from "@/components/require-access";
+
+import { useNewScheduledTask, useScheduledTaskMutations } from "../api";
+import { ScheduledTaskForm } from "../sections/ScheduledTaskForm";
+
+export default function ScheduledTaskNewPage() {
+  return (
+    <RequireAccess allowed={(me) => me.nav.scheduled_tasks}>
+      <ScheduledTaskNew />
+    </RequireAccess>
+  );
+}
+
+function ScheduledTaskNew() {
+  const { data: defaults } = useNewScheduledTask();
+  const { create } = useScheduledTaskMutations();
+  const navigate = useNavigate();
+
+  return (
+    <>
+      <PageHeader
+        title="New Scheduled Task"
+        subtitle="Schedule one agent prompt and deliver its response to Slack."
+      />
+      <ScheduledTaskForm
+        task={defaults}
+        submitLabel="Create task"
+        onSubmit={async (data) => {
+          await create.mutateAsync(data);
+          toast.success("Task created.");
+          navigate("/console/scheduled_tasks");
+        }}
+      />
+    </>
+  );
+}
