@@ -2857,6 +2857,40 @@ fn spawn_fake_codex_recovery(name: &str) -> (BridgeProcess, PathBuf, PathBuf) {
     (bridge, fake_codex, log)
 }
 
+/// Makes the fake app-server report each thread's provider, give every fork a
+/// new id (`<parent>.<provider>`), and stream a turn only on the thread it was
+/// started on, so a harness that keeps using a stale thread id never completes.
+fn track_fake_codex_thread_providers(fake_codex: &Path) {
+    let script = std::fs::read_to_string(fake_codex).unwrap();
+    let provider =
+        r#"provider=$(printf '%s' "$line" | sed -n 's/.*"modelProvider":"\([^" ]*\)".*/\1/p')"#;
+    let thread = r#"tid=$(printf '%s' "$line" | sed -n 's/.*"threadId":"\([^"]*\)".*/\1/p')"#;
+    let script = script
+        .replace(
+            "    *'\"method\":\"thread/start\"'*)\n      id=$(request_id \"$line\")\n      printf '{\"id\":%s,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}\\n' \"$id\"\n",
+            &format!(
+                "    *'\"method\":\"thread/start\"'*)\n      id=$(request_id \"$line\")\n      {provider}\n      printf '{{\"id\":%s,\"result\":{{\"thread\":{{\"id\":\"thread-1\"}},\"modelProvider\":\"%s\"}}}}\\n' \"$id\" \"$provider\"\n"
+            ),
+        )
+        .replace(
+            "    *'\"method\":\"thread/resume\"'*|*'\"method\":\"thread/fork\"'*)\n      id=$(request_id \"$line\")\n      printf '{\"id\":%s,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}\\n' \"$id\"\n",
+            &format!(
+                "    *'\"method\":\"thread/resume\"'*|*'\"method\":\"thread/fork\"'*)\n      id=$(request_id \"$line\")\n      {provider}\n      {thread}\n      case \"$line\" in *'\"method\":\"thread/fork\"'*) tid=\"$tid.$provider\";; esac\n      printf '{{\"id\":%s,\"result\":{{\"thread\":{{\"id\":\"%s\"}},\"modelProvider\":\"%s\"}}}}\\n' \"$id\" \"$tid\" \"$provider\"\n"
+            ),
+        );
+    let turn_start = "    *'\"method\":\"turn/start\"'*)\n";
+    let turn_steer = "    *'\"method\":\"turn/steer\"'*)\n";
+    let (head, rest) = script.split_once(turn_start).unwrap();
+    let (turn, tail) = rest.split_once(turn_steer).unwrap();
+    let turn = turn.replace(r#""threadId":"thread-1""#, r#""threadId":"'"$tid"'""#);
+    let script = format!("{head}{turn_start}      {thread}\n{turn}{turn_steer}{tail}");
+    assert!(
+        script.contains("tid=\"$tid.$provider\""),
+        "fake app-server fork patch did not apply"
+    );
+    std::fs::write(fake_codex, script).unwrap();
+}
+
 fn read_requests(log: &Path) -> Vec<Value> {
     std::fs::read_to_string(log)
         .unwrap()
@@ -2891,41 +2925,57 @@ fn wait_for_fake_codex_exit(log: &Path) {
 #[test]
 fn fake_codex_blocks_mode_switches_provider_by_forking_the_thread() {
     let (mut bridge, fake_codex, log) = spawn_fake_codex_recovery("fake-provider-switch");
-    let script = std::fs::read_to_string(&fake_codex).unwrap().replace(
-        "      printf '{\"id\":%s,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}\\n' \"$id\"",
-        r#"      provider=$(printf '%s' "$line" | sed -n 's/.*"modelProvider":"\([^" ]*\)".*/\1/p')
-      printf '{"id":%s,"result":{"thread":{"id":"thread-1"},"modelProvider":"%s"}}\n' "$id" "$provider""#,
-    );
-    std::fs::write(&fake_codex, script).unwrap();
-    let user_line = |provider: &str, model: &str| {
+    track_fake_codex_thread_providers(&fake_codex);
+    let user_line = |provider: &str, model: &str, text: &str| {
         json!({
             "type": "user", "provider": provider, "model": model,
-            "message": {"role": "user", "content": [{"type": "text", "text": "continue"}]},
+            "message": {"role": "user", "content": [{"type": "text", "text": text}]},
         })
     };
-    for (provider, model) in [
-        ("original", "original-model"),
-        ("other", "other-model"),
-        ("other", "other-model"),
-        ("openai", "default-model"),
+    for (provider, model, text) in [
+        ("original", "original-model", "continue"),
+        ("other", "other-model", "continue"),
+        // The app-server exits after this turn, so the next one must resume the fork.
+        ("other", "other-model", "exit after turn"),
+        ("other", "other-model", "continue"),
+        ("openai", "default-model", "continue"),
     ] {
         assert_completed_turn(
-            &bridge.run_blocks_user_line(user_line(provider, model), Duration::from_secs(10)),
+            &bridge.run_blocks_user_line(user_line(provider, model, text), Duration::from_secs(10)),
         );
+        if text == "exit after turn" {
+            wait_for_fake_codex_exit(&log);
+        }
     }
     bridge.finish_successfully();
     let requests = read_requests(&log);
-    assert_eq!(count_method(&requests, "initialize"), 3);
+    let thread_ids = |method: &str| {
+        requests
+            .iter()
+            .filter(|request| request["method"] == method)
+            .map(|request| request["params"]["threadId"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(count_method(&requests, "initialize"), 4);
     assert_eq!(count_method(&requests, "thread/start"), 1);
-    // Codex rejects resuming a thread on another provider; a switch forks it.
-    assert_eq!(count_method(&requests, "thread/resume"), 0);
-    assert_eq!(count_method(&requests, "thread/fork"), 2);
-    assert_eq!(count_method(&requests, "turn/start"), 4);
+    // Codex rejects resuming a thread on another provider; a switch forks it,
+    // and every later request uses the fork's id.
+    assert_eq!(thread_ids("thread/fork"), ["thread-1", "thread-1.other"]);
+    assert_eq!(thread_ids("thread/resume"), ["thread-1.other"]);
+    assert_eq!(
+        thread_ids("turn/start"),
+        [
+            "thread-1",
+            "thread-1.other",
+            "thread-1.other",
+            "thread-1.other",
+            "thread-1.other.openai",
+        ]
+    );
     let fork = requests
         .iter()
         .find(|request| request["method"] == "thread/fork")
         .unwrap();
-    assert_eq!(fork["params"]["threadId"], "thread-1");
     assert_eq!(fork["params"]["modelProvider"], "other");
     assert_eq!(fork["params"]["model"], "other-model");
     // Codex admits input only on the provider its app-server was launched on.
@@ -2934,6 +2984,7 @@ fn fake_codex_blocks_mode_switches_provider_by_forking_the_thread() {
         launches.lines().collect::<Vec<_>>(),
         [
             r#"app-server --listen stdio:// -c model_provider="original""#,
+            r#"app-server --listen stdio:// -c model_provider="other""#,
             r#"app-server --listen stdio:// -c model_provider="other""#,
             r#"app-server --listen stdio:// -c model_provider="openai""#,
         ]
@@ -2946,12 +2997,7 @@ fn fake_codex_blocks_mode_switches_provider_by_forking_the_thread() {
 #[test]
 fn fake_codex_blocks_mode_resolves_default_provider_for_a_new_model_without_provider() {
     let (mut bridge, fake_codex, log) = spawn_fake_codex_recovery("fake-provider-default");
-    let script = std::fs::read_to_string(&fake_codex).unwrap().replace(
-        "      printf '{\"id\":%s,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}\\n' \"$id\"",
-        r#"      provider=$(printf '%s' "$line" | sed -n 's/.*"modelProvider":"\([^" ]*\)".*/\1/p')
-      printf '{"id":%s,"result":{"thread":{"id":"thread-1"},"modelProvider":"%s"}}\n' "$id" "$provider""#,
-    );
-    std::fs::write(&fake_codex, script).unwrap();
+    track_fake_codex_thread_providers(&fake_codex);
     let user_line = |provider: Option<&str>, model: Option<&str>| {
         let mut line = json!({
             "type": "user",
