@@ -21,9 +21,8 @@ module Console
       post console_descope_url
       assert_redirected_to console_integrations_path
 
-      get console_users_url
-      assert_redirected_to console_integrations_path
-      assert_nil flash[:alert]
+      get api_v1_users_path
+      assert_response :forbidden
 
       get console_skills_url
       assert_response :ok
@@ -41,7 +40,7 @@ module Console
       delete console_descope_url
       assert_redirected_to console_principals_path
 
-      get console_users_url
+      get api_v1_users_path
       assert_response :ok
       assert_select ".console-descope-banner", count: 0
     end
