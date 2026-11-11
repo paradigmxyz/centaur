@@ -1,5 +1,6 @@
 import { Link } from "react-router";
 
+import { ErrorAlert } from "@/components/alerts";
 import { StatusBadge, credentialStatusTone } from "@/components/badges";
 import { ControlTabs } from "@/components/control-tabs";
 import { DataTable, type Column } from "@/components/data-table";
@@ -8,6 +9,7 @@ import { PageHeader } from "@/components/page-header";
 import { usePageParam } from "@/components/pagination";
 import { RequireAccess } from "@/components/require-access";
 import { Button } from "@/components/ui/button";
+import { errorMessage } from "@/lib/api";
 import { pluralize, truncateMiddle } from "@/lib/format";
 
 import { useCredentialList, type BrokerCredential } from "../api";
@@ -98,19 +100,24 @@ function CredentialsList() {
           </Button>
         }
       />
-      <DataTable
-        caption="Managed credentials"
-        columns={columns}
-        rows={list.data?.data}
-        loading={list.isLoading}
-        rowKey={(credential) => credential.id}
-        empty="No managed credentials."
-        pagination={
-          list.data && list.data.meta.total_pages > 1
-            ? { meta: list.data.meta, unit: "credential", onPageChange: setPage }
-            : undefined
-        }
-      />
+      {/* A failed load (or refetch) is an error, never "No managed credentials.";
+          rows from an earlier successful load stay visible below the alert. */}
+      {list.isError && <ErrorAlert>Could not load credentials: {errorMessage(list.error)}</ErrorAlert>}
+      {(!list.isError || list.data) && (
+        <DataTable
+          caption="Managed credentials"
+          columns={columns}
+          rows={list.data?.data}
+          loading={list.isLoading}
+          rowKey={(credential) => credential.id}
+          empty="No managed credentials."
+          pagination={
+            list.data && list.data.meta.total_pages > 1
+              ? { meta: list.data.meta, unit: "credential", onPageChange: setPage }
+              : undefined
+          }
+        />
+      )}
     </>
   );
 }

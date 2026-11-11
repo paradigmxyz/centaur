@@ -45,6 +45,7 @@ const credential: BrokerCredential = {
   dead_reason: null,
   failure_count: 0,
   has_client_secret: true,
+  has_refresh_token: true,
   has_username: false,
   has_password: false,
   has_api_key: false,
@@ -101,6 +102,31 @@ describe("credentials list", () => {
     renderRoute(<CredentialsListPage />, { path: "/console/credentials" });
     expect(await screen.findByText("No managed credentials.")).toBeInTheDocument();
     expect(screen.getByText("0 broker credentials. Token material is never shown.")).toBeInTheDocument();
+  });
+
+  it("shows an error, not the empty state, when the list fails to load", async () => {
+    mockApi({ "GET /api/v1/broker_credentials": apiResponse(500, { error: { message: "database unavailable" } }) });
+    renderRoute(<CredentialsListPage />, { path: "/console/credentials" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load credentials: database unavailable");
+    expect(screen.queryByText("No managed credentials.")).not.toBeInTheDocument();
+  });
+
+  it("shows an error but keeps the loaded rows when a refetch fails", async () => {
+    let fail = false;
+    mockApi({
+      "GET /api/v1/broker_credentials": () =>
+        fail
+          ? apiResponse(503, { error: { message: "upstream timeout" } })
+          : { data: [credential], meta: meta(1) },
+    });
+    const { queryClient } = renderRoute(<CredentialsListPage />, { path: "/console/credentials" });
+    expect(await screen.findByRole("link", { name: "managed-gmail" })).toBeInTheDocument();
+
+    fail = true;
+    await queryClient.refetchQueries({ queryKey: ["credentials"] });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load credentials: upstream timeout");
+    expect(screen.getByRole("link", { name: "managed-gmail" })).toBeInTheDocument();
+    expect(screen.queryByText("No managed credentials.")).not.toBeInTheDocument();
   });
 
   it("sends non-admins to their landing page without fetching", async () => {
@@ -165,6 +191,23 @@ describe("credential detail", () => {
     expect(within(screen.getByRole("region", { name: "Token Client" })).getByText("app-client")).toBeInTheDocument();
     expect(within(screen.getByRole("region", { name: "Refresh" })).getByText("invalid_grant")).toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Grantable As" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the loaded record and shows an error when a refetch fails", async () => {
+    let fail = false;
+    mockApi({
+      "GET /api/v1/broker_credentials/bcr_gmail": () =>
+        fail ? apiResponse(503, { error: { message: "upstream timeout" } }) : { data: credential },
+    });
+    const { queryClient } = renderRoute(<CredentialDetailPage />, {
+      path: "/console/credentials/:id",
+      url: "/console/credentials/bcr_gmail",
+    });
+    expect(await screen.findByRole("heading", { name: "Managed Gmail" })).toBeInTheDocument();
+    fail = true;
+    await queryClient.refetchQueries({ queryKey: ["credentials"] });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not refresh this credential: upstream timeout");
+    expect(screen.getByRole("heading", { name: "Managed Gmail" })).toBeInTheDocument();
   });
 
   it("redacts stored password and preqin values", async () => {
@@ -330,6 +373,7 @@ describe("edit credential", () => {
     expect(screen.getByLabelText("Client secret")).toHaveValue("");
     expect(screen.getByLabelText("Client secret")).toHaveAttribute("placeholder", "•••••••• (unchanged)");
     expect(screen.getByRole("textbox", { name: "Refresh Token" })).toHaveValue("");
+    expect(screen.getByRole("textbox", { name: "Refresh Token" })).toHaveAttribute("placeholder", "•••••••• (unchanged)");
     expect(screen.getByLabelText("Header 1 name")).toHaveValue("Authorization");
     expect(screen.getByLabelText("Header 1 value")).toHaveValue("");
     expect(screen.getByLabelText("Header 1 value")).toHaveAttribute("placeholder", "•••••••• (unchanged)");
@@ -347,6 +391,23 @@ describe("edit credential", () => {
     for (const key of ["foreign_id", "client_secret", "refresh_token", "username", "password", "api_key"]) {
       expect(body.data).not.toHaveProperty(key);
     }
+  });
+
+  it("marks the refresh token and client secret unchanged only when one is stored", async () => {
+    mockApi({
+      "GET /api/v1/broker_credentials/bcr_gmail": {
+        data: { ...credential, has_refresh_token: false, has_client_secret: false },
+      },
+    });
+    renderRoute(<CredentialEditPage />, {
+      path: "/console/credentials/:id/edit",
+      url: "/console/credentials/bcr_gmail/edit",
+    });
+    const token = await screen.findByRole("textbox", { name: "Refresh Token" });
+    expect(token).toHaveValue("");
+    expect(token).toHaveAttribute("placeholder", "initial refresh token for the loop");
+    expect(screen.getByLabelText("Client secret")).not.toHaveAttribute("placeholder", "•••••••• (unchanged)");
+    expect(screen.queryByText(/Leave blank to keep the current secret/)).not.toBeInTheDocument();
   });
 
   it("requires a value for a renamed stored header", async () => {

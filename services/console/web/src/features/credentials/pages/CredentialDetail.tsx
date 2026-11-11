@@ -1,6 +1,7 @@
 import { Link, useNavigate, useParams } from "react-router";
 import { toast } from "sonner";
 
+import { ErrorAlert } from "@/components/alerts";
 import { AppLink } from "@/components/app-link";
 import { BackLink } from "@/components/back-link";
 import { LabelChips, StatusBadge, credentialStatusTone } from "@/components/badges";
@@ -28,7 +29,7 @@ export default function CredentialDetailPage() {
 
 function CredentialDetail() {
   const { id = "" } = useParams();
-  const { data: credential } = useCredential(id);
+  const { data: credential, error: refetchError } = useCredential(id);
   const destroy = useDeleteCredential(id);
   const navigate = useNavigate();
   const title = credentialTitle(credential);
@@ -51,6 +52,11 @@ function CredentialDetail() {
 
   return (
     <>
+      {/* A failed background refetch keeps the last loaded record (the first
+          load's failure goes to the route error page). */}
+      {refetchError && (
+        <ErrorAlert>Could not refresh this credential: {errorMessage(refetchError)} Showing the last loaded values.</ErrorAlert>
+      )}
       <div className="mb-8">
         <BackLink to="/console/credentials">back to credentials</BackLink>
         <div className="mt-2 flex flex-wrap items-center gap-3">
