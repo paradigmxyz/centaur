@@ -122,8 +122,8 @@ function SecretsList() {
           <QueryErrorAlert what="the secret count" error={total.error} onRetry={() => void total.refetch()} />
         )
       )}
-      {/* A failed request shows the alert, never the empty state; stale rows stay visible after a failed refetch. */}
-      {(!list.isError || list.data) && (
+      {/* A failed request shows the alert, never the empty state; stale non-empty rows stay after a failed refetch. */}
+      {(!list.isError || (list.data?.data.length ?? 0) > 0) && (
         <DataTable
           fixed
           caption="Secrets"

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { KindRecord } from "./api";
-import { errorMessages, rulesPayload, settingsPayload, sourcePayload, splitTerms, toFormValues, toPayload } from "./form-model";
+import { errorMessages, normalizeDetails, rulesPayload, settingsPayload, sourcePayload, splitTerms, toFormValues, toPayload } from "./form-model";
 
 const base = { id: "ssr_1", foreign_id: null, name: "n", description: null, labels: {}, created_at: "", updated_at: "" };
 
@@ -107,5 +107,35 @@ describe("secret form model", () => {
       "Rules must include at least one rule",
       "Foreign id can't be blank",
     ]);
+  });
+});
+
+describe("normalizeDetails", () => {
+  it("drops the compatibility duplicates of nested errors", () => {
+    expect(
+      normalizeDetails({
+        base: ["host and cidr are mutually exclusive"],
+        "rules[0].base": ["host and cidr are mutually exclusive"],
+        cidr: ["is not a valid CIDR"],
+        "rules[1].cidr": ["is not a valid CIDR"],
+      }),
+    ).toEqual({
+      "rules[0].base": ["host and cidr are mutually exclusive"],
+      "rules[1].cidr": ["is not a valid CIDR"],
+    });
+    expect(
+      normalizeDetails({
+        rules: ["is invalid"],
+        "rules[0].base": ["x"],
+        keyfile_source: ["is invalid"],
+        "keyfile.config": ["y"],
+        scopes: ["can't be blank"],
+      }),
+    ).toEqual({ "rules[0].base": ["x"], "keyfile.config": ["y"], scopes: ["can't be blank"] });
+  });
+
+  it("leaves responses without nested path keys unchanged", () => {
+    const details = { base: ["must define one of inject_config or replace_config"], rules: ["must include at least one rule"] };
+    expect(normalizeDetails(details)).toBe(details);
   });
 });

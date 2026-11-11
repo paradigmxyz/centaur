@@ -16,6 +16,7 @@ import { useSaveSecret, type FormKind, type KindRecord } from "../api";
 import {
   errorMessages,
   GCP_ID_TOKEN_HEADERS,
+  normalizeDetails,
   STATIC_PROFILES,
   storedSource,
   toFormValues,
@@ -95,7 +96,7 @@ export function SecretForm({ kind, record }: { kind: FormKind; record?: KindReco
       navigate(`/console/secrets/${kind}/${body.data.id}`);
     } catch (error) {
       if (error instanceof ApiError && error.status === 422) {
-        const fieldErrors = error.fieldErrors;
+        const fieldErrors = normalizeDetails(error.fieldErrors);
         setDetails(Object.keys(fieldErrors).length > 0 ? fieldErrors : { base: [error.message] });
         for (const [key, messages] of Object.entries(fieldErrors)) {
           const field = key === "header" && kind === "gcp_id_token" ? "id_token_header" : FIELD_KEYS[key];

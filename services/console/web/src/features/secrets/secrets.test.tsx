@@ -310,7 +310,12 @@ describe("new secret", () => {
       "POST /api/v1/static_secrets": apiResponse(422, {
         error: {
           message: "validation failed",
-          details: { "rules[0].base": ["must set exactly one of host or cidr"], name: ["is too long"] },
+          details: {
+            // The additive 422 form: compatibility key + path key for the same nested error.
+            base: ["must set exactly one of host or cidr"],
+            "rules[0].base": ["must set exactly one of host or cidr"],
+            name: ["is too long"],
+          },
         },
       }),
     });
@@ -322,6 +327,7 @@ describe("new secret", () => {
     await userEvent.click(screen.getByRole("button", { name: "Create secret" }));
 
     expect(await screen.findByText("2 errors prevented this secret from saving:")).toBeInTheDocument();
+    expect(screen.getAllByText(/must set exactly one of host or cidr/)).toHaveLength(2); // summary + rule row
     expect(screen.getByText("Rule 1: must set exactly one of host or cidr")).toBeInTheDocument();
     expect(screen.getByText("Name is too long")).toBeInTheDocument();
     expect(screen.getByText("is too long")).toBeInTheDocument();
@@ -701,5 +707,35 @@ describe("inline values in client caches", () => {
     await waitFor(() => expect(cachedState(queryClient)).not.toContain(PLAINTEXT));
     unmount();
     await waitFor(() => expect(cachedState(queryClient)).not.toContain(PLAINTEXT));
+  });
+});
+
+describe("successful empty response, then a failed refetch", () => {
+  it("drops 'No secrets yet.' and shows only the alert", async () => {
+    let fail = false;
+    mockApi({ "GET /api/v1/secrets": () => (fail ? failure : { data: [], meta: meta(0) }) });
+    const { queryClient } = renderRoute(<SecretsListPage />, { path: "/console/secrets" });
+    expect(await screen.findByText("No secrets yet.")).toBeInTheDocument();
+    fail = true;
+    await queryClient.refetchQueries();
+    expect(await screen.findByText("Could not load secrets: upstream exploded")).toBeInTheDocument();
+    expect(screen.queryByText("No secrets yet.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("table", { name: "Secrets" })).not.toBeInTheDocument();
+  });
+
+  it("drops 'No roles assigned.' and shows only the alert", async () => {
+    let fail = false;
+    detailApi({
+      "GET /api/v1/secrets/static/ssr_gh/role_grants": () => (fail ? failure : { data: [], assignable_roles: [] }),
+    });
+    const { queryClient } = renderRoute(<SecretDetailPage />, {
+      path: "/console/secrets/:kind/:id",
+      url: "/console/secrets/static/ssr_gh",
+    });
+    expect(await screen.findByText("No roles assigned.")).toBeInTheDocument();
+    fail = true;
+    await queryClient.refetchQueries();
+    expect(await screen.findByText("Could not load role grants: upstream exploded")).toBeInTheDocument();
+    expect(screen.queryByText("No roles assigned.")).not.toBeInTheDocument();
   });
 });

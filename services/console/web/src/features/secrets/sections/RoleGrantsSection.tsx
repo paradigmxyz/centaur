@@ -110,10 +110,12 @@ export function RoleGrantsSection({ kind, id }: { kind: string; id: string }) {
       )}
       {grants.isLoading ? (
         <p className="text-sm text-muted-foreground">Loading…</p>
-      ) : !grants.data ? null : rows.length === 0 ? (
-        <EmptyState>No roles assigned.</EmptyState>
-      ) : (
+      ) : rows.length > 0 ? (
+        // Stale non-empty rows stay visible after a failed refetch.
         <DataTable caption="Roles" columns={columns} rows={rows} rowKey={(grant) => grant.id} empty="No roles assigned." />
+      ) : (
+        // The empty state only for a successful empty response.
+        grants.isSuccess && <EmptyState>No roles assigned.</EmptyState>
       )}
     </section>
   );

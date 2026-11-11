@@ -312,6 +312,34 @@ export function toPayload(kind: FormKind, values: SecretFormValues, record?: Kin
   }
 }
 
+const NESTED_PATH = /^(?:(?:source|dsn|keyfile)\.|rules\[\d+\]\.)/;
+
+/**
+ * Reads the additive 422 form: nested errors arrive under path keys
+ * ("source.config", "rules[0].cidr") and are repeated under the keys older
+ * clients read ("config", "base", "rules": ["is invalid"]). Drops those
+ * compatibility duplicates so each nested message appears once.
+ */
+export function normalizeDetails(details: Record<string, string[]>): Record<string, string[]> {
+  const nested = new Set(
+    Object.entries(details)
+      .filter(([key]) => NESTED_PATH.test(key))
+      .flatMap(([, messages]) => messages),
+  );
+  if (nested.size === 0) return details;
+  const out: Record<string, string[]> = {};
+  for (const [key, messages] of Object.entries(details)) {
+    const kept = NESTED_PATH.test(key)
+      ? messages
+      : messages.filter(
+          (message) =>
+            !nested.has(message) && !(message === "is invalid" && /^(rules|dsn_source|keyfile_source|source)$/.test(key)),
+        );
+    if (kept.length > 0) out[key] = kept;
+  }
+  return out;
+}
+
 /** The form-error summary lines (secret_error_messages): "Source: …", "Rule N: …". */
 export function errorMessages(details: Record<string, string[]>): string[] {
   const out: string[] = [];
