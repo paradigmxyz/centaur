@@ -22,6 +22,9 @@
 - [Secrets (all kinds)](#secrets-all-kinds)
 - [Slack channels](#slack-channels)
 - [API keys](#api-keys)
+- [Users](#users)
+- [API clients](#api-clients)
+- [System settings](#system-settings)
 - [Skills](#skills)
 - [Proxies](#proxies)
 - [Proxy sync](#proxy-sync)
@@ -1685,6 +1688,127 @@ Returns `201`. The plaintext `token` is included **only** in this create respons
 | `GET`    | `/api/v1/api_keys` | List your keys (paginated). Tokens are never returned. |
 | `GET`    | `/api/v1/api_keys/:id` | Fetch one (no token). |
 | `DELETE` | `/api/v1/api_keys/:id` | Revoke (soft delete). Returns `204`. Revoking the key used for the current request returns `422` with `"cannot revoke the API key used for this request"`. |
+
+## Users
+
+Console operator accounts, for the console Users page. Admin-only. Users are
+addressed by `usr_…` oid.
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/api/v1/users` | Every user, unpaginated, admins first then by email. Optional `status` (`pending`, `active`, `disabled`; anything else returns `400`). |
+| `POST` | `/api/v1/users/:id/approve` | Activate a pending user and record the approver. |
+| `POST` | `/api/v1/users/:id/disable` | Revoke access. Also revokes the user's MCP OAuth refresh tokens; their console session is signed out on its next request. Your own account returns `422` (`"You can't disable your own account."`, `details.reason = "self"`). |
+| `POST` | `/api/v1/users/:id/promote` | Make the user an admin. This also activates the account. |
+| `POST` | `/api/v1/users/:id/demote` | Remove admin. Your own account returns `422` (`"You can't demote your own account."`, `details.reason = "self"`). |
+
+Each action returns the updated user as `{ "data": user }`. The list
+response looks like this:
+
+```json
+{
+  "data": [
+    {
+      "id": "usr_…", "email": "ops@example.com", "name": "Ops", "status": "active",
+      "admin": true, "current": true, "identity_providers": ["google"],
+      "approved_at": null, "approved_by": null,
+      "created_at": "…", "updated_at": "…"
+    }
+  ],
+  "meta": { "total": 1 }
+}
+```
+
+`current` is `true` for the caller's own account. `identity_providers` lists
+the distinct linked SSO providers, sorted; it is empty for password-only
+accounts. `approved_by` is `{ "id", "email" }` or `null`.
+
+## API clients
+
+Machine callers of the api-rs session API, such as eval runners. Each client
+runs sessions as one of its attached principals. Admin-only. While
+`CENTAUR_CONSOLE_API_CLIENTS_ENABLED` is off, every endpoint returns `404`
+`{"error":{"message":"not found"}}`, before authentication, so the feature is
+not advertised. Clients are addressed by `acl_…` oid (the client id), and
+principal links by `aclp_…` oid.
+
+```json
+{
+  "data": {
+    "id": "acl_…", "name": "eval-runner", "scopes": ["sessions:read", "sessions:write"],
+    "disabled": false, "disabled_at": null, "principals_count": 1,
+    "principals": [
+      { "id": "aclp_…", "default": true,
+        "principal": { "id": "prn_…", "foreign_id": "evals", "name": "Evals", "kind": "user" } }
+    ],
+    "created_at": "…", "updated_at": "…"
+  }
+}
+```
+
+The client secret (`acs_…`) appears as `data.secret` **only** in the
+responses to create and `rotate_secret`. Those responses are sent with
+`Cache-Control: no-store`. The console stores only a digest, so no endpoint
+can return the secret again.
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/api/v1/api_clients` | Every client, unpaginated, by creation order (`meta.total`). |
+| `GET` | `/api/v1/api_clients/:id` | One client. |
+| `POST` | `/api/v1/api_clients` | `{"data": {"name", "scopes": [...], "principal"}}`. `scopes` is a subset of `sessions:read` and `sessions:write`; blank entries are dropped, and at least one scope is required. The optional `principal` (an oid or a foreign ID) is attached as the default. If it matches nothing, the request returns `422` with `details.base = ["No principal matches \"x\"."]` and no client is created. Returns `201` with `secret`. |
+| `PATCH` | `/api/v1/api_clients/:id` | Update `name` and/or `scopes`; omitted fields are kept. Never changes the secret. |
+| `DELETE` | `/api/v1/api_clients/:id` | Delete the client and its principal links. Returns `204`. |
+| `POST` | `/api/v1/api_clients/:id/rotate_secret` | Issue a new secret. The previous secret and its access tokens stop working immediately. Returns the client with `secret`. |
+| `POST` | `/api/v1/api_clients/:id/disable` | Disable (idempotent). The client's access tokens stop working. |
+| `POST` | `/api/v1/api_clients/:id/enable` | Re-enable. |
+| `POST` | `/api/v1/api_clients/:id/principals` | `{"data": {"principal": "<oid or foreign ID>"}}`. Attaches the principal and returns `201` with the link. The first link becomes the default, and attaching an already attached principal returns the existing link. If the principal matches nothing, the request returns `422` (`"No principal matches that OID or foreign ID."`). |
+| `DELETE` | `/api/v1/api_clients/:id/principals/:link_id` | Detach. Sessions already bound to that principal stop accepting turns. Returns `204`. |
+| `POST` | `/api/v1/api_clients/:id/principals/:link_id/default` | Make this link the default principal. Returns the link. |
+
+A `link_id` that belongs to another client returns `404`.
+
+## System settings
+
+Deployment-wide defaults for new control-plane records. Admin-only.
+
+`GET /api/v1/system_settings`:
+
+```json
+{
+  "data": {
+    "default_sandbox_repo_cache": "all",
+    "default_sandbox_observability_enabled": true,
+    "default_sandbox_sessions_read_enabled": false,
+    "default_sandbox_workflows_read_enabled": false,
+    "default_sandbox_workflows_write_enabled": false,
+    "default_role_ids": ["role_…"],
+    "roles": [{ "id": "role_…", "foreign_id": "infra", "name": "Infra", "assign_by_default": true }],
+    "updated_at": "…"
+  }
+}
+```
+
+`roles` lists every role (by name, then foreign ID) for the default-role
+picker. New principals that have no preassigned roles receive the roles in
+`default_role_ids`.
+
+`PATCH /api/v1/system_settings` takes `{"data": {...}}` with any of the
+`default_sandbox_*` fields (`default_sandbox_repo_cache` is one of `none`,
+`public`, `all`) and `default_role_ids`, a list of role oids that replaces the
+default set. `[]` clears the set. If `default_role_ids` is omitted, the
+current defaults are kept. Invalid values and unknown role oids return `422`
+and change nothing. The response has the same shape as `GET`.
+
+### Slack Connect workspaces
+
+The allowlist of external Slack workspaces whose messages and actions
+Centaur accepts. api-rs stores it and Slackbot reads it; the console proxies
+it.
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/api/v1/system_settings/slack_external_teams` | `{"data": {"slack_external_team_ids": ["T0…"]}}`. Returns `503` if the Centaur API is unreachable. |
+| `PUT` | `/api/v1/system_settings/slack_external_teams` | `{"data": {"slack_external_team_ids": [...]}}` replaces the whole list. The value may also be one string split on whitespace and commas. Returns the stored list. A validation error from the Centaur API (HTTP 400) returns `422` with its message; any other failure returns `503`. |
 
 ## Scheduled Tasks
 
