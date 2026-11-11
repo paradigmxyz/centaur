@@ -30,7 +30,9 @@ module Api
 
       def destroy
         key = current_user.api_keys.find_by_oid!(params[:id])
-        if key.id == current_api_key.id
+        # Only a bearer request has a key of its own; a cookie session may
+        # revoke any of the user's keys.
+        if api_key_authenticated? && key.id == current_api_key.id
           return render status: :unprocessable_entity,
                         json: { error: { message: "cannot revoke the API key used for this request" } }
         end

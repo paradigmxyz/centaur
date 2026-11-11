@@ -133,6 +133,29 @@ module Api
         assert_nil ApiKey.unscoped.find(key.id).deleted_at
       end
 
+      test "a cookie-session DELETE revokes any of the user's own keys" do
+        key = api_keys(:acme_ci_key)
+        assert_equal users(:acme_admin), key.user
+        sign_in_console(users(:acme_admin))
+
+        delete api_v1_api_key_url(id: key.oid), headers: csrf_headers
+        assert_response :no_content
+        assert_not_nil ApiKey.unscoped.find(key.id).deleted_at
+
+        # The revoked key no longer authenticates bearer requests.
+        get api_v1_api_keys_url, headers: auth_headers
+        assert_response :unauthorized
+      end
+
+      test "a cookie-session DELETE on another user's key returns 404" do
+        key = api_keys(:globex_ci_key)
+        sign_in_console(users(:acme_admin))
+
+        delete api_v1_api_key_url(id: key.oid), headers: csrf_headers
+        assert_response :not_found
+        assert_nil ApiKey.unscoped.find(key.id).deleted_at
+      end
+
       test "DELETE on another user's key returns 404" do
         key = api_keys(:globex_ci_key)
         delete api_v1_api_key_url(id: key.oid), headers: auth_headers
