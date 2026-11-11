@@ -91,6 +91,7 @@ module Api
         assert data.key?("next_attempt_at")
         assert_equal [ "Authorization" ], data["token_endpoint_header_names"]
         assert data["has_client_secret"]
+        assert data["has_refresh_token"]
         assert_not data["has_username"]
         assert_not data["has_password"]
         assert_not data["has_api_key"]
@@ -109,8 +110,33 @@ module Api
         assert data["has_username"]
         assert data["has_password"]
         assert_not data["has_client_secret"]
+        assert_not data["has_refresh_token"]
         assert_not_includes response.body, "user-value"
         assert_not_includes response.body, "password-value"
+      end
+
+      test "has_refresh_token reports a stored token without returning it, in index and show" do
+        cred = broker_credentials(:globex_managed_api)
+        cred.update!(refresh_token: "stored-refresh-token-value", access_token: "minted-access-token-value")
+
+        get api_v1_broker_credential_path(cred.oid)
+        assert_response :ok
+        assert json_body.dig("data", "has_refresh_token")
+        assert_not json_body["data"].key?("refresh_token")
+        assert_not_includes response.body, "stored-refresh-token-value"
+        assert_not_includes response.body, "minted-access-token-value"
+
+        get api_v1_broker_credentials_path(limit: 200)
+        assert_response :ok
+        row = json_body["data"].find { |r| r["id"] == cred.oid }
+        assert row["has_refresh_token"]
+        assert_not row.key?("refresh_token")
+        assert_not_includes response.body, "stored-refresh-token-value"
+        assert_not_includes response.body, "minted-access-token-value"
+
+        cred.update!(refresh_token: nil)
+        get api_v1_broker_credential_path(cred.oid)
+        assert_equal false, json_body.dig("data", "has_refresh_token")
       end
 
       test "show links the static secret that makes the credential grantable" do

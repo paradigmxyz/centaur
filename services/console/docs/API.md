@@ -951,7 +951,7 @@ Read-only fields are returned but never accepted in requests:
 | `external_user_key`           | An opaque key generated for the credential when it is minted by the consent flow. |
 | `oauth_app`                   | `{ id, slug, provider }` for the minting [OAuth app](#oauth-apps), or `null`. |
 | `effective_client_id`         | The client id the refresh loop uses: the OAuth app's for a flow-minted credential, otherwise `client_id`. |
-| `has_client_secret`, `has_username`, `has_password`, `has_api_key` | Whether the credential stores that write-only value. The values themselves are never returned. |
+| `has_client_secret`, `has_refresh_token`, `has_username`, `has_password`, `has_api_key` | Whether the credential stores that write-only value. The values themselves are never returned. |
 | `static_secret`               | `{ id, foreign_id, name }` for the grantable [static secret](#static-secrets) that wraps this credential, or `null`. |
 
 The minted `access_token`, the `refresh_token`, `username`, `password`, `api_key`, the `client_secret`, and the `token_endpoint_headers` values are never returned in any response.

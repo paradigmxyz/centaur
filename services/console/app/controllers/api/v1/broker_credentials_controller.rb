@@ -152,6 +152,7 @@ module Api
           failure_count: ref.failure_count,
           # Presence of the write-only values, never the values themselves.
           has_client_secret: ref.client_secret.present?,
+          has_refresh_token: ref.refresh_token.present?,
           has_username: ref.username.present?,
           has_password: ref.password.present?,
           has_api_key: ref.api_key.present?,

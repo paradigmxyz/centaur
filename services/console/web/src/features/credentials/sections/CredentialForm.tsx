@@ -156,7 +156,6 @@ interface CredentialFormProps {
 }
 
 export function CredentialForm({ credential, submitLabel, error, onSubmit }: CredentialFormProps) {
-  const isEdit = Boolean(credential);
   const foreignIdLocked = Boolean(credential?.foreign_id);
   const form = useForm<CredentialFormValues>({
     resolver: zodResolver(schema),
@@ -212,8 +211,8 @@ export function CredentialForm({ credential, submitLabel, error, onSubmit }: Cre
                 control={form.control}
                 name="client_secret"
                 label="Client secret"
-                hasStoredValue={isEdit}
-                hint={`Stored encrypted. Not used for Preqin.${isEdit ? " Leave blank to keep the current secret." : ""}`}
+                hasStoredValue={Boolean(credential?.has_client_secret)}
+                hint={`Stored encrypted. Not used for Preqin.${credential?.has_client_secret ? " Leave blank to keep the current secret." : ""}`}
               />
               <TextareaField
                 control={form.control}
@@ -275,7 +274,7 @@ export function CredentialForm({ credential, submitLabel, error, onSubmit }: Cre
                 name="refresh_token"
                 label="Refresh Token"
                 multiline
-                hasStoredValue={isEdit}
+                hasStoredValue={Boolean(credential?.has_refresh_token)}
                 placeholder="initial refresh token for the loop"
                 hint="Write-only initial value, stored encrypted. Leave blank to keep the current token; entering a new one reschedules the credential and clears any dead state."
               />

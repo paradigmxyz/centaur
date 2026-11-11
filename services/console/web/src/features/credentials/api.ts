@@ -40,6 +40,7 @@ export interface BrokerCredential {
   dead_reason: string | null;
   failure_count: number;
   has_client_secret: boolean;
+  has_refresh_token: boolean;
   has_username: boolean;
   has_password: boolean;
   has_api_key: boolean;
