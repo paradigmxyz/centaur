@@ -72,8 +72,8 @@ module Api
       def attach_principal
         principal = find_principal(principal_ref_param)
         unless principal
-          return render_error(status: :unprocessable_entity, message: "No principal matches that OID or foreign ID.",
-                              details: { principal: [ "matches no principal" ] })
+          message = "No principal matches that OID or foreign ID."
+          return render_error(status: :unprocessable_entity, message: message, details: { base: [ message ] })
         end
 
         begin
