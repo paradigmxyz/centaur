@@ -1,16 +1,5 @@
-# Admin slice: users, API clients, system settings, and descope. The pages live
-# in the SPA (web/src/features/admin); Rails keeps path helpers for links from
-# legacy pages (the Control tabs).
-direct(:console_users) { "/console/users" }
-direct(:console_api_clients) { "/console/api_clients" }
-direct(:edit_console_system_settings) { "/console/settings/edit" }
-
-# Admin self-descope ("view as operator") from the legacy layout's account menu
-# and banner. Removed with the legacy layout at teardown; the SPA uses
-# POST/DELETE /api/v1/descope.
-namespace :console do
-  resource :descope, only: %i[create destroy]
-end
+# Admin slice: users, API clients, and system settings. The pages live in the
+# SPA (web/src/features/admin); descope is POST/DELETE /api/v1/descope (api.rb).
 
 # /api/v1 additions used by the admin pages (see docs/API.md#users,
 # #api-clients, and #system-settings). All admin-only.

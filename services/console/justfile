@@ -17,14 +17,13 @@ export CENTAUR_CONSOLE_DB_PASSWORD := env_var_or_default("CENTAUR_CONSOLE_DB_PAS
 default:
     @just --list
 
-# Prepare the database, then run the Rails server, the Tailwind CSS watcher
-# (legacy pages), and the Vite dev server for the SPA under overmind (see
-# Procfile.dev). Browse the SPA at http://localhost:5173; it proxies API and
-# auth paths to Rails.
+# Prepare the database, then run the Rails server and the Vite dev server for
+# the SPA under overmind (see Procfile.dev). Browse the SPA at
+# http://localhost:5173; it proxies API and auth paths to Rails.
 dev: deps postgres
     @echo "== Preparing database =="
     bin/rails db:prepare
-    @echo "== Starting overmind (rails + css watch + vite) =="
+    @echo "== Starting overmind (rails + vite) =="
     @echo "   console:  http://localhost:5173/console/principals (Vite)"
     @echo "   rails:    http://localhost:3000"
     @echo "   user:     $CENTAUR_CONSOLE_INITIAL_USER_EMAIL"
@@ -35,14 +34,6 @@ dev: deps postgres
 # Start the persistent PostgreSQL container used by local Console development.
 postgres:
     script/start-postgres
-
-# Build the Tailwind CSS bundle once (app/assets/builds/tailwind.css).
-css:
-    bin/rails tailwindcss:build
-
-# Watch and rebuild the Tailwind CSS bundle on change.
-css-watch:
-    bin/rails tailwindcss:watch
 
 # Install gem and SPA dependencies if needed.
 deps:
@@ -58,6 +49,10 @@ web-check:
     pnpm -C web typecheck
     pnpm -C web lint
     pnpm -C web test
+
+# Run the full local CI sequence (bin/ci): Ruby and SPA checks, audits, tests.
+ci:
+    bin/ci
 
 # Print the dev API key for use as a bearer token.
 api-key:

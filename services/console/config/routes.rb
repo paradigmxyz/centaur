@@ -3,14 +3,14 @@ Rails.application.routes.draw do
   # Can be used by load balancers and uptime monitors to verify that the app is live.
   get "up" => "rails/health#show", as: :rails_health_check
 
-  # One file per console slice under config/routes/. During the SPA migration a
-  # slice's legacy HTML routes live here and take precedence over the SPA
-  # catch-all below; deleting them hands those paths to the SPA.
+  # One file per console area under config/routes/: its /api/v1 endpoints, the
+  # Rails protocol routes (SSO, OAuth, MCP OAuth, PWA), and the few path
+  # helpers server-side redirects use. Routes drawn here take precedence over
+  # the SPA catch-all below. Broker credentials need no additions beyond api.rb.
   draw :console_auth_pages
   draw :console_principals
   draw :console_roles
   draw :console_secrets
-  draw :console_credentials
   draw :console_oauth_apps
   draw :console_admin
   draw :console_automation

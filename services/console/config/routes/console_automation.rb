@@ -1,7 +1,5 @@
 # Automation slice: workflows and scheduled tasks. The pages live in the SPA
-# (web/src/features/automation); Rails keeps path helpers for the legacy layout.
-direct(:console_workflows) { "/console/workflows" }
-direct(:console_scheduled_tasks) { "/console/scheduled_tasks" }
+# (web/src/features/automation).
 
 # /api/v1 endpoints behind the automation pages (see docs/API.md#workflows and
 # docs/API.md#scheduled-tasks). GET /api/v1/scheduled_tasks/:id is drawn in

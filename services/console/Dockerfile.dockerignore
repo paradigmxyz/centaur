@@ -26,9 +26,6 @@ services/console/tmp/pids/*
 
 # Ignore built assets and dependencies; the image builds them.
 **/node_modules
-services/console/app/assets/builds/*
-!services/console/app/assets/builds/.keep
-services/console/public/assets
 services/console/public/spa
 
 # Ignore development and Docker files.

@@ -52,7 +52,7 @@ RUN apt-get update -qq && \
     rm -rf /var/lib/apt/lists /var/cache/apt/archives
 
 # Install application gems
-COPY services/console/vendor/* ./vendor/
+COPY services/console/vendor/ ./vendor/
 COPY services/console/Gemfile services/console/Gemfile.lock ./
 
 RUN bundle install && \
@@ -65,15 +65,10 @@ COPY services/console/ .
 RUN rm -rf web
 COPY --from=web /repo/services/console/public/spa public/spa
 
-# Precompile bootsnap code for faster boot times.
+# Precompile bootsnap code for faster boot times. The UI is the prebuilt SPA
+# above; there is no Rails asset pipeline to precompile.
 # -j 1 disable parallel compilation to avoid a QEMU bug: https://github.com/rails/bootsnap/issues/495
 RUN bundle exec bootsnap precompile -j 1 app/ lib/
-
-# Precompiling assets for production without requiring secret RAILS_MASTER_KEY
-RUN SECRET_KEY_BASE_DUMMY=1 ./bin/rails assets:precompile
-
-
-
 
 # Final stage for app image
 FROM base

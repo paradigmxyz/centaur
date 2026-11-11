@@ -1,7 +1,4 @@
-# Roles slice. The pages live in the SPA (web/src/features/roles); Rails only
-# keeps path helpers for redirects and links from legacy pages.
-direct(:console_roles) { "/console/roles" }
-direct(:console_role) { |oid| "/console/roles/#{oid}" }
+# Roles slice. The pages live in the SPA (web/src/features/roles).
 
 # /api/v1 additions used by the role pages (see docs/API.md#roles).
 namespace :api do

@@ -4,10 +4,9 @@
 // the SPA shell (index.html) nor API responses are ever cached. Navigations go
 // straight to the network and only fall back to the offline page when the
 // network itself is unreachable. Content-hashed assets (the SPA build under
-// /spa/assets/, legacy /assets/) and the static PWA icons are safe to cache
-// forever.
+// /spa/assets/) and the static PWA icons are safe to cache forever.
 
-const CACHE_VERSION = "centaur-console-v2";
+const CACHE_VERSION = "centaur-console-v3";
 const OFFLINE_URL = "/offline.html";
 const PRECACHE_URLS = [OFFLINE_URL, "/pwa-icon.svg", "/pwa-icon-192.png", "/pwa-icon-512.png"];
 
@@ -65,7 +64,6 @@ self.addEventListener("fetch", (event) => {
   // Digested assets and static icons: cache first, populate on miss.
   const cacheable =
     url.pathname.startsWith("/spa/assets/") ||
-    url.pathname.startsWith("/assets/") ||
     PRECACHE_URLS.includes(url.pathname);
   if (!cacheable) return;
 

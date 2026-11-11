@@ -1,6 +1,6 @@
 # OAuth apps slice. The Apps pages and the user-facing Integrations page live
 # in the SPA (web/src/features/oauth-apps); Rails only keeps path helpers for
-# redirects (the consent callback, landing page) and links from legacy pages.
+# redirects (the consent callback and the landing page).
 direct(:console_oauth_apps) { "/console/oauth_apps" }
 direct(:console_oauth_app) { |oid| "/console/oauth_apps/#{oid}" }
 direct(:console_integrations) { "/console/integrations" }

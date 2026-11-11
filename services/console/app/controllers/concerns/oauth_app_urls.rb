@@ -1,6 +1,10 @@
-# Public consent-flow URLs for OAuth apps, for /api/v1 controllers (the HTML
-# side has the same helpers on ApplicationController). The public origin is
-# CENTAUR_CONSOLE_PUBLIC_URL when set, else the request's base URL.
+# The console's public origin and the OAuth consent-flow URLs built on it.
+# Shared by ApplicationController (the redirect URIs the SSO, broker OAuth, and
+# MCP OAuth endpoints send to providers and clients) and the /api/v1 OAuth app
+# endpoints (the redirect URI and start URL shown to operators), so the two
+# never drift. The public origin is CENTAUR_CONSOLE_PUBLIC_URL when set (for
+# proxies whose Host header doesn't match the public origin), else the
+# request's base URL.
 module OauthAppUrls
   private
 

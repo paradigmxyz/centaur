@@ -1,45 +1,24 @@
+# Base class for the console's browser-facing Rails endpoints that are not
+# part of the JSON API: SSO login (/auth/:provider/*), the broker OAuth consent
+# flow (/oauth/:slug/*), the MCP OAuth authorization server, and the PWA
+# launch handler. They answer with redirects (into the SPA) or JSON; the
+# console UI itself is the SPA served by SpaController.
 class ApplicationController < ActionController::Base
   include ConsoleSession
   include ConsoleSignIn
+  include OauthAppUrls
 
-  # Only allow modern browsers supporting webp images, web push, badges, import maps, CSS nesting, and CSS :has.
-  allow_browser versions: :modern
-
-  # Changes to the importmap will invalidate the etag for HTML responses
-  stale_when_importmap_changes
-
-  # UI-wide 404 for record lookups (find_by_oid! and friends), so console
-  # controllers don't each hand-roll a rescue. Mirrors Api::BaseController.
+  # 404 for record lookups (find_by_oid! and friends). Mirrors Api::BaseController.
   rescue_from ActiveRecord::RecordNotFound, with: :render_not_found
 
-  helper_method :current_user, :acting_admin?, :descoped?
-  helper_method :public_base_url, :oauth_callback_redirect_uri
-
-  # The public origin the console is reached at. Derived from the request by
-  # default; CENTAUR_CONSOLE_PUBLIC_URL overrides it for deployments behind
-  # proxies whose Host header doesn't match the public origin. Shared by the
-  # OAuth flow controller (the redirect URI it sends the IdP) and the console
-  # (the redirect URI / start-URL template it shows operators), so the two never
-  # drift.
-  def public_base_url
-    ConsoleEnv["PUBLIC_URL"].presence || request.base_url
-  end
-
-  # The OAuth callback redirect URI registered with the IdP for an app:
-  # "<public base>/oauth/<slug>/callback". One per app, keyed by its slug.
-  def oauth_callback_redirect_uri(slug)
-    URI.join(public_base_url, "/oauth/#{slug}/callback").to_s
-  end
-
-  # Gate every UI route behind a console session by default. Controllers that
-  # must stay reachable while signed out (e.g. the login form) skip this. API
-  # controllers descend from ActionController::API, not this class, so they keep
-  # their own ApiKey/proxy-token auth and are unaffected.
+  # Require a console session by default. Endpoints that must stay reachable
+  # while signed out (SSO, MCP OAuth) skip this. API controllers descend from
+  # Api::BaseController, not this class, and authenticate on their own.
   before_action :require_login
-  # A signed-in user must also be approved (active) to use the console. The login
-  # and pending controllers skip this so pending users can reach the holding page
-  # and sign out.
+  # A signed-in user must also be approved (active) to use the console. The SSO
+  # and MCP OAuth controllers skip this and apply their own status checks.
   before_action :require_active_account
+
   private
 
   # The signed-in operator for cookie-session (console) requests, or nil.
@@ -60,8 +39,8 @@ class ApplicationController < ActionController::Base
     current_user&.admin? && !descoped?
   end
 
-  # before_action gate for console pages: bounce anonymous requests to the login
-  # form rather than rendering the page.
+  # before_action gate: bounce anonymous requests to the SPA login page,
+  # remembering where they were going.
   def require_login
     return if current_user
 
@@ -81,10 +60,8 @@ class ApplicationController < ActionController::Base
     end
   end
 
-  # Guard for admin-only controllers (the Control section and user
-  # management). Not a global gate. Bounces non-admins to their default section.
-  # Keep this redirect silent: direct/admin-default URLs are not
-  # actionable errors for non-admin operators, especially on a fresh visit.
+  # Guard for admin-only endpoints (shared OAuth app consent). Not a global
+  # gate. Bounces non-admins to their default section, silently.
   def require_admin
     redirect_to default_console_landing_path unless acting_admin?
   end

@@ -39,10 +39,20 @@ mapfile -t gems < <(
 )
 report "UI gems (Gemfile)" "${gems[@]}"
 mapfile -t ui_config < <(
-  ls -1d config/importmap.rb config/tailwind.config.js bin/importmap app/assets/tailwind \
-    app/assets/stylesheets 2>/dev/null
+  ls -1d config/importmap.rb config/tailwind.config.js bin/importmap app/assets vendor/javascript \
+    config/initializers/assets.rb 2>/dev/null
 )
 report "UI asset config" "${ui_config[@]}"
+
+# Build, dev, and CI wiring that only existed for the Rails asset pipeline or
+# the importmap/Tailwind UI (the SPA is built by pnpm; see web/).
+mapfile -t ui_wiring < <(
+  grep -nE 'assets:precompile|tailwindcss:|importmap|config\.assets|allow_browser|stale_when_importmap' \
+    Dockerfile Procfile.dev justfile bin/dev bin/setup config/ci.rb config/application.rb \
+    config/environments/*.rb config/initializers/*.rb app/controllers/application_controller.rb 2>/dev/null |
+    grep -vE ':[0-9]+:\s*#'
+)
+report "UI build wiring" "${ui_wiring[@]}"
 
 # 4. Controllers that render HTML templates or declare layouts. JSON, plain,
 # head, redirects, and send_file responses are fine.

@@ -1,10 +1,4 @@
-# Secrets slice. The pages live in the SPA (web/src/features/secrets); Rails
-# only keeps path helpers for links and redirects from legacy pages.
-direct(:console_secrets) { "/console/secrets" }
-direct(:console_secret) do |kind, oid, options = {}|
-  path = "/console/secrets/#{kind}/#{oid}"
-  options[:anchor].present? ? "#{path}##{options[:anchor]}" : path
-end
+# Secrets slice. The pages live in the SPA (web/src/features/secrets).
 
 # /api/v1 additions used by the secrets pages (see docs/API.md#secrets).
 namespace :api do

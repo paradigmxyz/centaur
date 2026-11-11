@@ -1,13 +1,5 @@
 # Skills slice: skill authoring and the personal SSH key. The pages live in the
-# SPA (web/src/features/skills); Rails only keeps path helpers for redirects and
-# links from legacy pages (e.g. the Integrations SSH card).
-direct(:console_skills) { "/console/skills" }
-direct(:mine_console_skills) { "/console/skills/mine" }
-direct(:new_console_skill) { "/console/skills/new" }
-direct(:console_skill) { |oid| "/console/skills/#{oid}" }
-direct(:edit_console_skill) { |oid| "/console/skills/#{oid}/edit" }
-direct(:console_ssh_key) { "/console/ssh_key" }
-direct(:edit_console_ssh_key) { "/console/ssh_key/edit" }
+# SPA (web/src/features/skills).
 
 # /api/v1 endpoints behind those pages (see docs/API.md#console-skills and
 # docs/API.md#personal-ssh-key). Open to any active user.
