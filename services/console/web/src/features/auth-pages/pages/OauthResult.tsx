@@ -1,6 +1,7 @@
 // /oauth/result — where a failed broker OAuth consent (/oauth/<slug>/start or
 // /callback) lands. The outcome arrives once through GET /api/v1/auth/config;
 // it never travels in the URL, so a crafted link cannot put text on this page.
+import { ErrorAlert } from "@/components/alerts";
 import { useDocumentTitle } from "@/components/page-header";
 import { errorMessage } from "@/lib/api";
 import lockup from "@/assets/centaur-lockup-white.svg";
@@ -20,7 +21,17 @@ export default function OauthResultPage() {
 
   if (config.isPending) return <AuthLoading />;
 
-  const message = config.isError ? errorMessage(config.error) : (result?.message ?? EXPIRED_MESSAGE);
+  if (config.isError) {
+    return (
+      <AuthCard>
+        <h1 className="mb-3 text-lg font-bold text-red-300 light:text-red-700">Something went wrong</h1>
+        <ErrorAlert className="mb-0">{errorMessage(config.error)}</ErrorAlert>
+      </AuthCard>
+    );
+  }
+
+  // Only a successful response without a result means "already shown".
+  const message = result?.message ?? EXPIRED_MESSAGE;
   const retryPath = isOauthStartPath(result?.retry_path) ? result.retry_path : null;
 
   return (

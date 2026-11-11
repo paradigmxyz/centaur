@@ -152,6 +152,42 @@ describe("login page", () => {
     expect(api.calls("POST /api/v1/session").at(-1)?.headers["X-CSRF-Token"]).toBe("token-2");
   });
 
+  it("shows a failed bootstrap request instead of an empty sign-in card", async () => {
+    mockApi({ "GET /api/v1/auth/config": apiResponse(500, { error: { message: "Request failed with HTTP 500" } }) });
+    renderRoute(<LoginPage />, { path: "/login" });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Request failed with HTTP 500");
+    expect(screen.queryByLabelText("Email")).not.toBeInTheDocument();
+  });
+
+  it("requires email and password before calling the API", async () => {
+    const api = mockApi({ "GET /api/v1/auth/config": authConfig() });
+    renderRoute(<LoginPage />, { path: "/login" });
+
+    await userEvent.click(await screen.findByRole("button", { name: "Sign in" }));
+    expect(screen.getByText("Email is required.")).toBeInTheDocument();
+    expect(screen.getByText("Password is required.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Email")).toHaveAttribute("aria-invalid", "true");
+
+    await userEvent.type(screen.getByLabelText("Email"), "   ");
+    await userEvent.type(screen.getByLabelText("Password"), "pw");
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(screen.getByText("Email is required.")).toBeInTheDocument();
+    expect(screen.queryByText("Password is required.")).not.toBeInTheDocument();
+    expect(api.calls("POST /api/v1/session")).toHaveLength(0);
+  });
+
+  it("shows a failed sign-in request (server error)", async () => {
+    mockApi({ "GET /api/v1/auth/config": authConfig(), "POST /api/v1/session": apiResponse(500, { error: { message: "Request failed with HTTP 500" } }) });
+    renderRoute(<LoginPage />, { path: "/login" });
+
+    await userEvent.type(await screen.findByLabelText("Email"), "ops@example.test");
+    await userEvent.type(screen.getByLabelText("Password"), "pw");
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Request failed with HTTP 500");
+    expect(assign).not.toHaveBeenCalled();
+  });
+
   it("sends an already signed-in browser on without showing the form", async () => {
     mockApi({ "GET /api/v1/auth/config": authConfig({ signed_in: true, redirect_to: "/console/principals" }) });
     renderRoute(<LoginPage />, { path: "/login" });
@@ -184,6 +220,21 @@ describe("pending page", () => {
     await userEvent.click(screen.getByRole("button", { name: "Sign out" }));
     await waitFor(() => expect(assign).toHaveBeenCalledWith("/login"));
     expect(api.calls("DELETE /api/v1/session")[0]?.headers["X-CSRF-Token"]).toBe("pending-csrf");
+  });
+
+  it("shows a failed session probe instead of redirecting", async () => {
+    mockApi({ "GET /api/v1/me": apiResponse(500, { error: { message: "Request failed with HTTP 500" } }) });
+    renderRoute(<PendingPage />, { path: "/pending" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Request failed with HTTP 500");
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  it("shows a failed sign-out", async () => {
+    mockApi({ "GET /api/v1/me": { data: pendingMe }, "DELETE /api/v1/session": apiResponse(500, { error: { message: "Request failed with HTTP 500" } }) });
+    renderRoute(<PendingPage />, { path: "/pending" });
+    await userEvent.click(await screen.findByRole("button", { name: "Sign out" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Request failed with HTTP 500");
+    expect(assign).not.toHaveBeenCalled();
   });
 
   it("sends signed-out browsers to the login page", async () => {
@@ -238,6 +289,14 @@ describe("OAuth consent result page", () => {
     });
     renderRoute(<OauthResultPage />, { path: "/oauth/result" });
     expect(await screen.findByText("Failed.")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Try again" })).not.toBeInTheDocument();
+  });
+
+  it("shows a failed request, not the already-shown message", async () => {
+    mockApi({ "GET /api/v1/auth/config": apiResponse(500, { error: { message: "Request failed with HTTP 500" } }) });
+    renderRoute(<OauthResultPage />, { path: "/oauth/result" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Request failed with HTTP 500");
+    expect(screen.queryByText(/no longer available/)).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Try again" })).not.toBeInTheDocument();
   });
 
@@ -317,6 +376,13 @@ describe("MCP consent page", () => {
     renderRoute(<McpConsentPage />, { path: "/mcp/oauth/consent", url: "/mcp/oauth/consent?request=stale" });
 
     expect(await screen.findByRole("alert")).toHaveTextContent("invalid or has expired");
+    expect(screen.queryByRole("button", { name: "Allow" })).not.toBeInTheDocument();
+  });
+
+  it("shows a failed details request (server error)", async () => {
+    mockApi({ "GET /api/v1/mcp/authorization": apiResponse(500, { error: { message: "Request failed with HTTP 500" } }) });
+    renderRoute(<McpConsentPage />, { path: "/mcp/oauth/consent", url: "/mcp/oauth/consent?request=t" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Request failed with HTTP 500");
     expect(screen.queryByRole("button", { name: "Allow" })).not.toBeInTheDocument();
   });
 

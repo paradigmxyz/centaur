@@ -24,6 +24,7 @@ export default function LoginPage() {
   const signIn = useSignIn();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<{ email?: string; password?: string }>({});
 
   const redirectTo = config.data?.redirect_to;
   useEffect(() => {
@@ -32,8 +33,15 @@ export default function LoginPage() {
 
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();
+    // The API treats a blank field as bad credentials; say what is missing instead.
+    const errors = {
+      email: email.trim() === "" ? "Email is required." : undefined,
+      password: password === "" ? "Password is required." : undefined,
+    };
+    setFieldErrors(errors);
+    if (errors.email || errors.password) return;
     signIn.mutate(
-      { email, password },
+      { email: email.trim(), password },
       { onSuccess: (result) => navigation.assign(safeLocalPath(result.redirect_to)) },
     );
   };
@@ -91,7 +99,7 @@ export default function LoginPage() {
         )}
 
         {passwordLogin && (
-          <form onSubmit={onSubmit}>
+          <form onSubmit={onSubmit} noValidate>
             <div className="space-y-5">
               <div>
                 <Label htmlFor="login-email" className={labelClass}>
@@ -106,8 +114,15 @@ export default function LoginPage() {
                   autoFocus
                   required
                   value={email}
+                  aria-invalid={fieldErrors.email ? true : undefined}
+                  aria-describedby={fieldErrors.email ? "login-email-error" : undefined}
                   onChange={(event) => setEmail(event.target.value)}
                 />
+                {fieldErrors.email && (
+                  <p id="login-email-error" className="mt-1 text-xs text-red-400 light:text-red-700">
+                    {fieldErrors.email}
+                  </p>
+                )}
               </div>
               <div>
                 <Label htmlFor="login-password" className={labelClass}>
@@ -120,8 +135,15 @@ export default function LoginPage() {
                   autoComplete="current-password"
                   required
                   value={password}
+                  aria-invalid={fieldErrors.password ? true : undefined}
+                  aria-describedby={fieldErrors.password ? "login-password-error" : undefined}
                   onChange={(event) => setPassword(event.target.value)}
                 />
+                {fieldErrors.password && (
+                  <p id="login-password-error" className="mt-1 text-xs text-red-400 light:text-red-700">
+                    {fieldErrors.password}
+                  </p>
+                )}
               </div>
             </div>
             <div className="mt-6">
