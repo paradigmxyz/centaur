@@ -51,6 +51,14 @@ const saved = {
   ],
 };
 
+/** Everything TanStack holds: mutation and query state, serialized. */
+function cachedText(queryClient: import("@tanstack/react-query").QueryClient) {
+  return JSON.stringify([
+    queryClient.getMutationCache().getAll().map((mutation) => mutation.state),
+    queryClient.getQueryCache().getAll().map((query) => [query.queryKey, query.state.data]),
+  ]);
+}
+
 describe("ssh key show", () => {
   it("shows the saved key, its grants, and the public key", async () => {
     mockApi({ "GET /api/v1/me/ssh_key": { data: saved } });
@@ -233,5 +241,57 @@ describe("ssh key edit", () => {
     expect(within(alert).getByText("Name can't be blank")).toBeInTheDocument();
     expect(within(alert).getByText("Private key is not a valid private key")).toBeInTheDocument();
     expect(toast.success).not.toHaveBeenCalled();
+  });
+});
+
+describe("ssh key plaintext hygiene", () => {
+  it("leaves no private key in the TanStack caches after a successful save and unmount", async () => {
+    const user = userEvent.setup();
+    const api = mockApi({
+      "GET /api/v1/me/ssh_key": { data: unsaved },
+      "POST /api/v1/me/ssh_key/validate": { data: { valid: true, message: "Valid private key. Ready to save.", fingerprint: "SHA256:abc123" } },
+      "PUT /api/v1/me/ssh_key": { data: saved },
+    });
+    const { queryClient, unmount } = renderRoute(<SshKeyEditPage />, {
+      path: "/console/ssh_key/edit",
+      me,
+      routes: [{ path: "/console/ssh_key", element: <p>key page</p> }],
+    });
+
+    fireEvent.change(await screen.findByLabelText("Your private SSH key"), { target: { value: PRIVATE_KEY } });
+    await screen.findByText(/Not saved yet/, undefined, { timeout: 2000 });
+    expect(cachedText(queryClient)).not.toContain("synthetic-test-body");
+    await user.click(screen.getByRole("button", { name: "Save SSH key" }));
+    expect(await screen.findByText("key page")).toBeInTheDocument();
+    expect(api.calls("PUT /api/v1/me/ssh_key")[0]?.body).toEqual({ data: { name: "My SSH key", private_key: PRIVATE_KEY } });
+
+    await waitFor(() => expect(cachedText(queryClient)).not.toContain("synthetic-test-body"));
+    unmount();
+    expect(cachedText(queryClient)).not.toContain("synthetic-test-body");
+    expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
+  });
+
+  it("clears the key from the form and the caches when saving fails", async () => {
+    const user = userEvent.setup();
+    mockApi({
+      "GET /api/v1/me/ssh_key": { data: unsaved },
+      "POST /api/v1/me/ssh_key/validate": apiResponse(422, { error: { message: "Invalid key.", details: { valid: false } } }),
+      "PUT /api/v1/me/ssh_key": apiResponse(422, {
+        error: { message: "validation failed", details: { private_key: ["is not a valid private key"] } },
+      }),
+    });
+    const { queryClient, unmount } = renderRoute(<SshKeyEditPage />, { path: "/console/ssh_key/edit", me });
+
+    const keyField = await screen.findByLabelText("Your private SSH key");
+    fireEvent.change(keyField, { target: { value: PRIVATE_KEY } });
+    await user.click(screen.getByRole("button", { name: "Save SSH key" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Private key is not a valid private key");
+    await waitFor(() => expect(keyField).toHaveValue(""));
+    expect(cachedText(queryClient)).not.toContain("synthetic-test-body");
+    expect(document.body.innerHTML).not.toContain("synthetic-test-body");
+    unmount();
+    expect(cachedText(queryClient)).not.toContain("synthetic-test-body");
+    expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
   });
 });

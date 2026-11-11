@@ -128,6 +128,27 @@ describe("skills list", () => {
     expect(await screen.findByText("You have not created any skills yet.")).toBeInTheDocument();
   });
 
+  it("reports a failed load instead of an empty state", async () => {
+    mockApi({ "GET /api/v1/skills": apiResponse(500, { error: { message: "database unavailable" } }) });
+    renderRoute(<SkillsListPage />, { path: "/console/skills", me });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load skills: database unavailable");
+    expect(screen.queryByText("No public skills yet.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  it("reports a failed search instead of no matches", async () => {
+    mockApi({
+      "GET /api/v1/skills": ({ url }: { url: URL }) =>
+        url.searchParams.get("q") ? apiResponse(500, { error: { message: "search failed" } }) : { data: [summary] },
+    });
+    renderRoute(<MySkillsListPage />, { path: "/console/skills/mine", url: "/console/skills/mine?q=deploy", me });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load skills: search failed");
+    expect(screen.queryByText("No skills match “deploy”.")).not.toBeInTheDocument();
+    expect(screen.queryByText("You have not created any skills yet.")).not.toBeInTheDocument();
+  });
+
   it("is hidden from users without skills access", async () => {
     mockApi({ "GET /api/v1/skills": { data: [] } });
     renderRoute(<SkillsListPage />, { path: "/console/skills", me: operatorMe() });
@@ -278,6 +299,14 @@ describe("skill form", () => {
       data: { name: "release-helper", description: "Help with releases.", instructions: "# Release", editor_ids: ["usr_alice"] },
     });
     expect(toast.success).toHaveBeenCalledWith("Skill created.");
+  });
+
+  it("reports when the editor candidates cannot be loaded", async () => {
+    mockApi({ "GET /api/v1/skills/editor_candidates": apiResponse(500, { error: { message: "users unavailable" } }) });
+    renderRoute(<SkillNewPage />, { path: "/console/skills/new", me });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load console users: users unavailable");
+    expect(screen.getByRole("button", { name: "Create skill" })).toBeInTheDocument();
   });
 
   it("keeps the fields and shows every server error when saving fails", async () => {

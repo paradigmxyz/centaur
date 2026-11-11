@@ -174,10 +174,14 @@ export function validateSshKey(privateKey: string, signal: AbortSignal) {
 export function useSshKeyMutations() {
   const queryClient = useQueryClient();
   return {
+    // The body carries the private key: gcTime 0 so the settled mutation (and
+    // its variables) leaves the MutationCache as soon as the caller reset()s
+    // it or unmounts. Callers must reset() after every settle.
     save: useMutation({
       mutationFn: (data: { name: string; private_key?: string }) =>
         api.put<DataEnvelope<PersonalSshKey>>(sshKeyPath, { data }),
       onSuccess: (body) => queryClient.setQueryData(sshKeyKeys.all, body),
+      gcTime: 0,
     }),
     destroy: useMutation({
       mutationFn: () => api.delete(sshKeyPath),

@@ -2,12 +2,14 @@
 import { Link, useSearchParams } from "react-router";
 
 import { useSession } from "@/app/session";
+import { ErrorAlert } from "@/components/alerts";
 import { DataTable, type Column } from "@/components/data-table";
 import { LocalTime } from "@/components/local-time";
 import { PageHeader } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
 import { SearchBox } from "@/components/search-box";
 import { Button } from "@/components/ui/button";
+import { errorMessage } from "@/lib/api";
 
 import { useSkillList, type SkillSummary, type SkillTab } from "../api";
 import { SkillTabs, VisibilityBadge } from "./SkillParts";
@@ -104,15 +106,20 @@ function SkillsIndex({ tab }: { tab: SkillTab }) {
         }
       />
       <SearchBox key={tab} placeholder={copy.placeholder} label="Search skills" />
-      <DataTable
-        fixed
-        caption={copy.title}
-        columns={columns}
-        rows={list.data}
-        loading={list.isLoading}
-        rowKey={(skill) => skill.id}
-        empty={q ? `No skills match “${q}”.` : copy.empty}
-      />
+      {list.isError ? (
+        // Never let a failed load read as "no skills" or "no matches".
+        <ErrorAlert>Could not load skills: {errorMessage(list.error)}</ErrorAlert>
+      ) : (
+        <DataTable
+          fixed
+          caption={copy.title}
+          columns={columns}
+          rows={list.data}
+          loading={list.isLoading}
+          rowKey={(skill) => skill.id}
+          empty={q ? `No skills match “${q}”.` : copy.empty}
+        />
+      )}
     </>
   );
 }

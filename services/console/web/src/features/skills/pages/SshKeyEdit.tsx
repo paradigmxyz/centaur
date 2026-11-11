@@ -33,13 +33,13 @@ interface Feedback {
 /**
  * Live check of a pasted key (port of the ssh-key Stimulus controller): 500ms
  * debounce, stale requests aborted, nothing saved. The key is only ever sent
- * to the validate endpoint, whose responses never echo it.
+ * to the validate endpoint, whose responses never echo it. The check is a
+ * plain request, not a TanStack mutation or query, so the plaintext never
+ * enters the Query/Mutation caches; results are matched to the input by an
+ * edit counter (`version`) rather than by storing the key.
  */
-function useKeyFeedback(privateKey: string, saved: boolean): Feedback {
-  const [result, setResult] = useState<{ key: string; feedback: Feedback } | null>(null);
-  // The initial hint stays until the field is first edited, even if cleared again.
-  const [touched, setTouched] = useState(false);
-  if (!touched && privateKey !== "") setTouched(true);
+function useKeyFeedback(privateKey: string, version: number, saved: boolean): Feedback {
+  const [result, setResult] = useState<{ version: number; feedback: Feedback } | null>(null);
   const blank = privateKey.trim() === "";
 
   useEffect(() => {
@@ -50,7 +50,7 @@ function useKeyFeedback(privateKey: string, saved: boolean): Feedback {
         const body = await validateSshKey(privateKey, controller.signal);
         const { message, fingerprint } = body.data;
         setResult({
-          key: privateKey,
+          version,
           feedback: { text: `${message} Fingerprint: ${fingerprint}. Not saved yet—click Save SSH key.`, invalid: false },
         });
       } catch (error) {
@@ -59,16 +59,17 @@ function useKeyFeedback(privateKey: string, saved: boolean): Feedback {
           error instanceof ApiError && error.status === 422
             ? { text: error.message, invalid: true }
             : { text: UNAVAILABLE_FEEDBACK };
-        setResult({ key: privateKey, feedback });
+        setResult({ version, feedback });
       }
     }, 500);
     return () => {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [privateKey, blank]);
+  }, [privateKey, version, blank]);
 
-  if (!touched) return { text: INITIAL_FEEDBACK };
+  // The initial hint stays until the field is first edited, even if cleared again.
+  if (version === 0) return { text: INITIAL_FEEDBACK };
   if (blank) {
     return {
       text: saved
@@ -76,7 +77,7 @@ function useKeyFeedback(privateKey: string, saved: boolean): Feedback {
         : "Paste the complete private key, including the BEGIN and END lines.",
     };
   }
-  if (result?.key === privateKey) return result.feedback;
+  if (result?.version === version) return result.feedback;
   return { text: "Checking key…" };
 }
 
@@ -88,7 +89,8 @@ export default function SshKeyEditPage() {
   const savedKey = key.saved && key.has_private_key;
   const form = useForm<Values>({ defaultValues: { name: key.name, private_key: "" } });
   const privateKey = useWatch({ control: form.control, name: "private_key" });
-  const feedback = useKeyFeedback(privateKey, savedKey);
+  const [keyVersion, setKeyVersion] = useState(0);
+  const feedback = useKeyFeedback(privateKey, keyVersion, savedKey);
   const [errors, setErrors] = useState<string[]>([]);
 
   const onSubmit = form.handleSubmit(async (values) => {
@@ -102,6 +104,12 @@ export default function SshKeyEditPage() {
     } catch (error) {
       applyApiErrors(form.setError, error, ["name", "private_key"]);
       setErrors(validationMessages(error));
+    } finally {
+      // Drop the plaintext everywhere it was held: the mutation's variables
+      // (MutationCache) and the form field. The user re-pastes after an error.
+      save.reset();
+      form.setValue("private_key", "");
+      setKeyVersion((current) => current + 1);
     }
   });
 
@@ -157,6 +165,10 @@ export default function SshKeyEditPage() {
                     aria-describedby="ssh-key-feedback"
                     placeholder={savedKey ? "Leave blank to keep your saved key" : "Paste your dedicated private SSH key"}
                     {...field}
+                    onChange={(event) => {
+                      field.onChange(event);
+                      setKeyVersion((current) => current + 1);
+                    }}
                   />
                 </FieldShell>
               )}

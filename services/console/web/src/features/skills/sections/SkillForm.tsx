@@ -11,7 +11,7 @@ import { applyApiErrors } from "@/components/form/form-errors";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { UserTypeahead, type UserOption } from "@/components/user-typeahead";
-import { ApiError } from "@/lib/api";
+import { ApiError, errorMessage } from "@/lib/api";
 
 import { useEditorCandidates, userLabel, type Skill, type SkillInput, type SkillUser } from "../api";
 import { validationMessages } from "./helpers";
@@ -183,6 +183,9 @@ function EditorPicker({
   return (
     <div>
       <p className="mb-1 block text-xs font-semibold tracking-wider text-foreground uppercase">Editors</p>
+      {candidates.isError && (
+        <ErrorAlert className="mb-2 max-w-xl">Could not load console users: {errorMessage(candidates.error)}</ErrorAlert>
+      )}
       <div className="max-w-xl">
         <UserTypeahead
           options={options}
