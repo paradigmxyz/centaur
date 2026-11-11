@@ -1,6 +1,7 @@
 # Establishes the console cookie session after a successful login (password via
-# POST /api/v1/session, or SSO via /auth/:provider/callback) and decides where
-# the browser goes next. Shared by ApplicationController and Api::BaseController.
+# POST /login, or SSO via /auth/:provider/callback) and decides where the
+# browser goes next. Also remembers a signed-out browser's destination
+# (require_login, the SPA fallback, GET /login?return_to=).
 #
 # The caller must already have rejected disabled accounts. The session is reset
 # (session fixation) but the remembered return path survives it; only

@@ -1,30 +1,14 @@
-// Auth pages slice: login and pending. They render outside the app shell
-// (publicRoutes) and never call useSession(): the signed-out and pending
-// browsers that use them would be bounced by the shell. The OAuth flows (MCP
-// OAuth consent, the broker OAuth result page) are intentionally
-// server-rendered by Rails, not routes here. PWA registration lives here too (pwa.ts, run from
-// main.tsx).
-import type { ComponentType } from "react";
-
+// Auth pages slice. Sign-in is a step of the MCP OAuth flow, so the login and
+// pending pages (/login, /pending), like the OAuth consent and result pages,
+// are intentionally server-rendered by Rails (layouts/oauth) and are not SPA
+// routes: the api client and the shell send the browser there with a full page
+// load. The SPA keeps everything after sign-in; sign-out is
+// DELETE /api/v1/session from the account menu. PWA registration lives here
+// (pwa.ts, run from main.tsx).
 import type { FeatureModule } from "@/app/types";
-
-import { AuthLayout, AuthRouteError } from "./sections/AuthLayout";
-
-const page = (load: () => Promise<{ default: ComponentType }>) => () =>
-  load().then((m) => ({ Component: m.default }));
 
 const authPages: FeatureModule = {
   id: "auth_pages",
-  publicRoutes: [
-    {
-      Component: AuthLayout,
-      ErrorBoundary: AuthRouteError,
-      children: [
-        { path: "/login", lazy: page(() => import("./pages/Login")) },
-        { path: "/pending", lazy: page(() => import("./pages/Pending")) },
-      ],
-    },
-  ],
 };
 
 export default authPages;

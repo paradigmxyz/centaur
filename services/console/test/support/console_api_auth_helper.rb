@@ -14,21 +14,20 @@ module ConsoleApiAuthHelper
   MEMBER_TOKEN = "iak_member-token".freeze
   DISABLED_TOKEN = "iak_disabled-token".freeze
 
-  # Signs +user+ in the way the SPA login page does (POST /api/v1/session with
-  # the login CSRF token), establishing the console session cookie for the
-  # current integration session.
+  # Signs +user+ in the way the login page does (the POST /login form),
+  # establishing the console session cookie for the current integration
+  # session.
   def sign_in_console(user, password: TEST_PASSWORD)
     console_password_login(user.email, password)
     user
   end
 
-  # POST /api/v1/session for +email+; the response (status, redirect_to) is
-  # left for the caller to inspect.
+  # POST /login for +email+, as the server-rendered login form submits it
+  # (the test environment skips the authenticity token; the CSRF tests in
+  # sessions_controller_test turn forgery protection on). The response (a
+  # redirect, or the re-rendered form) is left for the caller to inspect.
   def console_password_login(email, password = TEST_PASSWORD)
-    get api_v1_auth_config_path
-    token = JSON.parse(response.body).dig("data", "csrf_token")
-    post api_v1_session_path, params: { data: { email: email, password: password } },
-                              headers: { "X-CSRF-Token" => token }, as: :json
+    post login_path, params: { email: email, password: password }
     @console_csrf_token = nil
   end
 
@@ -38,9 +37,10 @@ module ConsoleApiAuthHelper
     @console_csrf_token = nil
   end
 
-  # Where the last console_password_login sent the browser.
+  # Where the last console_password_login sent the browser (path and query).
   def console_login_redirect
-    JSON.parse(response.body).dig("data", "redirect_to")
+    location = response.location || raise("no redirect: #{response.status}")
+    URI.parse(location).request_uri
   end
 
   # The session's CSRF token, as the SPA obtains it from GET /api/v1/me.

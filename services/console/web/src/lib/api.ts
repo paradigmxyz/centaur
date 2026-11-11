@@ -3,7 +3,8 @@
 // - Sends the console session cookie (same-origin) and, for writes, the CSRF
 //   token from GET /api/v1/me as X-CSRF-Token.
 // - Parses the error envelope {error: {message, details}} into ApiError.
-// - 401 sends the browser to /login; 403 "account_pending" to /pending.
+// - 401 sends the browser to the server-rendered /login (full page load,
+//   with the current page as return_to); 403 "account_pending" to /pending.
 // - A 403 "csrf" (stale token after sign-in elsewhere) refreshes the token
 //   and retries once.
 
@@ -58,8 +59,6 @@ export interface RequestOptions {
   query?: Record<string, QueryValue>;
   body?: unknown;
   signal?: AbortSignal;
-  /** Skip the global 401/pending redirects (e.g. the session probe on auth pages). */
-  noRedirect?: boolean;
 }
 
 let csrfToken: string | null = null;
@@ -68,12 +67,23 @@ export function setCsrfToken(token: string | null | undefined) {
   csrfToken = token ?? null;
 }
 
-/** Hook for tests and the auth pages: where redirects go. */
+/** Hook for tests: where full-page redirects (login, pending) go. */
 export const navigation = {
   assign(url: string) {
     window.location.assign(url);
   },
 };
+
+/**
+ * The server-rendered login page (a full page load, not an SPA route), with
+ * the current page as return_to. Rails remembers it only when it is an
+ * allowlisted same-origin path (ConsoleReturnPath) and returns there after
+ * sign-in.
+ */
+export function loginUrl(location: Pick<Location, "pathname" | "search"> = window.location): string {
+  const here = location.pathname + location.search;
+  return `/login?return_to=${encodeURIComponent(here)}`;
+}
 
 export function buildUrl(path: string, query?: Record<string, QueryValue>): string {
   const params = new URLSearchParams();
@@ -142,13 +152,10 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}, 
     await refreshCsrfToken();
     return apiRequest<T>(path, options, true);
   }
-  if (!options.noRedirect) {
-    if (error.status === 401) {
-      const here = window.location.pathname + window.location.search;
-      navigation.assign(here.startsWith("/console") || here === "/" ? `/login?return_to=${encodeURIComponent(here)}` : "/login");
-    } else if (error.status === 403 && error.reason === "account_pending") {
-      navigation.assign("/pending");
-    }
+  if (error.status === 401) {
+    navigation.assign(loginUrl());
+  } else if (error.status === 403 && error.reason === "account_pending") {
+    navigation.assign("/pending");
   }
   throw error;
 }

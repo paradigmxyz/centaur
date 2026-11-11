@@ -69,23 +69,21 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
   # --- login page -----------------------------------------------------------
 
   test "the login page offers a button for each configured provider" do
-    get api_v1_auth_config_path
+    get login_url
     assert_response :ok
-    providers = json_body.dig("data", "providers")
-    assert_equal [ { "key" => "google", "label" => "Google", "start_path" => auth_start_path(provider: "google") } ],
-                 providers
+    assert_select "a[href=?]", auth_start_path(provider: "google"), text: "Continue with Google"
     # Slack has no credentials configured, so it must not appear.
-    assert_not(providers.any? { |provider| provider["key"] == "slack" })
+    assert_select "a[href=?]", auth_start_path(provider: "slack"), count: 0
   end
 
-  test "SSO failures reach the SPA login page through the one-shot flash" do
+  test "SSO failures reach the login page through the one-shot flash" do
     get auth_start_url(provider: "slack")
     assert_redirected_to login_path
 
-    get api_v1_auth_config_path
-    assert_equal({ "alert" => "That sign-in method is not available." }, json_body.dig("data", "flash"))
-    get api_v1_auth_config_path
-    assert_equal({}, json_body.dig("data", "flash"))
+    get login_url
+    assert_select "[role=alert]", text: "That sign-in method is not available."
+    get login_url
+    assert_select "[role=alert]", count: 0
   end
 
   test "SSO success leaves the signed-in notice for the console" do

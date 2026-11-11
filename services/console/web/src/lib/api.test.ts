@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { api, ApiError, navigation, setCsrfToken } from "@/lib/api";
+import { api, ApiError, loginUrl, navigation, setCsrfToken } from "@/lib/api";
 import { apiResponse, mockApi } from "@/test/utils";
 
 afterEach(() => {
@@ -41,10 +41,20 @@ describe("api client", () => {
       "GET /api/v1/a": apiResponse(401, { error: { message: "invalid or missing API key" } }),
       "GET /api/v1/b": apiResponse(403, { error: { message: "pending", details: { reason: "account_pending" } } }),
     });
+    window.history.replaceState(null, "", "/console/credentials?kind=oauth");
     await expect(api.get("/api/v1/a")).rejects.toBeInstanceOf(ApiError);
-    expect(assign).toHaveBeenLastCalledWith(expect.stringMatching(/^\/login/));
+    // A full page load of the server-rendered login page, back here afterwards.
+    expect(assign).toHaveBeenLastCalledWith("/login?return_to=%2Fconsole%2Fcredentials%3Fkind%3Doauth");
     await expect(api.get("/api/v1/b")).rejects.toBeInstanceOf(ApiError);
     expect(assign).toHaveBeenLastCalledWith("/pending");
+  });
+
+  it("always passes the current page as return_to; the server allowlists it", () => {
+    expect(loginUrl({ pathname: "/", search: "" })).toBe("/login?return_to=%2F");
+    expect(loginUrl({ pathname: "/console/principals/prn_1", search: "?tab=grants" })).toBe(
+      "/login?return_to=%2Fconsole%2Fprincipals%2Fprn_1%3Ftab%3Dgrants",
+    );
+    expect(loginUrl({ pathname: "/elsewhere", search: "" })).toBe("/login?return_to=%2Felsewhere");
   });
 
   it("refreshes a stale CSRF token and retries once", async () => {

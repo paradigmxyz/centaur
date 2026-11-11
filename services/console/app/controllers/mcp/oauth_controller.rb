@@ -11,8 +11,8 @@ module Mcp
   # behaviour they were built against: GET /mcp/oauth/authorize validates the
   # request and renders the consent form, and POST /mcp/oauth/authorize (a
   # standard Rails form with an authenticity token) revalidates it, issues the
-  # code, and redirects to the registered redirect_uri. Only the login step
-  # lives in the SPA (/login, which returns here through ConsoleReturnPath).
+  # code, and redirects to the registered redirect_uri. The login step
+  # (/login, also server-rendered) returns here through ConsoleReturnPath.
   class OauthController < ApplicationController
     layout "oauth"
 

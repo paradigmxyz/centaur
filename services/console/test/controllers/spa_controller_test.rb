@@ -17,7 +17,7 @@ class SpaControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "HTML navigations to SPA paths serve the built index" do
-    [ "/console/spa-only-page", "/console/spa-only/nested/prn_123", "/login", "/pending" ].each do |path|
+    [ "/console/spa-only-page", "/console/spa-only/nested/prn_123" ].each do |path|
       get path, headers: HTML
       assert_response :ok, path
       assert_includes response.body, "<div id=\"root\">"
@@ -46,12 +46,10 @@ class SpaControllerTest < ActionDispatch::IntegrationTest
   test "a signed-out deep link is remembered for the post-login redirect" do
     get "/console/spa-only-page?q=1", headers: HTML
     console_password_login(users(:acme_admin).email)
-    assert_equal "/console/spa-only-page?q=1", console_login_redirect
+    assert_redirected_to "/console/spa-only-page?q=1"
   end
 
   test "only allowlisted deep links are remembered" do
-    get "/login?return_to=%2Fconsole", headers: HTML
-    assert_nil session[:return_to]
     get "/console/a%2e%2e/b", headers: HTML
     assert_nil session[:return_to]
   end
@@ -76,7 +74,8 @@ class SpaControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "HTML requests to API, framework, and protocol prefixes keep the JSON 404" do
-    [ "/api/v1/nope", "/api", "/rails/nope", "/spa/assets/missing.js", "/.well-known/nope", "/mcp/oauth/token" ].each do |path|
+    [ "/api/v1/nope", "/api", "/rails/nope", "/spa/assets/missing.js", "/.well-known/nope", "/mcp/oauth/token",
+      "/login/nope", "/logout", "/pending/nope" ].each do |path|
       get path, headers: HTML
       assert_response :not_found, path
       assert_equal "not found", JSON.parse(response.body).dig("error", "message"), path
@@ -87,6 +86,12 @@ class SpaControllerTest < ActionDispatch::IntegrationTest
     # OAuth protocol endpoints stay Rails routes after the UI moves to the SPA.
     get "/oauth/unknown-app/start", headers: HTML
     assert_response :redirect
+    # The login and pending pages are server-rendered, not SPA routes.
+    get "/login", headers: HTML
+    assert_response :ok
+    assert_not_includes response.body, "<div id=\"root\">"
+    get "/pending", headers: HTML
+    assert_redirected_to "/login"
   end
 
   test "an unbuilt SPA explains how to build it" do

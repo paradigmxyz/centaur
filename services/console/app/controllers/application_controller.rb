@@ -1,9 +1,10 @@
 # Base class for the console's browser-facing Rails endpoints that are not
-# part of the JSON API: SSO login (/auth/:provider/*), the broker OAuth consent
-# flow (/oauth/:slug/*), the MCP OAuth authorization server, and the PWA
-# launch handler. They answer with redirects (into the SPA) or JSON, except
-# the OAuth consent and result pages, which are intentionally server-rendered
-# (layouts/oauth). The console UI itself is the SPA served by SpaController.
+# part of the JSON API: password login (/login, /logout, /pending), SSO login
+# (/auth/:provider/*), the broker OAuth consent flow (/oauth/:slug/*), the MCP
+# OAuth authorization server, and the PWA launch handler. They answer with
+# redirects or JSON, except the login, pending, OAuth consent, and OAuth result
+# pages, which are intentionally server-rendered (layouts/oauth). The console
+# UI itself is the SPA served by SpaController.
 class ApplicationController < ActionController::Base
   include ConsoleSession
   include ConsoleSignIn
@@ -13,11 +14,12 @@ class ApplicationController < ActionController::Base
   rescue_from ActiveRecord::RecordNotFound, with: :render_not_found
 
   # Require a console session by default. Endpoints that must stay reachable
-  # while signed out (SSO, MCP OAuth) skip this. API controllers descend from
+  # while signed out (the login form, SSO, MCP OAuth) skip this. API controllers descend from
   # Api::BaseController, not this class, and authenticate on their own.
   before_action :require_login
-  # A signed-in user must also be approved (active) to use the console. The SSO
-  # and MCP OAuth controllers skip this and apply their own status checks.
+  # A signed-in user must also be approved (active) to use the console. The
+  # login, SSO, and MCP OAuth controllers skip this and apply their own status
+  # checks.
   before_action :require_active_account
 
   private
@@ -40,7 +42,7 @@ class ApplicationController < ActionController::Base
     current_user&.admin? && !descoped?
   end
 
-  # before_action gate: bounce anonymous requests to the SPA login page,
+  # before_action gate: bounce anonymous requests to the login page,
   # remembering where they were going.
   def require_login
     return if current_user
@@ -74,8 +76,8 @@ class ApplicationController < ActionController::Base
   end
 
   # Completes an SSO login: establishes the console session and redirects to
-  # the remembered return path or the user's landing page. The SPA login page
-  # shows the flash (notice or alert) through GET /api/v1/auth/config.
+  # the remembered return path or the user's landing page. Failures land on
+  # the login page, which renders the flash alert.
   def sign_in_console_user(user)
     return redirect_to login_path, alert: ConsoleSignIn::DISABLED_MESSAGE if user.disabled?
 

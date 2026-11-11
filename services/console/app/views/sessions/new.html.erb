@@ -1,0 +1,44 @@
+<% content_for :title, "Sign In · Centaur Console" %>
+
+<div class="oauth-header">
+  <img src="<%= OauthPageAssets.path("centaur-lockup-white.svg") %>" alt="Centaur" class="oauth-logo" width="497" height="127">
+  <h1 class="oauth-subtitle">Operator console sign in.</h1>
+</div>
+
+<% if flash[:notice] %>
+  <div class="oauth-notice" role="status"><%= flash[:notice] %></div>
+<% end %>
+
+<section class="oauth-card">
+  <% if flash[:alert] %>
+    <div class="oauth-alert" role="alert"><%= flash[:alert] %></div>
+  <% end %>
+
+  <% providers = ConsoleAuth.providers %>
+  <% if providers.any? %>
+    <div class="oauth-stack">
+      <% providers.each do |provider| %>
+        <a href="<%= auth_start_path(provider: provider) %>" class="oauth-button oauth-button-outline">Continue with <%= provider.capitalize %></a>
+      <% end %>
+    </div>
+
+    <% if password_login_enabled? %>
+      <div class="oauth-divider">or sign in with email</div>
+    <% end %>
+  <% end %>
+
+  <% if password_login_enabled? %>
+    <%= form_with url: login_path, method: :post, class: "oauth-login-form" do |f| %>
+      <div class="oauth-field">
+        <%= f.label :email, "Email", class: "oauth-label" %>
+        <%= f.email_field :email, value: params[:email].to_s.strip.presence, class: "oauth-input", placeholder: "you@example.com", autocomplete: "username", autofocus: true, required: true %>
+      </div>
+      <div class="oauth-field">
+        <%= f.label :password, "Password", class: "oauth-label" %>
+        <%= f.password_field :password, class: "oauth-input", autocomplete: "current-password", required: true %>
+      </div>
+
+      <%= f.submit "Sign in", class: "oauth-button oauth-button-primary" %>
+    <% end %>
+  <% end %>
+</section>

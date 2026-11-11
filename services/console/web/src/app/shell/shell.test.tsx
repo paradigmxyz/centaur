@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider, useSuspenseQuery } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { act } from "react";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildRoutes } from "@/app/router";
 import type { Me } from "@/app/session";
 import type { FeatureModule } from "@/app/types";
-import { api } from "@/lib/api";
+import { api, navigation } from "@/lib/api";
 import { sharedKeys } from "@/lib/query-keys";
 import { adminMe, apiResponse, mockApi, operatorMe } from "@/test/utils";
 
@@ -25,7 +25,6 @@ const testFeature: FeatureModule = {
     { path: "/console/flaky", element: <FlakyPage /> },
     { path: "/console/other", element: <p>other page</p> },
   ],
-  publicRoutes: [{ path: "/pending", element: <p>holding page</p> }],
 };
 
 function renderShell(url: string, me: Me) {
@@ -40,7 +39,10 @@ function renderShell(url: string, me: Me) {
   return { router, queryClient };
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe("app shell", () => {
   it("refetches a page's failed suspense query when the page is visited again", async () => {
@@ -71,15 +73,15 @@ describe("app shell", () => {
     expect(queryClient.getQueryData(sharedKeys.me)).toBeDefined();
   });
 
-  it("sends a pending account to the holding page instead of rendering the shell", async () => {
+  it("sends a pending account to the server-rendered holding page instead of rendering the shell", async () => {
+    const assign = vi.spyOn(navigation, "assign").mockImplementation(() => {});
     const fetchMock = mockApi({});
     const pending = operatorMe({
       user: { id: "usr_p", email: "waiting@example.test", name: null, status: "pending", admin: false },
     });
-    const { router } = renderShell("/console/other", pending);
+    renderShell("/console/other", pending);
 
-    expect(await screen.findByText("holding page")).toBeInTheDocument();
-    expect(router.state.location.pathname).toBe("/pending");
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("/pending"));
     expect(screen.queryByText("other page")).not.toBeInTheDocument();
     expect(fetchMock.calls()).toHaveLength(0);
   });

@@ -1,0 +1,22 @@
+<% content_for :title, "Awaiting Approval · Centaur Console" %>
+
+<div class="oauth-header">
+  <img src="<%= OauthPageAssets.path("centaur-lockup-white.svg") %>" alt="Centaur" class="oauth-logo" width="497" height="127">
+  <p class="oauth-subtitle">Operator console.</p>
+</div>
+
+<% if flash[:notice] %>
+  <div class="oauth-notice" role="status"><%= flash[:notice] %></div>
+<% end %>
+
+<section class="oauth-card oauth-center" aria-labelledby="pending-heading">
+  <h1 id="pending-heading" class="oauth-result-heading">Awaiting approval</h1>
+  <p class="oauth-result-message">
+    You're signed in as <strong class="oauth-strong"><%= @email %></strong>, but your account
+    is pending approval by an administrator. You'll have access once it's approved.
+  </p>
+
+  <div class="oauth-result-retry">
+    <%= button_to "Sign out", logout_path, method: :delete, class: "oauth-button oauth-button-outline", form_class: "oauth-button-form" %>
+  </div>
+</section>

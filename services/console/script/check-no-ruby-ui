@@ -2,21 +2,24 @@
 # Lists server-rendered UI that remains in the console Rails app and exits
 # nonzero while any is left. The console UI lives in the SPA (web/); Rails
 # serves JSON under /api/v1, protocol redirects, the built index.html, and the
-# intentionally server-rendered OAuth pages listed below.
+# intentionally server-rendered sign-in and OAuth pages listed below.
 #
 # Usage: script/check-no-ruby-ui
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
-# The one intentional exception: the OAuth flows stay server-rendered so
-# installed MCP clients and in-flight consents see exactly the protocol
-# behaviour they were built against (GET/POST /mcp/oauth/authorize with a Rails
-# form, and the /oauth/<slug>/{start,callback} result page rendered in the same
-# response). They use a standalone layout and plain CSS from public/oauth-page,
-# with no asset pipeline or JavaScript. Nothing else may render a template.
-OAUTH_VIEWS_RE='^app/views/(layouts/oauth\.html\.erb|mcp/oauth/authorize\.html\.erb|oauth/flows/result\.html\.erb)$'
-OAUTH_RENDERS_RE='^app/controllers/(mcp/oauth_controller\.rb:[0-9]+:\s*(layout "oauth"|render :authorize)|oauth/flows_controller\.rb:[0-9]+:\s*(layout "oauth"|render :result, status: status))$'
+# The one intentional exception: sign-in and the OAuth flows stay
+# server-rendered so installed MCP clients, in-flight consents, and pods on
+# either side of a rolling deploy see exactly the protocol behaviour they were
+# built against (GET/POST /login, DELETE /logout, and GET /pending with Rails
+# forms; GET/POST /mcp/oauth/authorize with a Rails form; and the
+# /oauth/<slug>/{start,callback} result page rendered in the same response).
+# Sign-in is a step of the MCP OAuth flow and must work without JavaScript.
+# They use a standalone layout and plain CSS from public/oauth-page, with no
+# asset pipeline or JavaScript. Nothing else may render a template.
+OAUTH_VIEWS_RE='^app/views/(layouts/oauth\.html\.erb|mcp/oauth/authorize\.html\.erb|oauth/flows/result\.html\.erb|sessions/(new|pending)\.html\.erb)$'
+OAUTH_RENDERS_RE='^app/controllers/(mcp/oauth_controller\.rb:[0-9]+:\s*(layout "oauth"|render :authorize)|oauth/flows_controller\.rb:[0-9]+:\s*(layout "oauth"|render :result, status: status)|sessions_controller\.rb:[0-9]+:\s*(layout "oauth"|return render :new, status: :(not_found|unprocessable_entity)))$'
 
 offenders=0
 report() {

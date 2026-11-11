@@ -1,13 +1,19 @@
 # Auth pages slice: console login/logout, the pending holding page, SSO, the
 # broker OAuth consent flow, the MCP OAuth authorization server, and PWA/launch.
 #
-# The login and pending pages live in the SPA (web/src/features/auth-pages) and
-# are served by the SPA fallback. The OAuth flows are intentionally
-# server-rendered (layouts/oauth): the MCP OAuth consent page and the broker
-# OAuth result page keep the exact behaviour installed clients rely on. Rails
-# also keeps the protocol endpoints and the path helpers their redirects use.
-direct(:login) { "/login" }
-direct(:pending) { "/pending" }
+# Sign-in is part of the MCP OAuth flow, so the login and pending pages are
+# intentionally server-rendered (layouts/oauth), like the MCP OAuth consent page
+# and the broker OAuth result page. They keep origin/main's wire contract
+# (Rails form + authenticity token, the same paths, params, redirects, and
+# messages), work without JavaScript, and interoperate with older pods during a
+# rolling deploy. Everything after sign-in is the SPA.
+
+# Operator console session login (cookie-based, separate from the API key auth).
+get "login", to: "sessions#new", as: :login
+post "login", to: "sessions#create"
+delete "logout", to: "sessions#destroy", as: :logout
+# Holding page for a signed-in user whose account is still pending approval.
+get "pending", to: "sessions#pending", as: :pending
 
 # PWA manifest + service worker: static files under config/pwa served without a
 # console session (PwaController) so the browser can fetch them outside an
@@ -18,8 +24,7 @@ get "service-worker", to: "pwa#service_worker", as: :pwa_service_worker
 # custom-scheme URL in ?target= onto an in-app path and redirects.
 get "launch", to: "launch#show", as: :launch
 
-# Password sign-in and sign-out are POST/DELETE /api/v1/session (below and
-# api.rb).
+# The SPA's sign-out button uses DELETE /api/v1/session (api.rb).
 
 # Console SSO login, keyed by provider (/auth/google/start). Deliberately
 # unauthenticated; distinct /auth/* prefix avoids colliding with the broker's
@@ -46,11 +51,3 @@ post "mcp/oauth/token", to: "mcp/oauth#token"
 # "~"; the controller resolves (or 404s) the slug.
 get "oauth/:slug/start", to: "oauth/flows#start", as: :oauth_start, constraints: { slug: %r{[^/]+} }
 get "oauth/:slug/callback", to: "oauth/flows#callback", as: :oauth_callback, constraints: { slug: %r{[^/]+} }
-
-# /api/v1 endpoints for the auth pages (see docs/API.md#console-auth-pages).
-namespace :api do
-  namespace :v1 do
-    get "auth/config", to: "auth#show", as: :auth_config
-    resource :session, only: :create
-  end
-end

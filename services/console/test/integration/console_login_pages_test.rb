@@ -1,40 +1,20 @@
 require "test_helper"
 
-# The SPA login and pending pages and the console-wide session gates around
-# them. Password sign-in and sign-out (POST/DELETE /api/v1/session) and the
-# login bootstrap (GET /api/v1/auth/config) are covered by
-# test/controllers/api/v1/console_auth_pages_test.rb, which also ports the
-# former POST /login and DELETE /logout form-endpoint tests.
+# The console-wide session gates around the server-rendered login and pending
+# pages (sessions_controller_test covers the pages and their form endpoints),
+# and the SPA's sign-out endpoint, DELETE /api/v1/session.
 class ConsoleLoginPagesTest < ActionDispatch::IntegrationTest
   HTML = { "Accept" => "text/html,application/xhtml+xml" }.freeze
 
   setup { @operator = users(:acme_admin) }
 
-  test "the login and pending pages are served by the SPA" do
-    Dir.mktmpdir do |dir|
-      index = File.join(dir, "index.html")
-      File.write(index, "<div id=\"root\"></div>")
-      previous = SpaController.index_path
-      SpaController.index_path = index
-      [ "/login", "/login?return_to=%2Fconsole", "/pending" ].each do |path|
-        get path, headers: HTML
-        assert_response :ok, path
-        assert_includes response.body, "<div id=\"root\">", path
-      end
-    ensure
-      SpaController.index_path = previous
-    end
-  end
-
-  test "the legacy form endpoints are gone" do
-    post "/login", params: { email: @operator.email, password: ConsoleApiAuthHelper::TEST_PASSWORD }
+  test "the SPA-era login endpoints are gone" do
+    get "/api/v1/auth/config"
+    assert_response :not_found
+    post "/api/v1/session", params: { data: { email: @operator.email, password: ConsoleApiAuthHelper::TEST_PASSWORD } },
+                            as: :json
     assert_response :not_found
     assert_nil session[:user_id]
-
-    sign_in_console(@operator)
-    delete "/logout"
-    assert_response :not_found
-    assert_equal @operator.id, session[:user_id]
   end
 
   test "unsafe methods do not replace the remembered login destination" do
@@ -55,17 +35,47 @@ class ConsoleLoginPagesTest < ActionDispatch::IntegrationTest
     assert_nil session[:user_id]
   end
 
-  test "the pending page's session probe works for a pending user" do
+  test "a pending user's session probe reports the pending status" do
     sign_in_console(users(:pending_user))
     get api_v1_me_path
     assert_response :ok
     assert_equal "pending", json_body.dig("data", "user", "status")
   end
 
-  test "an active user's session probe reports the active status for the pending page redirect" do
+  # --- DELETE /api/v1/session (the SPA's sign-out button) ----------------------
+
+  test "SPA sign-out clears the session and leaves a notice for the login page" do
     sign_in_console(@operator)
-    get api_v1_me_path
-    assert_equal "active", json_body.dig("data", "user", "status")
-    assert_equal true, json_body.dig("data", "acting_admin")
+    console_sign_out
+    assert_response :no_content
+    assert_nil session[:user_id]
+
+    get login_path
+    assert_select "[role=status]", text: "Signed out."
+  end
+
+  test "a pending user can sign out from the SPA endpoint" do
+    sign_in_console(users(:pending_user))
+    delete api_v1_session_path, headers: csrf_headers
+    assert_response :no_content
+    assert_nil session[:user_id]
+  end
+
+  test "SPA sign-out requires the CSRF token" do
+    sign_in_console(@operator)
+    delete api_v1_session_path
+    assert_response :forbidden
+    assert_equal @operator.id, session[:user_id]
+  end
+
+  test "a CSRF token from before sign-in cannot be replayed after it" do
+    get login_path
+    token = controller.send(:form_authenticity_token)
+    post login_path, params: { email: @operator.email, password: ConsoleApiAuthHelper::TEST_PASSWORD }
+    assert_equal @operator.id, session[:user_id]
+
+    delete api_v1_session_path, headers: { "X-CSRF-Token" => token }
+    assert_response :forbidden
+    assert_equal @operator.id, session[:user_id]
   end
 end

@@ -10,6 +10,9 @@ import { defineConfig } from "vite";
 const railsUrl = process.env.CONSOLE_RAILS_URL ?? "http://localhost:3000";
 const railsPaths = [
   "/api",
+  "/login",
+  "/logout",
+  "/pending",
   "/auth",
   "/oauth",
   "/mcp",

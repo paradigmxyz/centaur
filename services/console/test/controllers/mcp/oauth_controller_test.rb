@@ -130,7 +130,7 @@ module Mcp
 
       assert_redirected_to login_path
 
-      # The SPA login page follows the remembered return path.
+      # The login form follows the remembered return path.
       console_password_login(@operator.email)
       assert_match %r{\A/mcp/oauth/authorize\?}, console_login_redirect
       assert_equal authorize_params(client).transform_keys(&:to_s),

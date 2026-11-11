@@ -1,6 +1,7 @@
 /*
- * Standalone styles for the server-rendered OAuth pages (layouts/oauth.html.erb):
- * the MCP OAuth consent page and the broker OAuth result page. Plain CSS served
+ * Standalone styles for the server-rendered pages (layouts/oauth.html.erb): the
+ * console login and pending pages, the MCP OAuth consent page, and the broker
+ * OAuth result page. Plain CSS served
  * from public/, with no asset pipeline and no JavaScript. The colours mirror the
  * SPA theme in web/src/index.css: dark by default, light when the browser asks for it.
  */
@@ -267,7 +268,118 @@ body {
   margin-top: 1.25rem;
 }
 
+/* Login and pending pages. */
+
+.oauth-header h1.oauth-subtitle {
+  font-weight: 400;
+}
+
+.oauth-center {
+  text-align: center;
+}
+
+.oauth-strong {
+  color: var(--foreground);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.oauth-notice,
+.oauth-alert {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem 1rem;
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+.oauth-notice {
+  margin-bottom: 1.5rem;
+  background: var(--card);
+  color: var(--muted-foreground);
+}
+
+.oauth-alert {
+  margin-bottom: 1.25rem;
+  border-color: color-mix(in oklab, var(--destructive) 40%, transparent);
+  background: color-mix(in oklab, var(--destructive) 10%, transparent);
+  color: var(--destructive);
+}
+
+.oauth-stack {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.oauth-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 1.5rem 0;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+}
+
+.oauth-divider::before,
+.oauth-divider::after {
+  content: "";
+  height: 1px;
+  flex: 1;
+  background: var(--border);
+}
+
+.oauth-login-form {
+  display: grid;
+  gap: 1rem;
+}
+
+.oauth-login-form .oauth-button {
+  margin-top: 0.5rem;
+}
+
+.oauth-label {
+  display: block;
+  margin-bottom: 0.375rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.oauth-input {
+  display: block;
+  width: 100%;
+  min-height: 2.25rem;
+  border: 1px solid var(--input);
+  border-radius: calc(var(--radius) - 2px);
+  background: color-mix(in oklab, var(--input) 30%, transparent);
+  padding: 0.375rem 0.75rem;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 0.875rem;
+  transition: border-color 150ms, box-shadow 150ms;
+}
+
+.oauth-input::placeholder {
+  color: var(--muted-foreground);
+}
+
+.oauth-input:focus-visible {
+  outline: none;
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent);
+}
+
+.oauth-button-form {
+  margin: 0;
+}
+
+@media (prefers-color-scheme: light) {
+  .oauth-input {
+    background: transparent;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .oauth-input,
   .oauth-button {
     transition: none;
   }

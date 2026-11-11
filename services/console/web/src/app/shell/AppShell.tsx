@@ -1,6 +1,6 @@
 import { Menu } from "lucide-react";
 import { Suspense, useEffect, useMemo, useRef } from "react";
-import { Link, Navigate, Outlet, useLocation } from "react-router";
+import { Link, Outlet, useLocation } from "react-router";
 import { toast } from "sonner";
 
 import { features } from "@/app/registry";
@@ -14,6 +14,7 @@ import { isSpaPath } from "@/app/spa-paths";
 import { Button } from "@/components/ui/button";
 import { SidebarInset, SidebarProvider, useSidebar } from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
+import { navigation } from "@/lib/api";
 import lockup from "@/assets/centaur-lockup-white.svg";
 
 function ShellLoading() {
@@ -59,9 +60,10 @@ function ShellFrame() {
 
   useFlashToasts(me.flash);
 
-  // An account awaiting approval may only see the holding page; send it there
-  // instead of rendering pages whose API calls would all be refused.
-  if (me.user.status === "pending") return <Navigate to="/pending" replace />;
+  // An account awaiting approval may only see the holding page (server-rendered
+  // /pending, a full page load); send it there instead of rendering pages whose
+  // API calls would all be refused.
+  if (me.user.status === "pending") return <FullPageRedirect to="/pending" />;
 
   return (
     <ShellContext.Provider value={shell}>
@@ -80,6 +82,12 @@ function ShellFrame() {
       </SidebarProvider>
     </ShellContext.Provider>
   );
+}
+
+/** Leaves the SPA for a Rails-rendered page (login, pending). */
+function FullPageRedirect({ to }: { to: string }) {
+  useEffect(() => navigation.assign(to), [to]);
+  return <ShellLoading />;
 }
 
 /** Closes the mobile navigation drawer after every navigation. */
