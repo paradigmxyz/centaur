@@ -40,7 +40,7 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     get console_credentials_url(kind: "oauth")
     assert_equal "/console/credentials?kind=oauth", session[:return_to]
 
-    post console_roles_url, params: { role: { foreign_id: "new-role" } }
+    post console_broker_credentials_url, params: { broker_credential: { foreign_id: "new-credential" } }
     assert_redirected_to login_path
     assert_equal "/console/credentials?kind=oauth", session[:return_to]
   end
@@ -97,7 +97,7 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
 
   test "a pending user hitting a console page is bounced to the holding page" do
     post login_url, params: { email: users(:pending_user).email, password: "password123456" }
-    get console_roles_url
+    get console_credentials_url
     assert_redirected_to pending_path
   end
 

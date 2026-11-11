@@ -19,7 +19,7 @@ module Console
       client = create_client
       ENV.delete("CENTAUR_CONSOLE_API_CLIENTS_ENABLED")
 
-      get console_roles_url
+      get console_credentials_url
       assert_select "a[href=?]", console_api_clients_path, count: 0
 
       get console_api_clients_url
@@ -33,7 +33,7 @@ module Console
     end
 
     test "the API Clients tab shows for admins while the feature is on" do
-      get console_roles_url
+      get console_credentials_url
       assert_select "a[href=?]", console_api_clients_path, text: "API Clients"
     end
 

@@ -8,7 +8,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
 
   test "redirects to login when not signed in" do
     delete logout_url
-    get console_roles_url
+    get console_secrets_url
     assert_redirected_to login_path
   end
 
@@ -16,22 +16,12 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     delete logout_url
     post login_url, params: { email: users(:member_user).email, password: "password123456" }
 
-    [ console_roles_url, console_secrets_url,
+    [ console_secrets_url,
       console_credentials_url, console_oauth_apps_url ].each do |url|
       get url
       assert_redirected_to console_integrations_path
       assert_nil flash[:alert]
     end
-  end
-
-  test "a non-admin cannot mutate through the Control form controllers" do
-    delete logout_url
-    post login_url, params: { email: users(:member_user).email, password: "password123456" }
-
-    assert_no_difference -> { Role.count } do
-      post console_roles_url, params: { role: { foreign_id: "sneaky" } }
-    end
-    assert_redirected_to console_integrations_path
   end
 
   test "secrets table combines kinds and links names to detail" do
@@ -258,7 +248,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "header shows the signed-in operator and a sign-out control" do
-    get console_roles_url
+    get console_credentials_url
     assert_response :ok
     assert_select "span", text: @operator.email
     assert_select "form[action=?][method=?]", logout_path, "post" do

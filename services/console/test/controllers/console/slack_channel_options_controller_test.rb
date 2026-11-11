@@ -12,15 +12,6 @@ module Console
       post login_url, params: { email: @operator.email, password: "password123456" }
     end
 
-    test "role options use the same lookup endpoint" do
-      with_catalog do
-        get slack_channel_options_console_role_url(roles(:acme_infra).oid), params: { q: "no-match" }
-      end
-
-      assert_response :ok
-      assert_equal [], response.parsed_body.fetch("options")
-    end
-
     test "scheduled task options include public channels and shared private channels" do
       public_channel = SlackBotChannel.create!(
         team_id: "T0123456789",
@@ -127,16 +118,6 @@ module Console
       assert_response :ok
       assert_nil response.parsed_body["error"]
       assert_equal "G2222222222", response.parsed_body.fetch("options").sole.fetch("value")
-    end
-
-    test "non-admins cannot search the catalog" do
-      delete logout_url
-      post login_url, params: { email: users(:member_user).email, password: "password123456" }
-
-      get slack_channel_options_console_role_url(roles(:acme_infra).oid),
-          params: { owner_type: "scheduled_task" }
-
-      assert_redirected_to console_integrations_path
     end
 
     test "non-admins can search scheduled task delivery channels" do

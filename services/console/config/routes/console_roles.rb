@@ -1,17 +1,17 @@
-# Roles slice (HTML console routes). The Slack channel permission delete
-# route is shared with the principal page until both pages move to the SPA.
+# Roles slice. The pages live in the SPA (web/src/features/roles); Rails only
+# keeps path helpers for redirects and links from legacy pages.
+direct(:console_roles) { "/console/roles" }
+direct(:console_role) { |oid| "/console/roles/#{oid}" }
 
-namespace :console do
-  resources :roles, only: %i[index show new create edit update] do
-    member do
-      get "slack_channel_options", to: "slack_channel_options#index",
-          defaults: { owner_type: "role" }, as: :slack_channel_options
-      post "grants", to: "roles#grant_secret", as: :grant_secret
-      delete "grants/:grant_id", to: "roles#revoke_grant", as: :revoke_grant
-      patch "slack_channel_permissions", to: "roles#update_slack_channel_permissions",
-            as: :slack_channel_permissions
+# /api/v1 additions used by the role pages (see docs/API.md#roles).
+namespace :api do
+  namespace :v1 do
+    resources :roles, only: [] do
+      member do
+        put "slack_channel_permissions", action: :replace_slack_channel_permissions
+        delete "slack_channel_permissions/:channel_id", action: :destroy_slack_channel_permission,
+               as: :slack_channel_permission, constraints: { channel_id: /[^\/]+/ }
+      end
     end
   end
-  delete "slack_channel_permissions/:slack_channel_permission_id", to: "slack_channel_permissions#destroy",
-         as: :slack_channel_permission
 end

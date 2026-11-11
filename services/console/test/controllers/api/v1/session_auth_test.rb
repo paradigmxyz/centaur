@@ -223,7 +223,7 @@ module Api
       test "descope is shared with the HTML console session" do
         sign_in_console(users(:acme_admin))
         post api_v1_descope_path, headers: csrf_headers
-        get console_roles_path
+        get console_credentials_path
         assert_redirected_to console_integrations_path
       end
 

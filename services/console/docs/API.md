@@ -1502,6 +1502,8 @@ Returns `201`:
 | `GET`    | `/api/v1/roles/:role_id/grants` | [List the grants](#list-by-grantee) attached to the role. |
 | `POST`   | `/api/v1/roles/:id/slack_channel_permissions` | Idempotently create or update one role-owned Slack channel permission without replacing other rows. Omitted flags default to enabled on create and remain unchanged on update. |
 | `PUT`/`PATCH` | `/api/v1/roles/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, `labels`, and `slack_channel_permissions` are mutable on an existing record; `foreign_id` applies only when creating. |
+| `PUT`    | `/api/v1/roles/:id/slack_channel_permissions` | Replace the role's Slack channel permissions with `data.slack_channel_permissions`. Rows are keyed by `channel_id`. An unchanged submission writes nothing; a change bumps the sync config of every principal holding the role. Returns the stored rows. `422` if a row has no permission enabled. |
+| `DELETE` | `/api/v1/roles/:id/slack_channel_permissions/:channel_id` | Delete one role Slack channel permission. `204`; `404` if absent. |
 | `DELETE` | `/api/v1/roles/:id` | Delete. Returns `204`. Cascades: the role's grants and its assignments are removed. |
 
 ### Role assignments
