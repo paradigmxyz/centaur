@@ -647,7 +647,7 @@ describe("workflow detail", () => {
     expect(screen.getByText("cron */5 * * * * · America/Los_Angeles")).toBeInTheDocument();
     expect(screen.getByText("2 minutes")).toBeInTheDocument();
     expect(screen.getByText("Debugging")).toBeInTheDocument();
-    expect(screen.getByText("Last failure")).toHaveClass("text-red-400");
+    expect(screen.getByText("Last failure")).toHaveClass("text-destructive");
     expect(screen.getByText("run run-failed")).toBeInTheDocument();
     expect(screen.getByText(/"mode": "incremental"/)).toBeInTheDocument();
 

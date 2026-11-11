@@ -35,34 +35,34 @@ function SkillDetail() {
       <div className="mb-8">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-bold text-heading">{skill.name}</h1>
+            <h1 className="text-2xl font-semibold tracking-tight">{skill.name}</h1>
             <VisibilityBadge visibility={skill.visibility} />
           </div>
           <SkillActions skill={skill} />
         </div>
-        <p className="mt-2 text-xs text-subtle-foreground">
+        <p className="mt-2 text-sm text-muted-foreground">
           by {skill.author} · updated <LocalTime value={skill.updated_at} format="relative" />
         </p>
       </div>
 
-      <div className="max-w-3xl space-y-8">
-        <section aria-labelledby="skill-description-heading">
-          <h2 id="skill-description-heading" className="mb-3 text-sm font-semibold text-heading">
+      <div className="max-w-3xl space-y-4">
+        <section aria-labelledby="skill-description-heading" className="rounded-xl border bg-card p-5 shadow-xs">
+          <h2 id="skill-description-heading" className="mb-3 text-sm font-semibold">
             Description
           </h2>
           <p className="text-sm leading-6 text-muted-foreground">{skill.description}</p>
         </section>
 
-        <section aria-labelledby="skill-instructions-heading">
-          <h2 id="skill-instructions-heading" className="mb-3 text-sm font-semibold text-heading">
+        <section aria-labelledby="skill-instructions-heading" className="rounded-xl border bg-card p-5 shadow-xs">
+          <h2 id="skill-instructions-heading" className="mb-3 text-sm font-semibold">
             Instructions
           </h2>
           <SkillMarkdown html={skill.content_html} />
         </section>
 
         {skill.editors.length > 0 && (
-          <section aria-labelledby="skill-editors-heading">
-            <h2 id="skill-editors-heading" className="mb-3 text-sm font-semibold text-heading">
+          <section aria-labelledby="skill-editors-heading" className="rounded-xl border bg-card p-5 shadow-xs">
+            <h2 id="skill-editors-heading" className="mb-3 text-sm font-semibold">
               Editors
             </h2>
             <ul className="space-y-2 text-sm text-muted-foreground">
@@ -120,20 +120,25 @@ function SkillActions({ skill }: { skill: Skill }) {
             disabled={busy}
             title={shared ? "Make this skill private" : "Make this skill public"}
             onClick={() => setVisibility(!shared)}
-            className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-sm border border-border px-3 text-xs hover:border-ink-500 disabled:opacity-60"
+            className="group inline-flex h-9 cursor-pointer items-center gap-2.5 rounded-md border border-input bg-transparent px-3 text-sm shadow-xs transition-[color,box-shadow] outline-none hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 dark:bg-input/30 dark:hover:bg-input/50"
           >
-            <span className={shared ? "text-muted-foreground" : "font-medium text-heading"}>Private</span>
-            <span className={cn("relative h-5 w-9 rounded-full", shared ? "bg-centaur-500" : "bg-ink-600 light:bg-zinc-300")}>
+            <span className={shared ? "text-muted-foreground" : "font-medium"}>Private</span>
+            {/* The track and thumb of the shadcn Switch. */}
+            <span
+              aria-hidden="true"
+              className={cn(
+                "relative inline-flex h-[1.15rem] w-8 shrink-0 items-center rounded-full transition-colors",
+                shared ? "bg-primary" : "bg-input dark:bg-input/80",
+              )}
+            >
               <span
                 className={cn(
-                  "absolute top-1 left-1 h-3 w-3 rounded-full bg-white transition-transform",
-                  shared && "translate-x-4",
+                  "block size-4 rounded-full transition-transform",
+                  shared ? "translate-x-[calc(100%-2px)] bg-background dark:bg-primary-foreground" : "translate-x-0 bg-background dark:bg-foreground",
                 )}
               />
             </span>
-            <span className={shared ? "font-medium text-centaur-300 light:text-primary" : "text-muted-foreground"}>
-              Public
-            </span>
+            <span className={shared ? "font-medium text-primary" : "text-muted-foreground"}>Public</span>
           </button>
           <Button variant="destructive" disabled={busy} onClick={archive}>
             Archive

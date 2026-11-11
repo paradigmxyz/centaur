@@ -1,5 +1,6 @@
 // /pending — holding page for a signed-in account awaiting approval. Signed-out
 // browsers go to /login and active accounts to their landing page.
+import { Hourglass } from "lucide-react";
 import { useEffect } from "react";
 
 import { defaultLandingPath } from "@/app/session";
@@ -37,16 +38,19 @@ export default function PendingPage() {
         <AuthLoading />
       ) : (
         <AuthCard className="text-center">
-          <h2 className="text-lg font-semibold text-heading">Awaiting approval</h2>
+          <div className="mx-auto mb-4 grid size-11 place-items-center rounded-full bg-warning/10 text-warning">
+            <Hourglass className="size-5" aria-hidden="true" />
+          </div>
+          <h2 className="text-lg font-semibold">Awaiting approval</h2>
           <p className="mt-2 text-sm text-muted-foreground">
-            You&apos;re signed in as <span className="text-heading">{me.user.email}</span>, but your account is pending
+            You&apos;re signed in as <span className="font-medium text-foreground">{me.user.email}</span>, but your account is pending
             approval by an administrator. You&apos;ll have access once it&apos;s approved.
           </p>
           {signOut.isError && <ErrorAlert className="mt-4 mb-0 text-left">{errorMessage(signOut.error)}</ErrorAlert>}
           <div className="mt-6">
             <Button
               type="button"
-              variant="secondary"
+              variant="outline"
               className="w-full"
               disabled={signOut.isPending || signOut.isSuccess}
               onClick={() => signOut.mutate(undefined, { onSuccess: () => navigation.assign("/login") })}

@@ -41,15 +41,15 @@ function OauthAppDetail() {
       <div className="mb-8">
         <BackLink to="/console/oauth_apps">back to Apps</BackLink>
         <div className="mt-2 flex flex-wrap items-center gap-3">
-          <h1 className="font-mono text-2xl font-bold text-heading">{app.slug}</h1>
+          <h1 className="font-mono text-2xl font-semibold tracking-tight">{app.slug}</h1>
           <EnabledBadge enabled={app.enabled} />
           <Button asChild variant="secondary" className="ml-auto">
             <Link to={`/console/oauth_apps/${app.id}/edit`}>Edit</Link>
           </Button>
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
-          <span className="glow text-centaur-400 light:text-primary">{app.id}</span>
-          <span className="text-subtle-foreground">·</span>
+          <span className="rounded-md border bg-muted/50 px-1.5 py-0.5 font-mono text-xs text-foreground">{app.id}</span>
+          <span className="text-muted-foreground">·</span>
           <ProviderPill provider={app.provider} />
         </div>
         {app.description && <p className="mt-3 max-w-2xl text-sm text-muted-foreground">{app.description}</p>}
@@ -85,7 +85,7 @@ function OauthAppDetail() {
 
       <MintedCredentialsSection appId={app.id} />
 
-      <p className="text-xs text-subtle-foreground">
+      <p className="text-xs text-muted-foreground">
         The client secret is never shown. Credentials minted by this app inherit its client id and secret.
       </p>
     </>

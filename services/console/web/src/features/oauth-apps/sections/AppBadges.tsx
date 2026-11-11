@@ -1,9 +1,12 @@
 import { StatusBadge } from "@/components/badges";
+import { Badge } from "@/components/ui/badge";
 
-/** Uppercase provider pill (legacy rounded bg-ink-700 chip). */
+/** Provider pill. */
 export function ProviderPill({ provider }: { provider: string }) {
   return (
-    <span className="rounded-sm bg-muted px-2 py-0.5 text-[11px] tracking-wide text-foreground uppercase">{provider}</span>
+    <Badge variant="outline" className="rounded-md bg-muted/50 font-mono text-[11px] font-normal text-muted-foreground">
+      {provider}
+    </Badge>
   );
 }
 

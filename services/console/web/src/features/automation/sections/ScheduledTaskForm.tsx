@@ -9,8 +9,11 @@ import { CheckboxField, SelectField, TextareaField, TextField } from "@/componen
 import { applyApiErrors } from "@/components/form/form-errors";
 import { SlackChannelPicker } from "@/components/slack-channel-picker";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { ApiError, errorMessage, humanize } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 import { deliveryChannelLoader, type ScheduledTask, type ScheduledTaskInput, type SchedulePreset } from "../api";
 
@@ -114,7 +117,7 @@ export function ScheduledTaskForm({ task, submitLabel, onSubmit }: ScheduledTask
   const customTimeError = form.formState.errors.custom_time;
 
   return (
-    <form onSubmit={submit} className="space-y-5" noValidate>
+    <form onSubmit={submit} className="max-w-3xl space-y-6 rounded-xl border bg-card p-6 shadow-xs" noValidate>
       {messages.length > 0 && (
         <ErrorAlert className="mb-0">
           <p className="font-semibold">Could not save this task:</p>
@@ -144,36 +147,26 @@ export function ScheduledTaskForm({ task, submitLabel, onSubmit }: ScheduledTask
       />
 
       <fieldset>
-        <legend className="mb-2 block text-xs font-semibold tracking-wider text-foreground uppercase">Deliver to</legend>
+        <legend className="mb-3 block text-sm font-medium">Deliver to</legend>
         <Controller
           control={form.control}
           name="delivery_mode"
           render={({ field }) => (
-            <div className="flex flex-wrap gap-4">
-              <label className="flex items-center gap-2 text-sm text-foreground">
-                <input
-                  type="radio"
-                  name={field.name}
-                  value="dm"
-                  checked={field.value === "dm"}
-                  disabled={!dmUserId}
-                  onChange={() => field.onChange("dm")}
-                  className="accent-centaur-500"
-                />
+            <RadioGroup
+              name={field.name}
+              value={field.value}
+              onValueChange={(next) => field.onChange(next)}
+              className="flex flex-wrap gap-x-6 gap-y-3"
+            >
+              <label className={cn("flex items-center gap-2 text-sm", dmUserId ? "cursor-pointer" : "cursor-not-allowed opacity-60")}>
+                <RadioGroupItem value="dm" disabled={!dmUserId} />
                 <span>Deliver to my DM</span>
               </label>
-              <label className="flex items-center gap-2 text-sm text-foreground">
-                <input
-                  type="radio"
-                  name={field.name}
-                  value="channel"
-                  checked={field.value === "channel"}
-                  onChange={() => field.onChange("channel")}
-                  className="accent-centaur-500"
-                />
+              <label className="flex cursor-pointer items-center gap-2 text-sm">
+                <RadioGroupItem value="channel" />
                 <span>Deliver to a channel</span>
               </label>
-            </div>
+            </RadioGroup>
           )}
         />
         {deliveryMode === "channel" && (
@@ -192,7 +185,7 @@ export function ScheduledTaskForm({ task, submitLabel, onSubmit }: ScheduledTask
                     pattern={CHANNEL_ID_PATTERN}
                   />
                   {fieldState.error && (
-                    <p className="mt-1 text-xs text-red-400 light:text-red-700">{fieldState.error.message}</p>
+                    <p className="mt-1.5 text-xs text-destructive">{fieldState.error.message}</p>
                   )}
                 </>
               )}
@@ -219,47 +212,45 @@ export function ScheduledTaskForm({ task, submitLabel, onSubmit }: ScheduledTask
         />
 
         {schedulePreset === "custom" && (
-          <fieldset className="mt-4 rounded-sm border border-border bg-muted/40 p-4">
-            <legend className="px-1 text-sm font-medium text-heading">Custom schedule</legend>
+          <fieldset className="mt-4 rounded-lg border bg-muted/30 p-4">
+            <legend className="px-1 text-sm font-semibold">Custom schedule</legend>
             <Controller
               control={form.control}
               name="custom_days"
               render={({ field, fieldState }) => (
                 <div role="group" aria-labelledby="custom-days-label">
-                  <span id="custom-days-label" className="mb-2 block text-xs font-medium text-muted-foreground">
+                  <span id="custom-days-label" className="mb-2 block text-sm font-medium">
                     Days
                   </span>
                   <div className="grid grid-cols-4 gap-2 sm:grid-cols-7">
                     {CUSTOM_DAYS.map(([label, value]) => (
                       <label
                         key={value}
-                        className="flex cursor-pointer items-center justify-center gap-2 rounded-sm border border-border bg-card px-2 py-2 text-sm text-foreground hover:border-primary/50"
+                        className="flex cursor-pointer items-center justify-center gap-2 rounded-lg border bg-background px-2 py-2 text-sm transition-colors hover:bg-accent has-data-[state=checked]:border-primary/50 has-data-[state=checked]:bg-primary/10 dark:bg-input/30"
                       >
-                        <input
-                          type="checkbox"
+                        <Checkbox
                           value={value}
                           checked={field.value.includes(value)}
-                          onChange={(event) =>
+                          onCheckedChange={(checked) =>
                             field.onChange(
-                              event.target.checked
+                              checked === true
                                 ? [...field.value, value]
                                 : field.value.filter((day) => day !== value),
                             )
                           }
-                          className="accent-centaur-500"
                         />
                         <span>{label}</span>
                       </label>
                     ))}
                   </div>
                   {fieldState.error && (
-                    <p className="mt-1 text-xs text-red-400 light:text-red-700">{fieldState.error.message}</p>
+                    <p className="mt-1.5 text-xs text-destructive">{fieldState.error.message}</p>
                   )}
                 </div>
               )}
             />
             <div className="mt-4 max-w-xs">
-              <label htmlFor="scheduled-task-custom-time" className="mb-2 block text-xs font-medium text-muted-foreground">
+              <label htmlFor="scheduled-task-custom-time" className="mb-2 block text-sm font-medium">
                 Time
               </label>
               <Input
@@ -270,18 +261,18 @@ export function ScheduledTaskForm({ task, submitLabel, onSubmit }: ScheduledTask
                 {...form.register("custom_time")}
               />
               {customTimeError && (
-                <p className="mt-1 text-xs text-red-400 light:text-red-700">{customTimeError.message}</p>
+                <p className="mt-1.5 text-xs text-destructive">{customTimeError.message}</p>
               )}
               <p className="mt-2 text-xs text-muted-foreground">Custom schedules use Pacific Time.</p>
             </div>
           </fieldset>
         )}
         {cronError && (
-          <p className="mt-2 text-xs text-red-400 light:text-red-700">Choose at least one day and a time.</p>
+          <p className="mt-2 text-xs text-destructive">Choose at least one day and a time.</p>
         )}
       </div>
 
-      <div className="rounded-sm border border-border bg-muted/40 px-4 py-3">
+      <div className="rounded-lg border bg-muted/30 px-4 py-3">
         <CheckboxField
           control={form.control}
           name="enabled"

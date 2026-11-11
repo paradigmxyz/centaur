@@ -88,7 +88,7 @@ export function ProviderLogo({ provider, className = "size-8 shrink-0" }: { prov
 export function ProviderTile({ provider, fallback = true }: { provider: string; fallback?: boolean }) {
   if (hasProviderLogo(provider)) {
     return (
-      <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-heading">
+      <span className="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-muted/50">
         <ProviderLogo provider={provider} />
       </span>
     );
@@ -96,7 +96,7 @@ export function ProviderTile({ provider, fallback = true }: { provider: string; 
   if (!fallback) return null;
   return (
     <span
-      className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-xs font-semibold tracking-wide text-foreground uppercase"
+      className="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-muted/50 text-xs font-semibold"
       aria-hidden="true"
     >
       {provider.slice(0, 2)}

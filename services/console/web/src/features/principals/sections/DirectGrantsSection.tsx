@@ -58,9 +58,9 @@ export function DirectGrantsSection({ principal, mutations }: SectionProps) {
       {
         id: "id",
         header: "ID",
-        className: "w-32 whitespace-nowrap",
+        className: "font-mono text-xs w-32 whitespace-nowrap",
         cell: (row) => (
-          <AppLink to={secretPath(row.grantable)} className="text-centaur-400 hover:underline light:text-primary">
+          <AppLink to={secretPath(row.grantable)} className="text-primary hover:underline">
             {row.grantable.id}
           </AppLink>
         ),
@@ -68,27 +68,27 @@ export function DirectGrantsSection({ principal, mutations }: SectionProps) {
       {
         id: "foreign_id",
         header: "Foreign ID",
-        className: "w-[28%] whitespace-nowrap",
+        className: "font-mono text-xs w-[28%] whitespace-nowrap",
         cell: (row) =>
           row.grantable.foreign_id ? (
             <span className="block truncate" title={row.grantable.foreign_id}>
               {row.grantable.foreign_id}
             </span>
           ) : (
-            <span className="text-subtle-foreground">—</span>
+            <span className="text-muted-foreground">—</span>
           ),
       },
       {
         id: "name",
         header: "Name",
-        className: "whitespace-nowrap text-heading",
+        className: "whitespace-nowrap text-foreground",
         cell: (row) =>
           row.grantable.name ? (
             <span className="block truncate" title={row.grantable.name}>
               {row.grantable.name}
             </span>
           ) : (
-            <span className="text-subtle-foreground">unnamed</span>
+            <span className="text-muted-foreground">unnamed</span>
           ),
       },
       {
@@ -108,7 +108,7 @@ export function DirectGrantsSection({ principal, mutations }: SectionProps) {
               }
             }}
             trigger={
-              <Button variant="secondary" size="sm" className="hover:border-red-500/40 hover:text-red-300">
+              <Button variant="secondary" size="sm" className="hover:border-destructive/40 hover:text-destructive">
                 Revoke
               </Button>
             }

@@ -19,19 +19,19 @@ const columns: Column<ApiClient>[] = [
     cell: (client) => (
       <Link
         to={`/console/api_clients/${client.id}`}
-        className="text-centaur-400 hover:text-centaur-300 hover:underline light:text-primary"
+        className="text-primary hover:underline"
       >
         {client.id}
       </Link>
     ),
   },
-  { id: "name", header: "Name", className: "whitespace-nowrap text-heading", cell: (client) => client.name },
+  { id: "name", header: "Name", className: "whitespace-nowrap text-foreground", cell: (client) => client.name },
   { id: "scopes", header: "Scopes", cell: (client) => <ScopeChips scopes={client.scopes} /> },
-  { id: "principals", header: "Principals", className: "text-zinc-400", cell: (client) => client.principals_count },
+  { id: "principals", header: "Principals", className: "text-muted-foreground", cell: (client) => client.principals_count },
   {
     id: "status",
     header: "Status",
-    className: "text-zinc-400",
+    className: "text-muted-foreground",
     cell: (client) => (client.disabled ? "disabled" : "active"),
   },
 ];

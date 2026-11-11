@@ -22,9 +22,9 @@ const columns: Column<EffectiveGrant>[] = [
   {
     id: "id",
     header: "ID",
-    className: "w-32 whitespace-nowrap",
+    className: "font-mono text-xs w-32 whitespace-nowrap",
     cell: (row) => (
-      <AppLink to={secretPath(row)} className="text-centaur-400 hover:underline light:text-primary">
+      <AppLink to={secretPath(row)} className="text-primary hover:underline">
         {row.id}
       </AppLink>
     ),
@@ -32,27 +32,27 @@ const columns: Column<EffectiveGrant>[] = [
   {
     id: "foreign_id",
     header: "Foreign ID",
-    className: "w-[28%] whitespace-nowrap",
+    className: "font-mono text-xs w-[28%] whitespace-nowrap",
     cell: (row) =>
       row.foreign_id ? (
         <span className="block truncate" title={row.foreign_id}>
           {row.foreign_id}
         </span>
       ) : (
-        <span className="text-subtle-foreground">—</span>
+        <span className="text-muted-foreground">—</span>
       ),
   },
   {
     id: "name",
     header: "Name",
-    className: "whitespace-nowrap text-heading",
+    className: "whitespace-nowrap text-foreground",
     cell: (row) =>
       row.name ? (
         <span className="block truncate" title={row.name}>
           {row.name}
         </span>
       ) : (
-        <span className="text-subtle-foreground">unnamed</span>
+        <span className="text-muted-foreground">unnamed</span>
       ),
   },
   {
@@ -62,7 +62,7 @@ const columns: Column<EffectiveGrant>[] = [
     cell: (row) => (
       <div className="flex flex-wrap gap-1">
         {row.direct && (
-          <span className="inline-flex items-center rounded-sm bg-primary/10 px-2 py-0.5 text-[11px] text-centaur-300 ring-1 ring-primary/30 light:text-primary">
+          <span className="inline-flex items-center rounded-md bg-primary/10 px-2 py-0.5 text-[11px] text-primary ring-1 ring-primary/30">
             direct
           </span>
         )}
@@ -70,7 +70,7 @@ const columns: Column<EffectiveGrant>[] = [
           <span
             key={role.id}
             title={`${displayLabel(role)} (${role.id})`}
-            className="inline-flex max-w-full min-w-0 items-center rounded-sm bg-secondary px-2 py-0.5 text-[11px] text-foreground ring-1 ring-border"
+            className="inline-flex max-w-full min-w-0 items-center rounded-md bg-secondary px-2 py-0.5 text-[11px] text-foreground ring-1 ring-border"
           >
             <span className="truncate">via {displayLabel(role)}</span>
           </span>

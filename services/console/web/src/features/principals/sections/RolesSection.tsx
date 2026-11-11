@@ -51,11 +51,11 @@ export function RolesSection({ principal, mutations }: SectionProps) {
     {
       id: "role",
       header: "Role",
-      className: "whitespace-nowrap text-heading",
-      cell: (role) => role.name || <span className="text-subtle-foreground">unnamed</span>,
+      className: "whitespace-nowrap text-foreground",
+      cell: (role) => role.name || <span className="text-muted-foreground">unnamed</span>,
     },
-    { id: "id", header: "ID", className: "whitespace-nowrap text-centaur-400 light:text-primary", cell: (role) => role.id },
-    { id: "foreign_id", header: "Foreign ID", className: "whitespace-nowrap", cell: (role) => role.foreign_id || "—" },
+    { id: "id", header: "ID", className: "font-mono text-xs whitespace-nowrap text-primary", cell: (role) => role.id },
+    { id: "foreign_id", header: "Foreign ID", className: "font-mono text-xs whitespace-nowrap", cell: (role) => role.foreign_id || "—" },
     {
       id: "actions",
       header: <span className="sr-only">Actions</span>,
@@ -73,7 +73,7 @@ export function RolesSection({ principal, mutations }: SectionProps) {
             }
           }}
           trigger={
-            <Button variant="secondary" size="sm" className="hover:border-red-500/40 hover:text-red-300">
+            <Button variant="secondary" size="sm" className="hover:border-destructive/40 hover:text-destructive">
               Unassign
             </Button>
           }

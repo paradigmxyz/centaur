@@ -14,7 +14,7 @@ export function SourcesSection({ segments }: { segments: SourceSegment[] }) {
           {
             id: "field",
             header: "Field",
-            className: "whitespace-nowrap font-mono text-xs text-zinc-400",
+            className: "whitespace-nowrap font-mono text-xs text-muted-foreground",
             cell: (segment: SourceSegment) => segment.role || "—",
           },
         ]
@@ -24,7 +24,7 @@ export function SourcesSection({ segments }: { segments: SourceSegment[] }) {
       header: "Backend",
       className: "whitespace-nowrap",
       cell: (segment) => (
-        <span className="rounded-sm bg-muted px-2 py-0.5 text-xs text-foreground">{segment.type_label}</span>
+        <span className="rounded-md bg-muted px-2 py-0.5 text-xs text-foreground">{segment.type_label}</span>
       ),
     },
     {
@@ -34,7 +34,7 @@ export function SourcesSection({ segments }: { segments: SourceSegment[] }) {
         segment.ref ? (
           <span className="block font-mono text-xs break-all text-foreground">{segment.ref}</span>
         ) : (
-          <span className="text-subtle-foreground">—</span>
+          <span className="text-muted-foreground">—</span>
         ),
     },
   ];
@@ -61,11 +61,11 @@ export function ConfigurationSection({ rows }: { rows: SecretDetail["configurati
   return (
     <section className="mb-8">
       <SectionHeading className="mb-3">Configuration</SectionHeading>
-      <dl className="divide-y divide-border/70 rounded-sm border border-border bg-card">
+      <dl className="divide-y divide-border/70 rounded-xl border bg-card shadow-xs">
         {rows.map((row) => (
           <div key={row.label} className="flex flex-col gap-1 px-5 py-3 sm:flex-row sm:gap-4">
-            <dt className="w-40 shrink-0 text-xs tracking-wider text-muted-foreground uppercase">{row.label}</dt>
-            <dd className="font-mono text-xs break-all whitespace-pre-line text-heading">{row.value}</dd>
+            <dt className="w-40 shrink-0 text-xs text-muted-foreground">{row.label}</dt>
+            <dd className="font-mono text-xs break-all whitespace-pre-line text-foreground">{row.value}</dd>
           </div>
         ))}
       </dl>
@@ -82,7 +82,7 @@ export function SignedHeadersSection({ headers }: { headers: SecretDetail["signe
         caption="Signed headers"
         columns={[
           { id: "name", header: "Name", className: "whitespace-nowrap font-mono text-xs", cell: (h) => h.name },
-          { id: "value", header: "Value", className: "font-mono text-xs break-all text-zinc-400", cell: (h) => h.value },
+          { id: "value", header: "Value", className: "font-mono text-xs break-all text-muted-foreground", cell: (h) => h.value },
         ]}
         rows={headers}
         rowKey={(header) => header.name}
@@ -98,7 +98,7 @@ export function RequestRulesSection({ rules }: { rules: RequestRule[] | null }) 
     <section className="mb-8">
       <SectionHeading className="mb-3">Request Rules</SectionHeading>
       {rules.length === 0 ? (
-        <p className="text-sm text-subtle-foreground">No request rules.</p>
+        <p className="text-sm text-muted-foreground">No request rules.</p>
       ) : (
         <DataTable
           caption="Request rules"
@@ -112,13 +112,13 @@ export function RequestRulesSection({ rules }: { rules: RequestRule[] | null }) 
             {
               id: "methods",
               header: "Methods",
-              className: "font-mono text-xs text-zinc-400",
+              className: "font-mono text-xs text-muted-foreground",
               cell: (rule) => (rule.http_methods.length > 0 ? rule.http_methods.join(", ") : "any"),
             },
             {
               id: "paths",
               header: "Paths",
-              className: "font-mono text-xs break-all text-zinc-400",
+              className: "font-mono text-xs break-all text-muted-foreground",
               cell: (rule) => (rule.paths.length > 0 ? rule.paths.join(", ") : "any"),
             },
           ]}

@@ -101,7 +101,7 @@ function WorkflowDashboard({ workflow }: { workflow: WorkflowDetail }) {
       <div className="mb-8">
         <BackLink to="/console/workflows">back to workflows</BackLink>
         <div className="mt-2 flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-bold text-heading" title={workflow.label}>
+          <h1 className="text-2xl font-semibold tracking-tight" title={workflow.label}>
             {truncateMiddle(workflow.label, 72)}
           </h1>
           <WorkflowStatusPill status={workflow.status} />
@@ -118,17 +118,17 @@ function WorkflowDashboard({ workflow }: { workflow: WorkflowDetail }) {
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
           <span className="text-muted-foreground">{workflow.task_name || "workflow"}</span>
-          <span className="text-subtle-foreground">·</span>
+          <span className="text-muted-foreground">·</span>
           <span className="text-muted-foreground">{totalRuns}</span>
           {schedule?.source_url && (
             <>
-              <span className="text-subtle-foreground">·</span>
+              <span className="text-muted-foreground">·</span>
               <a
                 href={schedule.source_url}
                 target="_blank"
                 rel="noopener noreferrer"
                 title={schedule.source_path ?? undefined}
-                className="text-centaur-400 hover:underline light:text-primary"
+                className="text-primary hover:underline"
               >
                 {schedule.source_path} ↗
               </a>
@@ -152,7 +152,7 @@ function WorkflowDashboard({ workflow }: { workflow: WorkflowDetail }) {
               value: (
                 <div className="flex-1">
                   {row.run_id && <div className="mb-1 text-muted-foreground">run {row.run_id}</div>}
-                  <pre className="max-h-64 overflow-auto rounded-sm bg-muted p-3 leading-5">{debugJson(row.value)}</pre>
+                  <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 leading-5">{debugJson(row.value)}</pre>
                 </div>
               ),
             }))}
@@ -167,20 +167,20 @@ function WorkflowDashboard({ workflow }: { workflow: WorkflowDetail }) {
 
 function DefinitionList({ rows }: { rows: { label: string; value: ReactNode; danger?: boolean }[] }) {
   return (
-    <dl className="divide-y divide-border/70 rounded-sm border border-border bg-card">
+    <dl className="divide-y divide-border/70 rounded-xl border bg-card shadow-xs">
       {rows.map((row) => (
         <div key={row.label} className="flex flex-col gap-1 px-5 py-3 sm:flex-row sm:gap-4">
           <dt
             className={cn(
-              "w-48 shrink-0 text-xs tracking-wider uppercase",
-              row.danger ? "text-red-400 light:text-red-700" : "text-muted-foreground",
+              "w-48 shrink-0 text-xs",
+              row.danger ? "text-destructive" : "text-muted-foreground",
             )}
           >
             {row.label}
           </dt>
           <dd className="min-w-0 flex-1 text-xs text-foreground">
             {row.value === null || row.value === undefined || row.value === "" ? (
-              <span className="text-subtle-foreground">—</span>
+              <span className="text-muted-foreground">—</span>
             ) : (
               row.value
             )}
@@ -223,12 +223,12 @@ const runColumns: Column<WorkflowRun>[] = [
   {
     id: "run",
     header: "Run",
-    className: "text-xs text-muted-foreground",
+    className: "font-mono text-xs text-muted-foreground",
     cell: (run) => (
       <>
-        <div title={run.run_id}>{truncateMiddle(run.run_id, 34)}</div>
+        <div className="text-foreground" title={run.run_id}>{truncateMiddle(run.run_id, 34)}</div>
         {run.task_id && (
-          <div className="mt-1 text-subtle-foreground" title={run.task_id}>
+          <div className="mt-1 text-muted-foreground" title={run.task_id}>
             {truncateMiddle(run.task_id, 34)}
           </div>
         )}
@@ -272,7 +272,7 @@ function HistoricalRuns({ workflow }: { workflow: WorkflowDetail }) {
       </div>
       {workflow.queues.length > 1 && (
         <div className="mb-3 flex flex-wrap items-center gap-1.5">
-          <span className="mr-1 text-xs tracking-wider text-muted-foreground uppercase">Queue</span>
+          <span className="mr-1 text-xs text-muted-foreground">Queue</span>
           <FilterChip to={filterHref({ queue: "" })} active={queue === ""}>
             all
           </FilterChip>
@@ -306,10 +306,10 @@ function FilterChip({ to, active, children }: { to: string; active: boolean; chi
       to={to}
       aria-current={active ? "true" : undefined}
       className={cn(
-        "inline-flex items-center rounded-sm border px-2 py-1 text-xs transition-colors",
+        "inline-flex h-7 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-[color,background-color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50",
         active
-          ? "border-primary/50 bg-primary/10 text-centaur-300 light:text-primary"
-          : "border-border text-muted-foreground hover:border-primary/40 hover:text-foreground",
+          ? "border-primary/40 bg-primary/10 text-primary"
+          : "border-input text-muted-foreground hover:bg-accent hover:text-foreground dark:bg-input/30",
       )}
     >
       {children}

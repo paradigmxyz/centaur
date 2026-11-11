@@ -27,7 +27,7 @@ function CredentialNew() {
       <div className="mb-8">
         <BackLink to="/console/credentials">back to credentials</BackLink>
         <div className="mt-2 flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-bold text-heading">New credential</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">New credential</h1>
           <ResourceBadge>Broker</ResourceBadge>
         </div>
       </div>

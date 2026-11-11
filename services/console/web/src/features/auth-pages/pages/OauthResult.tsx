@@ -1,9 +1,13 @@
 // /oauth/result — where a failed broker OAuth consent (/oauth/<slug>/start or
 // /callback) lands. The outcome arrives once through GET /api/v1/auth/config;
 // it never travels in the URL, so a crafted link cannot put text on this page.
+import { CircleAlert, CircleSlash } from "lucide-react";
+
 import { ErrorAlert } from "@/components/alerts";
 import { useDocumentTitle } from "@/components/page-header";
+import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import lockup from "@/assets/centaur-lockup-white.svg";
 
 import { useAuthConfig } from "../api";
@@ -24,7 +28,7 @@ export default function OauthResultPage() {
   if (config.isError) {
     return (
       <AuthCard>
-        <h1 className="mb-3 text-lg font-bold text-red-300 light:text-red-700">Something went wrong</h1>
+        <h1 className="mb-3 text-lg font-semibold text-destructive">Something went wrong</h1>
         <ErrorAlert className="mb-0">{errorMessage(config.error)}</ErrorAlert>
       </AuthCard>
     );
@@ -36,28 +40,23 @@ export default function OauthResultPage() {
 
   return (
     <AuthCard>
-      <div className="mb-3">
+      <div className="mb-5">
         <img src={lockup} alt="Centaur" width={497} height={127} className="logo-themed h-6 w-auto" />
       </div>
-      <h1
-        className={
-          denied
-            ? "text-lg font-bold text-amber-300 light:text-amber-700"
-            : "text-lg font-bold text-red-300 light:text-red-700"
-        }
-      >
+      <h1 className={cn("flex items-center gap-2 text-lg font-semibold", denied ? "text-warning" : "text-destructive")}>
+        {denied ? <CircleSlash className="size-5" aria-hidden="true" /> : <CircleAlert className="size-5" aria-hidden="true" />}
         {heading}
       </h1>
-      <p className="mt-3 text-sm text-muted-foreground">{message}</p>
+      <p className="mt-2 text-sm text-muted-foreground">{message}</p>
       {retryPath ? (
-        <a href={retryPath} className="mt-4 inline-block text-sm text-primary hover:underline">
-          Try again
-        </a>
+        <Button asChild className="mt-5 w-full">
+          <a href={retryPath}>Try again</a>
+        </Button>
       ) : (
         !result && (
-          <a href="/console/integrations" className="mt-4 inline-block text-sm text-primary hover:underline">
-            Go to Integrations
-          </a>
+          <Button asChild variant="outline" className="mt-5 w-full">
+            <a href="/console/integrations">Go to Integrations</a>
+          </Button>
         )
       )}
     </AuthCard>

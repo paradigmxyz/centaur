@@ -9,6 +9,7 @@ import { LocalTime } from "@/components/local-time";
 import { PageHeader } from "@/components/page-header";
 import { usePageParam } from "@/components/pagination";
 import { RequireAccess } from "@/components/require-access";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -31,7 +32,7 @@ const columns: Column<SecretListItem>[] = [
   {
     id: "name",
     header: "Name",
-    className: "w-[38%] overflow-hidden text-heading",
+    className: "w-[38%] overflow-hidden text-foreground",
     cell: (secret) => {
       const name = secret.name || "unnamed";
       return (
@@ -40,19 +41,20 @@ const columns: Column<SecretListItem>[] = [
             to={`/console/secrets/${secret.kind}/${secret.id}`}
             title={name}
             className={cn(
-              "block min-w-0 truncate text-centaur-400 hover:text-centaur-300 hover:underline light:text-primary",
-              !secret.name && "text-subtle-foreground",
+              "block min-w-0 truncate text-primary hover:underline",
+              !secret.name && "text-muted-foreground",
             )}
           >
             {truncateMiddle(name, 64)}
           </Link>
           {secret.managed_by && (
-            <span
+            <Badge
+              variant="outline"
               title={`Managed by the ${secret.managed_by.oauth_app_slug ?? ""} OAuth integration`}
-              className="inline-flex shrink-0 items-center rounded-sm bg-primary/10 px-1.5 py-0.5 text-[11px] text-centaur-300 ring-1 ring-primary/30 light:text-primary"
+              className="border-border bg-muted/50 text-[11px] font-normal text-muted-foreground"
             >
               managed
-            </span>
+            </Badge>
           )}
         </div>
       );
@@ -70,7 +72,7 @@ const columns: Column<SecretListItem>[] = [
     className: "w-[27%] overflow-hidden",
     cell: (secret) =>
       secret.source_types.length === 0 ? (
-        <span className="text-subtle-foreground">—</span>
+        <span className="text-muted-foreground">—</span>
       ) : (
         <div className="flex min-w-0 flex-wrap gap-1">
           {secret.source_types.map((type) => (
@@ -185,8 +187,8 @@ function SecretFilters({ q, type }: { q: string; type: string }) {
   };
 
   return (
-    <form role="search" onSubmit={onSubmit} className="mb-3 flex flex-wrap items-center gap-2">
-      <div className="relative w-full max-w-md">
+    <form role="search" onSubmit={onSubmit} className="mb-4 flex flex-wrap items-center gap-2">
+      <div className="relative w-full sm:max-w-md">
         <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-muted-foreground">
           <Search className="size-4" aria-hidden="true" />
         </span>
@@ -212,17 +214,13 @@ function SecretFilters({ q, type }: { q: string; type: string }) {
           ))}
         </SelectContent>
       </Select>
-      <Button type="submit" variant="secondary">
+      <Button type="submit" variant="outline">
         Filter
       </Button>
       {(q || type) && (
-        <button
-          type="button"
-          onClick={() => apply("", "")}
-          className="cursor-pointer px-2 py-2 text-sm text-muted-foreground hover:text-centaur-300"
-        >
+        <Button type="button" variant="ghost" onClick={() => apply("", "")} className="text-muted-foreground">
           Clear
-        </button>
+        </Button>
       )}
     </form>
   );

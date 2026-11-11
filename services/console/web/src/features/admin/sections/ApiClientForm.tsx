@@ -58,7 +58,7 @@ export function ApiClientForm({ mode, defaults, cancelTo, onSubmit }: ApiClientF
   return (
     <>
       <FormErrorSummary error={error} subject="API client" />
-      <form onSubmit={submit} className="space-y-6" noValidate>
+      <form onSubmit={submit} className="max-w-4xl space-y-6" noValidate>
         <FormSection title="Client">
           <div className="grid gap-5 sm:grid-cols-2">
             <TextField control={form.control} name="name" label="Name *" placeholder="eval-runner" />
@@ -97,7 +97,7 @@ export function ApiClientForm({ mode, defaults, cancelTo, onSubmit }: ApiClientF
                           )
                         }
                       />
-                      <label htmlFor={id} className="cursor-pointer text-xs font-semibold tracking-wider text-foreground">
+                      <label htmlFor={id} className="cursor-pointer text-sm font-medium">
                         {scope}
                       </label>
                     </div>
@@ -106,7 +106,7 @@ export function ApiClientForm({ mode, defaults, cancelTo, onSubmit }: ApiClientF
               </fieldset>
             )}
           />
-          {scopesError && <p className="mt-1 text-xs text-red-400 light:text-red-700">{scopesError}</p>}
+          {scopesError && <p className="mt-1 text-xs text-destructive">{scopesError}</p>}
           <p id="api-client-scopes-hint" className="mt-1 text-xs text-muted-foreground">
             sessions:write creates sessions and starts turns; sessions:read reads session state and events.
           </p>

@@ -134,7 +134,7 @@ export default function SshKeyEditPage() {
             </ul>
           </ErrorAlert>
         )}
-        <form onSubmit={onSubmit} className="space-y-6" noValidate>
+        <form onSubmit={onSubmit} className="max-w-4xl space-y-6" noValidate>
           <FormSection title="Your key">
             <FieldShell id={fieldId("name")} label="Name" error={nameError}>
               <Input

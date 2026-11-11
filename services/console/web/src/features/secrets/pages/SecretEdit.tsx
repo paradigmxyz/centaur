@@ -51,7 +51,7 @@ function SecretEdit({ kind, id }: { kind: FormKind; id: string }) {
       <div className="mb-8">
         <BackLink to={`/console/secrets/${kind}/${id}`}>back to secret</BackLink>
         <div className="mt-2 flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-bold text-heading">Edit {title}</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Edit {title}</h1>
           <ResourceBadge>{secretKindLabel(kind)}</ResourceBadge>
         </div>
       </div>

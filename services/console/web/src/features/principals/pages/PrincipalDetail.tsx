@@ -47,7 +47,7 @@ function PrincipalDetail() {
       <div className="mb-8">
         <BackLink to="/console/principals">back to principals</BackLink>
         <div className="mt-2 flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-bold text-heading">{principal.name || principal.foreign_id || "Principal"}</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">{principal.name || principal.foreign_id || "Principal"}</h1>
           <div className="ml-auto">
             <ConfirmDialog
               title="Delete this principal?"
@@ -63,12 +63,12 @@ function PrincipalDetail() {
           </div>
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
-          <span className="glow text-centaur-400 light:text-primary">{principal.id}</span>
+          <span className="rounded-md border bg-muted/50 px-1.5 py-0.5 font-mono text-xs text-foreground">{principal.id}</span>
           {principal.foreign_id && (
             <>
-              <span className="text-subtle-foreground">·</span>
-              <span className="text-zinc-400">
-                foreign_id: <span className="text-heading">{principal.foreign_id}</span>
+              <span className="text-muted-foreground">·</span>
+              <span className="text-muted-foreground">
+                foreign_id: <span className="font-mono text-xs text-foreground">{principal.foreign_id}</span>
               </span>
             </>
           )}

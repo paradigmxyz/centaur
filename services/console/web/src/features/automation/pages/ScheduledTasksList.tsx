@@ -54,16 +54,16 @@ function ScheduledTasksList() {
         <>
           <Link
             to={editPath(task)}
-            className="font-medium text-centaur-400 hover:text-centaur-300 hover:underline light:text-primary"
+            className="font-medium text-primary hover:underline"
           >
             {task.name}
           </Link>
           {task.last_error ? (
-            <div className="mt-1 text-xs text-red-400 light:text-red-700" title={task.last_error}>
+            <div className="mt-1 text-xs text-destructive" title={task.last_error}>
               Last dispatch failed
             </div>
           ) : task.last_run_at ? (
-            <div className="mt-1 text-xs text-subtle-foreground">
+            <div className="mt-1 text-xs text-muted-foreground">
               Last run <LocalTime value={task.last_run_at} format="compact" />
             </div>
           ) : null}
@@ -77,7 +77,7 @@ function ScheduledTasksList() {
       cell: (task) => (
         <>
           <div className={cn(task.schedule_label === task.cron_expression && "font-mono")}>{task.schedule_label}</div>
-          {!task.enabled && <div className="mt-1 text-subtle-foreground">Disabled</div>}
+          {!task.enabled && <div className="mt-1 text-muted-foreground">Disabled</div>}
         </>
       ),
     },
@@ -88,7 +88,7 @@ function ScheduledTasksList() {
       cell: (task) => (
         <>
           <div>{task.delivery_name || task.delivery_channel}</div>
-          {task.delivery_name && <div className="mt-1 text-subtle-foreground">{task.delivery_channel}</div>}
+          {task.delivery_name && <div className="mt-1 text-muted-foreground">{task.delivery_channel}</div>}
         </>
       ),
     },
@@ -108,7 +108,7 @@ function ScheduledTasksList() {
             confirmLabel="Delete"
             onConfirm={() => destroy(task)}
             trigger={
-              <Button variant="secondary" size="sm" className="text-red-300 light:text-red-700">
+              <Button variant="secondary" size="sm" className="text-destructive">
                 Delete
               </Button>
             }

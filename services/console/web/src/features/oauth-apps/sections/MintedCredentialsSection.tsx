@@ -17,7 +17,7 @@ const columns: Column<MintedCredential>[] = [
     cell: (credential) => (
       <AppLink
         to={`/console/credentials/${credential.id}`}
-        className="text-centaur-400 hover:text-centaur-300 hover:underline light:text-primary"
+        className="text-primary hover:underline"
       >
         {credential.foreign_id || credential.id}
       </AppLink>

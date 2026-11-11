@@ -13,20 +13,20 @@ import { pluralize, truncateMiddle } from "@/lib/format";
 
 import { useRoleList, type Role } from "../api";
 
-const linkClass = "text-centaur-400 hover:text-centaur-300 hover:underline light:text-primary";
+const linkClass = "text-primary hover:underline";
 
 const columns: Column<Role>[] = [
   {
     id: "id",
     header: "ID",
-    className: "whitespace-nowrap",
+    className: "font-mono text-[13px] whitespace-nowrap",
     cell: (role) =>
       role.foreign_id ? (
         <>
           <Link to={`/console/roles/${role.id}`} title={role.foreign_id} className={linkClass}>
             {truncateMiddle(role.foreign_id)}
           </Link>
-          <div className="mt-0.5 text-xs text-subtle-foreground">{role.id}</div>
+          <div className="mt-0.5 font-mono text-xs text-muted-foreground">{role.id}</div>
         </>
       ) : (
         <Link to={`/console/roles/${role.id}`} className={linkClass}>
@@ -37,12 +37,12 @@ const columns: Column<Role>[] = [
   {
     id: "name",
     header: "Name",
-    className: "whitespace-nowrap text-heading",
+    className: "whitespace-nowrap text-foreground",
     cell: (role) =>
       role.name ? (
         <span title={role.name}>{truncateMiddle(role.name)}</span>
       ) : (
-        <span className="text-subtle-foreground">unnamed</span>
+        <span className="text-muted-foreground">unnamed</span>
       ),
   },
   {
@@ -52,7 +52,7 @@ const columns: Column<Role>[] = [
       Object.keys(role.labels ?? {}).length > 0 ? (
         <LabelChips labels={role.labels} />
       ) : (
-        <span className="text-subtle-foreground">—</span>
+        <span className="text-muted-foreground">—</span>
       ),
   },
   {
@@ -63,7 +63,7 @@ const columns: Column<Role>[] = [
       <Link
         to={`/console/roles/${role.id}`}
         aria-label={`Open ${role.name || role.foreign_id || role.id}`}
-        className="text-subtle-foreground hover:text-centaur-400"
+        className="text-muted-foreground hover:text-primary"
       >
         →
       </Link>

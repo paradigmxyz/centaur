@@ -9,7 +9,9 @@ import { DataTable, type Column } from "@/components/data-table";
 import { LocalTime } from "@/components/local-time";
 import { PageHeader } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Table, TableBody, TableCaption, TableCell, TableRow } from "@/components/ui/table";
 import { errorMessage } from "@/lib/api";
 
 import { useUserAction, useUsers, type ConsoleUser, type UserAction } from "../api";
@@ -21,7 +23,7 @@ const SUCCESS: Record<UserAction, (user: ConsoleUser) => string> = {
   demote: (user) => `${user.email} is now a user.`,
 };
 
-const actionButton = "hover:border-primary/40 hover:text-centaur-300";
+const actionButton = "hover:border-primary/40 hover:text-primary";
 
 export default function UsersPageRoute() {
   return (
@@ -37,9 +39,9 @@ function IdpChips({ user }: { user: ConsoleUser }) {
   return (
     <div className="flex flex-wrap gap-1">
       {labels.map((label) => (
-        <span key={label} className="rounded-sm bg-muted px-1.5 py-0.5 text-xs text-zinc-300 ring-1 ring-border light:text-zinc-700">
+        <Badge key={label} variant="outline" className="rounded-md bg-muted/50 font-normal text-muted-foreground">
           {label.charAt(0).toUpperCase() + label.slice(1)}
-        </span>
+        </Badge>
       ))}
     </div>
   );
@@ -48,11 +50,11 @@ function IdpChips({ user }: { user: ConsoleUser }) {
 function EmailCell({ user }: { user: ConsoleUser }) {
   return (
     <>
-      <div className="text-heading">
+      <div className="font-medium">
         {user.email}
-        {user.current && <span className="ml-2 text-xs text-subtle-foreground">(you)</span>}
+        {user.current && <span className="ml-2 text-xs text-muted-foreground">(you)</span>}
       </div>
-      {user.name && <div className="text-xs text-subtle-foreground">{user.name}</div>}
+      {user.name && <div className="text-xs text-muted-foreground">{user.name}</div>}
     </>
   );
 }
@@ -91,7 +93,7 @@ function UsersPage() {
     {
       id: "role",
       header: "Role",
-      className: "whitespace-nowrap text-zinc-400",
+      className: "whitespace-nowrap text-muted-foreground",
       cell: (user) => (user.admin ? "admin" : "operator"),
     },
     { id: "idps", header: "IdPs", cell: (user) => <IdpChips user={user} /> },
@@ -131,7 +133,7 @@ function UsersPage() {
               confirmLabel="Disable"
               onConfirm={() => run(user, "disable")}
               trigger={
-                <Button variant="secondary" size="sm" className="hover:border-red-500/40 hover:text-red-300">
+                <Button variant="secondary" size="sm" className="hover:border-destructive/40 hover:text-destructive">
                   Disable
                 </Button>
               }
@@ -153,35 +155,35 @@ function UsersPage() {
         <section aria-labelledby="pending-users-heading" className="mb-10">
           <h2
             id="pending-users-heading"
-            className="mb-3 text-xs font-semibold tracking-wider text-amber-300/80 uppercase light:text-amber-700"
+            className="mb-3 flex items-center gap-2 text-sm font-semibold text-warning"
           >
             {/* Fixed label, as on the legacy page. */}
             {pending.length} pending approval
           </h2>
-          <div className="relative overflow-x-auto rounded-sm border border-amber-500/30 bg-amber-500/[0.04]">
-            <table className="min-w-full text-sm">
-              <caption className="sr-only">Pending users</caption>
-              <tbody className="divide-y divide-border/70">
+          <div className="overflow-hidden rounded-xl border border-warning/30 bg-warning/5">
+            <Table>
+              <TableCaption className="sr-only">Pending users</TableCaption>
+              <TableBody>
                 {pending.map((user) => (
-                  <tr key={user.id}>
-                    <td className="px-5 py-2">
+                  <TableRow key={user.id} className="border-warning/20 hover:bg-warning/5">
+                    <TableCell className="px-5 py-2.5 whitespace-normal">
                       <EmailCell user={user} />
-                    </td>
-                    <td className="px-5 py-2">
+                    </TableCell>
+                    <TableCell className="px-5 py-2.5">
                       <IdpChips user={user} />
-                    </td>
-                    <td className="px-5 py-2 text-subtle-foreground">
+                    </TableCell>
+                    <TableCell className="px-5 py-2.5 text-muted-foreground">
                       requested <LocalTime value={user.created_at} format="relative" />
-                    </td>
-                    <td className="px-5 py-2 text-right">
+                    </TableCell>
+                    <TableCell className="px-5 py-2.5 text-right">
                       <Button size="sm" disabled={action.isPending} onClick={() => void run(user, "approve")}>
                         Approve
                       </Button>
-                    </td>
-                  </tr>
+                    </TableCell>
+                  </TableRow>
                 ))}
-              </tbody>
-            </table>
+              </TableBody>
+            </Table>
           </div>
         </section>
       )}

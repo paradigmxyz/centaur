@@ -38,23 +38,23 @@ export function RoleGrantsSection({ kind, id }: { kind: string; id: string }) {
     {
       id: "role",
       header: "Role",
-      className: "whitespace-nowrap text-heading",
-      cell: (grant) => grant.role.name || <span className="text-subtle-foreground">unnamed</span>,
+      className: "whitespace-nowrap text-foreground",
+      cell: (grant) => grant.role.name || <span className="text-muted-foreground">unnamed</span>,
     },
     {
       id: "id",
       header: "ID",
-      className: "whitespace-nowrap",
+      className: "font-mono text-xs whitespace-nowrap",
       cell: (grant) => (
         <AppLink
           to={`/console/roles/${grant.role.id}`}
-          className="text-centaur-400 hover:text-centaur-300 hover:underline light:text-primary"
+          className="text-primary hover:underline"
         >
           {grant.role.id}
         </AppLink>
       ),
     },
-    { id: "foreign_id", header: "Foreign ID", className: "whitespace-nowrap", cell: (grant) => grant.role.foreign_id || "—" },
+    { id: "foreign_id", header: "Foreign ID", className: "font-mono text-xs whitespace-nowrap", cell: (grant) => grant.role.foreign_id || "—" },
     {
       id: "actions",
       header: <span className="sr-only">Actions</span>,
@@ -72,7 +72,7 @@ export function RoleGrantsSection({ kind, id }: { kind: string; id: string }) {
             }
           }}
           trigger={
-            <Button variant="secondary" size="sm" className="hover:border-red-500/40 hover:text-red-300">
+            <Button variant="secondary" size="sm" className="hover:border-destructive/40 hover:text-destructive">
               Unassign
             </Button>
           }

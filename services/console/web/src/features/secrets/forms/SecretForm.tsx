@@ -120,7 +120,7 @@ export function SecretForm({ kind, record }: { kind: FormKind; record?: KindReco
   return (
     <>
       {summary.length > 0 && (
-        <ErrorAlert>
+        <ErrorAlert className="max-w-4xl">
           <p className="mb-1 font-semibold">{pluralize(summary.length, "error")} prevented this secret from saving:</p>
           <ul className="list-disc space-y-0.5 pl-5">
             {summary.map((message, index) => (
@@ -129,9 +129,9 @@ export function SecretForm({ kind, record }: { kind: FormKind; record?: KindReco
           </ul>
         </ErrorAlert>
       )}
-      {rootError && summary.length === 0 && <ErrorAlert>{rootError}</ErrorAlert>}
+      {rootError && summary.length === 0 && <ErrorAlert className="max-w-4xl">{rootError}</ErrorAlert>}
       <FormProvider {...form}>
-        <form onSubmit={onSubmit} className="space-y-6" noValidate>
+        <form onSubmit={onSubmit} className="max-w-4xl space-y-6" noValidate>
           <IdentitySection foreignIdRequired={kind === "pg_dsn"} />
           {kind === "static" && <StaticSections details={details} hasStoredInline={hasStoredInline} />}
           {kind === "pg_dsn" && <PgDsnSections details={details} hasStoredInline={hasStoredInline} />}

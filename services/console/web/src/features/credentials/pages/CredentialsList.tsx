@@ -15,20 +15,20 @@ import { pluralize, truncateMiddle } from "@/lib/format";
 import { useCredentialList, type BrokerCredential } from "../api";
 import { providerLabel } from "../sections/provider";
 
-const linkClass = "text-centaur-400 hover:text-centaur-300 hover:underline light:text-primary";
+const linkClass = "text-primary hover:underline";
 
 const columns: Column<BrokerCredential>[] = [
   {
     id: "id",
     header: "ID",
-    className: "whitespace-nowrap",
+    className: "font-mono text-[13px] whitespace-nowrap",
     cell: (credential) =>
       credential.foreign_id ? (
         <>
           <Link to={`/console/credentials/${credential.id}`} title={credential.foreign_id} className={linkClass}>
             {truncateMiddle(credential.foreign_id)}
           </Link>
-          <div className="text-xs text-muted-foreground">{credential.id}</div>
+          <div className="font-mono text-xs text-muted-foreground">{credential.id}</div>
         </>
       ) : (
         <Link to={`/console/credentials/${credential.id}`} className={linkClass}>
@@ -39,13 +39,13 @@ const columns: Column<BrokerCredential>[] = [
   {
     id: "name",
     header: "Name",
-    className: "whitespace-nowrap text-heading",
+    className: "whitespace-nowrap text-foreground",
     cell: (credential) => (
       <>
         {credential.name ? (
           <span title={credential.name}>{truncateMiddle(credential.name)}</span>
         ) : (
-          <span className="text-subtle-foreground">unnamed</span>
+          <span className="text-muted-foreground">unnamed</span>
         )}
         {credential.oauth_app && (
           <span className="ml-1 text-xs text-muted-foreground">(via {providerLabel(credential.oauth_app.provider)} OAuth)</span>
@@ -69,7 +69,7 @@ const columns: Column<BrokerCredential>[] = [
   {
     id: "last_refresh",
     header: "Last Refresh",
-    className: "whitespace-nowrap text-zinc-400",
+    className: "whitespace-nowrap text-muted-foreground",
     cell: (credential) => <LocalTime value={credential.last_refresh} format="relative" />,
   },
 ];

@@ -58,7 +58,7 @@ export function RoleForm({ role, onSubmit, error }: RoleFormProps) {
     <>
       <FormErrorSummary error={error} subject="Role" />
       <FormProvider {...form}>
-        <form onSubmit={submit} className="space-y-6" noValidate>
+        <form onSubmit={submit} className="max-w-4xl space-y-6" noValidate>
           <FormSection title="Identity">
             <div className="grid gap-5 sm:grid-cols-2">
               {role ? (

@@ -38,7 +38,7 @@ function SecretNew() {
       <div className="mb-8">
         <BackLink to="/console/secrets">back to secrets</BackLink>
         <div className="mt-2 flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-bold text-heading">New secret</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">New secret</h1>
           <ResourceBadge>{secretKindLabel(kind)}</ResourceBadge>
         </div>
       </div>

@@ -75,7 +75,7 @@ export function SkillForm({ skill, canManageEditors, onSubmit, cancelTo }: Skill
   });
 
   return (
-    <form onSubmit={submit} className="space-y-5" noValidate>
+    <form onSubmit={submit} className="max-w-5xl space-y-6 rounded-xl border bg-card p-6 shadow-xs" noValidate>
       {serverError && (
         <ErrorAlert>
           <p className="font-semibold">Could not save this skill:</p>
@@ -115,10 +115,10 @@ export function SkillForm({ skill, canManageEditors, onSubmit, cancelTo }: Skill
         />
       ) : (
         <div>
-          <h2 className="mb-1 text-xs font-semibold tracking-wider text-foreground uppercase">Editors</h2>
+          <h2 className="mb-2 text-sm font-medium">Editors</h2>
           <div className="space-y-2">
             {(skill?.editors ?? []).map((editor) => (
-              <div key={editor.id} className="rounded-sm border border-border bg-muted px-3 py-2 text-sm text-foreground">
+              <div key={editor.id} className="rounded-lg border bg-muted/40 px-3 py-2 text-sm">
                 {userLabel(editor)}
               </div>
             ))}
@@ -182,7 +182,7 @@ function EditorPicker({
 
   return (
     <div>
-      <p className="mb-1 block text-xs font-semibold tracking-wider text-foreground uppercase">Editors</p>
+      <p className="mb-2 block text-sm font-medium">Editors</p>
       {candidates.isError && (
         <ErrorAlert className="mb-2 max-w-xl">Could not load console users: {errorMessage(candidates.error)}</ErrorAlert>
       )}

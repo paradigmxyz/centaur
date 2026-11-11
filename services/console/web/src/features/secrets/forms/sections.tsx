@@ -8,6 +8,7 @@ import { FieldShell, FormSection, SelectField, TextField } from "@/components/fo
 import { KeyValueRowsField } from "@/components/form/key-value-rows";
 import { SecretField } from "@/components/form/secret-field";
 import { Button } from "@/components/ui/button";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
@@ -23,7 +24,7 @@ import { MethodChips, PathChips } from "./chips";
 /** Inline field error under a section (legacy .field-error). */
 export function SectionError({ messages }: { messages: string[] | undefined }) {
   if (!messages || messages.length === 0) return null;
-  return <p className="mb-3 text-xs text-red-400 light:text-red-700">{messages.join(", ")}</p>;
+  return <p className="mb-3 text-xs text-destructive">{messages.join(", ")}</p>;
 }
 
 export function IdentitySection({ foreignIdRequired = false }: { foreignIdRequired?: boolean }) {
@@ -106,7 +107,7 @@ export function SourceFields({ heading = "Source", bare = false, hasStoredInline
   if (bare) {
     return (
       <div className="space-y-4">
-        <h3 className="text-xs font-semibold tracking-wider text-foreground uppercase">{heading}</h3>
+        <h3 className="text-sm font-medium">{heading}</h3>
         {body}
       </div>
     );
@@ -143,7 +144,7 @@ export function RulesSection({
         {fields.map((field, index) => {
           const n = index + 1;
           return (
-            <div key={field.id} className="rounded-sm border border-border bg-muted/20 p-4" data-testid={`rule-${n}`}>
+            <div key={field.id} className="rounded-lg border bg-muted/20 p-4" data-testid={`rule-${n}`}>
               <SectionError messages={ruleErrors?.[index]} />
               <div className="grid gap-4 sm:grid-cols-2">
                 <FieldShell id={`rule-${n}-host`} label="Host">
@@ -153,7 +154,7 @@ export function RulesSection({
                   <Input id={`rule-${n}-cidr`} placeholder="10.0.0.0/8" aria-label={`Rule ${n} CIDR`} {...register(`rules.${index}.cidr`)} />
                 </FieldShell>
                 <div className="sm:col-span-2">
-                  <p className="mb-1 text-xs font-semibold tracking-wider text-foreground uppercase">HTTP methods</p>
+                  <p className="mb-2 text-sm font-medium">HTTP methods</p>
                   <Controller
                     control={control}
                     name={`rules.${index}.http_methods`}
@@ -163,7 +164,7 @@ export function RulesSection({
                   />
                 </div>
                 <div className="sm:col-span-2">
-                  <p className="mb-1 text-xs font-semibold tracking-wider text-foreground uppercase">Paths</p>
+                  <p className="mb-2 text-sm font-medium">Paths</p>
                   <Controller
                     control={control}
                     name={`rules.${index}.paths`}
@@ -173,14 +174,16 @@ export function RulesSection({
                   />
                 </div>
               </div>
-              <div className="mt-3 text-right">
-                <button
+              <div className="mt-3 flex justify-end">
+                <Button
                   type="button"
-                  className="cursor-pointer text-xs text-muted-foreground transition-colors hover:text-red-400"
+                  variant="ghost"
+                  size="sm"
+                  className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                   onClick={() => remove(index)}
                 >
                   Remove rule {n}
-                </button>
+                </Button>
               </div>
             </div>
           );
@@ -215,7 +218,7 @@ export function SettingsSection({ errors }: { errors?: string[] }) {
           return (
             <div key={field.id} className="flex items-center gap-2">
               <Input aria-label={`Setting ${n} name`} placeholder="app.tenant" {...register(`settings.${index}.name`)} />
-              <span className="text-subtle-foreground">=</span>
+              <span className="text-muted-foreground">=</span>
               <Controller
                 control={control}
                 name={`settings.${index}.kind`}
@@ -260,20 +263,18 @@ export function RadioChoice<V extends string>({
   options: { value: V; label: ReactNode }[];
 }) {
   return (
-    <div className="mb-4 flex flex-wrap gap-6 text-sm text-foreground" role="radiogroup">
+    <RadioGroup
+      name={name}
+      value={value}
+      onValueChange={(next) => onChange(next as V)}
+      className="mb-4 flex flex-wrap gap-x-6 gap-y-3 text-sm"
+    >
       {options.map((option) => (
         <label key={option.value} className="flex cursor-pointer items-center gap-2">
-          <input
-            type="radio"
-            name={name}
-            value={option.value}
-            checked={value === option.value}
-            onChange={() => onChange(option.value)}
-            className="accent-primary"
-          />
+          <RadioGroupItem value={option.value} />
           <span>{option.label}</span>
         </label>
       ))}
-    </div>
+    </RadioGroup>
   );
 }

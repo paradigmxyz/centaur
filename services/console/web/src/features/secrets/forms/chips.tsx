@@ -9,10 +9,10 @@ import { HTTP_METHODS, METHOD_WILDCARD, splitTerms } from "../form-model";
 
 const chipClass = (on: boolean) =>
   cn(
-    "cursor-pointer rounded-sm border px-2.5 py-1 font-mono text-xs transition-colors",
+    "h-7 cursor-pointer rounded-md border px-2.5 font-mono text-xs transition-[color,background-color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50",
     on
-      ? "border-primary/50 bg-primary/15 text-centaur-300 light:text-primary"
-      : "border-border bg-muted/40 text-muted-foreground hover:text-heading",
+      ? "border-primary/50 bg-primary/15 text-primary"
+      : "border-input bg-transparent text-muted-foreground hover:bg-accent hover:text-foreground dark:bg-input/30",
   );
 
 /** Method toggles; ALL (`*`) and specific methods are mutually exclusive. */
@@ -79,17 +79,17 @@ export function PathChips({
   };
 
   return (
-    <div className="flex min-h-9 flex-wrap items-center gap-1.5 rounded-sm border border-input bg-background px-2 py-1.5">
+    <div className="flex min-h-9 flex-wrap items-center gap-1.5 rounded-md border border-input bg-transparent px-2 py-1.5 shadow-xs transition-[color,box-shadow] focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50 dark:bg-input/30">
       {value.map((path) => (
         <span
           key={path}
-          className="inline-flex items-center gap-1 rounded-sm bg-primary/10 px-1.5 py-0.5 font-mono text-xs text-centaur-300 ring-1 ring-primary/20 light:text-primary"
+          className="inline-flex items-center gap-1 rounded-md border border-primary/25 bg-primary/10 py-0.5 pr-1 pl-1.5 font-mono text-xs text-primary"
         >
           <span>{path}</span>
           <button
             type="button"
             aria-label={`Remove path ${path}`}
-            className="cursor-pointer text-muted-foreground hover:text-red-400"
+            className="cursor-pointer rounded-sm text-muted-foreground outline-none hover:text-destructive focus-visible:ring-2 focus-visible:ring-ring/50"
             onClick={() => onChange(value.filter((p) => p !== path))}
           >
             <X className="size-3" aria-hidden="true" />
@@ -108,7 +108,7 @@ export function PathChips({
         onKeyDown={onKeyDown}
         onBlur={() => commit(entry)}
         placeholder="/v1/* then comma"
-        className="min-w-32 flex-1 bg-transparent font-mono text-xs text-heading outline-none placeholder:text-subtle-foreground"
+        className="min-w-32 flex-1 bg-transparent font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground"
       />
     </div>
   );

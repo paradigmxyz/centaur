@@ -20,7 +20,7 @@ const columns: Column<Principal>[] = [
   {
     id: "name",
     header: "Name",
-    className: "w-[28%] overflow-hidden text-heading",
+    className: "w-[28%] overflow-hidden text-foreground",
     cell: (principal) => {
       const name = principal.name || "unnamed";
       return (
@@ -28,8 +28,8 @@ const columns: Column<Principal>[] = [
           to={`/console/principals/${principal.id}`}
           title={name}
           className={cn(
-            "block min-w-0 truncate text-centaur-400 hover:text-centaur-300 hover:underline light:text-primary",
-            !principal.name && "text-subtle-foreground",
+            "block min-w-0 truncate text-primary hover:underline",
+            !principal.name && "text-muted-foreground",
           )}
         >
           {truncateMiddle(name, 64)}
@@ -40,16 +40,16 @@ const columns: Column<Principal>[] = [
   {
     id: "kind",
     header: "Kind",
-    className: "w-[14%] overflow-hidden whitespace-nowrap",
+    className: "w-[18%] overflow-hidden whitespace-nowrap",
     cell: (principal) => <ResourceBadge title={principal.kind}>{principal.kind.toUpperCase()}</ResourceBadge>,
   },
   {
     id: "roles",
     header: "Roles",
-    className: "w-[32%] overflow-hidden",
+    className: "w-[28%] overflow-hidden",
     cell: (principal) =>
       principal.roles.length === 0 ? (
-        <span className="text-subtle-foreground">—</span>
+        <span className="text-muted-foreground">—</span>
       ) : (
         <div className="flex min-w-0 flex-wrap gap-1">
           {[...principal.roles]
@@ -112,6 +112,7 @@ function PrincipalsList() {
       ) : (
       <DataTable
         fixed
+        minWidth="min-w-[48rem]"
         caption="Principals"
         columns={columns}
         rows={list.data?.data}

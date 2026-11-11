@@ -16,6 +16,7 @@ import { KeyValueRowsField, recordToRows, rowsToRecord } from "@/components/form
 import { SecretField, omitBlankSecrets } from "@/components/form/secret-field";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 
 import { GRANTS, PREQIN_TOKEN_ENDPOINT, type BrokerCredential, type CredentialPayload, type Grant } from "../api";
 import { grantLabel } from "./provider";
@@ -188,7 +189,7 @@ export function CredentialForm({ credential, submitLabel, error, onSubmit }: Cre
     <>
       <FormErrorSummary error={error} subject="Credential" />
       <FormProvider {...form}>
-        <form onSubmit={submit} className="space-y-6" noValidate autoComplete="off">
+        <form onSubmit={submit} className="max-w-4xl space-y-6" noValidate autoComplete="off">
           <FormSection title="Identity">
             <div className="grid gap-5 sm:grid-cols-2">
               <TextField
@@ -388,26 +389,23 @@ function GrantRadios({ control }: { control: Control<CredentialFormValues> }) {
   return (
     <fieldset className="mb-4">
       <legend className="sr-only">Grant</legend>
-      <div className="flex flex-wrap gap-3">
+      <RadioGroup
+        name={field.name}
+        value={field.value}
+        onValueChange={(next) => field.onChange(next as Grant)}
+        className="flex flex-wrap gap-2"
+      >
         {GRANTS.map((value: Grant) => (
           <label
             key={value}
-            className="inline-flex cursor-pointer items-center gap-2 rounded-sm border border-border px-3 py-2 text-sm text-heading"
+            className="inline-flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors has-data-[state=checked]:border-primary/50 has-data-[state=checked]:bg-primary/10"
           >
-            <input
-              type="radio"
-              name={field.name}
-              value={value}
-              checked={field.value === value}
-              onChange={() => field.onChange(value)}
-              onBlur={field.onBlur}
-              className="accent-primary"
-            />
+            <RadioGroupItem value={value} onBlur={field.onBlur} />
             <span>{grantLabel(value)}</span>
           </label>
         ))}
-      </div>
-      {fieldState.error && <p className="mt-1 text-xs text-red-400 light:text-red-700">{fieldState.error.message}</p>}
+      </RadioGroup>
+      {fieldState.error && <p className="mt-1.5 text-xs text-destructive">{fieldState.error.message}</p>}
     </fieldset>
   );
 }
@@ -459,7 +457,7 @@ function HeaderRow({
     <div>
       <div className="flex items-center gap-3">
         <Input aria-label={`Header ${index + 1} name`} placeholder="Authorization" {...key.field} />
-        <span className="text-subtle-foreground">:</span>
+        <span className="text-muted-foreground">:</span>
         <Input
           aria-label={`Header ${index + 1} value`}
           type="password"
@@ -474,7 +472,7 @@ function HeaderRow({
           <Trash2 />
         </Button>
       </div>
-      {error && <p className="mt-1 text-xs text-red-400 light:text-red-700">{error}</p>}
+      {error && <p className="mt-1 text-xs text-destructive">{error}</p>}
     </div>
   );
 }

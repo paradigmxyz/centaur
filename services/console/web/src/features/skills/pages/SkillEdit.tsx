@@ -32,7 +32,7 @@ function SkillEdit() {
         title={`Edit ${skill.name}`}
         subtitle={
           skill.visibility === "shared" ? (
-            <span className="text-amber-300 light:text-amber-800">
+            <span className="text-warning">
               This skill is shared. Saving changes makes them live immediately.
             </span>
           ) : undefined

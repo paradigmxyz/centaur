@@ -12,14 +12,14 @@ export function MercatorPanel({ credential, details }: { credential: Credential;
   const claimUrl = `https://mercator.sh/slack-claim?${new URLSearchParams({ wallet: subject }).toString()}`;
 
   return (
-    <section className="mb-8 space-y-4 rounded-sm border border-border bg-card p-5" aria-label="Mercator wallet">
-      <h2 className="text-sm font-semibold text-heading">Shared wallet</h2>
+    <section className="mb-8 space-y-4 rounded-xl border bg-card p-5 shadow-xs" aria-label="Mercator wallet">
+      <h2 className="text-sm font-semibold text-foreground">Shared wallet</h2>
       <a
         href={`https://explore.tempo.xyz/address/${encodeURIComponent(subject)}`}
         title={subject}
         target="_blank"
         rel="noopener noreferrer"
-        className="font-mono text-sm text-centaur-400 hover:text-centaur-300 hover:underline light:text-primary"
+        className="font-mono text-sm text-primary hover:underline"
       >
         {short} ↗
       </a>

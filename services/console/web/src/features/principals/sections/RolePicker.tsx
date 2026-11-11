@@ -48,7 +48,7 @@ export function RolePicker({ principalId, value, onChange }: RolePickerProps) {
           <CommandInput placeholder="Search roles" value={query} onValueChange={setQuery} />
           <CommandList>
             {roles.isError ? (
-              <p role="alert" className="px-3 py-4 text-sm text-red-300 light:text-red-700">
+              <p role="alert" className="px-3 py-4 text-sm text-destructive">
                 Could not load roles: {errorMessage(roles.error)}
               </p>
             ) : (

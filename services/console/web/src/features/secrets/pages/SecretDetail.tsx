@@ -39,17 +39,17 @@ function SecretDetail() {
       <div className="mb-8">
         <BackLink to="/console/secrets">back to secrets</BackLink>
         <div className="mt-2 flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-bold text-heading">{title}</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
           <ResourceBadge>{secretKindLabel(secret.kind)}</ResourceBadge>
           {secret.editable && isFormKind(secret.kind) && <EditActions kind={secret.kind} secret={secret} />}
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
-          <span className="glow text-centaur-400 light:text-primary">{secret.id}</span>
+          <span className="rounded-md border bg-muted/50 px-1.5 py-0.5 font-mono text-xs text-foreground">{secret.id}</span>
           {secret.foreign_id && (
             <>
-              <span className="text-subtle-foreground">·</span>
-              <span className="text-zinc-400">
-                foreign_id: <span className="break-all text-heading">{secret.foreign_id}</span>
+              <span className="text-muted-foreground">·</span>
+              <span className="text-muted-foreground">
+                foreign_id: <span className="break-all font-mono text-xs text-foreground">{secret.foreign_id}</span>
               </span>
             </>
           )}
@@ -61,12 +61,12 @@ function SecretDetail() {
       </div>
 
       {secret.managed_by && (
-        <div className="mb-8 rounded-sm border border-primary/30 bg-primary/[0.06] px-4 py-3 text-sm text-foreground">
-          <span className="font-semibold text-centaur-300 light:text-primary">Managed secret.</span> Auto-created by the{" "}
+        <div className="mb-8 rounded-xl border border-primary/25 bg-primary/5 px-4 py-3 text-sm text-foreground">
+          <span className="font-semibold text-primary">Managed secret.</span> Auto-created by the{" "}
           {secret.managed_by.oauth_app_id ? (
             <AppLink
               to={`/console/oauth_apps/${secret.managed_by.oauth_app_id}`}
-              className="text-centaur-400 hover:underline light:text-primary"
+              className="text-primary hover:underline"
             >
               {secret.managed_by.oauth_app_slug} OAuth integration
             </AppLink>
@@ -76,7 +76,7 @@ function SecretDetail() {
           to deliver broker credential{" "}
           <AppLink
             to={`/console/credentials/${secret.managed_by.broker_credential_id}`}
-            className="text-centaur-400 hover:underline light:text-primary"
+            className="text-primary hover:underline"
           >
             {secret.managed_by.broker_credential_id}
           </AppLink>

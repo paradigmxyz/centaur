@@ -14,7 +14,7 @@ export function Attempts({ run }: { run: Pick<WorkflowTiming, "attempts" | "max_
   return (
     <>
       {run.attempts}
-      <span className="text-subtle-foreground"> / {run.max_attempts ?? "unlimited"}</span>
+      <span className="text-muted-foreground"> / {run.max_attempts ?? "unlimited"}</span>
     </>
   );
 }
@@ -25,7 +25,7 @@ export function Started({ run }: { run: Pick<WorkflowTiming, "started_at" | "cre
     <>
       <LocalTime value={run.started_at} format="relative" />
       {run.created_at && run.started_at !== run.created_at && (
-        <div className="mt-1 text-subtle-foreground">
+        <div className="mt-1 text-muted-foreground">
           queued <LocalTime value={run.created_at} format="compact" />
         </div>
       )}

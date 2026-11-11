@@ -33,7 +33,7 @@ function OauthAppNew() {
       <div className="mb-8">
         <BackLink to="/console/oauth_apps">back to Apps</BackLink>
         <div className="mt-2 flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-bold text-heading">New App</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">New App</h1>
           <ResourceBadge>OAuth</ResourceBadge>
         </div>
       </div>
@@ -41,7 +41,7 @@ function OauthAppNew() {
       {providers.error ? (
         <ErrorAlert>{errorMessage(providers.error)}</ErrorAlert>
       ) : !providers.data ? (
-        <p className="text-sm text-subtle-foreground">Loading…</p>
+        <p className="text-sm text-muted-foreground">Loading…</p>
       ) : (
         <OauthAppForm
           providers={providers.data}

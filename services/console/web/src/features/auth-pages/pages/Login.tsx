@@ -14,7 +14,7 @@ import { useAuthConfig, useSignIn } from "../api";
 import { safeLocalPath } from "../navigation";
 import { AuthCard, AuthHeader, AuthLoading, AuthNotice } from "../sections/AuthLayout";
 
-const labelClass = "mb-1 block text-xs font-semibold tracking-wider text-muted-foreground uppercase";
+const labelClass = "mb-2 block";
 
 export default function LoginPage() {
   useDocumentTitle("Sign In");
@@ -95,19 +95,15 @@ export default function LoginPage() {
         {providers.length > 0 && (
           <div className="space-y-3">
             {providers.map((provider) => (
-              <a
-                key={provider.key}
-                href={provider.start_path}
-                className="flex w-full items-center justify-center rounded-sm border border-border bg-muted/60 px-4 py-2 text-sm text-heading transition-colors hover:border-primary/40 hover:text-centaur-200 light:hover:text-primary"
-              >
-                Continue with {provider.label}
-              </a>
+              <Button key={provider.key} asChild variant="outline" className="w-full">
+                <a href={provider.start_path}>Continue with {provider.label}</a>
+              </Button>
             ))}
           </div>
         )}
 
         {providers.length > 0 && passwordLogin && (
-          <div className="my-6 flex items-center gap-3 text-xs tracking-wider text-subtle-foreground uppercase">
+          <div className="my-6 flex items-center gap-3 text-xs text-muted-foreground">
             <span className="h-px flex-1 bg-border" />
             or sign in with email
             <span className="h-px flex-1 bg-border" />
@@ -116,7 +112,7 @@ export default function LoginPage() {
 
         {passwordLogin && (
           <form onSubmit={onSubmit} noValidate>
-            <div className="space-y-5">
+            <div className="space-y-4">
               <div>
                 <Label htmlFor="login-email" className={labelClass}>
                   Email
@@ -135,7 +131,7 @@ export default function LoginPage() {
                   onChange={(event) => setEmail(event.target.value)}
                 />
                 {fieldErrors.email && (
-                  <p id="login-email-error" className="mt-1 text-xs text-red-400 light:text-red-700">
+                  <p id="login-email-error" className="mt-1.5 text-xs text-destructive">
                     {fieldErrors.email}
                   </p>
                 )}
@@ -156,7 +152,7 @@ export default function LoginPage() {
                   onChange={(event) => setPassword(event.target.value)}
                 />
                 {fieldErrors.password && (
-                  <p id="login-password-error" className="mt-1 text-xs text-red-400 light:text-red-700">
+                  <p id="login-password-error" className="mt-1.5 text-xs text-destructive">
                     {fieldErrors.password}
                   </p>
                 )}

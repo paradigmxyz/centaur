@@ -24,19 +24,19 @@ export function DefinitionSection({
   return (
     <section className="mb-8" aria-label={title}>
       <SectionHeading className="mb-3">{title}</SectionHeading>
-      <dl className="divide-y divide-border/70 rounded-sm border border-border bg-card">
+      <dl className="divide-y divide-border/70 rounded-xl border bg-card shadow-xs">
         {rows
           .filter((row): row is DefinitionRow => Boolean(row))
           .map(([label, value]) => (
             <div key={label} className="flex flex-col gap-1 px-5 py-3 sm:flex-row sm:gap-4">
-              <dt className="w-48 shrink-0 text-xs tracking-wider text-muted-foreground uppercase">{label}</dt>
-              <dd className="font-mono text-xs break-all whitespace-pre-line text-heading">
-                {isBlank(value) ? <span className="text-subtle-foreground">—</span> : value}
+              <dt className="w-48 shrink-0 text-xs text-muted-foreground">{label}</dt>
+              <dd className="font-mono text-xs break-all whitespace-pre-line text-foreground">
+                {isBlank(value) ? <span className="text-muted-foreground">—</span> : value}
               </dd>
             </div>
           ))}
       </dl>
-      {note && <p className="mt-2 text-xs text-subtle-foreground">{note}</p>}
+      {note && <p className="mt-2 text-xs text-muted-foreground">{note}</p>}
     </section>
   );
 }

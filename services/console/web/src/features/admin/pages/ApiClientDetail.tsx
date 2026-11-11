@@ -19,8 +19,8 @@ import { useApiClient, useApiClientMutations, type ApiClientPrincipalLink } from
 import { useIssuedSecret } from "../secret-handoff";
 import { Chip, ScopeChips } from "../sections/ScopeChips";
 
-const rowButton = "hover:border-primary/40 hover:text-centaur-300";
-const dangerButton = "hover:border-red-500/40 hover:text-red-300";
+const rowButton = "hover:border-primary/40 hover:text-primary";
+const dangerButton = "hover:border-destructive/40 hover:text-destructive";
 
 function principalLabel(principal: ApiClientPrincipalLink["principal"]) {
   return principal.name || principal.foreign_id || principal.id;
@@ -105,24 +105,24 @@ function ApiClientDetailBody({
     {
       id: "id",
       header: "ID",
-      className: "whitespace-nowrap",
+      className: "font-mono text-xs whitespace-nowrap",
       cell: ({ principal }) => (
         <>
           <AppLink
             to={`/console/principals/${principal.id}`}
-            className="text-centaur-400 hover:text-centaur-300 hover:underline light:text-primary"
+            className="text-primary hover:underline"
           >
             {principal.id}
           </AppLink>
           {principal.foreign_id && (
-            <div className="text-xs text-subtle-foreground" title={principal.foreign_id}>
+            <div className="text-xs text-muted-foreground" title={principal.foreign_id}>
               {truncateMiddle(principal.foreign_id)}
             </div>
           )}
         </>
       ),
     },
-    { id: "name", header: "Name", className: "text-heading", cell: ({ principal }) => principal.name || "unnamed" },
+    { id: "name", header: "Name", className: "text-foreground", cell: ({ principal }) => principal.name || "unnamed" },
     {
       id: "kind",
       header: "Kind",
@@ -180,7 +180,7 @@ function ApiClientDetailBody({
       <div className="mb-8">
         <BackLink to="/console/api_clients">back to API clients</BackLink>
         <div className="mt-2 flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-bold text-heading">{client.name}</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">{client.name}</h1>
           <div className="ml-auto flex flex-wrap items-center gap-2">
             <Button asChild variant="secondary" size="sm">
               <Link to={`/console/api_clients/${client.id}/edit`}>Edit</Link>
@@ -232,10 +232,10 @@ function ApiClientDetailBody({
           </div>
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
-          <span className="text-zinc-400">client_id:</span>
-          <span className="glow text-centaur-400 light:text-primary">{client.id}</span>
-          <span className="text-subtle-foreground">·</span>
-          <span className="text-zinc-400">{client.disabled ? "disabled" : "active"}</span>
+          <span className="text-muted-foreground">client_id:</span>
+          <span className="rounded-md border bg-muted/50 px-1.5 py-0.5 font-mono text-xs text-foreground">{client.id}</span>
+          <span className="text-muted-foreground">·</span>
+          <span className="text-muted-foreground">{client.disabled ? "disabled" : "active"}</span>
         </div>
         <div className="mt-3">
           <ScopeChips scopes={client.scopes} />
@@ -244,13 +244,13 @@ function ApiClientDetailBody({
 
       {secret && (
         <section
-          className="mb-8 rounded-sm border border-amber-500/30 bg-amber-500/[0.04] p-5"
+          className="mb-8 rounded-xl border border-warning/30 bg-warning/10 p-5"
           aria-labelledby="api-client-secret-heading"
         >
-          <h2 id="api-client-secret-heading" className="mb-2 text-sm font-semibold text-amber-300 light:text-amber-700">
+          <h2 id="api-client-secret-heading" className="mb-2 text-sm font-semibold text-warning">
             Client secret
           </h2>
-          <p className="mb-3 text-sm text-zinc-400 light:text-zinc-600">
+          <p className="mb-3 text-sm text-muted-foreground">
             Copy it now. It is shown only once; rotate the secret if it is lost.
           </p>
           <div className="flex items-center gap-2">
@@ -277,7 +277,7 @@ function ApiClientDetailBody({
             <SectionHeading>
               <span id="api-client-principals-heading">Principals</span>
             </SectionHeading>
-            <p className="text-sm text-subtle-foreground">
+            <p className="text-sm text-muted-foreground">
               A session runs as the principal it names, or the default. Its sandbox gets that principal&apos;s grants.
             </p>
           </div>

@@ -12,7 +12,7 @@ export function OauthAppErrors({ error }: { error: unknown }) {
         )
       : [errorMessage(error)];
   return (
-    <ErrorAlert>
+    <ErrorAlert className="max-w-4xl">
       <p className="mb-1 font-semibold">{pluralize(messages.length, "error")} prevented this app from saving:</p>
       <ul className="list-disc space-y-0.5 pl-5">
         {messages.map((message) => (

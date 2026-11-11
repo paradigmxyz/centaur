@@ -54,7 +54,7 @@ export function SandboxAccessSection({ principal, mutations }: SectionProps) {
           <span id="sandbox-access-heading">Sandbox Access</span>
         </SectionHeading>
       </div>
-      <div className="rounded-sm border border-border bg-card p-5">
+      <div className="rounded-xl border bg-card p-5 shadow-xs">
         <form onSubmit={onSubmit} className="space-y-4">
           <SelectField
             control={form.control}

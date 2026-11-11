@@ -64,7 +64,7 @@ function PrincipalNew() {
       <PageHeader title="New Principal" />
       <FormErrorSummary error={create.error} subject="Principal" />
       <FormProvider {...form}>
-        <form onSubmit={onSubmit} className="space-y-6" noValidate>
+        <form onSubmit={onSubmit} className="max-w-4xl space-y-6" noValidate>
           <FormSection title="Identity">
             <div className="grid gap-5 sm:grid-cols-2">
               <TextField

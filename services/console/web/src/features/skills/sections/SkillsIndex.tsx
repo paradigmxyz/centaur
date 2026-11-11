@@ -53,7 +53,7 @@ function SkillsIndex({ tab }: { tab: SkillTab }) {
         <Link
           to={`/console/skills/${skill.id}`}
           title={skill.name}
-          className="block min-w-0 truncate font-medium text-centaur-400 hover:text-centaur-300 hover:underline light:text-primary"
+          className="block min-w-0 truncate font-medium text-primary hover:underline"
         >
           {skill.name}
         </Link>
@@ -79,7 +79,7 @@ function SkillsIndex({ tab }: { tab: SkillTab }) {
       : {
           id: "author",
           header: "Author",
-          className: "w-[15%] overflow-hidden text-sm text-zinc-400 light:text-muted-foreground",
+          className: "w-[15%] overflow-hidden text-sm text-muted-foreground",
           cell: (skill) => (
             <span className="block min-w-0 truncate">{skill.owner.id === me.user.id ? "You" : skill.author}</span>
           ),

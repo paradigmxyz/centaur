@@ -34,7 +34,7 @@ function Integrations() {
     <>
       <PageHeader title="Integrations" subtitle="Connect your accounts so Centaur can act on your behalf." />
       {query.isError && <ErrorAlert>{errorMessage(query.error)}</ErrorAlert>}
-      {query.isLoading && <p className="text-sm text-subtle-foreground">Loading…</p>}
+      {query.isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
       {query.data && (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <SshKeyCard configured={query.data.ssh_key.configured} />
@@ -46,7 +46,7 @@ function Integrations() {
           ))}
         </div>
       )}
-      <p className="mt-6 text-xs text-subtle-foreground">
+      <p className="mt-6 text-xs text-muted-foreground">
         Connecting opens the provider's consent screen. Once you approve, Centaur stores and refreshes the credential
         automatically.
       </p>
@@ -56,7 +56,7 @@ function Integrations() {
 
 function Card({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <section aria-label={label} className="flex flex-col gap-3 rounded-sm border border-border bg-card p-5">
+    <section aria-label={label} className="flex flex-col gap-3 rounded-xl border bg-card p-5 shadow-xs transition-colors hover:border-foreground/15">
       {children}
     </section>
   );
@@ -67,14 +67,14 @@ function SshKeyCard({ configured }: { configured: boolean }) {
     <Card label="SSH key">
       <div className="flex items-center gap-3">
         <span
-          className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted font-mono text-sm text-heading"
+          className="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-muted/50 font-mono text-sm"
           aria-hidden="true"
         >
           &gt;_
         </span>
         <div>
-          <h2 className="font-mono text-sm font-semibold text-heading">SSH key</h2>
-          <div className="text-[11px] tracking-wide text-muted-foreground uppercase">Remote development</div>
+          <h2 className="text-sm font-semibold">SSH key</h2>
+          <div className="text-xs text-muted-foreground">Remote development</div>
         </div>
       </div>
       <p className="text-xs text-muted-foreground">
@@ -82,10 +82,10 @@ function SshKeyCard({ configured }: { configured: boolean }) {
         bot; channels need an admin grant.
       </p>
       <div className="mt-auto flex items-center justify-between gap-3 pt-1">
-        <Button asChild variant={configured ? "secondary" : "default"}>
+        <Button asChild variant={configured ? "secondary" : "outline"}>
           <AppLink to={configured ? "/console/ssh_key" : "/console/ssh_key/edit"}>{configured ? "Manage" : "Connect"}</AppLink>
         </Button>
-        {configured && <span className="text-xs text-emerald-300 light:text-emerald-700">Configured</span>}
+        {configured && <span className="text-xs text-success">Configured</span>}
       </div>
     </Card>
   );
@@ -98,10 +98,10 @@ function AppCard({ app }: { app: IntegrationApp }) {
       <div className="flex items-center gap-3">
         <ProviderTile provider={app.provider} />
         <div className="min-w-0">
-          <div className="truncate font-mono text-sm font-semibold text-heading" title={app.slug}>
+          <div className="truncate text-sm font-semibold" title={app.slug}>
             {app.slug}
           </div>
-          <div className="text-[11px] tracking-wide text-muted-foreground uppercase">{app.provider}</div>
+          <div className="font-mono text-xs text-muted-foreground">{app.provider}</div>
         </div>
       </div>
       {app.description && !app.shared && (
@@ -126,15 +126,15 @@ function AppCard({ app }: { app: IntegrationApp }) {
             <span
               className={cn(
                 "flex items-center gap-1.5 text-xs",
-                needsReconnect ? "text-amber-300 light:text-amber-700" : "text-emerald-300 light:text-emerald-700",
+                needsReconnect ? "text-warning" : "text-success",
               )}
             >
-              <span className={cn("size-1.5 rounded-full", needsReconnect ? "bg-amber-400" : "bg-emerald-400")} />
+              <span className={cn("size-1.5 rounded-full", needsReconnect ? "bg-warning" : "bg-success")} />
               {needsReconnect ? "Needs reconnecting" : "Connected"}
             </span>
           </>
         ) : (
-          <Button asChild>
+          <Button asChild variant="outline">
             <a href={app.start_url}>Connect</a>
           </Button>
         )}
@@ -157,11 +157,11 @@ function PresetCard({ preset }: { preset: IntegrationPreset }) {
     <Card label={preset.display_name}>
       <div className="flex items-center gap-3">
         <ProviderTile provider={preset.provider} fallback={false} />
-        <h2 className="font-mono text-sm font-semibold text-heading">{preset.display_name}</h2>
+        <h2 className="text-sm font-semibold">{preset.display_name}</h2>
       </div>
       {preset.description && <p className="text-xs text-muted-foreground">{preset.description}</p>}
       <div className="mt-auto pt-1">
-        <Button type="button" onClick={connect} disabled={setup.isPending}>
+        <Button type="button" variant="outline" onClick={connect} disabled={setup.isPending}>
           Connect
         </Button>
       </div>

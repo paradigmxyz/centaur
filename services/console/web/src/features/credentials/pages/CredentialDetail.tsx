@@ -16,7 +16,7 @@ import { displayLabel } from "@/lib/format";
 import { credentialTitle, useCredential, useDeleteCredential } from "../api";
 import { DefinitionSection } from "../sections/DefinitionSection";
 
-const linkClass = "text-centaur-400 hover:text-centaur-300 hover:underline light:text-primary";
+const linkClass = "text-primary hover:underline";
 const REDACTED = "[redacted]";
 
 export default function CredentialDetailPage() {
@@ -60,7 +60,7 @@ function CredentialDetail() {
       <div className="mb-8">
         <BackLink to="/console/credentials">back to credentials</BackLink>
         <div className="mt-2 flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-bold text-heading">{title}</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
           <StatusBadge tone={credentialStatusTone(credential.status)}>{credential.status}</StatusBadge>
           <div className="ml-auto flex items-center gap-2">
             <Button asChild variant="secondary" size="sm">
@@ -80,12 +80,12 @@ function CredentialDetail() {
           </div>
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
-          <span className="glow text-centaur-400 light:text-primary">{credential.id}</span>
+          <span className="rounded-md border bg-muted/50 px-1.5 py-0.5 font-mono text-xs text-foreground">{credential.id}</span>
           {credential.foreign_id && (
             <>
-              <span className="text-subtle-foreground">·</span>
-              <span className="text-zinc-400">
-                foreign_id: <span className="break-all text-heading">{credential.foreign_id}</span>
+              <span className="text-muted-foreground">·</span>
+              <span className="text-muted-foreground">
+                foreign_id: <span className="break-all font-mono text-xs text-foreground">{credential.foreign_id}</span>
               </span>
             </>
           )}
@@ -179,7 +179,7 @@ function CredentialDetail() {
         ]}
       />
 
-      <p className="text-xs text-subtle-foreground">
+      <p className="text-xs text-muted-foreground">
         Token material (access token, refresh token, client secret) is never shown.
       </p>
     </>

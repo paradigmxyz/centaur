@@ -22,11 +22,11 @@ const columns: Column<OauthApp>[] = [
       <>
         <Link
           to={`/console/oauth_apps/${app.id}`}
-          className="font-mono text-centaur-400 hover:text-centaur-300 hover:underline light:text-primary"
+          className="font-mono text-primary hover:underline"
         >
           {app.slug}
         </Link>
-        <div className="text-xs text-muted-foreground">{app.id}</div>
+        <div className="font-mono text-xs text-muted-foreground">{app.id}</div>
       </>
     ),
   },
@@ -38,7 +38,7 @@ const columns: Column<OauthApp>[] = [
       app.description ? (
         <span title={app.description}>{truncateMiddle(app.description)}</span>
       ) : (
-        <span className="text-subtle-foreground">—</span>
+        <span className="text-muted-foreground">—</span>
       ),
   },
   { id: "provider", header: "Provider", className: "whitespace-nowrap", cell: (app) => <ProviderPill provider={app.provider} /> },

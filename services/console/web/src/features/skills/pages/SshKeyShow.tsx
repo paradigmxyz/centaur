@@ -1,3 +1,4 @@
+import { CircleCheck } from "lucide-react";
 import { Link, Navigate, useNavigate } from "react-router";
 import { toast } from "sonner";
 
@@ -37,9 +38,10 @@ function SshKeyShow({ sshKey: key }: { sshKey: PersonalSshKey }) {
     <>
       <PageHeader title={key.name} documentTitle="SSH key" subtitle="Your personal SSH key" />
       <div className="max-w-3xl space-y-6">
-        <div role="status" className="rounded-sm border border-green-700 bg-green-950/20 p-4 light:bg-green-50">
-          <p className="font-semibold text-heading">SSH key saved</p>
-          <p className="text-sm text-foreground">
+        <div role="status" className="relative rounded-xl border border-success/30 bg-success/10 py-4 pr-4 pl-11">
+          <CircleCheck className="absolute top-4.5 left-4 size-4 text-success" aria-hidden="true" />
+          <p className="font-semibold text-success">SSH key saved</p>
+          <p className="mt-1 text-sm text-foreground">
             Saved {formatUtcMinute(key.updated_at)}. Your private key is stored encrypted. You can leave this page.
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
@@ -52,8 +54,8 @@ function SshKeyShow({ sshKey: key }: { sshKey: PersonalSshKey }) {
           <p className="mb-4 text-xs text-muted-foreground">Provide the destination URL when asking Centaur to connect.</p>
           <dl className="space-y-4 text-sm">
             <div>
-              <dt className="mb-1 text-xs font-semibold tracking-wider text-foreground uppercase">Your key fingerprint</dt>
-              <dd className="font-mono break-all text-foreground">{key.fingerprint}</dd>
+              <dt className="mb-1 text-sm font-medium">Your key fingerprint</dt>
+              <dd className="font-mono text-[13px] break-all text-foreground">{key.fingerprint}</dd>
             </div>
           </dl>
         </FormSection>
@@ -66,7 +68,7 @@ function SshKeyShow({ sshKey: key }: { sshKey: PersonalSshKey }) {
           {key.grants.length > 0 ? (
             <ul className="space-y-1 text-sm">
               {key.grants.map((grant) => (
-                <li key={grant.id} className="font-mono text-foreground">
+                <li key={grant.id} className="font-mono text-[13px] text-foreground">
                   {grant.grantee_type === "role" ? "Role" : "Principal"}: {grant.label}
                   {grant.principal_kind && <span className="text-muted-foreground"> ({grant.principal_kind})</span>}
                 </li>
@@ -85,7 +87,7 @@ function SshKeyShow({ sshKey: key }: { sshKey: PersonalSshKey }) {
             Add this public key to each environment&apos;s SSH access settings. You can reuse this key for any URL allowed
             by your administrator. Saving does not register it automatically.
           </p>
-          <label htmlFor="ssh-public-key" className="mb-1 block text-xs font-semibold tracking-wider text-foreground uppercase">
+          <label htmlFor="ssh-public-key" className="mb-2 block text-sm font-medium">
             Public key
           </label>
           <Textarea id="ssh-public-key" className="font-mono" rows={4} readOnly spellCheck={false} value={key.public_key ?? ""} />
@@ -103,9 +105,9 @@ function SshKeyShow({ sshKey: key }: { sshKey: PersonalSshKey }) {
             description="Access ends within seconds."
             confirmLabel="Delete"
             onConfirm={onDelete}
-            trigger={<Button variant="secondary">Delete</Button>}
+            trigger={<Button variant="outline" className="text-destructive hover:text-destructive">Delete</Button>}
           />
-          <Button asChild variant="secondary">
+          <Button asChild variant="ghost">
             <AppLink to={INTEGRATIONS_PATH}>Back to integrations</AppLink>
           </Button>
         </div>

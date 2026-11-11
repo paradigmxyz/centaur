@@ -105,7 +105,7 @@ function DefaultsForm() {
   return (
     <>
       <FormErrorSummary error={update.error} subject="Settings" />
-      <form onSubmit={onSubmit} className="space-y-6" noValidate>
+      <form onSubmit={onSubmit} className="max-w-4xl space-y-6" noValidate>
         <FormSection title="Default Sandbox Capabilities">
           <div className="grid gap-5 md:grid-cols-3">
             <SelectField
@@ -118,7 +118,7 @@ function DefaultsForm() {
             {FLAGS.map((flag) => (
               <CheckboxField
                 key={flag.name}
-                className="rounded-sm border border-border bg-muted/40 p-4"
+                className="rounded-lg border bg-muted/30 p-4"
                 control={form.control}
                 name={flag.name}
                 label={flag.label}
@@ -129,7 +129,7 @@ function DefaultsForm() {
         </FormSection>
 
         <FormSection title="Default Roles">
-          <p className="mb-4 text-sm text-subtle-foreground">
+          <p className="mb-4 text-sm text-muted-foreground">
             New principals with no preassigned roles receive the selected roles. Existing principals are unchanged.
           </p>
           {settings.roles.length > 0 ? (
@@ -137,7 +137,7 @@ function DefaultsForm() {
               control={form.control}
               name="default_role_ids"
               render={({ field }) => (
-                <fieldset className="grid max-w-md gap-3 rounded-sm border border-border bg-muted/40 p-4">
+                <fieldset className="grid max-w-md gap-3 rounded-lg border bg-muted/30 p-4">
                   <legend className="sr-only">Default roles</legend>
                   {settings.roles.map((role) => {
                     const id = `default-role-${role.id}`;
@@ -157,10 +157,10 @@ function DefaultsForm() {
                           }
                         />
                         <label htmlFor={id} className="cursor-pointer">
-                          <span className="block text-sm font-medium text-heading">
+                          <span className="block text-sm font-medium text-foreground">
                             {role.name || role.foreign_id || role.id}
                           </span>
-                          <span className="block text-xs text-subtle-foreground">{role.foreign_id || role.id}</span>
+                          <span className="block font-mono text-xs text-muted-foreground">{role.foreign_id || role.id}</span>
                         </label>
                       </div>
                     );
@@ -169,10 +169,10 @@ function DefaultsForm() {
               )}
             />
           ) : (
-            <p className="text-sm text-subtle-foreground">Create a role before configuring default role assignments.</p>
+            <p className="text-sm text-muted-foreground">Create a role before configuring default role assignments.</p>
           )}
           {form.formState.errors.default_role_ids?.message && (
-            <p className="mt-1 text-xs text-red-400 light:text-red-700">{form.formState.errors.default_role_ids.message}</p>
+            <p className="mt-1 text-xs text-destructive">{form.formState.errors.default_role_ids.message}</p>
           )}
         </FormSection>
 
@@ -207,13 +207,13 @@ function SlackConnectSection() {
   };
 
   return (
-    <section id="slack-connect" aria-labelledby="slack-connect-heading" className="mt-6 rounded-sm border border-border bg-card p-5">
-      <h2 id="slack-connect-heading" className="mb-3 text-xs font-semibold tracking-wider text-foreground uppercase">
+    <section id="slack-connect" aria-labelledby="slack-connect-heading" className="mt-6 rounded-xl border bg-card p-5 shadow-xs">
+      <h2 id="slack-connect-heading" className="mb-3 text-sm font-medium">
         Slack Connect
       </h2>
       {replace.error ? <ErrorAlert className="mb-4">{errorMessage(replace.error)}</ErrorAlert> : null}
       {teams.isLoading ? (
-        <p className="text-sm text-subtle-foreground">Loading…</p>
+        <p className="text-sm text-muted-foreground">Loading…</p>
       ) : teams.isError ? (
         <ErrorAlert className="mb-0">
           The allowed external workspaces could not be loaded from the Centaur API. Reload the page to try again.

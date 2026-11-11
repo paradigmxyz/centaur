@@ -1,11 +1,13 @@
 import type { ReactNode } from "react";
 
+import { Badge } from "@/components/ui/badge";
+
 /** A plain chip (legacy .label-chip): scopes, the "default" principal marker. */
 export function Chip({ children }: { children: ReactNode }) {
   return (
-    <span className="rounded-sm bg-primary/10 px-1.5 py-0.5 text-xs text-centaur-300/90 ring-1 ring-primary/20 light:text-primary">
+    <Badge variant="outline" className="rounded-md border-primary/25 bg-primary/10 font-mono text-[11px] text-primary">
       {children}
-    </span>
+    </Badge>
   );
 }
 

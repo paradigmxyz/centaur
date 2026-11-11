@@ -146,7 +146,7 @@ export function OauthAppForm({ app, providers, submitLabel, cancelTo, onSubmit }
 
   return (
     <FormProvider {...form}>
-      <form onSubmit={submit} className="space-y-6" noValidate>
+      <form onSubmit={submit} className="max-w-4xl space-y-6" noValidate>
         <FormSection title="Identity">
           <div className="grid gap-5 sm:grid-cols-2">
             <TextField
@@ -207,7 +207,7 @@ export function OauthAppForm({ app, providers, submitLabel, cancelTo, onSubmit }
               />
             ))}
           </div>
-          {configError && <p className="mt-2 text-xs text-red-400 light:text-red-700">{configError}</p>}
+          {configError && <p className="mt-2 text-xs text-destructive">{configError}</p>}
           <p className="mt-2 text-xs text-muted-foreground">
             The token endpoint must accept <code>client_secret_post</code>. Identity comes from the userinfo{" "}
             <code>sub</code>, or from the access token's claims when no userinfo endpoint is set. The minted token is
@@ -240,7 +240,7 @@ export function OauthAppForm({ app, providers, submitLabel, cancelTo, onSubmit }
                 disabled={!isNew}
               />
               {form.formState.errors.shared?.message && (
-                <p className="mt-1 text-xs text-red-400 light:text-red-700">{form.formState.errors.shared.message}</p>
+                <p className="mt-1 text-xs text-destructive">{form.formState.errors.shared.message}</p>
               )}
             </div>
             <CheckboxField

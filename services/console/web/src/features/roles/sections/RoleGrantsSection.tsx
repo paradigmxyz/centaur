@@ -57,9 +57,9 @@ export function RoleGrantsSection({ role, mutations }: SectionProps) {
       {
         id: "id",
         header: "ID",
-        className: "w-32 whitespace-nowrap",
+        className: "font-mono text-xs w-32 whitespace-nowrap",
         cell: (row) => (
-          <AppLink to={secretPath(row.grantable)} className="text-centaur-400 hover:underline light:text-primary">
+          <AppLink to={secretPath(row.grantable)} className="text-primary hover:underline">
             {row.grantable.id}
           </AppLink>
         ),
@@ -67,27 +67,27 @@ export function RoleGrantsSection({ role, mutations }: SectionProps) {
       {
         id: "foreign_id",
         header: "Foreign ID",
-        className: "w-[28%] whitespace-nowrap",
+        className: "font-mono text-xs w-[28%] whitespace-nowrap",
         cell: (row) =>
           row.grantable.foreign_id ? (
             <span className="block truncate" title={row.grantable.foreign_id}>
               {row.grantable.foreign_id}
             </span>
           ) : (
-            <span className="text-subtle-foreground">—</span>
+            <span className="text-muted-foreground">—</span>
           ),
       },
       {
         id: "name",
         header: "Name",
-        className: "whitespace-nowrap text-heading",
+        className: "whitespace-nowrap text-foreground",
         cell: (row) =>
           row.grantable.name ? (
             <span className="block truncate" title={row.grantable.name}>
               {row.grantable.name}
             </span>
           ) : (
-            <span className="text-subtle-foreground">unnamed</span>
+            <span className="text-muted-foreground">unnamed</span>
           ),
       },
       {
@@ -107,7 +107,7 @@ export function RoleGrantsSection({ role, mutations }: SectionProps) {
               }
             }}
             trigger={
-              <Button variant="secondary" size="sm" className="hover:border-red-500/40 hover:text-red-300">
+              <Button variant="secondary" size="sm" className="hover:border-destructive/40 hover:text-destructive">
                 Revoke
               </Button>
             }
@@ -120,11 +120,13 @@ export function RoleGrantsSection({ role, mutations }: SectionProps) {
 
   return (
     <section id="secrets">
-      <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
-        <SectionHeading>Secrets</SectionHeading>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <SectionHeading className="mb-0">Secrets</SectionHeading>
         {showGrantForm && (
-          <div className="flex flex-wrap items-center gap-3">
-            <SecretGrantPicker value={selected} onChange={setSelected} excludeGrantee={`role:${role.id}`} />
+          <div className="flex w-full items-center gap-3 sm:w-auto">
+            <div className="min-w-0 flex-1 sm:w-80 sm:flex-none">
+              <SecretGrantPicker value={selected} onChange={setSelected} excludeGrantee={`role:${role.id}`} />
+            </div>
             <Button onClick={() => void grant()} disabled={mutations.grantSecret.isPending}>
               Grant secret
             </Button>

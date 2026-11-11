@@ -31,16 +31,16 @@ const columns: Column<WorkflowRow>[] = [
           <Link
             to={workflowPath(row.workflow_key)}
             title={row.label}
-            className="font-medium text-heading hover:text-centaur-300 hover:underline"
+            className="font-medium text-foreground hover:text-primary hover:underline"
           >
             {truncateMiddle(row.label, 48)}
           </Link>
         ) : (
-          <div className="font-medium text-heading" title={row.label}>
+          <div className="font-medium text-foreground" title={row.label}>
             {truncateMiddle(row.label, 48)}
           </div>
         )}
-        <div className="mt-1 text-xs text-subtle-foreground">{row.task_name || "workflow"}</div>
+        <div className="mt-1 text-xs text-muted-foreground">{row.task_name || "workflow"}</div>
       </>
     ),
   },
@@ -57,10 +57,10 @@ const columns: Column<WorkflowRow>[] = [
           <div className="mt-2 space-y-2.5">
             {row.queues.map((queue, index) => (
               <div key={queue.queue_name ?? index} className="flex items-center gap-2">
-                <span className="text-subtle-foreground">{index === row.queues.length - 1 ? "└" : "├"}</span>
+                <span className="text-muted-foreground">{index === row.queues.length - 1 ? "└" : "├"}</span>
                 <span>{queue.queue_label}</span>
                 <WorkflowStatusPill status={queue.status} />
-                <span className="text-subtle-foreground">
+                <span className="text-muted-foreground">
                   <LocalTime value={queue.last_activity_at} format="compact" /> · {queue.run_count.toLocaleString("en-US")}{" "}
                   runs
                 </span>
@@ -100,7 +100,7 @@ function WorkflowsList() {
   return (
     <>
       <h1 className="sr-only">Workflows</h1>
-      <h2 className="mb-3 text-sm font-semibold text-heading">Workflow Runs</h2>
+      <h2 className="mb-3 text-sm font-semibold text-foreground">Workflow Runs</h2>
       {unavailable && <WarningAlert className="mb-4 px-4 py-3">{WORKFLOW_DB_UNAVAILABLE}</WarningAlert>}
       {list.isError && !unavailable ? (
         <ErrorAlert>Could not load workflows: {errorMessage(list.error)}</ErrorAlert>
