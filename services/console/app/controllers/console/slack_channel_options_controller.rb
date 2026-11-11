@@ -49,7 +49,6 @@ module Console
 
     def find_owner
       case params[:owner_type]
-      when "principal" then Principal.find_by_oid!(params[:id])
       when "role" then Role.find_by_oid!(params[:id])
       else raise ActiveRecord::RecordNotFound
       end

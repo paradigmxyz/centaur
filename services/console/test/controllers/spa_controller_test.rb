@@ -26,6 +26,23 @@ class SpaControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "the root path and the principals pages are served by the SPA" do
+    [ "/", "/console/principals", "/console/principals/new", "/console/principals/prn_123" ].each do |path|
+      get path, headers: HTML
+      assert_response :ok, path
+      assert_includes response.body, "<div id=\"root\">", path
+    end
+  end
+
+  test "legacy principal routes are gone" do
+    sign_in_console(users(:acme_admin))
+    post "/console/principals", params: { principal: { foreign_id: "legacy" } }
+    assert_response :not_found
+    delete "/console/principals/#{principals(:acme_channel).oid}"
+    assert_response :not_found
+    assert Principal.exists?(principals(:acme_channel).id)
+  end
+
   test "a signed-out deep link is remembered for the post-login redirect" do
     get "/console/spa-only-page?q=1", headers: HTML
     post login_path, params: { email: users(:acme_admin).email, password: "password123456" }

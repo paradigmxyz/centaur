@@ -8,7 +8,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
 
   test "redirects to login when not signed in" do
     delete logout_url
-    get console_principals_url
+    get console_roles_url
     assert_redirected_to login_path
   end
 
@@ -16,7 +16,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     delete logout_url
     post login_url, params: { email: users(:member_user).email, password: "password123456" }
 
-    [ root_url, console_principals_url, console_roles_url, console_secrets_url,
+    [ console_roles_url, console_secrets_url,
       console_credentials_url, console_oauth_apps_url ].each do |url|
       get url
       assert_redirected_to console_integrations_path
@@ -166,162 +166,6 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_response :not_found
   end
 
-  test "principals search matches names and foreign ids case insensitively" do
-    principal = principals(:acme_channel)
-    principal.update!(name: "Platform Release Captain")
-
-    get console_principals_url, params: { q: "release captain" }
-
-    assert_response :ok
-    assert_select "input[type=search][name=q][value=?]", "release captain"
-    assert_select "tbody a[href=?]", console_principal_path(principal.oid), count: 1
-    assert_select "tbody tr", count: 1
-
-    get console_principals_url, params: { q: "c012345" }
-
-    assert_response :ok
-    assert_select "tbody a[href=?]", console_principal_path(principal.oid), count: 1
-    assert_select "tbody tr", count: 1
-  end
-
-  test "principals are ordered alphabetically by name with unnamed principals last" do
-    principals(:acme_channel).update!(name: "zulu")
-    principals(:globex_user).update!(name: "Alpha")
-    principals(:acme_user_alice).update!(name: "bravo")
-
-    get console_principals_url
-
-    assert_response :ok
-    names = css_select("tbody td:first-child a").map { |link| link.text.strip }
-    assert_equal [ "Alpha", "bravo", "zulu", "unnamed", "unnamed" ], names
-  end
-
-  test "principals use creation time as secondary ordering" do
-    common = { kind: "user", name: "same", created_by: @operator }
-    newer = Principal.create!(common.merge(foreign_id: "Alpha-sort", created_at: 1.day.ago))
-    older = Principal.create!(common.merge(foreign_id: "zeta-sort", created_at: 2.days.ago))
-
-    get console_principals_url
-
-    assert_response :ok
-    same_name_paths = css_select("tbody td:first-child a")
-      .select { |link| link.text.strip == "same" }
-      .map { |link| link["href"] }
-    assert_equal [ older, newer ].map { |principal| console_principal_path(principal.oid) }, same_name_paths
-  end
-
-  test "principals table paginates fifty records per page" do
-    now = Time.current
-    Principal.insert_all!((1..46).map do |number|
-      {
-        created_at: now,
-        updated_at: now,
-        created_by_id: @operator.id,
-        foreign_id: "pagination-#{number}",
-        kind: "user",
-        name: "Pagination principal #{number}"
-      }
-    end)
-
-    get console_principals_url
-
-    assert_response :ok
-    assert_select "tbody tr", count: 50
-    assert_select "a[href*='page=2']", text: "Next"
-    assert_select "div", text: /51 principals.*page 1 of 2/
-
-    get console_principals_url, params: { page: 2 }
-
-    assert_response :ok
-    assert_select "tbody tr", count: 1
-    assert_select "tbody a", text: "unnamed"
-    assert_select "a[href*='page=1']", text: "Previous"
-  end
-
-  test "principals table links to add principal" do
-    get console_principals_url
-    assert_response :ok
-    assert_select "a[href=?]", console_new_principal_path, text: "Add Principal"
-  end
-
-  test "principal pages do not render first-class identity fields as labels" do
-    principal = principals(:acme_channel)
-    principal.update!(
-      kind: "slack_dm",
-      slack_user_id: "U0123456789",
-      slack_channel_id: "D0123456789",
-      slack_team_id: "T0123456789",
-      slack_email: "member@example.com"
-    )
-    expected_labels = {
-      "kind" => "slack_dm",
-      "slack_user_id" => "U0123456789",
-      "slack_channel_id" => "D0123456789",
-      "slack_team_id" => "T0123456789",
-      "slack_email" => "member@example.com"
-    }
-
-    get console_principal_url(principal.oid)
-    assert_response :ok
-    expected_labels.each do |key, value|
-      assert_select ".label-chip", text: "#{key}=#{value}", count: 0
-    end
-  end
-
-  test "principal detail page offers delete" do
-    principal = principals(:acme_channel)
-    get console_principal_url(principal.oid)
-    assert_response :ok
-    assert_select "form[action=?][method=?]", console_delete_principal_path(principal.oid), "post" do
-      assert_select "input[name=_method][value=delete]"
-      assert_select "button[type=submit]", "Delete"
-    end
-  end
-
-  test "principal detail page renders DM permissions as API-managed rows" do
-    principal = principals(:acme_user_bob)
-    principal.update!(name: "Bob")
-    SlackChannelPermission.create!(
-      principal: principal,
-      channel_id: "D0123456789",
-      upload_enabled: true,
-      download_enabled: false,
-      history_enabled: true
-    )
-
-    get console_principal_url(principal.oid)
-    assert_response :ok
-
-    assert_select "td", text: /DM Bob/
-    assert_select "td", text: "API-managed"
-  end
-
-  test "principal detail page resolves direct and inherited Slack channel names from the catalog" do
-    principal = principals(:acme_channel)
-    principal.slack_channel_permissions.create!(
-      channel_id: "C0123456789",
-      upload_enabled: true
-    )
-    roles(:acme_infra).slack_channel_permissions.create!(
-      channel_id: "G9876543210",
-      history_enabled: true
-    )
-    get console_principal_url(principal.oid)
-    assert_response :ok
-
-    assert_select "td", text: /#general/
-    assert_select "h3", text: "Inherited From Roles"
-    assert_select "td", text: /#private/
-    assert_select "input[type=checkbox][disabled]", minimum: 3
-    assert_select "input[role=combobox][aria-controls]"
-    assert_select "[data-slack-channel-autocomplete-url-value=?]",
-                  console_principal_slack_channel_options_path(principal.oid)
-    assert_select "input[type=submit][data-slack-channel-autocomplete-target=submit]:not([disabled])",
-                  value: "Save Slack channel permissions"
-    assert_select "select[name$='[channel_id]']", count: 0
-    assert_select "body", text: /#unused/, count: 0
-  end
-
   test "credentials table combines id, shows status, and links to detail" do
     credential = broker_credentials(:acme_managed_gmail)
     get console_credentials_url
@@ -413,123 +257,8 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "a[href=?]", console_oauth_app_path(app.oid)
   end
 
-  test "principal detail page renders the role and direct-grant management forms" do
-    principal = principals(:acme_channel)
-    get console_principal_url(principal.oid)
-    assert_response :ok
-    assert_select "h2", text: "Roles"
-    assert_select "form[action=?]", console_principal_assign_role_path(principal.oid) do
-      assert_select "select[name=role_id][aria-label=?]", "Role to assign"
-      assert_select "option[value=?]", roles(:acme_admin_role).oid
-      assert_select "option[value=?]", roles(:globex_infra).oid, count: 1
-    end
-    assert_select "form[action=?]", console_principal_unassign_role_path(principal.oid, roles(:acme_infra).oid) do
-      assert_select "button[type=submit]", "Unassign"
-    end
-    assert_select "h2", text: "Direct Grants"
-    assert_select "select[name=grantable] optgroup"
-    # Each direct grant exposes a revoke form.
-    assert_select "form[action=?]", console_principal_revoke_grant_path(principal.oid, grants(:acme_channel_github_token).oid)
-    # The direct grant's id links to the secret's detail page.
-    assert_select "a[href=?]", console_secret_path("static", static_secrets(:github_token_inject).oid)
-  end
-
-  test "principal detail paginates roles, direct grants, and effective grants independently" do
-    principal = principals(:acme_channel)
-    now = Time.current
-    role_ids = Role.insert_all!((1..50).map do |number|
-      {
-        foreign_id: "detail-page-role-#{number}",
-        name: "Detail page role #{number}",
-        labels: {},
-        assign_by_default: false,
-        created_by_id: @operator.id,
-        created_at: now,
-        updated_at: now
-      }
-    end, returning: %w[id]).rows.flatten
-    PrincipalRole.insert_all!(role_ids.map do |role_id|
-      { principal_id: principal.id, role_id: role_id, created_at: now, updated_at: now }
-    end)
-
-    secret_ids = StaticSecret.insert_all!((1..50).map do |number|
-      {
-        foreign_id: "detail-page-secret-#{number}",
-        name: "Detail page secret #{number}",
-        kind: "custom",
-        labels: {},
-        inject_config: { "header" => "X-Detail-Page-#{number}" },
-        created_by_id: @operator.id,
-        created_at: now,
-        updated_at: now
-      }
-    end, returning: %w[id]).rows.flatten
-    Grant.insert_all!(secret_ids.map do |secret_id|
-      {
-        principal_id: principal.id,
-        static_secret_id: secret_id,
-        priority: Grant::DEFAULT_DIRECT_PRIORITY,
-        created_by_id: @operator.id,
-        created_at: now,
-        updated_at: now
-      }
-    end)
-
-    get console_principal_url(principal.oid), params: {
-      roles_page: 2,
-      direct_grants_page: 2,
-      effective_grants_page: 2
-    }
-
-    assert_response :ok
-    assert_select "section#roles" do
-      assert_select "tbody tr", count: 1
-      assert_select "a[href*='roles_page=1'][href$='#roles']", text: "Previous"
-      assert_select "div", text: /51 roles.*page 2 of 2/
-    end
-    assert_select "section#direct-grants" do
-      assert_select "tbody tr", count: 3
-      assert_select "a[href*='direct_grants_page=1'][href$='#direct-grants']", text: "Previous"
-      assert_select "div", text: /53 direct grants.*page 2 of 2/
-    end
-    assert_select "section#effective-grants" do
-      assert_select "tbody tr", count: 4
-      assert_select "a[href*='effective_grants_page=1'][href$='#effective-grants']", text: "Previous"
-      assert_select "div", text: /54 effective grants.*page 2 of 2/
-    end
-  end
-
-  test "effective grants table sources each secret as direct or via a role" do
-    principal = principals(:acme_channel) # direct grants + acme_prod_api_key via the acme_infra role
-    get console_principal_url(principal.oid)
-    assert_response :ok
-    # The Source column exists.
-    assert_select "section table th", text: "Source"
-    # A directly granted secret is tagged "direct".
-    assert_select "td", text: "direct"
-    # The role-inherited secret names the role it comes through, and its id links
-    # to the secret (it appears only in the effective table, not the direct one).
-    assert_select "td span", text: "via #{roles(:acme_infra).name}"
-    assert_select "a[href=?]", console_secret_path("static", static_secrets(:acme_prod_api_key).oid)
-  end
-
-  test "grant dropdown omits secrets already granted directly but keeps the rest" do
-    principal = principals(:acme_channel) # github_token_inject is granted directly
-    get console_principal_url(principal.oid)
-    assert_response :ok
-    granted = static_secrets(:github_token_inject)
-    ungranted = static_secrets(:acme_staging_api_key)
-    assert_select "select[name=grantable] option[value=?]", "static:#{granted.oid}", count: 0
-    assert_select "select[name=grantable] option[value=?]", "static:#{ungranted.oid}"
-    # A kind with no direct grant on this principal still lists all its secrets.
-    gcp = gcp_auth_secrets(:acme_bigquery)
-    assert_select "select[name=grantable] option[value=?]", "gcp_auth:#{gcp.oid}"
-    gcp_id = gcp_id_token_secrets(:acme_cloud_run)
-    assert_select "select[name=grantable] option[value=?]", "gcp_id_token:#{gcp_id.oid}"
-  end
-
   test "header shows the signed-in operator and a sign-out control" do
-    get console_principals_url
+    get console_roles_url
     assert_response :ok
     assert_select "span", text: @operator.email
     assert_select "form[action=?][method=?]", logout_path, "post" do

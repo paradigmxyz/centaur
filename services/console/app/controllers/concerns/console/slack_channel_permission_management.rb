@@ -16,11 +16,8 @@ module Console
       @slack_channel_options_url = slack_channel_options_url(owner)
     end
 
-    def update_slack_channel_permissions_from_form(owner, path, preserve_api_managed_direct_messages: false)
-      rows = slack_channel_permission_replacement_rows(
-        owner,
-        preserve_api_managed_direct_messages: preserve_api_managed_direct_messages
-      )
+    def update_slack_channel_permissions_from_form(owner, path)
+      rows = slack_channel_permission_form_rows(owner)
       if slack_channel_permission_rows_unchanged?(owner, rows)
         return redirect_to path, notice: "Updated Slack channel permissions."
       end
@@ -33,12 +30,6 @@ module Console
       redirect_to path, alert: "Slack channels cannot be changed after creation."
     rescue ActiveRecord::RecordNotUnique
       redirect_to path, alert: "Each Slack channel can only be selected once."
-    end
-
-    def slack_channel_permission_replacement_rows(owner, preserve_api_managed_direct_messages: false)
-      rows = slack_channel_permission_form_rows(owner)
-      rows.concat(api_managed_direct_message_rows(owner)) if preserve_api_managed_direct_messages
-      rows
     end
 
     def slack_channel_permission_rows_unchanged?(owner, rows)
@@ -82,15 +73,8 @@ module Console
       permission.channel_id
     end
 
-    def api_managed_direct_message_rows(owner)
-      owner.slack_channel_permissions
-           .select { |permission| permission.channel_id.to_s.start_with?("D") }
-           .map(&:as_permission_json)
-    end
-
     def slack_channel_options_url(owner)
       case owner
-      when Principal then console_principal_slack_channel_options_path(owner.oid)
       when Role then slack_channel_options_console_role_path(owner.oid)
       else raise ArgumentError, "unsupported Slack channel permission owner"
       end

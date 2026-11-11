@@ -1,17 +1,14 @@
-# Operator console: a lightweight, server-rendered HTML view over principals,
-# their effective grants, and secrets. Read-only; gated behind a console session
+# Operator console: a lightweight, server-rendered HTML view over secrets,
+# credentials, and OAuth apps (principals moved to the SPA). Read-only; gated behind a console session
 # (ApplicationController#require_login) and restricted to admins (require_admin),
 # like every Control page. Distinct from the JSON API.
 class ConsoleController < ApplicationController
   include SecretKinds
-  include Console::SlackChannelPermissionManagement
 
   layout "console"
 
   before_action :require_admin
 
-  PRINCIPALS_PER_PAGE = 50
-  PRINCIPAL_DETAIL_PER_PAGE = 50
   SECRETS_PER_PAGE = 50
 
   # Friendly labels for the source backend (and the gcp_auth credentials_provider
@@ -23,73 +20,6 @@ class ConsoleController < ApplicationController
     "control_plane" => "Inline", "token_broker" => "Token-Broker",
     "workload_identity" => "Workload-Identity"
   }.freeze
-
-  def principals
-    @search_query = params[:q].to_s.strip
-    scope = Principal.order(name: :asc, created_at: :asc)
-    @total_principals = scope.count
-
-    if @search_query.present?
-      pattern = "%#{Principal.sanitize_sql_like(@search_query)}%"
-      scope = scope.where("name ILIKE :pattern OR foreign_id ILIKE :pattern", pattern: pattern)
-    end
-
-    @total_count = scope.count
-    @total_pages = [ (@total_count.to_f / PRINCIPALS_PER_PAGE).ceil, 1 ].max
-    @page = [ page_param, @total_pages ].min
-    @principals = scope
-      .limit(PRINCIPALS_PER_PAGE)
-      .offset((@page - 1) * PRINCIPALS_PER_PAGE)
-      .includes(:roles)
-  end
-
-  def principal
-    @principal = Principal.find_by_oid!(params[:id])
-    load_slack_channel_permission_form(@principal)
-    @inherited_slack_channel_permissions = @principal.inherited_slack_channel_permissions_payload
-    load_principal_roles
-    effective_page = PrincipalEffectiveGrantsPage.new(
-      principal: @principal,
-      relations: @principal.granted_secrets_by_kind,
-      page: params[:effective_grants_page],
-      per_page: PRINCIPAL_DETAIL_PER_PAGE
-    ).call
-    @granted = effective_page.records_by_kind
-    @grant_sources = effective_page.sources_by_key
-    @effective_grants_page = effective_page.page
-    @effective_grants_total_pages = effective_page.total_pages
-    @effective_grants_total_count = effective_page.total_count
-
-    # Direct grants (revocable here) -- distinct from @granted, which also folds in
-    # grants inherited from roles.
-    direct_grants_scope = @principal.grants.order(:id)
-    @direct_grants_total_count = direct_grants_scope.count
-    @direct_grants_total_pages = total_pages(@direct_grants_total_count, PRINCIPAL_DETAIL_PER_PAGE)
-    @direct_grants_page = bounded_page(params[:direct_grants_page], @direct_grants_total_pages)
-    @direct_grants = direct_grants_scope
-      .includes(Grant::GRANTABLE_ASSOCIATIONS)
-      .limit(PRINCIPAL_DETAIL_PER_PAGE)
-      .offset((@direct_grants_page - 1) * PRINCIPAL_DETAIL_PER_PAGE)
-    # Assignment options for the inline forms. Already-directly-granted secrets
-    # are filtered out of the grant dropdown
-    # (they're in the table above); a role-inherited secret stays offered, so it
-    # can be promoted to a direct grant.
-    @assignable_roles = Role
-      .where.not(id: @principal.role_ids)
-      .order(:id)
-    granted_ids = Hash.new { |hash, key| hash[key] = [] }
-    @principal.grants.pluck(*Grant::GRANTABLE_ASSOCIATIONS.map { |assoc| "#{assoc}_id" }).each do |ids|
-      ids.each_with_index do |id, index|
-        next unless id
-
-        kind = Grant::GRANTABLE_ASSOCIATIONS.fetch(index).to_s.delete_suffix("_secret")
-        granted_ids[kind] << id
-      end
-    end
-    @assignable_secrets = SECRET_KINDS.each_with_object({}) do |(kind, cfg), acc|
-      acc[kind] = cfg[:model].where.not(id: granted_ids[kind]).order(:id)
-    end
-  end
 
   def secrets
     @search_query = params[:q].to_s.strip
@@ -236,16 +166,6 @@ class ConsoleController < ApplicationController
 
   private
 
-  def load_principal_roles
-    scope = @principal.roles.order(:id)
-    @roles_total_count = scope.count
-    @roles_total_pages = total_pages(@roles_total_count, PRINCIPAL_DETAIL_PER_PAGE)
-    @roles_page = bounded_page(params[:roles_page], @roles_total_pages)
-    @roles = scope
-      .limit(PRINCIPAL_DETAIL_PER_PAGE)
-      .offset((@roles_page - 1) * PRINCIPAL_DETAIL_PER_PAGE)
-  end
-
   def total_pages(total_count, per_page)
     [ (total_count.to_f / per_page).ceil, 1 ].max
   end
@@ -253,11 +173,6 @@ class ConsoleController < ApplicationController
   def bounded_page(value, total_pages)
     page = Integer(value.to_s, 10, exception: false) || 1
     [ [ page, 1 ].max, total_pages ].min
-  end
-
-  def page_param
-    page = Integer(params[:page].to_s, 10, exception: false) || 1
-    page < 1 ? 1 : page
   end
 
   def source_segment(source, role: nil)

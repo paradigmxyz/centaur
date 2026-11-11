@@ -97,7 +97,7 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
 
   test "a pending user hitting a console page is bounced to the holding page" do
     post login_url, params: { email: users(:pending_user).email, password: "password123456" }
-    get console_principals_url
+    get console_roles_url
     assert_redirected_to pending_path
   end
 

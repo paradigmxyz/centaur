@@ -123,9 +123,13 @@ class Console::SshKeysControllerTest < ActionDispatch::IntegrationTest
     assert_response :ok
     assert_no_match(/BEGIN OPENSSH PRIVATE KEY/, response.body)
 
-    post console_principal_grant_secret_url(principals(:acme_channel).oid), params: { grantable: "ssh_key:#{key.oid}" }
-    get console_principal_url(principals(:acme_channel).oid)
-    assert_response :ok
-    assert_select "a[href=?]", console_secret_path("ssh_key", key.oid)
+    principal = principals(:acme_channel)
+    post api_v1_grants_path, params: { data: { principal_id: principal.oid, ssh_key_secret_id: key.oid } },
+         headers: csrf_headers, as: :json
+    assert_response :created
+    get api_v1_principal_grants_path(principal.oid)
+    grant = response.parsed_body["data"].find { |g| g["ssh_key_secret_id"] == key.oid }
+    assert_equal({ "kind" => "ssh_key", "id" => key.oid }, grant["grantable"].slice("kind", "id"))
+    assert_no_match(/BEGIN OPENSSH PRIVATE KEY/, response.body)
   end
 end
