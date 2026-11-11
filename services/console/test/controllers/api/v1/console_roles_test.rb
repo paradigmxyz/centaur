@@ -49,6 +49,24 @@ module Api
         assert_response :not_found
       end
 
+      test "the legacy role page paths are served by the SPA" do
+        Dir.mktmpdir do |dir|
+          index = File.join(dir, "index.html")
+          File.write(index, "<!doctype html><div id=\"root\"></div>")
+          previous = SpaController.index_path
+          SpaController.index_path = index
+          role = roles(:acme_infra)
+          [ "/console/roles", "/console/roles/new", "/console/roles/#{role.oid}",
+            "/console/roles/#{role.oid}/edit" ].each do |path|
+            get path, headers: { "Accept" => "text/html" }
+            assert_response :ok, path
+            assert_includes response.body, "<div id=\"root\">", path
+          end
+        ensure
+          SpaController.index_path = previous
+        end
+      end
+
       # -- index / show ----------------------------------------------------------
 
       test "index lists every role with identity and labels" do

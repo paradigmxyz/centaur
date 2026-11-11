@@ -203,6 +203,8 @@ describe("role detail", () => {
     expect(screen.getByRole("link", { name: "Edit" })).toHaveAttribute("href", "/console/roles/role_infra/edit");
 
     expect(await screen.findByText("#general")).toBeInTheDocument();
+    // Existing channels are immutable: shown as text, never as an editable channel input.
+    expect(screen.queryByDisplayValue("C0123456789")).not.toBeInTheDocument();
     expect(screen.queryByText("Inherited From Roles")).not.toBeInTheDocument();
     expect(screen.queryByText("API-managed")).not.toBeInTheDocument();
 

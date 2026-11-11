@@ -77,8 +77,9 @@ class SpaControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "legacy HTML routes still take precedence" do
-    get "/console/roles", headers: HTML
-    assert_redirected_to login_path
+    # OAuth protocol endpoints stay Rails routes after the UI moves to the SPA.
+    get "/oauth/unknown-app/start", headers: HTML
+    assert_response :redirect
   end
 
   test "an unbuilt SPA explains how to build it" do
