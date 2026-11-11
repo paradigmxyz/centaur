@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_11_09_021725) do
+ActiveRecord::Schema[8.1].define(version: 2026_11_11_160000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -229,6 +229,18 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_09_021725) do
     t.jsonb "response_types", default: [], null: false
     t.jsonb "scopes", default: [], null: false
     t.datetime "updated_at", null: false
+  end
+
+  create_table "mcp_oauth_consents", force: :cascade do |t|
+    t.string "nonce_digest", null: false
+    t.bigint "user_id", null: false
+    t.datetime "expires_at", null: false
+    t.datetime "consumed_at"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["expires_at"], name: "index_mcp_oauth_consents_on_expires_at"
+    t.index ["nonce_digest"], name: "index_mcp_oauth_consents_on_nonce_digest", unique: true
+    t.index ["user_id"], name: "index_mcp_oauth_consents_on_user_id"
   end
 
   create_table "mcp_oauth_refresh_tokens", force: :cascade do |t|
@@ -645,6 +657,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_09_021725) do
   add_foreign_key "mcp_oauth_authorization_codes", "mcp_oauth_clients"
   add_foreign_key "mcp_oauth_authorization_codes", "principals"
   add_foreign_key "mcp_oauth_authorization_codes", "users"
+  add_foreign_key "mcp_oauth_consents", "users", on_delete: :cascade
   add_foreign_key "mcp_oauth_refresh_tokens", "mcp_oauth_clients"
   add_foreign_key "mcp_oauth_refresh_tokens", "principals"
   add_foreign_key "mcp_oauth_refresh_tokens", "users"

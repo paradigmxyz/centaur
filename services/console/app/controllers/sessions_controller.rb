@@ -1,42 +1,25 @@
-# Quick session-cookie login for the operator console. Authenticates an existing
-# User (has_secure_password) by email + password and stores their id in the
-# session. No registration, password reset, or rate limiting: deployments that
-# expose the console publicly should disable this break-glass path with
-# CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED=false.
+# Redirect-only form endpoints for console password login and logout. The login
+# and pending pages live in the SPA (web/src/features/auth-pages), which signs
+# in through POST /api/v1/session and out through DELETE /api/v1/session.
+#
+# POST /login is kept for form posts from older pages and request tests until
+# the legacy UI is gone; it shares the sign-in logic (ConsoleSignIn) and the
+# CSRF protection of every form post, and reports failures through the flash
+# on the SPA login page. DELETE /logout serves the legacy account menu.
 class SessionsController < ApplicationController
-  layout "auth"
-
-  # The login form must be reachable while signed out, so it opts out of the
-  # app-wide require_login gate. (logout keeps the gate: it's a no-op when
-  # there's no session.)
-  skip_before_action :require_login, only: %i[new create]
-  # None of these enforce approval: the login form is anonymous, and pending users
-  # must still reach the holding page and be able to sign out.
+  skip_before_action :require_login, only: :create
+  # Pending users must still be able to sign out (and sign in as someone else).
   skip_before_action :require_active_account
 
-  def new
-    redirect_to safe_console_return_path if current_user&.active?
-  end
-
-  # Holding page for a signed-in but not-yet-approved user. Active users have no
-  # reason to be here, so send them to the console.
-  def pending
-    redirect_to default_console_landing_path if current_user&.active?
-  end
-
   def create
-    unless password_login_enabled?
-      flash.now[:alert] = "Email and password sign in is disabled."
-      return render :new, status: :not_found
+    unless ConsoleAuth.password_login_enabled?
+      return redirect_to login_path, alert: "Email and password sign in is disabled."
     end
 
     user = User.find_by(email: params[:email].to_s.strip.downcase)
-    unless user&.authenticate(params[:password])
-      flash.now[:alert] = "Invalid email or password."
-      return render :new, status: :unprocessable_entity
-    end
+    return redirect_to login_path, alert: "Invalid email or password." unless user&.authenticate(params[:password])
 
-    sign_in_console_user(user, disabled: :render)
+    sign_in_console_user(user)
   end
 
   def destroy

@@ -7,6 +7,16 @@ class McpOauthClient < ApplicationRecord
   DEFAULT_GRANT_TYPES = %w[authorization_code refresh_token].freeze
   DEFAULT_RESPONSE_TYPES = %w[code].freeze
   DEFAULT_SCOPES = %w[mcp:tools].freeze
+  # Schemes a browser executes, renders locally, or reserves for itself. A
+  # redirect_uri with one of these would turn the post-consent redirect into
+  # script execution or local content in the console origin, so they are never
+  # accepted, whatever the registration says.
+  FORBIDDEN_REDIRECT_SCHEMES = %w[
+    javascript vbscript livescript data blob file filesystem about view-source
+    jar mhtml res ms-its chrome chrome-extension moz-extension resource ws wss
+  ].freeze
+  # RFC 3986 scheme syntax.
+  SCHEME_FORMAT = /\A[a-z][a-z0-9+.-]*\z/
 
   has_many :authorization_codes, class_name: "McpOauthAuthorizationCode", dependent: :destroy
   has_many :refresh_tokens, class_name: "McpOauthRefreshToken", dependent: :destroy
@@ -64,13 +74,23 @@ class McpOauthClient < ApplicationRecord
     errors.add(:scopes, "contains unsupported values: #{unsupported.join(', ')}") if unsupported.any?
   end
 
+  # Whether +value+ may be a public-client redirect target. Checked at
+  # registration and again (through redirect_uri_allowed?) at authorize and
+  # decision time, so rows stored before a rule existed are refused too.
   def self.allowed_redirect_uri?(value)
-    uri = URI.parse(value.to_s)
-    return false if uri.scheme.blank?
-    return false if uri.fragment.present?
-    return false if value.to_s.include?("*")
+    raw = value.to_s
+    # Browsers strip tabs/newlines and ignore leading spaces/controls before
+    # parsing the scheme ("java<TAB>script:", " javascript:"); refuse them outright.
+    return false if raw.empty? || raw.match?(/[[:space:][:cntrl:]]/) || raw.include?("\\")
 
-    case uri.scheme
+    uri = URI.parse(raw)
+    scheme = uri.scheme.to_s.downcase
+    return false unless scheme.match?(SCHEME_FORMAT)
+    return false if FORBIDDEN_REDIRECT_SCHEMES.include?(scheme)
+    return false if uri.fragment.present?
+    return false if raw.include?("*")
+
+    case scheme
     when "https"
       uri.host.present?
     when "http"

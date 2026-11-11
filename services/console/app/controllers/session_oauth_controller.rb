@@ -16,9 +16,10 @@ require "uri"
 # SECURITY: never logs codes, tokens, or response bodies -- only provider keys and
 # error codes, like the Broker/Oauth subsystem. Account linking is gated on
 # email_verified so an unverified IdP email can't take over an existing account.
+#
+# Failures redirect to the SPA login page with a flash alert, which the page
+# reads (once) from GET /api/v1/auth/config.
 class SessionOauthController < ApplicationController
-  layout "auth"
-
   # The login form, the IdP redirect, and the callback must all work signed out.
   skip_before_action :require_login
   skip_before_action :require_active_account

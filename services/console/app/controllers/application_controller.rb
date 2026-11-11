@@ -1,5 +1,6 @@
 class ApplicationController < ActionController::Base
   include ConsoleSession
+  include ConsoleSignIn
 
   # Only allow modern browsers supporting webp images, web push, badges, import maps, CSS nesting, and CSS :has.
   allow_browser versions: :modern
@@ -11,7 +12,7 @@ class ApplicationController < ActionController::Base
   # controllers don't each hand-roll a rescue. Mirrors Api::BaseController.
   rescue_from ActiveRecord::RecordNotFound, with: :render_not_found
 
-  helper_method :current_user, :acting_admin?, :descoped?, :password_login_enabled?
+  helper_method :current_user, :acting_admin?, :descoped?
   helper_method :public_base_url, :oauth_callback_redirect_uri
 
   # The public origin the console is reached at. Derived from the request by
@@ -50,10 +51,6 @@ class ApplicationController < ActionController::Base
   # See ConsoleSession#console_session_descoped?.
   def descoped?
     console_session_descoped?
-  end
-
-  def password_login_enabled?
-    ConsoleAuth.password_login_enabled?
   end
 
   # The permission check console gates use instead of current_user.admin?: a
@@ -98,55 +95,19 @@ class ApplicationController < ActionController::Base
     acting_admin? ? console_principals_path : console_integrations_path
   end
 
-  # Establishes the console cookie session and sends the user to the right
-  # post-login page. Password login re-renders for disabled accounts; SSO login
-  # redirects because it is returning from an external provider.
-  def sign_in_console_user(user, disabled: :redirect, destination: nil)
-    if user.disabled?
-      if disabled == :render
-        flash.now[:alert] = "Your account is disabled."
-        return render :new, status: :unprocessable_entity
-      end
+  # Completes an SSO login: establishes the console session and redirects to
+  # the remembered return path or the user's landing page. The SPA login page
+  # shows the flash (notice or alert) through GET /api/v1/auth/config.
+  def sign_in_console_user(user)
+    return redirect_to login_path, alert: ConsoleSignIn::DISABLED_MESSAGE if user.disabled?
 
-      return redirect_to login_path, alert: "Your account is disabled."
-    end
-
-    return_to = session[:return_to]
-    reset_session
-    session[:user_id] = user.id
-    session[:return_to] = return_to if return_to.present?
-    if user.active?
-      redirect_to(destination.presence || post_login_redirect_path, notice: "Signed in as #{user.email}.")
-    else
-      redirect_to pending_path, notice: "Your account is awaiting approval."
-    end
-  end
-
-  def post_login_redirect_path
-    path = session.delete(:return_to).to_s
-    return default_console_landing_path unless path.start_with?("/") && !path.start_with?("//")
-    path
+    redirect_to establish_console_session!(user)
   end
 
   def store_return_to_for_login
     return unless request.request_method == "GET"
 
-    session[:return_to] = request.fullpath
-  end
-
-  def safe_console_return_path(default: default_console_landing_path)
-    raw = params[:return_to].presence || params[:next].presence
-    return default if raw.blank?
-
-    uri = URI.parse(raw.to_s)
-    return default if uri.scheme.present? || uri.host.present?
-
-    path = uri.path.presence
-    return default unless path == "/" || path&.start_with?("/console")
-
-    uri.to_s
-  rescue URI::InvalidURIError
-    default
+    remember_console_return_path(request.fullpath)
   end
 
   def render_not_found(e)

@@ -112,6 +112,119 @@ unaffected.
 callback; it is `{}` when there is none. `POST`/`DELETE /api/v1/descope`
 return `{ "data": { "descoped": true|false } }`; bearer callers receive `422`.
 
+### Console auth pages
+
+Endpoints behind the SPA's signed-out and consent pages (`/login`, `/pending`,
+`/oauth/result`, `/mcp/oauth/consent`).
+
+| Method | Path | Access | Description |
+|---|---|---|---|
+| `GET` | `/api/v1/auth/config` | public (no session or key needed) | Login-page bootstrap: sign-in methods, CSRF token, one-shot flash |
+| `POST` | `/api/v1/session` | public, CSRF token required | Password sign-in |
+| `GET` | `/api/v1/mcp/authorization?request=` | active session (not bearer) | MCP consent ticket details |
+
+`GET /api/v1/auth/config` (sent with `Cache-Control: no-store`; ignores any
+`Authorization` header):
+
+```json
+{
+  "data": {
+    "providers": [ { "key": "google", "label": "Google", "start_path": "/auth/google/start" } ],
+    "password_login": true,
+    "csrf_token": "…",
+    "signed_in": false,
+    "redirect_to": null,
+    "flash": { "alert": "Sign in was canceled." },
+    "oauth_result": null
+  }
+}
+```
+
+- `providers` lists the configured SSO providers; `start_path` begins the
+  browser redirect flow. `password_login` is `false` when
+  `CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED=false`.
+- `csrf_token` is bound to the (possibly new) session; send it as
+  `X-CSRF-Token` to `POST /api/v1/session`.
+- `signed_in` is `true` for an active or pending session (a disabled
+  account's session is cleared). `redirect_to` is set only for an active
+  session: where the login page should send it (`?return_to=` when
+  allowlisted, else the landing page).
+- `?return_to=` from a signed-out browser is remembered for the post-login
+  redirect when it is an allowlisted same-origin path: `/`, `/console…`,
+  `/mcp/oauth/authorize`, `/oauth/<slug>/start`, or `/launch` (no scheme,
+  host, `//`, backslashes, control characters, or dot segments). Other values
+  are ignored.
+- `flash` hands off (once) the `notice`/`alert` left by a redirect: SSO
+  failures, sign-out (`"Signed out."`), or a failed `POST /login`.
+- `oauth_result` hands off (once) the outcome of a failed broker OAuth consent
+  (`/oauth/<slug>/callback` and `/start` redirect to `/oauth/result`):
+  `{ "kind": "error" | "denied", "message": "…", "retry_path": "/oauth/<slug>/start" }`.
+  `retry_path` is omitted when the integration is unknown or disabled.
+
+`POST /api/v1/session` body `{ "data": { "email": "…", "password": "…" } }`
+(email is trimmed and matched case-insensitively). Success resets the session
+(fixation) and returns `{ "data": { "status": "active" | "pending", "redirect_to": "/console/principals" } }`;
+`redirect_to` is the remembered return path, the landing page, or `/pending`
+for a pending account. The next `GET /api/v1/me` carries the `notice`. Errors:
+`404` `password_login_disabled`, `422` `invalid_credentials` ("Invalid email
+or password."), `422` `account_disabled`, `403` `csrf`.
+
+`DELETE /api/v1/session` also leaves the `"Signed out."` notice for the login
+page.
+
+#### MCP OAuth consent
+
+Dynamic client registration (`POST /mcp/oauth/register`) accepts `https`
+redirect URIs, loopback `http`, and native private-use schemes (`cursor://`,
+`vscode://`, `com.example.app:/…`). It rejects executable or browser-reserved
+schemes (`javascript`, `data`, `vbscript`, `file`, `blob`, `about`, …, in any
+case), and URIs containing whitespace, control characters, backslashes,
+fragments, or wildcards. The same check runs again at authorize and decision
+time, so stored registrations that predate it are refused.
+
+`GET /mcp/oauth/authorize` validates the request (client, `response_type=code`,
+registered `redirect_uri`, S256 PKCE, scopes, resource). Invalid requests go
+back to the client's registered `redirect_uri` with `error`/`state`, or render a
+plain `400` when the client or `redirect_uri` is not trusted. A valid request
+redirects to `/mcp/oauth/consent?request=<ticket>`. The ticket is signed,
+expires after 10 minutes, and is bound to the signed-in user and browser
+session. It is also backed by a server-side row (`mcp_oauth_consents`) that a
+decision consumes with one conditional `UPDATE`, so a ticket is decided at most
+once, even when the session cookie is replayed or decisions race.
+
+`GET /api/v1/mcp/authorization?request=<ticket>` (`Cache-Control: no-store`):
+
+```json
+{
+  "data": {
+    "client": { "id": "moc_…", "name": "Amp" },
+    "redirect_host": "127.0.0.1",
+    "resource": "https://mcp.example.com/mcp",
+    "scopes": [ "mcp:tools" ],
+    "user": { "email": "ops@example.com" },
+    "decision_path": "/mcp/oauth/consent",
+    "csrf_token": "…"
+  }
+}
+```
+
+Errors: `403` `session_required` for bearer callers, `404`
+`invalid_consent_request` for a tampered, expired, decided, foreign-user, or
+foreign-session ticket, and `422` `invalid_authorization_request` when the
+client or its registration changed since the ticket was issued.
+
+The decision is a classic form post (not JSON), so neither the client URL nor
+the authorization code passes through page JavaScript:
+`POST /mcp/oauth/consent` with `request=<ticket>`, `decision=approve|deny`, and
+`authenticity_token`. The response is a `303` to the client's registered
+`redirect_uri`, with `code` and `state` (or `error=access_denied`). A signed-out
+browser goes to `/login` and a pending one to `/pending`. Failures redirect to
+`/mcp/oauth/consent?error=<code>`, where `code` is one of `csrf`,
+`invalid_decision` (the ticket is not consumed), `invalid_consent_request`,
+`invalid_authorization_request`, or `server_error`. If the client's
+redirect_uri is still trusted, a revalidation failure goes to the client
+instead.
+
 ### Proxy tokens
 
 `iron-proxy` instances authenticate to [proxy sync](#proxy-sync), served by the separate `proxy-sync` service, with their own token (`iprx_` followed by 64 lowercase hex characters), issued once when the proxy is created. An invalid proxy token returns `401` with `"invalid or missing proxy token"`.
