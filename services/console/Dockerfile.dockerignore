@@ -1,0 +1,39 @@
+# Docker build context is the repository root (see Dockerfile). Only the
+# workspace manifests and the console service are sent.
+*
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!patches/
+!services/console/
+
+# Ignore bundler config, environment files, and default key files.
+services/console/.bundle
+services/console/.env*
+services/console/config/master.key
+services/console/config/credentials/*.key
+
+# Ignore logs, tempfiles, and uploaded files, but keep the directories.
+services/console/log/*
+services/console/tmp/*
+services/console/storage/*
+!services/console/log/.keep
+!services/console/tmp/.keep
+!services/console/tmp/pids/
+services/console/tmp/pids/*
+!services/console/tmp/pids/.keep
+!services/console/storage/.keep
+
+# Ignore built assets and dependencies; the image builds them.
+**/node_modules
+services/console/app/assets/builds/*
+!services/console/app/assets/builds/.keep
+services/console/public/assets
+services/console/public/spa
+
+# Ignore development and Docker files.
+services/console/.devcontainer
+services/console/.overmind.sock
+services/console/Procfile.dev
+services/console/Dockerfile*
+services/console/.dockerignore

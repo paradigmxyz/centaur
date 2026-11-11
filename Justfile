@@ -113,10 +113,10 @@ _build-workflow-python:
     just _build-api-rs
     just _build-agent
 
-# The console builds from its own subdirectory context (services/console), unlike
-# the other services which build from the repo root.
+# The console builds from the repo root so its SPA can use the pnpm workspace
+# lockfile; services/console/Dockerfile.dockerignore limits the context.
 _build-console:
-    docker build -t centaur-console:latest -f services/console/Dockerfile services/console
+    docker build -t centaur-console:latest -f services/console/Dockerfile .
 
 # Push locally-built images to the local registry under library/ so k3s pulls
 # them via its docker.io mirror. Used by `just up k3s`. Only changed layers are
