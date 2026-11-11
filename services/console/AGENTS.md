@@ -11,17 +11,27 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
 
 ## Architecture
 
-- Rails has no server-rendered UI: no views (other than the unused mailer
-  layouts), view helpers, browser JavaScript, or asset pipeline.
-  `script/check-no-ruby-ui` enforces this in `bin/ci` and CI. Every console
-  page, including login, pending, the OAuth consent result, and MCP OAuth
-  consent, is a route in `web/`.
+- Rails has no server-rendered UI except the OAuth flows: no views (other
+  than the unused mailer layouts and the OAuth pages below), view helpers,
+  browser JavaScript, or asset pipeline. `script/check-no-ruby-ui` enforces
+  this in `bin/ci` and CI. Every console page, including login and pending,
+  is a route in `web/`.
+- The OAuth flows are intentionally server-rendered so installed MCP clients
+  see exactly the protocol behaviour they were built against: the MCP consent
+  page (`GET`/`POST /mcp/oauth/authorize`, a standard Rails form with an
+  authenticity token) and the broker OAuth result page
+  (`/oauth/:slug/{start,callback}`). They use `layouts/oauth.html.erb` and
+  plain CSS in `public/oauth-page` (no Stimulus, no JavaScript); keep its
+  colours in step with `web/src/index.css`. Do not move them into the SPA, and
+  keep their URLs, form field names, validation order, and error redirects
+  stable. Only the login step goes through the SPA.
 - Rails serves `public/spa/index.html` (built by `pnpm -C web build`) for any
   browser navigation no route claims (`SpaController`, `lib/spa_request.rb`).
-  The remaining browser-facing Rails routes are protocol endpoints that answer
-  with redirects into the SPA or JSON: SSO (`/auth/:provider/*`), broker OAuth
-  consent (`/oauth/:slug/*`), the MCP OAuth server (`/mcp/oauth/*`,
-  `/.well-known/*`), and the PWA files and `/launch`.
+  The remaining browser-facing Rails routes are protocol endpoints: SSO
+  (`/auth/:provider/*`), broker OAuth consent (`/oauth/:slug/*`), the MCP
+  OAuth server (`/mcp/oauth/*`, `/.well-known/*`), and the PWA files and
+  `/launch`. Apart from the OAuth pages above they answer with redirects or
+  JSON.
 - Each console area owns `config/routes/console_<area>.rb` (its `/api/v1`
   additions and protocol routes) and `web/src/features/<area>/`. Shared SPA
   building blocks live in `web/src/components/` (see its `README.md`),
@@ -55,6 +65,10 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
 - Apply authorization in controllers and service objects before loading or
   mutating scoped resources. Test disabled users, non-admin users, namespace
   isolation, token replay, and ownership checks where relevant.
+- MCP redirect URIs keep the long-standing `McpOauthClient.allowed_redirect_uri?`
+  rules at authorize time so existing registrations are never newly refused;
+  registration additionally rejects `javascript:`, `vbscript:`,
+  `livescript:`, and `data:` targets.
 - OAuth/MCP changes must cover redirect validation, consent, PKCE, refresh-token
   family rotation and replay, revocation, account disablement, and identity
   reconciliation. A connected UI state alone is not proof of usable access.

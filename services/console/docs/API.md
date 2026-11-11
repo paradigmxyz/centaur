@@ -125,14 +125,16 @@ return `{ "data": { "descoped": true|false } }`; bearer callers receive `422`.
 
 ### Console auth pages
 
-Endpoints behind the SPA's signed-out and consent pages (`/login`, `/pending`,
-`/oauth/result`, `/mcp/oauth/consent`).
+Endpoints behind the SPA's signed-out pages (`/login`, `/pending`). The OAuth
+flows are intentionally not SPA pages: the MCP OAuth consent page and the
+broker OAuth result page are server-rendered by Rails (see
+[MCP OAuth consent](#mcp-oauth-consent) and the
+[consent flow](#oauth-consent-flow)).
 
 | Method | Path | Access | Description |
 |---|---|---|---|
 | `GET` | `/api/v1/auth/config` | public (no session or key needed) | Login-page bootstrap: sign-in methods, CSRF token, one-shot flash |
 | `POST` | `/api/v1/session` | public, CSRF token required | Password sign-in |
-| `GET` | `/api/v1/mcp/authorization?request=` | active session (not bearer) | MCP consent ticket details |
 
 `GET /api/v1/auth/config` (sent with `Cache-Control: no-store`; ignores any
 `Authorization` header):
@@ -145,8 +147,7 @@ Endpoints behind the SPA's signed-out and consent pages (`/login`, `/pending`,
     "csrf_token": "…",
     "signed_in": false,
     "redirect_to": null,
-    "flash": { "alert": "Sign in was canceled." },
-    "oauth_result": null
+    "flash": { "alert": "Sign in was canceled." }
   }
 }
 ```
@@ -168,10 +169,6 @@ Endpoints behind the SPA's signed-out and consent pages (`/login`, `/pending`,
 - `flash` hands off (once) the `notice`/`alert` left by a redirect: SSO
   failures, sign-out (`"Signed out."`), or a disabled account bounced by a
   Rails-owned route (`"Your account is disabled."`).
-- `oauth_result` hands off (once) the outcome of a failed broker OAuth consent
-  (`/oauth/<slug>/callback` and `/start` redirect to `/oauth/result`):
-  `{ "kind": "error" | "denied", "message": "…", "retry_path": "/oauth/<slug>/start" }`.
-  `retry_path` is omitted when the integration is unknown or disabled.
 
 `POST /api/v1/session` body `{ "data": { "email": "…", "password": "…" } }`
 (email is trimmed and matched case-insensitively). Success resets the session
@@ -186,56 +183,36 @@ page.
 
 #### MCP OAuth consent
 
+The MCP OAuth consent flow is intentionally server-rendered by Rails (not an
+SPA page), so installed MCP clients keep exactly the behaviour they were built
+against. Only the sign-in step goes through the SPA.
+
 Dynamic client registration (`POST /mcp/oauth/register`) accepts `https`
 redirect URIs, loopback `http`, and native private-use schemes (`cursor://`,
-`vscode://`, `com.example.app:/…`). It rejects executable or browser-reserved
-schemes (`javascript`, `data`, `vbscript`, `file`, `blob`, `about`, …, in any
-case), and URIs containing whitespace, control characters, backslashes,
-fragments, or wildcards. The same check runs again at authorize and decision
-time, so stored registrations that predate it are refused.
+`vscode://`, `chrome-extension://`, `com.example.app:/…`), and rejects
+fragments, wildcards, and non-loopback `http`. Registration also rejects
+`javascript:`, `vbscript:`, `livescript:`, and `data:` redirect URIs (in any
+case, after leading whitespace or control characters). That extra check
+applies to new registrations only; authorize-time checks are unchanged, so an
+existing registration is never newly refused.
 
-`GET /mcp/oauth/authorize` validates the request (client, `response_type=code`,
-registered `redirect_uri`, S256 PKCE, scopes, resource). Invalid requests go
-back to the client's registered `redirect_uri` with `error`/`state`, or render a
-plain `400` when the client or `redirect_uri` is not trusted. A valid request
-redirects to `/mcp/oauth/consent?request=<ticket>`. The ticket is signed,
-expires after 10 minutes, and is bound to the signed-in user and browser
-session. It is also backed by a server-side row (`mcp_oauth_consents`) that a
-decision consumes with one conditional `UPDATE`, so a ticket is decided at most
-once, even when the session cookie is replayed or decisions race.
+`GET /mcp/oauth/authorize` sends a signed-out browser to `/login` (which
+returns here after sign-in), a pending account to `/pending`, and a disabled
+one to `/login` with `"Your account is disabled."`. It then validates, in
+order: the client, `response_type=code`, the registered `redirect_uri`, S256
+PKCE (`code_challenge_method`, then `code_challenge`), scopes, and the
+resource. Invalid requests go back to the client's registered `redirect_uri`
+with `error`, `error_description`, and `state`, or render a plain-text `400`
+when the client or `redirect_uri` is not trusted. A valid request renders the
+HTML consent page.
 
-`GET /api/v1/mcp/authorization?request=<ticket>` (`Cache-Control: no-store`):
-
-```json
-{
-  "data": {
-    "client": { "id": "moc_…", "name": "Amp" },
-    "redirect_host": "127.0.0.1",
-    "resource": "https://mcp.example.com/mcp",
-    "scopes": [ "mcp:tools" ],
-    "user": { "email": "ops@example.com" },
-    "decision_path": "/mcp/oauth/consent",
-    "csrf_token": "…"
-  }
-}
-```
-
-Errors: `403` `session_required` for bearer callers, `404`
-`invalid_consent_request` for a tampered, expired, decided, foreign-user, or
-foreign-session ticket, and `422` `invalid_authorization_request` when the
-client or its registration changed since the ticket was issued.
-
-The decision is a classic form post (not JSON), so neither the client URL nor
-the authorization code passes through page JavaScript:
-`POST /mcp/oauth/consent` with `request=<ticket>`, `decision=approve|deny`, and
-`authenticity_token`. The response is a `303` to the client's registered
-`redirect_uri`, with `code` and `state` (or `error=access_denied`). A signed-out
-browser goes to `/login` and a pending one to `/pending`. Failures redirect to
-`/mcp/oauth/consent?error=<code>`, where `code` is one of `csrf`,
-`invalid_decision` (the ticket is not consumed), `invalid_consent_request`,
-`invalid_authorization_request`, or `server_error`. If the client's
-redirect_uri is still trusted, a revalidation failure goes to the client
-instead.
+The consent page posts a standard Rails form to `POST /mcp/oauth/authorize`
+with `authenticity_token`, the original `response_type`, `client_id`,
+`redirect_uri`, `scope`, `state`, `resource`, `code_challenge`,
+`code_challenge_method`, and `decision`. The request needs an active console
+session and a valid authenticity token, and is validated again. `decision=approve`
+issues a single-use code and redirects (`302`) to the `redirect_uri` with
+`code` and `state`; any other decision redirects with `error=access_denied`.
 
 ### Proxy tokens
 
@@ -1485,11 +1462,11 @@ On success the endpoint redirects the browser to the provider's consent screen. 
 
 ### Callback and result page
 
-After consent the provider redirects back to `/oauth/<slug>/callback`, which exchanges the code, mints or updates the credential, and renders an iron-control result page:
+After consent the provider redirects back to `/oauth/<slug>/callback`, which exchanges the code, mints or updates the credential, and either redirects into the console or renders a result page. The result page is intentionally server-rendered by Rails in the same response (a standalone page, not an SPA route), with a "Try again" link back to `/oauth/<slug>/start` while the app is enabled:
 
 | Outcome  | Page | Status |
 | -------- | ---- | ------ |
-| Success  | Confirms the integration is connected and shows the credential OID. | `200` |
+| Success  | Redirects to the console Integrations page (or the shared app's page) with a "connected" notice. | `302` |
 | Denied   | The user declined (or another IdP-side error). | `422` |
 | Error    | The code exchange or identity check failed (e.g. `invalid_grant`). | `422` |
 

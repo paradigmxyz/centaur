@@ -32,8 +32,11 @@ Operators manage credentials, principals, roles, and grants through the API or t
 
 The operator console lives in [`web/`](web/): Vite, React, TypeScript,
 shadcn/ui on Tailwind CSS, React Router, and TanStack Query. It covers every
-console page, including the signed-out ones (login, the pending-approval page,
-the OAuth consent result page, and the MCP OAuth consent page).
+console page, including the signed-out ones (login and the pending-approval
+page). The OAuth flows are the one intentional exception: the MCP OAuth consent
+page and the broker OAuth result page stay server-rendered by Rails (see
+below), so installed MCP clients keep exactly the behaviour they were built
+against.
 
 - **Serving.** `pnpm -C web build` writes the app to `public/spa` (asset URLs
   under `/spa/`). Any browser `GET`/`HEAD` navigation that no Rails route
@@ -49,12 +52,21 @@ the OAuth consent result page, and the MCP OAuth consent page).
   [docs/API.md](docs/API.md#authentication).
 - **Rails-owned browser routes.** `/auth/:provider/{start,callback}` (SSO),
   `/oauth/:slug/{start,callback}` (broker OAuth consent),
-  `/mcp/oauth/{authorize,consent,token,register}` and the
+  `/mcp/oauth/{authorize,token,register}` and the
   `/.well-known` metadata (MCP OAuth), `/launch` (PWA protocol handler), and
   `/manifest` / `/service-worker` (PWA files from `config/pwa`). They answer
-  with redirects into the SPA or JSON; there are no server-rendered views.
-  `script/check-no-ruby-ui` fails if templates, view helpers, browser
-  JavaScript, or asset-pipeline gems come back.
+  with redirects into the SPA or JSON.
+- **Server-rendered OAuth pages.** `GET /mcp/oauth/authorize` renders the MCP
+  consent page and `POST /mcp/oauth/authorize` (a standard Rails form with an
+  authenticity token) issues the code; `/oauth/:slug/{start,callback}` render
+  their failure page in the same response. Only the sign-in step goes through
+  the SPA (`/login` returns to the authorize URL). These pages use the
+  standalone `layouts/oauth.html.erb` and plain CSS from `public/oauth-page`
+  (the SPA's colours, dark by default and light under
+  `prefers-color-scheme: light`), with no asset pipeline and no JavaScript.
+  `script/check-no-ruby-ui` allows exactly these views and the two
+  controllers that render them, and fails if any other template, view helper,
+  browser JavaScript, or asset-pipeline gem comes back.
 
 ## Local Development
 
