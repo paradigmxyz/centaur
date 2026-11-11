@@ -2835,7 +2835,10 @@ fn spawn_fake_codex_recovery(name: &str) -> (BridgeProcess, PathBuf, PathBuf) {
     let fake_codex = temp_path(&format!("{name}.sh"));
     let log = temp_path(&format!("{name}-requests.jsonl"));
     let script = fake_codex_app_server_script(&log)
-        .replace("request_id() {", "echo $$ > \"$log.pid\"\n\nrequest_id() {")
+        .replace(
+            "request_id() {",
+            "echo $$ > \"$log.pid\"\nprintf '%s\\n' \"$*\" >> \"$log.args\"\n\nrequest_id() {",
+        )
         .replace(
             "    *'\"method\":\"turn/start\"'*)\n",
             "    *'\"method\":\"turn/start\"'*)\n      case \"$line\" in *'die mid turn'*) exit 7;; esac\n",
@@ -2886,7 +2889,7 @@ fn wait_for_fake_codex_exit(log: &Path) {
 }
 
 #[test]
-fn fake_codex_blocks_mode_switches_provider_by_resuming_same_thread() {
+fn fake_codex_blocks_mode_switches_provider_by_forking_the_thread() {
     let (mut bridge, fake_codex, log) = spawn_fake_codex_recovery("fake-provider-switch");
     let script = std::fs::read_to_string(&fake_codex).unwrap().replace(
         "      printf '{\"id\":%s,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}\\n' \"$id\"",
@@ -2914,15 +2917,28 @@ fn fake_codex_blocks_mode_switches_provider_by_resuming_same_thread() {
     let requests = read_requests(&log);
     assert_eq!(count_method(&requests, "initialize"), 3);
     assert_eq!(count_method(&requests, "thread/start"), 1);
-    assert_eq!(count_method(&requests, "thread/resume"), 2);
+    // Codex rejects resuming a thread on another provider; a switch forks it.
+    assert_eq!(count_method(&requests, "thread/resume"), 0);
+    assert_eq!(count_method(&requests, "thread/fork"), 2);
     assert_eq!(count_method(&requests, "turn/start"), 4);
-    let resume = requests
+    let fork = requests
         .iter()
-        .find(|request| request["method"] == "thread/resume")
+        .find(|request| request["method"] == "thread/fork")
         .unwrap();
-    assert_eq!(resume["params"]["threadId"], "thread-1");
-    assert_eq!(resume["params"]["modelProvider"], "other");
-    assert_eq!(resume["params"]["model"], "other-model");
+    assert_eq!(fork["params"]["threadId"], "thread-1");
+    assert_eq!(fork["params"]["modelProvider"], "other");
+    assert_eq!(fork["params"]["model"], "other-model");
+    // Codex admits input only on the provider its app-server was launched on.
+    let launches = std::fs::read_to_string(format!("{}.args", log.display())).unwrap();
+    assert_eq!(
+        launches.lines().collect::<Vec<_>>(),
+        [
+            r#"app-server --listen stdio:// -c model_provider="original""#,
+            r#"app-server --listen stdio:// -c model_provider="other""#,
+            r#"app-server --listen stdio:// -c model_provider="openai""#,
+        ]
+    );
+    let _ = std::fs::remove_file(format!("{}.args", log.display()));
     let _ = std::fs::remove_file(fake_codex);
     let _ = std::fs::remove_file(log);
 }
@@ -2965,14 +2981,14 @@ fn fake_codex_blocks_mode_resolves_default_provider_for_a_new_model_without_prov
     bridge.finish_successfully();
     let requests = read_requests(&log);
     assert_eq!(count_method(&requests, "thread/start"), 1);
-    assert_eq!(count_method(&requests, "thread/resume"), 1);
+    assert_eq!(count_method(&requests, "thread/fork"), 1);
     assert_eq!(count_method(&requests, "turn/start"), 5);
-    let resume = requests
+    let fork = requests
         .iter()
-        .find(|request| request["method"] == "thread/resume")
+        .find(|request| request["method"] == "thread/fork")
         .unwrap();
-    assert_eq!(resume["params"]["modelProvider"], "openai");
-    assert_eq!(resume["params"]["model"], "default-model");
+    assert_eq!(fork["params"]["modelProvider"], "openai");
+    assert_eq!(fork["params"]["model"], "default-model");
     let _ = std::fs::remove_file(fake_codex);
     let _ = std::fs::remove_file(log);
 }
@@ -3112,7 +3128,7 @@ while IFS= read -r line; do
       id=$(request_id "$line")
       printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id"
       ;;
-    *'"method":"thread/resume"'*)
+    *'"method":"thread/resume"'*|*'"method":"thread/fork"'*)
       id=$(request_id "$line")
       printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id"
       ;;
