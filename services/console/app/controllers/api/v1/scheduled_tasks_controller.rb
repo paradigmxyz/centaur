@@ -7,9 +7,8 @@ module Api
     # never the prompt.
     #
     # Everything else backs the console Scheduled Tasks pages and is open to
-    # any active user for the tasks they authored. Acting admins may also read
-    # and manage other users' tasks (index ?scope=all). A task the caller may
-    # not see is a 404.
+    # any active user, scoped to the tasks they authored. Any other task is a
+    # 404 for everyone, admins included (the legacy console's authority).
     class ScheduledTasksController < Api::BaseController
       MAX_CHANNEL_OPTIONS = 20
 
@@ -20,8 +19,7 @@ module Api
       before_action :set_task, only: %i[show update destroy run], if: -> { action_name != "show" || console_view? }
 
       def index
-        tasks = params[:scope] == "all" && acting_admin? ? authored_tasks : current_user.scheduled_tasks
-        tasks = tasks.includes(:author, :principal).order(:name, :id).to_a
+        tasks = current_user.scheduled_tasks.includes(:author, :principal).order(:name, :id).to_a
         names = slack_channel_names(tasks)
         render json: { data: tasks.map { |task| console_payload(task, names) } }
       end
@@ -69,13 +67,11 @@ module Api
       end
 
       # Delivery channels for the task form: public channels plus private
-      # channels both the author and the bot are in (SlackDeliveryPolicy). The
-      # author is the caller, or the author of ?task_id= when editing a task.
+      # channels both the caller and the bot are in (SlackDeliveryPolicy).
+      # ?task_id= (editing) must be one of the caller's tasks.
       def slack_channel_options
-        author = params[:task_id].present? ? task_author_for_options : current_user
-        return if performed?
-
-        policy = SlackDeliveryPolicy.new(author || current_user)
+        current_user.scheduled_tasks.find_by_oid!(params[:task_id]) if params[:task_id].present?
+        policy = SlackDeliveryPolicy.new(current_user)
 
         SlackChannelCatalogSync.enqueue_if_empty
         channels = policy.allowed_channels.matching(params[:q]).ordered.limit(MAX_CHANNEL_OPTIONS)
@@ -100,19 +96,10 @@ module Api
         require_admin! unless console_view?
       end
 
-      # Slack channel tasks (no author) are managed from Slack, not here.
-      def authored_tasks
-        ScheduledTask.where.not(author_id: nil)
-      end
-
+      # Only the caller's own tasks; Slack channel tasks (no author) and other
+      # users' tasks are 404 (RecordNotFound), admins included.
       def set_task
-        @task = authored_tasks.find_by_oid!(params[:id])
-        require_owner_or_admin!(@task, owner: :author)
-      end
-
-      def task_author_for_options
-        task = authored_tasks.find_by_oid!(params[:task_id])
-        task.author if require_owner_or_admin!(task, owner: :author)
+        @task = current_user.scheduled_tasks.find_by_oid!(params[:id])
       end
 
       def save(task, status:)
@@ -135,11 +122,10 @@ module Api
           name: task.name,
           prompt: task.prompt,
           author_id: task.author&.oid,
-          author_email: task.author&.email,
           principal_id: task.principal&.oid,
           delivery_channel: task.delivery_channel.presence,
           delivery_mode: delivery_mode(task, dm_user_id),
-          delivery_name: delivers_to_dm ? dm_name(task) : names[task.delivery_channel],
+          delivery_name: delivers_to_dm ? "Direct message to you" : names[task.delivery_channel],
           direct_message_user_id: dm_user_id,
           cron_expression: task.cron_expression,
           timezone: task.timezone.presence || ScheduledTask::DEFAULT_TIMEZONE,
@@ -165,10 +151,6 @@ module Api
         return "channel" if task.delivery_channel.present?
 
         dm_user_id.present? ? "dm" : "channel"
-      end
-
-      def dm_name(task)
-        task.author == current_user ? "Direct message to you" : "Direct message to #{task.author.email}"
       end
 
       def slack_channel_names(tasks)

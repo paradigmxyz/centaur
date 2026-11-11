@@ -1711,21 +1711,20 @@ Responses include the task's optional cron expression, fixed timezone, human-rea
 
 The console Scheduled Tasks pages use these endpoints. Any active Console user
 may call them with the session cookie or a bearer API key. Each one is scoped
-to tasks the caller authored. An acting admin can also read and manage other
-users' tasks, but a descoped admin cannot. A task the caller may not see
-returns `404`. Tasks owned by a Slack channel are managed from Slack and are
-never returned here. Responses set `Cache-Control: no-store`.
+to tasks the caller authored. Any other user's task returns `404` for every
+caller, admins included. Tasks owned by a Slack channel are managed from Slack
+and are never returned here. Responses set `Cache-Control: no-store`.
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
-| `GET` | `/api/v1/scheduled_tasks` | The caller's tasks, ordered by name. An acting admin may pass `?scope=all` to list every user's tasks. |
+| `GET` | `/api/v1/scheduled_tasks` | The caller's tasks, ordered by name. |
 | `GET` | `/api/v1/scheduled_tasks/new` | Defaults for a new task: daily at 9:00 PT, enabled, and delivery to the caller's Slack DM when one is linked. |
 | `GET` | `/api/v1/scheduled_tasks/:id?view=console` | One task in the console shape below. Without `view=console`, this is the admin execution-state lookup described above. |
 | `POST` | `/api/v1/scheduled_tasks` | Create a task authored by the caller. Returns `201`. |
 | `PUT`/`PATCH` | `/api/v1/scheduled_tasks/:id` | Update the fields that are sent and keep the rest. |
 | `DELETE` | `/api/v1/scheduled_tasks/:id` | Returns `204`. |
 | `POST` | `/api/v1/scheduled_tasks/:id/run` | Queue an immediate run. Returns `202` with the task and `queued: true`. A disabled task returns `422` with `details.reason=task_disabled` and the message `Enable the task before running it.` |
-| `GET` | `/api/v1/scheduled_tasks/slack_channel_options` | Delivery channel search (`q`, at most 20). Returns public channels and the private channels that both the author and the bot are in. The author is the caller, or the author of `?task_id=` when editing a task. The response shape matches `GET /api/v1/slack_channels`. `meta.catalog_error` can also report `Slack channel memberships are loading.` |
+| `GET` | `/api/v1/scheduled_tasks/slack_channel_options` | Delivery channel search (`q`, at most 20). Returns public channels and the private channels that both the caller and the bot are in. When editing, `?task_id=` must be one of the caller's tasks; any other task returns `404`. The response shape matches `GET /api/v1/slack_channels`. `meta.catalog_error` can also report `Slack channel memberships are loading.` |
 
 Write bodies take `data` with these fields:
 
@@ -1740,7 +1739,7 @@ Write bodies take `data` with these fields:
 {
   "data": {
     "id": "tsk_...", "name": "Daily support summary", "prompt": "...",
-    "author_id": "usr_...", "author_email": "user@example.com", "principal_id": null,
+    "author_id": "usr_...", "principal_id": null,
     "delivery_channel": "C0123456789", "delivery_mode": "channel", "delivery_name": "#support",
     "direct_message_user_id": "U0123456789",
     "cron_expression": "0 9 * * *", "timezone": "America/Los_Angeles",
@@ -1753,9 +1752,9 @@ Write bodies take `data` with these fields:
 }
 ```
 
-`delivery_name` is the channel's catalog name, or "Direct message to you" (or
-"Direct message to <author email>") for a DM. `direct_message_user_id` is the
-author's linked Slack user ID, or `null` when the author has none.
+`delivery_name` is the channel's catalog name, or "Direct message to you" for a
+DM. `direct_message_user_id` is the caller's linked Slack user ID, or `null`
+when the caller has none.
 
 ## Workflows
 

@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { adminMe, apiResponse, mockApi, operatorMe, renderRoute } from "@/test/utils";
+import { apiResponse, mockApi, operatorMe, renderRoute } from "@/test/utils";
 
 import ScheduledTaskEditPage from "./pages/ScheduledTaskEdit";
 import ScheduledTaskNewPage from "./pages/ScheduledTaskNew";
@@ -29,7 +29,6 @@ const task = {
   name: "Weekday summary",
   prompt: "Summarize open incidents.",
   author_id: "usr_member",
-  author_email: "member@example.test",
   principal_id: null,
   delivery_channel: "C0123456789",
   delivery_mode: "channel",
@@ -444,18 +443,6 @@ describe("edit scheduled task", () => {
     expect(api.calls("PATCH /api/v1/scheduled_tasks/tsk_1")[0]?.body).toMatchObject({
       data: { delivery_mode: "dm", delivery_channel: "" },
     });
-  });
-
-  it("labels another user's task for an admin", async () => {
-    mockApi({ "GET /api/v1/scheduled_tasks/tsk_1": { data: task } });
-    renderRoute(<ScheduledTaskEditPage />, {
-      path: "/console/scheduled_tasks/:id/edit",
-      url: "/console/scheduled_tasks/tsk_1/edit",
-      me: adminMe(),
-    });
-
-    expect(await screen.findByText("Weekday summary · member@example.test")).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Deliver to the author's DM" })).toBeInTheDocument();
   });
 });
 

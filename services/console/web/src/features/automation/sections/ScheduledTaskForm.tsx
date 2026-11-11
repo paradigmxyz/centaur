@@ -69,14 +69,12 @@ type Values = z.infer<typeof schema>;
 
 interface ScheduledTaskFormProps {
   task: ScheduledTask;
-  /** The task author is someone else (an admin editing another user's task). */
-  foreignAuthor?: boolean;
   submitLabel: string;
   onSubmit: (data: ScheduledTaskInput) => Promise<unknown>;
 }
 
 /** The new/edit scheduled task form (legacy scheduled_tasks/_form). */
-export function ScheduledTaskForm({ task, foreignAuthor = false, submitLabel, onSubmit }: ScheduledTaskFormProps) {
+export function ScheduledTaskForm({ task, submitLabel, onSubmit }: ScheduledTaskFormProps) {
   const dmUserId = task.direct_message_user_id;
   const form = useForm<Values>({
     resolver: zodResolver(schema),
@@ -162,7 +160,7 @@ export function ScheduledTaskForm({ task, foreignAuthor = false, submitLabel, on
                   onChange={() => field.onChange("dm")}
                   className="accent-centaur-500"
                 />
-                <span>{foreignAuthor ? "Deliver to the author's DM" : "Deliver to my DM"}</span>
+                <span>Deliver to my DM</span>
               </label>
               <label className="flex items-center gap-2 text-sm text-foreground">
                 <input
@@ -206,9 +204,7 @@ export function ScheduledTaskForm({ task, foreignAuthor = false, submitLabel, on
         )}
         {!dmUserId && (
           <p className="mt-2 text-xs text-muted-foreground">
-            {foreignAuthor
-              ? "The author has not connected a Slack account, so tasks cannot deliver to their DM."
-              : "Connect your Slack account to deliver to your DM."}
+            Connect your Slack account to deliver to your DM.
           </p>
         )}
       </fieldset>

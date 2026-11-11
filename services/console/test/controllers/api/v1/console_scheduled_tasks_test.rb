@@ -250,9 +250,6 @@ module Api
         get api_v1_scheduled_tasks_path
         assert_equal [ own.oid ], json_body["data"].pluck("id")
 
-        get api_v1_scheduled_tasks_path(scope: "all")
-        assert_equal [ own.oid ], json_body["data"].pluck("id")
-
         get api_v1_scheduled_task_path(other_task.oid, view: "console")
         assert_response :not_found
 
@@ -286,29 +283,47 @@ module Api
         assert_response :not_found
       end
 
-      test "acting admins may manage other users' tasks, descoped admins may not" do
+      test "admins get 404 on another user's task for every member action" do
         member = users(:member_user)
         task = create_task(author: member, name: "Member task")
+        own = create_task
 
         get api_v1_scheduled_tasks_path
-        assert_empty json_body["data"]
+        assert_equal [ own.oid ], json_body["data"].pluck("id")
 
         get api_v1_scheduled_tasks_path(scope: "all")
-        assert_includes json_body["data"].pluck("id"), task.oid
-        assert_equal member.email, json_body["data"].find { |row| row["id"] == task.oid }["author_email"]
+        assert_equal [ own.oid ], json_body["data"].pluck("id")
+        assert_not json_body["data"].first.key?("author_email")
 
-        get api_v1_scheduled_task_path(task.oid, view: "console")
+        [ { headers: {} }, { headers: bearer_headers } ].each do |auth|
+          headers = auth[:headers].presence || csrf_headers
+          get api_v1_scheduled_task_path(task.oid, view: "console"), headers: auth[:headers]
+          assert_response :not_found
+
+          patch api_v1_scheduled_task_path(task.oid), params: { data: { name: "Renamed by admin" } },
+                                                      headers: headers, as: :json
+          assert_response :not_found
+
+          assert_no_enqueued_jobs only: ScheduledTaskRunJob do
+            post run_api_v1_scheduled_task_path(task.oid), headers: headers, as: :json
+          end
+          assert_response :not_found
+
+          assert_no_difference -> { ScheduledTask.count } do
+            delete api_v1_scheduled_task_path(task.oid), headers: headers, as: :json
+          end
+          assert_response :not_found
+
+          get slack_channel_options_api_v1_scheduled_tasks_path(task_id: task.oid), headers: auth[:headers]
+          assert_response :not_found
+        end
+
+        assert_equal "Member task", task.reload.name
+
+        # The admin-only execution-state lookup still reaches any task.
+        get api_v1_scheduled_task_path(task.oid)
         assert_response :ok
-        assert_nil json_body.dig("data", "direct_message_user_id")
-
-        patch api_v1_scheduled_task_path(task.oid), params: { data: { name: "Renamed by admin" } },
-                                                    headers: csrf_headers, as: :json
-        assert_response :ok
-        assert_equal member, task.reload.author
-
-        post api_v1_descope_path, headers: csrf_headers
-        get api_v1_scheduled_task_path(task.oid, view: "console")
-        assert_response :not_found
+        assert_equal({ "id" => task.oid, "enabled" => true, "delivery_channel" => "C0123456789" }, json_body["data"])
       end
 
       test "Slack channel tasks are not reachable from the console endpoints" do
@@ -317,7 +332,7 @@ module Api
         task = ScheduledTask.create!(name: "Channel task", prompt: "Hi", principal: principal,
                                      delivery_channel: "C0123456789")
 
-        get api_v1_scheduled_tasks_path(scope: "all")
+        get api_v1_scheduled_tasks_path
         assert_not_includes json_body["data"].pluck("id"), task.oid
 
         get api_v1_scheduled_task_path(task.oid, view: "console")
@@ -424,18 +439,16 @@ module Api
         assert_equal "G2222222222", json_body["data"].sole["channel_id"]
       end
 
-      test "delivery options for an existing task use its author's policy" do
-        member = users(:member_user)
-        task = create_task(author: member, name: "Member task")
+      test "delivery options accept the caller's own task id" do
+        task = create_task
         shared = create_channel("G1111111111", "eng-shared", private: true, members: %w[U0123456789 U0999999999])
 
         with_catalog do
-          get slack_channel_options_api_v1_scheduled_tasks_path, params: { q: "eng" }
-          assert_includes json_body["data"].pluck("channel_id"), shared.channel_id
-
           get slack_channel_options_api_v1_scheduled_tasks_path, params: { q: "eng", task_id: task.oid }
-          assert_not_includes json_body["data"].pluck("channel_id"), shared.channel_id
         end
+
+        assert_response :ok
+        assert_includes json_body["data"].pluck("channel_id"), shared.channel_id
       end
 
       test "delivery options report an unconfigured catalog" do

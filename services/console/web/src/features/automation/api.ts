@@ -20,7 +20,6 @@ export interface ScheduledTask {
   name: string | null;
   prompt: string | null;
   author_id: string | null;
-  author_email: string | null;
   delivery_channel: string | null;
   delivery_mode: DeliveryMode;
   delivery_name: string | null;
