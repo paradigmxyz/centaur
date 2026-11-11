@@ -489,6 +489,76 @@ class GeneratedShimTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout), "package-loaded:ok")
 
+    def test_call_reads_thread_key_from_sandbox_context_file(self) -> None:
+        # A claimed warm sandbox has no CENTAUR_THREAD_KEY, only the context
+        # file harness-server writes before the first turn.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            fake_bin = root / "fake-bin"
+            project_dir = root / "whoami"
+            bin_dir.mkdir()
+            fake_bin.mkdir()
+            project_dir.mkdir()
+            (project_dir / "client.py").write_text(
+                "from centaur_sdk.tool_sdk import get_tool_context\n"
+                "\n"
+                "def whoami():\n"
+                "    return get_tool_context().thread_key\n"
+            )
+            index_path = bin_dir / ".centaur-tools.json"
+            index_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "whoami",
+                            "project_dir": str(project_dir),
+                            "package": "whoami",
+                            "entrypoint": "cli:app",
+                            "client_module": "client.py",
+                        }
+                    ]
+                )
+                + "\n"
+            )
+            install_tool_shims._write_catalog(
+                bin_dir / "centaur-tools",
+                index_path,
+                str(Path(__file__).resolve().parents[2]),
+            )
+            fake_uvx = fake_bin / "uvx"
+            fake_uvx.write_text(
+                f"#!{sys.executable}\n"
+                "import subprocess\n"
+                "import sys\n"
+                "\n"
+                "raise SystemExit(subprocess.call([sys.executable, *sys.argv[4:]]))\n"
+            )
+            fake_uvx.chmod(0o755)
+            context_file = root / "sandbox.json"
+            context_file.write_text(json.dumps({"version": 1, "thread_key": "slack:T1:C1:1.0"}))
+            analytics_log = root / "tool-analytics.log"
+
+            env = os.environ.copy()
+            env.pop("CENTAUR_THREAD_KEY", None)
+            env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+            env["CENTAUR_SANDBOX_CONTEXT_FILE"] = str(context_file)
+            env["CENTAUR_TOOL_ANALYTICS_LOG_PATH"] = str(analytics_log)
+            result = subprocess.run(
+                [str(bin_dir / "centaur-tools"), "call", "whoami", "whoami"],
+                check=False,
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), "slack:T1:C1:1.0")
+            events = [json.loads(line) for line in analytics_log.read_text().splitlines()]
+            self.assertTrue(events)
+            for event in events:
+                self.assertEqual(event["thread_key"], "slack:T1:C1:1.0")
+
 
 class RefreshInstallTest(unittest.TestCase):
     def test_install_removes_stale_generated_shims(self) -> None:
