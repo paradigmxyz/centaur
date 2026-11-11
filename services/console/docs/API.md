@@ -923,7 +923,7 @@ The token credentials it refreshes with are fields on the credential, resolved b
 | `scopes`                       | optional    | Array of strings. |
 | `client_id`                    | conditional | OAuth client id. Required for standalone `refresh_token`, `client_credentials`, and `password` credentials. Returned in responses. Not used for `preqin`. |
 | `client_secret`                | conditional | OAuth client secret. Required for `client_credentials`, optional for `refresh_token` and `password`, and not used for `preqin`. Write-only and encrypted at rest; omit for public clients. Never returned. |
-| `token_endpoint_headers`       | optional    | Object mapping header name to a string value, sent on the refresh request. Values are write-only and encrypted; only the header names are returned (as `token_endpoint_header_names`). |
+| `token_endpoint_headers`       | optional    | Object mapping header name to a string value, sent on the refresh request. Values are write-only and encrypted; only the header names are returned (as `token_endpoint_header_names`). When supplied, the object replaces the stored headers, except that a `null` value for a header name that is already stored keeps that header's stored value, so a client can keep, drop, or add headers without re-entering existing values. A `null` value for a new name is rejected with `422`; `null` for the whole field clears the headers. |
 | `refresh_token`                | optional    | Write-only initial value for `refresh_token` credentials. Also used by `password` credentials when the provider returns one. Not used by `client_credentials` credentials. Supplying a value schedules the credential immediately and clears dead state. Never returned. |
 | `username`                     | conditional | Required for `password` credentials. Write-only and encrypted at rest. Never returned. |
 | `password`                     | conditional | Required for `password` credentials. Write-only and encrypted at rest. Never returned. |
@@ -949,6 +949,10 @@ Read-only fields are returned but never accepted in requests:
 | `provider_subject`            | The IdP-stable account id (Google `sub`) for a flow-minted credential. |
 | `provider_email`              | The account email captured at consent time. |
 | `external_user_key`           | An opaque key generated for the credential when it is minted by the consent flow. |
+| `oauth_app`                   | `{ id, slug, provider }` for the minting [OAuth app](#oauth-apps), or `null`. |
+| `effective_client_id`         | The client id the refresh loop uses: the OAuth app's for a flow-minted credential, otherwise `client_id`. |
+| `has_client_secret`, `has_username`, `has_password`, `has_api_key` | Whether the credential stores that write-only value. The values themselves are never returned. |
+| `static_secret`               | `{ id, foreign_id, name }` for the grantable [static secret](#static-secrets) that wraps this credential, or `null`. |
 
 The minted `access_token`, the `refresh_token`, `username`, `password`, `api_key`, the `client_secret`, and the `token_endpoint_headers` values are never returned in any response.
 
