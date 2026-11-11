@@ -7,22 +7,18 @@ class McpOauthClient < ApplicationRecord
   DEFAULT_GRANT_TYPES = %w[authorization_code refresh_token].freeze
   DEFAULT_RESPONSE_TYPES = %w[code].freeze
   DEFAULT_SCOPES = %w[mcp:tools].freeze
-  # Schemes a browser executes, renders locally, or reserves for itself. A
-  # redirect_uri with one of these would turn the post-consent redirect into
-  # script execution or local content in the console origin, so they are never
-  # accepted, whatever the registration says.
-  FORBIDDEN_REDIRECT_SCHEMES = %w[
-    javascript vbscript livescript data blob file filesystem about view-source
-    jar mhtml res ms-its chrome chrome-extension moz-extension resource ws wss
-  ].freeze
-  # RFC 3986 scheme syntax.
-  SCHEME_FORMAT = /\A[a-z][a-z0-9+.-]*\z/
+  # Schemes a browser executes or renders as a document. New registrations may
+  # not use them as a redirect target, so the post-consent redirect can never
+  # turn into script execution. Checked at registration only: existing
+  # registrations keep authorizing exactly as before.
+  EXECUTABLE_REDIRECT_SCHEMES = %w[javascript vbscript livescript data].freeze
 
   has_many :authorization_codes, class_name: "McpOauthAuthorizationCode", dependent: :destroy
   has_many :refresh_tokens, class_name: "McpOauthRefreshToken", dependent: :destroy
 
   validates :redirect_uris, presence: true
   validate :redirect_uris_valid
+  validate :redirect_uri_schemes_safe, on: :create
   validate :grant_types_supported
   validate :response_types_supported
   validate :scopes_supported
@@ -56,6 +52,25 @@ class McpOauthClient < ApplicationRecord
     end
   end
 
+  def redirect_uri_schemes_safe
+    return unless redirect_uris.is_a?(Array)
+
+    redirect_uris.each do |uri|
+      next unless self.class.executable_redirect_scheme?(uri)
+
+      errors.add(:redirect_uris, "#{uri.inspect} uses a scheme that is not allowed for redirect URIs")
+    end
+  end
+
+  # Whether +value+ names an executable scheme the way a browser would read it:
+  # case-insensitively, after leading whitespace and control characters, and
+  # with embedded tabs and newlines removed ("java\tscript:").
+  def self.executable_redirect_scheme?(value)
+    normalized = value.to_s.sub(/\A[[:space:][:cntrl:]]+/, "").gsub(/[\t\n\r]/, "")
+    scheme = normalized[/\A([^:\/?#]+):/, 1].to_s.downcase
+    EXECUTABLE_REDIRECT_SCHEMES.include?(scheme)
+  end
+
   def grant_types_supported
     return errors.add(:grant_types, "must be an array") unless grant_types.is_a?(Array)
     unsupported = grant_types - DEFAULT_GRANT_TYPES
@@ -74,23 +89,13 @@ class McpOauthClient < ApplicationRecord
     errors.add(:scopes, "contains unsupported values: #{unsupported.join(', ')}") if unsupported.any?
   end
 
-  # Whether +value+ may be a public-client redirect target. Checked at
-  # registration and again (through redirect_uri_allowed?) at authorize and
-  # decision time, so rows stored before a rule existed are refused too.
   def self.allowed_redirect_uri?(value)
-    raw = value.to_s
-    # Browsers strip tabs/newlines and ignore leading spaces/controls before
-    # parsing the scheme ("java<TAB>script:", " javascript:"); refuse them outright.
-    return false if raw.empty? || raw.match?(/[[:space:][:cntrl:]]/) || raw.include?("\\")
-
-    uri = URI.parse(raw)
-    scheme = uri.scheme.to_s.downcase
-    return false unless scheme.match?(SCHEME_FORMAT)
-    return false if FORBIDDEN_REDIRECT_SCHEMES.include?(scheme)
+    uri = URI.parse(value.to_s)
+    return false if uri.scheme.blank?
     return false if uri.fragment.present?
-    return false if raw.include?("*")
+    return false if value.to_s.include?("*")
 
-    case scheme
+    case uri.scheme
     when "https"
       uri.host.present?
     when "http"

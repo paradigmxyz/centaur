@@ -174,6 +174,38 @@ module Mcp
       assert_equal "state-test", query.fetch("state")
     end
 
+    test "dynamic client registration rejects executable redirect URI schemes" do
+      [
+        "javascript://x/%0aalert(document.domain)//",
+        "JavaScript://x/%0aalert(1)",
+        "javascript:alert(1)",
+        " javascript:alert(1)",
+        "vbscript:msgbox(1)",
+        "VBScript://x",
+        "livescript:alert(1)",
+        "data:text/html;base64,PHNjcmlwdD4=",
+        "DATA:text/plain,x"
+      ].each do |uri|
+        assert_no_difference -> { McpOauthClient.count } do
+          post "/mcp/oauth/register", params: { client_name: "Attacker", redirect_uris: [ uri ] }, as: :json
+        end
+        assert_response :bad_request, uri
+        assert_equal "invalid_client_metadata", JSON.parse(response.body).fetch("error"), uri
+      end
+    end
+
+    test "dynamic client registration still accepts native and extension custom-scheme callbacks" do
+      [
+        "vscode://vscode.github-authentication/did-authenticate",
+        "chrome-extension://abcdefghijklmnopabcdefghijklmnop/callback",
+        "com.example.app:/oauth2redirect"
+      ].each do |uri|
+        post "/mcp/oauth/register", params: { client_name: "Native", redirect_uris: [ uri ] }, as: :json
+        assert_response :created, uri
+        assert_equal [ uri ], JSON.parse(response.body).fetch("redirect_uris")
+      end
+    end
+
     test "authorize renders the consent page with the origin/main form fields" do
       client = create_client
       client.update!(name: "Amp <script>alert(1)</script>")
@@ -393,6 +425,34 @@ module Mcp
         end
         assert_response :redirect
         assert URI.parse(response.location).query.include?("code=")
+      end
+    end
+
+    test "an existing client with a custom-scheme redirect still authorizes" do
+      [
+        "chrome-extension://abcdefghijklmnopabcdefghijklmnop/callback",
+        "cursor://anysphere.cursor-mcp/oauth/callback",
+        "com.example.legacy-app:/oauth2redirect"
+      ].each do |stored|
+        client = create_client
+        client.update_column(:redirect_uris, [ stored ])
+        console_password_login(@operator.email)
+        params = authorize_params(client).merge(redirect_uri: stored)
+
+        get "/mcp/oauth/authorize", params: params
+        assert_response :ok, stored
+        assert_select "form[action=?]", "/mcp/oauth/authorize"
+
+        post "/mcp/oauth/authorize", params: params.merge(decision: "approve")
+        assert_response :redirect, stored
+        assert response.location.start_with?(stored.split(":").first + ":"), response.location
+        code = Rack::Utils.parse_nested_query(URI.parse(response.location).query).fetch("code")
+
+        post "/mcp/oauth/token", params: {
+          grant_type: "authorization_code", client_id: client.public_client_id,
+          code: code, redirect_uri: stored, code_verifier: code_verifier
+        }
+        assert_response :ok, stored
       end
     end
 
