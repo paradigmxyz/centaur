@@ -2,7 +2,7 @@
 
 `iron-control` is the control plane for [`iron-proxy`](https://github.com/ironsh/iron-proxy), a forwarding proxy that adds credentials to outbound HTTP requests. Applications route their traffic through `iron-proxy` and never hold the secrets themselves. `iron-control` stores the credentials, decides which proxy may use which credential on which requests, and hands each proxy its configuration.
 
-It is a Rails application backed by Postgres. It provides a JSON API, an operator console, and encryption at rest for the secrets it stores.
+It is a Rails application backed by Postgres. It provides a JSON API, an operator console, and encryption at rest for the secrets it stores. The console is a TypeScript React single-page app in [`web/`](web/) that talks to the same JSON API; Rails serves its built `index.html` for browser navigations and keeps only JSON endpoints and the OAuth/SSO protocol redirects.
 
 ## What It Does
 
@@ -28,20 +28,58 @@ It is a Rails application backed by Postgres. It provides a JSON API, an operato
 
 Operators manage credentials, principals, roles, and grants through the API or the console. Each `iron-proxy` instance signs in with its own token, fetches the configuration for its assigned principal, and adds the granted credentials to matching outbound requests.
 
+## Console UI
+
+The operator console lives in [`web/`](web/): Vite, React, TypeScript,
+shadcn/ui on Tailwind CSS, React Router, and TanStack Query. It covers every
+console page, including the signed-out ones (login, the pending-approval page,
+the OAuth consent result page, and the MCP OAuth consent page).
+
+- **Serving.** `pnpm -C web build` writes the app to `public/spa` (asset URLs
+  under `/spa/`). Any browser `GET`/`HEAD` navigation that no Rails route
+  claims gets `public/spa/index.html` from `SpaController`, served `no-cache`;
+  React Router renders the page, including its own not-found page. API,
+  framework, and protocol prefixes (`/api`, `/rails`, `/spa`, `/assets`,
+  `/.well-known`, `/up`, `/mcp/oauth/token`, `/mcp/oauth/register`) never get
+  HTML. See `lib/spa_request.rb` and `config/routes/spa.rb`.
+- **Data.** The SPA only uses `/api/v1`, authenticated by the console session
+  cookie. It reads the session, CSRF token, nav flags, and one-shot flash from
+  `GET /api/v1/me`, and sends `X-CSRF-Token` on every write. The signed-out
+  pages bootstrap from the public `GET /api/v1/auth/config`. See
+  [docs/API.md](docs/API.md#authentication).
+- **Rails-owned browser routes.** `/auth/:provider/{start,callback}` (SSO),
+  `/oauth/:slug/{start,callback}` (broker OAuth consent),
+  `/mcp/oauth/{authorize,consent,token,register}` and the
+  `/.well-known` metadata (MCP OAuth), `/launch` (PWA protocol handler), and
+  `/manifest` / `/service-worker` (PWA files from `config/pwa`). They answer
+  with redirects into the SPA or JSON; there are no server-rendered views.
+  `script/check-no-ruby-ui` fails if templates, view helpers, browser
+  JavaScript, or asset-pipeline gems come back.
+
 ## Local Development
 
 Console runs on stock PostgreSQL 16, including managed services such as RDS
-and Cloud SQL. Install Docker, Ruby using the version in `.ruby-version`, and
-Overmind or Foreman, then run:
+and Cloud SQL. Install Docker, Ruby using the version in `.ruby-version`,
+Node.js with pnpm (the versions CI uses are in
+`.github/workflows/console-ci.yml`), and Overmind or Foreman, then run:
 
 ```bash
 just dev
 ```
 
-This starts a persistent `postgres:16` container named
-`centaur-console-postgres`, exposes it on `127.0.0.1:55432`, prepares the Rails
-database, and starts the web and CSS processes. Database files are retained in
-the `centaur-console-postgres-data` Docker volume between runs.
+This installs the gem and SPA dependencies, starts a persistent `postgres:16`
+container named `centaur-console-postgres`, exposes it on `127.0.0.1:55432`,
+prepares the Rails database, and starts the Rails server (`:3000`) and the Vite
+dev server (`:5173`). Browse the console at `http://localhost:5173`; Vite
+proxies the API and the Rails-owned browser routes to Rails. Database files are
+retained in the `centaur-console-postgres-data` Docker volume between runs.
+
+To check the SPA served by Rails itself, as in production, build it with
+`just web-build` and browse `http://localhost:3000`.
+
+`just ci` (or `bin/ci`) runs the full local CI sequence: RuboCop, the
+no-server-UI check, gem and SPA dependency audits, Brakeman, the SPA's
+typecheck, lint, tests, and build, the Rails tests, and seed validation.
 
 To use an existing PostgreSQL server instead, set
 `CENTAUR_CONSOLE_DB_HOST`, `CENTAUR_CONSOLE_DB_PORT`,
@@ -52,8 +90,9 @@ To use an existing PostgreSQL server instead, set
 
 All of the console's environment variables use the `CENTAUR_CONSOLE_` prefix. For backwards compatibility, every variable also resolves from the legacy `IRON_CONTROL_` name when the `CENTAUR_CONSOLE_` one is unset, so existing deployments keep working until they migrate. The `CENTAUR_CONSOLE_` name wins when both are set.
 
-For local development, sign in through the normal login form at
-`http://localhost:3000/login` with the seeded initial user's
+For local development, sign in through the normal login page at
+`http://localhost:5173/login` (Vite) or `http://localhost:3000/login` (the built
+SPA served by Rails) with the seeded initial user's
 `CENTAUR_CONSOLE_INITIAL_USER_EMAIL` / `CENTAUR_CONSOLE_INITIAL_USER_PASSWORD`
 credentials, the same as every other environment.
 
@@ -141,6 +180,6 @@ Rotating any of these keys makes previously encrypted data unreadable. Treat the
 
 ## API
 
-`iron-control` exposes a JSON API under `/api/v1`. All resource endpoints authenticate with an API key sent as a bearer token (`Authorization: Bearer iak_...`). `iron-proxy` instances fetch their configuration from the separate `proxy-sync` service with a proxy bearer token.
+`iron-control` exposes a JSON API under `/api/v1`. Operator endpoints authenticate with either an API key sent as a bearer token (`Authorization: Bearer iak_...`) or the console session cookie (the SPA); cookie-authenticated writes also need the session's CSRF token. Endpoints are admin-only unless documented otherwise. `iron-proxy` instances fetch their configuration from the separate `proxy-sync` service with a proxy bearer token.
 
 See [docs/API.md](docs/API.md) for the full reference: authentication, request/response conventions, pagination, error formats, the shared secret-source and request-rule shapes, and detailed payloads for every endpoint (static secrets, GCP auth secrets, OAuth token secrets, principals, roles, grants, API keys, proxies, and proxy sync).

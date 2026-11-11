@@ -2,20 +2,53 @@
 
 ## Role
 
-The console is a Rails application that provides the operator UI and the
-credential-control JSON API. It manages principals, roles, grants, encrypted
-secret records, proxies, broker credentials, console login, and
-MCP OAuth flows.
+The console is a Rails application that provides the credential-control JSON
+API and serves the operator UI, a TypeScript React SPA in `web/`. It manages
+principals, roles, grants, encrypted secret records, proxies, broker
+credentials, console login, and MCP OAuth flows.
 
 Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
+
+## Architecture
+
+- Rails has no server-rendered UI: no views (other than the unused mailer
+  layouts), view helpers, browser JavaScript, or asset pipeline.
+  `script/check-no-ruby-ui` enforces this in `bin/ci` and CI. Every console
+  page, including login, pending, the OAuth consent result, and MCP OAuth
+  consent, is a route in `web/`.
+- Rails serves `public/spa/index.html` (built by `pnpm -C web build`) for any
+  browser navigation no route claims (`SpaController`, `lib/spa_request.rb`).
+  The remaining browser-facing Rails routes are protocol endpoints that answer
+  with redirects into the SPA or JSON: SSO (`/auth/:provider/*`), broker OAuth
+  consent (`/oauth/:slug/*`), the MCP OAuth server (`/mcp/oauth/*`,
+  `/.well-known/*`), and the PWA files and `/launch`.
+- Each console area owns `config/routes/console_<area>.rb` (its `/api/v1`
+  additions and protocol routes) and `web/src/features/<area>/`. Shared SPA
+  building blocks live in `web/src/components/` (see its `README.md`),
+  `web/src/lib/`, and the shell in `web/src/app/`. Business logic stays in
+  models and `app/services`; the SPA never duplicates an authorization rule
+  the API does not also enforce.
+- Post-login return paths go through `ConsoleReturnPath`; redirects never
+  follow an unvalidated parameter.
 
 ## Invariants
 
 - `/api/v1` operator endpoints accept either a bearer API key or the console
-  session cookie (the SPA). Cookie-authenticated writes require the session
-  CSRF token; every endpoint is admin-only (descope-aware) unless it opts in
-  with `allow_active_users`. Keep proxy sync authentication, sandbox JWTs, and
-  OAuth/MCP tokens as separate trust boundaries.
+  session cookie (the SPA); the former separation between bearer and cookie
+  callers is intentionally gone. An `Authorization` header always wins and a
+  bad bearer token never falls back to the cookie. Cookie-authenticated writes
+  require the session CSRF token (`X-CSRF-Token`) and a same-origin `Origin`;
+  bearer requests skip CSRF. Every endpoint is admin-only and descope-aware
+  unless it opts in with `allow_active_users` (scope records with
+  `owned_scope` / `require_owner_or_admin!`, which 404s for non-owners) or
+  `allow_pending_users`. Test new endpoints with `assert_admin_only_api` or
+  `assert_active_user_api` plus ownership cases. Keep proxy sync
+  authentication, sandbox JWTs, and OAuth/MCP tokens as separate trust
+  boundaries.
+- In the SPA, a failed query renders an error alert, never an empty state.
+  Secret-bearing mutations use `gcTime: 0`, are reset after they settle, and
+  clear their form fields; plaintext never enters a query key or cache, and
+  tests assert it is absent from the TanStack caches.
 - Secret plaintext may be accepted for creation or rotation but must never be
   returned, logged, rendered, inspected in tests, or stored outside encrypted
   model attributes and configured providers.
@@ -66,17 +99,23 @@ bin/rubocop
 bin/brakeman --quiet --no-pager --exit-on-warn --exit-on-error
 ```
 
-The SPA lives in `web/` (Vite, React, TypeScript, shadcn/ui). From
-`services/console`:
+The SPA lives in `web/` (Vite, React, TypeScript, shadcn/ui, TanStack Query).
+From `services/console`:
 
 ```bash
+pnpm install --frozen-lockfile --filter @centaur/console-web
 pnpm -C web typecheck
 pnpm -C web lint
 pnpm -C web test
 pnpm -C web build   # into public/spa, served by Rails for HTML navigations
+script/check-no-ruby-ui
+script/audit-web
 ```
 
-`bin/ci` runs the full local CI sequence, including dependency audits, tests,
-and seed validation. Add focused controller/model/service tests with each
+`bin/ci` (`just ci`) runs the full local CI sequence: RuboCop, the
+no-server-UI check, gem and SPA dependency audits, Brakeman, the SPA checks
+and build, Rails tests, and seed validation. When several checkouts share one
+PostgreSQL server, give each its own `CENTAUR_CONSOLE_TEST_DB_NAME` and
+`CENTAUR_CONSOLE_DEV_DB_NAME`, and cap `PARALLEL_WORKERS`. Add focused controller/model/service tests with each
 behavior change. For visible UI changes, run `just dev`, exercise the affected
 flow in a browser, and check narrow and wide layouts plus keyboard/focus states.

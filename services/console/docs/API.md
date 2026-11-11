@@ -3,6 +3,9 @@
 `iron-control` exposes a JSON API under `/api/v1`. Resource endpoints require API key authentication or a console session cookie, and sandbox read endpoints use the sandbox entitlement JWT injected by `iron-proxy`.
 
 - [Authentication](#authentication)
+  - [Console session (browser SPA)](#console-session-browser-spa)
+  - [Session endpoints](#session-endpoints)
+  - [Console auth pages](#console-auth-pages)
 - [Conventions](#conventions)
 - [Errors](#errors)
 - [Shared building blocks](#shared-building-blocks)
@@ -15,7 +18,12 @@
 - [OAuth token secrets](#oauth-token-secrets)
 - [PG DSN secrets](#pg-dsn-secrets)
 - [HMAC secrets](#hmac-secrets)
+- [SSH key secrets](#ssh-key-secrets)
 - [Broker credentials](#broker-credentials)
+- [OAuth apps](#oauth-apps)
+  - [OAuth providers](#oauth-providers)
+  - [Integrations](#integrations)
+- [OAuth consent flow](#oauth-consent-flow)
 - [Principals](#principals)
 - [Roles](#roles)
 - [Grants](#grants)
@@ -25,6 +33,9 @@
 - [Users](#users)
 - [API clients](#api-clients)
 - [System settings](#system-settings)
+- [Scheduled tasks](#scheduled-tasks)
+  - [Console scheduled tasks](#console-scheduled-tasks)
+- [Workflows](#workflows)
 - [Skills](#skills)
   - [Console skills](#console-skills)
 - [Personal SSH key](#personal-ssh-key)
@@ -155,7 +166,8 @@ Endpoints behind the SPA's signed-out and consent pages (`/login`, `/pending`,
   host, `//`, backslashes, control characters, or dot segments). Other values
   are ignored.
 - `flash` hands off (once) the `notice`/`alert` left by a redirect: SSO
-  failures, sign-out (`"Signed out."`), or a failed `POST /login`.
+  failures, sign-out (`"Signed out."`), or a disabled account bounced by a
+  Rails-owned route (`"Your account is disabled."`).
 - `oauth_result` hands off (once) the outcome of a failed broker OAuth consent
   (`/oauth/<slug>/callback` and `/start` redirect to `/oauth/result`):
   `{ "kind": "error" | "denied", "message": "…", "retry_path": "/oauth/<slug>/start" }`.
